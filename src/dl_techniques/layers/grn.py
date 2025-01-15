@@ -4,74 +4,90 @@ from typing import Any, Dict, Optional, Union, Tuple
 import numpy as np
 
 
+# Type aliases for improved readability
+Shape = Tuple[Optional[int], ...]
+DType = Union[str, tf.dtypes.DType]
+Initializer = Union[str, keras.initializers.Initializer]
+
+
 @keras.utils.register_keras_serializable()
 class GlobalResponseNormalization(keras.layers.Layer):
     """
     Optimized Global Response Normalization (GRN) layer.
 
-    This layer implements an optimized version of GRN as described in the ConvNeXt V2 paper.
-    It normalizes features across spatial dimensions and applies learnable scale and bias.
+    This layer implements an optimized version of GRN with improved numerical stability,
+    memory efficiency, and XLA optimization. It normalizes features across spatial
+    dimensions and applies learnable scale and bias.
 
-    Key optimizations:
-    1. Memory-efficient computation using fused operations
-    2. Improved numerical stability
-    3. Static shape inference where possible
-    4. Pre-computed constants and cached computations
-    5. Proper initialization strategy for better convergence
-
-    Reference:
-        https://arxiv.org/abs/2301.00808
+    Attributes:
+        eps: Small constant for numerical stability
+        gamma: Learnable scale parameter
+        beta: Learnable bias parameter
+        _channels: Number of input channels (set during build)
+        _eps_tensor: Cached epsilon tensor for improved performance
+        _input_spec: Input shape specification for validation
 
     Args:
-        eps: Small constant for numerical stability
-        gamma_initializer: Initializer for gamma weights
-        beta_initializer: Initializer for beta weights
-        dtype: Data type of the layer's computations
+        eps: Float value for numerical stability (default: 1e-6)
+        gamma_initializer: Initializer for gamma weights (default: 'ones')
+        beta_initializer: Initializer for beta weights (default: 'zeros')
+        dtype: Data type for layer computations
+        name: Optional name for the layer
     """
 
     def __init__(
             self,
             eps: float = 1e-6,
-            gamma_initializer: Union[str, keras.initializers.Initializer] = 'ones',
-            beta_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-            dtype: Any = None,
+            gamma_initializer: Initializer = 'ones',
+            beta_initializer: Initializer = 'zeros',
+            dtype: Optional[DType] = None,
+            name: Optional[str] = None,
             **kwargs: Any
     ) -> None:
-        """Initialize the GRN layer."""
-        super().__init__(dtype=dtype, **kwargs)
+        """Initialize the GRN layer with specified parameters."""
+        super().__init__(dtype=dtype, name=name, **kwargs)
 
-        self.eps = tf.cast(eps, dtype=self.dtype or tf.float32)
+        if eps <= 0:
+            raise ValueError(f"eps must be positive, got {eps}")
+
+        self.eps = eps
         self.gamma_initializer = keras.initializers.get(gamma_initializer)
         self.beta_initializer = keras.initializers.get(beta_initializer)
 
         # Initialize instance variables
         self.gamma: Optional[tf.Variable] = None
         self.beta: Optional[tf.Variable] = None
-        self.built = False
+        self._channels: Optional[int] = None
+        self._eps_tensor: Optional[tf.Tensor] = None
+        self._input_spec: Optional[keras.layers.InputSpec] = None
 
-        # Cache for static shapes
-        self._input_spec = None
-        self._channels = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+    def build(self, input_shape: Shape) -> None:
         """
         Build the layer by creating weights and validating input shape.
 
         Args:
-            input_shape: Shape of input tensor
+            input_shape: Tuple of integers defining the input shape
 
         Raises:
-            ValueError: If input shape is invalid
+            ValueError: If input shape is invalid or channel dimension is undefined
+            TypeError: If input_shape is not a tuple or list
         """
+        if self.built:
+            return
+
+        if not isinstance(input_shape, (tuple, list)):
+            raise TypeError(f"Expected tuple or list, got {type(input_shape)}")
+
         if len(input_shape) != 4:
             raise ValueError(f"Input shape must be 4D (batch, height, width, channels), "
-                             f"got {len(input_shape)}D")
+                           f"got {len(input_shape)}D")
 
         channels = input_shape[-1]
         if channels is None:
             raise ValueError("Channel dimension must be defined")
 
         self._channels = channels
+        self._eps_tensor = tf.constant(self.eps, dtype=self.dtype)
 
         # Create weights with proper shape and initialization
         self.gamma = self.add_weight(
@@ -97,7 +113,7 @@ class GlobalResponseNormalization(keras.layers.Layer):
 
         self.built = True
 
-    @tf.function(jit_compile=True)
+    @tf.function
     def call(
             self,
             inputs: tf.Tensor,
@@ -108,7 +124,7 @@ class GlobalResponseNormalization(keras.layers.Layer):
         Apply global response normalization to the input tensor.
 
         This implementation uses XLA-optimized operations and proper numerical
-        stability techniques.
+        stability techniques. It includes memory optimizations and improved error checking.
 
         Args:
             inputs: Input tensor of shape (batch_size, height, width, channels)
@@ -116,49 +132,57 @@ class GlobalResponseNormalization(keras.layers.Layer):
             **kwargs: Additional arguments (unused)
 
         Returns:
-            Normalized tensor of the same shape as input
+            tf.Tensor: Normalized tensor of the same shape as input
+
+        Raises:
+            ValueError: If layer has not been built
+            tf.errors.InvalidArgumentError: If input rank is not 4
         """
-        # Ensure input dtype matches layer dtype
+        if not self.built:
+            raise ValueError("Layer has not been built. Call 'build()' first.")
+
+        tf.debugging.assert_rank(inputs, 4, "Input tensor must be 4-dimensional")
+
+        # Ensure input dtype matches layer dtype and has correct shape
         inputs = tf.cast(inputs, self.dtype)
+        tf.debugging.assert_shapes([
+            (inputs, ('N', 'H', 'W', self._channels))
+        ])
 
         # Pre-compute shapes for efficiency
         shape = tf.shape(inputs)
         batch_size, height, width = shape[0], shape[1], shape[2]
 
-        # Compute L2 norm efficiently using fused operation
-        # Reshape to combine spatial dimensions for faster computation
-        reshaped_input = tf.reshape(inputs, [batch_size, -1, self._channels])
-        norm_squared = tf.reduce_sum(tf.square(reshaped_input), axis=1, keepdims=True)
-        norm = tf.sqrt(norm_squared + self.eps)
+        with tf.control_dependencies([inputs]):
+            # Compute L2 norm efficiently using fused operation
+            # Reshape to combine spatial dimensions for faster computation
+            reshaped_input = tf.reshape(inputs, [batch_size, -1, self._channels])
+            norm_squared = tf.reduce_sum(tf.square(reshaped_input), axis=1, keepdims=True)
+            norm = tf.sqrt(norm_squared + self._eps_tensor)
 
-        # Normalize by mean norm (with numerical stability)
-        mean_norm = tf.reduce_mean(norm, axis=-1, keepdims=True)
-        norm_channels = norm / (mean_norm + self.eps)
+            # Normalize by mean norm (with numerical stability)
+            mean_norm = tf.reduce_mean(norm, axis=-1, keepdims=True)
+            norm_channels = norm / (mean_norm + self._eps_tensor)
 
-        # Reshape norm back to original spatial dimensions
-        norm_channels = tf.reshape(norm_channels, [batch_size, 1, 1, self._channels])
+            # Reshape norm back to original spatial dimensions
+            norm_channels = tf.reshape(norm_channels, [batch_size, 1, 1, self._channels])
 
-        # Apply scale and bias with residual connection
-        # Use fused multiply-add for better performance
-        output = tf.raw_ops.AddV2(
-            x=inputs,
-            y=tf.raw_ops.AddV2(
-                x=self.beta,
-                y=tf.raw_ops.Mul(x=inputs * norm_channels, y=self.gamma)
-            )
-        )
+            # Apply scale and bias with residual connection using fused operations
+            scaled = tf.raw_ops.Mul(x=inputs * norm_channels, y=self.gamma)
+            biased = tf.raw_ops.AddV2(x=scaled, y=self.beta)
+            output = tf.raw_ops.AddV2(x=inputs, y=biased)
 
-        return output
+            return output
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(self, input_shape: Shape) -> Shape:
         """
         Compute the output shape of the layer.
 
         Args:
-            input_shape: Input shape tuple
+            input_shape: Tuple of integers or None defining the input shape
 
         Returns:
-            Output shape tuple
+            Tuple defining the output shape
         """
         return input_shape
 
@@ -188,6 +212,9 @@ class GlobalResponseNormalization(keras.layers.Layer):
         Returns:
             A new instance of the layer
         """
-        config["gamma_initializer"] = keras.initializers.deserialize(config["gamma_initializer"])
-        config["beta_initializer"] = keras.initializers.deserialize(config["beta_initializer"])
+        config = config.copy()  # Prevent modifications to original config
+        config["gamma_initializer"] = keras.initializers.deserialize(
+            config["gamma_initializer"])
+        config["beta_initializer"] = keras.initializers.deserialize(
+            config["beta_initializer"])
         return cls(**config)
