@@ -1,3 +1,151 @@
+"""
+CoupledLogitNorm Multi-Label Classification Experiments
+====================================================
+
+Overview
+--------
+This experimental framework evaluates a novel approach to multi-label classification
+using coupled logit normalization. The core innovation introduces deliberate coupling
+between label predictions through a normalization mechanism, creating a form of
+"confidence budget" across labels. This aims to improve prediction quality in scenarios
+with complex label relationships.
+
+Architecture Components
+----------------------
+1. CoupledLogitNorm Layer
+   - Custom activation layer implementing coupled normalization
+   - Introduces interdependencies between label predictions
+   - Parameters:
+     * coupling_strength: Controls interaction strength (0.8 default)
+     * constant: Scaling factor for normalization (2.0 default)
+
+2. Neural Network
+   - Three-layer architecture (256 → 128 → 64)
+   - ReLU activation in hidden layers
+   - Batch normalization after each dense layer
+   - Dropout (0.3) for regularization
+   - CoupledLogitNorm activation in output layer
+
+Experimental Design
+------------------
+Three major experiments testing different aspects of the coupling mechanism:
+
+1. Mutual Exclusivity Test
+   Data Generation:
+   - 10,000 samples, 64 features, 3 classes
+   - High noise level (0.5)
+   - Significant feature overlap (0.7)
+   - Close class centers (1.5)
+   - Added complexity:
+     * Non-linear feature transformations
+     * Structured noise from other classes
+     * Mixed random and structured noise
+     * Weak activation leakage
+   Purpose:
+   - Test handling of mutually exclusive labels
+   - Evaluate coupling effect on label competition
+   - Measure confidence distribution
+
+2. Hierarchical Labels Test
+   Data Generation:
+   - 10,000 samples, 64 features
+   - Three-level hierarchy [2, 4, 8]
+   - Parent-child relationships
+   - Hierarchical noise structure
+   Purpose:
+   - Test preservation of hierarchical relationships
+   - Evaluate parent-child prediction consistency
+   - Measure hierarchy violation rates
+
+3. Confidence Calibration
+   Evaluation:
+   - High confidence prediction analysis
+   - Multi-label activation patterns
+   - Zero-label case handling
+   Purpose:
+   - Assess confidence distribution
+   - Evaluate prediction sparsity
+   - Measure calibration quality
+
+Evaluation Metrics
+-----------------
+1. Basic Classification Metrics:
+   - Average precision
+   - Micro/Macro AUC
+   - Label cardinality
+   - Label density
+
+2. Multi-Label Specific:
+   - Multi-label samples rate
+   - Zero-label samples rate
+   - Label correlation analysis
+
+3. Hierarchical Metrics:
+   - Hierarchy violation rate
+   - Hierarchy compliance
+   - Hierarchical accuracy
+   - Level-wise performance
+
+4. Data Complexity Metrics:
+   - Linear separability
+   - Feature correlations
+   - Class distances
+   - Decision boundary characteristics
+
+Training Configuration
+---------------------
+- Optimizer: Adam
+- Learning rate: 0.001
+- Batch size: 64
+- Epochs: 30
+- Validation split: 0.2
+- Binary cross-entropy loss
+- Early stopping patience: 5
+
+Baselines
+---------
+1. Standard Neural Network:
+   - Identical architecture
+   - Regular sigmoid activation
+   - No coupling mechanism
+
+2. Performance Comparisons:
+   - Mutual exclusivity handling
+   - Hierarchy preservation
+   - Confidence calibration
+   - Prediction sparsity
+
+Implementation Notes
+-------------------
+- TensorFlow 2.18.0
+- Keras 3.8.0
+- Custom layer implementation
+- Type hints and documentation
+- Reproducible random seeds
+- Comprehensive logging
+- Modular architecture
+
+Future Extensions
+----------------
+1. Architecture Variations:
+   - Dynamic coupling strength
+   - Attention mechanisms
+   - Residual connections
+   - Feature disentanglement
+
+2. Data Complexity:
+   - Adversarial examples
+   - Temporal dependencies
+   - Multi-task scenarios
+   - More complex hierarchies
+
+3. Evaluation Extensions:
+   - Robustness testing
+   - Decision boundary visualization
+   - Feature attribution
+   - Confidence analysis
+"""
+
 import keras
 import numpy as np
 from keras import layers
@@ -17,9 +165,6 @@ class SyntheticData:
     y_test: np.ndarray
     label_names: List[str]
     hierarchy_matrix: Optional[np.ndarray] = None
-
-
-
 
 
 def validate_data_difficulty(data: SyntheticData) -> Dict[str, float]:
