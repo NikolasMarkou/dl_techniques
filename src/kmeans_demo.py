@@ -186,8 +186,8 @@ def main():
 
     # Show sample soft assignments
     sample_assignments = model.predict(data[:100])
-    logger.info(f"Sample soft assignments for first 5 points:\n{sample_assignments}")
-    logger.info(f"Sum of assignments (should be 1.0):\n{sample_assignments.sum(axis=1)}")
+    logger.info(f"Sample soft assignments for first 100 points:\n{sample_assignments[:100]}")
+    logger.info(f"Sum of assignments (should be ~1.0):\n{sample_assignments.sum(axis=1)}")
 
 
 # ---------------------------------------------------------------------
