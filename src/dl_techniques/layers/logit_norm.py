@@ -1,79 +1,81 @@
 """
-LogitNorm Variations - A Comprehensive Overview
-=============================================
+Neural Network Normalization Layers
+==================================
 
-This module implements different variations of LogitNorm layers for various classification scenarios.
-LogitNorm helps with Out-of-Distribution (OOD) detection and confidence calibration by normalizing
-network outputs.
+A comprehensive collection of normalization layers focusing on logit normalization
+and RMS normalization for various deep learning tasks, particularly targeting
+confidence calibration and out-of-distribution detection.
 
-Base Variations:
----------------
-1. LogitNorm:
-   - Standard implementation of logit normalization
-   - Uses L2 normalization on logits
-   - Best for basic classification tasks
-   - Helps prevent overconfident predictions
-   - Key parameter: constant (scaling factor)
-
-2. CoupledLogitNorm:
-   - Extends LogitNorm for multi-label classification
-   - Creates interdependence between label predictions
-   - Implements a "confidence budget" across labels
-   - Key parameters: constant, coupling_strength
-   - Returns both normalized logits and normalization factor
-
-Advanced Variations:
-------------------
-3. DynamicCoupledLogitNorm:
-   - Adaptive version of CoupledLogitNorm
-   - Coupling strength changes during training
-   - Uses moving averages to track distribution statistics
-   - Automatically adjusts to data characteristics
-   - Key features:
-     * Trainable coupling strength
-     * Min/max coupling constraints
-     * Distribution-based adaptation
-     * Momentum-based updates
-
-4. OODRobustLogitNorm:
-   - Specifically designed for OOD detection
-   - Includes temperature scaling for better calibration
-   - Computes energy scores for OOD detection
-   - Key features:
-     * Learnable temperature parameter
-     * Energy-based OOD scoring
-     * Returns (logits, energy, temperature)
-
-Usage Guidelines:
----------------
-- Basic Classification: Use standard LogitNorm
-- Multi-label Tasks: Use CoupledLogitNorm
-- Distribution Shifts: Use DynamicCoupledLogitNorm
-- OOD Detection: Use OODRobustLogitNorm
-
-
-Key Benefits:
------------
-1. Improved Calibration:
-   - Better uncertainty estimates
-   - More reliable confidence scores
-   - Reduced overconfidence
-
-2. OOD Robustness:
-   - Better handling of distribution shifts
-   - Early detection of OOD samples
-   - More reliable predictions on edge cases
-
-3. Training Stability:
-   - Normalized gradient flow
-   - Better convergence properties
-   - Reduced sensitivity to initialization
-
-References:
+Layer Types
 ----------
-1. "LogitNorm: Rethinking Confident Logits"
-2. "Energy-based Out-of-distribution Detection"
-3. "Temperature Scaling for Neural Networks"
+1. RMSNorm:
+    - Root mean square normalization
+    - Stabilizes training through magnitude normalization
+    - Best for general neural network layers
+    - Key parameter: constant (scaling factor)
+
+2. LogitNorm:
+    - L2 normalization with temperature scaling
+    - Specifically designed for network output layers
+    - Helps prevent overconfident predictions
+    - Key parameter: temperature (calibration factor)
+
+3. CoupledLogitNorm:
+    - Multi-label classification variant
+    - Creates label prediction interdependence
+    - Implements confidence budgeting across labels
+    - Returns normalized logits and norm factor
+    - Key parameters: constant, coupling_strength
+
+4. DynamicCoupledLogitNorm:
+    - Adaptive coupling mechanism
+    - Self-adjusting normalization strength
+    - Features:
+        * Trainable coupling parameter
+        * Constrained coupling range
+        * Distribution-aware adaptation
+        * Momentum-based statistics
+
+5. OODRobustLogitNorm:
+    - Specialized for OOD detection
+    - Temperature calibration
+    - Energy-based scoring
+    - Features:
+        * Learnable temperature
+        * Energy scoring for OOD
+        * Returns logits, energy scores, and temperature
+
+Usage Recommendations
+--------------------
+- General Layers: RMSNorm
+- Classification Output: LogitNorm
+- Multi-label Tasks: CoupledLogitNorm
+- Distribution Shifts: DynamicCoupledLogitNorm
+- OOD Detection: OODRobustLogitNorm
+
+Implementation Benefits
+---------------------
+1. Training Stability:
+    - Controlled gradient magnitudes
+    - Improved convergence
+    - Initialization robustness
+
+2. Model Calibration:
+    - Better uncertainty quantification
+    - Reliable confidence scores
+    - Reduced overconfidence issues
+
+3. OOD Detection:
+    - Distribution shift handling
+    - Anomaly detection capability
+    - Robust edge case behavior
+
+References
+----------
+[1] "Mitigating Neural Network Overconfidence with Logit Normalization"
+[2] "Root Mean Square Layer Normalization"
+[3] "Energy-based Out-of-distribution Detection"
+[4] "Temperature Scaling for Neural Networks"
 """
 
 
@@ -85,18 +87,42 @@ from typing import Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 @tf.keras.utils.register_keras_serializable()
-class LogitNorm(Layer):
+class RMSNorm(Layer):
     """
-    LogitNorm layer for classification tasks.
+    Root Mean Square Normalization layer for classification tasks.
 
-    This layer implements standard logit normalization, which helps stabilize
-    training and can improve model calibration.
+    This layer implements root mean square normalization by normalizing inputs by their
+    RMS value. Unlike LogitNorm which uses L2 normalization, RMSNorm uses root mean
+    square for normalization, which can help stabilize training and improve model
+    robustness.
+
+    The normalization is computed as:
+        output = input / sqrt(mean(input^2) + epsilon) * constant
+
+    This implementation differs from LogitNorm in that it:
+    - Uses mean of squared values rather than sum
+    - Applies a constant scaling factor instead of temperature
+    - Does not specifically target logit calibration
 
     Args:
-        constant: Scaling factor for normalization. Higher values produce more
-                 spread-out logits.
-        axis: Axis along which to perform normalization.
-        epsilon: Small constant for numerical stability.
+        constant: float, default=1.0
+            Scaling factor applied after normalization. Higher values produce
+            outputs with larger magnitudes.
+        axis: int, default=-1
+            Axis along which to compute RMS statistics. The default (-1)
+            computes RMS over the last dimension.
+        epsilon: float, default=1e-7
+            Small constant added to denominator for numerical stability.
+
+    Inputs:
+        A tensor of any rank
+
+    Outputs:
+        A tensor of the same shape as the input, normalized by RMS values
+
+    References:
+        "Root Mean Square Layer Normalization", 2019
+        https://arxiv.org/abs/1910.07467
     """
 
     def __init__(
@@ -160,6 +186,86 @@ class LogitNorm(Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
+@tf.keras.utils.register_keras_serializable()
+class LogitNorm(Layer):
+    """
+    LogitNorm layer for classification tasks.
+
+    This layer implements logit normalization by applying L2 normalization with a learned temperature
+    parameter. This helps stabilize training and can improve model calibration.
+
+    Args:
+        temperature: Float, temperature scaling parameter. Higher values produce more spread-out logits.
+        axis: Integer, axis along which to perform normalization.
+        epsilon: Float, small constant for numerical stability.
+
+    References:
+        - Paper: "Mitigating Neural Network Overconfidence with Logit Normalization"
+    """
+
+    def __init__(
+            self,
+            temperature: float = 0.04,  # Default from paper for CIFAR-10
+            axis: int = -1,
+            epsilon: float = 1e-7,
+            **kwargs: Any
+    ):
+        super().__init__(**kwargs)
+        self._validate_inputs(temperature, epsilon)
+        self.temperature = temperature
+        self.axis = axis
+        self.epsilon = epsilon
+
+    def _validate_inputs(self, temperature: float, epsilon: float) -> None:
+        """Validate initialization parameters."""
+        if temperature <= 0:
+            raise ValueError(f"temperature must be positive, got {temperature}")
+        if epsilon <= 0:
+            raise ValueError(f"epsilon must be positive, got {epsilon}")
+
+    def call(
+            self,
+            inputs: tf.Tensor,
+            training: Optional[bool] = None
+    ) -> tf.Tensor:
+        """
+        Apply logit normalization.
+
+        Args:
+            inputs: Input logits tensor
+            training: Whether in training mode (unused)
+
+        Returns:
+            Normalized logits tensor
+        """
+        # Cast inputs to float
+        inputs = tf.cast(inputs, self.compute_dtype)
+
+        # Compute L2 norm along specified axis
+        norm = tf.sqrt(
+            tf.maximum(
+                tf.reduce_sum(tf.square(inputs), axis=self.axis, keepdims=True),
+                self.epsilon
+            )
+        )
+
+        # Normalize logits and scale by temperature
+        return inputs / (norm * self.temperature)
+
+    def compute_output_shape(self, input_shape: tf.TensorShape) -> tf.TensorShape:
+        """Compute output shape."""
+        return input_shape
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get layer configuration."""
+        config = super().get_config()
+        config.update({
+            "temperature": self.temperature,
+            "axis": self.axis,
+            "epsilon": self.epsilon
+        })
+        return config
 
 # ---------------------------------------------------------------------
 
