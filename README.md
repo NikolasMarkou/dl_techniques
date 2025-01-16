@@ -1,57 +1,59 @@
-# Playground for different ml ideas
+# DL Techniques
 
-## Project Structure:
+This project is a playground for experimenting with various deep learning techniques, particularly focusing on neural network layers and transformations. It provides implementations of several advanced techniques and includes experiments to demonstrate their applications.
 
-```markdown
-dl_playground/
-├── .env                        # Environment variables
-├── .gitignore                  # Git ignore file
-├── README.md                   # Project documentation
-├── requirements.txt            # Project dependencies
-├── setup.py                    # Package installation script
-├── pyproject.toml             # Project metadata and build configuration
-│
-├── src/                       # Source code directory
-│   └── dl_playground/         # Main package directory
-│       ├── __init__.py
-│       ├── layers/            # Custom layers module
-│       │   ├── __init__.py
-│       │   ├── cfar10_model.py
-│       │   ├── convnext_kmeans_block.py
-│       │   ├── convolutional_transformer_block.py
-│       │   ├── differentiable_kmeans_layer.py
-│       │   └── logit_norm.py
-│       │
-│       └── utils/             # Utility functions
-│           ├── __init__.py
-│           ├── data_loader.py
-│           └── visualization.py
-│
-├── tests/                     # Test directory
-│   ├── __init__.py
-│   ├── conftest.py           # pytest configuration
-│   ├── test_layers/          # Tests for layers
-│   │   ├── __init__.py
-│   │   ├── test_cfar10_model.py
-│   │   ├── test_convnext_kmeans.py
-│   │   └── test_logit_norm.py
-│   └── test_utils/           # Tests for utilities
-│       ├── __init__.py
-│       └── test_data_loader.py
-│
-├── notebooks/                 # Jupyter notebooks
-│   ├── experiments/          # Experimental notebooks
-│   │   ├── kmeans_demo.ipynb
-│   │   └── logit_norm_analysis.ipynb
-│   └── tutorials/            # Tutorial notebooks
-│       └── getting_started.ipynb
-│
-├── docs/                     # Documentation
-│   ├── api/                  # API documentation
-│   ├── examples/             # Example usage
-│   └── tutorials/            # Written tutorials
-│
-└── scripts/                  # Utility scripts
-    ├── train.py             # Training script
-    └── evaluate.py          # Evaluation script
+## Project Structure
+
+- **src/dl_techniques/layers**: Contains implementations of various deep learning layers and techniques, such as convolutional transformers, differentiable KMeans, Gaussian filters, and more.
+- **src/dl_techniques/regularizers**: Includes regularization techniques to improve model generalization.
+- **src/dl_techniques/utils**: Utility functions for logging, tensor operations, and visualization.
+- **src/experiments**: Scripts demonstrating the application of the implemented techniques, such as KMeans clustering and logit normalization experiments.
+- **tests**: Unit tests for the implemented layers, regularizers, and utilities.
+
+## Installation
+
+To install the required dependencies, run:
+
+```bash
+pip install -r requirements.txt
 ```
+
+## Usage
+
+### KMeans Clustering
+
+To run the KMeans clustering demo, execute:
+
+```bash
+python src/experiments/kmeans_demo.py
+```
+
+### Logit Normalization Experiments
+
+To run the logit normalization experiments, execute:
+
+```bash
+python src/experiments/logit_norm.py
+```
+
+## Dependencies
+
+- numpy
+- pytest
+- pytest-cov
+- matplotlib
+- scikit-learn
+- keras~=3.8.0
+- tensorflow==2.18.0
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for more details.
+
+## Contributing
+
+Contributions are welcome! Please open an issue or submit a pull request for any improvements or new features.
+
+## Contact
+
+For any questions or inquiries, please contact the project maintainer.

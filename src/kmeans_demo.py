@@ -1,10 +1,19 @@
+import sys
+
 import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
 from sklearn.datasets import make_blobs
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
 from dl_techniques.layers.differentiable_kmeans import DifferentiableKMeansLayer
 
+
+# ---------------------------------------------------------------------
 
 # Generate synthetic clustered data
 def generate_clustered_data(
@@ -36,6 +45,8 @@ def generate_clustered_data(
     )
     return tf.cast(X, tf.float32)
 
+
+# ---------------------------------------------------------------------
 
 # Create and train a model
 def train_kmeans_model(
@@ -89,6 +100,8 @@ def train_kmeans_model(
     return model, history
 
 
+# ---------------------------------------------------------------------
+
 # Visualize results
 def plot_clustering_results(
         data: tf.Tensor,
@@ -137,8 +150,9 @@ def plot_clustering_results(
     plt.show()
 
 
-# Main execution
-if __name__ == "__main__":
+# ---------------------------------------------------------------------
+
+def main():
     # Set random seed for reproducibility
     tf.random.set_seed(42)
     np.random.seed(42)
@@ -172,6 +186,13 @@ if __name__ == "__main__":
 
     # Show sample soft assignments
     sample_assignments = model.predict(data[:100])
-    print("\nSample soft assignments for first 5 points:\n")
-    print(sample_assignments)
-    print("\nSum of assignments (should be 1.0):\n", sample_assignments.sum(axis=1))
+    logger.info(f"Sample soft assignments for first 5 points:\n{sample_assignments}")
+    logger.info(f"Sum of assignments (should be 1.0):\n{sample_assignments.sum(axis=1)}")
+
+
+# ---------------------------------------------------------------------
+
+
+# Main execution
+if __name__ == "__main__":
+    sys.exit(main())
