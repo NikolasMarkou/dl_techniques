@@ -19,8 +19,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 
-
 from dl_techniques.layers.logit_norm import LogitNorm
+
 
 def load_and_preprocess_mnist() -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Load and preprocess MNIST dataset."""
@@ -237,6 +237,214 @@ class ActivationVisualizer:
         plt.show()
 
 
+class ConfidenceAnalyzer:
+    """Class for analyzing and comparing model confidence distributions."""
+
+    def __init__(
+            self,
+            baseline_model: keras.Model,
+            logitnorm_model: keras.Model
+    ) -> None:
+        """Initialize with both models."""
+        self.baseline_model = baseline_model
+        self.logitnorm_model = logitnorm_model
+
+    def compute_confidence_stats(
+            self,
+            x_test: np.ndarray,
+            y_test: np.ndarray
+    ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+        """Compute confidence statistics for each digit.
+
+        Returns:
+            Tuple of (baseline_stats, logitnorm_stats) where each dict contains:
+            - 'mean_confidence': Mean confidence per digit
+            - 'max_confidence': Max confidence per digit
+            - 'std_confidence': Std deviation of confidence per digit
+            - 'confidence_matrix': Full confidence distribution matrix
+        """
+        # Get predictions from both models
+        baseline_preds = self.baseline_model.predict(x_test)
+        logitnorm_preds = self.logitnorm_model.predict(x_test)
+
+        # Get true labels
+        true_labels = np.argmax(y_test, axis=1)
+
+        # Initialize stats dictionaries
+        baseline_stats = {}
+        logitnorm_stats = {}
+
+        # Compute statistics for each digit
+        for digit in range(10):
+            # Get indices for this digit
+            digit_mask = (true_labels == digit)
+
+            # Get predictions for this digit
+            baseline_digit_preds = baseline_preds[digit_mask]
+            logitnorm_digit_preds = logitnorm_preds[digit_mask]
+
+            # Compute confidence matrices (predicted confidence for each class)
+            if digit == 0:  # Initialize on first digit
+                baseline_stats['confidence_matrix'] = np.zeros((10, 10))
+                logitnorm_stats['confidence_matrix'] = np.zeros((10, 10))
+
+            baseline_stats['confidence_matrix'][digit] = np.mean(baseline_digit_preds, axis=0)
+            logitnorm_stats['confidence_matrix'][digit] = np.mean(logitnorm_digit_preds, axis=0)
+
+            # Compute confidence statistics for correct class
+            baseline_correct_conf = baseline_digit_preds[:, digit]
+            logitnorm_correct_conf = logitnorm_digit_preds[:, digit]
+
+            if digit == 0:  # Initialize arrays on first digit
+                for stats, prefix in [(baseline_stats, 'baseline'), (logitnorm_stats, 'logitnorm')]:
+                    stats['mean_confidence'] = np.zeros(10)
+                    stats['max_confidence'] = np.zeros(10)
+                    stats['std_confidence'] = np.zeros(10)
+
+            # Store statistics
+            baseline_stats['mean_confidence'][digit] = np.mean(baseline_correct_conf)
+            baseline_stats['max_confidence'][digit] = np.max(baseline_correct_conf)
+            baseline_stats['std_confidence'][digit] = np.std(baseline_correct_conf)
+
+            logitnorm_stats['mean_confidence'][digit] = np.mean(logitnorm_correct_conf)
+            logitnorm_stats['max_confidence'][digit] = np.max(logitnorm_correct_conf)
+            logitnorm_stats['std_confidence'][digit] = np.std(logitnorm_correct_conf)
+
+        return baseline_stats, logitnorm_stats
+
+    def plot_confidence_comparison(
+            self,
+            x_test: np.ndarray,
+            y_test: np.ndarray,
+            save_path: Optional[str] = None
+    ) -> None:
+        """Plot comprehensive confidence comparison between models."""
+        # Compute confidence statistics
+        baseline_stats, logitnorm_stats = self.compute_confidence_stats(x_test, y_test)
+
+        # Create figure with subplots
+        fig = plt.figure(figsize=(20, 15))
+        gs = plt.GridSpec(2, 3)
+
+        # 1. Plot confidence heatmaps
+        ax1 = fig.add_subplot(gs[0, 0])
+        ax2 = fig.add_subplot(gs[1, 0])
+
+        # Baseline confidence heatmap
+        sns.heatmap(
+            baseline_stats['confidence_matrix'],
+            ax=ax1,
+            cmap='YlOrRd',
+            vmin=0,
+            vmax=1,
+            annot=True,
+            fmt='.2f',
+            cbar_kws={'label': 'Average Confidence'}
+        )
+        ax1.set_title('Baseline Model Confidence Distribution')
+        ax1.set_xlabel('Predicted Digit')
+        ax1.set_ylabel('True Digit')
+
+        # LogitNorm confidence heatmap
+        sns.heatmap(
+            logitnorm_stats['confidence_matrix'],
+            ax=ax2,
+            cmap='YlOrRd',
+            vmin=0,
+            vmax=1,
+            annot=True,
+            fmt='.2f',
+            cbar_kws={'label': 'Average Confidence'}
+        )
+        ax2.set_title('LogitNorm Model Confidence Distribution')
+        ax2.set_xlabel('Predicted Digit')
+        ax2.set_ylabel('True Digit')
+
+        # 2. Plot mean confidence comparison
+        ax3 = fig.add_subplot(gs[0, 1])
+        x = np.arange(10)
+        width = 0.35
+
+        ax3.bar(x - width / 2, baseline_stats['mean_confidence'], width, label='Baseline')
+        ax3.bar(x + width / 2, logitnorm_stats['mean_confidence'], width, label='LogitNorm')
+        ax3.set_title('Mean Confidence per Digit')
+        ax3.set_xlabel('Digit')
+        ax3.set_ylabel('Mean Confidence')
+        ax3.legend()
+        ax3.set_xticks(x)
+
+        # 3. Plot confidence standard deviation comparison
+        ax4 = fig.add_subplot(gs[1, 1])
+        ax4.bar(x - width / 2, baseline_stats['std_confidence'], width, label='Baseline')
+        ax4.bar(x + width / 2, logitnorm_stats['std_confidence'], width, label='LogitNorm')
+        ax4.set_title('Confidence Standard Deviation per Digit')
+        ax4.set_xlabel('Digit')
+        ax4.set_ylabel('Standard Deviation')
+        ax4.legend()
+        ax4.set_xticks(x)
+
+        # 4. Plot confidence statistics boxplot
+        ax5 = fig.add_subplot(gs[:, 2])
+
+        # Prepare data for boxplot
+        baseline_data = [
+            baseline_stats['confidence_matrix'][i, i] for i in range(10)
+        ]
+        logitnorm_data = [
+            logitnorm_stats['confidence_matrix'][i, i] for i in range(10)
+        ]
+
+        # Create boxplot
+        box_data = [baseline_data, logitnorm_data]
+        ax5.boxplot(box_data, labels=['Baseline', 'LogitNorm'])
+        ax5.set_title('Distribution of Confidence Scores')
+        ax5.set_ylabel('Confidence')
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path)
+        plt.show()
+
+
+def analyze_model_confidence(
+        baseline_model: keras.Model,
+        logitnorm_model: keras.Model,
+        x_test: np.ndarray,
+        y_test: np.ndarray
+) -> None:
+    """Analyze and compare confidence distributions between models."""
+    print("\nAnalyzing confidence distributions...")
+
+    # Create confidence analyzer
+    analyzer = ConfidenceAnalyzer(baseline_model, logitnorm_model)
+
+    # Create output directory
+    output_dir = Path("confidence_analysis")
+    output_dir.mkdir(exist_ok=True)
+
+    # Generate and save confidence comparison plots
+    analyzer.plot_confidence_comparison(
+        x_test,
+        y_test,
+        save_path=str(output_dir / 'confidence_comparison.png')
+    )
+
+    # Compute and print summary statistics
+    baseline_stats, logitnorm_stats = analyzer.compute_confidence_stats(x_test, y_test)
+
+    print("\nConfidence Summary Statistics:")
+    print("\nBaseline Model:")
+    print(f"Average confidence: {np.mean(baseline_stats['mean_confidence']):.3f}")
+    print(f"Max confidence: {np.max(baseline_stats['max_confidence']):.3f}")
+    print(f"Average std deviation: {np.mean(baseline_stats['std_confidence']):.3f}")
+
+    print("\nLogitNorm Model:")
+    print(f"Average confidence: {np.mean(logitnorm_stats['mean_confidence']):.3f}")
+    print(f"Max confidence: {np.max(logitnorm_stats['max_confidence']):.3f}")
+    print(f"Average std deviation: {np.mean(logitnorm_stats['std_confidence']):.3f}")
+
+
 def main() -> None:
     """Main training and visualization pipeline."""
     # Load and preprocess data
@@ -265,6 +473,9 @@ def main() -> None:
         y_test,
         'logitnorm_model'
     )
+
+    # Analyze confidence distributions
+    analyze_model_confidence(baseline_model, logitnorm_model, x_test, y_test)
 
     # Create visualizer
     visualizer = ActivationVisualizer(baseline_model, logitnorm_model)
