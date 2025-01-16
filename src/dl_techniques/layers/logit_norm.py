@@ -39,7 +39,7 @@ class CoupledLogitNorm(Layer):
         """Validate initialization parameters."""
         if constant <= 0:
             raise ValueError(f"constant must be positive, got {constant}")
-        if coupling_strength <= 0:
+        if coupling_strength < 0:
             raise ValueError(f"coupling_strength must be positive, got {coupling_strength}")
         if epsilon <= 0:
             raise ValueError(f"epsilon must be positive, got {epsilon}")
