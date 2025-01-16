@@ -1,9 +1,10 @@
 import tensorflow as tf
+from keras.api.layers import Layer
 from typing import Optional, Union, Tuple, Dict, Any
 
 
 @tf.keras.utils.register_keras_serializable()
-class CoupledLogitNorm(tf.keras.layers.Layer):
+class CoupledLogitNorm(Layer):
     """
     Coupled LogitNorm layer for multi-label classification.
 
@@ -87,7 +88,7 @@ class CoupledLogitNorm(tf.keras.layers.Layer):
         return config
 
 
-class CoupledMultiLabelHead(tf.keras.layers.Layer):
+class CoupledMultiLabelHead(Layer):
     """
     Multi-label classification head with coupled logit normalization.
 
@@ -111,25 +112,3 @@ class CoupledMultiLabelHead(tf.keras.layers.Layer):
         """Apply coupled normalization and sigmoid activation."""
         normalized_logits, _ = self.logit_norm(inputs)
         return tf.sigmoid(normalized_logits)
-
-
-# Example usage and testing
-if __name__ == "__main__":
-    # Create sample data
-    logits = tf.constant([
-        [1.0, 5.0, 0.5],  # Sample 1
-        [2.0, 0.1, 3.0],  # Sample 2
-        [10.0, 8.0, 9.0]  # Sample 3 (high confidence)
-    ])
-
-    # Test different coupling strengths
-    coupling_strengths = [0.5, 1.0, 2.0]
-
-    print("Original logits:\n", logits.numpy())
-    print("\nPredictions with different coupling strengths:")
-
-    for strength in coupling_strengths:
-        head = CoupledMultiLabelHead(coupling_strength=strength)
-        preds = head(logits)
-        print(f"\nCoupling strength {strength}:")
-        print(preds.numpy())

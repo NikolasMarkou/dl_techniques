@@ -33,7 +33,7 @@ python src/experiments/kmeans_demo.py
 To run the logit normalization experiments, execute:
 
 ```bash
-python src/experiments/logit_norm.py
+python src/experiments/coupled_logit_norm.py
 ```
 
 ## Dependencies
