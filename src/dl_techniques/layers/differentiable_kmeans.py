@@ -267,16 +267,10 @@ refer to the accompanying code and documentation.
 
 import numpy as np
 import tensorflow as tf
-from dataclasses import dataclass
-from tensorflow.python.keras import layers
-from tensorflow.python.keras import backend
-from tensorflow.python.keras import initializers
 from typing import Optional, Union, Literal, List, Any, Tuple, Dict
-
-import matplotlib.pyplot as plt
-from sklearn.manifold import TSNE
-from tensorflow.python import keras
-from sklearn.metrics import silhouette_score
+from keras.api.layers import Layer
+from keras.api import initializers
+from keras.api import backend
 
 # ---------------------------------------------------------------------
 
@@ -289,7 +283,7 @@ Axis = Union[int, List[int]]
 # ---------------------------------------------------------------------
 
 @tf.keras.utils.register_keras_serializable()
-class DifferentiableKMeansLayer(layers.Layer):
+class DifferentiableKMeansLayer(Layer):
     """A differentiable K-means layer that can operate on arbitrary tensor shapes.
 
     This layer implements a differentiable version of K-means clustering using soft

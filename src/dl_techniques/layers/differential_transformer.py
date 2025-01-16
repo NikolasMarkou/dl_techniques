@@ -41,8 +41,12 @@ Implementation Details:
 
 import numpy as np
 import tensorflow as tf
-from tensorflow.python import keras
-from typing import Optional, Tuple, Union, Dict, Any, List
+from keras.api import Model
+from keras.api import layers
+from keras.api import losses
+from keras.api import optimizers
+from keras.api import initializers
+from typing import Optional, Dict, Any
 
 # ---------------------------------------------------------------------
 # local imports
@@ -53,7 +57,7 @@ from dl_techniques.utils.tensors import safe_divide, create_causal_mask
 # ---------------------------------------------------------------------
 
 
-class LayerNorm(keras.layers.Layer):
+class LayerNorm(layers.Layer):
     """Custom Layer Normalization with safe division."""
 
     def __init__(self, dim: int, eps: float = 1e-5) -> None:
@@ -82,7 +86,7 @@ class LayerNorm(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-class GlobalResponseNorm(keras.layers.Layer):
+class GlobalResponseNorm(layers.Layer):
     """Global Response Normalization with enhanced stability."""
 
     def __init__(
@@ -110,7 +114,7 @@ class GlobalResponseNorm(keras.layers.Layer):
         self.gamma = self.add_weight(
             "gamma",
             shape=(dim,),
-            initializer=keras.initializers.Constant(init_scale),
+            initializer=initializers.Constant(init_scale),
             trainable=True
         )
         self.beta = self.add_weight(
@@ -151,7 +155,7 @@ class GlobalResponseNorm(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-class DifferentialAttention(keras.layers.Layer):
+class DifferentialAttention(layers.Layer):
     """Differential attention with comprehensive stability features."""
 
     def __init__(
@@ -193,10 +197,10 @@ class DifferentialAttention(keras.layers.Layer):
         self.scale = head_dim ** -0.5
 
         # QKV projection with careful initialization
-        self.qkv = keras.layers.Dense(
+        self.qkv = layers.Dense(
             3 * num_heads * head_dim,
             use_bias=qkv_bias,
-            kernel_initializer=keras.initializers.VarianceScaling(
+            kernel_initializer=initializers.VarianceScaling(
                 scale=2.0,
                 mode='fan_out',
                 distribution='truncated_normal'
@@ -204,9 +208,9 @@ class DifferentialAttention(keras.layers.Layer):
         )
 
         # Output projection
-        self.proj = keras.layers.Dense(
+        self.proj = layers.Dense(
             dim,
-            kernel_initializer=keras.initializers.VarianceScaling(
+            kernel_initializer=initializers.VarianceScaling(
                 scale=2.0,
                 mode='fan_in',
                 distribution='truncated_normal'
@@ -215,8 +219,8 @@ class DifferentialAttention(keras.layers.Layer):
         )
 
         # Dropout layers
-        self.dropout = keras.layers.Dropout(dropout)
-        self.attn_dropout = keras.layers.Dropout(attention_dropout)
+        self.dropout = layers.Dropout(dropout)
+        self.attn_dropout = layers.Dropout(attention_dropout)
 
         # Initialize λ parameters
         self._init_lambda_params(head_dim, lambda_init)
@@ -228,25 +232,25 @@ class DifferentialAttention(keras.layers.Layer):
         self.lambda_q1 = self.add_weight(
             "lambda_q1",
             shape=(head_dim,),
-            initializer=keras.initializers.Constant(init_val),
+            initializer=initializers.Constant(init_val),
             trainable=True
         )
         self.lambda_k1 = self.add_weight(
             "lambda_k1",
             shape=(head_dim,),
-            initializer=keras.initializers.Constant(init_val),
+            initializer=initializers.Constant(init_val),
             trainable=True
         )
         self.lambda_q2 = self.add_weight(
             "lambda_q2",
             shape=(head_dim,),
-            initializer=keras.initializers.Constant(-init_val),
+            initializer=initializers.Constant(-init_val),
             trainable=True
         )
         self.lambda_k2 = self.add_weight(
             "lambda_k2",
             shape=(head_dim,),
-            initializer=keras.initializers.Constant(-init_val),
+            initializer=initializers.Constant(-init_val),
             trainable=True
         )
 
@@ -354,7 +358,7 @@ class DifferentialAttention(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-class FeedForward(keras.layers.Layer):
+class FeedForward(layers.Layer):
     """Feed-forward network with SwiGLU activation."""
 
     def __init__(
@@ -367,24 +371,24 @@ class FeedForward(keras.layers.Layer):
     ) -> None:
         super().__init__()
 
-        self.fc1 = keras.layers.Dense(
+        self.fc1 = layers.Dense(
             hidden_dim,
             activation=activation,
-            kernel_initializer=keras.initializers.VarianceScaling(
+            kernel_initializer=initializers.VarianceScaling(
                 scale=init_scale,
                 mode='fan_out',
                 distribution='truncated_normal'
             )
         )
-        self.fc2 = keras.layers.Dense(
+        self.fc2 = layers.Dense(
             dim,
-            kernel_initializer=keras.initializers.VarianceScaling(
+            kernel_initializer=initializers.VarianceScaling(
                 scale=init_scale,
                 mode='fan_in',
                 distribution='truncated_normal'
             )
         )
-        self.dropout = keras.layers.Dropout(dropout)
+        self.dropout = layers.Dropout(dropout)
 
     def call(self, x: tf.Tensor, training: bool = False) -> tf.Tensor:
         x = self.fc1(x)
@@ -395,7 +399,7 @@ class FeedForward(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-class TransformerBlock(keras.layers.Layer):
+class TransformerBlock(layers.Layer):
     """Transformer block with differential attention and enhanced stability.
 
     Implements pre-normalization, differential attention, and feed-forward layers
@@ -499,7 +503,7 @@ class TransformerBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-class PositionalEmbedding(keras.layers.Layer):
+class PositionalEmbedding(layers.Layer):
     """Learned positional embedding with enhanced stability."""
 
     def __init__(
@@ -525,11 +529,11 @@ class PositionalEmbedding(keras.layers.Layer):
         self.pos_embedding = self.add_weight(
             "pos_embedding",
             shape=(1, max_seq_len, dim),
-            initializer=keras.initializers.TruncatedNormal(stddev=scale),
+            initializer=initializers.TruncatedNormal(stddev=scale),
             trainable=True
         )
 
-        self.dropout = keras.layers.Dropout(dropout)
+        self.dropout = layers.Dropout(dropout)
 
     def call(
             self,
@@ -560,7 +564,7 @@ class PositionalEmbedding(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-class DifferentialTransformer(keras.Model):
+class DifferentialTransformer(Model):
     """Complete Differential Transformer model with comprehensive stability features."""
 
     def __init__(
@@ -598,9 +602,9 @@ class DifferentialTransformer(keras.Model):
             raise ValueError(f"dim {dim} must be divisible by num_heads {num_heads}")
 
         # Input embedding with proper initialization
-        self.embedding = keras.layers.Dense(
+        self.embedding = layers.Dense(
             dim,
-            kernel_initializer=keras.initializers.TruncatedNormal(stddev=0.02)
+            kernel_initializer=initializers.TruncatedNormal(stddev=0.02)
         )
 
         # Positional embedding
@@ -630,9 +634,9 @@ class DifferentialTransformer(keras.Model):
 
         # Output head
         self.norm = GlobalResponseNorm(dim)
-        self.fc = keras.layers.Dense(
+        self.fc = layers.Dense(
             num_classes,
-            kernel_initializer=keras.initializers.TruncatedNormal(stddev=0.02),
+            kernel_initializer=initializers.TruncatedNormal(stddev=0.02),
             bias_initializer="zeros"
         )
 
@@ -750,7 +754,7 @@ def create_diff_transformer(
     )
 
     # Configure optimizer with weight decay fix
-    optimizer = keras.optimizers.AdamW(
+    optimizer = optimizers.AdamW(
         learning_rate=learning_rate,
         weight_decay=weight_decay,
         beta_1=beta1,
@@ -761,9 +765,9 @@ def create_diff_transformer(
     # Compile with loss and metrics
     model.compile(
         optimizer=optimizer,
-        loss=keras.losses.SparseCategoricalCrossentropy(
+        loss=losses.SparseCategoricalCrossentropy(
             from_logits=True,
-            reduction=tf.keras.losses.Reduction.NONE  # For custom loss scaling
+            reduction=losses.Reduction.NONE  # For custom loss scaling
         ),
         metrics=['accuracy']
     )
