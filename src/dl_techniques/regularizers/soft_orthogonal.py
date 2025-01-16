@@ -25,6 +25,7 @@ DEFAULT_SOFTORTHOGONAL_L2: float = 0.001
 DEFAULT_SOFTORTHOGONAL_LAMBDA: float = 0.01
 DEFAULT_SOFTORTHOGONAL_STDDEV: float = 0.02
 
+# ---------------------------------------------------------------------
 
 # @tf.function
 # def reshape_to_2d(weights: tf.Tensor) -> tf.Tensor:

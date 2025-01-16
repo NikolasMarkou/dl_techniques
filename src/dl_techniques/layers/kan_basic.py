@@ -103,8 +103,8 @@ Version: 1.0.0
 import numpy as np
 from typing import Tuple
 import tensorflow as tf
-from keras.api.layers import Layer
-from keras.api.regularizers import l2
+from tensorflow.python.keras.layers import Layer
+from tensorflow.python.keras.regularizers import l2
 
 # ---------------------------------------------------------------------
 # local imports

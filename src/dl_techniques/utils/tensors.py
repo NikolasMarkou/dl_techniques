@@ -89,4 +89,35 @@ def power_iteration(
     # Compute spectral norm using the ratio of norms
     return tf.norm(product) / (tf.norm(vector) + epsilon)
 
+
+# ---------------------------------------------------------------------
+
+def create_causal_mask(size: int) -> tf.Tensor:
+    """Create causal mask for attention.
+
+    Args:
+        size: Sequence length
+
+    Returns:
+        Causal mask tensor
+    """
+    mask = 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
+    return tf.cast(mask == 0, tf.float32)
+
+
+# ---------------------------------------------------------------------
+
+def safe_divide(x: tf.Tensor, y: tf.Tensor, eps: float = 1e-12) -> tf.Tensor:
+    """Safe division with epsilon to prevent div by zero.
+
+    Args:
+        x: Numerator tensor
+        y: Denominator tensor
+        eps: Small constant for numerical stability
+
+    Returns:
+        Result of safe division
+    """
+    return x / (y + eps)
+
 # ---------------------------------------------------------------------

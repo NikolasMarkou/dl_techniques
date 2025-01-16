@@ -3,6 +3,7 @@ import numpy as np
 import tensorflow as tf
 from dl_techniques.layers.differentiable_kmeans import DifferentiableKMeansLayer
 
+# ---------------------------------------------------------------------
 
 @pytest.fixture
 def random_seed():
@@ -19,6 +20,8 @@ def basic_config():
         "output_mode": "assignments",
         "cluster_axis": -1
     }
+
+# ---------------------------------------------------------------------
 
 
 class TestDifferentiableKMeansLayer:
@@ -147,6 +150,8 @@ class TestDifferentiableKMeansLayer:
         assert new_layer.output_mode == layer.output_mode
         assert new_layer.cluster_axis == layer.cluster_axis
         assert new_layer.random_seed == layer.random_seed
+
+# ---------------------------------------------------------------------
 
 
 if __name__ == "__main__":
