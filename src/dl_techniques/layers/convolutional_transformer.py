@@ -43,6 +43,10 @@ class ConvolutionalTransformerBlock(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
+        # Validate dimensions
+        if dim % num_heads != 0:
+            raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
+
         # Store initialization parameters
         self.dim = dim
         self.num_heads = num_heads
@@ -56,57 +60,71 @@ class ConvolutionalTransformerBlock(keras.layers.Layer):
         self.head_dim = dim // num_heads
         self.regularization_rate = 1e-3
 
-        # Validate dimensions
-        if dim % num_heads != 0:
-            raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
+        # Initialize layer attributes as None
+        self.q_conv = None
+        self.k_conv = None
+        self.v_conv = None
+        self.attention = None
+        self.proj = None
+        self.mlp = None
+        self.norm1 = None
+        self.norm2 = None
+        self.dropout_layer = None
 
+    def build(self, input_shape: tf.TensorShape) -> None:
+        """
+        Build the layer when the input shape is known.
+
+        Args:
+            input_shape (tf.TensorShape): Shape of the input tensor.
+        """
         # Convolutional projections for Q, K, V
         self.q_conv = keras.layers.Conv2D(
-            dim, conv_kernel_size,
+            self.dim, self.conv_kernel_size,
             padding="same",
-            groups=num_heads,
+            groups=self.num_heads,
             name="query_conv",
             kernel_regularizer=keras.regularizers.l2(self.regularization_rate)
         )
         self.k_conv = keras.layers.Conv2D(
-            dim, conv_kernel_size,
+            self.dim, self.conv_kernel_size,
             padding="same",
-            groups=num_heads,
+            groups=self.num_heads,
             name="key_conv",
             kernel_regularizer=keras.regularizers.l2(self.regularization_rate)
         )
         self.v_conv = keras.layers.Conv2D(
-            dim, conv_kernel_size,
+            self.dim, self.conv_kernel_size,
             padding="same",
-            groups=num_heads,
+            groups=self.num_heads,
             name="value_conv",
             kernel_regularizer=keras.regularizers.l2(self.regularization_rate)
         )
 
         # Attention layer
         self.attention = keras.layers.Attention(
-            use_scale=use_scale,
-            dropout=attention_dropout,
+            use_scale=self.use_scale,
+            dropout=self.attention_dropout,
             name="attention"
         )
 
         # Output projection
         self.proj = keras.layers.Conv2D(
-            dim, 1,
+            self.dim, 1,
             name="output_projection",
             kernel_regularizer=keras.regularizers.l2(self.regularization_rate))
 
         # Feed-Forward Network
-        mlp_hidden_dim = int(dim * mlp_ratio)
+        mlp_hidden_dim = int(self.dim * self.mlp_ratio)
         self.mlp = keras.Sequential([
             keras.layers.Dense(
                 mlp_hidden_dim,
                 name="mlp_dense_1",
                 kernel_regularizer=keras.regularizers.l2(self.regularization_rate)),
             keras.layers.Activation(self.activation, name="mlp_activation"),
-            keras.layers.Dropout(rate=dropout_rate, name="mlp_dropout_1"),
+            keras.layers.Dropout(rate=self.dropout_rate, name="mlp_dropout_1"),
             keras.layers.Dense(
-                dim,
+                self.dim,
                 name="mlp_dense_2",
                 kernel_regularizer=keras.regularizers.l2(self.regularization_rate))
         ], name="mlp")
@@ -116,7 +134,9 @@ class ConvolutionalTransformerBlock(keras.layers.Layer):
         self.norm2 = keras.layers.LayerNormalization(epsilon=1e-6, name="norm2")
 
         # Dropout
-        self.dropout = keras.layers.Dropout(rate=dropout_rate, name="proj_dropout")
+        self.dropout_layer = keras.layers.Dropout(rate=self.dropout_rate, name="proj_dropout")
+
+        super().build(input_shape)
 
     def _reshape_for_attention(self, x: tf.Tensor) -> tf.Tensor:
         """
@@ -179,7 +199,7 @@ class ConvolutionalTransformerBlock(keras.layers.Layer):
         # Reshape back to spatial dimensions
         attention_output = self._reshape_from_attention(attention_output, height, width)
         attention_output = self.proj(attention_output)
-        attention_output = self.dropout(attention_output, training=training)
+        attention_output = self.dropout_layer(attention_output, training=training)
 
         # First residual connection
         x = inputs + attention_output
