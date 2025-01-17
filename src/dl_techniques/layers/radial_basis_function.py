@@ -81,8 +81,8 @@ References
 
 import keras
 import tensorflow as tf
+from typing import Tuple, Any
 from keras.api.layers import Layer
-from typing import Union, Tuple, Any
 
 # ---------------------------------------------------------------------
 
