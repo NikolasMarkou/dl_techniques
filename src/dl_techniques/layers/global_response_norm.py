@@ -2,11 +2,14 @@ import keras
 import tensorflow as tf
 from typing import Any, Dict, Optional, Union, Tuple
 
+# ---------------------------------------------------------------------
 
 # Type aliases for improved readability
 Shape = Tuple[Optional[int], ...]
 DType = Union[str, tf.dtypes.DType]
 Initializer = Union[str, keras.initializers.Initializer]
+
+# ---------------------------------------------------------------------
 
 
 @keras.utils.register_keras_serializable()
@@ -217,3 +220,5 @@ class GlobalResponseNormalization(keras.layers.Layer):
         config["beta_initializer"] = keras.initializers.deserialize(
             config["beta_initializer"])
         return cls(**config)
+
+# ---------------------------------------------------------------------

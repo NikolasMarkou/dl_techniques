@@ -11,11 +11,6 @@ Key Features:
     - Orthonormal initialization options
     - Configurable convolution parameters
 
-Dependencies:
-    - TensorFlow 2.18.0
-    - Keras 3.8.0
-    - Python 3.11
-
 Note:
     All convolution operations use 'same' padding by default to maintain
     spatial dimensions consistency except for explicit strided operations.

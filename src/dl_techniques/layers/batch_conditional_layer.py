@@ -14,8 +14,10 @@ import numpy as np
 import tensorflow as tf
 from typing import List, Tuple, Optional, Union, Sequence
 
+# ---------------------------------------------------------------------
 
-@tf.keras.utils.register_keras_serializable(package="custom_layers")
+
+@keras.utils.register_keras_serializable()
 class BatchConditionalOutputLayer(keras.layers.Layer):
     """
     A custom Keras layer for conditional output selection based on ground truth values.
@@ -165,4 +167,7 @@ class BatchConditionalOutputLayer(keras.layers.Layer):
             dict: Layer configuration dictionary
         """
         return super().get_config()
+
+# ---------------------------------------------------------------------
+
 

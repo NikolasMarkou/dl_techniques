@@ -214,8 +214,8 @@ class LearnableMultiplier(keras.layers.Layer):
         config.update({
             "multiplier_type": self.multiplier_type.to_string(),
             "capped": self.capped,
-            "regularizer": tf.keras.regularizers.serialize(self.regularizer),
-            "initializer": tf.keras.initializers.serialize(self.initializer)
+            "regularizer": keras.regularizers.serialize(self.regularizer),
+            "initializer": keras.initializers.serialize(self.initializer)
         })
         return config
 

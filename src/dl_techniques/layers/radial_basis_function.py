@@ -79,6 +79,7 @@ References
    a review.
 """
 
+import keras
 import tensorflow as tf
 from keras.api.layers import Layer
 from typing import Union, Tuple, Any
@@ -124,7 +125,7 @@ class RBFLayer(Layer):
         super().__init__(**kwargs)
         self.units = units
         self.gamma = gamma
-        self.initializer = tf.keras.initializers.get(initializer)
+        self.initializer = keras.initializers.get(initializer)
         self.centers = None
         self.widths = None
 
@@ -157,7 +158,7 @@ class RBFLayer(Layer):
             initializer=tf.constant_initializer(self.gamma),
             trainable=True,
             dtype=tf.float32,
-            constraint=tf.keras.constraints.NonNeg()
+            constraint=keras.constraints.NonNeg()
         )
 
         super().build(input_shape)
@@ -211,7 +212,7 @@ class RBFLayer(Layer):
         config.update({
             'units': self.units,
             'gamma': self.gamma,
-            'initializer': tf.keras.initializers.serialize(self.initializer)
+            'initializer': keras.initializers.serialize(self.initializer)
         })
         return config
 

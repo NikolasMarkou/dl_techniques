@@ -11,6 +11,7 @@ import tensorflow as tf
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+# ---------------------------------------------------------------------
 
 @dataclass
 class LayerConfig:
@@ -19,6 +20,7 @@ class LayerConfig:
     trainable: bool = True
     dtype: Optional[str] = None
 
+# ---------------------------------------------------------------------
 
 class SelectiveGradientMask(keras.layers.Layer):
     """
@@ -174,6 +176,8 @@ class SelectiveGradientMask(keras.layers.Layer):
             "dtype": self.config.dtype
         }
 
+# ---------------------------------------------------------------------
+
 
 def create_model(
         input_shape: Tuple[int, ...] = (28, 28, 1),
@@ -241,4 +245,6 @@ def create_model(
     )
 
     return model
+
+# ---------------------------------------------------------------------
 

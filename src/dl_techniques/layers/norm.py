@@ -117,6 +117,7 @@ When choosing a normalization layer, consider:
 [5] "Hybrid Normalization for Deep Neural Networks"
 """
 
+import keras
 import tensorflow as tf
 from keras.api.layers import Layer
 from typing import Optional, Union, Tuple, Dict, Any
@@ -124,7 +125,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
 
-@tf.keras.utils.register_keras_serializable()
+@keras.utils.register_keras_serializable()
 class RMSNorm(Layer):
     """
     Root Mean Square Normalization layer for classification tasks.
@@ -226,7 +227,7 @@ class RMSNorm(Layer):
 
 
 # ---------------------------------------------------------------------
-@tf.keras.utils.register_keras_serializable()
+@keras.utils.register_keras_serializable()
 class LogitNorm(Layer):
     """
     LogitNorm layer for classification tasks.
@@ -309,7 +310,7 @@ class LogitNorm(Layer):
 
 # ---------------------------------------------------------------------
 
-@tf.keras.utils.register_keras_serializable()
+@keras.utils.register_keras_serializable()
 class CoupledLogitNorm(Layer):
     """
     Coupled LogitNorm layer for multi-label classification.
@@ -425,7 +426,7 @@ class CoupledMultiLabelHead(Layer):
 
 # ---------------------------------------------------------------------
 
-@tf.keras.utils.register_keras_serializable()
+@keras.utils.register_keras_serializable()
 class DynamicCoupledLogitNorm(Layer):
     """
     Dynamic Coupled LogitNorm layer for multi-label classification.
@@ -471,7 +472,7 @@ class DynamicCoupledLogitNorm(Layer):
         self.coupling_strength = self.add_weight(
             name='coupling_strength',
             shape=(),
-            initializer=tf.keras.initializers.Constant(initial_coupling),
+            initializer=keras.initializers.Constant(initial_coupling),
             constraint=lambda x: tf.clip_by_value(x, min_coupling, max_coupling),
             trainable=True
         )
@@ -534,7 +535,7 @@ class DynamicCoupledLogitNorm(Layer):
         if training:
             # Compute current batch statistics
             batch_mean = tf.reduce_mean(x_norm)
-            batch_var = tf.reduce_variance(x_norm)
+            batch_var = tf.math.reduce_variance(x_norm)
 
             # Update moving averages
             momentum = 0.9
@@ -613,7 +614,7 @@ class DynamicCoupledLogitNorm(Layer):
 
 # ---------------------------------------------------------------------
 
-@tf.keras.utils.register_keras_serializable()
+@keras.utils.register_keras_serializable()
 class OODRobustLogitNorm(Layer):
     """
     LogitNorm layer specifically designed for OOD robustness.
@@ -645,7 +646,7 @@ class OODRobustLogitNorm(Layer):
         self.temperature = self.add_weight(
             name='temperature',
             shape=(),
-            initializer=tf.keras.initializers.Constant(initial_temperature),
+            initializer=keras.initializers.Constant(initial_temperature),
             constraint=lambda x: tf.maximum(x, epsilon),
             trainable=True
         )
@@ -684,7 +685,7 @@ class OODRobustLogitNorm(Layer):
 
 # ---------------------------------------------------------------------
 
-@tf.keras.utils.register_keras_serializable()
+@keras.utils.register_keras_serializable()
 class HybridLogitRMSNorm(Layer):
     """
     Hybrid normalization layer combining LogitNorm and RMSNorm approaches.
@@ -752,7 +753,7 @@ class HybridLogitRMSNorm(Layer):
             self.alpha = self.add_weight(
                 name='alpha',
                 shape=(),
-                initializer=tf.keras.initializers.Constant(0.5),
+                initializer=keras.initializers.Constant(0.5),
                 constraint=lambda x: tf.clip_by_value(x, 0.0, 1.0),
                 trainable=True
             )

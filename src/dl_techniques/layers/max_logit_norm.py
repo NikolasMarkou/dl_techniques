@@ -14,6 +14,8 @@ import tensorflow as tf
 from keras import Layer
 from typing import Optional, Tuple, Dict, Any, Union, Literal
 
+# ---------------------------------------------------------------------
+
 
 class MaxLogitNorm(Layer):
     """
@@ -81,6 +83,8 @@ class MaxLogitNorm(Layer):
             "epsilon": self.epsilon
         })
         return config
+
+# ---------------------------------------------------------------------
 
 
 class DecoupledMaxLogit(Layer):
@@ -169,6 +173,8 @@ class DecoupledMaxLogit(Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
+
 
 class DMLPlus:
     """
@@ -232,3 +238,6 @@ class DMLPlus:
             # Center model returns MaxNorm and norm factor
             max_norm = tf.reduce_max(norm, axis=self.axis)
             return max_norm, norm
+
+# ---------------------------------------------------------------------
+

@@ -1,4 +1,5 @@
 import copy
+import keras
 from enum import Enum
 import tensorflow as tf
 from typing import List, Tuple, Iterable, Union, Dict
@@ -13,7 +14,7 @@ from .mish import Mish, ScaledMish
 # ---------------------------------------------------------------------
 
 def activation_wrapper(
-        activation: Union[tf.keras.layers.Layer, str] = "linear") -> tf.keras.layers.Layer:
+        activation: Union[keras.layers.Layer, str] = "linear") -> keras.layers.Layer:
     if not isinstance(activation, str):
         return activation
 
@@ -28,28 +29,28 @@ def activation_wrapper(
     elif activation in ["leakyrelu", "leaky_relu"]:
         # leaky relu, practically same us Relu
         # with very small negative slope to allow gradient flow
-        x = tf.keras.layers.LeakyReLU(alpha=0.3)
+        x = keras.layers.LeakyReLU(alpha=0.3)
     elif activation in ["leakyrelu_01", "leaky_relu_01"]:
         # leaky relu, practically same us Relu
         # with very small negative slope to allow gradient flow
-        x = tf.keras.layers.LeakyReLU(alpha=0.1)
+        x = keras.layers.LeakyReLU(alpha=0.1)
     elif activation in ["leaky_relu_001", "leakyrelu_001"]:
         # leaky relu, practically same us Relu
         # with very small negative slope to allow gradient flow
-        x = tf.keras.layers.LeakyReLU(alpha=0.01)
+        x = keras.layers.LeakyReLU(alpha=0.01)
     elif activation in ["prelu"]:
         # parametric Rectified Linear Unit
         constraint = \
-            tf.keras.constraints.MinMaxNorm(
+            keras.constraints.MinMaxNorm(
                 min_value=0.0, max_value=1.0, rate=1.0, axis=0)
-        x = tf.keras.layers.PReLU(
+        x = keras.layers.PReLU(
             alpha_initializer=0.1,
             # very small l1
-            alpha_regularizer=tf.keras.regularizers.l1(1e-3),
+            alpha_regularizer=keras.regularizers.l1(1e-3),
             alpha_constraint=constraint,
             shared_axes=[1, 2])
     else:
-        x = tf.keras.layers.Activation(activation)
+        x = keras.layers.Activation(activation)
 
     return x
 
@@ -206,21 +207,21 @@ def conv2d_wrapper(
 
     # --- convolution
     if conv_type == ConvType.CONV2D:
-        x = tf.keras.layers.Conv2D(**conv_params)(x)
+        x = keras.layers.Conv2D(**conv_params)(x)
     elif conv_type == ConvType.CONV2D_DEPTHWISE:
-        x = tf.keras.layers.DepthwiseConv2D(**conv_params)(x)
+        x = keras.layers.DepthwiseConv2D(**conv_params)(x)
     elif conv_type == ConvType.CONV2D_TRANSPOSE:
-        x = tf.keras.layers.Conv2DTranspose(**conv_params)(x)
+        x = keras.layers.Conv2DTranspose(**conv_params)(x)
     elif conv_type == ConvType.CONV2D_SEPARABLE:
-        x = tf.keras.layers.SeparableConv2D(**conv_params)(x)
+        x = keras.layers.SeparableConv2D(**conv_params)(x)
     else:
         raise ValueError(f"don't know how to handle this [{conv_type}]")
 
     # --- perform post convolution normalizations and activation
     if use_bn:
-        x = tf.keras.layers.BatchNormalization(**bn_params)(x)
+        x = keras.layers.BatchNormalization(**bn_params)(x)
     if use_ln:
-        x = tf.keras.layers.LayerNormalization(**ln_params)(x)
+        x = keras.layers.LayerNormalization(**ln_params)(x)
 
     # --- perform activation post normalization
     if (conv_activation is not None and
@@ -229,10 +230,10 @@ def conv2d_wrapper(
 
     # --- dropout
     if use_dropout:
-        x = tf.keras.layers.Dropout(**dropout_params)(x)
+        x = keras.layers.Dropout(**dropout_params)(x)
 
     if use_dropout_2d:
-        x = tf.keras.layers.SpatialDropout2D(**dropout_2d_params)(x)
+        x = keras.layers.SpatialDropout2D(**dropout_2d_params)(x)
 
     return x
 
