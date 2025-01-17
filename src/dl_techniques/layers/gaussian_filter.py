@@ -150,36 +150,130 @@ class GaussianFilter(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
+def create_gaussian_kernel(
+        kernel_size: Tuple[int, int],
+        sigma: Union[float, Tuple[float, float]],
+        channels: int,
+        dtype: tf.DType = tf.float32
+) -> tf.Tensor:
+    """
+    Creates a 2D Gaussian kernel for multiple channels.
 
-if __name__ == "__main__":
-    # Set random seed for reproducibility
-    tf.random.set_seed(42)
-    np.random.seed(42)
+    Args:
+        kernel_size: Tuple[int, int]
+            The size of the kernel in (height, width) format.
+        sigma: Union[float, Tuple[float, float]]
+            The standard deviation for the Gaussian kernel.
+            If float, same sigma is used for both dimensions.
+            If tuple, (sigma_height, sigma_width) are used.
+        channels: int
+            Number of input channels.
+        dtype: tf.DType, optional
+            Data type of the output kernel, defaults to tf.float32.
 
-    # Create a sample image
-    image = np.random.rand(1, 100, 100, 3).astype(np.float32)
+    Returns:
+        tf.Tensor: A 4D tensor of shape (kernel_height, kernel_width, channels, 1)
+            representing the depthwise Gaussian kernel.
 
-    # Create and apply GaussianFilter with different kernel sizes
-    gaussian_filter_3x3 = GaussianFilter(kernel_size=(3, 3))
-    gaussian_filter_5x5 = GaussianFilter(kernel_size=(5, 5))
-    gaussian_filter_7x7 = GaussianFilter(kernel_size=(7, 7))
+    Raises:
+        ValueError: If kernel_size is not a tuple of length 2.
+        ValueError: If sigma is negative or invalid type.
+    """
+    if len(kernel_size) != 2:
+        raise ValueError("kernel_size must be a tuple of length 2")
 
-    # Apply filters
-    filtered_3x3 = gaussian_filter_3x3(image)
-    filtered_5x5 = gaussian_filter_5x5(image)
-    filtered_7x7 = gaussian_filter_7x7(image)
+    if isinstance(sigma, (int, float)):
+        sigma = (float(sigma), float(sigma))
+    elif isinstance(sigma, (tuple, list)) and len(sigma) == 2:
+        sigma = (float(sigma[0]), float(sigma[1]))
+    else:
+        raise ValueError(f"Invalid sigma value: {sigma}")
 
-    # Test serialization and deserialization
-    config = gaussian_filter_5x5.get_config()
-    reconstructed_layer = GaussianFilter.from_config(config)
+    if sigma[0] <= 0 or sigma[1] <= 0:
+        raise ValueError("sigma values must be positive")
 
-    print("Original layer config:", config)
-    print("Reconstructed layer config:", reconstructed_layer.get_config())
-    print("Configs are identical:", config == reconstructed_layer.get_config())
+    # Create meshgrid for kernel computation
+    x = tf.range(-(kernel_size[1] - 1) / 2, (kernel_size[1] + 1) / 2)
+    y = tf.range(-(kernel_size[0] - 1) / 2, (kernel_size[0] + 1) / 2)
+    y_grid, x_grid = tf.meshgrid(y, x)
 
-    # Verify that the reconstructed layer produces the same output
-    reconstructed_output = reconstructed_layer(image)
-    is_equal = tf.reduce_all(tf.equal(filtered_5x5, reconstructed_output))
-    print("Original and reconstructed layer outputs are identical:", is_equal.numpy())
+    # Compute 2D Gaussian kernel
+    gaussian = tf.exp(-(
+            tf.square(x_grid) / (2 * tf.square(sigma[1])) +
+            tf.square(y_grid) / (2 * tf.square(sigma[0]))
+    ))
+
+    # Normalize the kernel
+    gaussian = gaussian / tf.reduce_sum(gaussian)
+
+    # Expand dimensions for channels
+    gaussian = tf.expand_dims(gaussian, axis=-1)
+    gaussian = tf.expand_dims(gaussian, axis=-1)
+
+    # Tile for multiple channels
+    kernel = tf.tile(gaussian, [1, 1, channels, 1])
+
+    return tf.cast(kernel, dtype)
 
 # ---------------------------------------------------------------------
+
+
+@tf.function
+def gaussian_filter(
+        inputs: tf.Tensor,
+        kernel_size: Tuple[int, int] = (5, 5),
+        sigma: Union[float, Tuple[float, float]] = 1.0,
+        strides: Tuple[int, int] = (1, 1),
+        padding: str = 'SAME',
+        name: Optional[str] = None
+) -> tf.Tensor:
+    """
+    Applies Gaussian filtering to the input tensor.
+
+    Args:
+        inputs: tf.Tensor
+            Input tensor of shape [batch_size, height, width, channels].
+        kernel_size: Tuple[int, int], optional
+            Size of the Gaussian kernel (height, width), defaults to (5, 5).
+        sigma: Union[float, Tuple[float, float]], optional
+            Standard deviation for Gaussian kernel, defaults to 1.0.
+        strides: Tuple[int, int], optional
+            Stride of the sliding window for each dimension, defaults to (1, 1).
+        padding: str, optional
+            The type of padding algorithm, either 'SAME' or 'VALID', defaults to 'SAME'.
+        name: Optional[str], optional
+            Name for the operation, defaults to None.
+
+    Returns:
+        tf.Tensor: Filtered tensor of shape [batch_size, height', width', channels],
+            where dimensions depend on padding and stride values.
+
+    Raises:
+        ValueError: If inputs tensor has incorrect rank or invalid parameters.
+    """
+    with tf.name_scope(name or "gaussian_filter"):
+        inputs = tf.convert_to_tensor(inputs)
+
+        if inputs.shape.rank != 4:
+            raise ValueError(
+                f"Expected input tensor of rank 4, got shape {inputs.shape}"
+            )
+
+        # Create Gaussian kernel
+        kernel = create_gaussian_kernel(
+            kernel_size=kernel_size,
+            sigma=sigma,
+            channels=inputs.shape[-1],
+            dtype=inputs.dtype
+        )
+
+        # Apply depthwise convolution
+        return tf.nn.depthwise_conv2d(
+            input=inputs,
+            filter=kernel,
+            strides=[1, strides[0], strides[1], 1],
+            padding=padding
+        )
+
+# ---------------------------------------------------------------------
+

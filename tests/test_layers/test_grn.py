@@ -9,7 +9,7 @@ import tempfile
 import os
 
 # Import the layer to test
-from dl_techniques.layers.grn import GlobalResponseNormalization  # Update with correct import
+from dl_techniques.layers.global_response_norm import GlobalResponseNormalization  # Update with correct import
 
 
 @dataclass

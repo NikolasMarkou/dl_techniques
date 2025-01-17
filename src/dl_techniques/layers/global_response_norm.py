@@ -1,5 +1,4 @@
 import keras
-import numpy as np
 import tensorflow as tf
 from typing import Any, Dict, Optional, Union, Tuple
 
