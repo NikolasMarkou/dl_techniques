@@ -1,83 +1,121 @@
 """
-Neural Network Normalization Layers
-==================================
+# Neural Network Normalization Layers
 
 A comprehensive collection of normalization layers focusing on logit normalization
 and RMS normalization for various deep learning tasks, particularly targeting
 confidence calibration and out-of-distribution detection.
 
-Layer Types
-----------
-1. RMSNorm:
-    - Root mean square normalization
-    - Stabilizes training through magnitude normalization
-    - Best for general neural network layers
-    - Key parameter: constant (scaling factor)
+## Layer Types
 
-2. LogitNorm:
-    - L2 normalization with temperature scaling
-    - Specifically designed for network output layers
-    - Helps prevent overconfident predictions
-    - Key parameter: temperature (calibration factor)
+### 1. RMSNorm
+- Root mean square normalization
+- Stabilizes training through magnitude normalization
+- Best for general neural network layers
+- Key parameter: constant (scaling factor)
 
-3. CoupledLogitNorm:
-    - Multi-label classification variant
-    - Creates label prediction interdependence
-    - Implements confidence budgeting across labels
-    - Returns normalized logits and norm factor
-    - Key parameters: constant, coupling_strength
+### 2. LogitNorm
+- L2 normalization with temperature scaling
+- Specifically designed for network output layers
+- Helps prevent overconfident predictions
+- Key parameter: temperature (calibration factor)
 
-4. DynamicCoupledLogitNorm:
-    - Adaptive coupling mechanism
-    - Self-adjusting normalization strength
-    - Features:
-        * Trainable coupling parameter
-        * Constrained coupling range
-        * Distribution-aware adaptation
-        * Momentum-based statistics
+### 3. CoupledLogitNorm
+- Multi-label classification variant
+- Creates label prediction interdependence
+- Implements confidence budgeting across labels
+- Returns normalized logits and norm factor
+- Key parameters: constant, coupling_strength
 
-5. OODRobustLogitNorm:
-    - Specialized for OOD detection
-    - Temperature calibration
-    - Energy-based scoring
-    - Features:
-        * Learnable temperature
-        * Energy scoring for OOD
-        * Returns logits, energy scores, and temperature
+### 4. DynamicCoupledLogitNorm
+- Adaptive coupling mechanism
+- Self-adjusting normalization strength
+- Features:
+    * Trainable coupling parameter
+    * Constrained coupling range
+    * Distribution-aware adaptation
+    * Momentum-based statistics
 
-Usage Recommendations
---------------------
+### 5. OODRobustLogitNorm
+- Specialized for OOD detection
+- Temperature calibration
+- Energy-based scoring
+- Features:
+    * Learnable temperature
+    * Energy scoring for OOD
+    * Returns logits, energy scores, and temperature
+
+### 6. HybridLogitRMSNorm
+- Combined RMS and Logit normalization
+- Sequential application of both normalizations
+- Optional learnable weighted combination
+- Features:
+    * Two-stage normalization process
+    * Configurable temperature and RMS scaling
+    * Training stability with calibration benefits
+- Key parameters: temperature, rms_constant, weighted_combination
+
+## Usage Recommendations
 - General Layers: RMSNorm
 - Classification Output: LogitNorm
 - Multi-label Tasks: CoupledLogitNorm
 - Distribution Shifts: DynamicCoupledLogitNorm
 - OOD Detection: OODRobustLogitNorm
+- Complex Tasks: HybridLogitRMSNorm (when both stability and calibration are crucial)
 
-Implementation Benefits
----------------------
-1. Training Stability:
-    - Controlled gradient magnitudes
-    - Improved convergence
-    - Initialization robustness
+## Implementation Benefits
 
-2. Model Calibration:
-    - Better uncertainty quantification
-    - Reliable confidence scores
-    - Reduced overconfidence issues
+### 1. Training Stability
+- Controlled gradient magnitudes
+- Improved convergence
+- Initialization robustness
+- Enhanced gradient flow (HybridLogitRMSNorm)
 
-3. OOD Detection:
-    - Distribution shift handling
-    - Anomaly detection capability
-    - Robust edge case behavior
+### 2. Model Calibration
+- Better uncertainty quantification
+- Reliable confidence scores
+- Reduced overconfidence issues
+- Multi-stage calibration (HybridLogitRMSNorm)
 
-References
-----------
+### 3. OOD Detection
+- Distribution shift handling
+- Anomaly detection capability
+- Robust edge case behavior
+- Enhanced detection through combined normalization
+
+### 4. Hybrid Benefits (HybridLogitRMSNorm)
+- Combined stability and calibration
+- Adaptive normalization weighting
+- Flexible architecture integration
+- Improved robustness through dual normalization
+
+## Layer Selection Guide
+
+When choosing a normalization layer, consider:
+
+1. Task Type:
+   - Single-label classification → LogitNorm or HybridLogitRMSNorm
+   - Multi-label classification → CoupledLogitNorm
+   - General feature extraction → RMSNorm
+   - OOD detection → OODRobustLogitNorm
+
+2. Training Characteristics:
+   - Unstable training → RMSNorm or HybridLogitRMSNorm
+   - Overconfidence issues → LogitNorm
+   - Distribution shifts → DynamicCoupledLogitNorm
+   - Complex scenarios → HybridLogitRMSNorm with weighted combination
+
+3. Model Architecture:
+   - Deep networks → Consider HybridLogitRMSNorm for stability
+   - Output layers → LogitNorm variants
+   - Hidden layers → RMSNorm or weighted HybridLogitRMSNorm
+
+## References
 [1] "Mitigating Neural Network Overconfidence with Logit Normalization"
 [2] "Root Mean Square Layer Normalization"
 [3] "Energy-based Out-of-distribution Detection"
 [4] "Temperature Scaling for Neural Networks"
+[5] "Hybrid Normalization for Deep Neural Networks"
 """
-
 
 import tensorflow as tf
 from keras.api.layers import Layer
@@ -186,6 +224,7 @@ class RMSNorm(Layer):
         })
         return config
 
+
 # ---------------------------------------------------------------------
 @tf.keras.utils.register_keras_serializable()
 class LogitNorm(Layer):
@@ -266,6 +305,7 @@ class LogitNorm(Layer):
             "epsilon": self.epsilon
         })
         return config
+
 
 # ---------------------------------------------------------------------
 
@@ -640,5 +680,174 @@ class OODRobustLogitNorm(Layer):
         energy = -tf.reduce_logsumexp(normalized_logits, axis=self.axis)
 
         return normalized_logits, energy, self.temperature
+
+
+# ---------------------------------------------------------------------
+
+@tf.keras.utils.register_keras_serializable()
+class HybridLogitRMSNorm(Layer):
+    """
+    Hybrid normalization layer combining LogitNorm and RMSNorm approaches.
+
+    This layer implements a novel combination of logit normalization and root mean square
+    normalization, providing both calibration benefits and training stability. The layer
+    first applies RMS normalization followed by temperature-scaled L2 normalization.
+
+    The normalization process occurs in two steps:
+    1. RMS Normalization: x_rms = x / sqrt(mean(x^2) + epsilon)
+    2. Logit Normalization: output = x_rms / (||x_rms||_2 * temperature)
+
+    Args:
+        temperature: float, default=0.04
+            Temperature scaling parameter for logit normalization. Higher values
+            produce more spread-out logits.
+        rms_constant: float, default=1.0
+            Scaling factor for RMS normalization. Controls the magnitude of
+            intermediate activations.
+        axis: int, default=-1
+            Axis along which to perform normalization operations.
+        epsilon: float, default=1e-7
+            Small constant added for numerical stability.
+        weighted_combination: bool, default=False
+            If True, uses learnable weights to combine RMS and Logit normalizations.
+
+    Attributes:
+        alpha: tf.Variable, optional
+            Learnable weight for combining normalizations when weighted_combination=True.
+
+    Example:
+        ```python
+        # Create layer
+        norm_layer = HybridLogitRMSNorm(temperature=0.04, rms_constant=1.0)
+
+        # Apply to logits
+        normalized_logits = norm_layer(logits)
+        ```
+
+    References:
+        - "Root Mean Square Layer Normalization"
+        - "Mitigating Neural Network Overconfidence with Logit Normalization"
+    """
+
+    def __init__(
+            self,
+            temperature: float = 0.04,
+            rms_constant: float = 1.0,
+            axis: int = -1,
+            epsilon: float = 1e-7,
+            weighted_combination: bool = False,
+            **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+        self._validate_inputs(temperature, rms_constant, epsilon)
+
+        self.temperature = temperature
+        self.rms_constant = rms_constant
+        self.axis = axis
+        self.epsilon = epsilon
+        self.weighted_combination = weighted_combination
+
+        # Initialize alpha if using weighted combination
+        if weighted_combination:
+            self.alpha = self.add_weight(
+                name='alpha',
+                shape=(),
+                initializer=tf.keras.initializers.Constant(0.5),
+                constraint=lambda x: tf.clip_by_value(x, 0.0, 1.0),
+                trainable=True
+            )
+
+    def _validate_inputs(
+            self,
+            temperature: float,
+            rms_constant: float,
+            epsilon: float
+    ) -> None:
+        """Validate initialization parameters."""
+        if temperature <= 0:
+            raise ValueError(f"temperature must be positive, got {temperature}")
+        if rms_constant <= 0:
+            raise ValueError(f"rms_constant must be positive, got {rms_constant}")
+        if epsilon <= 0:
+            raise ValueError(f"epsilon must be positive, got {epsilon}")
+
+    def _apply_rms_norm(self, inputs: tf.Tensor) -> tf.Tensor:
+        """Apply RMS normalization to inputs."""
+        mean_square = tf.reduce_mean(
+            tf.square(inputs),
+            axis=self.axis,
+            keepdims=True
+        )
+        rms_norm = tf.math.rsqrt(mean_square + self.epsilon)
+        return inputs * rms_norm * self.rms_constant
+
+    def _apply_logit_norm(self, inputs: tf.Tensor) -> tf.Tensor:
+        """Apply logit normalization to inputs."""
+        square_sum = tf.reduce_sum(
+            tf.square(inputs),
+            axis=self.axis,
+            keepdims=True
+        )
+        l2_norm = tf.math.rsqrt(square_sum + self.epsilon)
+        return inputs * l2_norm / self.temperature
+
+    def call(
+            self,
+            inputs: tf.Tensor,
+            training: Optional[bool] = None
+    ) -> Union[tf.Tensor, Tuple[tf.Tensor, Dict[str, tf.Tensor]]]:
+        """
+        Apply hybrid normalization to inputs.
+
+        Args:
+            inputs: Input tensor to normalize
+            training: Whether in training mode (unused)
+
+        Returns:
+            If weighted_combination is False:
+                Normalized tensor
+            If weighted_combination is True:
+                Tuple of (normalized tensor, dict with intermediate values)
+        """
+        # Cast inputs to compute dtype
+        inputs = tf.cast(inputs, self.compute_dtype)
+
+        # Apply RMS normalization
+        rms_normalized = self._apply_rms_norm(inputs)
+
+        # Apply Logit normalization
+        logit_normalized = self._apply_logit_norm(rms_normalized)
+
+        if self.weighted_combination:
+            # Combine normalizations using learned weight
+            final_output = (
+                    self.alpha * logit_normalized +
+                    (1 - self.alpha) * rms_normalized
+            )
+
+            # Return output and intermediate values
+            return final_output, {
+                'rms_normalized': rms_normalized,
+                'logit_normalized': logit_normalized,
+                'alpha': self.alpha
+            }
+
+        return logit_normalized
+
+    def compute_output_shape(self, input_shape: tf.TensorShape) -> tf.TensorShape:
+        """Compute output shape."""
+        return input_shape
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get layer configuration."""
+        config = super().get_config()
+        config.update({
+            'temperature': self.temperature,
+            'rms_constant': self.rms_constant,
+            'axis': self.axis,
+            'epsilon': self.epsilon,
+            'weighted_combination': self.weighted_combination
+        })
+        return config
 
 # ---------------------------------------------------------------------
