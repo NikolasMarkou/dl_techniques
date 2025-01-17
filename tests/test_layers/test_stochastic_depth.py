@@ -208,3 +208,6 @@ def test_learning_phase():
 
     assert training_outputs_different
     assert inference_outputs_same
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

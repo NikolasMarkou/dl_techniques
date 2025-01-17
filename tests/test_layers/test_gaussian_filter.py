@@ -228,3 +228,6 @@ def test_gaussian_filter_gradient():
     gradient = tape.gradient(loss, test_input)
     assert gradient is not None
     assert not tf.reduce_any(tf.math.is_nan(gradient))
+
+if __name__ == "__main__":
+    pytest.main([__file__])

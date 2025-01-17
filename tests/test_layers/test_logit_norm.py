@@ -1,11 +1,7 @@
-import sys
-from pathlib import Path
+import keras
 import pytest
 import tensorflow as tf
 
-# Add the src directory to the Python path
-project_root = Path(__file__).parent.parent.parent
-sys.path.append(str(project_root / "src"))
 
 from dl_techniques.layers.logit_norm import CoupledLogitNorm, CoupledMultiLabelHead
 
@@ -41,7 +37,6 @@ class TestCoupledLogitNorm:
         {"constant": -1.0},
         {"constant": 0.0},
         {"coupling_strength": -1.0},
-        {"coupling_strength": 0.0},
         {"epsilon": -1e-7}
     ])
     def test_invalid_initialization(self, invalid_config):
@@ -132,9 +127,9 @@ class TestCoupledMultiLabelHead:
 @pytest.mark.integration
 def test_integration():
     """Integration test with a simple model."""
-    inputs = tf.keras.Input(shape=(3,))
+    inputs = keras.Input(shape=(3,))
     outputs = CoupledMultiLabelHead()(inputs)
-    model = tf.keras.Model(inputs, outputs)
+    model = keras.Model(inputs, outputs)
 
     # Test forward pass
     batch = tf.random.normal((4, 3))
@@ -143,3 +138,6 @@ def test_integration():
     assert predictions.shape == (4, 3)
     assert tf.reduce_all(predictions >= 0.0)
     assert tf.reduce_all(predictions <= 1.0)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

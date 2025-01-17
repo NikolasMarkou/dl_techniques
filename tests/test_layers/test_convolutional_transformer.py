@@ -190,3 +190,6 @@ def test_model_save_load(model_params: Dict[str, Any], tmp_path) -> None:
     original_output = model(test_input)
     loaded_output = loaded_model(test_input)
     assert np.allclose(original_output.numpy(), loaded_output.numpy())
+
+if __name__ == "__main__":
+    pytest.main([__file__])

@@ -195,3 +195,6 @@ class TestIntegration:
             verbose=0
         )
         assert 'loss' in history.history
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
