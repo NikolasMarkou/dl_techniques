@@ -5,3 +5,7 @@ pythonpath = [
 testpaths = [
     "tests"
 ]
+
+[tool.pylint.main]
+recursive=yes
+ignore=CVS

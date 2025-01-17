@@ -5,7 +5,8 @@ import tensorflow as tf
 
 @tf.function
 def reshape_to_2d(weights: tf.Tensor) -> tf.Tensor:
-    """Reshape N-dimensional tensor to 2D matrix for regularization computations.
+    """
+    Reshape N-dimensional tensor to 2D matrix for regularization computations.
 
     This function takes a tensor of any dimension and reshapes it into a 2D matrix
     where the last dimension becomes the first dimension (F) and all other dimensions
@@ -107,7 +108,10 @@ def create_causal_mask(size: int) -> tf.Tensor:
 
 # ---------------------------------------------------------------------
 
-def safe_divide(x: tf.Tensor, y: tf.Tensor, eps: float = 1e-12) -> tf.Tensor:
+def safe_divide(
+        x: tf.Tensor,
+        y: tf.Tensor,
+        eps: float = 1e-12) -> tf.Tensor:
     """Safe division with epsilon to prevent div by zero.
 
     Args:
@@ -118,6 +122,6 @@ def safe_divide(x: tf.Tensor, y: tf.Tensor, eps: float = 1e-12) -> tf.Tensor:
     Returns:
         Result of safe division
     """
-    return x / (y + eps)
+    return x / (y + tf.constant(eps))
 
 # ---------------------------------------------------------------------

@@ -49,16 +49,19 @@ class TriStatePreferenceRegularizer(keras.regularizers.Regularizer):
                       Higher values create stronger quantization pressure.
     """
 
-    def __init__(self, scale: float = 1.0) -> None:
+    def __init__(self, multiplier: float = 1.0, scale: float = 1.0) -> None:
         """
         Initialize the tri-state preference regularizer.
 
         Args:
-            scale (float): Scaling factor for the regularization term.
+            multiplier (float): multiplier factor for the regularization term.
                           Higher values create stronger pressure towards -1, 0, 1.
                           Defaults to 1.0.
+            scale (float): scales the signal
+                          Defaults to 1.0.
         """
-        self.scale = scale
+        self.multiplier = tf.constant(multiplier)
+        self.scale = tf.constant(scale)
         self.base_coefficient = 32.0 / 4.5  # Coefficient for exact maxima of 1
 
     def __call__(self, weights: tf.Tensor) -> tf.Tensor:
@@ -76,7 +79,7 @@ class TriStatePreferenceRegularizer(keras.regularizers.Regularizer):
             tf.Tensor: The calculated regularization cost.
         """
         # Calculate the polynomial terms: x²(x+1)²(x-1)²
-        x = weights
+        x = self.scale * weights
         x_squared = tf.square(x)
         plus_one_squared = tf.square(x + 1)
         minus_one_squared = tf.square(x - 1)
@@ -84,8 +87,8 @@ class TriStatePreferenceRegularizer(keras.regularizers.Regularizer):
         # Combine terms and apply base coefficient
         cost = self.base_coefficient * x_squared * plus_one_squared * minus_one_squared
 
-        # Apply scaling and return mean cost
-        return self.scale * tf.reduce_mean(cost)
+        # Apply multiplier and return mean cost
+        return self.multiplier * tf.reduce_mean(cost)
 
     def get_config(self) -> dict:
         """
@@ -94,7 +97,10 @@ class TriStatePreferenceRegularizer(keras.regularizers.Regularizer):
         Returns:
             dict: Configuration dictionary containing the scale parameter.
         """
-        return {'scale': self.scale}
+        return {
+            'multiplier': self.multiplier,
+            'scale': self.scale
+        }
 
     @classmethod
     def from_config(cls, config: dict) -> 'TriStatePreferenceRegularizer':
@@ -111,16 +117,18 @@ class TriStatePreferenceRegularizer(keras.regularizers.Regularizer):
 
 
 def get_tri_state_regularizer(
+        multiplier: Optional[float] = 1.0,
         scale: Optional[float] = 1.0
 ) -> TriStatePreferenceRegularizer:
     """
     Factory function to create a tri-state preference regularizer instance.
 
     Args:
-        scale (Optional[float]): Scaling factor for the regularization term.
+        multiplier (Optional[float]): multiplier factor for the regularization term.
                                 Higher values create stronger quantization.
                                 Defaults to 1.0.
-
+        scale (Optional[float]): scales the signal.
+                                Defaults to 1.0.
     Returns:
         TriStatePreferenceRegularizer: An instance of the tri-state regularizer.
 
@@ -133,6 +141,6 @@ def get_tri_state_regularizer(
         >>> strong_regularizer = get_tri_state_regularizer(scale=2.0)
         >>> model.add(Dense(32, kernel_regularizer=strong_regularizer))
     """
-    return TriStatePreferenceRegularizer(scale=scale)
+    return TriStatePreferenceRegularizer(multiplier=multiplier, scale=scale)
 
 # ---------------------------------------------------------------------

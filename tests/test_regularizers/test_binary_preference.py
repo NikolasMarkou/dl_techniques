@@ -19,18 +19,18 @@ from dl_techniques.regularizers.binary_preference import (
 @pytest.fixture
 def regularizer():
     """Fixture providing a default regularizer instance."""
-    return BinaryPreferenceRegularizer(scale=1.0)
+    return BinaryPreferenceRegularizer(multiplier=1.0)
 
 
 def test_regularizer_initialization():
     """Test proper initialization of the regularizer."""
     # Test default initialization
     reg = BinaryPreferenceRegularizer()
-    assert reg.scale == 1.0
+    assert reg.multiplier == 1.0
 
     # Test custom scale
-    reg = BinaryPreferenceRegularizer(scale=2.0)
-    assert reg.scale == 2.0
+    reg = BinaryPreferenceRegularizer(multiplier=2.0)
+    assert reg.multiplier == 2.0
 
 
 def test_binary_points_zero_cost(regularizer):
@@ -58,8 +58,8 @@ def test_scaling():
     weights = tf.constant([[0.5]], dtype=tf.float32)
 
     # Test different scales
-    reg1 = BinaryPreferenceRegularizer(scale=1.0)
-    reg2 = BinaryPreferenceRegularizer(scale=2.0)
+    reg1 = BinaryPreferenceRegularizer(multiplier=1.0)
+    reg2 = BinaryPreferenceRegularizer(multiplier=2.0)
 
     cost1 = reg1(weights)
     cost2 = reg2(weights)
@@ -85,13 +85,13 @@ def test_symmetry(regularizer):
 
 def test_config_serialization():
     """Test configuration serialization and deserialization."""
-    original_reg = BinaryPreferenceRegularizer(scale=2.0)
+    original_reg = BinaryPreferenceRegularizer(multiplier=2.0)
     config = original_reg.get_config()
 
     # Recreate from config
     new_reg = BinaryPreferenceRegularizer.from_config(config)
 
-    assert new_reg.scale == original_reg.scale
+    assert new_reg.multiplier == original_reg.multiplier
 
 
 def test_factory_function():
@@ -99,11 +99,11 @@ def test_factory_function():
     # Test default parameters
     reg1 = get_binary_regularizer()
     assert isinstance(reg1, BinaryPreferenceRegularizer)
-    assert reg1.scale == 1.0
+    assert reg1.multiplier == 1.0
 
-    # Test custom scale
-    reg2 = get_binary_regularizer(scale=2.0)
-    assert reg2.scale == 2.0
+    # Test custom multiplier
+    reg2 = get_binary_regularizer(multiplier=2.0)
+    assert reg2.multiplier == 2.0
 
 
 def test_keras_integration():
@@ -124,7 +124,7 @@ def test_keras_integration():
 
 def test_numerical_stability():
     """Test regularizer behavior with extreme values."""
-    regularizer = BinaryPreferenceRegularizer(scale=1.0)
+    regularizer = BinaryPreferenceRegularizer(multiplier=1.0)
 
     # Test very large and small values
     extreme_weights = tf.constant([
@@ -141,7 +141,7 @@ def test_numerical_stability():
 
 def test_gradient_computation():
     """Test that gradients can be computed through the regularizer."""
-    regularizer = BinaryPreferenceRegularizer(scale=1.0)
+    regularizer = BinaryPreferenceRegularizer(multiplier=1.0)
     weights = tf.Variable([[0.3, 0.7]], dtype=tf.float32)
 
     with tf.GradientTape() as tape:

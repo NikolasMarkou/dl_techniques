@@ -63,19 +63,25 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
     - Reducing model complexity by pushing weights to extreme values
 
     Attributes:
-        scale (float): Scaling factor for the regularization term
+        multiplier (float): Scaling factor for the regularization term
     """
 
-    def __init__(self, scale: float = 1.0) -> None:
+    def __init__(self, multiplier: float = 1.0, scale: float = 1.0) -> None:
         """
         Initialize the binary preference regularizer.
 
         Args:
-            scale (float): Scaling factor for the regularization term.
+            multiplier (float): multiplier factor for the regularization term.
                           Higher values create stronger binarization pressure.
                           Defaults to 1.0.
+            scale (float): Squeezes or expands the signature
+              Defaults to 1.0.
         """
+        if scale <= 0:
+            raise ValueError("scale must be > 0")
+        self.multiplier = multiplier
         self.scale = scale
+
 
     def __call__(self, weights: tf.Tensor) -> tf.Tensor:
         """
@@ -92,13 +98,13 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
             tf.Tensor: The calculated regularization cost.
         """
         # Calculate (x - 0.5)^2 / 0.25
-        normalized = tf.square(weights - 0.5) / 0.25
+        normalized = tf.square(self.scale * weights - 0.5) / 0.25
 
         # Calculate (1 - normalized)^2
         cost = tf.square(1.0 - normalized)
 
         # Apply scaling and return mean cost
-        return self.scale * tf.reduce_mean(cost)
+        return self.multiplier * tf.reduce_mean(cost)
 
     def get_config(self) -> dict:
         """
@@ -107,7 +113,10 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
         Returns:
             dict: Configuration dictionary containing the scale parameter.
         """
-        return {'scale': self.scale}
+        return {
+            'multiplier': self.multiplier,
+            'scale': self.scale
+        }
 
     @classmethod
     def from_config(cls, config: dict) -> 'BinaryPreferenceRegularizer':
@@ -124,16 +133,17 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
 
 
 def get_binary_regularizer(
+        multiplier: Optional[float] = 1.0,
         scale: Optional[float] = 1.0
 ) -> BinaryPreferenceRegularizer:
     """
     Factory function to create a binary preference regularizer instance.
 
     Args:
-        scale (Optional[float]): Scaling factor for the regularization term.
+        multiplier (Optional[float]): multiplier factor for the regularization term.
                                 Higher values create stronger binarization.
                                 Defaults to 1.0.
-
+        scale (Optional[float]): squeezes or expands the signal
     Returns:
         BinaryPreferenceRegularizer: An instance of the binary regularizer.
 
@@ -147,6 +157,8 @@ def get_binary_regularizer(
         >>> strong_regularizer = get_binary_regularizer(scale=2.0)
         >>> model.add(Dense(32, kernel_regularizer=strong_regularizer))
     """
-    return BinaryPreferenceRegularizer(scale=scale)
+    return BinaryPreferenceRegularizer(
+        multiplier=multiplier,
+        scale=scale)
 
 # ---------------------------------------------------------------------

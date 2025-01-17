@@ -12,4 +12,7 @@ setup(
         "jupyter",
         "tensorflow",
     ],
+    extras_require={
+        'dev': ['pylint']
+    }
 )

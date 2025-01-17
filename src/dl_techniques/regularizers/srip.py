@@ -23,7 +23,7 @@ from dl_techniques.utils.tensors import power_iteration
 # ---------------------------------------------------------------------
 
 
-@tf.keras.utils.register_keras_serializable()
+@keras.utils.register_keras_serializable()
 class SRIPRegularizer(keras.regularizers.Regularizer):
     """
     Spectral Restricted Isometry Property (SRIP) regularizer.

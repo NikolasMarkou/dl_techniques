@@ -52,13 +52,13 @@ def test_local_maxima(regularizer):
     assert abs(float(cost) - 1.0) < 1e-6
 
 
-def test_scaling():
-    """Test that scaling factor properly affects the cost."""
+def test_multiplier():
+    """Test that multiplier factor properly affects the cost."""
     weights = tf.constant([[0.5]], dtype=tf.float32)
 
     # Test different scales
-    reg1 = TriStatePreferenceRegularizer(scale=1.0)
-    reg2 = TriStatePreferenceRegularizer(scale=2.0)
+    reg1 = TriStatePreferenceRegularizer(multiplier=1.0)
+    reg2 = TriStatePreferenceRegularizer(multiplier=2.0)
 
     cost1 = reg1(weights)
     cost2 = reg2(weights)
