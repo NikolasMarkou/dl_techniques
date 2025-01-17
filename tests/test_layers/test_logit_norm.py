@@ -3,7 +3,7 @@ import pytest
 import tensorflow as tf
 
 
-from dl_techniques.layers.logit_norm import CoupledLogitNorm, CoupledMultiLabelHead
+from dl_techniques.layers.rms_logit_norm import CoupledLogitNorm, CoupledMultiLabelHead
 
 
 @pytest.fixture
