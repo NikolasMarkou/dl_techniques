@@ -25,7 +25,7 @@ pip install -r requirements.txt
 To run the KMeans clustering demo, execute:
 
 ```bash
-python src/experiments/kmeans_learnable.py
+python src/experiments/kmeans_basic.py
 ```
 
 ### Logit Normalization Experiments

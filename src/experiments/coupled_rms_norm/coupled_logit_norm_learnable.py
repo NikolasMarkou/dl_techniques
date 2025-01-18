@@ -154,7 +154,7 @@ from typing import Tuple, List, Dict, Optional
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 
-from dl_techniques.layers.logit_norm import CoupledMultiLabelHead
+from dl_techniques.layers.rms_logit_norm import CoupledMultiLabelHead
 
 @dataclass
 class SyntheticData:
