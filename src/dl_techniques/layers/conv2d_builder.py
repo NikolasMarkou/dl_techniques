@@ -1,8 +1,59 @@
+"""
+Advanced Layer and Activation Function Wrappers
+============================================
+
+This module provides custom wrappers and utilities for deep learning model construction,
+with a focus on convolution operations and activation functions in Keras.
+
+Key Components:
+--------------
+1. Activation Functions:
+   - Custom implementation of advanced activation functions including Mish, ScaledMish
+   - Parameterized activation wrappers for LeakyReLU and PReLU
+   - Flexible activation selection through string identifiers
+
+2. Multi-scale Feature Generation:
+   - Generates multi-scale feature representations using pooling operations
+   - Supports both max and average pooling strategies
+   - Optional value normalization, clipping, and rounding
+   - TensorFlow function compilation for performance optimization
+
+3. Convolution Operations:
+   - Enum-based convolution type selection (Conv2D, DepthwiseConv2D, etc.)
+   - Comprehensive wrapper for convolution layers with:
+     * Batch normalization
+     * Layer normalization
+     * Dropout (spatial and regular)
+     * Flexible activation functions
+   - Parameter validation and deep copying for safety
+
+Usage:
+------
+```python
+# Example activation usage
+layer = activation_wrapper("mish")(input_tensor)
+
+# Example convolution usage
+conv_params = {
+    "filters": 64,
+    "kernel_size": (3, 3),
+    "activation": "relu",
+    "padding": "same"
+}
+layer = conv2d_wrapper(
+    input_layer=prev_layer,
+    conv_params=conv_params,
+    bn_params={"momentum": 0.99},
+    conv_type=ConvType.CONV2D
+)
+"""
+
 import copy
 import keras
 from enum import Enum
 import tensorflow as tf
-from typing import List, Tuple, Iterable, Union, Dict
+from keras.api.layers import Layer
+from typing import List, Tuple, Union, Dict
 
 # ---------------------------------------------------------------------
 # local imports
@@ -13,42 +64,81 @@ from .mish import Mish, ScaledMish
 
 # ---------------------------------------------------------------------
 
-def activation_wrapper(
-        activation: Union[keras.layers.Layer, str] = "linear") -> keras.layers.Layer:
+def activation_wrapper(activation: Union[Layer, str] = "linear") -> keras.layers.Layer:
+    """
+    Creates and returns a Keras activation layer based on the specified activation type.
+
+    This wrapper supports both standard Keras activations and custom implementations
+    including Mish, ScaledMish, and various LeakyReLU variants. It provides flexible
+    configuration of advanced activation functions with specific parameters for
+    improved training dynamics.
+
+    Args:
+        activation (Union[Layer, str]): Activation specification. Can be either:
+            - A string identifying the activation function
+            - A pre-configured Keras Layer instance
+            Default is "linear" (no activation)
+
+    Supported activation types:
+        - "mish": Self-regularizing non-monotonic activation (2020)
+        - "scaled_mish": Mish variant with saturation, alpha=2.0
+        - "leakyrelu"/"leaky_relu": LeakyReLU with alpha=0.3
+        - "leakyrelu_01"/"leaky_relu_01": LeakyReLU with alpha=0.1
+        - "leaky_relu_001"/"leakyrelu_001": LeakyReLU with alpha=0.01
+        - "prelu": Parametric ReLU with:
+            * Constrained alpha in [0,1]
+            * L1 regularization (1e-3)
+            * Shared parameters across spatial dimensions
+        - Any valid Keras activation name (e.g., "relu", "tanh", etc.)
+
+    Returns:
+        keras.layers.Layer: Configured activation layer ready for use in a model
+
+    Examples:
+        >>> # Using string identifier
+        >>> layer = activation_wrapper("mish")
+        >>> # Using pre-configured layer
+        >>> custom_activation = keras.layers.PReLU()
+        >>> layer = activation_wrapper(custom_activation)
+
+    Note:
+        When using PReLU, the alpha parameter is:
+        - Initialized to 0.1
+        - Constrained between 0 and 1
+        - Regularized with L1 (1e-3)
+        - Shared across spatial dimensions (1,2)
+    """
+    # If activation is already a Layer instance, return it as is
     if not isinstance(activation, str):
         return activation
 
+    # Normalize activation string
     activation = activation.lower().strip()
 
+    # Select appropriate activation implementation
     if activation in ["mish"]:
-        # Mish: A Self Regularized Non-Monotonic Activation Function (2020)
         x = Mish()
     elif activation in ["scaled_mish"]:
-        # scaled mish: mish that saturates
         x = ScaledMish(alpha=2.0)
     elif activation in ["leakyrelu", "leaky_relu"]:
-        # leaky relu, practically same us Relu
-        # with very small negative slope to allow gradient flow
         x = keras.layers.LeakyReLU(alpha=0.3)
     elif activation in ["leakyrelu_01", "leaky_relu_01"]:
-        # leaky relu, practically same us Relu
-        # with very small negative slope to allow gradient flow
         x = keras.layers.LeakyReLU(alpha=0.1)
     elif activation in ["leaky_relu_001", "leakyrelu_001"]:
-        # leaky relu, practically same us Relu
-        # with very small negative slope to allow gradient flow
         x = keras.layers.LeakyReLU(alpha=0.01)
     elif activation in ["prelu"]:
-        # parametric Rectified Linear Unit
-        constraint = \
-            keras.constraints.MinMaxNorm(
-                min_value=0.0, max_value=1.0, rate=1.0, axis=0)
+        constraint = keras.constraints.MinMaxNorm(
+            min_value=0.0,
+            max_value=1.0,
+            rate=1.0,
+            axis=0
+        )
         x = keras.layers.PReLU(
             alpha_initializer=0.1,
-            # very small l1
             alpha_regularizer=keras.regularizers.l1(1e-3),
             alpha_constraint=constraint,
-            shared_axes=[1, 2])
+            shared_axes=[1, 2]
+        )
     else:
         x = keras.layers.Activation(activation)
 
@@ -155,57 +245,121 @@ class ConvType(Enum):
 
 
 def conv2d_wrapper(
-        input_layer,
-        conv_params: Dict,
-        bn_params: Dict = None,
-        ln_params: Dict = None,
-        dropout_params: Dict = None,
-        dropout_2d_params: Dict = None,
-        conv_type: Union[ConvType, str] = ConvType.CONV2D):
+        input_layer: keras.layers.Layer,
+        conv_params: Dict[str, Any],
+        bn_params: Optional[Dict[str, Any]] = None,
+        ln_params: Optional[Dict[str, Any]] = None,
+        dropout_params: Optional[Dict[str, Any]] = None,
+        dropout_2d_params: Optional[Dict[str, Any]] = None,
+        conv_type: Union[ConvType, str] = ConvType.CONV2D
+) -> keras.layers.Layer:
     """
-    wraps a conv2d with a preceding normalizer
+    Creates a wrapped convolution layer with optional normalization, activation, and regularization.
 
-    if bn_post_params force a conv(linear)->bn->activation setup
+    This wrapper provides a flexible way to construct complex convolution blocks with:
+    - Multiple types of convolution (standard, depthwise, transpose, separable)
+    - Batch normalization
+    - Layer normalization
+    - Dropout (both standard and spatial)
+    - Custom activations
 
-    :param input_layer: the layer to operate on
-    :param conv_params: conv2d parameters
-    :param bn_params: batchnorm parameters before the conv, None to disable bn
-    :param ln_params: layer normalization parameters before the conv, None to disable ln
-    :param dropout_params: dropout parameters after the conv, None to disable it
-    :param dropout_2d_params: dropout parameters after the conv, None to disable it
-    :param conv_type: if true use depthwise convolution,
+    The layer ordering is:
+    1. Convolution operation
+    2. Normalization (batch and/or layer)
+    3. Activation
+    4. Dropout (standard and/or spatial)
 
-    :return: transformed input
+    Args:
+        input_layer (keras.layers.Layer): Input tensor or layer
+        conv_params (Dict[str, Any]): Convolution parameters dictionary including:
+            - filters: Number of output filters
+            - kernel_size: Size of convolution kernel
+            - strides: Convolution stride
+            - padding: Padding type ('valid' or 'same')
+            - kernel_initializer: Weight initialization method
+            - kernel_regularizer: Weight regularization method
+            - Other valid Conv2D parameters
+        bn_params (Optional[Dict[str, Any]]): Batch normalization parameters.
+            If None, batch normalization is not applied. Default: None
+        ln_params (Optional[Dict[str, Any]]): Layer normalization parameters.
+            If None, layer normalization is not applied. Default: None
+        dropout_params (Optional[Dict[str, Any]]): Standard dropout parameters.
+            If None, dropout is not applied. Default: None
+        dropout_2d_params (Optional[Dict[str, Any]]): Spatial dropout parameters.
+            If None, spatial dropout is not applied. Default: None
+        conv_type (Union[ConvType, str]): Type of convolution to use.
+            Can be either a ConvType enum or a string. Default: ConvType.CONV2D
+
+    Returns:
+        keras.layers.Layer: The constructed layer stack
+
+    Raises:
+        ValueError: If input_layer is None
+        ValueError: If conv_params is None
+        ValueError: If conv_type is invalid
+
+    Examples:
+        >>> # Basic Conv2D with batch normalization
+        >>> layer = conv2d_wrapper(
+        ...     input_layer=prev_layer,
+        ...     conv_params={
+        ...         "filters": 64,
+        ...         "kernel_size": (3, 3),
+        ...         "padding": "same",
+        ...         "activation": "relu"
+        ...     },
+        ...     bn_params={"momentum": 0.99}
+        ... )
+
+        >>> # Depthwise convolution with dropout
+        >>> layer = conv2d_wrapper(
+        ...     input_layer=prev_layer,
+        ...     conv_params={
+        ...         "kernel_size": (3, 3),
+        ...         "depth_multiplier": 1,
+        ...         "padding": "same"
+        ...     },
+        ...     dropout_params={"rate": 0.1},
+        ...     conv_type=ConvType.CONV2D_DEPTHWISE
+        ... )
+
+    Notes:
+        - Convolution type can be automatically adjusted based on parameters:
+          * If 'depth_multiplier' is in conv_params, switches to CONV2D_DEPTHWISE
+          * If 'dilation_rate' is in conv_params, switches to CONV2D_TRANSPOSE
+        - Activation is applied after normalization layers
+        - Both standard and spatial dropout can be applied simultaneously
+        - Parameters are deep copied to prevent unexpected modifications
     """
-    # --- argument checking
+    # Argument validation
     if input_layer is None:
         raise ValueError("input_layer cannot be None")
     if conv_params is None:
         raise ValueError("conv_params cannot be None")
 
-    # --- prepare arguments
+    # Prepare flags and parameters
     use_ln = ln_params is not None
     use_bn = bn_params is not None
     use_dropout = dropout_params is not None
     use_dropout_2d = dropout_2d_params is not None
+
+    # Deep copy conv_params to prevent modifications
     conv_params = copy.deepcopy(conv_params)
     conv_activation = conv_params.get("activation", "linear")
     conv_params["activation"] = "linear"
 
-    # TODO restructure this
+    # Handle convolution type
     if isinstance(conv_type, str):
         conv_type = ConvType.from_string(conv_type)
-    if "depth_multiplier" in conv_params:
-        if conv_type != ConvType.CONV2D_DEPTHWISE:
-            conv_type = ConvType.CONV2D_DEPTHWISE
-    if "dilation_rate" in conv_params:
-        if conv_type != ConvType.CONV2D_TRANSPOSE:
-            conv_type = ConvType.CONV2D_TRANSPOSE
+    if "depth_multiplier" in conv_params and conv_type != ConvType.CONV2D_DEPTHWISE:
+        conv_type = ConvType.CONV2D_DEPTHWISE
+    if "dilation_rate" in conv_params and conv_type != ConvType.CONV2D_TRANSPOSE:
+        conv_type = ConvType.CONV2D_TRANSPOSE
 
-    # --- set up stack of operation
+    # Build layer stack
     x = input_layer
 
-    # --- convolution
+    # Apply convolution
     if conv_type == ConvType.CONV2D:
         x = keras.layers.Conv2D(**conv_params)(x)
     elif conv_type == ConvType.CONV2D_DEPTHWISE:
@@ -215,23 +369,21 @@ def conv2d_wrapper(
     elif conv_type == ConvType.CONV2D_SEPARABLE:
         x = keras.layers.SeparableConv2D(**conv_params)(x)
     else:
-        raise ValueError(f"don't know how to handle this [{conv_type}]")
+        raise ValueError(f"Unsupported convolution type: [{conv_type}]")
 
-    # --- perform post convolution normalizations and activation
+    # Apply normalization
     if use_bn:
         x = keras.layers.BatchNormalization(**bn_params)(x)
     if use_ln:
         x = keras.layers.LayerNormalization(**ln_params)(x)
 
-    # --- perform activation post normalization
-    if (conv_activation is not None and
-            conv_activation != "linear"):
+    # Apply activation
+    if conv_activation is not None and conv_activation != "linear":
         x = activation_wrapper(conv_activation)(x)
 
-    # --- dropout
+    # Apply dropout
     if use_dropout:
         x = keras.layers.Dropout(**dropout_params)(x)
-
     if use_dropout_2d:
         x = keras.layers.SpatialDropout2D(**dropout_2d_params)(x)
 
