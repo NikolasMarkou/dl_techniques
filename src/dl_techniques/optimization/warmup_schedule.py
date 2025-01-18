@@ -8,6 +8,7 @@ from typing import Dict, Optional, Union
 
 from dl_techniques.utils.logger import logger
 
+
 # ---------------------------------------------------------------------
 
 class WarmupSchedule(keras.optimizers.schedules.LearningRateSchedule):
@@ -74,7 +75,7 @@ class WarmupSchedule(keras.optimizers.schedules.LearningRateSchedule):
         warmup_rate_at_step = (
             tf.maximum(
                 x=0.0,
-                y=(primary_lr * current_step_percentage) +self.warmup_start_lr * (1.0 - current_step_percentage)
+                y=(primary_lr * current_step_percentage) + self.warmup_start_lr * (1.0 - current_step_percentage)
             )
         )
 
@@ -92,7 +93,6 @@ class WarmupSchedule(keras.optimizers.schedules.LearningRateSchedule):
             'warmup_start_lr': self.warmup_start_lr,
             'primary_schedule': keras.optimizers.schedules.serialize(self.primary_schedule)
         }
-
 
     @classmethod
     def from_config(cls, config: Dict) -> 'WarmupSchedule':

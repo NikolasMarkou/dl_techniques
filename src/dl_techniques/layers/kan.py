@@ -100,11 +100,13 @@ Author: Nikolas Markou
 Date: 16/01/2025
 Version: 1.0.0
 """
+
+import keras
 import numpy as np
 from typing import Tuple
 import tensorflow as tf
-from tensorflow.python.keras.layers import Layer
-from tensorflow.python.keras.regularizers import l2
+from keras.api.layers import Layer
+from keras.api.regularizers import l2
 
 # ---------------------------------------------------------------------
 # local imports
@@ -182,7 +184,7 @@ class KANLinear(Layer):
         self.spline_weight = self.add_weight(
             name="spline_weight",
             shape=(in_features, out_features, grid_size + spline_order - 1),
-            initializer=tf.keras.initializers.RandomUniform(
+            initializer=keras.api.initializers.RandomUniform(
                 -spline_init_scale,
                 spline_init_scale
             ),
@@ -197,17 +199,17 @@ class KANLinear(Layer):
             shape=(in_features, out_features),
             initializer='ones',
             regularizer=self.regularizer,
-            constraint=tf.keras.constraints.NonNeg(),
+            constraint=keras.api.constraints.NonNeg(),
             trainable=True
         )
 
     def _create_orthogonal_initializer(self):
         """Creates an orthogonal initializer for better gradient flow."""
-        return tf.keras.initializers.Orthogonal(gain=1.0)
+        return keras.api.initializers.Orthogonal(gain=1.0)
 
     def _create_clip_constraint(self):
         """Creates a constraint to clip weights for stability."""
-        return tf.keras.constraints.MaxNorm(max_value=self.clip_value)
+        return keras.api.constraints.MaxNorm(max_value=self.clip_value)
 
     def build_grid(self) -> tf.Tensor:
         """Builds the grid points with proper spacing and caching."""
@@ -383,7 +385,7 @@ class KANLinear(Layer):
 # ---------------------------------------------------------------------
 
 
-class KAN(tf.keras.Sequential):
+class KAN(keras.Model):
     """Kolmogorov-Arnold Network model with stability enhancements."""
 
     def __init__(self,
