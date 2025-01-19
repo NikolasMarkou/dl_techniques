@@ -104,10 +104,14 @@ class ShearletTransform(Layer):
         return result
 
     def _create_shearlet_filters(self) -> List[tf.Tensor]:
-        """Create shearlet filters with proper frame bounds.
+        """Create shearlet filters with scale-adaptive coverage.
 
         Returns:
             List[tf.Tensor]: List of shearlet filters in Fourier domain
+
+        Notes:
+            Adjusts filter coverage based on number of scales to ensure
+            proper frame bounds regardless of scale configuration.
         """
         filters = []
 
@@ -115,34 +119,44 @@ class ShearletTransform(Layer):
         rho = tf.sqrt(self.freq_x ** 2 + self.freq_y ** 2)
         theta = tf.atan2(self.freq_y, self.freq_x)
 
-        # Create low-pass filter with wider support
-        phi_low = self._create_meyer_wavelet(1.5 * rho)  # Increased support
+        # Adjust coverage based on number of scales
+        scale_factor = max(1.5, 2.5 - self.scales * 0.25)  # More overlap for fewer scales
+
+        # Create low-pass filter with adaptive support
+        phi_low = self._create_meyer_wavelet(scale_factor * rho)
         filters.append(tf.cast(phi_low, tf.complex64))
 
-        # Create directional filters with better overlap
+        # Create directional filters with scale-dependent overlap
         for j in range(self.scales):
             scale = 2.0 ** j
 
-            # Create radial window with increased overlap
-            window_j = self._create_meyer_wavelet(rho / scale) * \
-                       (1.0 - self._create_meyer_wavelet(1.5 * rho / scale))  # Increased overlap
+            # Adjust overlap factor based on scale index
+            overlap_factor = scale_factor * (1.0 + 0.2 * (self.scales - j - 1) / self.scales)
 
-            # Add directional selectivity with better angular coverage
+            # Create radial window with adaptive overlap
+            window_j = self._create_meyer_wavelet(rho / scale) * \
+                       (1.0 - self._create_meyer_wavelet(overlap_factor * rho / scale))
+
+            # Add directional selectivity with adaptive angular coverage
+            angular_overlap = 1.0 + 1.0 / (self.directions + 1)  # Increase angular overlap
+
             for k in range(-self.directions // 2, self.directions // 2 + 1):
-                # Smoother shearing with increased overlap
-                shear = k / (self.directions + 2.0)  # Increased overlap
+                # Adaptive shearing with increased overlap for fewer directions
+                shear = k / (self.directions + 2.0)
                 angle = tf.atan(shear)
 
-                # Create angular window with wider support
+                # Create angular window with adaptive support
                 dir_window = self._create_meyer_wavelet(
-                    1.5 * (theta - angle) / np.pi  # Increased angular support
+                    angular_overlap * (theta - angle) / np.pi
                 )
 
-                # Create shearlet
+                # Create shearlet with energy compensation
                 shearlet = window_j * dir_window
 
-                # Normalize each shearlet individually
-                shearlet = shearlet / (tf.reduce_max(tf.abs(shearlet) + 1e-10))
+                # Scale-dependent normalization
+                scale_weight = 1.0 / tf.sqrt(float(2 ** j + 1))  # Compensate for scale-based energy
+                shearlet = scale_weight * shearlet / (tf.reduce_max(tf.abs(shearlet) + 1e-10))
+
                 filters.append(tf.cast(shearlet, tf.complex64))
 
         # Calculate the total energy response
@@ -151,9 +165,16 @@ class ShearletTransform(Layer):
             axis=0
         )
 
-        # Normalize the entire filter bank to achieve tight frame property
+        # Ensure minimum energy threshold
+        min_energy_threshold = 0.1
+        total_energy = tf.maximum(total_energy, min_energy_threshold)
+
+        # Normalize the entire filter bank with energy compensation
         normalization = tf.sqrt(total_energy + 1e-10)
         filters = [f / tf.cast(normalization, tf.complex64) for f in filters]
+
+        # Final energy equalization
+        filters = [f * tf.cast(tf.sqrt(1.0 / len(filters)), tf.complex64) for f in filters]
 
         return filters
 
