@@ -104,46 +104,56 @@ class ShearletTransform(Layer):
         return result
 
     def _create_shearlet_filters(self) -> List[tf.Tensor]:
-        """Create shearlet filters."""
+        """Create shearlet filters with proper frame bounds.
+
+        Returns:
+            List[tf.Tensor]: List of shearlet filters in Fourier domain
+        """
         filters = []
 
         # Get polar coordinates
         rho = tf.sqrt(self.freq_x ** 2 + self.freq_y ** 2)
         theta = tf.atan2(self.freq_y, self.freq_x)
 
-        # Create low-pass filter
-        phi_low = self._create_meyer_wavelet(2.0 * rho)
+        # Create low-pass filter with wider support
+        phi_low = self._create_meyer_wavelet(1.5 * rho)  # Increased support
         filters.append(tf.cast(phi_low, tf.complex64))
 
-        # Create directional filters
+        # Create directional filters with better overlap
         for j in range(self.scales):
             scale = 2.0 ** j
 
-            # Create radial window with overlap
+            # Create radial window with increased overlap
             window_j = self._create_meyer_wavelet(rho / scale) * \
-                       (1.0 - self._create_meyer_wavelet(2.0 * rho / scale))
+                       (1.0 - self._create_meyer_wavelet(1.5 * rho / scale))  # Increased overlap
 
-            # Add directional selectivity
+            # Add directional selectivity with better angular coverage
             for k in range(-self.directions // 2, self.directions // 2 + 1):
-                # Smoother shearing with overlap
-                shear = k / (self.directions + 1.0)
+                # Smoother shearing with increased overlap
+                shear = k / (self.directions + 2.0)  # Increased overlap
                 angle = tf.atan(shear)
 
-                # Create angular window
+                # Create angular window with wider support
                 dir_window = self._create_meyer_wavelet(
-                    2.0 * (theta - angle) / np.pi
+                    1.5 * (theta - angle) / np.pi  # Increased angular support
                 )
 
                 # Create shearlet
                 shearlet = window_j * dir_window
 
-                # Normalize
+                # Normalize each shearlet individually
                 shearlet = shearlet / (tf.reduce_max(tf.abs(shearlet) + 1e-10))
                 filters.append(tf.cast(shearlet, tf.complex64))
 
-        # Normalize the filter bank
-        filters = [f / tf.cast(tf.sqrt(float(len(filters))), tf.complex64)
-                   for f in filters]
+        # Calculate the total energy response
+        total_energy = tf.reduce_sum(
+            [tf.abs(f) ** 2 for f in filters],
+            axis=0
+        )
+
+        # Normalize the entire filter bank to achieve tight frame property
+        normalization = tf.sqrt(total_energy + 1e-10)
+        filters = [f / tf.cast(normalization, tf.complex64) for f in filters]
 
         return filters
 
