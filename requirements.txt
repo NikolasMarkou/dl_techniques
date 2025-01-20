@@ -11,3 +11,4 @@ scipy~=1.15.1
 setuptools~=65.5.1
 pylint
 pre-commit
+pandas~=2.2.3
