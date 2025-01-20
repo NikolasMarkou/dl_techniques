@@ -132,6 +132,8 @@ class ComplexLayer(Layer):
 
         return tf.cast(weights, dtype)
 
+# ---------------------------------------------------------------------
+
 
 class ComplexConv2D(ComplexLayer):
     """Complex-valued 2D convolution layer with improved stability.
@@ -224,6 +226,8 @@ class ComplexConv2D(ComplexLayer):
 
         return output
 
+# ---------------------------------------------------------------------
+
 
 class ComplexDense(ComplexLayer):
     """Complex-valued dense layer with improved initialization.
@@ -296,6 +300,8 @@ class ComplexDense(ComplexLayer):
             imag_output + tf.math.imag(self.bias)
         )
 
+# ---------------------------------------------------------------------
+
 
 class ComplexReLU(ComplexLayer):
     """Complex ReLU activation with split implementation.
@@ -317,3 +323,7 @@ class ComplexReLU(ComplexLayer):
             tf.nn.relu(tf.math.real(inputs)),
             tf.nn.relu(tf.math.imag(inputs))
         )
+
+# ---------------------------------------------------------------------
+
+
