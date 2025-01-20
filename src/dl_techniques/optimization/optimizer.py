@@ -17,6 +17,7 @@ from dl_techniques.utils.constants import *
 from dl_techniques.utils.logger import logger
 from .warmup_schedule import WarmupSchedule
 
+
 # ---------------------------------------------------------------------
 
 
@@ -84,6 +85,7 @@ def schedule_builder(
         warmup_start_lr=warmup_start_lr,
         primary_schedule=schedule
     )
+
 
 # ---------------------------------------------------------------------
 
