@@ -131,6 +131,8 @@ class MNISTConvNet(Model):
         self.act_dense = ReLU()
         self.drop_dense = Dropout(self.dropout_rate)
 
+        self.kmeans = DifferentiableKMeansLayer(n_clusters=32)
+
         # Output layer
         self.output_layer = Dense(
             self.num_classes,
@@ -139,9 +141,7 @@ class MNISTConvNet(Model):
             kernel_regularizer=L2(self.kernel_regularizer)
         )
 
-        self.kmeans = DifferentiableKMeansLayer(n_clusters=32)
-
-    def call(self, inputs: tf.Tensor, training: bool = False) -> tf.Tensor:
+    def call(self, inputs: tf.Tensor, training: bool = True) -> tf.Tensor:
         """Forward pass of the model.
 
         Args:
@@ -180,7 +180,7 @@ class MNISTConvNet(Model):
         x = self.dense1(x)
         if self.bn_dense:
             x = self.bn_dense(x, training=training)
-        x = self.kmeans(x)
+        x = self.kmeans(x, training=training)
 
         # Output layer
         return self.output_layer(x)

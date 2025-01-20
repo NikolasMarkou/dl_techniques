@@ -284,54 +284,40 @@ Axis = Union[int, List[int]]
 
 @tf.keras.utils.register_keras_serializable()
 class DifferentiableKMeansLayer(Layer):
-    """A differentiable K-means layer that can operate on arbitrary tensor shapes.
+    """A differentiable K-means layer with momentum and centroid repulsion.
 
     This layer implements a differentiable version of K-means clustering using soft
-    assignments, enabling end-to-end training in neural networks. The softmax
-    temperature parameter controls the "softness" of assignments.
+    assignments, momentum, and repulsive forces between centroids to prevent collapse.
 
     Args:
         n_clusters: int
             Number of clusters (K in K-means)
         temperature: float, optional (default=0.1)
-            Softmax temperature for assignments. Lower values produce harder
-            assignments, higher values produce softer assignments.
+            Softmax temperature for assignments
+        momentum: float, optional (default=0.9)
+            Momentum coefficient for centroid updates
+        centroid_lr: float, optional (default=0.1)
+            Learning rate for centroid updates
+        repulsion_strength: float, optional (default=0.1)
+            Strength of the repulsive force between centroids
+        min_distance: float, optional (default=1.0)
+            Minimum desired distance between centroids
         output_mode: str, optional (default='assignments')
-            Type of output to return:
-            - 'assignments': returns soft cluster assignments
-            - 'mixture': returns weighted mixture of centroids
+            Output type: 'assignments' or 'mixture'
         cluster_axis: Union[int, List[int]], optional (default=-1)
-            Axis or axes to perform clustering on. Can be a single axis (int)
-            or multiple axes (List[int])
+            Axis or axes to perform clustering on
         random_seed: Optional[int], optional (default=None)
-            Random seed for centroid initialization
-
-    Input shape:
-        N-D tensor with shape: (batch_size, ..., feature_dim)
-        The feature dimension(s) specified by cluster_axis will be used for clustering.
-
-    Output shape:
-        If output_mode == 'assignments':
-            Same as input shape but with cluster_axis dimensions replaced by n_clusters
-        If output_mode == 'mixture':
-            Same as input shape
-
-    Raises:
-        ValueError: If invalid arguments are provided
-
-    Example:
-        ```python
-        # Cluster on feature dimension
-        layer = DifferentiableKMeansLayer(n_clusters=10, temperature=0.1)
-        input_tensor = tf.random.normal((32, 100))  # (batch_size, features)
-        output_tensor = layer(input_tensor)  # (batch_size, n_clusters)
-        ```
+            Random seed for initialization
     """
 
     def __init__(
             self,
             n_clusters: int,
             temperature: float = 0.1,
+            momentum: float = 0.9,
+            centroid_lr: float = 0.1,
+            repulsion_strength: float = 0.1,
+            min_distance: float = 1.0,
             output_mode: OutputMode = 'assignments',
             cluster_axis: Axis = -1,
             random_seed: Optional[int] = None,
@@ -341,17 +327,25 @@ class DifferentiableKMeansLayer(Layer):
         super().__init__(**kwargs)
 
         # Input validation
-        self._validate_init_args(n_clusters, temperature, output_mode)
+        self._validate_init_args(
+            n_clusters, temperature, momentum, centroid_lr,
+            repulsion_strength, min_distance, output_mode
+        )
 
         # Store configuration
         self.n_clusters = n_clusters
         self.temperature = tf.constant(temperature, dtype=self.dtype)
+        self.momentum = tf.constant(momentum, dtype=self.dtype)
+        self.centroid_lr = tf.constant(centroid_lr, dtype=self.dtype)
+        self.repulsion_strength = tf.constant(repulsion_strength, dtype=self.dtype)
+        self.min_distance = tf.constant(min_distance, dtype=self.dtype)
         self.output_mode = output_mode
         self.cluster_axis = [cluster_axis] if isinstance(cluster_axis, int) else cluster_axis
         self.random_seed = random_seed
 
         # Initialize state variables (set in build)
         self.centroids: Optional[tf.Variable] = None
+        self.centroid_momentum: Optional[tf.Variable] = None
         self.input_rank: Optional[int] = None
         self.feature_dims: Optional[int] = None
         self.non_feature_dims: Optional[List[int]] = None
@@ -361,22 +355,25 @@ class DifferentiableKMeansLayer(Layer):
             self,
             n_clusters: int,
             temperature: float,
+            momentum: float,
+            centroid_lr: float,
+            repulsion_strength: float,
+            min_distance: float,
             output_mode: str
     ) -> None:
-        """Validate initialization arguments.
-
-        Args:
-            n_clusters: Number of clusters
-            temperature: Softmax temperature
-            output_mode: Output mode string
-
-        Raises:
-            ValueError: If any arguments are invalid
-        """
+        """Validate initialization arguments."""
         if not isinstance(n_clusters, int) or n_clusters < 1:
             raise ValueError(f"n_clusters must be a positive integer, got {n_clusters}")
         if not isinstance(temperature, (int, float)) or temperature <= 0:
             raise ValueError(f"temperature must be positive, got {temperature}")
+        if not 0 <= momentum < 1:
+            raise ValueError(f"momentum must be in [0, 1), got {momentum}")
+        if not 0 < centroid_lr <= 1:
+            raise ValueError(f"centroid_lr must be in (0, 1], got {centroid_lr}")
+        if repulsion_strength < 0:
+            raise ValueError(f"repulsion_strength must be non-negative, got {repulsion_strength}")
+        if min_distance <= 0:
+            raise ValueError(f"min_distance must be positive, got {min_distance}")
         if output_mode not in ['assignments', 'mixture']:
             raise ValueError(
                 f"output_mode must be 'assignments' or 'mixture', got {output_mode}"
@@ -404,6 +401,15 @@ class DifferentiableKMeansLayer(Layer):
 
         # Initialize centroids
         self._initialize_centroids()
+
+        # Initialize momentum buffer with zeros
+        self.centroid_momentum = self.add_weight(
+            name="centroid_momentum",
+            shape=(self.n_clusters, self.feature_dims),
+            initializer="zeros",
+            trainable=False,
+            dtype=self.dtype
+        )
 
     def _setup_cluster_axes(self) -> None:
         """Setup and validate cluster axes."""
@@ -541,12 +547,54 @@ class DifferentiableKMeansLayer(Layer):
 
         return exp_distances / (sum_exp_distances + backend.epsilon())
 
+    def _compute_repulsion_forces(self) -> tf.Tensor:
+        """Compute repulsive forces between centroids.
+
+        Returns:
+            Tensor of shape (n_clusters, feature_dims) containing repulsion vectors
+        """
+        # Compute pairwise distances between centroids
+        # Shape: (n_clusters, n_clusters, feature_dims)
+        centroid_diffs = tf.expand_dims(self.centroids, 1) - tf.expand_dims(self.centroids, 0)
+
+        # Compute squared distances
+        # Shape: (n_clusters, n_clusters)
+        squared_distances = tf.reduce_sum(tf.square(centroid_diffs), axis=-1)
+
+        # Add epsilon to prevent division by zero in diagonal
+        distances = tf.sqrt(squared_distances + backend.epsilon())
+
+        # Compute repulsion strength based on distance
+        # Uses soft thresholding with min_distance
+        # Shape: (n_clusters, n_clusters)
+        repulsion_weights = tf.maximum(
+            0.0,
+            1.0 - distances / self.min_distance
+        )
+
+        # Scale repulsion by strength parameter and distance
+        # Shape: (n_clusters, n_clusters, 1)
+        repulsion_scale = tf.expand_dims(
+            self.repulsion_strength * repulsion_weights / (distances + backend.epsilon()),
+            axis=-1
+        )
+
+        # Compute repulsion vectors
+        # Shape: (n_clusters, n_clusters, feature_dims)
+        repulsion_vectors = repulsion_scale * centroid_diffs
+
+        # Sum repulsion from all other centroids
+        # Shape: (n_clusters, feature_dims)
+        total_repulsion = tf.reduce_sum(repulsion_vectors, axis=1)
+
+        return total_repulsion
+
     def _update_centroids(
             self,
             inputs: tf.Tensor,
             assignments: tf.Tensor
     ) -> None:
-        """Update centroids using soft assignments.
+        """Update centroids using soft assignments with momentum and repulsion.
 
         Args:
             inputs: Input tensor
@@ -560,12 +608,25 @@ class DifferentiableKMeansLayer(Layer):
         # Compute sum of weights
         sum_weights = tf.reduce_sum(assignments, axis=0, keepdims=True)
 
-        # Update centroids with weighted average
-        new_centroids = sum_weighted_points / (
+        # Compute target centroids from data
+        target_centroids = sum_weighted_points / (
                 tf.transpose(sum_weights) + backend.epsilon()
         )
 
-        self.centroids.assign(new_centroids)
+        # Compute repulsion forces
+        repulsion_forces = self._compute_repulsion_forces()
+
+        # Combine data-driven update with repulsion
+        update = (target_centroids - self.centroids) + repulsion_forces
+
+        # Update momentum buffer
+        self.centroid_momentum.assign(
+            self.momentum * self.centroid_momentum +
+            (1.0 - self.momentum) * update
+        )
+
+        # Apply momentum update with learning rate
+        self.centroids.assign_add(self.centroid_lr * self.centroid_momentum)
 
     def _reshape_output(self, output: tf.Tensor) -> tf.Tensor:
         """Reshape clustering output to match desired shape.
@@ -634,15 +695,15 @@ class DifferentiableKMeansLayer(Layer):
         return self._reshape_output(output)
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration.
-
-        Returns:
-            Dictionary containing configuration
-        """
+        """Get layer configuration."""
         config = super().get_config()
         config.update({
             "n_clusters": self.n_clusters,
             "temperature": float(self.temperature),
+            "momentum": float(self.momentum),
+            "centroid_lr": float(self.centroid_lr),
+            "repulsion_strength": float(self.repulsion_strength),
+            "min_distance": float(self.min_distance),
             "output_mode": self.output_mode,
             "cluster_axis": self.cluster_axis,
             "random_seed": self.random_seed
