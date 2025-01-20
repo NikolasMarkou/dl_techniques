@@ -33,37 +33,51 @@ def rayleigh(
         A tensor of the specified shape filled with random Rayleigh values.
 
     Raises:
-        ValueError: If scale is not positive when specified.
-        ValueError: If shape has negative dimensions.
+        tf.errors.InvalidArgumentError: If scale is not positive when specified.
+        tf.errors.InvalidArgumentError: If shape has negative dimensions.
     """
     with tf.name_scope(name or 'rayleigh'):
         # Convert shape to tensor and validate
-        shape = tf.convert_to_tensor(shape, dtype=tf.int32, name='shape')
-        if tf.reduce_any(shape < 0):
-            raise ValueError(f'All dimensions in shape must be non-negative. Got {shape}')
+        shape_tensor = tf.convert_to_tensor(shape, dtype=tf.int32, name='shape')
+
+        # Validate shape using tf.debugging
+        tf.debugging.assert_greater_equal(
+            shape_tensor,
+            tf.zeros_like(shape_tensor),
+            message="All dimensions in shape must be non-negative."
+        )
 
         # Handle scale parameter
         if scale is not None:
-            scale = tf.convert_to_tensor(scale, dtype=dtype, name='scale')
-            if tf.reduce_any(scale <= 0):
-                raise ValueError('Scale parameter must be positive.')
-            # Broadcast shape to match scale's shape
-            shape = tf.broadcast_dynamic_shape(shape, tf.shape(scale))
+            scale_tensor = tf.convert_to_tensor(scale, dtype=dtype, name='scale')
+            # Validate scale using tf.debugging
+            tf.debugging.assert_positive(
+                scale_tensor,
+                message="Scale parameter must be positive."
+            )
+        else:
+            scale_tensor = tf.ones([], dtype=dtype)
 
-        # Create stateless random generator for reproducibility
+        # Broadcast shape if necessary
+        final_shape = tf.broadcast_dynamic_shape(
+            shape_tensor,
+            tf.shape(scale_tensor)
+        )
+
+        # Generate uniform samples
         if seed is not None:
-            seed_tensor = tf.constant([seed, 0], dtype=tf.int32)
+            seed_tensor = tf.stack([seed, 0])
             uniform_samples = tf.random.stateless_uniform(
-                shape=shape,
+                shape=final_shape,
                 seed=seed_tensor,
-                minval=tf.keras.backend.epsilon(),  # Small positive number
+                minval=tf.keras.backend.epsilon(),
                 maxval=1.0,
                 dtype=dtype
             )
         else:
             uniform_samples = tf.random.uniform(
-                shape=shape,
-                minval=tf.keras.backend.epsilon(),  # Small positive number
+                shape=final_shape,
+                minval=tf.keras.backend.epsilon(),
                 maxval=1.0,
                 dtype=dtype
             )
@@ -73,12 +87,8 @@ def rayleigh(
         # where U is uniform(0,1) and σ is the scale parameter
         x = tf.sqrt(-2.0 * tf.math.log(uniform_samples))
 
-        # Apply scale if provided
-        if scale is not None:
-            x = x * scale
-
-        return x
-
+        # Apply scale
+        return x * scale_tensor
 
 def validate_rayleigh_samples(
         samples: tf.Tensor,

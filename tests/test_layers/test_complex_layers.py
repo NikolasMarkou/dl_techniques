@@ -6,10 +6,12 @@ This module provides comprehensive tests for complex-valued neural network layer
 including initialization tests, shape verification, and numerical correctness checks.
 """
 
+import keras
 import pytest
 import numpy as np
 import tensorflow as tf
-from typing import Tuple, List
+from dataclasses import dataclass
+from typing import Tuple, List, Optional
 
 from dl_techniques.layers.complex_layers import (
     ComplexLayer,
@@ -38,6 +40,33 @@ def random_complex_dense_input() -> tf.Tensor:
     imag = tf.random.normal((8, 128))
     return tf.complex(real, imag)
 
+
+@dataclass
+class ComplexModelConfig:
+    """Configuration for complex model testing.
+
+    Args:
+        batch_size: Number of samples per batch
+        input_shape: Shape of input data (height, width, channels)
+        num_classes: Number of output classes
+        learning_rate: Learning rate for optimizer
+        num_epochs: Number of training epochs
+        conv_filters: Number of filters in conv layer
+        kernel_size: Size of conv kernel
+        dense_units: Number of units in dense layer
+        kernel_regularizer: Regularization factor for kernel
+        kernel_initializer: Initializer for kernel weights
+    """
+    batch_size: int = 32
+    input_shape: Tuple[int, ...] = (32, 32, 3)
+    num_classes: int = 10
+    learning_rate: float = 0.0001
+    num_epochs: int = 10
+    conv_filters: int = 32
+    kernel_size: int = 3
+    dense_units: int = 10
+    kernel_regularizer: Optional[keras.regularizers.Regularizer] = None
+    kernel_initializer: str = 'glorot_uniform'
 
 # ---------------------------------------------------------------------
 # Base Layer Tests
@@ -323,47 +352,117 @@ def test_numerical_stability() -> None:
     assert not tf.reduce_any(tf.math.is_inf(tf.abs(dense_out)))
 
 
-def test_training_loop() -> None:
-    """Test full training loop with complex layers."""
-    # Create synthetic dataset
-    x_train = tf.complex(
-        tf.random.normal((100, 32, 32, 3)),
-        tf.random.normal((100, 32, 32, 3))
+def create_complex_model(config: ComplexModelConfig) -> keras.Model:
+    """Create a model with complex layers.
+
+    Args:
+        config: Model configuration parameters
+
+    Returns:
+        Compiled Keras model
+    """
+    model = keras.Sequential([
+        ComplexConv2D(
+            filters=config.conv_filters,
+            kernel_size=config.kernel_size,
+            kernel_regularizer=config.kernel_regularizer,
+            kernel_initializer=config.kernel_initializer,
+        ),
+        ComplexReLU(),
+        keras.layers.Flatten(),
+        ComplexDense(
+            units=config.dense_units,
+            kernel_regularizer=config.kernel_regularizer,
+            kernel_initializer=config.kernel_initializer
+        ),
+        # Final layer to get real outputs
+        keras.layers.Lambda(lambda x: tf.abs(x))
+    ])
+
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=config.learning_rate),
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics=['accuracy']
     )
-    y_train = tf.random.uniform((100,), maxval=10, dtype=tf.int32)
 
-    # Create model
-    conv = ComplexConv2D(32, 3)
-    relu = ComplexReLU()
-    flatten = tf.keras.layers.Flatten()
-    dense = ComplexDense(10)
+    return model
 
-    # Training loop
-    optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
 
-    for _ in range(2):  # Just test a couple iterations
-        with tf.GradientTape() as tape:
-            # Forward pass
-            x = conv(x_train)
-            x = relu(x)
-            x = flatten(x)
-            logits = tf.abs(dense(x))
+def generate_complex_data(
+        config: ComplexModelConfig,
+        num_samples: int = 100
+) -> Tuple[tf.Tensor, tf.Tensor]:
+    """Generate synthetic complex data for testing.
 
-            # Compute loss
-            loss = tf.reduce_mean(
-                tf.keras.losses.sparse_categorical_crossentropy(
-                    y_train, logits, from_logits=True
-                )
-            )
+    Args:
+        config: Model configuration
+        num_samples: Number of samples to generate
 
-        # Backward pass
-        grads = tape.gradient(loss, [conv.trainable_variables,
-                                     dense.trainable_variables])
-        optimizer.apply_gradients(zip(grads[0], conv.trainable_variables))
-        optimizer.apply_gradients(zip(grads[1], dense.trainable_variables))
+    Returns:
+        Tuple of (x_train, y_train)
+    """
+    x_train = tf.complex(
+        tf.random.normal((num_samples,) + config.input_shape),
+        tf.random.normal((num_samples,) + config.input_shape)
+    )
+    y_train = tf.random.uniform(
+        (num_samples,),
+        maxval=config.num_classes,
+        dtype=tf.int32
+    )
+    return x_train, y_train
 
-        assert not tf.math.is_nan(loss)
-        assert not tf.math.is_inf(loss)
+
+@pytest.mark.integration
+def test_complex_model_training() -> None:
+    """Integration test for training complex model.
+
+    Tests the full training loop with all complex layers integrated
+    into a single model using the Keras API.
+    """
+    # Initialize configuration
+    config = ComplexModelConfig(
+        kernel_regularizer=keras.regularizers.L2(l2=0.01)
+    )
+
+    # Generate synthetic data
+    x_train, y_train = generate_complex_data(config)
+
+    # Create and compile model
+    model = create_complex_model(config)
+
+    # Train model
+    history = model.fit(
+        x_train,
+        y_train,
+        batch_size=config.batch_size,
+        epochs=config.num_epochs,
+        verbose=0
+    )
+
+    # Basic assertions to verify training
+    assert history.history['loss'][-1] < history.history['loss'][0], \
+       "Loss should decrease during training"
+    assert not any(tf.math.is_nan(loss) for loss in history.history['loss']), \
+        "Loss should not be NaN"
+    assert not any(tf.math.is_inf(loss) for loss in history.history['loss']), \
+        "Loss should not be infinite"
+
+    # Test model save/load
+    model.save("test_complex_model.keras")
+    loaded_model = keras.models.load_model(
+        "test_complex_model.keras"
+    )
+    #
+    # # Verify loaded model predictions match original
+    # original_pred = model.predict(x_train[:1])
+    # loaded_pred = loaded_model.predict(x_train[:1])
+    # np.testing.assert_allclose(
+    #     original_pred,
+    #     loaded_pred,
+    #     rtol=1e-5,
+    #     atol=1e-5
+    # )
 
 
 if __name__ == '__main__':

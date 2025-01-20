@@ -78,9 +78,10 @@ from typing import Optional, Tuple, List, Union, Dict, Any
 
 from dl_techniques.utils.random import rayleigh
 
+
 # ---------------------------------------------------------------------
 
-
+@keras.utils.register_keras_serializable()
 class ComplexLayer(Layer):
     """Base class for complex-valued layers.
 
@@ -138,9 +139,24 @@ class ComplexLayer(Layer):
 
         return tf.cast(weights, dtype)
 
+    def get_config(self) -> Dict[str, Any]:
+        """Get layer configuration.
+
+        Returns:
+            Configuration dictionary
+        """
+        config = super().get_config()
+        config.update({
+            'epsilon': self.epsilon,
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer)
+        })
+        return config
+
+
 # ---------------------------------------------------------------------
 
-
+@keras.utils.register_keras_serializable()
 class ComplexConv2D(ComplexLayer):
     """Complex-valued 2D convolution layer with improved stability.
 
@@ -232,9 +248,25 @@ class ComplexConv2D(ComplexLayer):
 
         return output
 
+    def get_config(self) -> Dict[str, Any]:
+        """Get layer configuration.
+
+        Returns:
+            Configuration dictionary
+        """
+        config = super().get_config()
+        config.update({
+            'filters': self.filters,
+            'kernel_size': self.kernel_size,
+            'strides': self.strides,
+            'padding': self.padding,
+        })
+        return config
+
+
 # ---------------------------------------------------------------------
 
-
+@keras.utils.register_keras_serializable()
 class ComplexDense(ComplexLayer):
     """Complex-valued dense layer with improved initialization.
 
@@ -306,9 +338,22 @@ class ComplexDense(ComplexLayer):
             imag_output + tf.math.imag(self.bias)
         )
 
+    def get_config(self) -> Dict[str, Any]:
+        """Get layer configuration.
+
+        Returns:
+            Configuration dictionary
+        """
+        config = super().get_config()
+        config.update({
+            'units': self.units,
+        })
+        return config
+
+
 # ---------------------------------------------------------------------
 
-
+@keras.utils.register_keras_serializable()
 class ComplexReLU(ComplexLayer):
     """Complex ReLU activation with split implementation.
 
@@ -331,5 +376,3 @@ class ComplexReLU(ComplexLayer):
         )
 
 # ---------------------------------------------------------------------
-
-

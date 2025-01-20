@@ -26,7 +26,7 @@ from typing import Tuple, Optional, Union, List
 
 # ---------------------------------------------------------------------
 
-
+@keras.utils.register_keras_serializable()
 class KANConvolution(keras.layers.Layer):
     """
     Implements a Kolmogorov-Arnold Network convolution layer.

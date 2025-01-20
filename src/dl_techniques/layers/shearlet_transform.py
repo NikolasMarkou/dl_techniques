@@ -19,6 +19,7 @@ Core components:
 Reference: "CoShRem: Faithful Digital Shearlet Transforms based on Compactly Supported Shearlets"
 """
 
+import keras
 import numpy as np
 import tensorflow as tf
 from keras.api.layers import Layer
@@ -32,6 +33,7 @@ from dl_techniques.utils.logger import logger
 
 
 # ---------------------------------------------------------------------
+@keras.utils.register_keras_serializable()
 class ShearletTransform(Layer):
     """Shearlet transform layer with improved frame properties.
 
