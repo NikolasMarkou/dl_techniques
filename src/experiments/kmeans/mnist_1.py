@@ -11,7 +11,7 @@ import tensorflow as tf
 from keras import Model, Input
 from keras.api.layers import (
     Conv2D, MaxPooling2D, Dense, Flatten, BatchNormalization,
-    Dropout, Layer, ReLU
+    Dropout, ReLU
 )
 from keras.api.optimizers import Adam
 from keras.api.regularizers import L2
@@ -19,12 +19,20 @@ from keras.api.initializers import HeNormal
 from keras.api.metrics import SparseCategoricalAccuracy
 from keras.api.losses import SparseCategoricalCrossentropy
 
-from dl_techniques.layers.differentiable_kmeans import DifferentiableKMeansLayer
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
+
+from dl_techniques.layers.kmeans import KMeansLayer
+
+
+# ---------------------------------------------------------------------
 
 @dataclass(frozen=True)
-class ModelConfig:
-    """Configuration constants for the MNIST CNN model."""
+class ExperimentConfig:
+    """Configuration constants for the experiment."""
     # Model architecture
     INPUT_SHAPE: Tuple[int, int, int] = (28, 28, 1)
     NUM_CLASSES: int = 10
@@ -38,6 +46,8 @@ class ModelConfig:
 
     # KMeans
     N_CLUSTERS: int = 32
+    TEMPERATURE: float = 0.1
+    MOMENTUM: float = 0.9
 
     # Regularization
     KERNEL_REGULARIZER: float = 1e-4
@@ -60,6 +70,9 @@ class ModelConfig:
     MODEL_SAVE_PATH: str = 'mnist_model.keras'
 
 
+# ---------------------------------------------------------------------
+
+
 class MNISTConvNet(Model):
     """CNN model for MNIST digit classification.
 
@@ -76,11 +89,11 @@ class MNISTConvNet(Model):
 
     def __init__(
             self,
-            input_shape: Tuple[int, int, int] = ModelConfig.INPUT_SHAPE,
-            num_classes: int = ModelConfig.NUM_CLASSES,
-            kernel_regularizer: float = ModelConfig.KERNEL_REGULARIZER,
-            dropout_rate: float = ModelConfig.DROPOUT_RATE,
-            use_batch_norm: bool = ModelConfig.USE_BATCH_NORM,
+            input_shape: Tuple[int, int, int] = ExperimentConfig.INPUT_SHAPE,
+            num_classes: int = ExperimentConfig.NUM_CLASSES,
+            kernel_regularizer: float = ExperimentConfig.KERNEL_REGULARIZER,
+            dropout_rate: float = ExperimentConfig.DROPOUT_RATE,
+            use_batch_norm: bool = ExperimentConfig.USE_BATCH_NORM,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -105,21 +118,21 @@ class MNISTConvNet(Model):
         }
 
         # First conv block
-        self.conv1 = Conv2D(ModelConfig.CONV1_FILTERS, ModelConfig.KERNEL_SIZE, padding='same', **conv_params)
+        self.conv1 = Conv2D(ExperimentConfig.CONV1_FILTERS, ExperimentConfig.KERNEL_SIZE, padding='same', **conv_params)
         self.bn1 = BatchNormalization() if self.use_batch_norm else None
         self.act1 = ReLU()
         self.pool1 = MaxPooling2D()
         self.drop1 = Dropout(self.dropout_rate)
 
         # Second conv block
-        self.conv2 = Conv2D(ModelConfig.CONV2_FILTERS, ModelConfig.KERNEL_SIZE, padding='same', **conv_params)
+        self.conv2 = Conv2D(ExperimentConfig.CONV2_FILTERS, ExperimentConfig.KERNEL_SIZE, padding='same', **conv_params)
         self.bn2 = BatchNormalization() if self.use_batch_norm else None
         self.act2 = ReLU()
         self.pool2 = MaxPooling2D()
         self.drop2 = Dropout(self.dropout_rate)
 
         # Third conv block
-        self.conv3 = Conv2D(ModelConfig.CONV3_FILTERS, ModelConfig.KERNEL_SIZE, padding='same', **conv_params)
+        self.conv3 = Conv2D(ExperimentConfig.CONV3_FILTERS, ExperimentConfig.KERNEL_SIZE, padding='same', **conv_params)
         self.bn3 = BatchNormalization() if self.use_batch_norm else None
         self.act3 = ReLU()
         self.pool3 = MaxPooling2D()
@@ -128,7 +141,7 @@ class MNISTConvNet(Model):
         # Flatten and dense layers
         self.flatten = Flatten()
         self.dense1 = Dense(
-            ModelConfig.DENSE_UNITS,
+            ExperimentConfig.DENSE_UNITS,
             kernel_initializer=HeNormal(),
             kernel_regularizer=L2(self.kernel_regularizer)
         )
@@ -137,8 +150,10 @@ class MNISTConvNet(Model):
         self.drop_dense = Dropout(self.dropout_rate)
 
         self.kmeans_flat_features = \
-            DifferentiableKMeansLayer(
-                n_clusters=ModelConfig.N_CLUSTERS,
+            KMeansLayer(
+                n_clusters=ExperimentConfig.N_CLUSTERS,
+                temperature=ExperimentConfig.TEMPERATURE,
+                momentum=ExperimentConfig.MOMENTUM,
                 name="kmeans_flat_features"
             )
 
@@ -207,6 +222,8 @@ class MNISTConvNet(Model):
         return config
 
 
+# ---------------------------------------------------------------------
+
 def plot_confusion_matrix(model: tf.keras.Model, x_test: np.ndarray, y_test: np.ndarray) -> None:
     """Plot confusion matrix for model predictions.
 
@@ -230,6 +247,8 @@ def plot_confusion_matrix(model: tf.keras.Model, x_test: np.ndarray, y_test: np.
     plt.xlabel('Predicted Label')
     plt.show()
 
+
+# ---------------------------------------------------------------------
 
 def visualize_layer_activations(
         model: tf.keras.Model,
@@ -326,6 +345,9 @@ def visualize_layer_activations(
     plt.tight_layout()
     plt.subplots_adjust(top=0.93)  # Adjust to prevent title overlap
     plt.show()
+
+
+# ---------------------------------------------------------------------
 
 
 def visualize_centroids(
@@ -465,6 +487,9 @@ def visualize_centroids(
     plt.xlabel('Cluster Index')
     plt.ylabel('Number of Points')
     plt.show()
+
+
+# ---------------------------------------------------------------------
 
 
 def visualize_centroid_evolution(
@@ -631,6 +656,9 @@ def visualize_centroid_evolution(
     plt.show()
 
 
+# ---------------------------------------------------------------------
+
+
 def train_and_visualize_mnist() -> None:
     """Train the CNN model on MNIST dataset and visualize results."""
     # Load and preprocess MNIST data
@@ -645,57 +673,60 @@ def train_and_visualize_mnist() -> None:
     # Create and train model
     model = MNISTConvNet()
     model.compile(
-        optimizer=Adam(learning_rate=ModelConfig.INITIAL_LEARNING_RATE),
+        optimizer=Adam(learning_rate=ExperimentConfig.INITIAL_LEARNING_RATE),
         loss=SparseCategoricalCrossentropy(),
         metrics=[SparseCategoricalAccuracy()]
     )
+    model.summary()
 
     # Train model
     model.fit(
         x_train,
         y_train,
-        batch_size=ModelConfig.BATCH_SIZE,
-        epochs=ModelConfig.EPOCHS,
-        validation_split=ModelConfig.VALIDATION_SPLIT,
+        batch_size=ExperimentConfig.BATCH_SIZE,
+        epochs=ExperimentConfig.EPOCHS,
+        validation_split=ExperimentConfig.VALIDATION_SPLIT,
         callbacks=[
             tf.keras.callbacks.ModelCheckpoint(
-                ModelConfig.MODEL_SAVE_PATH,
+                ExperimentConfig.MODEL_SAVE_PATH,
                 save_best_only=True,
                 monitor='val_sparse_categorical_accuracy'
             ),
             tf.keras.callbacks.EarlyStopping(
                 monitor='val_sparse_categorical_accuracy',
-                patience=ModelConfig.PATIENCE,
+                patience=ExperimentConfig.PATIENCE,
                 restore_best_weights=True
             ),
             tf.keras.callbacks.ReduceLROnPlateau(
                 monitor='val_sparse_categorical_accuracy',
-                factor=ModelConfig.LR_REDUCTION_FACTOR,
-                patience=ModelConfig.LR_PATIENCE,
-                min_lr=ModelConfig.MIN_LEARNING_RATE
+                factor=ExperimentConfig.LR_REDUCTION_FACTOR,
+                patience=ExperimentConfig.LR_PATIENCE,
+                min_lr=ExperimentConfig.MIN_LEARNING_RATE
             )
         ]
     )
 
     # Evaluate model
     test_loss, test_acc = model.evaluate(x_test, y_test)
-    print(f"\nTest accuracy: {test_acc:.4f}")
+    logger.info(f"Test accuracy: {test_acc:.4f}")
 
     # Plot confusion matrix
-    print("\nGenerating confusion matrix...")
+    logger.info("Generating confusion matrix...")
     plot_confusion_matrix(model, x_test, y_test)
 
     # Visualize activations
-    print("\nGenerating activation visualizations...")
+    logger.info("Generating activation visualizations...")
     visualize_layer_activations(model, x_test, y_test)
 
     # Add after training:
-    print("\nVisualizing centroids...")
+    logger.info("Visualizing centroids...")
     visualize_centroids(model, x_test, y_test)
 
-    print("\nVisualizing centroid evolution...")
+    logger.info("Visualizing centroid evolution...")
     visualize_centroid_evolution(model, x_test)
 
+
+# ---------------------------------------------------------------------
 
 if __name__ == "__main__":
     train_and_visualize_mnist()

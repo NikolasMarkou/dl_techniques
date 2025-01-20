@@ -213,27 +213,6 @@ Monitoring and Debugging
    - Memory profiling
    - Performance optimization
 
-Production Considerations
------------------------
-
-1. Model Export:
-   - Save in .keras format
-   - Version control
-   - Documentation
-   - Testing pipeline
-
-2. Deployment:
-   - Resource requirements
-   - Batch size optimization
-   - Inference optimization
-   - Monitoring setup
-
-3. Maintenance:
-   - Retraining strategy
-   - Performance monitoring
-   - Quality metrics
-   - Update procedures
-
 Example Applications
 ------------------
 
@@ -267,10 +246,11 @@ refer to the accompanying code and documentation.
 
 import numpy as np
 import tensorflow as tf
-from typing import Optional, Union, Literal, List, Any, Tuple, Dict
+from keras.api import backend
+from collections import deque
 from keras.api.layers import Layer
 from keras.api import initializers
-from keras.api import backend
+from typing import Optional, Union, Literal, List, Any, Tuple, Dict, Deque
 
 # ---------------------------------------------------------------------
 
@@ -283,7 +263,7 @@ Axis = Union[int, List[int]]
 # ---------------------------------------------------------------------
 
 @tf.keras.utils.register_keras_serializable()
-class DifferentiableKMeansLayer(Layer):
+class KMeansLayer(Layer):
     """A differentiable K-means layer with momentum and centroid repulsion.
 
     This layer implements a differentiable version of K-means clustering using soft

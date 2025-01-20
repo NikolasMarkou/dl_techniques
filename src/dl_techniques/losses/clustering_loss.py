@@ -13,7 +13,7 @@ from sklearn.metrics import silhouette_score
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.differentiable_kmeans import DifferentiableKMeansLayer
+from dl_techniques.layers.kmeans import KMeansLayer
 
 # ---------------------------------------------------------------------
 
@@ -417,7 +417,7 @@ def create_clustering_pipeline(
         x = keras.layers.GaussianNoise(0.01)(x)
 
         # Clustering
-        kmeans = DifferentiableKMeansLayer(
+        kmeans = KMeansLayer(
             n_clusters=n_clusters,
             temperature=temperature
         )

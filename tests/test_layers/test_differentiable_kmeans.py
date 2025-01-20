@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import tensorflow as tf
-from dl_techniques.layers.differentiable_kmeans import DifferentiableKMeansLayer
+from dl_techniques.layers.kmeans import KMeansLayer
 
 # ---------------------------------------------------------------------
 
@@ -29,7 +29,7 @@ class TestDifferentiableKMeansLayer:
 
     def test_initialization(self, basic_config):
         """Test layer initialization with valid parameters."""
-        layer = DifferentiableKMeansLayer(**basic_config)
+        layer = KMeansLayer(**basic_config)
         assert layer.n_clusters == basic_config["n_clusters"]
         assert layer.temperature == basic_config["temperature"]
         assert layer.output_mode == basic_config["output_mode"]
@@ -46,7 +46,7 @@ class TestDifferentiableKMeansLayer:
         """Test layer initialization with invalid parameters."""
         invalid_params = {**basic_config, **invalid_config}
         with pytest.raises(ValueError):
-            DifferentiableKMeansLayer(**invalid_params)
+            KMeansLayer(**invalid_params)
 
     @pytest.mark.parametrize("input_shape,cluster_axis", [
         ((32, 64), -1),
@@ -57,7 +57,7 @@ class TestDifferentiableKMeansLayer:
     def test_build_shapes(self, input_shape, cluster_axis, basic_config):
         """Test layer building with different input shapes."""
         config = {**basic_config, "cluster_axis": cluster_axis}
-        layer = DifferentiableKMeansLayer(**config)
+        layer = KMeansLayer(**config)
 
         inputs = tf.random.normal(input_shape)
         output = layer(inputs)
@@ -78,7 +78,7 @@ class TestDifferentiableKMeansLayer:
     def test_output_modes(self, output_mode, basic_config):
         """Test different output modes."""
         config = {**basic_config, "output_mode": output_mode}
-        layer = DifferentiableKMeansLayer(**config)
+        layer = KMeansLayer(**config)
 
         inputs = tf.random.normal((32, 64))
         output = layer(inputs)
@@ -97,7 +97,7 @@ class TestDifferentiableKMeansLayer:
     def test_training_updates(self, basic_config, random_seed):
         """Test that centroids update during training."""
         tf.random.set_seed(random_seed)
-        layer = DifferentiableKMeansLayer(**basic_config, random_seed=random_seed)
+        layer = KMeansLayer(**basic_config, random_seed=random_seed)
 
         inputs = tf.random.normal((32, 64))
 
@@ -119,11 +119,11 @@ class TestDifferentiableKMeansLayer:
         config_without_temp = {k: v for k, v in basic_config.items() if k != 'temperature'}
 
         # Low temperature (harder assignments)
-        layer_hard = DifferentiableKMeansLayer(**config_without_temp, temperature=0.01)
+        layer_hard = KMeansLayer(**config_without_temp, temperature=0.01)
         output_hard = layer_hard(inputs)
 
         # High temperature (softer assignments)
-        layer_soft = DifferentiableKMeansLayer(**config_without_temp, temperature=1.0)
+        layer_soft = KMeansLayer(**config_without_temp, temperature=1.0)
         output_soft = layer_soft(inputs)
 
         # Hard assignments should be more extreme (closer to 0 or 1)
@@ -138,11 +138,11 @@ class TestDifferentiableKMeansLayer:
 
     def test_serialization(self, basic_config):
         """Test layer serialization and deserialization."""
-        layer = DifferentiableKMeansLayer(**basic_config)
+        layer = KMeansLayer(**basic_config)
         config = layer.get_config()
 
         # Recreate layer from config
-        new_layer = DifferentiableKMeansLayer.from_config(config)
+        new_layer = KMeansLayer.from_config(config)
 
         # Check all parameters are preserved
         assert new_layer.n_clusters == layer.n_clusters

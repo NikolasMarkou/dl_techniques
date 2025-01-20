@@ -10,7 +10,7 @@ from sklearn.datasets import make_blobs
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.differentiable_kmeans import DifferentiableKMeansLayer
+from dl_techniques.layers.kmeans import KMeansLayer
 
 
 # ---------------------------------------------------------------------
@@ -20,7 +20,7 @@ def generate_clustered_data(
         n_samples: int = 1000,
         n_features: int = 2,
         n_true_clusters: int = 5,
-        noise: float = 0.1,
+        noise: float = 0.5,
         random_state: int = 42
 ) -> tf.Tensor:
     """
@@ -72,7 +72,7 @@ def train_kmeans_model(
     # Create model
     model = tf.keras.Sequential([
         tf.keras.Input(shape=(data.shape[1],)),
-        DifferentiableKMeansLayer(n_clusters=n_clusters, temperature=temperature)
+        KMeansLayer(n_clusters=n_clusters, temperature=temperature)
     ])
 
     # Custom loss to encourage well-separated clusters
@@ -159,10 +159,10 @@ def main():
 
     # Generate synthetic data
     data = generate_clustered_data(
-        n_samples=1000,
+        n_samples=5000,
         n_features=2,  # 2D for easy visualization
         n_true_clusters=5,
-        noise=0.1
+        noise=0.5
     )
 
     # Train model
@@ -174,7 +174,7 @@ def main():
     )
 
     # Plot results
-    plot_clustering_results(data, model, "DifferentiableKMeans Clustering Results")
+    plot_clustering_results(data, model, "KMeans Clustering Results")
 
     # Plot training loss
     plt.figure(figsize=(10, 6))
