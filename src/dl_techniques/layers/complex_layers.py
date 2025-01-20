@@ -66,11 +66,17 @@ References:
 2. "Unitary Evolution Recurrent Neural Networks" (Arjovsky et al., 2016)
 """
 
+import keras
 import numpy as np
 import tensorflow as tf
+from keras.api.layers import Layer
 from typing import Optional, Tuple, List, Union, Dict, Any
-from keras.api.layers import Layer, Dense, AveragePooling2D
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.random import rayleigh
 
 # ---------------------------------------------------------------------
 
@@ -85,8 +91,8 @@ class ComplexLayer(Layer):
     def __init__(
             self,
             epsilon: float = 1e-7,
-            kernel_regularizer: Optional[tf.keras.regularizers.Regularizer] = None,
-            kernel_initializer: Optional[tf.keras.initializers.Initializer] = None,
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            kernel_initializer: Optional[keras.initializers.Initializer] = None,
             **kwargs
     ) -> None:
         """Initialize ComplexLayer.
@@ -100,7 +106,7 @@ class ComplexLayer(Layer):
         super().__init__(**kwargs)
         self.epsilon = epsilon
         self.kernel_regularizer = kernel_regularizer
-        self.kernel_initializer = kernel_initializer or tf.keras.initializers.GlorotUniform()
+        self.kernel_initializer = kernel_initializer or keras.initializers.GlorotUniform()
 
     def _init_complex_weights(
             self,
@@ -121,8 +127,8 @@ class ComplexLayer(Layer):
         sigma = tf.sqrt(2.0 / (fan_in + fan_out))
 
         # Initialize magnitude and phase
-        magnitude = tf.random.rayleigh(shape, sigma)
-        phase = tf.random.uniform(shape, -np.pi, np.pi)
+        magnitude = rayleigh(shape, sigma, dtype=tf.float64)
+        phase = tf.random.uniform(shape, -np.pi, np.pi, dtype=tf.float64)
 
         # Convert to complex representation
         weights = tf.complex(
