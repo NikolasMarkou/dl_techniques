@@ -353,13 +353,18 @@ class ComplexDense(ComplexLayer):
 
 # ---------------------------------------------------------------------
 
+
 @keras.utils.register_keras_serializable()
 class ComplexReLU(ComplexLayer):
-    """Complex ReLU activation with split implementation.
+    """Complex ReLU activation."""
 
-    Applies ReLU separately to real and imaginary parts for stable
-    non-linear activation in complex domain.
-    """
+    def get_config(self) -> Dict[str, Any]:
+        """Get layer configuration.
+
+        Returns:
+            Configuration dictionary
+        """
+        return super().get_config()
 
     def call(self, inputs: tf.Tensor) -> tf.Tensor:
         """Apply complex ReLU activation.
