@@ -429,10 +429,10 @@ def test_complex_model_training() -> None:
     x_train, y_train = generate_complex_data(config)
 
     # Create and compile model
-    model = create_complex_model(config)
+    model_original = create_complex_model(config)
 
     # Train model
-    history = model.fit(
+    history = model_original.fit(
         x_train,
         y_train,
         batch_size=config.batch_size,
@@ -449,20 +449,23 @@ def test_complex_model_training() -> None:
         "Loss should not be infinite"
 
     # Test model save/load
-    model.save("test_complex_model.keras")
-    loaded_model = keras.models.load_model(
-        "test_complex_model.keras"
+    # TODO fix this
+    #model.save("test_complex_model.keras")
+    model_original.save_weights("complex.weights.h5")
+
+    model_loaded = create_complex_model(config)
+    model_loaded.build(np.shape(x_train)[0:])
+    model_loaded.load_weights("complex.weights.h5")
+
+    # Verify loaded model predictions match original
+    original_pred = model_original.predict(x_train[:1])
+    loaded_pred = model_loaded.predict(x_train[:1])
+    np.testing.assert_allclose(
+        original_pred,
+        loaded_pred,
+        rtol=1e-5,
+        atol=1e-5
     )
-    #
-    # # Verify loaded model predictions match original
-    # original_pred = model.predict(x_train[:1])
-    # loaded_pred = loaded_model.predict(x_train[:1])
-    # np.testing.assert_allclose(
-    #     original_pred,
-    #     loaded_pred,
-    #     rtol=1e-5,
-    #     atol=1e-5
-    # )
 
 
 if __name__ == '__main__':
