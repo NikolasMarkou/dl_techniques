@@ -53,7 +53,7 @@ import keras
 from enum import Enum
 import tensorflow as tf
 from keras.api.layers import Layer
-from typing import List, Tuple, Union, Dict
+from typing import List, Tuple, Union, Dict, Optional, Any
 
 # ---------------------------------------------------------------------
 # local imports
