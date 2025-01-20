@@ -244,13 +244,20 @@ For detailed implementation examples and advanced usage patterns,
 refer to the accompanying code and documentation.
 """
 
+import keras
 import numpy as np
 import tensorflow as tf
 from keras.api import backend
-from collections import deque
 from keras.api.layers import Layer
-from keras.api import initializers
-from typing import Optional, Union, Literal, List, Any, Tuple, Dict, Deque
+from typing import Optional, Union, Literal, List, Any, Tuple, Dict
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.initializers.orthonormal_initializer import OrthonormalInitializer
+from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer, \
+    SoftOrthogonalConstraintRegularizer
 
 # ---------------------------------------------------------------------
 
@@ -262,7 +269,7 @@ Axis = Union[int, List[int]]
 
 # ---------------------------------------------------------------------
 
-@tf.keras.utils.register_keras_serializable()
+@keras.utils.register_keras_serializable()
 class KMeansLayer(Layer):
     """A differentiable K-means layer with momentum and centroid repulsion.
 
@@ -433,12 +440,18 @@ class KMeansLayer(Layer):
         return [i for i in range(self.input_rank) if i not in self.cluster_axis]
 
     def _initialize_centroids(self) -> None:
-        """Initialize centroid variables."""
-        initializer = initializers.GlorotNormal(seed=self.random_seed)
+        """Initialize centroid variables with orthonormal vectors."""
+
+        if self.n_clusters < self.feature_dims:
+            initializer = OrthonormalInitializer(seed=self.random_seed)
+        else:
+            initializer = keras.initializers.GlorotNormal(seed=self.random_seed)
+
         self.centroids = self.add_weight(
             name="centroids",
             shape=(self.n_clusters, self.feature_dims),
             initializer=initializer,
+            regularizer=None,
             trainable=True,
             dtype=self.dtype
         )

@@ -17,8 +17,6 @@ from typing import Any, Dict, Tuple
 from dl_techniques.regularizers.soft_orthogonal import (
     SoftOrthogonalConstraintRegularizer,
     SoftOrthonormalConstraintRegularizer,
-    reshape_to_2d,
-    gram_matrix,
     DEFAULT_SOFTORTHOGONAL_LAMBDA,
     DEFAULT_SOFTORTHOGONAL_L1,
     DEFAULT_SOFTORTHOGONAL_L2
@@ -50,35 +48,6 @@ def orthogonal_matrix() -> tf.Tensor:
         [np.sin(theta), np.cos(theta)]
     ], dtype=tf.float32)
     return matrix
-
-
-# Helper function tests
-def test_reshape_to_2d_with_2d_input(random_weights_2d: tf.Tensor) -> None:
-    """Test reshape_to_2d with 2D input."""
-    reshaped = reshape_to_2d(random_weights_2d)
-    assert len(reshaped.shape) == 2
-    assert reshaped.shape[0] == random_weights_2d.shape[1]
-    assert reshaped.shape[1] == random_weights_2d.shape[0]
-
-
-def test_reshape_to_2d_with_4d_input(random_weights_4d: tf.Tensor) -> None:
-    """Test reshape_to_2d with 4D input."""
-    reshaped = reshape_to_2d(random_weights_4d)
-    assert len(reshaped.shape) == 2
-    assert reshaped.shape[0] == random_weights_4d.shape[3]
-    assert reshaped.shape[1] == (random_weights_4d.shape[0] *
-                                 random_weights_4d.shape[1] *
-                                 random_weights_4d.shape[2])
-
-
-def test_wt_x_w_computation(random_weights_2d: tf.Tensor) -> None:
-    """Test wt_x_w computation."""
-    result = gram_matrix(random_weights_2d)
-    expected = tf.matmul(
-        tf.transpose(random_weights_2d),
-        random_weights_2d
-    )
-    assert tf.reduce_all(tf.abs(result - expected) < 1e-5)
 
 
 # SoftOrthogonalConstraintRegularizer tests

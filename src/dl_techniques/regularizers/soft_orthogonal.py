@@ -26,93 +26,17 @@ DEFAULT_SOFTORTHOGONAL_LAMBDA: float = 0.01
 DEFAULT_SOFTORTHOGONAL_STDDEV: float = 0.02
 
 # ---------------------------------------------------------------------
-
-# @tf.function
-# def reshape_to_2d(weights: tf.Tensor) -> tf.Tensor:
-#     """Reshape 2D or 4D tensor to 2D matrix for regularization computations."""
-#     weights_shape = tf.shape(weights)
-#
-#     if len(weights.shape) == 2:
-#         return tf.transpose(weights)
-#     elif len(weights.shape) == 4:
-#         # More stable reshaping with explicit size computation
-#         F = weights_shape[3]
-#         spatial_dims = weights_shape[0] * weights_shape[1] * weights_shape[2]
-#         w_t = tf.transpose(weights, perm=[3, 0, 1, 2])
-#         return tf.reshape(w_t, [F, spatial_dims])
-#
-#     # Handle unexpected input shapes gracefully
-#     tf.debugging.assert_rank_in(weights, [2, 4],
-#                                 message="Input tensor must be 2D or 4D")
-#     return weights
-
-@tf.function
-def reshape_to_2d(weights: tf.Tensor) -> tf.Tensor:
-    """Reshape weight tensor to 2D matrix for regularization computations.
-
-    Handles standard neural network weight tensor formats:
-    - Dense: (in_features, out_features)
-    - Conv2D: (h, w, in_c, out_c)
-    - Conv3D: (d, h, w, in_c, out_c)
-    - Conv1D: (w, in_c, out_c)
-
-    Args:
-        weights: Input weight tensor
-
-    Returns:
-        2D tensor where first dimension is output features/channels
-    """
-    ndims = len(weights.shape)
-
-    # Assert supported number of dimensions
-    tf.debugging.assert_equal(
-        tf.reduce_any(tf.equal(ndims, [2, 3, 4, 5])),
-        True,
-        message=(
-            "Tensor rank must be one of:\n"
-            "2 (Dense: in_features, out_features)\n"
-            "3 (Conv1D: width, in_channels, out_channels)\n"
-            "4 (Conv2D: height, width, in_channels, out_channels)\n"
-            "5 (Conv3D: depth, height, width, in_channels, out_channels)"
-        )
-    )
-
-    # For any conv layer (1D/2D/3D), last dimension is always out_channels
-    # Everything else gets flattened into the second dimension
-    out_channels = tf.shape(weights)[-1]
-
-    # Move out_channels to first dimension
-    perm = tf.concat([
-        [ndims - 1],  # Last dim (out_channels) goes first
-        tf.range(ndims - 1)  # Other dims maintain relative order
-    ], axis=0)
-    w_t = tf.transpose(weights, perm)
-
-    # Flatten rest into single dimension
-    return tf.reshape(w_t, [out_channels, -1])
+# local imports
+# ---------------------------------------------------------------------
 
 
-@tf.function
-def gram_matrix(weights: tf.Tensor) -> tf.Tensor:
-    """Compute W^T * W with improved numerical stability."""
-    wt = reshape_to_2d(weights)
-    return tf.matmul(wt, tf.transpose(wt))
+from dl_techniques.utils.tensors import reshape_to_2d, gram_matrix, wt_x_w_normalize
 
 
-@tf.function
-def wt_x_w_normalize(weights: tf.Tensor) -> tf.Tensor:
-    """Compute W^T * W with improved numerical stability."""
-    wt = reshape_to_2d(weights)
+# ---------------------------------------------------------------------
 
-    # Normalize the weights before multiplication for better conditioning
-    norm = tf.maximum(tf.norm(wt, axis=1, keepdims=True), EPSILON)
-    wt_normalized = wt / norm
-
-    return tf.matmul(wt_normalized, tf.transpose(wt_normalized))
-
-
-@tf.keras.utils.register_keras_serializable()
-class SoftOrthogonalConstraintRegularizer(tf.keras.regularizers.Regularizer):
+@keras.utils.register_keras_serializable()
+class SoftOrthogonalConstraintRegularizer(keras.regularizers.Regularizer):
     """Implements soft orthogonality constraint regularization.
 
     This regularizer penalizes deviations from orthogonality in weight matrices
@@ -134,7 +58,7 @@ class SoftOrthogonalConstraintRegularizer(tf.keras.regularizers.Regularizer):
             l2_coefficient: Weight for L2 regularization
             **kwargs: Additional arguments passed to parent
         """
-        super().__init__(**kwargs)
+        super().__init__()
         self._lambda_coefficient = lambda_coefficient
         self._l1_coefficient = l1_coefficient
         self._l2_coefficient = l2_coefficient
@@ -147,11 +71,11 @@ class SoftOrthogonalConstraintRegularizer(tf.keras.regularizers.Regularizer):
 
         # Create L1/L2 regularizers once
         if self._use_l1:
-            self._l1 = tf.keras.regularizers.L1(l1=self._l1_coefficient)
+            self._l1 = keras.regularizers.L1(l1=self._l1_coefficient)
         if self._use_l2:
-            self._l2 = tf.keras.regularizers.L2(l2=self._l2_coefficient)
+            self._l2 = keras.regularizers.L2(l2=self._l2_coefficient)
 
-    def generic_fn(self, x: tf.Tensor) -> tf.Tensor:
+    def __call__(self, x: tf.Tensor) -> tf.Tensor:
         """Compute regularization for given weights.
 
         Args:
@@ -186,22 +110,6 @@ class SoftOrthogonalConstraintRegularizer(tf.keras.regularizers.Regularizer):
 
         return result
 
-    def __call__(self, x: tf.Tensor) -> tf.Tensor:
-        """Apply regularization to weights.
-
-        Args:
-            x: Weight tensor
-
-        Returns:
-            Regularization loss value
-        """
-        if self._call_fn is None:
-            self._call_fn = tf.function(
-                func=self.generic_fn,
-                reduce_retracing=True
-            ).get_concrete_function(x)
-        return self._call_fn(x)
-
     def get_config(self) -> Dict[str, float]:
         """Get configuration for serialization.
 
@@ -215,8 +123,8 @@ class SoftOrthogonalConstraintRegularizer(tf.keras.regularizers.Regularizer):
         }
 
 
-@tf.keras.utils.register_keras_serializable()
-class SoftOrthonormalConstraintRegularizer(tf.keras.regularizers.Regularizer):
+@keras.utils.register_keras_serializable()
+class SoftOrthonormalConstraintRegularizer(keras.regularizers.Regularizer):
     """Implements soft orthonormality constraint regularization.
 
     This regularizer penalizes deviations from orthonormality in weight matrices
@@ -238,7 +146,7 @@ class SoftOrthonormalConstraintRegularizer(tf.keras.regularizers.Regularizer):
             l2_coefficient: Weight for L2 regularization
             **kwargs: Additional arguments passed to parent
         """
-        super().__init__(**kwargs)
+        super().__init__()
         self._lambda_coefficient = lambda_coefficient
         self._l1_coefficient = l1_coefficient
         self._l2_coefficient = l2_coefficient
@@ -251,11 +159,11 @@ class SoftOrthonormalConstraintRegularizer(tf.keras.regularizers.Regularizer):
 
         # Create L1/L2 regularizers once
         if self._use_l1:
-            self._l1 = tf.keras.regularizers.L1(l1=self._l1_coefficient)
+            self._l1 = keras.regularizers.L1(l1=self._l1_coefficient)
         if self._use_l2:
-            self._l2 = tf.keras.regularizers.L2(l2=self._l2_coefficient)
+            self._l2 = keras.regularizers.L2(l2=self._l2_coefficient)
 
-    def generic_fn(self, x: tf.Tensor) -> tf.Tensor:
+    def __call__(self, x: tf.Tensor) -> tf.Tensor:
         """Compute regularization for given weights.
 
         Args:
@@ -286,22 +194,6 @@ class SoftOrthonormalConstraintRegularizer(tf.keras.regularizers.Regularizer):
             result += self._l2(wt_w)
 
         return result
-
-    def __call__(self, x: tf.Tensor) -> tf.Tensor:
-        """Apply regularization to weights.
-
-        Args:
-            x: Weight tensor
-
-        Returns:
-            Regularization loss value
-        """
-        if self._call_fn is None:
-            self._call_fn = tf.function(
-                func=self.generic_fn,
-                reduce_retracing=True
-            ).get_concrete_function(x)
-        return self._call_fn(x)
 
     def get_config(self) -> Dict[str, float]:
         """Get configuration for serialization.

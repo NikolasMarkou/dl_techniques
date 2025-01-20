@@ -4,7 +4,22 @@ import numpy as np
 from numpy.testing import assert_allclose
 from typing import Tuple
 
-from dl_techniques.utils.tensors import power_iteration
+from dl_techniques.utils.tensors import \
+    power_iteration, wt_x_w_normalize, gram_matrix, reshape_to_2d
+
+
+@pytest.fixture
+def random_weights_2d() -> tf.Tensor:
+    """Generate random 2D weights for testing."""
+    tf.random.set_seed(42)
+    return tf.random.normal((10, 5))
+
+
+@pytest.fixture
+def random_weights_4d() -> tf.Tensor:
+    """Generate random 4D weights for testing."""
+    tf.random.set_seed(42)
+    return tf.random.normal((3, 3, 64, 32))
 
 
 class TestPowerIteration:
@@ -163,3 +178,28 @@ class TestPowerIteration:
         # Results should also be close to each other
         assert_allclose(result_base, result_more, rtol=1e-3)
         assert_allclose(result_more, result_most, rtol=1e-3)
+
+    def test_reshape_to_2d_with_2d_input(self, random_weights_2d: tf.Tensor) -> None:
+        """Test reshape_to_2d with 2D input."""
+        reshaped = reshape_to_2d(random_weights_2d)
+        assert len(reshaped.shape) == 2
+        assert reshaped.shape[0] == random_weights_2d.shape[1]
+        assert reshaped.shape[1] == random_weights_2d.shape[0]
+
+    def test_reshape_to_2d_with_4d_input(self, random_weights_4d: tf.Tensor) -> None:
+        """Test reshape_to_2d with 4D input."""
+        reshaped = reshape_to_2d(random_weights_4d)
+        assert len(reshaped.shape) == 2
+        assert reshaped.shape[0] == random_weights_4d.shape[3]
+        assert reshaped.shape[1] == (random_weights_4d.shape[0] *
+                                     random_weights_4d.shape[1] *
+                                     random_weights_4d.shape[2])
+
+    def test_wt_x_w_computation(self, random_weights_2d: tf.Tensor) -> None:
+        """Test wt_x_w computation."""
+        result = gram_matrix(random_weights_2d)
+        expected = tf.matmul(
+            tf.transpose(random_weights_2d),
+            random_weights_2d
+        )
+        assert tf.reduce_all(tf.abs(result - expected) < 1e-5)

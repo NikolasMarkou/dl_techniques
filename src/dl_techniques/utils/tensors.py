@@ -3,49 +3,66 @@ import tensorflow as tf
 
 # ---------------------------------------------------------------------
 
-@tf.function
 def reshape_to_2d(weights: tf.Tensor) -> tf.Tensor:
-    """
-    Reshape N-dimensional tensor to 2D matrix for regularization computations.
+    """Reshape weight tensor to 2D matrix for regularization computations.
 
-    This function takes a tensor of any dimension and reshapes it into a 2D matrix
-    where the last dimension becomes the first dimension (F) and all other dimensions
-    are flattened into the second dimension.
+    Handles standard neural network weight tensor formats:
+    - Dense: (in_features, out_features)
+    - Conv2D: (h, w, in_c, out_c)
+    - Conv3D: (d, h, w, in_c, out_c)
+    - Conv1D: (w, in_c, out_c)
 
     Args:
-        weights: Input tensor of shape (..., F)
+        weights: Input weight tensor
 
     Returns:
-        2D tensor of shape (F, prod(...))
+        2D tensor where first dimension is output features/channels
     """
-    # Get shape information
-    weights_shape = tf.shape(weights)
     ndims = len(weights.shape)
 
-    # Ensure tensor has at least 2 dimensions
-    tf.debugging.assert_greater_equal(
-        ndims, 2,
-        message=f"Input tensor must have at least 2 dimensions, got {ndims}"
+    # Assert supported number of dimensions
+    tf.debugging.assert_equal(
+        tf.reduce_any(tf.equal(ndims, [2, 3, 4, 5])),
+        True,
+        message=(
+            "Tensor rank must be one of:\n"
+            "2 (Dense: in_features, out_features)\n"
+            "3 (Conv1D: width, in_channels, out_channels)\n"
+            "4 (Conv2D: height, width, in_channels, out_channels)\n"
+            "5 (Conv3D: depth, height, width, in_channels, out_channels)"
+        )
     )
 
-    # No reshape needed for 2D
-    if ndims == 2:
-        return tf.transpose(weights)
+    # For any conv layer (1D/2D/3D), last dimension is always out_channels
+    # Everything else gets flattened into the second dimension
+    out_channels = tf.shape(weights)[-1]
 
-    # For N-dimensional tensors:
-    # 1. Move last dimension to front
-    # 2. Flatten all other dimensions
-    F = weights_shape[-1]  # Last dimension size
+    # Move out_channels to first dimension
     perm = tf.concat([
-        [ndims - 1],  # Last dim goes first
-        tf.range(ndims - 1)  # Other dims follow
+        [ndims - 1],  # Last dim (out_channels) goes first
+        tf.range(ndims - 1)  # Other dims maintain relative order
     ], axis=0)
-
-    # Reshape to (F, -1) where -1 is product of all other dimensions
     w_t = tf.transpose(weights, perm)
-    spatial_dims = tf.reduce_prod(weights_shape[:-1])  # All dims except last
 
-    return tf.reshape(w_t, [F, spatial_dims])
+    # Flatten rest into single dimension
+    return tf.reshape(w_t, [out_channels, -1])
+
+
+def gram_matrix(weights: tf.Tensor) -> tf.Tensor:
+    """Compute W^T * W with improved numerical stability."""
+    wt = reshape_to_2d(weights)
+    return tf.matmul(wt, tf.transpose(wt))
+
+
+def wt_x_w_normalize(weights: tf.Tensor) -> tf.Tensor:
+    """Compute W^T * W with improved numerical stability."""
+    wt = reshape_to_2d(weights)
+
+    # Normalize the weights before multiplication for better conditioning
+    norm = tf.maximum(tf.norm(wt, axis=1, keepdims=True), 0.0)
+    wt_normalized = wt / (norm + 1e-5)
+
+    return tf.matmul(wt_normalized, tf.transpose(wt_normalized))
 
 
 # ---------------------------------------------------------------------
