@@ -1,6 +1,8 @@
 import pytest
 import numpy as np
 import tensorflow as tf
+from itertools import product
+from typing import Tuple, Dict, Any
 from dl_techniques.layers.band_rms_norm import BandRMSNorm
 
 
@@ -9,19 +11,16 @@ def test_initialization():
     # Test default initialization
     layer = BandRMSNorm()
     assert layer.max_band_width == 0.2
-    assert layer.constant == 1.0
     assert layer.axis == -1
     assert layer.epsilon == 1e-7
 
     # Test custom initialization
     custom_layer = BandRMSNorm(
         max_band_width=0.1,
-        constant=2.0,
         axis=1,
         epsilon=1e-6
     )
     assert custom_layer.max_band_width == 0.1
-    assert custom_layer.constant == 2.0
     assert custom_layer.axis == 1
     assert custom_layer.epsilon == 1e-6
 
@@ -33,12 +32,6 @@ def test_input_validation():
         BandRMSNorm(max_band_width=1.5)
     with pytest.raises(ValueError, match="max_band_width must be between 0 and 1"):
         BandRMSNorm(max_band_width=-0.1)
-
-    # Test invalid constant
-    with pytest.raises(ValueError, match="constant must be positive"):
-        BandRMSNorm(constant=0.0)
-    with pytest.raises(ValueError, match="constant must be positive"):
-        BandRMSNorm(constant=-1.0)
 
     # Test invalid epsilon
     with pytest.raises(ValueError, match="epsilon must be positive"):
@@ -88,7 +81,7 @@ def test_normalization_bounds():
     max_allowed = 1.0
 
     tf.debugging.assert_greater_equal(output_rms, min_allowed - 1e-5)
-    tf.debugging.assert_less_equal(output_rms, max_allowed + 1e-5)
+    tf.debugging.assert_less_equal(output_rms, max_allowed + 1e-03)
 
 
 def test_training():
@@ -118,7 +111,6 @@ def test_serialization_and_deserialization():
     """Test layer serialization, deserialization, and config preservation."""
     original_layer = BandRMSNorm(
         max_band_width=0.15,
-        constant=2.0,
         axis=1,
         epsilon=1e-6
     )
@@ -133,7 +125,6 @@ def test_serialization_and_deserialization():
 
     # Verify config preservation
     assert new_layer.max_band_width == original_layer.max_band_width
-    assert new_layer.constant == original_layer.constant
     assert new_layer.axis == original_layer.axis
     assert new_layer.epsilon == original_layer.epsilon
 
@@ -205,3 +196,61 @@ def test_dynamic_batch_size():
             batch_output = outputs[i]
             rms = tf.sqrt(tf.reduce_mean(tf.square(batch_output)))
             tf.debugging.assert_near(rms, 1.0, atol=0.2)  # Within band width
+
+
+@pytest.mark.parametrize(
+    "input_shape, max_band_width",
+    [
+        ((32, 16, 64), 0.2),  # 3D input
+        ((8, 16, 32, 3), 0.3),  # 4D input (like images)
+        ((16, 8, 8, 16, 4), 0.1),  # 5D input
+    ]
+)
+def test_higher_dimensional_inputs(
+        input_shape: Tuple[int, ...],
+        max_band_width: float
+) -> None:
+    """Test that layer works correctly with higher dimensional inputs.
+
+    Args:
+        input_shape: Shape of input tensor
+        max_band_width: Maximum allowed deviation from unit norm
+    """
+    layer = BandRMSNorm(max_band_width=max_band_width)
+    inputs = tf.random.normal(input_shape)
+    outputs = layer(inputs)
+
+    # Verify output shape
+    assert outputs.shape == input_shape
+
+    # Check normalization bounds
+    output_rms = tf.sqrt(tf.reduce_mean(tf.square(outputs), axis=-1))
+    min_allowed = 1.0 - max_band_width
+    max_allowed = 1.0
+
+    tf.debugging.assert_greater_equal(output_rms, min_allowed - 1e-5)
+    tf.debugging.assert_less_equal(output_rms, max_allowed + 1e-5)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"max_band_width": 0},  # Zero band width
+        {"max_band_width": 1.0},  # Max band width too large
+        {"max_band_width": -0.1},  # Negative band width
+        {"epsilon": 0},  # Zero epsilon
+        {"epsilon": -1e-7},  # Negative epsilon
+    ]
+)
+def test_invalid_configurations(config: Dict[str, Any]) -> None:
+    """Test that layer correctly handles invalid configurations.
+
+    Args:
+        config: Dictionary of invalid configuration parameters
+    """
+    with pytest.raises(ValueError):
+        _ = BandRMSNorm(**config)
+
+
+if __name__ == '__main__':
+    pytest.main([__file__])

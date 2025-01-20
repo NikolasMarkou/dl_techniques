@@ -351,5 +351,6 @@ def test_batch_processing():
             batch_slice = batch_result[i:i + 1]
             assert tf.reduce_all(tf.equal(batch_slice, reference))
 
+
 if __name__ == "__main__":
     pytest.main([__file__])
