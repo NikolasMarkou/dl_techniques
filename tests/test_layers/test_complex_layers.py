@@ -8,6 +8,7 @@ including initialization tests, shape verification, and numerical correctness ch
 
 import keras
 import pytest
+import tempfile
 import numpy as np
 import tensorflow as tf
 from dataclasses import dataclass
@@ -416,9 +417,8 @@ def generate_complex_data(
 @pytest.mark.integration
 def test_complex_model_training() -> None:
     """Integration test for training complex model.
-
-    Tests the full training loop with all complex layers integrated
-    into a single model using the Keras API.
+    Tests the full training loop with all complex layers integrated into
+    a single model using the Keras API.
     """
     # Initialize configuration
     config = ComplexModelConfig(
@@ -442,30 +442,33 @@ def test_complex_model_training() -> None:
 
     # Basic assertions to verify training
     assert history.history['loss'][-1] < history.history['loss'][0], \
-       "Loss should decrease during training"
+        "Loss should decrease during training"
     assert not any(tf.math.is_nan(loss) for loss in history.history['loss']), \
         "Loss should not be NaN"
     assert not any(tf.math.is_inf(loss) for loss in history.history['loss']), \
         "Loss should not be infinite"
 
-    # Test model save/load
-    # TODO fix this
-    #model.save("test_complex_model.keras")
-    model_original.save_weights("complex.weights.h5")
+    # Test model save/load using temporary file
+    with tempfile.NamedTemporaryFile(suffix='.keras') as model_file, \
+         tempfile.NamedTemporaryFile(suffix='.weights.h5') as weights_file:
+        # Save model and weights
+        model_original.save(model_file.name)
+        model_original.save_weights(weights_file.name)
 
-    model_loaded = create_complex_model(config)
-    model_loaded.build(np.shape(x_train)[0:])
-    model_loaded.load_weights("complex.weights.h5")
+        # Load model
+        model_loaded = create_complex_model(config)
+        model_loaded.build(np.shape(x_train)[0:])
+        model_loaded.load_weights(weights_file.name)
 
-    # Verify loaded model predictions match original
-    original_pred = model_original.predict(x_train[:1])
-    loaded_pred = model_loaded.predict(x_train[:1])
-    np.testing.assert_allclose(
-        original_pred,
-        loaded_pred,
-        rtol=1e-5,
-        atol=1e-5
-    )
+        # Verify loaded model predictions match original
+        original_pred = model_original.predict(x_train[:1])
+        loaded_pred = model_loaded.predict(x_train[:1])
+        np.testing.assert_allclose(
+            original_pred,
+            loaded_pred,
+            rtol=1e-5,
+            atol=1e-5
+        )
 
 
 if __name__ == '__main__':
