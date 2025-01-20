@@ -2,6 +2,7 @@ import keras
 import tensorflow as tf
 from typing import Any, Dict
 
+
 # ---------------------------------------------------------------------
 
 @keras.utils.register_keras_serializable()
