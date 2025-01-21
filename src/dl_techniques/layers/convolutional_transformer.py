@@ -178,7 +178,7 @@ class ConvolutionalTransformerBlock(keras.layers.Layer):
             tf.Tensor: Output tensor of the same shape as input.
         """
         batch_size, height, width = tf.shape(inputs)[0], tf.shape(inputs)[1], tf.shape(inputs)[2]
-        x = self.norm1(inputs)
+        x = inputs
 
         # Generate Q, K, V using convolutions
         q = self.q_conv(x)
@@ -203,12 +203,15 @@ class ConvolutionalTransformerBlock(keras.layers.Layer):
 
         # First residual connection
         x = inputs + attention_output
+        x = self.norm1(x)
 
         # Feed-forward network
-        mlp_output = self.mlp(self.norm2(x), training=training)
+        mlp_output = self.mlp(x, training=training)
 
         # Second residual connection
-        return x + mlp_output
+        x = x + mlp_output
+        x = self.norm2(x)
+        return x
 
     def get_config(self) -> dict:
         """

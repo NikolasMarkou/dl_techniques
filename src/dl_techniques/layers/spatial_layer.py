@@ -1,8 +1,9 @@
-from typing import Optional, Tuple, Union
-
-import tensorflow as tf
 import keras
 from keras import ops
+import tensorflow as tf
+from typing import Optional, Tuple, Union
+
+# ---------------------------------------------------------------------
 
 
 @keras.utils.register_keras_serializable()
@@ -59,8 +60,8 @@ class SpatialLayer(keras.layers.Layer):
         xx_grid, yy_grid = ops.meshgrid(x_grid, y_grid)
 
         # Normalize the grids
-        xx_grid = (xx_grid - ops.mean(xx_grid)) / (ops.std(xx_grid) + DEFAULT_EPSILON)
-        yy_grid = (yy_grid - ops.mean(yy_grid)) / (ops.std(yy_grid) + DEFAULT_EPSILON)
+        xx_grid = (xx_grid - ops.mean(xx_grid)) / (ops.std(xx_grid) + 1e-7)
+        yy_grid = (yy_grid - ops.mean(yy_grid)) / (ops.std(yy_grid) + 1e-7)
 
         # Validate grid dimensions
         tf.debugging.assert_rank(x=xx_grid, rank=2)
@@ -134,3 +135,5 @@ class SpatialLayer(keras.layers.Layer):
             'resize_method': self.resize_method
         })
         return base_config
+
+# ---------------------------------------------------------------------
