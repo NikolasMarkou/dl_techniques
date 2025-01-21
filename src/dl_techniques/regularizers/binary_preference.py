@@ -43,7 +43,6 @@ from typing import Union, Optional
 # ---------------------------------------------------------------------
 
 
-
 class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
     """
     A regularizer that encourages weights to move towards binary values (0 or 1).
@@ -81,7 +80,6 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
             raise ValueError("scale must be > 0")
         self.multiplier = multiplier
         self.scale = scale
-
 
     def __call__(self, weights: tf.Tensor) -> tf.Tensor:
         """

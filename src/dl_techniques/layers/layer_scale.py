@@ -115,7 +115,7 @@ class LearnableMultiplier(keras.layers.Layer):
     Layer implementing learnable multipliers.
 
     The multipliers can be either global (single value) or per-channel.
-    Values are initialized close to 1.0 and constrained/regularized to stay near 1.0.
+    Values are initialized close to 1.0 and incentivised to stay near 1.0.
 
     Args:
         multiplier_type: Type of multiplier ('GLOBAL' or 'CHANNEL').
