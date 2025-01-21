@@ -1,219 +1,298 @@
+# Copyright (c) 2025. All rights reserved.
 """
-Radial Basis Function (RBF) Neural Network Layer Implementation
-============================================================
+Radial Basis Function Layer with Enhanced Center Repulsion
+======================================================
 
-Theory
-------
-Radial Basis Function Networks (RBFNs) are a class of neural networks that use radial basis functions
-as activation functions. They have several key properties that make them useful for various tasks:
+Theory and Mathematical Foundation
+-------------------------------
+1. Basic RBF Network:
+   A Radial Basis Function (RBF) network is a type of neural network that uses
+   radial basis functions as activation functions. For an input x, each RBF unit
+   computes:
+       φᵢ(x) = exp(-γᵢ ||x - cᵢ||²)
+   where:
+       - cᵢ is the center vector for unit i
+       - γᵢ is the width parameter (precision = 1/2σ²)
+       - ||·||² denotes squared Euclidean distance
 
-1. Universal Approximation: RBFNs can approximate any continuous function on a compact domain
-   to arbitrary precision, given sufficient hidden units.
+2. Enhanced Center Repulsion:
+   To prevent center collapse and ensure better space coverage, we use an enhanced
+   repulsion mechanism with adaptive strength:
+       Vᵣₑₚ(cᵢ, cⱼ) = α * D * max(0, d_min * (1 + μ) - ||cᵢ - cⱼ||)²
+   where:
+       - α is the base repulsion strength
+       - D is the input dimensionality (for scaling)
+       - μ is a safety margin (typically 0.2)
+       - d_min is the minimum desired distance between centers
+       - ||cᵢ - cⱼ|| is the Euclidean distance between centers
 
-2. Local Reception: Unlike sigmoid-based networks, RBF units respond maximally to inputs near
-   their centers and decrease monotonically with distance. This creates localized receptive fields.
-
-3. Geometric Interpretation: Each RBF unit defines a Gaussian "bump" in the input space, centered
-   at its center vector. The network output is a weighted sum of these bumps.
-
-Mathematical Foundation
----------------------
-For an input vector x, each RBF unit i computes:
-    φᵢ(x) = exp(-γᵢ ||x - cᵢ||²)
-where:
-    - cᵢ is the center vector for unit i
-    - γᵢ is the width parameter (inverse of variance)
-    - ||·||² denotes squared Euclidean distance
-
-The complete network computation is:
-    y(x) = Σ wᵢφᵢ(x)
-where wᵢ are the output layer weights.
-
-Training Process
---------------
-The network learns through three main parameters:
-1. Centers (cᵢ): Determine where each RBF unit is positioned in input space
-2. Widths (γᵢ): Control how quickly the response falls off with distance
-3. Output weights (wᵢ): Determine how RBF responses are combined
+3. Total Loss Function:
+   The network is trained with a combined loss:
+       L_total = L_task + α * D * L_repulsion
+   where L_repulsion is the sum of repulsion potentials between all center pairs.
 
 Implementation Details
 --------------------
-This implementation:
-- Uses fully trainable centers and widths
-- Employs efficient broadcasting for distance calculations
-- Ensures numerical stability through proper initialization
-- Supports both training and inference phases
-- Implements proper serialization for model saving/loading
+1. Numerical Stability:
+   - Use squared distances with epsilon for numerical stability
+   - Scale repulsion strength with input dimensionality
+   - Add safety margin to minimum distance
+   - Apply bounded constraints to parameters
 
-Common Applications
------------------
-1. Function Approximation
-2. Time Series Prediction
-3. Pattern Recognition
-4. Control Systems
-5. Signal Processing
-6. Interpolation Problems
+2. Initialization:
+   - Centers: Uniform distribution over expected data range
+   - Widths: Constant value with non-negativity constraint
+   - Repulsion parameters: Scaled by input dimension
 
-Advantages
----------
-1. Fast training compared to backprop-only networks
-2. Good generalization
-3. Interpretable hidden layer representations
-4. Insensitive to order of training data
-5. Single hidden layer sufficient for most applications
-
-Limitations
-----------
-1. Curse of dimensionality in high-dimensional spaces
-2. May require more units than sigmoid networks
-3. Sensitive to center initialization
-4. Limited extrapolation capabilities
+3. Performance Optimization:
+   - Efficient distance computation using broadcasting
+   - Vectorized repulsion computation with masking
+   - Carefully tuned hyperparameters for stability
 
 References
 ---------
-1. Broomhead, D. S., & Lowe, D. (1988). Radial basis functions, multi-variable
-   functional interpolation and adaptive networks.
-2. Moody, J., & Darken, C. J. (1989). Fast learning in networks of locally-tuned
-   processing units.
-3. Powell, M. J. D. (1987). Radial basis functions for multivariable interpolation:
-   a review.
+[1] Moody, J., & Darken, C. J. (1989). Fast learning in networks of
+    locally-tuned processing units.
+[2] Schwenker, F., Kestler, H. A., & Palm, G. (2001). Three learning phases
+    for radial-basis-function networks.
+[3] Bishop, C. M. (1995). Neural Networks for Pattern Recognition.
 """
 
-import keras
 import tensorflow as tf
-from typing import Tuple, Any
+import keras
+from typing import Tuple, Any, Optional, Union
 from keras.api.layers import Layer
-
-# ---------------------------------------------------------------------
 
 
 class RBFLayer(Layer):
     """
-    Custom Radial Basis Function Layer implementation.
+    Enhanced Radial Basis Function Layer with Stable Center Repulsion.
 
-    This layer implements RBF units where the activation of each unit
-    is computed using a Gaussian kernel. The centers and widths of the
-    RBF units are learned during training.
+    This layer implements RBF units with an improved repulsive force mechanism
+    between centers to ensure better coverage of the input space. The implementation
+    includes numerical stability improvements and adaptive repulsion strength.
 
     Args:
-        units (int): Number of RBF units in the layer
-        gamma (float, optional): Initial value for the width parameter.
-            Defaults to 1.0
-        initializer (str, optional): Initializer for the centers.
-            Defaults to 'glorot_uniform'
+        units: Number of RBF units in the layer.
+        gamma_init: Initial value for the width parameter (1/2σ²). Defaults to 1.0.
+        repulsion_strength: Base weight of the repulsion term (α). Defaults to 0.1.
+        min_center_distance: Minimum desired distance between centers. Defaults to 1.0.
+        center_initializer: Initializer for centers. Defaults to uniform distribution.
+        center_constraint: Optional constraint for centers.
+        trainable_gamma: Whether γ is trainable. Defaults to True.
+        safety_margin: Additional margin for minimum distance. Defaults to 0.2.
 
-    Attributes:
-        units (int): Number of RBF units
-        gamma (float): Width parameter for RBF units
-        centers (tf.Variable): Centers of RBF units
-        widths (tf.Variable): Widths of RBF units
+    Input shape:
+        (batch_size, input_dim) or (batch_size, timesteps, input_dim)
+
+    Output shape:
+        (batch_size, units) or (batch_size, timesteps, units)
     """
 
     def __init__(
             self,
             units: int,
-            gamma: float = 1.0,
-            initializer: str = 'glorot_uniform',
+            gamma_init: float = 1.0,
+            repulsion_strength: float = 0.1,
+            min_center_distance: float = 1.0,
+            center_initializer: Union[str, keras.initializers.Initializer] = 'uniform',
+            center_constraint: Optional[keras.constraints.Constraint] = None,
+            trainable_gamma: bool = True,
+            safety_margin: float = 0.2,
             **kwargs: Any
     ) -> None:
-        """Initialize the RBF layer."""
+        """Initialize the RBF layer with enhanced parameters."""
+        # Input validation
         if units < 1:
             raise ValueError(f"Number of units must be positive, got {units}")
-        if gamma <= 0:
-            raise ValueError(f"Gamma must be positive, got {gamma}")
+        if gamma_init <= 0:
+            raise ValueError(f"gamma_init must be positive, got {gamma_init}")
+        if repulsion_strength < 0:
+            raise ValueError(
+                f"repulsion_strength must be non-negative, got {repulsion_strength}"
+            )
+        if min_center_distance <= 0:
+            raise ValueError(
+                f"min_center_distance must be positive, got {min_center_distance}"
+            )
+        if safety_margin < 0:
+            raise ValueError(
+                f"safety_margin must be non-negative, got {safety_margin}"
+            )
 
         super().__init__(**kwargs)
+
+        # Store layer parameters
         self.units = units
-        self.gamma = gamma
-        self.initializer = keras.initializers.get(initializer)
+        self.gamma_init = gamma_init
+        self.repulsion_strength = repulsion_strength
+        self.min_center_distance = min_center_distance
+        self.safety_margin = safety_margin
+        self.center_initializer = keras.initializers.get(center_initializer)
+        self.center_constraint = keras.constraints.get(center_constraint)
+        self.trainable_gamma = trainable_gamma
+
+        # Initialize weights as None (will be created in build())
         self.centers = None
-        self.widths = None
+        self.gamma = None
+        self._feature_dim = None  # Store dimensionality for scaling
 
     def build(self, input_shape: Tuple[int, ...]) -> None:
         """
-        Build the layer by creating the trainable weights.
+        Create the layer's weights with improved initialization.
 
         Args:
-            input_shape: Shape of the input tensor
+            input_shape: Tuple of integers, the shape of input tensor.
 
         Raises:
-            ValueError: If input shape has less than 2 dimensions
+            ValueError: If input_shape has less than 2 dimensions.
         """
         if len(input_shape) < 2:
-            raise ValueError(f"Input shape must have at least 2 dimensions, got {len(input_shape)}")
+            raise ValueError(
+                f"Input shape must have at least 2 dimensions, got {len(input_shape)}"
+            )
 
-        input_dim = input_shape[-1]
+        # Store feature dimension for scaling
+        self._feature_dim = input_shape[-1]
 
+        # Create centers with shape (n_units, feature_dim)
         self.centers = self.add_weight(
             name='centers',
-            shape=(self.units, input_dim),
-            initializer=self.initializer,
+            shape=(self.units, self._feature_dim),
+            initializer=self.center_initializer,
+            constraint=self.center_constraint,
             trainable=True,
-            dtype=tf.float32
+            dtype=self.dtype
         )
 
-        self.widths = self.add_weight(
-            name='widths',
+        # Create gamma (precision) parameter with non-negativity constraint
+        self.gamma = self.add_weight(
+            name='gamma',
             shape=(self.units,),
-            initializer=tf.constant_initializer(self.gamma),
-            trainable=True,
-            dtype=tf.float32,
-            constraint=keras.constraints.NonNeg()
+            initializer=tf.constant_initializer(self.gamma_init),
+            constraint=keras.constraints.NonNeg(),
+            trainable=self.trainable_gamma,
+            dtype=self.dtype
         )
 
         super().build(input_shape)
 
-    def call(self, inputs: tf.Tensor) -> tf.Tensor:
+    def _compute_pairwise_distances(
+            self,
+            x: tf.Tensor,
+            y: tf.Tensor,
+            epsilon: float = 1e-12
+    ) -> tf.Tensor:
         """
-        Forward pass of the layer.
-
-        Computes the RBF activation for the input tensor using learned
-        centers and widths.
+        Compute pairwise squared Euclidean distances with improved stability.
 
         Args:
-            inputs: Input tensor of shape (batch_size, input_dim)
+            x: Tensor of shape (n, d)
+            y: Tensor of shape (m, d)
+            epsilon: Small constant for numerical stability
 
         Returns:
-            tf.Tensor: Output tensor of shape (batch_size, units)
+            Tensor of shape (n, m) containing squared distances.
         """
-        # Expand dimensions for broadcasting
-        inputs_expanded = tf.expand_dims(inputs, axis=1)  # (batch_size, 1, input_dim)
-        centers_expanded = tf.expand_dims(self.centers, axis=0)  # (1, units, input_dim)
+        # Compute squared norms
+        x_norm = tf.reduce_sum(tf.square(x), axis=-1)
+        y_norm = tf.reduce_sum(tf.square(y), axis=-1)
 
-        # Compute squared Euclidean distances
-        distances = tf.reduce_sum(
-            tf.square(inputs_expanded - centers_expanded),
-            axis=-1
-        )  # (batch_size, units)
+        # Reshape for broadcasting
+        x_norm = tf.reshape(x_norm, [-1, 1])  # Shape: (n, 1)
+        y_norm = tf.reshape(y_norm, [1, -1])  # Shape: (1, m)
 
-        # Apply RBF activation
-        return tf.exp(-self.widths * distances)
+        # Compute cross term
+        cross_term = 2 * tf.matmul(x, y, transpose_b=True)
 
-    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+        # Combine terms with numeric stability
+        distances = x_norm - cross_term + y_norm + epsilon
+
+        return tf.maximum(distances, 0.0)  # Ensure non-negative
+
+    def _compute_repulsion(self, centers: tf.Tensor) -> tf.Tensor:
         """
-        Compute the shape of the layer's output.
+        Compute the enhanced repulsion regularization term.
+
+        Features improved stability and scaling with input dimensionality.
 
         Args:
-            input_shape: Shape of the input tensor
+            centers: Tensor of shape (n_units, feature_dim)
 
         Returns:
-            tuple: Shape of the output tensor
+            Scalar tensor containing the total repulsion energy.
         """
-        return input_shape[:-1] + (self.units,)
+        # Add safety margin to minimum distance
+        effective_min_dist = self.min_center_distance * (1.0 + self.safety_margin)
+
+        # Compute pairwise distances with stability
+        distances = self._compute_pairwise_distances(centers, centers)
+
+        # Create mask to exclude self-distances
+        mask = tf.ones_like(distances) - tf.eye(self.units)
+
+        # Compute repulsion with improved formula
+        sqrt_dist = tf.sqrt(distances)
+        repulsion = tf.square(tf.maximum(0.0, effective_min_dist - sqrt_dist))
+
+        # Scale repulsion by dimensionality
+        dim_scale = tf.cast(self._feature_dim, tf.float32)
+        scaled_repulsion = self.repulsion_strength * dim_scale * \
+                           tf.reduce_mean(repulsion * mask)
+
+        return scaled_repulsion
+
+    def call(
+            self,
+            inputs: tf.Tensor,
+            training: Optional[bool] = None
+    ) -> tf.Tensor:
+        """
+        Forward pass with improved numerical stability.
+
+        Args:
+            inputs: Input tensor of shape (batch_size, feature_dim)
+            training: Boolean indicating training mode
+
+        Returns:
+            Tensor of shape (batch_size, units) containing RBF activations
+        """
+        # Compute distances with numeric stability
+        distances = self._compute_pairwise_distances(inputs, self.centers)
+
+        # Compute RBF activations with stable exponentiation
+        gamma_expanded = tf.expand_dims(self.gamma, 0)  # Shape: (1, units)
+        activations = tf.exp(-tf.minimum(gamma_expanded * distances, 50.0))
+
+        # Add repulsion loss in training mode
+        if training:
+            self.add_loss(self._compute_repulsion(self.centers))
+
+        return activations
 
     def get_config(self) -> dict:
-        """
-        Get the layer's configuration.
-
-        Returns:
-            dict: Configuration dictionary
-        """
+        """Return layer configuration."""
         config = super().get_config()
         config.update({
             'units': self.units,
-            'gamma': self.gamma,
-            'initializer': keras.initializers.serialize(self.initializer)
+            'gamma_init': self.gamma_init,
+            'repulsion_strength': self.repulsion_strength,
+            'min_center_distance': self.min_center_distance,
+            'safety_margin': self.safety_margin,
+            'center_initializer':
+                keras.initializers.serialize(self.center_initializer),
+            'center_constraint':
+                keras.constraints.serialize(self.center_constraint),
+            'trainable_gamma': self.trainable_gamma,
         })
         return config
 
-# ---------------------------------------------------------------------
+    @property
+    def center_positions(self) -> tf.Tensor:
+        """Get current positions of RBF centers."""
+        return tf.identity(self.centers)
+
+    @property
+    def width_values(self) -> tf.Tensor:
+        """Get current width (gamma) values."""
+        return tf.identity(self.gamma)
