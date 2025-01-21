@@ -1,3 +1,89 @@
+"""
+ConvNext Block Implementation
+===========================
+
+A modern implementation of the ConvNext block architecture as described in:
+"A ConvNet for the 2020s" (Liu et al., 2022)
+https://arxiv.org/abs/2201.03545
+
+Key Features:
+------------
+- Depthwise convolution with large kernels
+- Inverted bottleneck design
+- Proper normalization strategy (LayerNorm)
+- GELU activation by default
+- Configurable dropout (both standard and spatial)
+- Optional learnable scaling (gamma)
+- Support for various kernel regularization strategies
+
+Architecture:
+------------
+The ConvNext block consists of:
+1. Depthwise Conv (7x7) for local feature extraction
+2. LayerNorm for feature normalization
+3. Two-layer MLP for feature transformation:
+   - Expansion layer (pointwise conv, 4x channels)
+   - GELU activation
+   - Optional dropout
+   - Reduction layer (pointwise conv, back to input channels)
+4. Optional learnable scaling
+
+The computation flow is:
+input -> depthwise_conv -> layer_norm -> activation ->
+        pointwise_conv1 -> activation -> dropout ->
+        pointwise_conv2 -> gamma_scale -> output
+
+Configuration:
+-------------
+Supports extensive customization through ConvNextConfig:
+- Kernel sizes and filter counts
+- Stride configuration
+- Activation functions
+- Regularization strategies
+- Bias terms
+
+Features two types of dropout:
+- Standard dropout for feature regularization
+- Spatial dropout for structured regularization
+
+Supports different multiplier types:
+- Global: Single scaling factor
+- Channel-wise: Per-channel scaling
+
+Usage Examples:
+-------------
+```python
+# Basic configuration
+config = ConvNextConfig(
+    kernel_size=7,
+    filters=64,
+    activation="gelu"
+)
+block = ConvNextBlock(config)
+
+# Advanced configuration with regularization
+config = ConvNextConfig(
+    kernel_size=7,
+    filters=128,
+    kernel_regularizer=keras.regularizers.L2(0.01)
+)
+block = ConvNextBlock(
+    conv_config=config,
+    dropout_rate=0.1,
+    spatial_dropout_rate=0.1,
+    kernel_regularization="orthogonal"
+)
+```
+
+Notes:
+-----
+- The block implements proper normalization ordering
+- Uses truncated normal initialization (μ=0, σ=0.02)
+- Supports serialization and deserialization
+- Implements ResNet-style skip connections
+- Compatible with TF/Keras model saving
+"""
+
 import keras
 from enum import Enum
 import tensorflow as tf
@@ -23,6 +109,7 @@ class MultiplierType(Enum):
 
 
 # ---------------------------------------------------------------------
+
 @dataclass
 class ConvNextConfig:
     """Configuration for ConvNext block parameters.
@@ -82,7 +169,13 @@ class ConvNextBlock(keras.layers.Layer):
 
         # Initialize layers
         self.conv_1 = None
+        self.conv_2 = None
+        self.conv_3 = None
         self.norm = None
+        self.activation = None
+        self.dropout = None
+        self.spatial_dropout = None
+        self.gamma= None
 
     def build(self, input_shape) -> None:
         """Initialize all layers with proper configuration."""
@@ -108,12 +201,14 @@ class ConvNextBlock(keras.layers.Layer):
             "kernel_initializer": keras.initializers.TruncatedNormal(
                 mean=0.0, stddev=0.02
             ),
+            "kernel_regularizer": keras.regularizers.L2()
         }
 
         if self.kernel_regularization == "orthogonal":
-            conv_params["kernel_regularizer"] = self._orthogonal_regularizer()
+            conv_params["kernel_regularizer"] = SoftOrthogonalConstraintRegularizer()
         elif self.kernel_regularization == "orthonormal":
-            conv_params["kernel_regularizer"] = self._orthonormal_regularizer()
+            conv_params["kernel_regularizer"] = SoftOrthonormalConstraintRegularizer()
+
 
         self.conv_2 = keras.layers.Conv2D(
             filters=self.conv_config.filters * 4,
@@ -138,8 +233,7 @@ class ConvNextBlock(keras.layers.Layer):
         # Learnable multiplier
         if self.use_gamma:
             self.gamma = LearnableMultiplier(
-                multiplier_type=MultiplierType.Global if self.use_global_gamma
-                else MultiplierType.Channel,
+                multiplier_type=MultiplierType.Global if self.use_global_gamma else MultiplierType.Channel,
                 capped=True,
                 regularizer=keras.regularizers.l2(1e-2),
             )
@@ -195,7 +289,6 @@ class ConvNextBlock(keras.layers.Layer):
         config = super().get_config()
         config.update({
             "conv_config": self.conv_config.__dict__,
-            "norm_type": self.norm_type,
             "dropout_rate": self.dropout_rate,
             "spatial_dropout_rate": self.spatial_dropout_rate,
             "use_gamma": self.use_gamma,
