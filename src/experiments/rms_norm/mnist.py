@@ -394,7 +394,7 @@ def main():
 
     # Define training configuration
     training_config = TrainingConfig(
-        epochs=2,
+        epochs=20,
         batch_size=128,
         early_stopping_patience=5,
         monitor_metric='val_accuracy'
@@ -417,7 +417,7 @@ def main():
         training=training_config,
         visualization=VisualizationConfig(),
         weight_analysis=weight_analysis_config,
-        output_dir=Path("experiments"),
+        output_dir=Path("results"),
         experiment_name="mnist_normalization_with_weight_analysis"
     )
 

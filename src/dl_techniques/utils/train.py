@@ -1,5 +1,4 @@
 import os
-
 import keras
 import numpy as np
 from pathlib import Path
@@ -7,8 +6,14 @@ from typing import Optional
 from datetime import datetime
 from dataclasses import dataclass
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .logger import logger
 
+
+# ---------------------------------------------------------------------
 @dataclass
 class TrainingConfig:
     """Configuration class for model training parameters.
@@ -34,12 +39,8 @@ class TrainingConfig:
     min_learning_rate: float = 1e-6
     monitor_metric: str = 'val_loss'
 
-    def __post_init__(self) -> None:
-        """Initialize output directory if not provided."""
-        if self.output_dir is None:
-            self.output_dir = Path(f"outputs_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-        self.output_dir.mkdir(parents=True, exist_ok=True)
 
+# ---------------------------------------------------------------------
 
 def train_model(
         model: keras.Model,
@@ -74,17 +75,13 @@ def train_model(
             f"Training data shape {x_train.shape[1:]} does not match "
             f"model input shape {model.input_shape[1:]}"
         )
-    os.makedirs(str(config.output_dir), exist_ok=True)
+
+    if config.output_dir is not None:
+        os.makedirs(str(config.output_dir), exist_ok=True)
 
     # Define callbacks
     callbacks = [
-        keras.callbacks.ModelCheckpoint(
-            filepath=config.output_dir / f'{config.model_name}.keras',
-            save_best_only=True,
-            monitor=config.monitor_metric,
-            mode='min' if 'loss' in config.monitor_metric else 'max',
-            verbose=1
-        ),
+
         keras.callbacks.EarlyStopping(
             monitor=config.monitor_metric,
             patience=config.early_stopping_patience,
@@ -98,12 +95,23 @@ def train_model(
             min_lr=config.min_learning_rate,
             verbose=1
         ),
-        keras.callbacks.CSVLogger(
-            filename=config.output_dir / f'{config.model_name}_training_log.csv',
-            separator=',',
-            append=False
-        )
     ]
+
+    if config.output_dir is not None:
+        callbacks += [
+            keras.callbacks.ModelCheckpoint(
+                filepath=config.output_dir / f'{config.model_name}.keras',
+                save_best_only=True,
+                monitor=config.monitor_metric,
+                mode='min' if 'loss' in config.monitor_metric else 'max',
+                verbose=1
+            ),
+            keras.callbacks.CSVLogger(
+                filename=config.output_dir / f'{config.model_name}_training_log.csv',
+                separator=',',
+                append=False
+            )
+        ]
 
     try:
         history = model.fit(
@@ -117,11 +125,14 @@ def train_model(
         )
 
         # Save training configuration
-        with open(config.output_dir / f'{config.model_name}_config.txt', 'w') as f:
-            f.write(str(config))
+        if config.output_dir is not None:
+            with open(config.output_dir / f'{config.model_name}_config.txt', 'w') as f:
+                f.write(str(config))
 
         return history
 
     except Exception as e:
         logger.error(f"Training failed with error: {str(e)}")
         raise
+
+# ---------------------------------------------------------------------
