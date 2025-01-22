@@ -1,4 +1,3 @@
-# Copyright (c) 2025. All rights reserved.
 """
 Radial Basis Function Layer with Enhanced Center Repulsion
 ======================================================
@@ -58,10 +57,19 @@ References
 [3] Bishop, C. M. (1995). Neural Networks for Pattern Recognition.
 """
 
-import tensorflow as tf
+
 import keras
-from typing import Tuple, Any, Optional, Union
+import tensorflow as tf
 from keras.api.layers import Layer
+from typing import Tuple, Any, Optional, Union
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
+
+# ---------------------------------------------------------------------
 
 
 class RBFLayer(Layer):
@@ -170,7 +178,8 @@ class RBFLayer(Layer):
             name='gamma',
             shape=(self.units,),
             initializer=tf.constant_initializer(self.gamma_init),
-            constraint=keras.constraints.NonNeg(),
+            constraint=ValueRangeConstraint(min_value=1e-5, max_value=None, clip_gradients=False),
+            regularizer=keras.regularizers.L2(1e-5),
             trainable=self.trainable_gamma,
             dtype=self.dtype
         )

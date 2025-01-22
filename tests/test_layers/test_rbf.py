@@ -6,7 +6,7 @@ from typing import Generator, Any, Tuple, Dict, List
 
 
 # Import your RBF layer implementation
-from dl_techniques.layers.radial_basis_function import RBFLayer
+from dl_techniques.layers.rbf import RBFLayer
 
 
 def generate_cluster_data(

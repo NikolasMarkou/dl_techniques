@@ -22,6 +22,7 @@ class LayerConfig:
 
 # ---------------------------------------------------------------------
 
+
 class SelectiveGradientMask(keras.layers.Layer):
     """
     Custom Keras layer implementing selective gradient masking during backpropagation.
