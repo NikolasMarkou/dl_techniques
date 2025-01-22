@@ -33,6 +33,7 @@ from matplotlib import pyplot as plt
 from typing import Dict, Any, Optional, List, Literal, Tuple, Union
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.model_analyzer import ModelAnalyzer
 from dl_techniques.layers.rms_logit_norm import RMSNorm, LogitNorm
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.utils.datasets import load_and_preprocess_mnist, MNISTData
@@ -201,86 +202,7 @@ def build_model(config: ModelConfig) -> keras.Model:
 
 
 #------------------------------------------------------------------------------
-# 4. Analysis Utilities
-#------------------------------------------------------------------------------
-class ModelAnalyzer:
-    """Analyzer for model comparison with visualization support."""
-
-    def __init__(
-        self,
-        models: Dict[str, keras.Model],
-        vis_manager: VisualizationManager
-    ):
-        """Initialize analyzer with models and visualization manager.
-
-        Args:
-            models: Dictionary of models to analyze
-            vis_manager: Visualization manager instance
-        """
-        self.models = models
-        self.vis_manager = vis_manager
-
-    def generate_predictions(
-        self,
-        image: np.ndarray
-    ) -> Dict[str, np.ndarray]:
-        """Generate predictions from all models for a single image.
-
-        Args:
-            image: Input image
-
-        Returns:
-            Dictionary mapping model names to their predictions
-        """
-        return {
-            name: model.predict(np.expand_dims(image, 0))
-            for name, model in self.models.items()
-        }
-
-    def analyze_models(
-        self,
-        data: MNISTData,
-        sample_digits: Optional[List[int]] = None
-    ) -> Dict[str, Any]:
-        """Perform comprehensive model analysis.
-
-        Args:
-            data: MNIST dataset splits
-            sample_digits: Optional list of digits to analyze
-
-        Returns:
-            Dictionary containing analysis results
-        """
-        results = {}
-
-        # Model evaluation
-        for name, model in self.models.items():
-            evaluation = model.evaluate(data.x_test, data.y_test)
-            results[name] = dict(zip(model.metrics_names, evaluation))
-
-        # Sample digit analysis
-        if sample_digits is None:
-            sample_digits = list(range(10))
-
-        for digit in sample_digits:
-            digit_indices = np.where(np.argmax(data.y_test, axis=1) == digit)[0]
-            if len(digit_indices) > 0:
-                digit_idx = digit_indices[0]
-                digit_image = data.x_test[digit_idx]
-                predictions = self.generate_predictions(digit_image)
-
-                self.vis_manager.compare_images(
-                    [digit_image] * len(self.models),
-                    [f"{name} (conf: {pred.max():.2f})"
-                     for name, pred in predictions.items()],
-                    f"digit_{digit}_comparison"
-                )
-
-        return results
-
-
-#------------------------------------------------------------------------------
-# 5. Experiment Runner
+# 4. Experiment Runner
 #------------------------------------------------------------------------------
 def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     """Run the complete normalization comparison experiment.
@@ -358,6 +280,22 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             title=f'Model {metric.capitalize()} Comparison'
         )
 
+    model_predictions = {}
+    for name, model in models.items():
+        predictions = model.predict(mnist_data.x_test)
+        model_predictions[name] = predictions
+
+    # Plot confusion matrices comparison
+    vis_manager.plot_confusion_matrices_comparison(
+        y_true=np.argmax(mnist_data.y_test, axis=1),
+        model_predictions=model_predictions,
+        name='confusion_matrices_comparison',
+        subdir='model_comparisons',
+        normalize=True,
+        class_names=[str(i) for i in range(10)]  # For MNIST digits 0-9
+    )
+
+
     # Analyze results
     analyzer = ModelAnalyzer(models, vis_manager)
     results = analyzer.analyze_models(mnist_data)
@@ -367,65 +305,6 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         'histories': all_histories,
         'analysis': results
     }
-
-
-def plot_history(
-        self,
-        histories: Dict[str, Dict[str, List[float]]],
-        metrics: List[str],
-        name: str,
-        title: Optional[str] = None,
-        subdir: Optional[str] = None
-) -> Path:
-    """Plot training history metrics.
-
-    Args:
-        histories: Dictionary mapping model names to their metric histories
-        metrics: List of metrics to plot
-        name: Base name for saving
-        title: Optional overall title for the plot
-        subdir: Optional subdirectory for saving
-
-    Returns:
-        Path where figure was saved
-    """
-    n_metrics = len(metrics)
-    fig, axes = plt.subplots(
-        1, n_metrics,
-        figsize=(self.config.fig_size[0] * n_metrics, self.config.fig_size[1])
-    )
-
-    if n_metrics == 1:
-        axes = [axes]
-
-    for idx, metric in enumerate(metrics):
-        ax = axes[idx]
-
-        for model_name, history in histories.items():
-            if metric in history:
-                ax.plot(
-                    history[metric],
-                    label=f'{model_name} (Training)',
-                    linestyle='-'
-                )
-            if f'val_{metric}' in history:
-                ax.plot(
-                    history[f'val_{metric}'],
-                    label=f'{model_name} (Validation)',
-                    linestyle='--'
-                )
-
-        ax.set_title(f'{metric.capitalize()}')
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel(metric.capitalize())
-        ax.legend()
-        ax.grid(True)
-
-    if title:
-        fig.suptitle(title, fontsize=self.config.title_fontsize * 1.2)
-
-    return self.save_figure(fig, name, subdir)
-
 
 #------------------------------------------------------------------------------
 # 6. Main Execution

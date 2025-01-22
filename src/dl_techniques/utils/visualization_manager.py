@@ -12,15 +12,17 @@ Features:
     - Seaborn integration for better aesthetics
     - Type hints and comprehensive documentation
 """
-
-import matplotlib.pyplot as plt
-import seaborn as sns
+import keras
 import numpy as np
+import seaborn as sns
 from pathlib import Path
 from datetime import datetime
-from typing import Union, Optional, Tuple, Dict, Any, List
+import matplotlib.pyplot as plt
 from dataclasses import dataclass
+from sklearn.metrics import confusion_matrix
+from typing import Union, Optional, Tuple, Dict, Any, List
 
+from .datasets import MNISTData
 
 @dataclass
 class VisualizationConfig:
@@ -293,4 +295,98 @@ class VisualizationManager:
             ax.axis('off')
             plt.colorbar(im, ax=ax)
 
+        return self.save_figure(fig, name, subdir)
+
+    def plot_confusion_matrices_comparison(
+            self,
+            y_true: np.ndarray,
+            model_predictions: Dict[str, np.ndarray],
+            name: str,
+            subdir: Optional[str] = None,
+            figsize: Optional[Tuple[int, int]] = None,
+            normalize: bool = True,
+            class_names: Optional[List[str]] = None
+    ) -> Path:
+        """Plot confusion matrices for multiple models side by side for comparison.
+
+        Args:
+            y_true: Ground truth labels (1D array of class indices)
+            model_predictions: Dictionary mapping model names to their predictions (1D arrays of class indices)
+            name: Base name for saving the figure
+            subdir: Optional subdirectory for saving
+            figsize: Optional custom figure size (width, height)
+            normalize: Whether to normalize confusion matrices
+            class_names: Optional list of class names for labels
+
+        Returns:
+            Path where the comparison figure was saved
+
+        Raises:
+            ValueError: If model_predictions is empty or predictions don't match ground truth shape
+        """
+        if not model_predictions:
+            raise ValueError("No model predictions provided")
+
+        # Ensure y_true is 1D array of class indices
+        if len(y_true.shape) == 2:
+            y_true = np.argmax(y_true, axis=1)
+
+        n_models = len(model_predictions)
+        n_classes = len(np.unique(y_true))
+
+        if not class_names:
+            class_names = [str(i) for i in range(n_classes)]
+
+        # Calculate figure size based on number of models
+        if figsize is None:
+            width = min(20, self.config.fig_size[0] * n_models)
+            height = min(15, self.config.fig_size[1] * (n_models + 1) // 2)
+            figsize = (width, height)
+
+        # Create subplot grid
+        n_rows = (n_models + 2) // 3  # Adjust grid based on number of models
+        n_cols = min(3, n_models)
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+        if n_models == 1:
+            axes = np.array([axes])
+        axes = axes.flatten()
+
+        # Calculate confusion matrices and plot
+        for idx, (model_name, y_pred) in enumerate(model_predictions.items()):
+            # Convert predictions to class indices if needed
+            if len(y_pred.shape) == 2 and y_pred.shape[1] > 1:
+                y_pred = np.argmax(y_pred, axis=1)
+
+            if y_pred.shape != y_true.shape:
+                print(f"Shape mismatch for {model_name}:")
+                print(f"y_true shape: {y_true.shape}")
+                print(f"y_pred shape: {y_pred.shape}")
+                raise ValueError(f"Predictions shape mismatch for model {model_name}")
+
+            cm = confusion_matrix(y_true, y_pred)
+            if normalize:
+                cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+
+            # Plot confusion matrix
+            sns.heatmap(
+                cm,
+                ax=axes[idx],
+                cmap=self.config.cmap,
+                annot=True,
+                fmt='.2f' if normalize else 'd',
+                square=True,
+                xticklabels=class_names,
+                yticklabels=class_names
+            )
+
+            axes[idx].set_title(f'{model_name}\nConfusion Matrix')
+            axes[idx].set_xlabel('Predicted')
+            axes[idx].set_ylabel('True')
+
+        # Remove empty subplots if any
+        for idx in range(n_models, len(axes)):
+            fig.delaxes(axes[idx])
+
+        plt.tight_layout()
         return self.save_figure(fig, name, subdir)
