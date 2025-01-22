@@ -156,14 +156,6 @@ class SqueezeExcitation(layers.Layer):
             kernel_regularizer=self.kernel_regularizer,
         )
 
-        # Learnable channel scaling
-        self.scale = LearnableMultiplier(
-            capped=True,
-            multiplier_type="channel"
-        )
-
-        super().build(input_shape)
-
     def call(
             self,
             inputs: tf.Tensor,
@@ -185,11 +177,8 @@ class SqueezeExcitation(layers.Layer):
         x = self.conv_reduce(x, training=training)
         x = self.activation(x)  # Using configured activation
         x = self.conv_restore(x, training=training)
-        x = self.scale(x, training=training)
         x = tf.nn.sigmoid(x)
-
-        # Scale input features
-        return tf.math.multiply(inputs, x)
+        return inputs * x
 
     def get_config(self) -> Dict:
         """Returns the config of the layer.
