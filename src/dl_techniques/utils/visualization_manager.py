@@ -22,7 +22,10 @@ from dataclasses import dataclass
 from sklearn.metrics import confusion_matrix
 from typing import Union, Optional, Tuple, Dict, Any, List
 
+
+from .logger import logger
 from .datasets import MNISTData
+
 
 @dataclass
 class VisualizationConfig:
@@ -347,14 +350,13 @@ class VisualizationManager:
         n_rows = (n_models + 2) // 3  # Adjust grid based on number of models
         n_cols = min(3, n_models)
 
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
-        if n_models == 1:
-            axes = np.array([axes])
-        axes = axes.flatten()
+        # Create figure with extra space for colorbar
+        fig = plt.figure(figsize=figsize)
+        gs = plt.GridSpec(n_rows, n_cols + 1, width_ratios=[*[1] * n_cols, 0.05])
 
-        # Calculate confusion matrices and plot
-        for idx, (model_name, y_pred) in enumerate(model_predictions.items()):
-            # Convert predictions to class indices if needed
+        # Find global min/max values for consistent colormap scaling
+        all_cms = []
+        for model_name, y_pred in model_predictions.items():
             if len(y_pred.shape) == 2 and y_pred.shape[1] > 1:
                 y_pred = np.argmax(y_pred, axis=1)
 
@@ -367,26 +369,58 @@ class VisualizationManager:
             cm = confusion_matrix(y_true, y_pred)
             if normalize:
                 cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+            all_cms.append(cm)
 
-            # Plot confusion matrix
-            sns.heatmap(
+        vmin = min(cm.min() for cm in all_cms)
+        vmax = max(cm.max() for cm in all_cms)
+
+        # Plot confusion matrices
+        axes = []
+        for idx, (model_name, y_pred) in enumerate(model_predictions.items()):
+            row = idx // n_cols
+            col = idx % n_cols
+            ax = fig.add_subplot(gs[row, col])
+            axes.append(ax)
+
+            if len(y_pred.shape) == 2 and y_pred.shape[1] > 1:
+                y_pred = np.argmax(y_pred, axis=1)
+
+            cm = confusion_matrix(y_true, y_pred)
+            if normalize:
+                cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+
+            # Plot confusion matrix with consistent vmin/vmax
+            sns_heatmap = sns.heatmap(
                 cm,
-                ax=axes[idx],
+                ax=ax,
                 cmap=self.config.cmap,
                 annot=True,
                 fmt='.2f' if normalize else 'd',
                 square=True,
                 xticklabels=class_names,
-                yticklabels=class_names
+                yticklabels=class_names,
+                vmin=vmin,
+                vmax=vmax,
+                cbar=False  # Don't show individual colorbars
             )
 
-            axes[idx].set_title(f'{model_name}\nConfusion Matrix')
-            axes[idx].set_xlabel('Predicted')
-            axes[idx].set_ylabel('True')
+            ax.set_title(f'{model_name}\nConfusion Matrix')
+            ax.set_xlabel('Predicted')
+            ax.set_ylabel('True')
+
+            # Store the mappable object from the first heatmap for the colorbar
+            if idx == 0:
+                mappable = sns_heatmap.collections[0]
+
+        # Add a single colorbar for all plots using the mappable from the first heatmap
+        cbar_ax = fig.add_subplot(gs[:, -1])
+        plt.colorbar(mappable, cax=cbar_ax)
 
         # Remove empty subplots if any
-        for idx in range(n_models, len(axes)):
-            fig.delaxes(axes[idx])
+        for idx in range(n_models, n_rows * n_cols):
+            row = idx // n_cols
+            col = idx % n_cols
+            fig.add_subplot(gs[row, col]).remove()
 
         plt.tight_layout()
         return self.save_figure(fig, name, subdir)
