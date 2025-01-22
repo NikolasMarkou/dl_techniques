@@ -58,7 +58,7 @@ class ShearletTransform(Layer):
             directions: int = 8,
             alpha: float = 0.5,
             high_freq: bool = True,
-            kernel_regularizer: Optional[tf.keras.regularizers.Regularizer] = None,
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs
     ) -> None:
         """Initialize the ShearletTransform layer.
@@ -323,7 +323,7 @@ class ShearletTransform(Layer):
             'directions': self.directions,
             'alpha': self.alpha,
             'high_freq': self.high_freq,
-            'kernel_regularizer': tf.keras.regularizers.serialize(
+            'kernel_regularizer': keras.regularizers.serialize(
                 self.kernel_regularizer
             )
         })
@@ -341,7 +341,7 @@ class ShearletTransform(Layer):
         """
         regularizer_config = config.pop('kernel_regularizer', None)
         if regularizer_config:
-            config['kernel_regularizer'] = tf.keras.regularizers.deserialize(
+            config['kernel_regularizer'] = keras.regularizers.deserialize(
                 regularizer_config
             )
         return cls(**config)

@@ -12,7 +12,8 @@ Features:
     - Seaborn integration for better aesthetics
     - Type hints and comprehensive documentation
 """
-import keras
+
+
 import numpy as np
 import seaborn as sns
 from pathlib import Path
@@ -22,10 +23,14 @@ from dataclasses import dataclass
 from sklearn.metrics import confusion_matrix
 from typing import Union, Optional, Tuple, Dict, Any, List
 
+# ------------------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------------------
 
 from .logger import logger
 from .datasets import MNISTData
 
+# ------------------------------------------------------------------------------
 
 @dataclass
 class VisualizationConfig:
@@ -51,6 +56,8 @@ class VisualizationConfig:
     label_fontsize: int = 12
     tick_fontsize: int = 10
     legend_fontsize: int = 10
+
+# ------------------------------------------------------------------------------
 
 
 class VisualizationManager:

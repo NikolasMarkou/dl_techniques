@@ -13,24 +13,47 @@ analysis methods including:
 - Export capabilities for analysis results
 """
 import json
-import logging
-import pandas as pd
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Union, Any
-from dataclasses import dataclass
-from pathlib import Path
-import tensorflow as tf
+import keras
 import numpy as np
-import matplotlib.pyplot as plt
+import pandas as pd
 import seaborn as sns
 from scipy import stats
+from pathlib import Path
+from datetime import datetime
+import matplotlib.pyplot as plt
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Union, Any
+
+# ------------------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------------------
 
 from .logger import logger
 
-@dataclass
-class AnalysisConfig:
-    """Configuration for weight analysis parameters."""
+# ------------------------------------------------------------------------------
 
+
+@dataclass
+class WeightAnalyzerConfig:
+    """Configuration for weight analysis parameters.
+
+    Attributes:
+        compute_l1_norm: Whether to compute L1 norms
+        compute_l2_norm: Whether to compute L2 norms
+        compute_rms_norm: Whether to compute RMS norms
+        compute_statistics: Whether to compute basic statistics
+        compute_histograms: Whether to compute histograms
+        analyze_biases: Whether to analyze bias terms
+        layer_types: List of layer types to analyze
+        plot_style: Matplotlib style to use
+        color_palette: Seaborn color palette to use
+        fig_width: Width of output figures
+        fig_height: Height of output figures
+        dpi: DPI for saved figures
+        save_plots: Whether to save plots
+        save_stats: Whether to save statistics
+        export_format: Format for exported files
+    """
     # Norm analysis options
     compute_l1_norm: bool = True
     compute_l2_norm: bool = True
@@ -45,8 +68,8 @@ class AnalysisConfig:
     layer_types: Optional[List[str]] = None
 
     # Visualization options
-    plot_style: str = 'seaborn'
-    color_palette: str = 'husl'
+    plot_style: str = 'default'  # Use matplotlib's default style
+    color_palette: str = 'deep'  # Use seaborn's default palette
     fig_width: int = 12
     fig_height: int = 8
     dpi: int = 300
@@ -55,6 +78,27 @@ class AnalysisConfig:
     save_plots: bool = True
     save_stats: bool = True
     export_format: str = 'png'
+
+    def setup_plotting_style(self) -> None:
+        """Set up matplotlib and seaborn plotting styles safely."""
+        try:
+            # Reset to matplotlib defaults first
+            plt.style.use('default')
+
+            # Set up seaborn defaults
+            sns.set_theme(style='whitegrid')
+            sns.set_palette(self.color_palette)
+
+            # Apply any custom matplotlib style if specified
+            if self.plot_style != 'default':
+                try:
+                    plt.style.use(self.plot_style)
+                except Exception as e:
+                    logger.warning(f"Could not apply style {self.plot_style}, falling back to default. Error: {e}")
+        except Exception as e:
+            logger.warning(f"Error setting up plotting style: {e}")
+            # Ensure we have a workable style
+            plt.style.use('default')
 
 
 class LayerAnalysis:
@@ -106,14 +150,16 @@ class LayerAnalysis:
                 'filter_norms': norms
             })
 
+# ------------------------------------------------------------------------------
+
 
 class WeightAnalyzer:
     """Enhanced analyzer for neural network weight distributions."""
 
     def __init__(
             self,
-            models: Dict[str, tf.keras.Model],
-            config: Optional[AnalysisConfig] = None,
+            models: Dict[str, keras.Model],
+            config: Optional[WeightAnalyzerConfig] = None,
             output_dir: Optional[Union[str, Path]] = "weight_analysis"
     ):
         """
@@ -125,13 +171,12 @@ class WeightAnalyzer:
             output_dir: Directory to save analysis outputs
         """
         self.models = models
-        self.config = config or AnalysisConfig()
+        self.config = config or WeightAnalyzerConfig()
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Set plot style
-        plt.style.use(self.config.plot_style)
-        sns.set_palette(self.config.color_palette)
+        # Set up plotting style safely
+        self.config.setup_plotting_style()
 
         # Initialize analysis containers
         self.layer_analyses: Dict[str, Dict[str, LayerAnalysis]] = {
@@ -148,7 +193,7 @@ class WeightAnalyzer:
             logger.info("Analyzing model: %s", model_name)
             self._analyze_model(model_name, model)
 
-    def _analyze_model(self, model_name: str, model: tf.keras.Model) -> None:
+    def _analyze_model(self, model_name: str, model: keras.Model) -> None:
         """
         Analyze a single model's weights.
 
@@ -180,13 +225,16 @@ class WeightAnalyzer:
             self,
             norm_types: Optional[List[str]] = None,
             save_prefix: str = "norms"
-    ) -> None:
+    ) -> plt.Figure:
         """
         Plot specified norm distributions for all models.
 
         Args:
             norm_types: List of norm types to plot ('l1', 'l2', 'rms')
             save_prefix: Prefix for saved plot files
+
+        Returns:
+            matplotlib.figure.Figure: The generated figure
         """
         norm_types = norm_types or ['l2', 'rms']
         fig, axes = plt.subplots(
@@ -210,23 +258,26 @@ class WeightAnalyzer:
 
         plt.tight_layout()
         if self.config.save_plots:
-            plt.savefig(
+            fig.savefig(
                 self.output_dir / f"{save_prefix}_distributions.{self.config.export_format}",
                 dpi=self.config.dpi
             )
-        plt.close()
+        return fig
 
     def plot_weight_distributions(
             self,
             plot_type: str = 'histogram',
             save_prefix: str = "weights"
-    ) -> None:
+    ) -> plt.Figure:
         """
         Plot weight value distributions for all models.
 
         Args:
             plot_type: Type of plot ('histogram' or 'violin')
             save_prefix: Prefix for saved plot files
+
+        Returns:
+            matplotlib.figure.Figure: The generated figure
         """
         fig, axes = plt.subplots(
             len(self.models), 1,
@@ -254,14 +305,22 @@ class WeightAnalyzer:
 
         plt.tight_layout()
         if self.config.save_plots:
-            plt.savefig(
+            fig.savefig(
                 self.output_dir / f"{save_prefix}_{plot_type}.{self.config.export_format}",
                 dpi=self.config.dpi
             )
-        plt.close()
+        return fig
 
-    def plot_layer_comparisons(self, save_prefix: str = "layer_comparison") -> None:
-        """Plot layer-wise comparisons across models."""
+    def plot_layer_comparisons(self, save_prefix: str = "layer_comparison") -> plt.Figure:
+        """
+        Plot layer-wise comparisons across models.
+
+        Args:
+            save_prefix: Prefix for saved plot files
+
+        Returns:
+            matplotlib.figure.Figure: The generated figure
+        """
         metrics = ['mean', 'std', 'l2_norm', 'mean_orthogonality']
         fig, axes = plt.subplots(
             len(metrics), 1,
@@ -300,11 +359,11 @@ class WeightAnalyzer:
 
         plt.tight_layout()
         if self.config.save_plots:
-            plt.savefig(
+            fig.savefig(
                 self.output_dir / f"{save_prefix}.{self.config.export_format}",
                 dpi=self.config.dpi
             )
-        plt.close()
+        return fig
 
     def compute_statistical_tests(self) -> Dict[str, Dict[str, float]]:
         """Perform statistical tests comparing weight distributions."""
@@ -371,189 +430,7 @@ class WeightAnalyzer:
         logger.info("Saved analysis results to %s", filename)
 
 
-def analyze_models(
-        models: Dict[str, tf.keras.Model],
-        config: Optional[AnalysisConfig] = None,
-        output_dir: str = "weight_analysis"
-) -> WeightAnalyzer:
-    """
-    Perform comprehensive weight analysis on multiple models.
-
-    Args:
-        models: Dictionary mapping model names to keras models
-        config: Configuration object for analysis parameters
-        output_dir: Directory to save analysis outputs
-
-    Returns:
-        WeightAnalyzer instance with completed analysis
-    """
-    analyzer = WeightAnalyzer(models, config, output_dir)
-
-    # Generate standard plots
-    analyzer.plot_norm_distributions()
-    analyzer.plot_weight_distributions()
-    analyzer.plot_layer_comparisons()
-
-    # Save analysis results
-    analyzer.save_analysis_results()
-
-    logger.info("Completed model analysis")
-    return analyzer
-
-
-if __name__ == "__main__":
-    # Example usage with custom configuration
-    config = AnalysisConfig(
-        compute_l1_norm=True,
-        compute_rms_norm=True,
-        analyze_biases=True,
-        layer_types=['Dense', 'Conv2D'],
-        plot_style='seaborn-darkgrid',
-        color_palette='deep',
-        save_stats=True,
-        export_format='pdf'
-    )
-
-    try:
-        # Load example models
-        baseline_model = tf.keras.models.load_model("baseline.keras")
-        rms_model = tf.keras.models.load_model("rms_norm.keras")
-        logit_model = tf.keras.models.load_model("logit_norm.keras")
-
-        models = {
-            "Baseline": baseline_model,
-            "RMSNorm": rms_model,
-            "LogitNorm": logit_model
-        }
-
-        # Perform analysis
-        analyzer = analyze_models(
-            models=models,
-            config=config,
-            output_dir="weight_analysis_results"
-        )
-
-        # Additional custom analysis examples
-
-        # 1. Layer-specific analysis
-        analyzer.plot_layer_comparisons(save_prefix="detailed_layer_comparison")
-
-        # 2. Custom norm distribution analysis
-        analyzer.plot_norm_distributions(
-            norm_types=['l1', 'l2', 'rms', 'max'],
-            save_prefix="comprehensive_norms"
-        )
-
-        # 3. Different weight distribution visualization
-        analyzer.plot_weight_distributions(
-            plot_type='violin',
-            save_prefix="weight_violin_plots"
-        )
-
-        # 4. Get statistical test results
-        test_results = analyzer.compute_statistical_tests()
-        print("\nStatistical Test Results:")
-        print("========================")
-        for test_name, result in test_results.items():
-            print(f"{test_name}:")
-            print(f"  Statistic: {result['statistic']:.4f}")
-            print(f"  p-value: {result['p_value']:.4f}")
-
-    except FileNotFoundError as e:
-        logger.error("Model file not found: %s", str(e))
-    except Exception as e:
-        logger.error("Error during analysis: %s", str(e))
-        raise
-
-
-def plot_weight_evolution(
-        model_checkpoints: Dict[str, List[tf.keras.Model]],
-        config: Optional[AnalysisConfig] = None,
-        output_dir: str = "weight_evolution"
-) -> None:
-    """
-    Analyze weight distribution evolution across training checkpoints.
-
-    Args:
-        model_checkpoints: Dictionary mapping model names to lists of checkpoints
-        config: Configuration for analysis
-        output_dir: Directory to save evolution analysis
-    """
-    if config is None:
-        config = AnalysisConfig()
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Track metrics across checkpoints
-    metrics = {
-        'l2_norms': {},
-        'weight_means': {},
-        'weight_stds': {},
-        'orthogonality': {}
-    }
-
-    # Analyze each checkpoint
-    for model_name, checkpoints in model_checkpoints.items():
-        metrics['l2_norms'][model_name] = []
-        metrics['weight_means'][model_name] = []
-        metrics['weight_stds'][model_name] = []
-        metrics['orthogonality'][model_name] = []
-
-        for checkpoint in checkpoints:
-            analyzer = WeightAnalyzer(
-                models={model_name: checkpoint},
-                config=config,
-                output_dir=output_dir / "temp"
-            )
-
-            # Aggregate metrics across layers
-            model_metrics = analyzer.layer_analyses[model_name]
-            metrics['l2_norms'][model_name].append(
-                np.mean([
-                    layer.norm_stats['l2_norm']
-                    for layer in model_metrics.values()
-                ])
-            )
-            metrics['weight_means'][model_name].append(
-                np.mean([
-                    layer.weight_stats['mean']
-                    for layer in model_metrics.values()
-                ])
-            )
-            metrics['weight_stds'][model_name].append(
-                np.mean([
-                    layer.weight_stats['std']
-                    for layer in model_metrics.values()
-                ])
-            )
-            metrics['orthogonality'][model_name].append(
-                np.mean([
-                    layer.direction_stats.get('mean_orthogonality', 0)
-                    for layer in model_metrics.values()
-                ])
-            )
-
-    # Plot evolution of metrics
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    checkpoint_indices = range(len(next(iter(model_checkpoints.values()))))
-
-    for (metric_name, metric_values), ax in zip(metrics.items(), axes.flat):
-        for model_name, values in metric_values.items():
-            ax.plot(checkpoint_indices, values, label=model_name, marker='o')
-
-        ax.set_title(f'{metric_name.replace("_", " ").title()} Evolution')
-        ax.set_xlabel('Checkpoint')
-        ax.set_ylabel('Value')
-        ax.legend()
-        ax.grid(True)
-
-    plt.tight_layout()
-    plt.savefig(
-        output_dir / f"weight_evolution.{config.export_format}",
-        dpi=config.dpi
-    )
-    plt.close()
+# ------------------------------------------------------------------------------
 
 
 class WeightAnalysisReport:
@@ -579,48 +456,51 @@ class WeightAnalysisReport:
         try:
             import matplotlib.backends.backend_pdf as pdf_backend
 
-            pdf = pdf_backend.PdfPages(self.output_file)
+            with pdf_backend.PdfPages(self.output_file) as pdf:
+                # Title page
+                fig = plt.figure(figsize=(11, 8.5))
+                fig.text(
+                    0.5, 0.5,
+                    "Neural Network Weight Analysis Report",
+                    ha='center', va='center', fontsize=24
+                )
+                fig.text(
+                    0.5, 0.4,
+                    f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                    ha='center', va='center', fontsize=14
+                )
+                pdf.savefig(fig)
+                plt.close(fig)
 
-            # Title page
-            fig = plt.figure(figsize=(11, 8.5))
-            fig.text(
-                0.5, 0.5,
-                "Neural Network Weight Analysis Report",
-                ha='center', va='center', fontsize=24
-            )
-            fig.text(
-                0.5, 0.4,
-                f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-                ha='center', va='center', fontsize=14
-            )
-            pdf.savefig(fig)
-            plt.close()
+                # Plot norm distributions
+                fig = self.analyzer.plot_norm_distributions()
+                pdf.savefig(fig)
+                plt.close(fig)
 
-            # Add all standard plots
-            self.analyzer.plot_norm_distributions()
-            pdf.savefig()
+                # Plot weight distributions
+                fig = self.analyzer.plot_weight_distributions()
+                pdf.savefig(fig)
+                plt.close(fig)
 
-            self.analyzer.plot_weight_distributions()
-            pdf.savefig()
+                # Plot layer comparisons
+                fig = self.analyzer.plot_layer_comparisons()
+                pdf.savefig(fig)
+                plt.close(fig)
 
-            self.analyzer.plot_layer_comparisons()
-            pdf.savefig()
+                # Statistical summary
+                fig = plt.figure(figsize=(11, 8.5))
+                test_results = self.analyzer.compute_statistical_tests()
+                text = "Statistical Analysis Summary\n\n"
 
-            # Statistical summary
-            fig = plt.figure(figsize=(11, 8.5))
-            test_results = self.analyzer.compute_statistical_tests()
-            text = "Statistical Analysis Summary\n\n"
+                for test_name, result in test_results.items():
+                    text += f"{test_name}:\n"
+                    text += f"  Statistic: {result['statistic']:.4f}\n"
+                    text += f"  p-value: {result['p_value']:.4f}\n\n"
 
-            for test_name, result in test_results.items():
-                text += f"{test_name}:\n"
-                text += f"  Statistic: {result['statistic']:.4f}\n"
-                text += f"  p-value: {result['p_value']:.4f}\n\n"
+                fig.text(0.1, 0.9, text, fontsize=12, va='top')
+                pdf.savefig(fig)
+                plt.close(fig)
 
-            fig.text(0.1, 0.9, text, fontsize=12, va='top')
-            pdf.savefig(fig)
-            plt.close()
-
-            pdf.close()
             logger.info("Generated analysis report: %s", self.output_file)
 
         except Exception as e:

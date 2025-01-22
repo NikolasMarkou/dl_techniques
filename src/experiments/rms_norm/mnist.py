@@ -20,29 +20,52 @@ Organization:
 6. Main execution
 """
 
-#------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # 1. Imports and Dependencies
-#------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 
 import keras
 import numpy as np
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass
-from matplotlib import pyplot as plt
 from typing import Dict, Any, Optional, List, Literal, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.model_analyzer import ModelAnalyzer
 from dl_techniques.layers.rms_logit_norm import RMSNorm, LogitNorm
 from dl_techniques.utils.train import TrainingConfig, train_model
-from dl_techniques.utils.datasets import load_and_preprocess_mnist, MNISTData
+from dl_techniques.utils.datasets import load_and_preprocess_mnist
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
+from dl_techniques.utils.weight_analyzer import WeightAnalyzerConfig, WeightAnalyzer, WeightAnalysisReport
 
 
-#------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # 2. Configuration Classes
-#------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+
+@dataclass
+class WeightAnalysisConfig:
+    """Configuration for weight distribution analysis.
+
+    Attributes:
+        compute_l1_norm: Whether to compute L1 norms
+        compute_l2_norm: Whether to compute L2 norms
+        compute_rms_norm: Whether to compute RMS norms
+        analyze_biases: Whether to analyze bias terms
+        save_plots: Whether to save analysis plots
+        plot_format: Format for saving plots
+        plot_style: Style for matplotlib plots
+    """
+    compute_l1_norm: bool = True
+    compute_l2_norm: bool = True
+    compute_rms_norm: bool = True
+    analyze_biases: bool = True
+    save_plots: bool = True
+    plot_format: str = 'png'
+    plot_style: str = 'default'  # Using default style for better compatibility
+
+
 @dataclass
 class ModelConfig:
     """Configuration for model architecture and training.
@@ -81,24 +104,26 @@ class ExperimentConfig:
         model_configs: Dictionary mapping model names to their configurations
         training: Configuration for model training parameters
         visualization: Configuration for visualization settings
+        weight_analysis: Configuration for weight analysis
         output_dir: Directory for saving experiment outputs
         experiment_name: Name of the experiment for logging and saving
     """
     model_configs: Dict[str, ModelConfig]
     training: TrainingConfig
     visualization: VisualizationConfig
+    weight_analysis: WeightAnalysisConfig
     output_dir: Path
     experiment_name: str
 
 
-#------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # 3. Model Building Utilities
-#------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 def build_conv_block(
-    inputs: keras.layers.Layer,
-    filters: int,
-    config: ModelConfig,
-    block_index: int
+        inputs: keras.layers.Layer,
+        filters: int,
+        config: ModelConfig,
+        block_index: int
 ) -> keras.layers.Layer:
     """Build a convolutional block with normalization and activation.
 
@@ -117,7 +142,7 @@ def build_conv_block(
         padding='same',
         kernel_initializer='he_normal',
         kernel_regularizer=keras.regularizers.L2(config.weight_decay),
-        name=f'conv{block_index+1}'
+        name=f'conv{block_index + 1}'
     )(inputs)
     x = keras.layers.BatchNormalization()(x)
     x = keras.layers.ReLU()(x)
@@ -129,10 +154,10 @@ def build_conv_block(
 
 
 def build_dense_block(
-    inputs: keras.layers.Layer,
-    units: int,
-    config: ModelConfig,
-    dropout_rate: float
+        inputs: keras.layers.Layer,
+        units: int,
+        config: ModelConfig,
+        dropout_rate: float
 ) -> keras.layers.Layer:
     """Build a dense block with normalization and activation.
 
@@ -201,17 +226,17 @@ def build_model(config: ModelConfig) -> keras.Model:
     return model
 
 
-#------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # 4. Experiment Runner
-#------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
-    """Run the complete normalization comparison experiment.
+    """Run the complete normalization comparison experiment with weight analysis.
 
     Args:
         config: Experiment configuration
 
     Returns:
-        Dictionary containing experiment results
+        Dictionary containing experiment results including weight analysis
     """
     # Setup directories and managers
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -235,6 +260,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         'val_loss': {}
     }
 
+    # Training phase
     for name, model_config in config.model_configs.items():
         logger.info(f"\nTraining {name} model...")
         model = build_model(model_config)
@@ -258,12 +284,52 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         # Store the model
         models[name] = model
 
-        # Properly structure the history data
+        # Save model in .keras format
+        model.save(experiment_dir / name / f"{name}_model.keras")
+
+        # Structure the history data
         for metric in ['accuracy', 'loss']:
             all_histories[metric][name] = history.history[metric]
             all_histories[f'val_{metric}'][name] = history.history[f'val_{metric}']
 
-    # Generate visualizations with properly structured data
+    # Weight Analysis phase
+    logger.info("\nPerforming weight distribution analysis...")
+
+    # Configure weight analyzer
+    analysis_config = WeightAnalyzerConfig(
+        compute_l1_norm=config.weight_analysis.compute_l1_norm,
+        compute_l2_norm=config.weight_analysis.compute_l2_norm,
+        compute_rms_norm=config.weight_analysis.compute_rms_norm,
+        analyze_biases=config.weight_analysis.analyze_biases,
+        save_plots=config.weight_analysis.save_plots,
+        export_format=config.weight_analysis.plot_format,
+        plot_style='seaborn-darkgrid',
+        color_palette='deep'
+    )
+
+    # Initialize and run weight analyzer
+    weight_analyzer = WeightAnalyzer(
+        models=models,
+        config=analysis_config,
+        output_dir=experiment_dir / "weight_analysis"
+    )
+
+    # Generate standard analysis plots
+    weight_analyzer.plot_norm_distributions(save_prefix="norm_distributions")
+    weight_analyzer.plot_weight_distributions(save_prefix="weight_distributions")
+    weight_analyzer.plot_layer_comparisons(save_prefix="layer_comparisons")
+
+    # Compute statistical tests
+    statistical_results = weight_analyzer.compute_statistical_tests()
+
+    # Generate comprehensive analysis report
+    report_generator = WeightAnalysisReport(
+        analyzer=weight_analyzer,
+        output_file=str(experiment_dir / "weight_analysis" / "analysis_report.pdf")
+    )
+    report_generator.generate_report()
+
+    # Generate visualizations for training history
     for metric in ['accuracy', 'loss']:
         combined_histories = {
             name: {
@@ -280,6 +346,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             title=f'Model {metric.capitalize()} Comparison'
         )
 
+    # Generate predictions for confusion matrices
     model_predictions = {}
     for name, model in models.items():
         predictions = model.predict(mnist_data.x_test)
@@ -290,25 +357,31 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         y_true=np.argmax(mnist_data.y_test, axis=1),
         model_predictions=model_predictions,
         name='confusion_matrices_comparison',
-        subdir='model_comparisons',
+        subdir='model_comparison',
         normalize=True,
-        class_names=[str(i) for i in range(10)]  # For MNIST digits 0-9
+        class_names=[str(i) for i in range(10)]
     )
 
-
-    # Analyze results
+    # Analyze model performance
     analyzer = ModelAnalyzer(models, vis_manager)
-    results = analyzer.analyze_models(mnist_data)
+    performance_results = analyzer.analyze_models(mnist_data)
 
+    # Combine all results
     return {
         'models': models,
         'histories': all_histories,
-        'analysis': results
+        'performance_analysis': performance_results,
+        'weight_analysis': {
+            'statistical_tests': statistical_results,
+            'analyzer': weight_analyzer
+        }
     }
 
-#------------------------------------------------------------------------------
-# 6. Main Execution
-#------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# 5. Main Execution
+# ------------------------------------------------------------------------------
+
 def main():
     """Main execution function for running the experiment."""
     # Define model configurations
@@ -327,23 +400,47 @@ def main():
         monitor_metric='val_accuracy'
     )
 
+    # Define weight analysis configuration
+    weight_analysis_config = WeightAnalysisConfig(
+        compute_l1_norm=True,
+        compute_l2_norm=True,
+        compute_rms_norm=True,
+        analyze_biases=True,
+        save_plots=True,
+        plot_format='png',
+        plot_style='default'  # Using default matplotlib style
+    )
+
     # Create experiment configuration
     experiment_config = ExperimentConfig(
         model_configs=model_configs,
         training=training_config,
         visualization=VisualizationConfig(),
+        weight_analysis=weight_analysis_config,
         output_dir=Path("experiments"),
-        experiment_name="mnist_normalization"
+        experiment_name="mnist_normalization_with_weight_analysis"
     )
 
     # Run experiment and print results
     results = run_experiment(experiment_config)
 
-    logger.info("Experiment Results:")
-    for model_name, metrics in results['analysis'].items():
-        logger.info(f"{model_name} Model:")
+    logger.info("\nExperiment Results:")
+
+    # Print performance metrics
+    logger.info("\nPerformance Metrics:")
+    for model_name, metrics in results['performance_analysis'].items():
+        logger.info(f"\n{model_name} Model:")
         for metric, value in metrics.items():
             logger.info(f"{metric}: {value:.4f}")
+
+    # Print weight analysis statistical results
+    logger.info("\nWeight Analysis Statistical Tests:")
+    for test_name, result in results['weight_analysis']['statistical_tests'].items():
+        logger.info(f"\n{test_name}:")
+        logger.info(f"  Statistic: {result['statistic']:.4f}")
+        logger.info(f"  p-value: {result['p_value']:.4f}")
+
+# ------------------------------------------------------------------------------
 
 
 if __name__ == "__main__":
