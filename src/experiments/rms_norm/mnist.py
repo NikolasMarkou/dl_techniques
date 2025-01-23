@@ -36,8 +36,9 @@ from dl_techniques.utils.model_analyzer import ModelAnalyzer
 from dl_techniques.layers.rms_logit_norm import RMSNorm, LogitNorm
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.utils.datasets import load_and_preprocess_mnist
+from dl_techniques.utils.weight_analyzer import WeightAnalyzerConfig, WeightAnalyzer
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
-from dl_techniques.utils.weight_analyzer import WeightAnalyzerConfig, WeightAnalyzer, WeightAnalysisReport
+
 
 
 # ------------------------------------------------------------------------------
@@ -262,7 +263,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
     # Training phase
     for name, model_config in config.model_configs.items():
-        logger.info(f"\nTraining {name} model...")
+        logger.info(f"Training {name} model...")
         model = build_model(model_config)
         model.summary(print_fn=logger.info)
 
@@ -290,7 +291,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             all_histories[f'val_{metric}'][name] = history.history[f'val_{metric}']
 
     # Weight Analysis phase
-    logger.info("\nPerforming weight distribution analysis...")
+    logger.info("Performing weight distribution analysis...")
 
     # Configure weight analyzer
     analysis_config = WeightAnalyzerConfig(
@@ -312,19 +313,20 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     )
 
     # Generate standard analysis plots
-    weight_analyzer.plot_norm_distributions(save_prefix="norm_distributions")
-    weight_analyzer.plot_layer_comparisons(save_prefix="layer_comparisons")
-    weight_analyzer.plot_weight_distributions(save_prefix="weight_distributions")
-
-    # Compute statistical tests
-    statistical_results = weight_analyzer.compute_statistical_tests()
-
-    # Generate comprehensive analysis report
-    report_generator = WeightAnalysisReport(
-        analyzer=weight_analyzer,
-        output_file=str(experiment_dir / "weight_analysis" / "analysis_report.pdf")
-    )
-    report_generator.generate_report()
+    weight_analyzer.plot_norm_distributions()
+    weight_analyzer.plot_layer_comparisons()
+    weight_analyzer.plot_weight_distributions()
+    weight_analyzer.plot_layer_weight_histograms()
+    #
+    # # Compute statistical tests
+    # statistical_results = weight_analyzer.compute_statistical_tests()
+    #
+    # # Generate comprehensive analysis report
+    # report_generator = WeightAnalysisReport(
+    #     analyzer=weight_analyzer,
+    #     output_file=str(experiment_dir / "weight_analysis" / "analysis_report.pdf")
+    # )
+    # report_generator.generate_report()
 
     # Generate visualizations for training history
     for metric in ['accuracy', 'loss']:
@@ -367,11 +369,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     return {
         'models': models,
         'histories': all_histories,
-        'performance_analysis': performance_results,
-        'weight_analysis': {
-            'statistical_tests': statistical_results,
-            'analyzer': weight_analyzer
-        }
+        'performance_analysis': performance_results
     }
 
 
@@ -421,21 +419,21 @@ def main():
     # Run experiment and print results
     results = run_experiment(experiment_config)
 
-    logger.info("\nExperiment Results:")
+    logger.info("Experiment Results:")
 
     # Print performance metrics
-    logger.info("\nPerformance Metrics:")
+    logger.info("Performance Metrics:")
     for model_name, metrics in results['performance_analysis'].items():
-        logger.info(f"\n{model_name} Model:")
+        logger.info(f"{model_name} Model:")
         for metric, value in metrics.items():
             logger.info(f"{metric}: {value:.4f}")
 
     # Print weight analysis statistical results
-    logger.info("\nWeight Analysis Statistical Tests:")
-    for test_name, result in results['weight_analysis']['statistical_tests'].items():
-        logger.info(f"\n{test_name}:")
-        logger.info(f"  Statistic: {result['statistic']:.4f}")
-        logger.info(f"  p-value: {result['p_value']:.4f}")
+    # logger.info("\nWeight Analysis Statistical Tests:")
+    # for test_name, result in results['weight_analysis']['statistical_tests'].items():
+    #     logger.info(f"\n{test_name}:")
+    #     logger.info(f"  Statistic: {result['statistic']:.4f}")
+    #     logger.info(f"  p-value: {result['p_value']:.4f}")
 
 # ------------------------------------------------------------------------------
 
