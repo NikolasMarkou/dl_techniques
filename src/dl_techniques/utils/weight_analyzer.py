@@ -319,10 +319,10 @@ class WeightAnalyzer:
             save: bool = True
     ) -> plt.Figure:
         """
-        Plot layer-wise comparisons across models.
+        Plot layer-wise metric comparisons across models with improved readability.
 
         Args:
-            metrics: List of metrics to plot. Defaults to ['mean', 'std', 'l2_norm', 'mean_orthogonality']
+            metrics: List of metrics to plot. Defaults to ['mean', 'std', 'l2_norm']
             save: Whether to save the plot
 
         Returns:
@@ -331,25 +331,27 @@ class WeightAnalyzer:
         Raises:
             ValueError: If no valid metric data is available
         """
-        metrics = metrics or ['mean', 'std', 'l2_norm', 'mean_orthogonality']
+        metrics = metrics or ['mean', 'std', 'l2_norm']
 
-        fig, axes = plt.subplots(
-            len(metrics), 1,
-            figsize=(self.config.fig_width, self.config.fig_height * len(metrics)),
-            squeeze=False
-        )
-        axes = axes.ravel()
+        # Create figure with adjusted dimensions
+        fig = plt.figure(figsize=(self.config.fig_width, len(metrics) * 4))
+        gs = plt.GridSpec(len(metrics), 1, height_ratios=[1] * len(metrics))
 
-        for ax, metric in zip(axes, metrics):
-            data = []
-            model_names = []
-            layer_names = []
+        for idx, metric in enumerate(metrics):
+            ax = fig.add_subplot(gs[idx])
+
+            # Collect and organize data
+            model_data = {}
+            all_layers = set()
 
             for model_name, layer_stats in self.layer_statistics.items():
+                model_data[model_name] = {}
                 for layer_name, stats in layer_stats.items():
-                    value = None
+                    # Simplify layer names by removing common prefixes
+                    simple_name = layer_name.split('_weight_')[0]
+                    all_layers.add(simple_name)
 
-                    # Try to find the metric in different stat categories
+                    value = None
                     if metric in stats.basic_stats:
                         value = stats.basic_stats[metric]
                     elif metric in stats.norm_stats:
@@ -358,75 +360,179 @@ class WeightAnalyzer:
                         value = stats.direction_stats[metric]
 
                     if value is not None:
-                        data.append(value)
-                        model_names.append(model_name)
-                        layer_names.append(layer_name)
+                        model_data[model_name][simple_name] = value
 
-            if data:
-                df = pd.DataFrame({
-                    'Model': model_names,
-                    'Layer': layer_names,
-                    'Value': data
-                })
+            # Convert to DataFrame for plotting
+            df_data = []
+            for model_name, layer_values in model_data.items():
+                for layer_name, value in layer_values.items():
+                    df_data.append({
+                        'Model': model_name,
+                        'Layer': layer_name,
+                        'Value': value
+                    })
 
-                sns.barplot(data=df, x='Layer', y='Value', hue='Model', ax=ax)
-                ax.set_title(f'{metric.replace("_", " ").title()} by Layer')
-                ax.tick_params(axis='x', rotation=45)
-                ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            df = pd.DataFrame(df_data)
+
+            # Create enhanced barplot
+            sns.barplot(
+                data=df,
+                x='Layer',
+                y='Value',
+                hue='Model',
+                ax=ax,
+                alpha=0.7
+            )
+
+            # Improve readability
+            ax.set_title(
+                f'{metric.replace("_", " ").title()}',
+                pad=15,
+                fontsize=12,
+                fontweight='bold'
+            )
+            ax.set_xlabel('')
+            # Rotate x-axis labels
+            ax.tick_params(axis='x', rotation=45)
+            # Adjust label alignment after rotation
+            ax.set_xticklabels(ax.get_xticklabels(), ha='right')
+
+            # Move legend outside plot
+            ax.legend(
+                bbox_to_anchor=(1.05, 1),
+                loc='upper left',
+                borderaxespad=0.
+            )
+
+            # Add grid for better readability
+            ax.grid(True, axis='y', alpha=0.3)
 
         plt.tight_layout()
 
         if save and self.config.save_plots:
             fig.savefig(
                 self.output_dir / f"layer_comparisons.{self.config.export_format}",
-                dpi=self.config.dpi
+                dpi=self.config.dpi,
+                bbox_inches='tight'
             )
 
         return fig
 
-    def plot_weight_distributions(
+    def plot_weight_distributions_heatmap(
             self,
-            plot_type: str = 'histogram',
+            n_bins: int = 50,
             save: bool = True
     ) -> plt.Figure:
         """
-        Plot weight distributions for all models.
+        Plot weight distributions as vertical heatmaps for easy model comparison.
 
         Args:
-            plot_type: Type of plot ('histogram' or 'violin')
+            n_bins: Number of bins for the histogram computation
             save: Whether to save the plot
 
         Returns:
             matplotlib.figure.Figure: Generated figure
 
         Raises:
-            ValueError: If plot_type is invalid
+            ValueError: If no valid weight data is available
         """
-        if plot_type not in ['histogram', 'violin']:
-            raise ValueError("plot_type must be 'histogram' or 'violin'")
+        # Collect all unique layer names
+        all_layers = set()
+        for layer_stats in self.layer_statistics.values():
+            all_layers.update(
+                layer_name.split('_weight_')[0]
+                for layer_name in layer_stats.keys()
+            )
 
-        fig = plt.figure(figsize=(self.config.fig_width, self.config.fig_height))
+        if not all_layers:
+            raise ValueError("No valid layer data available for plotting")
 
-        for model_name, layer_stats in self.layer_statistics.items():
-            weights = [
-                stats.basic_stats['mean']
-                for stats in layer_stats.values()
-                if 'mean' in stats.basic_stats
-            ]
+        # Sort layers by their order in the network
+        layers = sorted(all_layers)
+        n_models = len(self.models)
 
-            if plot_type == 'histogram':
-                plt.hist(weights, bins=50, alpha=0.5, label=model_name)
+        # Create figure
+        fig, axes = plt.subplots(
+            1, n_models,
+            figsize=(self.config.fig_width, len(layers) * 0.4),
+            squeeze=False
+        )
+        axes = axes.ravel()
+
+        # Define common weight range for all heatmaps
+        all_weights = []
+        for layer_stats in self.layer_statistics.values():
+            for stats in layer_stats.values():
+                if 'mean' in stats.basic_stats:
+                    all_weights.extend([
+                        stats.basic_stats['mean'],
+                        stats.basic_stats['std']
+                    ])
+
+        weight_range = (
+            np.min(all_weights) - np.std(all_weights),
+            np.max(all_weights) + np.std(all_weights)
+        )
+
+        # Plot heatmaps for each model
+        for idx, (model_name, layer_stats) in enumerate(self.layer_statistics.items()):
+            # Initialize data matrix
+            data_matrix = np.zeros((len(layers), n_bins))
+
+            # Compute histograms for each layer
+            for layer_idx, layer_name in enumerate(layers):
+                matching_layers = [
+                    stats for name, stats in layer_stats.items()
+                    if name.split('_weight_')[0] == layer_name
+                ]
+
+                if matching_layers:
+                    weights = []
+                    for stats in matching_layers:
+                        if 'mean' in stats.basic_stats:
+                            weights.append(stats.basic_stats['mean'])
+
+                    if weights:
+                        hist, _ = np.histogram(
+                            weights,
+                            bins=n_bins,
+                            range=weight_range,
+                            density=True
+                        )
+                        data_matrix[layer_idx] = hist
+
+            # Create heatmap
+            im = axes[idx].imshow(
+                data_matrix,
+                aspect='auto',
+                cmap='viridis',
+                interpolation='nearest',
+                origin='lower'
+            )
+
+            # Customize appearance
+            axes[idx].set_title(f'{model_name}', pad=10)
+            axes[idx].set_yticks(range(len(layers)))
+            axes[idx].set_yticklabels(layers, fontsize=8)
+
+            if idx == 0:
+                axes[idx].set_ylabel('Layers')
             else:
-                plt.violinplot(weights, points=100, vert=False)
+                axes[idx].set_yticklabels([])
 
-        plt.title('Weight Distribution Comparison')
-        plt.xlabel('Weight Value')
-        plt.legend()
+            # Remove x-ticks for cleaner look
+            axes[idx].set_xticks([])
+
+        # Add colorbar
+        plt.colorbar(im, ax=axes, label='Normalized Density')
+
+        plt.tight_layout()
 
         if save and self.config.save_plots:
             fig.savefig(
-                self.output_dir / f"weight_dist_{plot_type}.{self.config.export_format}",
-                dpi=self.config.dpi
+                self.output_dir / f"weight_distributions_heatmap.{self.config.export_format}",
+                dpi=self.config.dpi,
+                bbox_inches='tight'
             )
 
         return fig

@@ -314,19 +314,9 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
     # Generate standard analysis plots
     weight_analyzer.plot_norm_distributions()
-    weight_analyzer.plot_layer_comparisons()
-    weight_analyzer.plot_weight_distributions()
+    weight_analyzer.plot_layer_comparisons(['mean', 'std', 'l2_norm'])
+    weight_analyzer.plot_weight_distributions_heatmap(n_bins=50)
     weight_analyzer.plot_layer_weight_histograms()
-    #
-    # # Compute statistical tests
-    # statistical_results = weight_analyzer.compute_statistical_tests()
-    #
-    # # Generate comprehensive analysis report
-    # report_generator = WeightAnalysisReport(
-    #     analyzer=weight_analyzer,
-    #     output_file=str(experiment_dir / "weight_analysis" / "analysis_report.pdf")
-    # )
-    # report_generator.generate_report()
 
     # Generate visualizations for training history
     for metric in ['accuracy', 'loss']:
@@ -389,7 +379,7 @@ def main():
 
     # Define training configuration
     training_config = TrainingConfig(
-        epochs=2,
+        epochs=1,
         batch_size=128,
         early_stopping_patience=5,
         monitor_metric='val_accuracy'
