@@ -284,9 +284,6 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         # Store the model
         models[name] = model
 
-        # Save model in .keras format
-        model.save(experiment_dir / name / f"{name}_model.keras")
-
         # Structure the history data
         for metric in ['accuracy', 'loss']:
             all_histories[metric][name] = history.history[metric]
@@ -316,8 +313,8 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
     # Generate standard analysis plots
     weight_analyzer.plot_norm_distributions(save_prefix="norm_distributions")
-    weight_analyzer.plot_weight_distributions(save_prefix="weight_distributions")
     weight_analyzer.plot_layer_comparisons(save_prefix="layer_comparisons")
+    weight_analyzer.plot_weight_distributions(save_prefix="weight_distributions")
 
     # Compute statistical tests
     statistical_results = weight_analyzer.compute_statistical_tests()
@@ -394,7 +391,7 @@ def main():
 
     # Define training configuration
     training_config = TrainingConfig(
-        epochs=20,
+        epochs=2,
         batch_size=128,
         early_stopping_patience=5,
         monitor_metric='val_accuracy'

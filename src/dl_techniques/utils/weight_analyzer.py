@@ -100,6 +100,8 @@ class WeightAnalyzerConfig:
             # Ensure we have a workable style
             plt.style.use('default')
 
+# ------------------------------------------------------------------------------
+
 
 class LayerAnalysis:
     """Container for layer-specific analysis results."""
@@ -224,7 +226,7 @@ class WeightAnalyzer:
     def plot_norm_distributions(
             self,
             norm_types: Optional[List[str]] = None,
-            save_prefix: str = "norms"
+            save_prefix: Optional[str] = None
     ) -> plt.Figure:
         """
         Plot specified norm distributions for all models.
@@ -257,7 +259,7 @@ class WeightAnalyzer:
             ax.legend()
 
         plt.tight_layout()
-        if self.config.save_plots:
+        if self.config.save_plots and save_prefix is not None and len(save_prefix) > 0:
             fig.savefig(
                 self.output_dir / f"{save_prefix}_distributions.{self.config.export_format}",
                 dpi=self.config.dpi
@@ -267,7 +269,7 @@ class WeightAnalyzer:
     def plot_weight_distributions(
             self,
             plot_type: str = 'histogram',
-            save_prefix: str = "weights"
+            save_prefix: Optional[str] = None
     ) -> plt.Figure:
         """
         Plot weight value distributions for all models.
@@ -304,14 +306,14 @@ class WeightAnalyzer:
             ax.set_xlabel('Weight Value')
 
         plt.tight_layout()
-        if self.config.save_plots:
+        if self.config.save_plots and save_prefix is not None and len(save_prefix) > 0:
             fig.savefig(
                 self.output_dir / f"{save_prefix}_{plot_type}.{self.config.export_format}",
                 dpi=self.config.dpi
             )
         return fig
 
-    def plot_layer_comparisons(self, save_prefix: str = "layer_comparison") -> plt.Figure:
+    def plot_layer_comparisons(self, save_prefix: Optional[str] = None) -> plt.Figure:
         """
         Plot layer-wise comparisons across models.
 
@@ -358,7 +360,7 @@ class WeightAnalyzer:
             ax.tick_params(axis='x', rotation=45)
 
         plt.tight_layout()
-        if self.config.save_plots:
+        if self.config.save_plots and save_prefix is not None and len(save_prefix) > 0:
             fig.savefig(
                 self.output_dir / f"{save_prefix}.{self.config.export_format}",
                 dpi=self.config.dpi
