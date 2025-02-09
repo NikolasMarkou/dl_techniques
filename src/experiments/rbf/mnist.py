@@ -12,7 +12,13 @@ from keras.api.optimizers import Adam
 from keras.api.metrics import SparseCategoricalAccuracy
 from keras.api.losses import SparseCategoricalCrossentropy
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.rbf import RBFLayer
+
+# ---------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -48,6 +54,8 @@ class ExperimentConfig:
 
     # File paths
     MODEL_SAVE_PATH: str = 'mnist_cnn_rbf_model.keras'
+
+# ---------------------------------------------------------------------
 
 
 class MNISTCNNRBFModel(Model):
@@ -180,6 +188,8 @@ class MNISTCNNRBFModel(Model):
         })
         return config
 
+# ---------------------------------------------------------------------
+
 
 def plot_confusion_matrix(model: Model, x_test: np.ndarray, y_test: np.ndarray) -> None:
     """Plot confusion matrix for model predictions.
@@ -204,15 +214,17 @@ def plot_confusion_matrix(model: Model, x_test: np.ndarray, y_test: np.ndarray) 
     plt.xlabel('Predicted Label')
     plt.show()
 
+# ---------------------------------------------------------------------
 
-def train_mnist_rbf() -> Tuple[Model, tf.keras.callbacks.History]:
+
+def train_mnist_rbf() -> Tuple[Model, keras.callbacks.History]:
     """Train the RBF-Dense model on MNIST dataset.
 
     Returns:
         Tuple of (trained model, training history)
     """
     # Load and preprocess MNIST data
-    (x_train, y_train), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
+    (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
 
     # Normalize and reshape data
     x_train = x_train.astype('float32') / 255.0
@@ -231,17 +243,17 @@ def train_mnist_rbf() -> Tuple[Model, tf.keras.callbacks.History]:
 
     # Create callbacks
     callbacks = [
-        tf.keras.callbacks.ModelCheckpoint(
+        keras.callbacks.ModelCheckpoint(
             ExperimentConfig.MODEL_SAVE_PATH,
             save_best_only=True,
             monitor='val_sparse_categorical_accuracy'
         ),
-        tf.keras.callbacks.EarlyStopping(
+        keras.callbacks.EarlyStopping(
             monitor='val_sparse_categorical_accuracy',
             patience=ExperimentConfig.PATIENCE,
             restore_best_weights=True
         ),
-        tf.keras.callbacks.ReduceLROnPlateau(
+        keras.callbacks.ReduceLROnPlateau(
             monitor='val_sparse_categorical_accuracy',
             factor=ExperimentConfig.LR_REDUCTION_FACTOR,
             patience=ExperimentConfig.LR_PATIENCE,
@@ -268,6 +280,8 @@ def train_mnist_rbf() -> Tuple[Model, tf.keras.callbacks.History]:
     plot_confusion_matrix(model, x_test, y_test)
 
     return model, history
+
+# ---------------------------------------------------------------------
 
 
 if __name__ == "__main__":
