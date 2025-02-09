@@ -1,9 +1,15 @@
+import keras
 import pytest
-import numpy as np
 import tensorflow as tf
-from itertools import product
 from typing import Tuple, Dict, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.band_rms_norm import BandRMSNorm
+
+# ---------------------------------------------------------------------
 
 
 def test_initialization():
@@ -137,15 +143,15 @@ def test_serialization_and_deserialization():
 def test_model_integration():
     """Test layer integration within a Keras model with training."""
     # Create a simple model with RMSNorm
-    inputs = tf.keras.Input(shape=(20, 10))
+    inputs = keras.Input(shape=(20, 10))
     # Flatten the input for proper dense layer processing
-    x = tf.keras.layers.Flatten()(inputs)
-    x = tf.keras.layers.Dense(16)(x)
+    x = keras.layers.Flatten()(inputs)
+    x = keras.layers.Dense(16)(x)
     x = BandRMSNorm(max_band_width=0.1)(x)
-    x = tf.keras.layers.Dense(8)(x)
+    x = keras.layers.Dense(8)(x)
     x = BandRMSNorm(max_band_width=0.2)(x)
-    outputs = tf.keras.layers.Dense(1)(x)
-    model = tf.keras.Model(inputs=inputs, outputs=outputs)
+    outputs = keras.layers.Dense(1)(x)
+    model = keras.Model(inputs=inputs, outputs=outputs)
 
     # Compile and train
     model.compile(

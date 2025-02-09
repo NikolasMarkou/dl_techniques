@@ -301,7 +301,7 @@ class BandRMSNorm(Layer):
         # Use hard sigmoid to strictly enforce the bounds
         scale = (1.0 - self.max_band_width) + (
                 self.max_band_width *
-                keras.backend.hard_sigmoid(tf.cast(self.band_param, inputs.dtype))
+                keras.activations.hard_sigmoid(tf.cast(self.band_param, inputs.dtype))
         )
 
         # The output will have L2 norm between [1-max_band_width, 1]
