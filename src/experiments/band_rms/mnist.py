@@ -35,7 +35,7 @@ class ExperimentConfig:
 
     # Training parameters
     BATCH_SIZE: int = 128
-    EPOCHS: int = 10
+    EPOCHS: int = 5
     VALIDATION_SPLIT: float = 0.2
     INITIAL_LEARNING_RATE: float = 0.001
     MIN_LEARNING_RATE: float = 1e-6
