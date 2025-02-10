@@ -7,7 +7,7 @@ from typing import Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.band_rms_norm import BandRMSNorm
+from dl_techniques.layers.band_rms_norm import SphericalBoundRMS
 
 # ---------------------------------------------------------------------
 
@@ -15,13 +15,13 @@ from dl_techniques.layers.band_rms_norm import BandRMSNorm
 def test_initialization():
     """Test layer initialization with default and custom parameters."""
     # Test default initialization
-    layer = BandRMSNorm()
+    layer = SphericalBoundRMS()
     assert layer.max_band_width == 0.2
     assert layer.axis == -1
     assert layer.epsilon == 1e-7
 
     # Test custom initialization
-    custom_layer = BandRMSNorm(
+    custom_layer = SphericalBoundRMS(
         max_band_width=0.1,
         axis=1,
         epsilon=1e-6
@@ -35,15 +35,15 @@ def test_input_validation():
     """Test parameter validation during initialization."""
     # Test invalid max_band_width
     with pytest.raises(ValueError, match="max_band_width must be between 0 and 1"):
-        BandRMSNorm(max_band_width=1.5)
+        SphericalBoundRMS(max_band_width=1.5)
     with pytest.raises(ValueError, match="max_band_width must be between 0 and 1"):
-        BandRMSNorm(max_band_width=-0.1)
+        SphericalBoundRMS(max_band_width=-0.1)
 
     # Test invalid epsilon
     with pytest.raises(ValueError, match="epsilon must be positive"):
-        BandRMSNorm(epsilon=0.0)
+        SphericalBoundRMS(epsilon=0.0)
     with pytest.raises(ValueError, match="epsilon must be positive"):
-        BandRMSNorm(epsilon=-1e-7)
+        SphericalBoundRMS(epsilon=-1e-7)
 
 
 def test_shape_handling():
@@ -56,7 +56,7 @@ def test_shape_handling():
 
     for shape in test_shapes:
         # Create new layer for each test to avoid shape conflicts
-        layer = BandRMSNorm()
+        layer = SphericalBoundRMS()
         inputs = tf.random.normal(shape)
         outputs = layer(inputs)
 
@@ -75,7 +75,7 @@ def test_shape_handling():
 
 def test_normalization_bounds():
     """Test that normalized outputs respect the band constraints."""
-    layer = BandRMSNorm(max_band_width=0.2)
+    layer = SphericalBoundRMS(max_band_width=0.2)
     inputs = tf.random.normal((32, 16))
     outputs = layer(inputs)
 
@@ -92,7 +92,7 @@ def test_normalization_bounds():
 
 def test_training():
     """Test that the layer is trainable and gradients flow properly."""
-    layer = BandRMSNorm()
+    layer = SphericalBoundRMS()
     inputs = tf.random.normal((16, 8))
 
     with tf.GradientTape() as tape:
@@ -115,7 +115,7 @@ def test_training():
 
 def test_serialization_and_deserialization():
     """Test layer serialization, deserialization, and config preservation."""
-    original_layer = BandRMSNorm(
+    original_layer = SphericalBoundRMS(
         max_band_width=0.15,
         axis=1,
         epsilon=1e-6
@@ -127,7 +127,7 @@ def test_serialization_and_deserialization():
 
     # Get config and create new layer
     config = original_layer.get_config()
-    new_layer = BandRMSNorm.from_config(config)
+    new_layer = SphericalBoundRMS.from_config(config)
 
     # Verify config preservation
     assert new_layer.max_band_width == original_layer.max_band_width
@@ -147,9 +147,9 @@ def test_model_integration():
     # Flatten the input for proper dense layer processing
     x = keras.layers.Flatten()(inputs)
     x = keras.layers.Dense(16)(x)
-    x = BandRMSNorm(max_band_width=0.1)(x)
+    x = SphericalBoundRMS(max_band_width=0.1)(x)
     x = keras.layers.Dense(8)(x)
-    x = BandRMSNorm(max_band_width=0.2)(x)
+    x = SphericalBoundRMS(max_band_width=0.2)(x)
     outputs = keras.layers.Dense(1)(x)
     model = keras.Model(inputs=inputs, outputs=outputs)
 
@@ -177,7 +177,7 @@ def test_model_integration():
 
 def test_dynamic_batch_size():
     """Test layer behavior with varying batch sizes and dynamic shapes."""
-    layer = BandRMSNorm()
+    layer = SphericalBoundRMS()
 
     # Test with different batch sizes
     batch_sizes = [1, 4, 16, 32]
@@ -222,7 +222,7 @@ def test_higher_dimensional_inputs(
         input_shape: Shape of input tensor
         max_band_width: Maximum allowed deviation from unit norm
     """
-    layer = BandRMSNorm(max_band_width=max_band_width)
+    layer = SphericalBoundRMS(max_band_width=max_band_width)
     inputs = tf.random.normal(input_shape)
     outputs = layer(inputs)
 
@@ -255,7 +255,7 @@ def test_invalid_configurations(config: Dict[str, Any]) -> None:
         config: Dictionary of invalid configuration parameters
     """
     with pytest.raises(ValueError):
-        _ = BandRMSNorm(**config)
+        _ = SphericalBoundRMS(**config)
 
 
 if __name__ == '__main__':

@@ -16,6 +16,7 @@ import numpy as np
 import tensorflow as tf
 from typing import Optional, Union, Tuple
 
+# ---------------------------------------------------------------------
 
 class BaseActivation(keras.layers.Layer):
     """Base class for all activation functions.
@@ -56,6 +57,8 @@ class BaseActivation(keras.layers.Layer):
         """
         return super().get_config()
 
+# ---------------------------------------------------------------------
+
 
 class GELU(BaseActivation):
     """Gaussian Error Linear Unit activation function.
@@ -74,6 +77,8 @@ class GELU(BaseActivation):
         """
         return 0.5 * inputs * (1 + tf.math.erf(inputs / tf.math.sqrt(2.0)))
 
+# ---------------------------------------------------------------------
+
 
 class SiLU(BaseActivation):
     """Sigmoid Linear Unit activation function.
@@ -91,6 +96,8 @@ class SiLU(BaseActivation):
             Tensor with SiLU activation applied.
         """
         return inputs * tf.sigmoid(inputs)
+
+# ---------------------------------------------------------------------
 
 
 class ExpandedActivation(BaseActivation):
@@ -123,6 +130,8 @@ class ExpandedActivation(BaseActivation):
         config = super().get_config()
         return config
 
+# ---------------------------------------------------------------------
+
 
 class xATLU(ExpandedActivation):
     """Expanded ArcTan Linear Unit activation function.
@@ -141,6 +150,8 @@ class xATLU(ExpandedActivation):
         """
         gate = (tf.math.atan(inputs) + np.pi / 2) / np.pi
         return inputs * (gate * (1 + 2 * self.alpha) - self.alpha)
+
+# ---------------------------------------------------------------------
 
 
 class xGELU(ExpandedActivation):
@@ -161,6 +172,8 @@ class xGELU(ExpandedActivation):
         gate = 0.5 * (1 + tf.math.erf(inputs / tf.math.sqrt(2.0)))
         return inputs * (gate * (1 + 2 * self.alpha) - self.alpha)
 
+# ---------------------------------------------------------------------
+
 
 class xSiLU(ExpandedActivation):
     """Expanded Sigmoid Linear Unit activation function.
@@ -179,6 +192,8 @@ class xSiLU(ExpandedActivation):
         """
         gate = tf.sigmoid(inputs)
         return inputs * (gate * (1 + 2 * self.alpha) - self.alpha)
+
+# ---------------------------------------------------------------------
 
 
 def get_activation(activation_name: str) -> BaseActivation:
@@ -209,3 +224,5 @@ def get_activation(activation_name: str) -> BaseActivation:
         )
 
     return activation_class()
+
+# ---------------------------------------------------------------------

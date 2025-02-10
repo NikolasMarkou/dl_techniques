@@ -12,7 +12,7 @@ from keras.api.optimizers import Adam
 from keras.api.metrics import SparseCategoricalAccuracy
 from keras.api.losses import SparseCategoricalCrossentropy
 
-from dl_techniques.layers.band_rms_norm import BandRMSNorm
+from dl_techniques.layers.band_rms_norm import SphericalBoundRMS
 
 @dataclass(frozen=True)
 class ExperimentConfig:
@@ -81,7 +81,7 @@ class NormalizationComparisonModel(Model):
     def _create_normalization(self) -> keras.layers.Layer:
         """Create normalization layer based on specified type."""
         if self.norm_type == "band_rms":
-            return BandRMSNorm(
+            return SphericalBoundRMS(
                 max_band_width=ExperimentConfig.BAND_WIDTH,
                 epsilon=ExperimentConfig.EPSILON,
                 band_regularizer=keras.regularizers.L2(ExperimentConfig.BAND_REGULARIZER)

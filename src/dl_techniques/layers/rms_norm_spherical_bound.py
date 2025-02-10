@@ -176,7 +176,7 @@ from typing import Any, Dict, Optional
 # ---------------------------------------------------------------------
 
 @keras.utils.register_keras_serializable()
-class BandRMSNorm(Layer):
+class SphericalBoundRMS(Layer):
     """Root Mean Square Normalization layer with L2 norm constraints.
 
     This layer implements root mean square normalization that guarantees the output

@@ -44,7 +44,10 @@ import tensorflow as tf
 from typing import Optional, Tuple, Union, Dict, Any
 from keras import initializers, regularizers, constraints, Layer
 
-class BoundedShellRMSNorm(Layer):
+# ---------------------------------------------------------------------
+
+
+class ShellClampRMS(Layer):
     """Root Mean Square Normalization with bounded shell support.
 
     This layer normalizes inputs to lie within a spherical shell of radius [1 - alpha, 1].
@@ -279,3 +282,6 @@ class BoundedShellRMSNorm(Layer):
         }
         base_config = super().get_config()
         return {**base_config, **config}
+
+# ---------------------------------------------------------------------
+

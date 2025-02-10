@@ -12,7 +12,7 @@ from keras.api.optimizers import Adam
 from keras.api.metrics import SparseCategoricalAccuracy
 from keras.api.losses import SparseCategoricalCrossentropy
 
-from dl_techniques.layers.band_rms_norm import BandRMSNorm
+from dl_techniques.layers.band_rms_norm import SphericalBoundRMS
 
 
 @dataclass(frozen=True)
@@ -61,10 +61,10 @@ class BandAnalyzer:
         self.model = model
         self._band_layers = self._find_band_layers()
 
-    def _find_band_layers(self) -> List[BandRMSNorm]:
+    def _find_band_layers(self) -> List[SphericalBoundRMS]:
         """Find all BandRMSNorm layers in the model."""
         return [layer for layer in self.model.layers
-                if isinstance(layer, BandRMSNorm)]
+                if isinstance(layer, SphericalBoundRMS)]
 
     def get_learned_bands(self) -> Dict[str, np.ndarray]:
         """Extract learned band parameters from each BandRMSNorm layer.
@@ -142,7 +142,7 @@ def create_band_model(
             kernel_regularizer=kernel_regularizer,
             input_shape=input_shape
         ),
-        BandRMSNorm(
+        SphericalBoundRMS(
             max_band_width=band_width,
             epsilon=ExperimentConfig.EPSILON,
             band_regularizer=keras.regularizers.L2(ExperimentConfig.BAND_REGULARIZER),
@@ -159,7 +159,7 @@ def create_band_model(
             kernel_initializer='he_normal',
             kernel_regularizer=kernel_regularizer
         ),
-        BandRMSNorm(
+        SphericalBoundRMS(
             max_band_width=band_width,
             epsilon=ExperimentConfig.EPSILON,
             band_regularizer=keras.regularizers.L2(ExperimentConfig.BAND_REGULARIZER),
@@ -175,7 +175,7 @@ def create_band_model(
             kernel_initializer='he_normal',
             kernel_regularizer=kernel_regularizer
         ),
-        BandRMSNorm(
+        SphericalBoundRMS(
             max_band_width=band_width,
             epsilon=ExperimentConfig.EPSILON,
             band_regularizer=keras.regularizers.L2(ExperimentConfig.BAND_REGULARIZER),
