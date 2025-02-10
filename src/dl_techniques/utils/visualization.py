@@ -4,15 +4,69 @@ Visualization utilities for comparing confusion matrices across multiple models.
 This module provides functions for generating and plotting confusion matrix
 comparisons for multiple models in a single figure.
 """
-
+import io
+import keras
+import matplotlib
 import numpy as np
 import seaborn as sns
-from typing import Dict, List
 from pathlib import Path
+from typing import Dict, List
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
-import keras
 
+# ---------------------------------------------------------------------
+
+def collage(
+        images_batch):
+    """
+    Create a collage of image from a batch
+
+    :param images_batch:
+    :return:
+    """
+    shape = images_batch.shape
+    no_images = shape[0]
+    images = []
+    result = None
+    width = np.ceil(np.sqrt(no_images))
+
+    for i in range(no_images):
+        images.append(images_batch[i, :, :, :])
+
+        if len(images) % width == 0:
+            if result is None:
+                result = np.hstack(images)
+            else:
+                tmp = np.hstack(images)
+                result = np.vstack([result, tmp])
+            images.clear()
+    return result
+
+# ---------------------------------------------------------------------
+
+def draw_figure_to_buffer(
+        fig: matplotlib.figure.Figure,
+        dpi: int) -> np.ndarray:
+    """
+    draw figure into numpy buffer
+
+    :param fig: figure to draw
+    :param dpi: dots per inch to draw
+    :return: np.ndarray buffer
+    """
+    # open binary buffer
+    with io.BytesIO() as io_buf:
+        # save figure and reset to start
+        fig.savefig(io_buf, format="raw", dpi=dpi)
+        io_buf.seek(0)
+        # load buffer into numpy and reshape
+        img_arr = \
+            np.reshape(
+                a=np.frombuffer(io_buf.getvalue(), dtype=np.uint8),
+                newshape=(int(fig.bbox.bounds[3]), int(fig.bbox.bounds[2]), -1))
+    return img_arr
+
+# ---------------------------------------------------------------------
 
 def plot_confusion_matrices(
         models: Dict[str, keras.Model],
@@ -88,3 +142,5 @@ def plot_confusion_matrices(
     plt.tight_layout()
     fig.savefig(output_path, bbox_inches='tight', dpi=300)
     plt.close()
+
+# ---------------------------------------------------------------------
