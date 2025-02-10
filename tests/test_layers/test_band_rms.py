@@ -7,7 +7,7 @@ from typing import Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.band_rms_norm import SphericalBoundRMS
+from dl_techniques.layers.rms_norm_spherical_bound import SphericalBoundRMS
 
 # ---------------------------------------------------------------------
 
