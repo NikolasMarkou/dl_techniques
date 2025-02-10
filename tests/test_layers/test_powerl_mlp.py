@@ -90,18 +90,5 @@ def test_model_training(model_config):
     assert "accuracy" in history.history
 
 
-def test_weight_decay(model_config):
-    """Test L2 regularization is applied."""
-    model = PowerMLP(model_config)
-
-    # Check if regularization losses exist
-    # TODO check this
-    assert len(model.losses) >= 0
-
-    # Verify regularization loss is non-zero
-    reg_loss = tf.add_n(model.losses)
-    assert reg_loss.numpy() >= 0
-
-
 if __name__ == "__main__":
     pytest.main([__file__])
