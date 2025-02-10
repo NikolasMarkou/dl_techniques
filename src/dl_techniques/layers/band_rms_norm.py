@@ -11,7 +11,7 @@ Root Mean Square Layer Normalization with Bounded Spherical Shell Constraints -
 
 The implementation is based on two key geometric insights:
 
-1. In high dimensions, the volume of a sphere concentrates near its surface (the "curse of dimensionality")
+1. In high dimensions, the volume of a sphere concentrates near its surface
 2. Creating a bounded shell between radii (1-α) and 1 adds back a degree of freedom while maintaining normalization benefits
 
 ## Core Algorithm
