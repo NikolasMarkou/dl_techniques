@@ -22,11 +22,11 @@ Key Findings and Architectural Details:
    - MNv4-Hybrid: Combines UIB with Mobile MQA
 """
 
-from typing import List, Tuple, Optional, Union, Dict, Any
+
+import keras
 import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
-from tensorflow.keras import regularizers
+from keras import regularizers, layers
+from typing import List, Tuple, Optional, Union, Dict, Any
 
 
 class ModelConfig:

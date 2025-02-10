@@ -62,7 +62,7 @@ References:
 3. "CoShRem: Faithful Digital Shearlet Transforms based on Compactly Supported Shearlets"
 """
 
-
+import keras
 import tensorflow as tf
 from keras import Model
 from dataclasses import dataclass
@@ -105,8 +105,8 @@ class CoShNetConfig:
     shearlet_scales: int = 4
     shearlet_directions: int = 8
     dropout_rate: float = 0.1
-    kernel_regularizer: Optional[tf.keras.regularizers.Regularizer] = None
-    kernel_initializer: tf.keras.initializers.Initializer = tf.keras.initializers.GlorotUniform()
+    kernel_regularizer: Optional[keras.regularizers.Regularizer] = None
+    kernel_initializer: keras.initializers.Initializer = keras.initializers.GlorotUniform()
     epsilon: float = 1e-7
 
 
