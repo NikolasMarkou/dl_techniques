@@ -12,7 +12,7 @@ from keras.api.optimizers import Adam
 from keras.api.metrics import SparseCategoricalAccuracy
 from keras.api.losses import SparseCategoricalCrossentropy
 
-from dl_techniques.layers.band_rms_norm import SphericalBoundRMS
+from dl_techniques.layers.rms_norm_spherical_bound import SphericalBoundRMS
 
 @dataclass(frozen=True)
 class ExperimentConfig:
