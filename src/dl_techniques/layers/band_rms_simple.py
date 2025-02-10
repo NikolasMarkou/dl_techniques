@@ -40,30 +40,36 @@ References:
     (Vershynin, 2018)
 """
 
-from typing import Optional, Tuple, Union, Dict, Any
 import tensorflow as tf
-from keras import Layer
-from keras import initializers
-from keras import regularizers
-from keras import constraints
-from keras import backend
+from typing import Optional, Tuple, Union, Dict, Any
+from keras import initializers, regularizers, constraints, Layer
 
-
-class RMSNorm(Layer):
+class BoundedShellRMSNorm(Layer):
     """Root Mean Square Normalization with bounded shell support.
 
-    This layer normalizes inputs to lie within a spherical shell of radius [1-α, 1],
-    using RMS statistics and accounting for high-dimensional geometric effects.
+    This layer normalizes inputs to lie within a spherical shell of radius [1 - alpha, 1].
+    Using RMS statistics helps it adapt well to high-dimensional data.
 
-    The normalization maintains running statistics and automatically adapts to the
-    input dimensionality, making it particularly effective for deep networks.
+    Key aspects:
+      - Preserves directional information
+      - Outputs are guaranteed to lie in [1 - alpha, 1] after normalization (in norm)
+      - Smooth and differentiable (except for the hard clamp)
+      - Equivariant to input scaling
+      - Maintains running statistics for inference
+
+    References:
+    [1] Root Mean Square Layer Normalization (Zhang & Sennrich, 2019)
+        https://arxiv.org/abs/1910.07467
+    [2] Geometric Deep Learning: Grids, Groups, Graphs, Geodesics, and Gauges
+        (Bronstein et al., 2021)
+    [3] High-Dimensional Probability: An Introduction with Applications in Data Science
+        (Vershynin, 2018)
 
     Args:
         axis: Integer or list of integers, the axes to normalize across.
             Typically -1 for the feature axis. Defaults to -1.
         alpha: Float in (0, 1), controls shell thickness. Smaller values enforce
-            stricter normalization. For high dimensions (d > 100), values around
-            1/sqrt(d) often work well. Defaults to 0.1.
+            stricter normalization. Defaults to 0.1.
         epsilon: Small float for numerical stability. Defaults to 1e-6.
         center: If True, add learnable offset (beta). Defaults to True.
         scale: If True, add learnable scale (gamma). Defaults to True.
@@ -75,25 +81,25 @@ class RMSNorm(Layer):
         beta_regularizer: Optional regularizer for beta.
         gamma_constraint: Optional constraint for gamma.
         beta_constraint: Optional constraint for beta.
-        **kwargs: Base layer keyword arguments.
+        **kwargs: Other keyword arguments for the base Layer class.
     """
 
     def __init__(
-            self,
-            axis: Union[int, list[int]] = -1,
-            alpha: float = 0.1,
-            epsilon: float = 1e-6,
-            center: bool = True,
-            scale: bool = True,
-            momentum: float = 0.99,
-            moving_mean_initializer: Union[str, initializers.Initializer] = "zeros",
-            gamma_initializer: Union[str, initializers.Initializer] = "ones",
-            beta_initializer: Union[str, initializers.Initializer] = "zeros",
-            gamma_regularizer: Optional[regularizers.Regularizer] = None,
-            beta_regularizer: Optional[regularizers.Regularizer] = None,
-            gamma_constraint: Optional[constraints.Constraint] = None,
-            beta_constraint: Optional[constraints.Constraint] = None,
-            **kwargs: Any,
+        self,
+        axis: Union[int, list[int]] = -1,
+        alpha: float = 0.1,
+        epsilon: float = 1e-6,
+        center: bool = True,
+        scale: bool = True,
+        momentum: float = 0.99,
+        moving_mean_initializer: Union[str, initializers.Initializer] = "zeros",
+        gamma_initializer: Union[str, initializers.Initializer] = "ones",
+        beta_initializer: Union[str, initializers.Initializer] = "zeros",
+        gamma_regularizer: Optional[regularizers.Regularizer] = None,
+        beta_regularizer: Optional[regularizers.Regularizer] = None,
+        gamma_constraint: Optional[constraints.Constraint] = None,
+        beta_constraint: Optional[constraints.Constraint] = None,
+        **kwargs: Any,
     ):
         super().__init__(**kwargs)
 
@@ -110,7 +116,6 @@ class RMSNorm(Layer):
         self.scale = scale
         self.momentum = momentum
 
-        # Initialize parameter creators
         self.moving_mean_initializer = initializers.get(moving_mean_initializer)
         self.gamma_initializer = initializers.get(gamma_initializer)
         self.beta_initializer = initializers.get(beta_initializer)
@@ -122,43 +127,27 @@ class RMSNorm(Layer):
         self.supports_masking = True
 
     def _validate_axis(self, ndims: int) -> list[int]:
-        """Validates and converts axis parameter to list of positive indices.
-
-        Args:
-            ndims: Number of dimensions in input tensor.
-
-        Returns:
-            List of positive axis indices.
-
-        Raises:
-            ValueError: If any axis is invalid.
-        """
+        """Validates and converts axis parameter to list of positive indices."""
         return [
-            axis if axis >= 0 else axis + ndims
-            for axis in self.axis
+            ax if ax >= 0 else ax + ndims
+            for ax in self.axis
         ]
 
     def build(self, input_shape: tf.TensorShape) -> None:
-        """Creates the layer weights and computed attributes.
-
-        Args:
-            input_shape: Shape of input tensor.
-
-        Raises:
-            ValueError: If input shape is invalid.
-        """
+        """Creates the layer weights and computed attributes."""
         ndims = len(input_shape)
         reduction_axes = self._validate_axis(ndims)
 
-        # Compute parameter shape - broadcast across normalized axes
+        # param_shape for gamma and beta: they should match the normalized dimensions
+        # i.e. for each axis in reduction_axes, we store that dimension size.
         param_shape = [1] * ndims
         for i in range(ndims):
-            if i not in reduction_axes:
+            if i in reduction_axes:
                 param_shape[i] = input_shape[i]
 
-        # Count normalized dimensions for alpha scaling
-        normalized_dims = sum(input_shape[axis] for axis in reduction_axes)
-        self.dim_adjusted_alpha = self.alpha / tf.sqrt(tf.cast(normalized_dims, tf.float32))
+        # Optionally, if you need 'd' (the total number of normalized features):
+        #   normalized_dims = reduce(operator.mul, [int(input_shape[a]) for a in reduction_axes], 1)
+        # In this version, we do not further scale alpha by sqrt(d).
 
         # Create trainable parameters if needed
         if self.scale:
@@ -170,6 +159,8 @@ class RMSNorm(Layer):
                 constraint=self.gamma_constraint,
                 trainable=True,
             )
+        else:
+            self.gamma = None
 
         if self.center:
             self.beta = self.add_weight(
@@ -180,16 +171,17 @@ class RMSNorm(Layer):
                 constraint=self.beta_constraint,
                 trainable=True,
             )
+        else:
+            self.beta = None
 
-        # Create moving statistics
-        # We track both RMS and length statistics for better adaptation
+        # Create moving statistics (RMS and length)
+        # These also match param_shape so that we can broadcast them properly.
         self.moving_rms = self.add_weight(
             name="moving_rms",
             shape=param_shape,
             initializer=self.moving_mean_initializer,
             trainable=False,
         )
-
         self.moving_length = self.add_weight(
             name="moving_length",
             shape=param_shape,
@@ -200,84 +192,50 @@ class RMSNorm(Layer):
         self.built = True
 
     def _compute_statistics(self, inputs: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-        """Computes RMS and length statistics efficiently.
-
-        Args:
-            inputs: Input tensor.
-
-        Returns:
-            Tuple of (RMS statistics, length statistics).
-        """
-        # Compute squares once for efficiency
+        """Computes RMS and vector length statistics along self.axis."""
         squares = tf.square(inputs)
 
-        # Compute RMS (root mean square)
+        # RMS: sqrt(mean of squares)
         mean_squares = tf.reduce_mean(squares, axis=self.axis, keepdims=True)
         rms = tf.sqrt(mean_squares + self.epsilon)
 
-        # Compute lengths
+        # Vector norm (length)
         sum_squares = tf.reduce_sum(squares, axis=self.axis, keepdims=True)
         lengths = tf.sqrt(sum_squares + self.epsilon)
 
         return rms, lengths
 
     def _normalize_to_shell(
-            self,
-            inputs: tf.Tensor,
-            rms: tf.Tensor,
-            lengths: tf.Tensor
+        self,
+        inputs: tf.Tensor,
+        rms: tf.Tensor,
+        lengths: tf.Tensor
     ) -> tf.Tensor:
-        """Normalizes inputs to lie within the [1-α, 1] shell.
-
-        Args:
-            inputs: Input tensor.
-            rms: RMS statistics.
-            lengths: Length statistics.
-
-        Returns:
-            Normalized tensor.
-        """
-        # Initial RMS normalization
+        """Normalizes inputs to lie within the [1 - alpha, 1] shell."""
+        # 1) RMS normalize
         outputs = inputs / rms
 
-        # Compute current lengths after RMS norm
+        # 2) Compute new lengths after RMS normalization
         normed_lengths = lengths / rms
 
-        # Scale factor to map into [1-α, 1] shell
-        # Using smooth min/max for better gradients
-        min_length = 1.0 - self.dim_adjusted_alpha
+        # 3) Clamp the normed_lengths to [1 - alpha, 1], then scale outputs accordingly
+        min_length = 1.0 - self.alpha
         max_length = 1.0
 
-        # Compute scale factor using softplus for smoothness
-        scale_factor = tf.minimum(
-            tf.maximum(
-                normed_lengths,
-                min_length + self.epsilon
-            ),
-            max_length
-        ) / tf.maximum(normed_lengths, self.epsilon)
+        # Hard clamp
+        clamped_length = tf.clip_by_value(normed_lengths, min_length, max_length)
+
+        # scale_factor = (clamped_length / normed_lengths)
+        scale_factor = clamped_length / tf.maximum(normed_lengths, self.epsilon)
 
         return outputs * scale_factor
 
-    def call(
-            self,
-            inputs: tf.Tensor,
-            training: Optional[bool] = None
-    ) -> tf.Tensor:
-        """Forward pass for RMS normalization.
-
-        Args:
-            inputs: Input tensor.
-            training: Boolean indicating whether in training mode.
-
-        Returns:
-            Normalized tensor.
-        """
-        # Compute current statistics
+    def call(self, inputs: tf.Tensor, training: Optional[bool] = None) -> tf.Tensor:
+        """Forward pass for RMS normalization with bounded shell."""
         rms, lengths = self._compute_statistics(inputs)
 
         if training:
-            # Update moving statistics with momentum
+            # Update moving stats
             self.moving_rms.assign(
                 self.momentum * self.moving_rms +
                 (1.0 - self.momentum) * rms
@@ -287,14 +245,14 @@ class RMSNorm(Layer):
                 (1.0 - self.momentum) * lengths
             )
         else:
-            # Use moving statistics in inference mode
+            # Use moving stats in inference
             rms = self.moving_rms
             lengths = self.moving_length
 
-        # Normalize to bounded shell
+        # Normalize to the shell
         outputs = self._normalize_to_shell(inputs, rms, lengths)
 
-        # Apply trainable parameters if needed
+        # Apply optional scale and offset
         if self.scale:
             outputs = outputs * self.gamma
         if self.center:
@@ -303,11 +261,7 @@ class RMSNorm(Layer):
         return outputs
 
     def get_config(self) -> Dict[str, Any]:
-        """Returns the config of the layer.
-
-        Returns:
-            Config dictionary.
-        """
+        """Returns the config of the layer."""
         config = {
             "axis": self.axis,
             "alpha": self.alpha,
@@ -315,9 +269,7 @@ class RMSNorm(Layer):
             "center": self.center,
             "scale": self.scale,
             "momentum": self.momentum,
-            "moving_mean_initializer": initializers.serialize(
-                self.moving_mean_initializer
-            ),
+            "moving_mean_initializer": initializers.serialize(self.moving_mean_initializer),
             "gamma_initializer": initializers.serialize(self.gamma_initializer),
             "beta_initializer": initializers.serialize(self.beta_initializer),
             "gamma_regularizer": regularizers.serialize(self.gamma_regularizer),
