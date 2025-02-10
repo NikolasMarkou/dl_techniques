@@ -1,3 +1,84 @@
+"""
+Convolutional Transformer Implementation
+=====================================
+
+A specialized vision transformer architecture that combines convolutional operations
+with transformer attention mechanisms for image processing tasks.
+
+Key Components
+------------
+1. ConvolutionalTransformerBlock:
+   - Core building block combining convolution and self-attention
+   - Follows layer ordering: Conv -> Norm -> Activation
+   - Uses grouped convolutions for Q,K,V projections
+   - Incorporates residual connections and layer normalization
+   - Features configurable MLP with customizable activation
+
+2. Architecture Flow:
+   Input -> Conv Projection -> [ConvTransformer Blocks] -> Global Pool -> Classification
+
+Technical Details
+---------------
+- Compatible with Keras 3.8.0 and TensorFlow 2.18.0 backend
+- Input: 4D tensor (batch_size, height, width, channels)
+- Output: Class probabilities for num_classes
+- Serializable via @keras.utils.register_keras_serializable()
+- Supports model saving in .keras format
+
+Key Features
+----------
+- L2 regularization on all learnable weights (default rate: 1e-3)
+- Proper layer normalization ordering
+- Configurable attention mechanism with dropout
+- Customizable activation functions
+- Robust error handling for dimension mismatches
+
+Best Practices
+------------
+1. Initialization:
+   - Validates dimensions compatibility
+   - Uses proper kernel initializers
+   - Implements L2 regularization
+
+2. Layer Configuration:
+   - Follows: Conv -> Norm -> Activation pattern
+   - Uses grouped convolutions for efficiency
+   - Implements residual connections
+
+3. Implementation:
+   - Full type hinting
+   - Comprehensive error handling
+   - Proper serialization support
+   - Memory-efficient tensor reshaping
+
+Usage Example
+-----------
+>>> model = create_convolutional_transformer_model(
+...     input_shape=(224, 224, 3),
+...     num_classes=1000,
+...     num_blocks=6,
+...     dim=256,
+...     num_heads=8
+... )
+
+Testing
+------
+Compatible with pytest framework:
+- Unit tests for layer operations
+- Integration tests for model building
+- Serialization/deserialization tests
+- Shape validation tests
+
+References
+---------
+- Layer Normalization: https://arxiv.org/abs/1607.06450
+- Vision Transformers: https://arxiv.org/abs/2010.11929
+- Convolutional Attention: https://arxiv.org/abs/2103.02907
+
+Note: This implementation prioritizes code clarity and maintainability while
+following Keras best practices for custom layer development.
+"""
+
 import keras
 import tensorflow as tf
 from typing import Optional, Tuple, Union, Callable
