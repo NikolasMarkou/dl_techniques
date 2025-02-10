@@ -2,6 +2,14 @@
 
 A versatile, modern library providing **advanced deep learning layers, initializers, constraints,** and **analysis tools** for Keras/TensorFlow. Whether you're researching new architectures, experimenting with custom constraints, or analyzing your network activations, **DL Techniques** brings you cutting-edge components to accelerate and enhance your workflows.
 
+Copyright (C) 2025 
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 ---
 
 ## Table of Contents
@@ -20,54 +28,55 @@ A versatile, modern library providing **advanced deep learning layers, initializ
 
 ## Key Features
 
-- **Advanced Layers**  
-  Includes custom layers like:
-  - **Gated MLPs**, **Capsule Networks**, **Complex Convolutions**  
-  - **Adaptive Temperature Softmax**, **Depthwise Haar Wavelet**, **BatchConditionalOutput**  
-  - **Convolutional Block Attention Modules (CBAM)**  
-  - **Kolmogorov-Arnold Networks (KAN)**  
-  - **Differential Transformers**, and more...
+- **Advanced Neural Network Layers**
+  - **Attention Mechanisms**: Hopfield Attention, Non-Local Attention, Differential Transformers
+  - **Normalization**: RMS Norm, Global Response Norm, Shell Clamp, Spherical Bound
+  - **Vision**: CBAM (Convolutional Block Attention Module), ConvNeXt, CLAHE
+  - **Complex Networks**: Complex Conv2D, Complex Dense
+  - **Modern Architectures**: Capsule Networks, Gated MLPs, KAN (Kolmogorov-Arnold Networks)
+  - **Special Layers**: RBF, Mish Activation, Canny Edge Detection, Shearlet Transform
 
-- **Custom Initializers**  
-  - **HaarWaveletInitializer** for wavelet decomposition  
-  - **OrthonormalInitializer** for stable centroid initialization  
-  - **Rayleigh-based** magnitude-phase initializers for complex layers
+- **Regularization & Optimization**
+  - **Advanced Regularizers**: SRIP, Soft Orthogonal, Binary/Tri-State Preferences
+  - **Training Utilities**: Deep Supervision, Warmup Scheduling
+  - **Stochastic Techniques**: Stochastic Depth, Selective Gradients
 
-- **Constraints & Regularizers**  
-  - **ValueRangeConstraint** for bounding weights within a min-max range  
-  - **SoftOrthogonalConstraintRegularizer** to gently encourage orthogonal transformations
+- **Analysis & Visualization**
+  - **Model Analysis**: Weight Analysis, Activation Distribution
+  - **Visualization**: Advanced plotting utilities
+  - **Logging**: Custom logging infrastructure
 
-- **Analysis Tools**  
-  - **ActivationDistributionAnalyzer** for analyzing and visualizing activation distributions  
-  - **Plotting** utilities for histograms, heatmaps, and more  
-  - **Activation stats** (mean, std, sparsity, zero-ratio, percentiles)
-
-- **Differentiable Clustering / K-Means**  
-  - **KMeansLayer** for end-to-end trainable clustering
-
-- **Out-of-Distribution & Other Utilities**  
-  - **MaxLogitNorm**, **DecoupledMaxLogit** for OOD detection  
-  - **Global Response Normalization**, **CLAHE**, **GaussianFilter** layers
+- **Complete Model Implementations**
+  - Depth Anything
+  - CoshNet
+  - MobileNet v4
+  - CapsNet
 
 ---
 
 ## Installation
 
-1. **Clone** this repository or include it as a submodule:
+1. **Clone** this repository:
    ```bash
    git clone https://github.com/your-username/dl_techniques.git
    ```
-2. **Install** using `pip` (in editable mode if you want to develop):
+
+2. **Install** dependencies:
    ```bash
-   pip install -e /path/to/dl_techniques
+   pip install -r requirements.txt
    ```
-3. Make sure the dependencies in `setup.py` are satisfied:
-   - `keras`
-   - `tensorflow`
-   - `numpy`
-   - `pytest`
-   - `jupyter`  
-   *(For development, ensure `pylint` is also installed.)*
+
+3. **Install** the package (development mode):
+   ```bash
+   pip install -e .
+   ```
+
+**Requirements**:
+- Python ≥ 3.11
+- Keras ≥ 3.8.0
+- TensorFlow ≥ 2.18.0
+- PyTest (for testing)
+- Additional dependencies in `requirements.txt`
 
 ---
 
@@ -76,18 +85,23 @@ A versatile, modern library providing **advanced deep learning layers, initializ
 ```python
 import tensorflow as tf
 from dl_techniques.layers.adaptive_softmax import AdaptiveTemperatureSoftmax
+from dl_techniques.layers.global_response_norm import GlobalResponseNorm
 
-# Sample usage in a Keras model
+# Create a model with advanced layers
 inputs = tf.keras.Input(shape=(64,))
-x = tf.keras.layers.Dense(128, activation='relu')(inputs)
-x = AdaptiveTemperatureSoftmax()(x)  # Adapts temperature based on entropy
+x = tf.keras.layers.Dense(128)(inputs)
+x = GlobalResponseNorm()(x)
+x = AdaptiveTemperatureSoftmax()(x)
 model = tf.keras.Model(inputs, x)
-model.compile(optimizer='adam', loss='mse')
 
-print(model.summary())
+# Use provided training utilities
+from dl_techniques.optimization.warmup_schedule import WarmupSchedule
+model.compile(
+    optimizer='adam',
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
 ```
-
-That's it! You can now experiment with other advanced layers, constraints, or initializers from this library.
 
 ---
 
@@ -95,180 +109,187 @@ That's it! You can now experiment with other advanced layers, constraints, or in
 
 ```
 dl_techniques/
-├─ analysis/
-│  └─ activation_activity.py      # ActivationDistributionAnalyzer & utilities
-├─ constraints/
-│  └─ value_range_constraint.py   # ValueRangeConstraint class
-├─ initializers/
-│  ├─ haar_wavelet_initializer.py # HaarWaveletInitializer & related
-│  └─ orthonormal_initializer.py  # OrthonormalInitializer
-├─ layers/
-│  ├─ adaptive_softmax.py         # AdaptiveTemperatureSoftmax
-│  ├─ batch_conditional_layer.py  # BatchConditionalOutputLayer
-│  ├─ canny.py                    # Edge detection (Canny)
-│  ├─ capsules.py                 # CapsNet layers, margin_loss, etc.
-│  ├─ clahe.py                    # Contrast Limited Adaptive Histogram Eq
-│  ├─ complex_layers.py           # ComplexConv2D, ComplexDense, etc.
-│  ├─ conditional_output.py       # Another conditional output layer
-│  ├─ conv2d_builder.py           # Helper wrapper for convolution ops
-│  ├─ convnext_block.py           # ConvNext style block
-│  ├─ ...
-│  └─ gaussian_filter.py          # GaussianFilter layer
-├─ ...
-└─ setup.py
+├─ src/
+│  └─ dl_techniques/
+│     ├─ analysis/            # Analysis tools
+│     ├─ constraints/         # Custom constraints
+│     ├─ initializers/        # Weight initializers
+│     ├─ layers/             # Neural network layers
+│     ├─ losses/             # Custom loss functions
+│     ├─ models/             # Complete model implementations
+│     ├─ optimization/       # Training optimizations
+│     ├─ regularizers/       # Custom regularizers
+│     ├─ utils/              # Utility functions
+│     └─ visualization/      # Visualization tools
+├─ tests/                    # Comprehensive test suite
+│  ├─ test_layers/
+│  ├─ test_losses/
+│  ├─ test_regularizers/
+│  └─ test_utils/
+├─ docs/                     # Documentation
+├─ experiments/              # Example experiments
+├─ pyproject.toml           # Project configuration
+├─ requirements.txt         # Dependencies
+├─ setup.py                # Package setup
+└─ LICENSE                 # GNU GPL v3
 ```
 
-- **`analysis`**  
-  Tools for analyzing neural network behavior, e.g., activation distributions.
+### Key Components
 
-- **`constraints`**  
-  Custom constraints for bounding or clipping weights.
+- **layers/**: Advanced neural network layers including:
+  - Attention mechanisms (Hopfield, Non-Local, Transformer)
+  - Normalization layers (RMS, GRN, Shell Clamp)
+  - Vision layers (CBAM, ConvNeXt, CLAHE)
+  - Complex network layers
+  - Modern architectures (Capsules, Gated MLP, KAN)
 
-- **`initializers`**  
-  Includes specialized initializers like Haar wavelets, orthonormal seeds, etc.
+- **models/**: Complete model implementations:
+  - Depth Anything
+  - CoshNet
+  - MobileNet v4
+  - CapsNet
 
-- **`layers`**  
-  Advanced custom layers—Capsules, Gated MLPs, BatchConditional, attention modules, and more.
+- **experiments/**: Real-world usage examples:
+  - Band RMS experiments
+  - KMeans clustering
+  - RMS normalization studies
+  - Activation function analyses
 
 ---
 
 ## Feature Highlights
 
-1. **ActivationDistributionAnalyzer**
-   - Quickly compute mean, std, sparsity, ratio of zeros
-   - Create distribution plots & heatmaps
-   - Save results for offline analysis
+1. **Advanced Normalization Techniques**
+   - RMS Norm with Spherical Bounds
+   - Global Response Normalization
+   - Shell Clamping
+   - Conditional Batch Normalization
 
-2. **ValueRangeConstraint**
-   - Constrain layer weights to a `[min_value, max_value]` range
-   - Prevent exploding or vanishing weights
-   - Gradient clipping option for stability
+2. **Attention Mechanisms**
+   - Hopfield Attention
+   - Non-Local Attention
+   - Differential Transformers
+   - Convolutional Block Attention
 
-3. **HaarWaveletInitializer**
-   - Initialize convolution weights as Haar wavelet filters
-   - Perfect for wavelet-based transforms or compressed representations
+3. **Modern Architecture Components**
+   - Capsule Networks
+   - Kolmogorov-Arnold Networks
+   - Gated MLPs
+   - ConvNeXt Blocks
 
-4. **Complex Layers**
-   - **ComplexConv2D**, **ComplexDense**, **ComplexReLU**
-   - Robust initialization (Rayleigh magnitude, uniform phase)
-   - Perfect for signal processing, wave-based PDEs, or general complex domain tasks
+4. **Specialized Layers**
+   - Shearlet Transform
+   - Canny Edge Detection
+   - Complex-valued Operations
+   - RBF Networks
 
-5. **CLAHE (Contrast Limited Adaptive Histogram Equalization)**
-   - Enhance local contrast in images
-   - Trainable mapping kernel for further fine-tuning
-   - Straightforward drop-in for image preprocessing layers
-
-6. **Differential Transformers**
-   - Weighted attention with entropic constraints
-   - Scalability with large contexts
-   - Out-of-distribution robust design
-
-7. **KMeansLayer** (Differentiable K-means)
-   - End-to-end clustering integrated into your network
-   - Repulsion forces to avoid centroid collapse
-   - Useful for image segmentation, attention grouping, or unsupervised tasks
+5. **Training Optimizations**
+   - Deep Supervision
+   - Warmup Scheduling
+   - Stochastic Depth
+   - Selective Gradients
 
 ---
 
 ## Usage Examples
 
-1. **Analyze Model Activations**
+1. **Using Advanced Normalization**
 
 ```python
-from dl_techniques.analysis.activation_activity import ActivationDistributionAnalyzer
-from pathlib import Path
+from dl_techniques.layers.rms_norm_spherical_bound import RMSNormSphericalBound
+from dl_techniques.layers.global_response_norm import GlobalResponseNorm
 
-analyzer = ActivationDistributionAnalyzer(model)
-stats = analyzer.compute_activation_stats(x_test)
-analyzer.plot_activation_distributions(x_test, save_path=Path("./analysis_results"))
-```
-Generates distribution plots, heatmaps, and text-based stats.
+# Apply spherical bound RMS normalization
+x = RMSNormSphericalBound()(inputs)
 
-2. **Use a Custom Weight Constraint**
-
-```python
-from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
-
-# Constrain weights between [0.01, 1.0] with gradient clipping
-constraint = ValueRangeConstraint(min_value=0.01, max_value=1.0, clip_gradients=True)
-
-model = tf.keras.Sequential([
-    tf.keras.layers.Dense(64, kernel_constraint=constraint),
-    ...
-])
+# Add global response normalization
+x = GlobalResponseNorm()(x)
 ```
 
-3. **Wavelet-Based Depthwise Convolution**
+2. **Implementing Attention**
 
 ```python
-from dl_techniques.initializers.haar_wavelet_initializer import create_haar_depthwise_conv2d
+from dl_techniques.layers.hopfield_attention import HopfieldAttention
+from dl_techniques.layers.convolutional_block_attention_module import CBAM
 
-layer = create_haar_depthwise_conv2d(
-    input_shape=(128, 128, 3),
-    channel_multiplier=4,
-    scale=1.0,
-    trainable=False
-)
+# Add Hopfield attention
+x = HopfieldAttention(heads=8)(inputs)
+
+# Apply CBAM
+x = CBAM(reduction_ratio=16)(x)
 ```
-Implements a Haar wavelet transform for input images.
 
-4. **Complex-Valued Layers**
+3. **Using Complex Layers**
 
 ```python
-from dl_techniques.layers.complex_layers import ComplexConv2D
+from dl_techniques.layers.complex_layers import ComplexConv2D, ComplexDense
 
-inputs = tf.keras.Input(shape=(128, 128, 2))  # Real and Imag channels
-x = ComplexConv2D(filters=16, kernel_size=3)(inputs)
-model = tf.keras.Model(inputs, x)
+# Create complex-valued network
+x = ComplexConv2D(filters=32, kernel_size=3)(inputs)
+x = ComplexDense(units=64)(x)
+```
+
+4. **Advanced Training**
+
+```python
+from dl_techniques.optimization.deep_supervision import DeepSupervision
+from dl_techniques.optimization.warmup_schedule import WarmupSchedule
+
+# Configure training
+scheduler = WarmupSchedule(warmup_steps=1000)
+supervisor = DeepSupervision(depth=3)
 ```
 
 ---
 
 ## Testing
 
-1. **Run Tests**  
-   ```bash
-   pytest
-   ```
-2. **Lint & Style Checks** (optional, requires `pylint`)  
-   ```bash
-   pylint src/dl_techniques
-   ```
+Run the comprehensive test suite:
 
-We use `pytest` for unit tests. The default test suite covers constraints, initializers, layers, and analysis modules.
+```bash
+pytest tests/
+```
+
+Test coverage includes:
+- Layer functionality
+- Loss computations
+- Regularizer behavior
+- Utility functions
+- End-to-end model tests
 
 ---
 
 ## Contributing
 
-Contributions are welcome! If you want to add a feature or fix a bug:
+1. Fork & clone the repository
+2. Create a feature branch
+3. Implement changes with tests
+4. Submit a pull request
 
-1. **Fork & Clone** this repository
-2. **Create a Feature Branch** (`git checkout -b feature/new-stuff`)
-3. **Add Tests** for your changes
-4. **Open a Pull Request** on the main repo
-
-Please ensure your code passes `pytest` and meets style guidelines.
+**Requirements**:
+- All tests must pass
+- Type hints required
+- Sphinx docstrings required
+- Follow layer normalization order
+- Proper kernel initialization
+- Error handling
+- Pre-commit hooks (see `.pre-commit-config.yaml`)
 
 ---
 
 ## License
 
-[MIT License](LICENSE) © 2025 Nikolas Markou
+GNU General Public License v3.0 - see [LICENSE](LICENSE) for details.
 
 ---
 
 ## References
 
-- **Bishop, C.M.** (1994). _Mixture Density Networks._  
-- **Sabour, S. et al.** (2017). _Dynamic Routing Between Capsules._  
-- **Trabelsi, C. et al.** (2018). _Deep Complex Networks._  
-- **Woo, S. et al.** (2018). _CBAM: Convolutional Block Attention Module._  
-- **Liu, Z. et al.** (2022). _A ConvNet for the 2020s (ConvNeXt)._  
-- **Ramsauer, H. et al.** (2020). _Hopfield Networks is All You Need._  
-- **Kolmogorov, A.** (1957). _On the representation of continuous functions._  
-- **Arnold, V.** (1963). _On functions of three variables._  
+- **Bishop, C.M.** (1994). _Mixture Density Networks._
+- **Sabour, S. et al.** (2017). _Dynamic Routing Between Capsules._
+- **Trabelsi, C. et al.** (2018). _Deep Complex Networks._
+- **Woo, S. et al.** (2018). _CBAM: Convolutional Block Attention Module._
+- **Liu, Z. et al.** (2022). _A ConvNet for the 2020s (ConvNeXt)._
+- **Ramsauer, H. et al.** (2020). _Hopfield Networks is All You Need._
 
-For a full list of references and extended documentation, see the docstrings in `analysis/`, `constraints/`, `initializers/`, and `layers/`. 
-
-Enjoy exploring the **DL Techniques** library for your next advanced deep learning project!
+For extended documentation, see the docstrings and `docs/` directory.
