@@ -1,15 +1,53 @@
 """
 Hierarchical MLP (hMLP) Stem for Vision Transformers
+==================================================
 
 This module implements the hierarchical MLP stem as described in
 "Three things everyone should know about Vision Transformers" by Touvron et al.
 
-Key features:
-1. Processes each patch independently (no information sharing between patches)
-2. Progressively increases patch size from 2×2 → 4×4 → 8×8 → 16×16
-3. Compatible with masked self-supervised learning methods
-4. Minimal computational overhead (<1% increase in FLOPs)
-5. Available with BatchNorm or LayerNorm variants
+PAPER OVERVIEW:
+--------------
+The paper introduces three key insights about Vision Transformers:
+1. Parallelizing ViT layers can improve efficiency without affecting accuracy
+2. Fine-tuning only attention layers is sufficient for adaptation
+3. Using hierarchical MLP stems improves compatibility with masked self-supervised learning
+
+HMLP STEM DESIGN:
+---------------
+The hMLP stem is a patch pre-processing technique that:
+- Processes each patch independently (no information leakage between patches)
+- Progressively processes patches from 2×2 → 4×4 → 8×8 → 16×16
+- Uses linear projections with normalization and non-linearity at each stage
+- Has minimal computational overhead (<1% increase in FLOPs vs. standard ViT)
+
+KEY ADVANTAGES:
+-------------
+1. Compatible with Masked Self-supervised Learning:
+   - Unlike conventional convolutional stems which cause information leakage between patches
+   - Works with BeiT, MAE, and other mask-based approaches
+   - Masking can be applied either before or after the stem with identical results
+
+2. Performance Benefits:
+   - Supervised learning: ~0.3% accuracy improvement over standard ViT
+   - BeiT pre-training: +0.4% accuracy improvement over linear projection
+   - On par with the best convolutional stems for supervised learning
+
+3. Implementation:
+   - Uses convolutions with matching kernel size and stride for efficiency
+   - Each patch is processed independently despite using convolutional layers
+   - Works with both BatchNorm (better performance) and LayerNorm (stable for small batches)
+
+EXPERIMENTAL RESULTS:
+------------------
+From the paper:
+- Supervised ViT-B with Linear stem: 82.2% top-1 accuracy on ImageNet
+- Supervised ViT-B with hMLP stem: 82.5% top-1 accuracy
+- BeiT+FT ViT-B with Linear stem: 83.1% top-1 accuracy
+- BeiT+FT ViT-B with hMLP stem: 83.4% top-1 accuracy
+
+When used with BeiT, existing convolutional stems show no improvement (83.0%)
+while hMLP stem provides significant gains, demonstrating its effectiveness
+for masked self-supervised learning approaches.
 """
 
 import keras
