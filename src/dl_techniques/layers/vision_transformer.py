@@ -11,7 +11,9 @@
 
 ## Overview
 
-This implementation provides a modular Vision Transformer (ViT) layer based on the architecture proposed in "An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale" (Dosovitskiy et al., 2020). The implementation follows Keras best practices and includes comprehensive type hinting and documentation.
+This implementation provides a modular Vision Transformer (ViT) layer based on the architecture proposed in
+"An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale" (Dosovitskiy et al., 2020).
+The implementation follows Keras best practices and includes comprehensive type hinting and documentation.
 
 ## Theoretical Background
 
