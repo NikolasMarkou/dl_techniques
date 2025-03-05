@@ -59,7 +59,7 @@ from typing import List, Tuple, Union, Dict, Optional, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from .mish import Mish, ScaledMish
+from .mish import Mish, SaturatedMish
 
 
 # ---------------------------------------------------------------------
@@ -119,7 +119,7 @@ def activation_wrapper(activation: Union[Layer, str] = "linear") -> keras.layers
     if activation in ["mish"]:
         x = Mish()
     elif activation in ["scaled_mish"]:
-        x = ScaledMish(alpha=2.0)
+        x = SaturatedMish(alpha=2.0)
     elif activation in ["leakyrelu", "leaky_relu"]:
         x = keras.layers.LeakyReLU(alpha=0.3)
     elif activation in ["leakyrelu_01", "leaky_relu_01"]:

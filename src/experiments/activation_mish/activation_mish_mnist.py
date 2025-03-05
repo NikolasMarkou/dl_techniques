@@ -25,7 +25,7 @@ import seaborn as sns
 from scipy import stats
 from dataclasses import dataclass
 
-from dl_techniques.layers.mish import Mish,ScaledMish
+from dl_techniques.layers.mish import Mish,SaturatedMish
 
 
 # ---------------------------------------------------------------------
@@ -77,7 +77,7 @@ class ActivationExperiment:
         return {
             'gelu': gelu,
             'mish': Mish(),
-            'scaled_mish': ScaledMish(alpha=2.0)
+            'scaled_mish': SaturatedMish(alpha=2.0)
         }
 
     def create_model(self, activation: Callable) -> keras.Model:

@@ -52,55 +52,66 @@ class Mish(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 @keras.utils.register_keras_serializable()
-class ScaledMish(keras.layers.Layer):
-    """Scaled Mish activation function.
+class SaturatedMish(keras.layers.Layer):
+    """ SaturatedMish activation function with continuous transition at alpha.
 
-    A variant of Mish that smoothly saturates at ±alpha. The function is computed as:
-    f(x) = α * tanh(mish(x)/α), where mish(x) = x * tanh(softplus(x))
+    The function behaves as follows:
+    - For x <= alpha: f(x) = x * tanh(softplus(x)) (standard Mish)
+    - For x > alpha: f(x) smoothly blends between the Mish value at alpha and
+      a slightly higher asymptotic value, creating a continuous transition
 
     Attributes:
-        alpha (float): Scaling factor that determines the saturation bounds.
+        alpha (float): The saturation threshold. Defaults to 3.0.
+        beta (float): Controls the steepness of the transition. A smaller beta
+                     makes the transition sharper, while a larger beta makes it
+                     smoother. Defaults to 0.5.
     """
 
-    def __init__(self, alpha: float = 2.0, **kwargs: Any) -> None:
-        """Initialize the Scaled Mish activation layer.
-
-        Args:
-            alpha: Scaling factor for activation bounds. Defaults to 2.0.
-            **kwargs: Additional layer keywords arguments.
-
-        Raises:
-            ValueError: If alpha is less than or equal to 0.
-        """
+    def __init__(self, alpha: float = 3.0, beta: float = 0.5, **kwargs):
+        """Initialize the SaturatedMish activation layer."""
         super().__init__(**kwargs)
-        if alpha <= 0:
-            raise ValueError(f"Alpha must be positive. Got {alpha}")
-        self._alpha = alpha
+        if alpha <= 0.0:
+            raise ValueError("alpha must be greater than 0.")
+        if beta <= 0.0:
+            raise ValueError("beta must be greater than 0.")
+        self.alpha = tf.convert_to_tensor(alpha, dtype=tf.float32)
+        self.beta = tf.convert_to_tensor(beta, dtype=tf.float32)
 
-    def call(self, inputs: tf.Tensor, training: bool = False, **kwargs: Any) -> tf.Tensor:
+    def call(self, inputs: tf.Tensor) -> tf.Tensor:
         """Forward pass computation.
 
         Args:
-            inputs: Input tensor.
-            training: Whether in training mode. Defaults to False.
-            **kwargs: Additional keywords arguments.
+            inputs (tf.Tensor): Input tensor.
 
         Returns:
-            tf.Tensor: Activated tensor.
+            tf.Tensor: Activated tensor with smooth saturation beyond alpha.
         """
-        mish_value = inputs * tf.nn.tanh(tf.nn.softplus(inputs))
-        scaled_mish = self._alpha * tf.nn.tanh(mish_value / self._alpha)
-        return scaled_mish
+        # Compute softplus
+        softplus = tf.nn.softplus(inputs)
 
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration.
+        # Standard Mish activation
+        mish = inputs * tf.tanh(softplus)
 
-        Returns:
-            Dict[str, Any]: Layer configuration dictionary.
-        """
+        # Compute the Mish activation value at alpha (our saturation reference point)
+        # This ensures continuity at the transition point
+        mish_at_alpha = self.alpha * tf.tanh(tf.nn.softplus(self.alpha))
+
+        # Create a smooth sigmoid-based blending factor
+        sigmoid_blend = tf.sigmoid((inputs - self.alpha) / self.beta)
+
+        # Combine both regions with smooth blending
+        # For x <= alpha: mostly standard Mish
+        # For x > alpha: gradually approach mish_at_alpha + small margin
+        output = mish * (1 - sigmoid_blend) + mish_at_alpha * sigmoid_blend
+
+        return output
+
+    def get_config(self):
+        """Get layer configuration."""
         config = super().get_config()
         config.update({
-            'alpha': self._alpha
+            'alpha': float(self.alpha),
+            'beta': float(self.beta)
         })
         return config
 
