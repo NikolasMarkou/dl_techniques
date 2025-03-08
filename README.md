@@ -2,30 +2,6 @@
 
 A versatile, modern library providing **advanced deep learning layers, initializers, constraints,** and **analysis tools** for Keras/TensorFlow. Whether you're researching new architectures, experimenting with custom constraints, or analyzing your network activations, **DL Techniques** brings you cutting-edge components to accelerate and enhance your workflows.
 
-Copyright (C) 2025 
-
-This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License along with this program. If not, see <https://www.gnu.org/licenses/>.
-
----
-
-## Table of Contents
-1. [Key Features](#key-features)
-2. [Installation](#installation)
-3. [Quick Start](#quick-start)
-4. [Project Structure](#project-structure)
-5. [Feature Highlights](#feature-highlights)
-6. [Usage Examples](#usage-examples)
-7. [Testing](#testing)
-8. [Contributing](#contributing)
-9. [License](#license)
-10. [References](#references)
-
----
-
 ## Key Features
 
 - **Advanced Neural Network Layers**
@@ -52,8 +28,6 @@ You should have received a copy of the GNU General Public License along with thi
   - MobileNet v4
   - CapsNet
 
----
-
 ## Installation
 
 1. **Clone** this repository:
@@ -78,8 +52,6 @@ You should have received a copy of the GNU General Public License along with thi
 - PyTest (for testing)
 - Additional dependencies in `requirements.txt`
 
----
-
 ## Quick Start
 
 ```python
@@ -102,8 +74,6 @@ model.compile(
     metrics=['accuracy']
 )
 ```
-
----
 
 ## Project Structure
 
@@ -134,66 +104,11 @@ dl_techniques/
 └─ LICENSE                 # GNU GPL v3
 ```
 
-### Key Components
-
-- **layers/**: Advanced neural network layers including:
-  - Attention mechanisms (Hopfield, Non-Local, Transformer)
-  - Normalization layers (RMS, GRN, Shell Clamp)
-  - Vision layers (CBAM, ConvNeXt, CLAHE)
-  - Complex network layers
-  - Modern architectures (Capsules, Gated MLP, KAN)
-
-- **models/**: Complete model implementations:
-  - Depth Anything
-  - CoshNet
-  - MobileNet v4
-  - CapsNet
-
-- **experiments/**: Real-world usage examples:
-  - Band RMS experiments
-  - KMeans clustering
-  - RMS normalization studies
-  - Activation function analyses
-
----
-
 ## Feature Highlights
 
-1. **Advanced Normalization Techniques**
-   - RMS Norm with Spherical Bounds
-   - Global Response Normalization
-   - Shell Clamping
-   - Conditional Batch Normalization
+### 1. Advanced Normalization Techniques
 
-2. **Attention Mechanisms**
-   - Hopfield Attention
-   - Non-Local Attention
-   - Differential Transformers
-   - Convolutional Block Attention
-
-3. **Modern Architecture Components**
-   - Capsule Networks
-   - Kolmogorov-Arnold Networks
-   - Gated MLPs
-   - ConvNeXt Blocks
-
-4. **Specialized Layers**
-   - Shearlet Transform
-   - Canny Edge Detection
-   - Complex-valued Operations
-   - RBF Networks
-
-5. **Training Optimizations**
-   - Deep Supervision
-   - Warmup Scheduling
-   - Stochastic Depth
-   - Selective Gradients
-
----
-
-## Usage Examples
-
-1. **Using Advanced Normalization**
+The library implements cutting-edge normalization techniques that improve training stability and model performance:
 
 ```python
 from dl_techniques.layers.rms_norm_spherical_bound import RMSNormSphericalBound
@@ -206,7 +121,9 @@ x = RMSNormSphericalBound()(inputs)
 x = GlobalResponseNorm()(x)
 ```
 
-2. **Implementing Attention**
+### 2. Attention Mechanisms
+
+Implement state-of-the-art attention mechanisms for both vision and sequence models:
 
 ```python
 from dl_techniques.layers.hopfield_attention import HopfieldAttention
@@ -219,7 +136,32 @@ x = HopfieldAttention(heads=8)(inputs)
 x = CBAM(reduction_ratio=16)(x)
 ```
 
-3. **Using Complex Layers**
+### 3. Capsule Networks
+
+Create advanced capsule networks with dynamic routing:
+
+```python
+from dl_techniques.layers.capsules import PrimaryCapsule, RoutingCapsule
+
+# Create primary capsules
+primary_caps = PrimaryCapsule(
+    num_capsules=32,
+    dim_capsules=8,
+    kernel_size=9,
+    strides=2
+)(conv_features)
+
+# Add routing capsules
+digit_caps = RoutingCapsule(
+    num_capsules=10,
+    dim_capsules=16,
+    routing_iterations=3
+)(primary_caps)
+```
+
+### 4. Complex-Valued Networks
+
+Build networks that operate on complex numbers:
 
 ```python
 from dl_techniques.layers.complex_layers import ComplexConv2D, ComplexDense
@@ -229,18 +171,94 @@ x = ComplexConv2D(filters=32, kernel_size=3)(inputs)
 x = ComplexDense(units=64)(x)
 ```
 
-4. **Advanced Training**
+## Usage Examples
+
+### Example 1: Custom Vision Transformer with Hierarchical MLP Stem
 
 ```python
-from dl_techniques.optimization.deep_supervision import DeepSupervision
-from dl_techniques.optimization.warmup_schedule import WarmupSchedule
+from dl_techniques.layers.hierarchical_vision_transformers import HierarchicalMlpStem
+from dl_techniques.layers.vision_transformer import TransformerEncoder
 
-# Configure training
-scheduler = WarmupSchedule(warmup_steps=1000)
-supervisor = DeepSupervision(depth=3)
+# Create input
+inputs = keras.layers.Input(shape=(224, 224, 3))
+
+# Apply hierarchical MLP stem
+x = HierarchicalMlpStem(
+    embed_dim=768,
+    patch_size=16
+)(inputs)
+
+# Add transformer encoder
+x = TransformerEncoder(
+    num_heads=12,
+    mlp_dim=3072,
+    num_layers=12
+)(x)
+
+# Output layer
+outputs = keras.layers.Dense(1000, activation='softmax')(x)
+
+# Create model
+model = keras.Model(inputs, outputs)
 ```
 
----
+### Example 2: Advanced Regularization
+
+```python
+from dl_techniques.regularizers.srip import SRIPRegularizer
+from dl_techniques.regularizers.soft_orthogonal import SoftOrthogonalConstraintRegularizer
+
+# Create layer with SRIP regularization
+dense = keras.layers.Dense(
+    units=512,
+    kernel_regularizer=SRIPRegularizer(beta=1e-3)
+)
+
+# Create layer with soft orthogonal regularization
+conv = keras.layers.Conv2D(
+    filters=64,
+    kernel_size=3,
+    kernel_regularizer=SoftOrthogonalConstraintRegularizer(beta=1e-2)
+)
+```
+
+### Example 3: Activation Analysis
+
+```python
+from dl_techniques.analysis.activation_activity import ActivationDistributionAnalyzer
+
+# Create analyzer
+analyzer = ActivationDistributionAnalyzer(model)
+
+# Analyze activation distributions
+stats = analyzer.compute_activation_stats(x_test)
+
+# Visualize activations
+analyzer.plot_activation_distributions(
+    x_test,
+    save_path='./activation_plots/'
+)
+```
+
+### Example 4: Any-Loss Classification
+
+```python
+from dl_techniques.losses.any_loss import F1Loss, BalancedAccuracyLoss
+
+# Train with F1 optimization
+model.compile(
+    optimizer='adam',
+    loss=F1Loss(),
+    metrics=['accuracy']
+)
+
+# Or train with balanced accuracy optimization
+model.compile(
+    optimizer='adam',
+    loss=BalancedAccuracyLoss(),
+    metrics=['accuracy']
+)
+```
 
 ## Testing
 
@@ -257,7 +275,15 @@ Test coverage includes:
 - Utility functions
 - End-to-end model tests
 
----
+## Documentation
+
+For detailed documentation on each component, please refer to the `docs/` directory:
+
+- [AnyLoss: Classification Metrics as Loss Functions](docs/anyloss_classification_metrics_loss_functions.md)
+- [Custom RMS Normalization](docs/custom_rms_norm.md)
+- [Hierarchical Vision Transformers](docs/hierarchical_vision_transformers.md)
+- [Input Normalization Best Practices](docs/input_normalization.md)
+- [Mixture Density Networks (MDNs)](docs/mdn.md)
 
 ## Contributing
 
@@ -275,13 +301,9 @@ Test coverage includes:
 - Error handling
 - Pre-commit hooks (see `.pre-commit-config.yaml`)
 
----
-
 ## License
 
 GNU General Public License v3.0 - see [LICENSE](LICENSE) for details.
-
----
 
 ## References
 
@@ -291,5 +313,3 @@ GNU General Public License v3.0 - see [LICENSE](LICENSE) for details.
 - **Woo, S. et al.** (2018). _CBAM: Convolutional Block Attention Module._
 - **Liu, Z. et al.** (2022). _A ConvNet for the 2020s (ConvNeXt)._
 - **Ramsauer, H. et al.** (2020). _Hopfield Networks is All You Need._
-
-For extended documentation, see the docstrings and `docs/` directory.
