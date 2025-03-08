@@ -2,6 +2,8 @@
 
 A diagnostic tool for analyzing TensorFlow/Keras neural network weight matrices.
 
+This is a direct copy of the work of Charles Martin (https://github.com/CalculatedContent/WeightWatcher/) better adapted to tensorflow / keras models
+
 ## Overview
 
 TensorFlow WeightWatcher is a tool that analyzes the weight matrices of neural networks to assess:
