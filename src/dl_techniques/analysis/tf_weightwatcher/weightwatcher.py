@@ -6,29 +6,32 @@ with a focus on power-law analysis and eigenvalue spectrum.
 """
 
 import os
-import keras
-import warnings
-from typing import Dict, List, Optional, Tuple, Union, Any, Callable
+from typing import Dict, List, Optional, Tuple, Union, Any
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import tensorflow as tf
+import keras
+import warnings
 
 # Import constants
 from .constants import (
-    EPSILON, EVALS_THRESH, OVER_TRAINED_THRESH, UNDER_TRAINED_THRESH,
     DEFAULT_MIN_EVALS, DEFAULT_MAX_EVALS, DEFAULT_MAX_N, DEFAULT_SAVEDIR,
-    WEAK_RANK_LOSS_TOLERANCE, DEFAULT_BINS, DEFAULT_FIG_SIZE, DEFAULT_DPI,
-    DEFAULT_SVD_SMOOTH_PERCENT, DEFAULT_SUMMARY_METRICS,
-    LayerType, SmoothingMethod, SVDMethod, StatusCode, MetricNames
+    WEAK_RANK_LOSS_TOLERANCE, DEFAULT_SUMMARY_METRICS,
+    LayerType, MetricNames
 )
 
 # Import metrics functions
 from .metrics import (
     compute_eigenvalues, calculate_matrix_entropy, fit_powerlaw,
-    calculate_stable_rank, calculate_spectral_metrics, jensen_shannon_distance,
-    compute_detX_constraint, smooth_matrix, calculate_glorot_normalization_factor
+    calculate_spectral_metrics, jensen_shannon_distance
+)
+
+# Import utility functions
+from .weights_utils import (
+    infer_layer_type, get_layer_weights_and_bias,
+    get_weight_matrices, plot_powerlaw_fit,
+    calculate_glorot_normalization_factor
 )
 
 from dl_techniques.utils.logger import logger
@@ -50,7 +53,6 @@ class WeightWatcher:
         Args:
             model: A Keras model to analyze. Can be set later.
         """
-
         self.model = model
         self.details = None
         self.results = None
@@ -66,205 +68,6 @@ class WeightWatcher:
             model: A Keras model.
         """
         self.model = model
-
-    def _infer_layer_type(self, layer: keras.layers.Layer) -> LayerType:
-        """
-        Determine the layer type for a given Keras layer.
-
-        Args:
-            layer: Keras layer.
-
-        Returns:
-            LayerType: The type of the layer.
-        """
-        layer_class = layer.__class__.__name__.lower()
-
-        if isinstance(layer, keras.layers.Dense) or 'dense' in layer_class:
-            return LayerType.DENSE
-        elif isinstance(layer, keras.layers.Conv1D) or 'conv1d' in layer_class:
-            return LayerType.CONV1D
-        elif isinstance(layer, keras.layers.Conv2D) or 'conv2d' in layer_class:
-            return LayerType.CONV2D
-        elif isinstance(layer, keras.layers.Conv3D) or 'conv3d' in layer_class:
-            return LayerType.CONV3D
-        elif isinstance(layer, keras.layers.Embedding) or 'embedding' in layer_class:
-            return LayerType.EMBEDDING
-        elif isinstance(layer, keras.layers.LSTM) or 'lstm' in layer_class:
-            return LayerType.LSTM
-        elif isinstance(layer, keras.layers.GRU) or 'gru' in layer_class:
-            return LayerType.GRU
-        elif isinstance(layer, keras.layers.LayerNormalization) or 'layernorm' in layer_class:
-            return LayerType.NORM
-        else:
-            return LayerType.UNKNOWN
-
-    def _get_layer_weights_and_bias(self, layer: keras.layers.Layer) -> Tuple[bool, np.ndarray, bool, np.ndarray]:
-        """
-        Extract weights and biases from a Keras layer.
-
-        Args:
-            layer: Keras layer.
-
-        Returns:
-            Tuple containing:
-            - has_weights (bool): Whether layer has weights
-            - weights (np.ndarray): Weight matrix if available, else None
-            - has_bias (bool): Whether layer has biases
-            - bias (np.ndarray): Bias vector if available, else None
-        """
-        has_weights, has_bias = False, False
-        weights, bias = None, None
-
-        layer_type = self._infer_layer_type(layer)
-
-        # Get layer weights
-        weights_list = layer.get_weights()
-
-        if len(weights_list) > 0:
-            if layer_type in [
-                LayerType.DENSE,
-                LayerType.CONV1D,
-                LayerType.CONV2D,
-                LayerType.CONV3D,
-                LayerType.EMBEDDING
-            ]:
-                has_weights = True
-                weights = weights_list[0]
-
-                # Check for bias
-                if hasattr(layer, 'use_bias') and layer.use_bias and len(weights_list) > 1:
-                    has_bias = True
-                    bias = weights_list[1]
-
-        return has_weights, weights, has_bias, bias
-
-    def _get_weight_matrices(self, weights: np.ndarray, layer_type: LayerType) -> Tuple[
-        List[np.ndarray], int, int, int]:
-        """
-        Extract weight matrices from a layer's weights.
-
-        Args:
-            weights: Layer weights.
-            layer_type: Type of layer.
-
-        Returns:
-            Tuple containing:
-            - List of weight matrices.
-            - N: Maximum dimension.
-            - M: Minimum dimension.
-            - rf: Receptive field size.
-        """
-        Wmats = []
-        N, M, rf = 0, 0, 1.0
-
-        if layer_type in [LayerType.DENSE, LayerType.EMBEDDING]:
-            Wmats = [weights]
-            N, M = max(weights.shape), min(weights.shape)
-
-        elif layer_type == LayerType.CONV1D:
-            # Conv1D weights shape: (kernel_size, input_dim, output_dim)
-            Wmats = [weights]
-
-            # For Conv1D, we'll use the flattened input weight dimensions
-            kernel_size, input_dim, output_dim = weights.shape
-            rf = kernel_size
-
-            # Reshape to 2D matrix for eigenvalue analysis
-            weights_reshaped = weights.reshape(-1, output_dim)
-            N, M = max(weights_reshaped.shape), min(weights_reshaped.shape)
-            Wmats = [weights_reshaped]
-
-        elif layer_type == LayerType.CONV2D:
-            # For Conv2D, extract weight matrices for each filter position
-            # Conv2D weights shape: (kernel_height, kernel_width, input_channels, output_channels)
-            kh, kw, in_c, out_c = weights.shape
-            rf = kh * kw
-
-            # Extract individual filter matrices
-            for i in range(kh):
-                for j in range(kw):
-                    W = weights[i, j, :, :]
-
-                    # Make sure larger dimension is first for consistency
-                    if W.shape[0] < W.shape[1]:
-                        W = W.T
-
-                    Wmats.append(W)
-
-            # Set N and M based on the shapes of the extracted matrices
-            if len(Wmats) > 0:
-                N, M = max(Wmats[0].shape), min(Wmats[0].shape)
-
-        return Wmats, N, M, rf
-
-    def _plot_powerlaw_fit(self,
-                           evals: np.ndarray,
-                           alpha: float,
-                           xmin: float,
-                           D: float,
-                           sigma: float,
-                           layer_name: str,
-                           layer_id: int,
-                           savedir: str) -> None:
-        """
-        Create and save power-law fit plots.
-
-        Args:
-            evals: Eigenvalues to plot.
-            alpha: Power-law exponent.
-            xmin: Minimum x value used for fit.
-            D: Kolmogorov-Smirnov statistic.
-            sigma: Standard error of alpha.
-            layer_name: Name of the layer.
-            layer_id: ID of the layer.
-            savedir: Directory to save plots.
-        """
-        # Create save directory if it doesn't exist
-        if not os.path.exists(savedir):
-            os.makedirs(savedir)
-
-        # Log-log plot
-        plt.figure(figsize=DEFAULT_FIG_SIZE)
-
-        # Plot histogram with log-log scale
-        hist, bin_edges = np.histogram(evals, bins=DEFAULT_BINS)
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-
-        # Normalize histogram to PDF
-        hist = hist / (np.sum(hist) * (bin_edges[1] - bin_edges[0]))
-
-        plt.loglog(bin_centers, hist, 'o', markersize=4, label='Eigenvalue distribution')
-
-        # Add power-law fit line
-        x_range = np.logspace(np.log10(xmin), np.log10(np.max(evals)), 100)
-        y_fit = (alpha - 1) * (xmin ** (alpha - 1)) * x_range ** (-alpha)
-        plt.loglog(x_range, y_fit, 'r-', label=f'Power-law fit: α={alpha:.3f}')
-
-        plt.axvline(x=xmin, color='r', linestyle='--', label=f'xmin={xmin:.3f}')
-
-        plt.title(f"Log-Log ESD for {layer_name}\nα={alpha:.3f}, D={D:.3f}, σ={sigma:.3f}")
-        plt.xlabel("Eigenvalue (λ)")
-        plt.ylabel("Probability density")
-        plt.legend()
-        plt.grid(True, which="both", ls="--", alpha=0.5)
-
-        # Save the plot
-        plt.tight_layout()
-        plt.savefig(f"{savedir}/layer_{layer_id}_powerlaw.png", dpi=DEFAULT_DPI)
-        plt.close()
-
-        # Additional plot: linear scale
-        plt.figure(figsize=DEFAULT_FIG_SIZE)
-        plt.hist(evals, bins=DEFAULT_BINS, density=True)
-        plt.axvline(x=xmin, color='r', linestyle='--', label=f'xmin={xmin:.3f}')
-        plt.title(f"Linear ESD for {layer_name}")
-        plt.xlabel("Eigenvalue (λ)")
-        plt.ylabel("Probability density")
-        plt.legend()
-
-        plt.tight_layout()
-        plt.savefig(f"{savedir}/layer_{layer_id}_esd_linear.png", dpi=DEFAULT_DPI)
-        plt.close()
 
     def describe(self,
                  model: Optional[keras.Model] = None,
@@ -299,16 +102,16 @@ class WeightWatcher:
                 continue
 
             layer_name = layer.name
-            layer_type = self._infer_layer_type(layer)
+            layer_type = infer_layer_type(layer)  # Using utility function
 
             # Get weights and bias
-            has_weights, weights, has_bias, bias = self._get_layer_weights_and_bias(layer)
+            has_weights, weights, has_bias, bias = get_layer_weights_and_bias(layer)  # Using utility function
 
             if not has_weights or layer_type == LayerType.UNKNOWN:
                 continue
 
             # Extract weight matrices
-            Wmats, N, M, rf = self._get_weight_matrices(weights, layer_type)
+            Wmats, N, M, rf = get_weight_matrices(weights, layer_type)  # Using utility function
 
             # Check matrix dimensions against thresholds
             if M < min_evals or M > max_evals or N > max_N:
@@ -396,22 +199,22 @@ class WeightWatcher:
         for layer_id in details.index:
             layer = self.model.layers[layer_id]
             layer_name = layer.name
-            layer_type = self._infer_layer_type(layer)
+            layer_type = infer_layer_type(layer)  # Using utility function
 
             # Get weights and bias
-            has_weights, weights, has_bias, bias = self._get_layer_weights_and_bias(layer)
+            has_weights, weights, has_bias, bias = get_layer_weights_and_bias(layer)  # Using utility function
 
             # Skip if no weights
             if not has_weights:
                 continue
 
             # Extract weight matrices and dimensions
-            Wmats, N, M, rf = self._get_weight_matrices(weights, layer_type)
+            Wmats, N, M, rf = get_weight_matrices(weights, layer_type)  # Using utility function
 
             # Apply Glorot normalization if requested
             if glorot_fix:
                 # Apply Glorot normalization: std = sqrt(2 / (fan_in + fan_out))
-                kappa = calculate_glorot_normalization_factor(N, M, rf)
+                kappa = calculate_glorot_normalization_factor(N, M, rf)  # Using utility function
                 Wmats = [W / kappa for W in Wmats]
 
             # Calculate number of components to analyze
@@ -433,7 +236,7 @@ class WeightWatcher:
 
             # Plot if requested
             if plot and status == 'success':
-                self._plot_powerlaw_fit(
+                plot_powerlaw_fit(  # Using utility function
                     evals,
                     alpha,
                     xmin,
@@ -450,7 +253,6 @@ class WeightWatcher:
             # Calculate spectral metrics
             spectral_metrics = calculate_spectral_metrics(evals, alpha)
 
-            # Analyze randomized matrices if requested
             # Analyze randomized matrices if requested
             if randomize:
                 # Generate randomized matrices with same dimensions
@@ -551,20 +353,19 @@ class WeightWatcher:
             raise ValueError(f"Layer ID {layer_id} out of range.")
 
         layer = self.model.layers[layer_id]
-        layer_type = self._infer_layer_type(layer)
+        layer_type = infer_layer_type(layer)  # Using utility function
 
         # Get weights
-        has_weights, weights, _, _ = self._get_layer_weights_and_bias(layer)
+        has_weights, weights, _, _ = get_layer_weights_and_bias(layer)  # Using utility function
 
         if not has_weights:
             logger.warning(f"Layer {layer_id} ({layer.name}) has no weights.")
             return np.array([])
 
         # Get weight matrices and calculate eigenvalues
-        Wmats, N, M, rf = self._get_weight_matrices(weights, layer_type)
+        Wmats, N, M, rf = get_weight_matrices(weights, layer_type)  # Using utility function
         n_comp = M * rf
 
         evals, _, _, _ = compute_eigenvalues(Wmats, N, M, n_comp)
 
         return evals
-

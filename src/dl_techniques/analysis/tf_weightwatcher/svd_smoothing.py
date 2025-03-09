@@ -1,9 +1,4 @@
-import os
 import keras
-import logging
-import warnings
-from typing import Dict, List, Optional, Tuple, Union, Any, Callable
-
 import numpy as np
 
 # Import constants
@@ -21,7 +16,12 @@ from .metrics import (
 
 from .weightwatcher import WeightWatcher
 
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
+
 
 class SVDSmoothing:
     """
