@@ -317,3 +317,23 @@ GNU General Public License v3.0 - see [LICENSE](LICENSE) for details.
 - **Woo, S. et al.** (2018). _CBAM: Convolutional Block Attention Module._
 - **Liu, Z. et al.** (2022). _A ConvNet for the 2020s (ConvNeXt)._
 - **Ramsauer, H. et al.** (2020). _Hopfield Networks is All You Need._
+- **Touvron et al.** "Three things everyone should know about Vision Transformers"
+- **Doheon Han, Nuno Moniz, and Nitesh V Chawla** "AnyLoss: Transforming Classification Metrics into Loss Functions"
+- **Arjovsky et al.** (2016). "Unitary Evolution Recurrent Neural Networks"
+- **Hinton et al.** Work on capsule networks and part-whole relationships
+- **Charles Martin** Original WeightWatcher implementation for neural network analysis
+- **Graves, A.** (2013). _Generating Sequences with Recurrent Neural Networks._
+- **Bishop, C.M.** (2006). _Pattern Recognition and Machine Learning._
+- **Doheon Han, Nuno Moniz, and Nitesh V Chawla** "AnyLoss: Transforming Classification Metrics into Loss Functions"
+- **Touvron et al.** "Three things everyone should know about Vision Transformers"
+- **Glorot, X. and Bengio, Y.** (2010). _Understanding the difficulty of training deep feedforward neural networks._
+- **He, K. et al.** (2015). _Delving Deep into Rectifiers: Surpassing Human-Level Performance on ImageNet Classification._
+- **Huang, G. et al.** (2016). _Deep Networks with Stochastic Depth._
+- **Xie, S. et al.** (2017). _Aggregated Residual Transformations for Deep Neural Networks._
+- **Ba, J.L., Kiros, J.R., and Hinton, G.E.** (2016). _Layer Normalization._
+- **Wu, Y. and He, K.** (2018). _Group Normalization._
+- **Misra, D.** (2019). _Mish: A Self Regularized Non-Monotonic Neural Activation Function._
+- **Zhang, H. et al.** (2018). _SRIP: Matrix-Based Spectral Regularization for Fine-Tuning Deep Neural Networks._
+- **Yu, F. and Koltun, V.** (2016). _Multi-Scale Context Aggregation by Dilated Convolutions._
+- **Yang, G. et al.** (2020). _Soft Orthogonality Constraints in Neural Networks._
+- **Dosovitskiy, A. et al.** (2021). _An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale._
