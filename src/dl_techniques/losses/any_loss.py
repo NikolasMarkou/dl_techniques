@@ -121,7 +121,7 @@ class AnyLoss(keras.losses.Loss):
             Default is 73.0 as recommended in the paper.
         from_logits: Whether the predictions are logits (not passed through
             a sigmoid). Default is False.
-        reduction: Type of reduction to apply to the loss. Default is 'auto'.
+        reduction: Type of reduction to apply to the loss. Default is 'sum_over_batch_size'.
         name: Optional name for the loss function.
         **kwargs: Additional keyword arguments passed to the parent class.
 
@@ -142,7 +142,7 @@ class AnyLoss(keras.losses.Loss):
             self,
             amplifying_scale: float = 73.0,
             from_logits: bool = False,
-            reduction: str = 'auto',
+            reduction: str = 'sum_over_batch_size',
             name: Optional[str] = None,
             **kwargs: Any
     ) -> None:
@@ -178,34 +178,42 @@ class AnyLoss(keras.losses.Loss):
         Returns:
             Tuple containing (TN, FN, FP, TP) confusion matrix entries.
         """
-        # Handle edge case with empty input
-        if tf.equal(tf.size(y_true), 0):
-            epsilon = tf.keras.backend.epsilon()
-            return (epsilon, epsilon, epsilon, epsilon)
-
-        # Apply sigmoid if predictions are logits
-        if self.from_logits:
-            y_pred = tf.nn.sigmoid(y_pred)
-
-        # Apply approximation function
-        y_approx = self.approximation(y_pred)
-
-        # Ensure y_true is of correct type
-        y_true = tf.cast(y_true, dtype=y_pred.dtype)
-
-        # Calculate confusion matrix entries
-        true_positive = tf.reduce_sum(y_true * y_approx)
-        false_negative = tf.reduce_sum(y_true * (1.0 - y_approx))
-        false_positive = tf.reduce_sum((1.0 - y_true) * y_approx)
-        true_negative = tf.reduce_sum((1.0 - y_true) * (1.0 - y_approx))
-
-        # Add small epsilon to avoid division by zero
+        # Handle edge case with empty input using tf.cond to avoid graph execution errors
         epsilon = tf.keras.backend.epsilon()
-        return (
-            true_negative + epsilon,
-            false_negative + epsilon,
-            false_positive + epsilon,
-            true_positive + epsilon
+        empty_result = (epsilon, epsilon, epsilon, epsilon)
+
+        def compute_matrix():
+            # Apply sigmoid if predictions are logits
+            if self.from_logits:
+                y_pred_sigmoid = tf.nn.sigmoid(y_pred)
+            else:
+                y_pred_sigmoid = y_pred
+
+            # Apply approximation function
+            y_approx = self.approximation(y_pred_sigmoid)
+
+            # Ensure y_true is of correct type
+            y_true_float = tf.cast(y_true, dtype=y_pred_sigmoid.dtype)
+
+            # Calculate confusion matrix entries
+            true_positive = tf.reduce_sum(y_true_float * y_approx)
+            false_negative = tf.reduce_sum(y_true_float * (1.0 - y_approx))
+            false_positive = tf.reduce_sum((1.0 - y_true_float) * y_approx)
+            true_negative = tf.reduce_sum((1.0 - y_true_float) * (1.0 - y_approx))
+
+            # Add small epsilon to avoid division by zero
+            return (
+                true_negative + epsilon,
+                false_negative + epsilon,
+                false_positive + epsilon,
+                true_positive + epsilon
+            )
+
+        # Use tf.cond for safe tensor handling in graph mode
+        return tf.cond(
+            tf.greater(tf.size(y_true), 0),
+            compute_matrix,
+            lambda: empty_result
         )
 
     def call(self, y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
@@ -259,7 +267,7 @@ class AccuracyLoss(AnyLoss):
             self,
             amplifying_scale: float = 73.0,
             from_logits: bool = False,
-            reduction: str = 'auto',
+            reduction: str = 'sum_over_batch_size',
             name: Optional[str] = None,
             **kwargs: Any
     ) -> None:
@@ -319,7 +327,7 @@ class F1Loss(AnyLoss):
             self,
             amplifying_scale: float = 73.0,
             from_logits: bool = False,
-            reduction: str = 'auto',
+            reduction: str = 'sum_over_batch_size',
             name: Optional[str] = None,
             **kwargs: Any
     ) -> None:
@@ -372,7 +380,7 @@ class FBetaLoss(AnyLoss):
             Default is 73.0 as recommended in the paper.
         from_logits: Whether the predictions are logits (not passed through
             a sigmoid). Default is False.
-        reduction: Type of reduction to apply to the loss. Default is 'auto'.
+        reduction: Type of reduction to apply to the loss. Default is 'sum_over_batch_size'.
         name: Optional name for the loss function.
         **kwargs: Additional keyword arguments passed to the parent class.
 
@@ -394,7 +402,7 @@ class FBetaLoss(AnyLoss):
             beta: float = 1.0,
             amplifying_scale: float = 73.0,
             from_logits: bool = False,
-            reduction: str = 'auto',
+            reduction: str = 'sum_over_batch_size',
             name: Optional[str] = None,
             **kwargs: Any
     ) -> None:
@@ -477,7 +485,7 @@ class GeometricMeanLoss(AnyLoss):
             self,
             amplifying_scale: float = 73.0,
             from_logits: bool = False,
-            reduction: str = 'auto',
+            reduction: str = 'sum_over_batch_size',
             name: Optional[str] = None,
             **kwargs: Any
     ) -> None:
@@ -544,7 +552,7 @@ class BalancedAccuracyLoss(AnyLoss):
             self,
             amplifying_scale: float = 73.0,
             from_logits: bool = False,
-            reduction: str = 'auto',
+            reduction: str = 'sum_over_batch_size',
             name: Optional[str] = None,
             **kwargs: Any
     ) -> None:
@@ -598,7 +606,7 @@ class WeightedCrossEntropyWithAnyLoss(AnyLoss):
             Default is 73.0 as recommended in the paper.
         from_logits: Whether the predictions are logits (not passed through
             a sigmoid). Default is False.
-        reduction: Type of reduction to apply to the loss. Default is 'auto'.
+        reduction: Type of reduction to apply to the loss. Default is 'sum_over_batch_size'.
         name: Optional name for the loss function.
         **kwargs: Additional keyword arguments passed to the parent class.
 
@@ -626,7 +634,7 @@ class WeightedCrossEntropyWithAnyLoss(AnyLoss):
             alpha: float = 0.5,
             amplifying_scale: float = 73.0,
             from_logits: bool = False,
-            reduction: str = 'auto',
+            reduction: str = 'sum_over_batch_size',
             name: Optional[str] = None,
             **kwargs: Any
     ) -> None:

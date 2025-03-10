@@ -3,20 +3,11 @@ Tests for the AnyLoss framework implementation.
 
 This module contains unit tests for the AnyLoss framework including the
 ApproximationFunction and various loss function implementations.
-
-Note: In Keras 3.8.0, the 'auto' reduction parameter is no longer valid.
-All loss functions need to specify a valid reduction mode such as:
-- 'sum_over_batch_size' (default replacement for 'auto')
-- 'sum'
-- 'mean'
-- 'none'
-- None
 """
-
+import keras
 import pytest
 import numpy as np
 import tensorflow as tf
-from tensorflow import keras
 
 # Import the classes to test - adjust the import path as needed
 from dl_techniques.losses.any_loss import (
@@ -26,9 +17,9 @@ from dl_techniques.losses.any_loss import (
     F1Loss,
     FBetaLoss,
     GeometricMeanLoss,
-    BalancedAccuracyLoss
+    BalancedAccuracyLoss,
+    WeightedCrossEntropyWithAnyLoss
 )
-
 
 @pytest.fixture
 def binary_data():
@@ -135,7 +126,7 @@ def test_model_training_with_anyloss():
                           kernel_regularizer=keras.regularizers.L2(0.001))(x)
     model = keras.Model(inputs=inputs, outputs=outputs)
 
-            # Compile the model with F1Loss
+    # Compile the model with F1Loss
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=0.01),
         loss=F1Loss(reduction="sum_over_batch_size"),
@@ -251,3 +242,186 @@ def test_loss_serialization_and_deserialization():
             f"Expected amplifying_scale to be {original_loss.amplifying_scale}, got {loaded_loss.amplifying_scale}"
         assert loaded_loss.from_logits == original_loss.from_logits, \
             f"Expected from_logits to be {original_loss.from_logits}, got {loaded_loss.from_logits}"
+
+
+def test_geometric_mean_loss_on_imbalanced_data():
+    """Test that GeometricMeanLoss works well on imbalanced datasets."""
+    # Create a highly imbalanced dataset (10% positive, 90% negative)
+    np.random.seed(42)
+    y_true = np.zeros((100, 1), dtype=np.float32)
+    y_true[:10] = 1.0  # Only 10% positive examples
+
+    # Create predictions with varying degrees of confidence
+    # Some correct, some incorrect predictions
+    y_pred = np.random.uniform(0, 0.3, size=(100, 1)).astype(np.float32)  # Most predicted as negative
+    y_pred[:5] = np.random.uniform(0.7, 1.0, size=(5, 1))  # 5 true positives (correctly predicted)
+    y_pred[10:15] = np.random.uniform(0.7, 1.0, size=(5, 1))  # 5 false positives
+
+    # Calculate using GeometricMeanLoss
+    gmean_loss = GeometricMeanLoss(reduction="sum_over_batch_size")
+    loss_value = gmean_loss(y_true, y_pred).numpy()
+
+    # Calculate expected value manually
+    # True positives: 5, False negatives: 5, False positives: 5, True negatives: 85
+    sensitivity = 5 / 10  # TP / (TP + FN)
+    specificity = 85 / 90  # TN / (TN + FP)
+    expected_gmean = np.sqrt(sensitivity * specificity)
+    expected_loss = 1.0 - expected_gmean
+
+    # Check if the loss is in the reasonable range
+    # We can't expect exact match due to the approximation function
+    assert 0 <= loss_value <= 1, f"Loss value {loss_value} should be between 0 and 1"
+    assert np.isclose(loss_value, expected_loss, atol=0.2), \
+        f"Expected GeometricMeanLoss to be around {expected_loss}, got {loss_value}"
+
+
+def test_amplifying_scale_effect():
+    """Test the effect of different amplifying scale values on the approximation function."""
+    # Create a range of probability values to test
+    prob_values = np.linspace(0, 1, 11).reshape(-1, 1).astype(np.float32)
+
+    # Create approximation functions with different scales
+    approx_low = ApproximationFunction(amplifying_scale=10.0)
+    approx_med = ApproximationFunction(amplifying_scale=73.0)
+    approx_high = ApproximationFunction(amplifying_scale=200.0)
+
+    # Apply the functions
+    result_low = approx_low(prob_values).numpy()
+    result_med = approx_med(prob_values).numpy()
+    result_high = approx_high(prob_values).numpy()
+
+    # Test that higher amplifying scales make the function sharper
+    # For values > 0.5, higher scale should result in values closer to 1
+    high_indices = np.where(prob_values > 0.5)[0]
+    for idx in high_indices:
+        if idx < len(result_low):  # Ensure index is valid
+            assert result_low[idx] <= result_med[idx] <= result_high[idx], \
+                f"At p={prob_values[idx]}, expected higher scales to produce higher values, got " \
+                f"{result_low[idx]}, {result_med[idx]}, {result_high[idx]}"
+
+    # For values < 0.5, higher scale should result in values closer to 0
+    low_indices = np.where(prob_values < 0.5)[0]
+    for idx in low_indices:
+        if idx < len(result_low):  # Ensure index is valid
+            assert result_low[idx] >= result_med[idx] >= result_high[idx], \
+                f"At p={prob_values[idx]}, expected higher scales to produce lower values, got " \
+                f"{result_low[idx]}, {result_med[idx]}, {result_high[idx]}"
+
+    # For p=0.5, all scales should produce approximately 0.5
+    mid_indices = np.where(np.isclose(prob_values, 0.5))[0]
+    for idx in mid_indices:
+        if idx < len(result_low):  # Ensure index is valid
+            assert np.isclose(result_low[idx], 0.5, atol=0.1)
+            assert np.isclose(result_med[idx], 0.5, atol=0.1)
+            assert np.isclose(result_high[idx], 0.5, atol=0.1)
+
+
+def test_balanced_accuracy_loss_vs_accuracy_loss():
+    """Test that BalancedAccuracyLoss handles imbalanced data better than AccuracyLoss."""
+    # Create a highly imbalanced dataset (10% positive, 90% negative)
+    np.random.seed(42)
+    y_true = np.zeros((100, 1), dtype=np.float32)
+    y_true[:10] = 1.0  # Only 10% positive examples
+
+    # Create predictions where all examples are predicted as negative
+    # This gives 90% accuracy but 0% recall
+    y_pred = np.zeros((100, 1), dtype=np.float32)
+
+    # Add a small epsilon to avoid exact 0 or 1 values
+    epsilon = 1e-7
+    y_pred = np.clip(y_pred, epsilon, 1.0 - epsilon)
+
+    # Calculate using AccuracyLoss
+    accuracy_loss = AccuracyLoss(reduction="sum_over_batch_size")
+    acc_loss_value = accuracy_loss(y_true, y_pred).numpy()
+
+    # Calculate using BalancedAccuracyLoss
+    balanced_loss = BalancedAccuracyLoss(reduction="sum_over_batch_size")
+    bal_loss_value = balanced_loss(y_true, y_pred).numpy()
+
+    # The balanced loss should be higher (worse) because it penalizes the
+    # model for not predicting any positive examples
+    assert bal_loss_value > acc_loss_value, \
+        f"Expected BalancedAccuracyLoss {bal_loss_value} to be higher than AccuracyLoss {acc_loss_value}"
+
+    # AccuracyLoss should be around 0.1 (1 - 0.9 accuracy)
+    assert np.isclose(acc_loss_value, 0.1, atol=0.1), \
+        f"Expected AccuracyLoss to be around 0.1, got {acc_loss_value}"
+
+    # BalancedAccuracyLoss should be around 0.5 (1 - (0.5+0.0)/2) given specificity=1, sensitivity=0
+    assert np.isclose(bal_loss_value, 0.5, atol=0.1), \
+        f"Expected BalancedAccuracyLoss to be around 0.5, got {bal_loss_value}"
+
+
+def test_weighted_cross_entropy_with_any_loss():
+    """Test the WeightedCrossEntropyWithAnyLoss combination loss."""
+    np.random.seed(42)
+    y_true = np.array([[1], [0], [1], [0], [1]], dtype=np.float32)
+    y_pred = np.array([[0.8], [0.3], [0.6], [0.2], [0.9]], dtype=np.float32)
+
+    # Create component losses
+    f1_loss = F1Loss(reduction="sum_over_batch_size")
+    bce = keras.losses.BinaryCrossentropy(from_logits=False)
+
+    # Calculate individual loss values
+    f1_loss_value = f1_loss(y_true, y_pred).numpy()
+    bce_value = bce(y_true, y_pred).numpy()
+
+    # Test with different alpha values
+    alphas = [0.0, 0.3, 0.7, 1.0]
+    for alpha in alphas:
+        # Create the combined loss
+        combined_loss = WeightedCrossEntropyWithAnyLoss(
+            anyloss=f1_loss,
+            alpha=alpha,
+            reduction="sum_over_batch_size"
+        )
+
+        # Calculate combined loss value
+        combined_value = combined_loss(y_true, y_pred).numpy()
+
+        # Check that the combined value is a weighted average of the components
+        expected_value = alpha * f1_loss_value + (1 - alpha) * bce_value
+        assert np.isclose(combined_value, expected_value, atol=1e-5), \
+            f"With alpha={alpha}, expected combined loss to be {expected_value}, got {combined_value}"
+
+        # Check limit cases
+        if alpha == 0.0:
+            # Should be equal to BCE
+            assert np.isclose(combined_value, bce_value, atol=1e-5), \
+                f"With alpha=0, expected combined loss to equal BCE value {bce_value}, got {combined_value}"
+        elif alpha == 1.0:
+            # Should be equal to F1Loss
+            assert np.isclose(combined_value, f1_loss_value, atol=1e-5), \
+                f"With alpha=1, expected combined loss to equal F1Loss value {f1_loss_value}, got {combined_value}"
+
+
+def test_from_logits_parameter():
+    """Test that from_logits parameter correctly handles logits vs probabilities."""
+    np.random.seed(42)
+
+    # Create binary labels
+    y_true = np.array([[1], [0], [1], [0], [1]], dtype=np.float32)
+
+    # Create logits (unbounded values)
+    logits = np.array([[2.0], [-1.5], [0.8], [-2.2], [3.1]], dtype=np.float32)
+
+    # Convert logits to probabilities
+    probs = 1.0 / (1.0 + np.exp(-logits))  # sigmoid
+
+    # Create two identical losses, one expecting logits, one expecting probabilities
+    loss_with_logits = F1Loss(from_logits=True, reduction="sum_over_batch_size")
+    loss_with_probs = F1Loss(from_logits=False, reduction="sum_over_batch_size")
+
+    # Calculate loss values
+    loss_value_from_logits = loss_with_logits(y_true, logits).numpy()
+    loss_value_from_probs = loss_with_probs(y_true, probs).numpy()
+
+    # Expect the values to be approximately the same
+    assert np.isclose(loss_value_from_logits, loss_value_from_probs, atol=1e-5), \
+        f"Expected the same loss value from logits and probabilities, got {loss_value_from_logits} and {loss_value_from_probs}"
+
+    # Test that feeding probabilities to a loss expecting logits gives different results
+    incorrect_loss_value = loss_with_logits(y_true, probs).numpy()
+    assert not np.isclose(incorrect_loss_value, loss_value_from_probs, atol=1e-5), \
+        f"Expected different loss values when mistakenly feeding probabilities to a loss expecting logits"
