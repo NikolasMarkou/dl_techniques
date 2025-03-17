@@ -1,3 +1,43 @@
+# ---------------------------------------------------------------------
+# Deep Supervision Weight Scheduling
+# ---------------------------------------------------------------------
+#
+# This module implements weight scheduling strategies for deep supervision
+# in neural networks, particularly designed for U-Net architectures. Deep
+# supervision applies loss functions at multiple depths/scales in a network,
+# and these schedules determine how to weight each level's contribution.
+#
+# The schedules control the training focus during different stages:
+# - Early training can focus on deeper, low-resolution outputs
+# - Later training can shift to shallower, high-resolution outputs
+# - Different applications may benefit from different weighting strategies
+#
+# Each schedule function takes a percentage of training completion (0.0 to 1.0)
+# and returns a normalized weight array with one weight per supervision level.
+#
+# Available schedules:
+# - constant_equal: Equal weights for all outputs
+# - constant_low_to_high: Fixed weights favoring higher resolution
+# - constant_high_to_low: Fixed weights favoring deeper layers
+# - linear_low_to_high: Gradual linear transition from deep to shallow focus
+# - non_linear_low_to_high: Quadratic transition for smoother focus shift
+# - custom_sigmoid_low_to_high: Sigmoid-based transition with custom parameters
+# - scale_by_scale_low_to_high: Progressive activation of outputs
+# - cosine_annealing: Oscillating weights with overall trend
+# - curriculum: Progressive activation based on training progress
+#
+# Usage Example:
+#   config = {
+#       "type": "linear_low_to_high",
+#       "config": {}
+#   }
+#   weighter = schedule_builder(config, 5)  # For 5 outputs
+#
+#   # Get weights at 30% through training
+#   weights = weighter(0.3)  # Returns numpy array of 5 weights
+#
+# ---------------------------------------------------------------------
+
 import numpy as np
 from enum import Enum, auto
 from typing import Dict, Callable, Optional, Literal, Union
