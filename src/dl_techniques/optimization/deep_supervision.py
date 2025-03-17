@@ -1,5 +1,6 @@
 import numpy as np
-from typing import Dict, Tuple, Callable, List, Union
+from enum import Enum, auto
+from typing import Dict, Callable, Optional, Literal, Union
 
 # ---------------------------------------------------------------------
 # local imports
@@ -8,337 +9,301 @@ from typing import Dict, Tuple, Callable, List, Union
 from dl_techniques.utils.constants import *
 from dl_techniques.utils.logger import logger
 
-
-# ---------------------------------------------------------------------
-# Helper functions for custom sigmoid schedule
 # ---------------------------------------------------------------------
 
-def custom_sigmoid(x: float, k: float = 10, x0: float = 0.5) -> float:
+
+class ScheduleType(str, Enum):
+    """Enumeration of available deep supervision schedule types."""
+    CONSTANT_EQUAL = "constant_equal"
+    CONSTANT_LOW_TO_HIGH = "constant_low_to_high"
+    CONSTANT_HIGH_TO_LOW = "constant_high_to_low"
+    LINEAR_LOW_TO_HIGH = "linear_low_to_high"
+    NON_LINEAR_LOW_TO_HIGH = "non_linear_low_to_high"
+    CUSTOM_SIGMOID_LOW_TO_HIGH = "custom_sigmoid_low_to_high"
+    SCALE_BY_SCALE_LOW_TO_HIGH = "scale_by_scale_low_to_high"
+    COSINE_ANNEALING = "cosine_annealing"
+    CURRICULUM = "curriculum"
+
+
+def schedule_builder(
+        config: Dict[str, Union[str, Dict[str, Union[float, str]]]],
+        no_outputs: int
+) -> Callable[[float], np.ndarray]:
+    """Builds a schedule function for deep supervision weight distribution.
+
+    Creates a callable that generates weight arrays for multiple outputs at different
+    training progress stages. The weights determine the contribution of each scale
+    to the final loss during training.
+
+    In the context of U-Net architecture:
+    - Output 0: Final inference output (highest resolution)
+    - Output (no_outputs-1): Deepest scale in the network (lowest resolution)
+    - Outputs in between: Intermediate scales
+
+    Args:
+        config: Configuration dictionary containing the schedule type and parameters.
+            Must include a 'type' key with string value specifying the schedule type.
+            May include a 'config' key with parameters specific to the schedule type.
+        no_outputs: Number of outputs (scales) for which weights must be generated.
+
+    Returns:
+        A function that takes a float percentage (0.0 to 1.0) and returns a numpy array
+        of shape [no_outputs] representing the weights for each output. The weights
+        always sum to 1.0.
+
+    Raises:
+        ValueError: If config is invalid, schedule_type is unknown, or no_outputs <= 0.
+
+    Example:
+        >>> config = {"type": "linear_low_to_high", "config": {}}
+        >>> weight_scheduler = schedule_builder(config, 5)
+        >>> weights_at_50_percent = weight_scheduler(0.5)  # Returns weights for 5 outputs
     """
-    Custom sigmoid function for smooth, adjustable transitions.
+    # Validate arguments
+    if not isinstance(config, dict):
+        raise ValueError("config must be a dictionary")
+    if no_outputs <= 0:
+        raise ValueError("no_outputs must be a positive integer")
 
-    Parameters
-    ----------
-    x : float
-        Input value
-    k : float
-        Controls the steepness of the sigmoid curve
-    x0 : float
-        Controls the midpoint of the transition
+    # Extract schedule type
+    schedule_type = config.get(TYPE_STR)
+    if schedule_type is None:
+        raise ValueError("schedule_type cannot be None")
+    if not isinstance(schedule_type, str):
+        raise ValueError("schedule_type must be a string")
 
-    Returns
-    -------
-    float
-        Sigmoid output in range [0,1]
+    # Get schedule parameters
+    params = config.get(CONFIG_STR, {})
+    schedule_type = schedule_type.strip().lower()
+
+    logger.info(
+        f"Deep supervision schedule: [{schedule_type}], with params: [{params}]"
+    )
+
+    # Create and return the appropriate schedule function
+    if schedule_type == ScheduleType.CONSTANT_EQUAL:
+        return lambda percentage_done: constant_equal_schedule(percentage_done, no_outputs)
+
+    elif schedule_type == ScheduleType.CONSTANT_LOW_TO_HIGH:
+        return lambda percentage_done: constant_low_to_high_schedule(percentage_done, no_outputs)
+
+    elif schedule_type == ScheduleType.CONSTANT_HIGH_TO_LOW:
+        return lambda percentage_done: constant_high_to_low_schedule(percentage_done, no_outputs)
+
+    elif schedule_type == ScheduleType.LINEAR_LOW_TO_HIGH:
+        return lambda percentage_done: linear_low_to_high_schedule(percentage_done, no_outputs)
+
+    elif schedule_type == ScheduleType.NON_LINEAR_LOW_TO_HIGH:
+        return lambda percentage_done: non_linear_low_to_high_schedule(percentage_done, no_outputs)
+
+    elif schedule_type == ScheduleType.CUSTOM_SIGMOID_LOW_TO_HIGH:
+        # Extract parameters for custom sigmoid
+        k: float = params.get('k', 10.0)
+        x0: float = params.get('x0', 0.5)
+        transition_point: float = params.get('transition_point', 0.25)
+
+        return lambda percentage_done: custom_sigmoid_low_to_high_schedule(
+            percentage_done, no_outputs, k, x0, transition_point
+        )
+
+    elif schedule_type == ScheduleType.SCALE_BY_SCALE_LOW_TO_HIGH:
+        return lambda percentage_done: scale_by_scale_low_to_high_schedule(
+            percentage_done, no_outputs
+        )
+
+    elif schedule_type == ScheduleType.COSINE_ANNEALING:
+        # Extract parameters for cosine annealing schedule
+        frequency: float = params.get('frequency', 3.0)
+        final_ratio: float = params.get('final_ratio', 0.8)
+
+        return lambda percentage_done: cosine_annealing_schedule(
+            percentage_done, no_outputs, frequency, final_ratio
+        )
+
+    elif schedule_type == ScheduleType.CURRICULUM:
+        # Extract parameters for curriculum schedule
+        max_active_outputs: int = params.get('max_active_outputs', no_outputs)
+        activation_strategy: str = params.get('activation_strategy', 'linear')
+
+        return lambda percentage_done: curriculum_schedule(
+            percentage_done, no_outputs, max_active_outputs, activation_strategy
+        )
+
+    else:
+        raise ValueError(
+            f"Unknown deep supervision schedule_type: [{schedule_type}]"
+        )
+
+
+def _normalize_weights(weights: np.ndarray) -> np.ndarray:
+    """Safely normalize weights to sum to 1.0.
+
+    Args:
+        weights: Array of weights to normalize.
+
+    Returns:
+        Normalized weights summing to 1.0.
     """
-    return 1 / (1 + np.exp(-k * (x - x0)))
+    weights_sum = np.sum(weights)
+    # Avoid division by zero
+    if weights_sum == 0:
+        return np.ones_like(weights) / len(weights)
+    return weights / weights_sum
 
-
-def normalize(x: float, x_min: float, x_max: float) -> float:
-    """
-    Min-max normalization to ensure output is in range [0,1]
-
-    Parameters
-    ----------
-    x : float
-        Value to normalize
-    x_min : float
-        Minimum expected value
-    x_max : float
-        Maximum expected value
-
-    Returns
-    -------
-    float
-        Normalized value in range [0,1]
-    """
-    return (x - x_min) / (x_max - x_min)
-
-
-def custom_function(x: float, k: float = 10, x0: float = 0.5) -> float:
-    """
-    Applies sigmoid and normalizes output to ensure range [0,1].
-
-    Parameters
-    ----------
-    x : float
-        Input value in range [0,1]
-    k : float
-        Controls sigmoid steepness
-    x0 : float
-        Controls sigmoid midpoint
-
-    Returns
-    -------
-    float
-        Normalized sigmoid output
-    """
-    y = custom_sigmoid(x, k, x0)
-    y_normalized = normalize(y, custom_sigmoid(0, k, x0), custom_sigmoid(1, k, x0))
-    return y_normalized
-
-
-# ---------------------------------------------------------------------
-# Schedule functions
-# ---------------------------------------------------------------------
 
 def constant_equal_schedule(percentage_done: float, no_outputs: int) -> np.ndarray:
+    """Equal weighting for all outputs regardless of training progress.
+
+    Args:
+        percentage_done: Current training progress from 0.0 to 1.0.
+        no_outputs: Number of outputs to generate weights for.
+
+    Returns:
+        Array of equal weights summing to 1.0.
     """
-    Equal weights for all outputs, constant throughout training.
-
-    Creates a uniform distribution where all outputs receive the same weight
-    (1/no_outputs). This is the simplest baseline approach.
-
-    For U-Net: Treats all decoder stages with equal importance.
-
-    Parameters
-    ----------
-    percentage_done : float
-        Training progress from 0.0 to 1.0 (not used in this schedule as weights are constant)
-    no_outputs : int
-        Number of outputs (scales) to generate weights for
-
-    Returns
-    -------
-    np.ndarray
-        Array of equal weights summing to 1.0
-    """
-    d = np.array([1.0, ] * no_outputs)
-    d = d / np.sum(d)
-    return d
+    return np.ones(no_outputs) / no_outputs
 
 
 def constant_low_to_high_schedule(percentage_done: float, no_outputs: int) -> np.ndarray:
+    """Constant weighting favoring higher resolution outputs.
+
+    Weights increase linearly from the deepest layer to the final output.
+
+    Args:
+        percentage_done: Current training progress from 0.0 to 1.0.
+        no_outputs: Number of outputs to generate weights for.
+
+    Returns:
+        Array of weights increasing from deeper to shallower layers.
     """
-    Weights increase linearly from output1 to outputN, constant throughout training.
-
-    Output weights are proportional to their index (1,2,3,...), creating a 
-    distribution that favors deeper layers.
-
-    For U-Net: Emphasizes deeper features (semantic information) over
-    the final inference output throughout training.
-
-    Parameters
-    ----------
-    percentage_done : float
-        Training progress from 0.0 to 1.0 (not used in this schedule as weights are constant)
-    no_outputs : int
-        Number of outputs (scales) to generate weights for
-
-    Returns
-    -------
-    np.ndarray
-        Array of increasing weights summing to 1.0
-    """
-    d = np.array(list(range(1, no_outputs + 1))).astype(np.float32)
-    d = d / np.sum(d)
-    return d
+    weights = np.arange(1, no_outputs + 1, dtype=np.float64)
+    return _normalize_weights(weights)
 
 
 def constant_high_to_low_schedule(percentage_done: float, no_outputs: int) -> np.ndarray:
+    """Constant weighting favoring deeper layer outputs.
+
+    Weights decrease linearly from the deepest layer to the final output.
+
+    Args:
+        percentage_done: Current training progress from 0.0 to 1.0.
+        no_outputs: Number of outputs to generate weights for.
+
+    Returns:
+        Array of weights decreasing from deeper to shallower layers.
     """
-    Weights decrease linearly from output1 to outputN, constant throughout training.
-
-    Output weights are inverse proportional to their index, creating a
-    distribution that favors shallower layers.
-
-    For U-Net: Emphasizes the final inference output (fine details) over
-    deeper features throughout training.
-
-    Parameters
-    ----------
-    percentage_done : float
-        Training progress from 0.0 to 1.0 (not used in this schedule as weights are constant)
-    no_outputs : int
-        Number of outputs (scales) to generate weights for
-
-    Returns
-    -------
-    np.ndarray
-        Array of decreasing weights summing to 1.0
-    """
-    d = np.array(list(range(1, no_outputs + 1))).astype(np.float32)
-    d = d / np.sum(d)
-    d = d[::-1]  # Reverse the array to make weights decrease
-    return d
+    weights = np.arange(no_outputs, 0, -1, dtype=np.float64)
+    return _normalize_weights(weights)
 
 
 def linear_low_to_high_schedule(percentage_done: float, no_outputs: int) -> np.ndarray:
+    """Linear transition from focusing on deep layers to focusing on shallow layers.
+
+    As training progresses, weight shifts from deeper to shallower layers linearly.
+
+    Args:
+        percentage_done: Current training progress from 0.0 to 1.0.
+        no_outputs: Number of outputs to generate weights for.
+
+    Returns:
+        Array of weights that transition based on training progress.
     """
-    Linear transition from emphasizing deep features to emphasizing inference output.
+    # Initial weights favor deeper layers
+    initial_weights = np.arange(no_outputs, 0, -1, dtype=np.float64)
 
-    At start of training (percentage_done=0): Weights increase from output1 to outputN
-    At end of training (percentage_done=1): Weights decrease from output1 to outputN
-    In between: Linear interpolation between these two states
+    # Final weights favor shallower layers
+    final_weights = np.arange(1, no_outputs + 1, dtype=np.float64)
 
-    For U-Net: Gradually shifts focus from semantic/contextual information to fine details
-    as training progresses. Midway through training, all outputs have equal weight.
+    # Linear interpolation between initial and final weights
+    weights = (1 - percentage_done) * initial_weights + percentage_done * final_weights
 
-    Parameters
-    ----------
-    percentage_done : float
-        Training progress from 0.0 to 1.0
-    no_outputs : int
-        Number of outputs (scales) to generate weights for
-
-    Returns
-    -------
-    np.ndarray
-        Array of weights that evolve linearly during training
-    """
-    d_start = np.array(list(range(1, no_outputs + 1))).astype(np.float32)
-    d_start = d_start / np.sum(d_start)
-    d_end = d_start[::-1]  # End state is the reverse of start state
-    # Linear interpolation between start and end states
-    return d_start * (1.0 - percentage_done) + d_end * percentage_done
+    return _normalize_weights(weights)
 
 
 def non_linear_low_to_high_schedule(percentage_done: float, no_outputs: int) -> np.ndarray:
+    """Non-linear transition from deep to shallow layer focus.
+
+    Uses quadratic interpolation for smoother transition.
+
+    Args:
+        percentage_done: Current training progress from 0.0 to 1.0.
+        no_outputs: Number of outputs to generate weights for.
+
+    Returns:
+        Array of weights with non-linear transition pattern.
     """
-    Non-linear transition from emphasizing deep features to emphasizing inference output.
+    # Initial weights favor deeper layers
+    initial_weights = np.arange(no_outputs, 0, -1, dtype=np.float64)
 
-    Similar to linear_low_to_high but uses a tanh function for smoother transitions.
-    The tanh function creates more gradual changes at the beginning and end of training,
-    with faster transitions in the middle.
+    # Final weights favor shallower layers
+    final_weights = np.arange(1, no_outputs + 1, dtype=np.float64)
 
-    For U-Net: Provides a more natural shift from contextual information to fine details,
-    with stabilized periods at the beginning and end of training.
+    # Non-linear (quadratic) interpolation - smoother transition in middle of training
+    factor = percentage_done ** 2
+    weights = (1 - factor) * initial_weights + factor * final_weights
 
-    Parameters
-    ----------
-    percentage_done : float
-        Training progress from 0.0 to 1.0
-    no_outputs : int
-        Number of outputs (scales) to generate weights for
-
-    Returns
-    -------
-    np.ndarray
-        Array of weights that evolve non-linearly during training
-    """
-    d_start = np.array(list(range(1, no_outputs + 1))).astype(np.float32)
-    d_start = d_start / np.sum(d_start)
-    d_end = d_start[::-1]  # End state is the reverse of start state
-    # Use tanh to create a smooth, non-linear transition rate
-    x = np.clip(np.tanh(2.5 * percentage_done), a_min=0.0, a_max=1.0)
-    return d_start * (1.0 - x) + d_end * x
+    return _normalize_weights(weights)
 
 
 def custom_sigmoid_low_to_high_schedule(
         percentage_done: float,
         no_outputs: int,
-        k: float = 10,
+        k: float = 10.0,
         x0: float = 0.5,
         transition_point: float = 0.25
 ) -> np.ndarray:
+    """Sigmoid-based transition from deep to shallow layer focus.
+
+    Uses a sigmoid function to create a smooth transition between layer importance.
+
+    Args:
+        percentage_done: Current training progress from 0.0 to 1.0.
+        no_outputs: Number of outputs to generate weights for.
+        k: Sigmoid steepness parameter.
+        x0: Sigmoid midpoint parameter.
+        transition_point: Training percentage where transition begins.
+
+    Returns:
+        Array of weights with sigmoid-based transition pattern.
     """
-    Two-phase training approach with focus transition at a specific point.
+    # Adjust percentage based on transition point
+    adjusted_percentage = max(0, (percentage_done - transition_point) / (1 - transition_point))
 
-    Before the transition_point: Smooth transition from emphasizing deep features
-    to emphasizing the inference output, controlled by a custom sigmoid.
+    # Sigmoid function: 1 / (1 + exp(-k(x - x0)))
+    sigmoid_factor = 1 / (1 + np.exp(-k * (adjusted_percentage - x0)))
 
-    After the transition_point: Fixed distribution with 90% weight on the inference
-    output and 10% distributed among all other outputs.
+    # Initial weights favor deeper layers
+    initial_weights = np.arange(no_outputs, 0, -1, dtype=np.float64)
 
-    For U-Net: Ensures the model first learns contextual information, then strongly
-    focuses on refining the final output. Good for complex segmentation tasks.
+    # Final weights favor shallower layers
+    final_weights = np.arange(1, no_outputs + 1, dtype=np.float64)
 
-    Parameters
-    ----------
-    percentage_done : float
-        Training progress from 0.0 to 1.0
-    no_outputs : int
-        Number of outputs (scales) to generate weights for
-    k : float
-        Steepness of sigmoid transition
-    x0 : float
-        Midpoint of sigmoid transition
-    transition_point : float
-        Point in training (0-1) where the final distribution is reached
+    # Sigmoid interpolation between initial and final weights
+    weights = (1 - sigmoid_factor) * initial_weights + sigmoid_factor * final_weights
 
-    Returns
-    -------
-    np.ndarray
-        Array of weights that follow the custom sigmoid pattern
-    """
-    if percentage_done >= transition_point:
-        # After transition point: 90% weight on output1, 10% distributed among others
-        w = np.array([0.9] + [0.1 / (no_outputs - 1)] * (no_outputs - 1))
-    else:
-        # Before transition point: Smooth transition using custom sigmoid
-        d_start = np.array(range(1, no_outputs + 1)) / np.sum(range(1, no_outputs + 1))
-        d_end = np.array([0.9] + [0.1 / (no_outputs - 1)] * (no_outputs - 1))
-        x = custom_function(percentage_done / transition_point, k, x0)
-        w = d_start * (1 - x) + d_end * x
-    return w / np.sum(w)
+    return _normalize_weights(weights)
 
 
 def scale_by_scale_low_to_high_schedule(percentage_done: float, no_outputs: int) -> np.ndarray:
+    """Progressive activation of outputs from deep to shallow.
+
+    Gradually activates outputs from deep to shallow as training progresses.
+
+    Args:
+        percentage_done: Current training progress from 0.0 to 1.0.
+        no_outputs: Number of outputs to generate weights for.
+
+    Returns:
+        Array of weights with scale-by-scale progression.
     """
-    Progressive focused training that systematically shifts emphasis across scales.
+    # Determine which scale is currently active
+    active_scale = min(int(np.floor(percentage_done * no_outputs)), no_outputs - 1)
 
-    Divides training into N equal intervals (where N is the number of outputs).
-    In each interval, weight is primarily (75%) concentrated on one specific output,
-    with remaining weight (25%) distributed equally among earlier outputs.
+    # Create weight array with active scale having weight 1.0
+    weights = np.zeros(no_outputs, dtype=np.float64)
+    weights[active_scale] = 1.0
 
-    As training progresses:
-    - First interval: Focus on deepest output (outputN)
-    - Second interval: Focus on output(N-1), with outputN zeroed out
-    - And so on until final interval: Focus entirely on output1 (inference)
-
-    For U-Net: Creates a structured curriculum that builds features from deep to shallow,
-    systematically focusing on each scale. Effective for learning hierarchical features.
-
-    Parameters
-    ----------
-    percentage_done : float
-        Training progress from 0.0 to 1.0
-    no_outputs : int
-        Number of outputs (scales) to generate weights for
-
-    Returns
-    -------
-    np.ndarray
-        Array of weights following the progressive focus pattern
-    """
-    # Handle edge cases first
-    if no_outputs == 1:
-        return np.array([1.0])
-
-    # Initialize result array with zeros
-    result = np.zeros(no_outputs, dtype=np.float64)  # Explicitly use float64 for precision
-
-    # Calculate interval size and number of active elements
-    interval_size = 1.0 / no_outputs
-
-    # Calculate active elements, handling numerical precision issues
-    active_elements = no_outputs - int(np.floor(percentage_done / interval_size))
-    active_elements = np.clip(active_elements, 1, no_outputs)  # Ensure bounds
-
-    # Special case: when exactly at an interval boundary
-    if np.isclose(percentage_done % interval_size, 0.0):
-        active_elements = no_outputs - int(percentage_done / interval_size)
-        active_elements = max(1, active_elements)
-
-    # Distribution logic
-    if active_elements > 1:
-        # Distribute 25% of weight equally among all outputs except the focal one
-        equal_portion = 0.25 / (active_elements - 1)
-        result[:active_elements - 1] = equal_portion
-        # Assign 75% weight to the focal output
-        result[active_elements - 1] = 0.75
-    else:
-        # In the final interval, all weight goes to output1 (inference)
-        result[0] = 1.0
-
-    # Final validation
-    assert np.isclose(np.sum(result), 1.0), "Results must sum to 1"
-    assert np.all(result >= 0), "All values must be non-negative"
-
-    # Round very small values to exactly zero to prevent floating point artifacts
-    result[np.isclose(result, 0, atol=1e-5)] = 0.0
-
-    return result
+    return weights
 
 
 def cosine_annealing_schedule(
@@ -347,58 +312,34 @@ def cosine_annealing_schedule(
         frequency: float = 3.0,
         final_ratio: float = 0.8
 ) -> np.ndarray:
+    """Cosine annealing schedule for weight distribution.
+
+    Uses cosine function to create cyclical weight patterns during training.
+
+    Args:
+        percentage_done: Current training progress from 0.0 to 1.0.
+        no_outputs: Number of outputs to generate weights for.
+        frequency: Number of complete cycles during training.
+        final_ratio: Ratio between final and initial layer weights.
+
+    Returns:
+        Array of weights following cosine annealing pattern.
     """
-    Implements a cosine annealing schedule that oscillates between emphasizing deep and shallow features.
+    # Cosine factor oscillates between 0 and 1
+    cosine_factor = 0.5 * (1 + np.cos(2 * np.pi * frequency * percentage_done))
 
-    The weights follow a cosine wave pattern with decreasing amplitude, gradually converging
-    to a final distribution that emphasizes the inference output.
+    # Adjust factor with final ratio to control the range of oscillation
+    adjusted_factor = (1 - final_ratio) * cosine_factor + final_ratio
 
-    For U-Net: Helps escape local minima by periodically shifting focus between semantic
-    features and fine details. Similar to cyclic learning rates, this can improve
-    generalization and exploration of the loss landscape.
+    # Create base weights
+    weights = np.ones(no_outputs, dtype=np.float64)
 
-    Parameters
-    ----------
-    percentage_done : float
-        Training progress from 0.0 to 1.0
-    no_outputs : int
-        Number of outputs (scales) to generate weights for
-    frequency : float
-        Number of complete oscillations during training
-    final_ratio : float
-        Final weight ratio between inference output (output1) and deepest output
+    # Apply increasing weight to deeper layers based on cosine factor
+    for i in range(no_outputs):
+        scale_factor = 1 + (no_outputs - i - 1) * adjusted_factor
+        weights[i] = scale_factor
 
-    Returns
-    -------
-    np.ndarray
-        Array of weights following the cosine annealing pattern
-    """
-    # Target final distribution (emphasizes inference output)
-    d_final = np.linspace(final_ratio, 1.0, no_outputs)
-    d_final = d_final / np.sum(d_final)
-
-    # Initial distribution (emphasizes deeper features)
-    d_initial = d_final[::-1]
-
-    # Calculate amplitude decay - reduces the oscillation over time
-    amplitude = np.cos(np.pi * percentage_done) * 0.5 + 0.5
-
-    # Calculate phase for the current training percentage
-    phase = np.cos(2 * np.pi * frequency * percentage_done)
-
-    # Interpolate between distributions based on phase and amplitude
-    if phase > 0:
-        # Moving toward initial distribution
-        mix_ratio = phase * amplitude
-        weights = d_final * (1 - mix_ratio) + d_initial * mix_ratio
-    else:
-        # Moving toward final distribution
-        mix_ratio = -phase * amplitude
-        weights = d_final * (1 - mix_ratio) + d_initial * mix_ratio
-
-    # Ensure weights sum to 1.0
-    weights = weights / np.sum(weights)
-    return weights
+    return _normalize_weights(weights)
 
 
 def curriculum_schedule(
@@ -407,164 +348,40 @@ def curriculum_schedule(
         max_active_outputs: int = None,
         activation_strategy: str = 'linear'
 ) -> np.ndarray:
+    """Curriculum learning schedule activating outputs progressively.
+
+    Args:
+        percentage_done: Current training progress from 0.0 to 1.0.
+        no_outputs: Number of outputs to generate weights for.
+        max_active_outputs: Maximum number of simultaneously active outputs.
+        activation_strategy: Strategy for activating outputs ('linear', 'exp', etc.).
+
+    Returns:
+        Array of weights implementing curriculum learning pattern.
     """
-    Implements a curriculum learning strategy by gradually incorporating shallower outputs.
-
-    Initially focuses entirely on the deepest output (outputN), then progressively
-    activates and includes shallower outputs as training progresses, ultimately
-    emphasizing the inference output (output1).
-
-    For U-Net: Enforces a strict curriculum where the model first learns deep semantic
-    features, then gradually incorporates finer details as training progresses.
-    This helps establish a strong hierarchical representation.
-
-    Parameters
-    ----------
-    percentage_done : float
-        Training progress from 0.0 to 1.0
-    no_outputs : int
-        Number of outputs (scales) to generate weights for
-    max_active_outputs : int, optional
-        Maximum number of simultaneously active outputs (default: all outputs)
-    activation_strategy : str
-        How outputs become active: 'linear' or 'sqrt'
-
-    Returns
-    -------
-    np.ndarray
-        Array of weights following the curriculum pattern
-    """
-    if max_active_outputs is None:
+    if max_active_outputs is None or max_active_outputs <= 0:
         max_active_outputs = no_outputs
+    else:
+        max_active_outputs = min(max_active_outputs, no_outputs)
 
-    # Initialize weights array
-    weights = np.zeros(no_outputs)
+    # Start with all weights at zero
+    weights = np.zeros(no_outputs, dtype=np.float64)
 
-    # Determine how many outputs are active at current percentage
-    if activation_strategy == 'sqrt':
-        # Square root activates outputs more rapidly at first, then slows down
-        active_outputs = min(int(np.sqrt(percentage_done) * no_outputs) + 1, max_active_outputs)
-    else:  # 'linear'
-        # Linear activation strategy
-        active_outputs = min(int(percentage_done * no_outputs) + 1, max_active_outputs)
+    # Calculate how many outputs should be active at current percentage
+    if activation_strategy == 'exp':
+        # Exponential activation (activates more outputs later in training)
+        active_count = int(max_active_outputs * (percentage_done ** 2))
+    else:
+        # Linear activation (default)
+        active_count = int(max_active_outputs * percentage_done)
 
     # Ensure at least one output is active
-    active_outputs = max(1, active_outputs)
+    active_count = max(1, active_count)
 
-    # Determine which outputs to activate (starting from deepest)
-    active_indices = list(range(no_outputs - active_outputs, no_outputs))
+    # Activate outputs from deepest to shallowest
+    active_indices = list(range(min(active_count, no_outputs)))
 
-    # If inference output (output1) is active, give it increasing weight
-    if 0 in active_indices:
-        inference_weight = percentage_done ** 2  # Quadratic increase in importance
-        remaining_weight = 1.0 - inference_weight
+    # Set equal weights for active outputs
+    weights[active_indices] = 1.0
 
-        # Distribute the remaining weight among other active outputs
-        if len(active_indices) > 1:
-            for i in active_indices:
-                if i == 0:
-                    weights[i] = inference_weight
-                else:
-                    # Weight deeper features more
-                    weights[i] = remaining_weight * (i + 1) / sum(range(1, active_outputs))
-        else:
-            # Only inference output is active
-            weights[0] = 1.0
-    else:
-        # Inference output not active yet, focus on deepest active feature
-        active_weights = np.array(range(1, active_outputs + 1))
-        active_weights = active_weights / np.sum(active_weights)
-
-        # Assign weights to active outputs
-        for idx, i in enumerate(active_indices):
-            weights[i] = active_weights[idx]
-
-    # Ensure weights sum to 1.0 (handle numerical precision issues)
-    weights = weights / np.sum(weights)
-    return weights
-
-# ---------------------------------------------------------------------
-# Main schedule builder function
-# ---------------------------------------------------------------------
-
-def schedule_builder(
-        config: Dict,
-        no_outputs: int) -> Callable[[float], np.ndarray]:
-    """
-    Builds a schedule function that computes weighting arrays for deep supervision
-    outputs at different training progress stages (percentage_done).
-
-    In the context of U-Net architecture:
-    - Output 1: Final inference output (highest resolution)
-    - Output 5 (or highest number): Deepest scale in the network
-    - Outputs in between: Intermediate scales
-
-    Parameters
-    ----------
-    config : Dict
-        Configuration dictionary containing the type of schedule and optional parameters.
-    no_outputs : int
-        Number of outputs (scales) for which weights must be generated.
-
-    Returns
-    -------
-    schedule : Callable[[float], np.ndarray]
-        A function taking a float percentage (0.0 to 1.0) and returning a numpy array
-        of shape [no_outputs] summing to 1.0, which represents the weights for each output.
-    """
-    # --- argument checking
-    if not isinstance(config, Dict):
-        raise ValueError("config must be a dictionary")
-    if no_outputs <= 0:
-        raise ValueError("no_outputs must be positive integer")
-
-    # --- select type
-    schedule_type = config.get(TYPE_STR, None)
-
-    # --- sanity checks
-    if schedule_type is None:
-        raise ValueError("schedule_type cannot be None")
-    if not isinstance(schedule_type, str):
-        raise ValueError("schedule_type must be a string")
-
-    # --- select schedule
-    params = config.get(CONFIG_STR, {})
-    schedule_type = schedule_type.strip().lower()
-    logger.info(f"deep supervision schedule: "
-                f"[{schedule_type}], "
-                f"with params: [{params}]")
-
-    # --- Create and return the appropriate schedule function
-    if schedule_type == "constant_equal":
-        return lambda percentage_done: constant_equal_schedule(percentage_done, no_outputs)
-
-    elif schedule_type == "constant_low_to_high":
-        return lambda percentage_done: constant_low_to_high_schedule(percentage_done, no_outputs)
-
-    elif schedule_type == "constant_high_to_low":
-        return lambda percentage_done: constant_high_to_low_schedule(percentage_done, no_outputs)
-
-    elif schedule_type == "linear_low_to_high":
-        return lambda percentage_done: linear_low_to_high_schedule(percentage_done, no_outputs)
-
-    elif schedule_type == "non_linear_low_to_high":
-        return lambda percentage_done: non_linear_low_to_high_schedule(percentage_done, no_outputs)
-
-    elif schedule_type == "custom_sigmoid_low_to_high":
-        # Extract parameters for custom sigmoid
-        k = params.get('k', 10)
-        x0 = params.get('x0', 0.5)
-        transition_point = params.get('transition_point', 0.25)
-
-        return lambda percentage_done: custom_sigmoid_low_to_high_schedule(
-            percentage_done, no_outputs, k, x0, transition_point
-        )
-
-    elif schedule_type == "scale_by_scale_low_to_high":
-        return lambda percentage_done: scale_by_scale_low_to_high_schedule(percentage_done, no_outputs)
-
-    else:
-        raise ValueError(f"don't know how to handle "
-                         f"deep supervision schedule_type [{schedule_type}]")
-
-# ---------------------------------------------------------------------
+    return _normalize_weights(weights)
