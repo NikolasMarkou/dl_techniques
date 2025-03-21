@@ -16,10 +16,42 @@ Key Features:
 
 Architecture:
 ------------
-The layer consists of three parallel branches:
-1. Gate branch: Controls information flow
-2. Up branch: Transforms input features
-3. Down branch: Final feature projection
+                   +------------------+
+                   |      Input       |
+                   +--------+---------+
+                            |
+                 +----------+-----------+
+      +----------+       Split         +-----------+
+      |          +--------------------+            |
+      |                                            |
++-----v------+                             +-------v-----+
+| Gate Conv  |                             |   Up Conv   |
+| (1x1 Conv) |                             | (1x1 Conv)  |
++-----+------+                             +-------+-----+
+      |                                            |
++-----v------+                             +-------v-----+
+| Activation |                             | Activation  |
+| (ReLU/GELU)|                             | (ReLU/GELU) |
++-----+------+                             +-------+-----+
+      |                                            |
+      |          +--------------------+            |
+      +----------> Element-wise       <------------+
+                 |  Multiplication    |
+                 +----------+---------+
+                            |
+                 +----------v---------+
+                 |    Down Conv       |
+                 |    (1x1 Conv)      |
+                 +----------+---------+
+                            |
+                 +----------v---------+
+                 |    Activation      |
+                 | (Linear/ReLU/etc.) |
+                 +----------+---------+
+                            |
+                 +----------v---------+
+                 |      Output        |
+                 +--------------------+
 
 The computation flow is:
 input -> (gate_conv, up_conv) -> activation -> multiply -> down_conv -> activation -> output
@@ -28,25 +60,11 @@ As described in the paper, gMLP is a simple variant of MLPs with gating that can
 perform comparably to Transformers in language and vision tasks, demonstrating that
 self-attention is not always necessary for achieving strong performance.
 
-Usage Examples:
--------------
-Basic usage:
-```python
-layer = GatedMLP(
-    filters=64,
-    attention_activation='relu',
-    output_activation='linear'
-)
-```
-
-With L2 regularization:
-```python
-layer = GatedMLP(
-    filters=64,
-    kernel_regularizer=keras.regularizers.L2(1e-4),
-    kernel_initializer='he_normal'
-)
-```
+Key differences from standard attention mechanisms:
+1. No token-to-token interactions via dot products
+2. Simplified architecture with purely MLP-based components
+3. Spatial gating rather than query-key-value attention
+4. Often more parameter-efficient than self-attention
 """
 
 import copy
