@@ -3,312 +3,189 @@
 <p align="center">
   <img src="./imgs/minimalist-2d-logo-with-a-left-to-right-_sSVDZkeKR4C_eovommSCFQ_mJekanaZTB2Nbe5dBKOnPQ.png" alt="Deep Learning Techniques" width="512" height="512">
 </p>
-A versatile, modern library providing **advanced deep learning layers, initializers, constraints,** and **analysis tools** for Keras/TensorFlow. 
 
-Whether you're researching new architectures, experimenting with custom constraints, or analyzing your network activations, **DL Techniques** brings you cutting-edge components to accelerate and enhance your workflows.
+A versatile, modern library providing **advanced deep learning layers, initializers, constraints,** and **analysis tools** for Keras/TensorFlow.  
+Use it to experiment with **cutting-edge network components**, build novel architectures, or perform in-depth **model analyses** – all while leveraging a robust test suite and real-world example experiments.
+
+---
+
+## Table of Contents
+
+1. [Key Features](#key-features)  
+2. [Installation](#installation)  
+3. [Usage Examples](#usage-examples)  
+4. [Project Structure](#project-structure)  
+5. [Documentation](#documentation)  
+6. [Contributing](#contributing)  
+7. [License](#license)  
+
+---
 
 ## Key Features
 
-- **Advanced Neural Network Layers**
-  - **Attention Mechanisms**: Hopfield Attention, Non-Local Attention, Differential Transformers
-  - **Normalization**: RMS Norm, Global Response Norm, Shell Clamp, Spherical Bound
-  - **Vision**: CBAM (Convolutional Block Attention Module), ConvNeXt, CLAHE
-  - **Complex Networks**: Complex Conv2D, Complex Dense
-  - **Modern Architectures**: Capsule Networks, Gated MLPs, KAN (Kolmogorov-Arnold Networks)
-  - **Special Layers**: RBF, Mish Activation, Canny Edge Detection, Shearlet Transform
+- **Wide Range of Layers**  
+  - **Normalization**: RMS Norm, Global Response Norm, Shell Clamp, etc.  
+  - **Attention Mechanisms**: Hopfield Attention, Non-Local Attention, Differential Transformer  
+  - **Vision**: Convolutional Block Attention Module (CBAM), CLAHE, ConvNeXt blocks, hierarchical Vision Transformers  
+  - **Miscellaneous**: Capsule Networks, RBF layers, advanced activation functions (Mish, GLU), Shearlet transforms  
 
-- **Regularization & Optimization**
-  - **Advanced Regularizers**: SRIP, Soft Orthogonal, Binary/Tri-State Preferences
-  - **Training Utilities**: Deep Supervision, Warmup Scheduling
-  - **Stochastic Techniques**: Stochastic Depth, Selective Gradients
+- **Regularization & Optimization**  
+  - **Regularizers**: SRIP, Soft Orthogonal, Tri-State Preferences  
+  - **Optimizers**: Warmup schedules, selective gradients, deep supervision  
+  - **Stochastic Techniques**: Stochastic Depth, Band-limited RMS Norm  
 
-- **Analysis & Visualization**
-  - **Model Analysis**: Weight Analysis, Activation Distribution
-  - **Visualization**: Advanced plotting utilities
-  - **Logging**: Custom logging infrastructure
+- **Advanced Analysis & Visualization**  
+  - **Activation Distribution Analysis**: Inspect layer-by-layer activation stats  
+  - **WeightWatcher Integration**: Assess weight matrix properties for generalization analysis  
+  - **Logging Infrastructure**: In-built logger for consistent experiment tracking  
 
-- **Complete Model Implementations**
-  - Depth Anything
-  - CoshNet
-  - MobileNet v4
-  - CapsNet
+- **Full Model Implementations**  
+  - **Depth Anything**, **CoshNet**, **MobileNet v4**, **Mixture Density Network (MDN) Model**, **CapsNet**, and more
+
+---
 
 ## Installation
 
 1. **Clone** this repository:
+
    ```bash
    git clone https://github.com/your-username/dl_techniques.git
+   cd dl_techniques
    ```
 
-2. **Install** dependencies:
+2. **Install** requirements:
+
    ```bash
    pip install -r requirements.txt
    ```
 
-3. **Install** the package (development mode):
+3. **Install** the library in development mode:
+
    ```bash
    pip install -e .
    ```
 
-**Requirements**:
+**Dependencies** (listed in `requirements.txt`):
 - Python ≥ 3.11
-- Keras ≥ 3.8.0
-- TensorFlow ≥ 2.18.0
-- PyTest (for testing)
-- Additional dependencies in `requirements.txt`
+- TensorFlow ≥ 2.18.0  
+- Keras ≥ 3.8.0  
+- NumPy, SciPy, Matplotlib, scikit-learn, Pandas, PyTest, etc.
 
-## Quick Start
+---
+
+## Usage Examples
+
+Here’s a quick example of how to leverage some of the library’s components in Keras/TensorFlow:
 
 ```python
 import tensorflow as tf
-from dl_techniques.layers.adaptive_softmax import AdaptiveTemperatureSoftmax
 from dl_techniques.layers.global_response_norm import GlobalResponseNorm
+from dl_techniques.layers.adaptive_softmax import AdaptiveTemperatureSoftmax
 
-# Create a model with advanced layers
+# Simple model using advanced layers
 inputs = tf.keras.Input(shape=(64,))
-x = tf.keras.layers.Dense(128)(inputs)
-x = GlobalResponseNorm()(x)
+x = tf.keras.layers.Dense(128, activation='relu')(inputs)
+x = GlobalResponseNorm()(x)  # apply GRN
 x = AdaptiveTemperatureSoftmax()(x)
 model = tf.keras.Model(inputs, x)
 
-# Use provided training utilities
-from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 model.compile(
     optimizer='adam',
     loss='categorical_crossentropy',
     metrics=['accuracy']
 )
+
+# Example training
+# model.fit(x_train, y_train, validation_data=(x_val, y_val), epochs=10, batch_size=32)
 ```
+
+**Additional Capabilities**  
+- **Custom Losses**: Try `AnyLoss` classes (e.g., F1Loss, BalancedAccuracyLoss) for direct metric optimization.  
+- **MDN**: Mixture Density Networks for multi-modal output predictions.  
+- **Analysis Tools**: Activation distribution analysis, WeightWatcher-based SVD smoothing, etc.
+
+---
 
 ## Project Structure
 
 ```
 dl_techniques/
+├─ README.md                     # High-level overview and usage info
+├─ LICENSE                      # GNU GPL v3
+├─ pyproject.toml.py            # Project configuration (for tools like pytest)
+├─ requirements.txt             # Dependencies
+├─ setup.py                     # Package setup file
+├─ docs/                        # Additional documentation & reference materials
+│  ├─ anyloss_classification_metrics_loss_functions.md
+│  ├─ custom_rms_norm.md
+│  ├─ hierarchical_vision_transformers.md
+│  ├─ input_normalization.md
+│  └─ mdn.md
+├─ imgs/                        # Images & graphics for docs
 ├─ src/
 │  └─ dl_techniques/
-│     ├─ analysis/            # Analysis tools
-│     ├─ constraints/         # Custom constraints
-│     ├─ initializers/        # Weight initializers
-│     ├─ layers/             # Neural network layers
-│     ├─ losses/             # Custom loss functions
-│     ├─ models/             # Complete model implementations
-│     ├─ optimization/       # Training optimizations
-│     ├─ regularizers/       # Custom regularizers
-│     ├─ utils/              # Utility functions
-│     └─ visualization/      # Visualization tools
-├─ tests/                    # Comprehensive test suite
-│  ├─ test_layers/
-│  ├─ test_losses/
-│  ├─ test_regularizers/
-│  └─ test_utils/
-├─ docs/                     # Documentation
-├─ experiments/              # Example experiments
-├─ pyproject.toml           # Project configuration
-├─ requirements.txt         # Dependencies
-├─ setup.py                # Package setup
-└─ LICENSE                 # GNU GPL v3
+│     ├─ analysis/              # Activation distribution, WeightWatcher, other analysis
+│     ├─ constraints/           # Constraint layers
+│     ├─ initializers/          # Specialized weight initializers
+│     ├─ layers/                # Custom Keras layers (attention, capsules, transforms, etc.)
+│     ├─ losses/                # Advanced loss functions (e.g., AnyLoss)
+│     ├─ models/                # Complete model implementations
+│     ├─ optimization/          # Warmup schedules, gradient manipulation
+│     ├─ regularizers/          # Soft orthogonal, tri-state preference, SRIP
+│     ├─ utils/                 # Helpers for logging, datasets, training
+│     └─ visualization/         # Visualization tools
+├─ experiments/                 # Example experiments & scripts
+└─ tests/                       # Comprehensive test suite
+   ├─ test_layers/
+   ├─ test_losses/
+   ├─ test_models/
+   ├─ test_regularizers/
+   └─ test_utils/
 ```
 
-## Feature Highlights
+**Highlights**:
+- **`src/dl_techniques/layers`**: Contains all custom neural network layers.  
+- **`docs/`**: Reference materials and technique explanations.  
+- **`experiments/`**: Real-world usage demos.  
+- **`tests/`**: PyTest-based testing for reliability.
 
-### 1. Advanced Normalization Techniques
-
-The library implements cutting-edge normalization techniques that improve training stability and model performance:
-
-```python
-from dl_techniques.layers.rms_norm_spherical_bound import RMSNormSphericalBound
-from dl_techniques.layers.global_response_norm import GlobalResponseNorm
-
-# Apply spherical bound RMS normalization
-x = RMSNormSphericalBound()(inputs)
-
-# Add global response normalization
-x = GlobalResponseNorm()(x)
-```
-
-### 2. Attention Mechanisms
-
-Implement state-of-the-art attention mechanisms for both vision and sequence models:
-
-```python
-from dl_techniques.layers.hopfield_attention import HopfieldAttention
-from dl_techniques.layers.convolutional_block_attention_module import CBAM
-
-# Add Hopfield attention
-x = HopfieldAttention(heads=8)(inputs)
-
-# Apply CBAM
-x = CBAM(reduction_ratio=16)(x)
-```
-
-### 3. Capsule Networks
-
-Create advanced capsule networks with dynamic routing:
-
-```python
-from dl_techniques.layers.capsules import PrimaryCapsule, RoutingCapsule
-
-# Create primary capsules
-primary_caps = PrimaryCapsule(
-    num_capsules=32,
-    dim_capsules=8,
-    kernel_size=9,
-    strides=2
-)(conv_features)
-
-# Add routing capsules
-digit_caps = RoutingCapsule(
-    num_capsules=10,
-    dim_capsules=16,
-    routing_iterations=3
-)(primary_caps)
-```
-
-### 4. Complex-Valued Networks
-
-Build networks that operate on complex numbers:
-
-```python
-from dl_techniques.layers.complex_layers import ComplexConv2D, ComplexDense
-
-# Create complex-valued network
-x = ComplexConv2D(filters=32, kernel_size=3)(inputs)
-x = ComplexDense(units=64)(x)
-```
-
-## Usage Examples
-
-### Example 1: Custom Vision Transformer with Hierarchical MLP Stem
-
-```python
-from dl_techniques.layers.hierarchical_vision_transformers import HierarchicalMlpStem
-from dl_techniques.layers.vision_transformer import TransformerEncoder
-
-# Create input
-inputs = keras.layers.Input(shape=(224, 224, 3))
-
-# Apply hierarchical MLP stem
-x = HierarchicalMlpStem(
-    embed_dim=768,
-    patch_size=16
-)(inputs)
-
-# Add transformer encoder
-x = TransformerEncoder(
-    num_heads=12,
-    mlp_dim=3072,
-    num_layers=12
-)(x)
-
-# Output layer
-outputs = keras.layers.Dense(1000, activation='softmax')(x)
-
-# Create model
-model = keras.Model(inputs, outputs)
-```
-
-### Example 2: Advanced Regularization
-
-```python
-from dl_techniques.regularizers.srip import SRIPRegularizer
-from dl_techniques.regularizers.soft_orthogonal import SoftOrthogonalConstraintRegularizer
-
-# Create layer with SRIP regularization
-dense = keras.layers.Dense(
-    units=512,
-    kernel_regularizer=SRIPRegularizer(beta=1e-3)
-)
-
-# Create layer with soft orthogonal regularization
-conv = keras.layers.Conv2D(
-    filters=64,
-    kernel_size=3,
-    kernel_regularizer=SoftOrthogonalConstraintRegularizer(beta=1e-2)
-)
-```
-
-### Example 3: Activation Analysis
-
-```python
-from dl_techniques.analysis.activation_activity import ActivationDistributionAnalyzer
-
-# Create analyzer
-analyzer = ActivationDistributionAnalyzer(model)
-
-# Analyze activation distributions
-stats = analyzer.compute_activation_stats(x_test)
-
-# Visualize activations
-analyzer.plot_activation_distributions(
-    x_test,
-    save_path='./activation_plots/'
-)
-```
-
-### Example 4: Any-Loss Classification
-
-```python
-from dl_techniques.losses.any_loss import F1Loss, BalancedAccuracyLoss
-
-# Train with F1 optimization
-model.compile(
-    optimizer='adam',
-    loss=F1Loss(),
-    metrics=['accuracy']
-)
-
-# Or train with balanced accuracy optimization
-model.compile(
-    optimizer='adam',
-    loss=BalancedAccuracyLoss(),
-    metrics=['accuracy']
-)
-```
-
-## Testing
-
-Run the comprehensive test suite:
-
-```bash
-pytest tests/
-```
-
-Test coverage includes:
-- Layer functionality
-- Loss computations
-- Regularizer behavior
-- Utility functions
-- End-to-end model tests
+---
 
 ## Documentation
 
-For detailed documentation on each component, please refer to the `docs/` directory:
+Detailed documentation resides in the `docs/` folder and includes:
+1. **Advanced Loss Functions**: [AnyLoss Overview](docs/anyloss_classification_metrics_loss_functions.md)  
+2. **Custom RMS Norm**: [RMS Normalization Variants](docs/custom_rms_norm.md)  
+3. **Hierarchical Vision Transformers**: [Implementation Details](docs/hierarchical_vision_transformers.md)  
+4. **Input Normalization**: [Best Practices](docs/input_normalization.md)  
+5. **Mixture Density Networks**: [MDN Theory & Usage](docs/mdn.md)
 
-- [AnyLoss: Classification Metrics as Loss Functions](docs/anyloss_classification_metrics_loss_functions.md)
-- [Custom RMS Normalization](docs/custom_rms_norm.md)
-- [Hierarchical Vision Transformers](docs/hierarchical_vision_transformers.md)
-- [Input Normalization Best Practices](docs/input_normalization.md)
-- [Mixture Density Networks (MDNs)](docs/mdn.md)
+---
 
 ## Contributing
 
-1. Fork & clone the repository
-2. Create a feature branch
-3. Implement changes with tests
-4. Submit a pull request
+1. **Fork** and **Clone** the repository  
+2. **Create a branch** for your feature or bugfix  
+3. **Write tests** covering your changes (see `tests/` folder)  
+4. **Ensure** all pre-commit hooks pass (`pylint`, `pytest`, etc.)  
+5. **Open a Pull Request** describing your changes
 
-**Requirements**:
-- All tests must pass
-- Type hints required
-- Sphinx docstrings required
-- Follow layer normalization order
-- Proper kernel initialization
-- Error handling
-- Pre-commit hooks (see `.pre-commit-config.yaml`)
+**Coding Standards**:
+- Follow [PEP 8](https://peps.python.org/pep-0008/)  
+- Use **type hints**  
+- Include **Sphinx docstrings** for new layers, models, or utilities  
+- Write comprehensive tests in `tests/`
+
+---
 
 ## License
 
-GNU General Public License v3.0 - see [LICENSE](LICENSE) for details.
+This project is licensed under the [GNU General Public License v3.0](LICENSE).  
+See the [LICENSE file](LICENSE) for details.
+
+---
+
+**Happy experimenting with DL Techniques!** If you have questions, bug reports, or feature requests, feel free to open an issue or start a discussion.
 
 ## References
 
