@@ -230,6 +230,7 @@ import tensorflow as tf
 from typing import Optional, Tuple, Union
 from keras import Layer, Regularizer, Initializer
 
+
 # ---------------------------------------------------------------------
 
 @keras.utils.register_keras_serializable()
@@ -251,23 +252,38 @@ class PatchEmbed(Layer):
             self,
             patch_size: Union[int, Tuple[int, int]],
             embed_dim: int,
-            kernel_initializer: Union[str, Initializer] = "he_normal",
+            kernel_initializer: Union[str, Initializer] = "glorot_normal",
             kernel_regularizer: Optional[Regularizer] = None,
+            activation: Union[str, None] = "linear",
             name: Optional[str] = None,
             **kwargs
     ):
+        """Initialize the PatchEmbed layer.
+
+        Args:
+            patch_size: Size of patches to split the input image into
+            embed_dim: Embedding dimension for patches
+            kernel_initializer: Initializer for the projection matrix
+            kernel_regularizer: Regularizer function for the projection matrix
+            activation: Activation function to use (default is 'linear')
+            name: Optional name for the layer
+            **kwargs: Additional layer arguments
+        """
         super().__init__(name=name, **kwargs)
         self.patch_size = patch_size if isinstance(patch_size, tuple) else (patch_size, patch_size)
         self.embed_dim = embed_dim
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = kernel_regularizer
+        self.activation = keras.activations.get(activation)
 
+        # Use Keras Conv2D layer for the projection
         self.proj = keras.layers.Conv2D(
             filters=embed_dim,
             kernel_size=self.patch_size,
             strides=self.patch_size,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
+            activation=self.activation,
             padding="valid",
             name=f"{name}_projection" if name else None
         )
@@ -281,10 +297,30 @@ class PatchEmbed(Layer):
         Returns:
             Embedded patches tensor of shape (batch_size, n_patches, embed_dim)
         """
+        # Apply convolution to extract patches
         x = self.proj(x)  # (batch_size, h', w', embed_dim)
-        batch_size = tf.shape(x)[0]
-        # Rearrange to (batch_size, n_patches, embed_dim)
-        return tf.reshape(x, (batch_size, -1, self.embed_dim))
+
+        # Reshape to (batch_size, n_patches, embed_dim)
+        x = keras.layers.Reshape((-1, self.embed_dim))(x)
+
+        return x
+
+    def get_config(self) -> dict:
+        """Return the configuration of the layer for serialization.
+
+        Returns:
+            Dictionary containing the layer configuration
+        """
+        config = super().get_config()
+        config.update({
+            'patch_size': self.patch_size,
+            'embed_dim': self.embed_dim,
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'activation': keras.activations.serialize(self.activation),
+        })
+        return config
+
 
 # ---------------------------------------------------------------------
 
@@ -358,6 +394,7 @@ class MultiHeadAttention(Layer):
         x = tf.reshape(x, (batch_size, seq_len, self.embed_dim))
 
         return self.proj(x)
+
 
 # ---------------------------------------------------------------------
 
