@@ -1,5 +1,6 @@
+import numpy as np
 import tensorflow as tf
-from typing import Optional
+from typing import Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
 
@@ -195,5 +196,69 @@ def safe_divide(
         Result of safe division
     """
     return x / (y + tf.constant(eps))
+
+# ---------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
+
+def gaussian_kernel(
+        kernel_size: Tuple[int, int],
+        nsig: Tuple[float, float]
+) -> np.ndarray:
+    """
+    Build a 2D Gaussian kernel array.
+
+    Args:
+        kernel_size (Tuple[int, int]): Size of the grid (height, width).
+        nsig (Tuple[float, float]): Standard deviation for x and y dimensions.
+
+    Returns:
+        np.ndarray: 2D Gaussian kernel.
+    """
+    if len(nsig) != 2 or len(kernel_size) != 2:
+        raise ValueError("Both kernel_size and nsig must be tuples of length 2.")
+
+    x = np.linspace(-nsig[0], nsig[0], kernel_size[0])
+    y = np.linspace(-nsig[1], nsig[1], kernel_size[1])
+    x, y = np.meshgrid(x, y)
+
+    kernel = np.exp(-(x ** 2 + y ** 2) / 2)
+    return kernel / np.sum(kernel)
+
+
+# ---------------------------------------------------------------------
+
+
+def depthwise_gaussian_kernel(
+        channels: int = 3,
+        kernel_size: Tuple[int, int] = (5, 5),
+        nsig: Tuple[float, float] = (2.0, 2.0),
+        dtype: Optional[np.dtype] = None
+) -> np.ndarray:
+    """
+    Create a depthwise Gaussian kernel.
+
+    Args:
+        channels (int): Number of input channels.
+        kernel_size (Tuple[int, int]): Size of the kernel (height, width).
+        nsig (Tuple[float, float]): Standard deviation for x and y dimensions.
+        dtype (Optional[np.dtype]): Data type of the output kernel.
+
+    Returns:
+        np.ndarray: Depthwise Gaussian kernel of shape (kernel_height, kernel_width, in_channels, 1).
+    """
+    # Generate the 2D Gaussian kernel
+    kernel_2d = gaussian_kernel(kernel_size, nsig)
+
+    # Create the depthwise kernel
+    kernel = np.zeros((*kernel_size, channels, 1))
+    for i in range(channels):
+        kernel[:, :, i, 0] = kernel_2d
+
+    # Set the data type
+    if dtype is not None:
+        kernel = kernel.astype(dtype)
+
+    return kernel
 
 # ---------------------------------------------------------------------
