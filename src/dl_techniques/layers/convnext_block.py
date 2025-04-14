@@ -83,11 +83,10 @@ Notes:
 - Implements ResNet-style skip connections
 - Compatible with TF/Keras model saving
 """
-
+import copy
 import keras
-from enum import Enum
 import tensorflow as tf
-from dataclasses import dataclass
+from dataclasses import dataclass, field, asdict
 from typing import Optional, Dict, Union, Tuple
 
 # ---------------------------------------------------------------------
@@ -95,10 +94,13 @@ from typing import Optional, Dict, Union, Tuple
 # ---------------------------------------------------------------------
 
 from .layer_scale import LearnableMultiplier
-from dl_techniques.regularizers.soft_orthogonal import \
-    SoftOrthogonalConstraintRegularizer, \
+from dl_techniques.regularizers.soft_orthogonal import (
+    SoftOrthogonalConstraintRegularizer,
     SoftOrthonormalConstraintRegularizer
-from ..constraints.value_range_constraint import ValueRangeConstraint
+)
+from dl_techniques.constraints.value_range_constraint import (
+    ValueRangeConstraint
+)
 
 
 # ---------------------------------------------------------------------
@@ -135,27 +137,27 @@ class ConvNextBlock(keras.layers.Layer):
         dropout_rate: Optional dropout rate
         spatial_dropout_rate: Optional spatial dropout rate
         use_gamma: Whether to use learnable multiplier
-        kernel_regularization: Type of kernel regularization to use
+        use_softorthonormal_regularizer: If true use soft orthonormal regularizer
         name: Name of the layer
     """
 
     def __init__(
             self,
             conv_config: ConvNextConfig,
-            dropout_rate: Optional[float] = None,
-            spatial_dropout_rate: Optional[float] = None,
+            dropout_rate: Optional[float] = 0.0,
+            spatial_dropout_rate: Optional[float] = 0.0,
             use_gamma: bool = True,
-            kernel_regularization: Optional[str] = None,
-            name: Optional[str] = None,
+            use_softorthonormal_regularizer: bool = False,
+            **kwargs
     ):
-        super().__init__(name=name)
+        super().__init__(**kwargs)
 
         # Store configurations
         self.conv_config = conv_config
         self.dropout_rate = dropout_rate
         self.spatial_dropout_rate = spatial_dropout_rate
         self.use_gamma = use_gamma
-        self.kernel_regularization = kernel_regularization
+        self.use_softorthonormal_regularizer = use_softorthonormal_regularizer
 
         # Initialize layers
         self.conv_1 = None
@@ -178,10 +180,16 @@ class ConvNextBlock(keras.layers.Layer):
                 mean=0.0, stddev=0.02
             ),
             use_bias=self.conv_config.use_bias,
+            depthwise_regularizer=copy.deepcopy(self.conv_config.kernel_regularizer),
         )
 
         # Normalization layer
-        self.norm = keras.layers.LayerNormalization(epsilon=1e-6)
+        self.norm = (
+            keras.layers.LayerNormalization(
+                epsilon=1e-6,
+                center=self.conv_config.use_bias,
+                scale=True)
+        )
 
         # Point-wise convolutions
         conv_params = {
@@ -191,12 +199,10 @@ class ConvNextBlock(keras.layers.Layer):
             "kernel_initializer": keras.initializers.TruncatedNormal(
                 mean=0.0, stddev=0.02
             ),
-            "kernel_regularizer": keras.regularizers.L2()
+            "kernel_regularizer": copy.deepcopy(self.conv_config.kernel_regularizer)
         }
 
-        if self.kernel_regularization == "orthogonal":
-            conv_params["kernel_regularizer"] = SoftOrthogonalConstraintRegularizer()
-        elif self.kernel_regularization == "orthonormal":
+        if self.use_softorthonormal_regularizer == "orthonormal":
             conv_params["kernel_regularizer"] = SoftOrthonormalConstraintRegularizer()
 
 
@@ -213,11 +219,12 @@ class ConvNextBlock(keras.layers.Layer):
         self.activation = keras.layers.Activation(self.conv_config.activation)
 
         # Dropout layers
-        if self.dropout_rate is not None:
+        if self.dropout_rate is not None and self.dropout_rate > 0:
             self.dropout = keras.layers.Dropout(self.dropout_rate)
         else:
-            self.dropout =keras.layers.Lambda(lambda x: x)
-        if self.spatial_dropout_rate is not None:
+            self.dropout = keras.layers.Lambda(lambda x: x)
+
+        if self.spatial_dropout_rate is not None and self.spatial_dropout_rate > 0:
             self.spatial_dropout = keras.layers.SpatialDropout2D(
                 self.spatial_dropout_rate
             )
@@ -279,25 +286,32 @@ class ConvNextBlock(keras.layers.Layer):
         """
         config = super().get_config()
         config.update({
-            "conv_config": self.conv_config.__dict__,
+            "conv_config": asdict(self.conv_config),
             "dropout_rate": self.dropout_rate,
             "spatial_dropout_rate": self.spatial_dropout_rate,
             "use_gamma": self.use_gamma,
-            "kernel_regularization": self.kernel_regularization,
+            "use_softorthonormal_regularizer": self.use_softorthonormal_regularizer,
         })
         return config
 
     @classmethod
-    def from_config(cls, config: Dict) -> 'ConvNextBlock':
-        """Creates a layer from its config.
+    def from_config(cls, config):
+        """Creates a layer from its config."""
+        from copy import deepcopy
 
-        Args:
-            config: Layer configuration dictionary
+        # Make a copy of the config to avoid modifying the original
+        config_copy = deepcopy(config)
 
-        Returns:
-            Instantiated ConvNextBlock layer
-        """
-        conv_config = ConvNextConfig(**config.pop("conv_config"))
-        return cls(conv_config=conv_config, **config)
+        # Extract the conv_config dictionary
+        conv_config_dict = config_copy.pop("conv_config", {})
+
+        # Import here to avoid circular imports
+        from dl_techniques.layers.convnext_block import ConvNextConfig
+
+        # Recreate the ConvNextConfig object
+        conv_config = ConvNextConfig(**conv_config_dict)
+
+        # Create the ConvNextBlock with the recreated ConvNextConfig
+        return cls(conv_config=conv_config, **config_copy)
 
 # ---------------------------------------------------------------------
