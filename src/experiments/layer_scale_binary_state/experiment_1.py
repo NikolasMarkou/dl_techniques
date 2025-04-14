@@ -3,17 +3,16 @@ Complete LayerScale and LearnableMultiplier Feature Selection Experiment
 =======================================================================
 
 This experiment demonstrates how the LearnableMultiplier layer with BinaryPreferenceRegularizer
-and the LayerScale layer can act as effective feature selectors on a synthetic dataset
+ can act as effective feature selectors on a synthetic dataset
 with many irrelevant features. The experiment includes visualization of decision boundaries.
 
 The experiment:
 1. Creates a synthetic dataset with 2 important features and many noise features
-2. Builds models with LearnableMultiplier and LayerScale layers
+2. Builds models with LearnableMultiplier and LearnableMultiplier (without binary preference) layers
 3. Trains the models and visualizes which features were selected
 4. Visualizes decision boundaries in different feature spaces
 
 Note: This code assumes you have already imported the following custom layers:
-- LayerScale
 - LearnableMultiplier
 - BinaryPreferenceRegularizer
 """
@@ -25,12 +24,14 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from typing import Tuple, List, Dict, Any, Optional
 
+from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
+
 # Set random seeds for reproducibility
 np.random.seed(42)
 tf.random.set_seed(42)
 
-# Uncomment these lines in your actual implementation:
-from dl_techniques.layers.layer_scale import LearnableMultiplier, LayerScale
+from dl_techniques.layers.layer_scale import LearnableMultiplier
+from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
 from dl_techniques.regularizers.binary_preference import BinaryPreferenceRegularizer
 
 
@@ -103,13 +104,15 @@ def create_model_with_learnable_multiplier(
     x = LearnableMultiplier(
         multiplier_type="CHANNEL",
         initializer=keras.initializers.Constant(0.5),
-        regularizer=BinaryPreferenceRegularizer(),
+        regularizer=BinaryPreferenceRegularizer(multiplier=1.5),
+        constraint=None
     )(inputs)
 
     # Add dense layers
-    x = keras.layers.Dense(128, activation='relu')(x)
-    x = keras.layers.Dense(64, activation='relu')(x)
-    x = keras.layers.Dense(num_classes, activation='softmax')(x)
+    x = keras.layers.Dense(256, activation='relu', use_bias=False)(x)
+    x = keras.layers.Dropout(0.5)(x)
+    x = keras.layers.Dense(64, activation='relu', use_bias=False)(x)
+    x = keras.layers.Dense(num_classes, activation='softmax', kernel_regularizer=SoftOrthonormalConstraintRegularizer(), use_bias=False)(x)
 
     model = keras.Model(inputs=inputs, outputs=x)
 
@@ -127,7 +130,7 @@ def create_model_with_layer_scale(
         num_classes: int
 ) -> keras.Model:
     """
-    Create a model with LayerScale layer for comparison.
+    Create a model with LearnableMultiplier (without binary preference) layer for comparison.
 
     Args:
         input_dim: Number of input features
@@ -139,15 +142,18 @@ def create_model_with_layer_scale(
     inputs = keras.layers.Input(shape=(input_dim,))
 
     # Add the LayerScale layer
-    x = LayerScale(
-        init_values=0.1,  # Start with small values to learn important features
-        projection_dim=input_dim
+    x = LearnableMultiplier(
+        multiplier_type="CHANNEL",
+        initializer=keras.initializers.Constant(0.5),
+        regularizer=None,
+        constraint=None
     )(inputs)
 
     # Add dense layers (same as the other model)
-    x = keras.layers.Dense(128, activation='relu')(x)
-    x = keras.layers.Dense(64, activation='relu')(x)
-    x = keras.layers.Dense(num_classes, activation='softmax')(x)
+    x = keras.layers.Dense(256, activation='relu', use_bias=False)(x)
+    x = keras.layers.Dropout(0.5)(x)
+    x = keras.layers.Dense(64, activation='relu', use_bias=False)(x)
+    x = keras.layers.Dense(num_classes, activation='softmax', kernel_regularizer=SoftOrthonormalConstraintRegularizer(), use_bias=False)(x)
 
     model = keras.Model(inputs=inputs, outputs=x)
 
@@ -379,9 +385,9 @@ def visualize_decision_boundaries(
         X: Feature matrix
         y: Class labels
         model_lm: Trained model with LearnableMultiplier
-        model_ls: Trained model with LayerScale
+        model_ls: Trained model with LearnableMultiplier (no binary preference)
         lm_weights: Weights from LearnableMultiplier
-        ls_weights: Weights from LayerScale
+        ls_weights: Weights from LearnableMultiplier (no binary preference)
         centers: Class centers in the original 2D space
     """
     # Create figure with 3 subplots
@@ -405,7 +411,7 @@ def visualize_decision_boundaries(
     ax3 = plt.subplot(1, 3, 3)
     visualize_single_boundary(
         X, y, ls_top_features,
-        f"LayerScale Selected Features\n({ls_top_features[0]+1} & {ls_top_features[1]+1})",
+        f"LearnableMultiplier (no binary preference) Selected Features\n({ls_top_features[0]+1} & {ls_top_features[1]+1})",
         ax3, model=model_ls
     )
 
@@ -441,19 +447,19 @@ def run_experiment() -> Dict[str, Any]:
 
     history_lm = model_lm.fit(
         X_train, y_train,
-        epochs=30,
+        epochs=50,
         batch_size=32,
         validation_data=(X_test, y_test),
         verbose=1
     )
 
-    # Create and train model with LayerScale
-    print("\nTraining model with LayerScale...")
+    # Create and train model with LearnableMultiplier
+    print("\nTraining model with LearnableMultiplier (no binary preference)...")
     model_ls = create_model_with_layer_scale(n_features, n_classes)
 
     history_ls = model_ls.fit(
         X_train, y_train,
-        epochs=30,
+        epochs=50,
         batch_size=32,
         validation_data=(X_test, y_test),
         verbose=1
@@ -465,15 +471,15 @@ def run_experiment() -> Dict[str, Any]:
     ls_eval = model_ls.evaluate(X_test, y_test, verbose=0)
 
     print(f"LearnableMultiplier Test Accuracy: {lm_eval[1]:.4f}")
-    print(f"LayerScale Test Accuracy: {ls_eval[1]:.4f}")
+    print(f"LearnableMultiplier (no binary preference) Test Accuracy: {ls_eval[1]:.4f}")
 
     # Extract feature weights from LearnableMultiplier
     lm_layer = model_lm.layers[1]
     lm_weights = lm_layer.get_weights()[0].flatten()
 
-    # Extract feature weights from LayerScale
+    # Extract feature weights from LearnableMultiplier
     ls_layer = model_ls.layers[1]
-    ls_weights = ls_layer.get_weights()[0]
+    ls_weights = ls_layer.get_weights()[0].flatten()
 
     # Visualize training history
     visualize_training_history(history_lm.history, history_ls.history)
@@ -514,7 +520,7 @@ def run_experiment() -> Dict[str, Any]:
 
 def main():
     """Execute the experiment."""
-    print("Starting LayerScale and LearnableMultiplier Feature Selection Experiment...")
+    print("Starting LearnableMultiplier Feature Selection Experiment...")
     print("=" * 80)
 
     # Run the experiment
@@ -526,7 +532,7 @@ def main():
     # Print final accuracy comparison
     print("\nFinal Performance Comparison:")
     print(f"LearnableMultiplier Accuracy: {results['accuracy']['lm']:.4f}")
-    print(f"LayerScale Accuracy: {results['accuracy']['ls']:.4f}")
+    print(f"LearnableMultiplier (no binary preference) Accuracy: {results['accuracy']['ls']:.4f}")
 
     # Print feature selection success analysis
     lm_weights = results['weights']['lm']
@@ -541,7 +547,7 @@ def main():
 
     print("\nFeature Selection Success:")
     print(f"LearnableMultiplier: {'✓' if lm_success else '✗'} (Selected features: {lm_top_features})")
-    print(f"LayerScale: {'✓' if ls_success else '✗'} (Selected features: {ls_top_features})")
+    print(f"LearnableMultiplier (no binary preference: {'✓' if ls_success else '✗'} (Selected features: {ls_top_features})")
 
 
 if __name__ == "__main__":

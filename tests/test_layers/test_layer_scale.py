@@ -14,7 +14,6 @@ import numpy as np
 from typing import Tuple, Dict, Any
 
 from dl_techniques.layers.layer_scale import (
-    LayerScale,
     MultiplierType,
     LearnableMultiplier
 )
@@ -32,52 +31,6 @@ def sample_input(sample_shape: Tuple[int, int, int, int]) -> tf.Tensor:
     """Generate sample input tensor."""
     tf.random.set_seed(42)
     return tf.random.normal(sample_shape)
-
-
-# LayerScale Tests
-class TestLayerScale:
-    @pytest.fixture
-    def layer_params(self) -> Dict[str, Any]:
-        """Default parameters for LayerScale."""
-        return {
-            "init_values": 0.1,
-            "projection_dim": 64
-        }
-
-    def test_initialization(self, layer_params: Dict[str, Any]) -> None:
-        """Test LayerScale initialization."""
-        layer = LayerScale(**layer_params)
-        assert layer.init_values == layer_params["init_values"]
-        assert layer.projection_dim == layer_params["projection_dim"]
-        assert layer.gamma is None  # Not built yet
-
-    def test_build(self, layer_params: Dict[str, Any], sample_shape: Tuple[int, int, int, int]) -> None:
-        """Test LayerScale build method."""
-        layer = LayerScale(**layer_params)
-        layer.build(sample_shape)
-        assert layer.gamma is not None
-        assert layer.gamma.shape == (layer_params["projection_dim"],)
-
-    def test_call(self, layer_params: Dict[str, Any], sample_input: tf.Tensor) -> None:
-        """Test LayerScale call method."""
-        layer = LayerScale(**layer_params)
-        output = layer(sample_input)
-        assert output.shape == sample_input.shape
-
-        # Test training vs inference mode
-        train_output = layer(sample_input, training=True)
-        infer_output = layer(sample_input, training=False)
-        assert np.allclose(train_output.numpy(), infer_output.numpy())
-
-    def test_serialization(self, layer_params: Dict[str, Any]) -> None:
-        """Test LayerScale serialization."""
-        layer = LayerScale(**layer_params)
-        config = layer.get_config()
-
-        # Recreate from config
-        new_layer = LayerScale.from_config(config)
-        assert new_layer.init_values == layer.init_values
-        assert new_layer.projection_dim == layer.projection_dim
 
 
 # MultiplierType Tests
@@ -172,7 +125,6 @@ class TestIntegration:
     def test_sequential_model(self, sample_input: tf.Tensor) -> None:
         """Test layers in a sequential model."""
         model = tf.keras.Sequential([
-            LayerScale(init_values=0.1, projection_dim=64),
             LearnableMultiplier(multiplier_type="GLOBAL"),
             LearnableMultiplier(multiplier_type="CHANNEL")
         ])
@@ -183,7 +135,6 @@ class TestIntegration:
     def test_training_pipeline(self, sample_input: tf.Tensor) -> None:
         """Test layers in a training pipeline."""
         model = tf.keras.Sequential([
-            LayerScale(init_values=0.1, projection_dim=64),
             LearnableMultiplier(multiplier_type="CHANNEL")
         ])
 
