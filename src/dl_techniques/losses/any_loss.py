@@ -179,7 +179,7 @@ class AnyLoss(keras.losses.Loss):
             Tuple containing (TN, FN, FP, TP) confusion matrix entries.
         """
         # Handle edge case with empty input using tf.cond to avoid graph execution errors
-        epsilon = tf.keras.backend.epsilon()
+        epsilon = keras.backend.epsilon()
         empty_result = (epsilon, epsilon, epsilon, epsilon)
 
         def compute_matrix():

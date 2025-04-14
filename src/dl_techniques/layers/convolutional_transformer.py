@@ -51,16 +51,6 @@ Best Practices
    - Proper serialization support
    - Memory-efficient tensor reshaping
 
-Usage Example
------------
->>> model = create_convolutional_transformer_model(
-...     input_shape=(224, 224, 3),
-...     num_classes=1000,
-...     num_blocks=6,
-...     dim=256,
-...     num_heads=8
-... )
-
 Testing
 ------
 Compatible with pytest framework:
@@ -79,9 +69,20 @@ Note: This implementation prioritizes code clarity and maintainability while
 following Keras best practices for custom layer development.
 """
 
+import copy
 import keras
 import tensorflow as tf
-from typing import Optional, Tuple, Union, Callable
+from typing import Optional, Union, Callable
+
+from dl_techniques.utils.logger import logger
+from dl_techniques.layers.layer_scale import (
+    LearnableMultiplier, MultiplierType)
+from dl_techniques.regularizers.soft_orthogonal import (
+    DEFAULT_SOFTORTHOGONAL_STDDEV,
+    SoftOrthonormalConstraintRegularizer
+)
+
+from .conv2d_builder import activation_wrapper
 
 # ---------------------------------------------------------------------
 
@@ -99,13 +100,17 @@ class ConvolutionalTransformerBlock(keras.layers.Layer):
     def __init__(
             self,
             dim: int,
+            use_bias: bool,
             num_heads: int = 8,
             mlp_ratio: float = 4.0,
             dropout_rate: float = 0.0,
             attention_dropout: float = 0.0,
-            use_scale: bool = False,
-            conv_kernel_size: int = 1,
-            activation: Union[str, Callable] = "gelu",
+            activation: Union[str, Callable] = "relu",
+            regularization_rate: float = 1e-4,
+            use_gamma: bool = False,
+            use_global_gamma: bool = False,
+            use_soft_orthonormal_regularization: bool = False,
+            seed: int = 1,
             **kwargs
     ):
         """
@@ -117,182 +122,171 @@ class ConvolutionalTransformerBlock(keras.layers.Layer):
             mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
             dropout_rate (float): Dropout rate.
             attention_dropout (float): Dropout rate for attention.
-            use_scale (bool): Whether to use scaled attention.
-            conv_kernel_size (int): Kernel size for convolutions.
             activation (Union[str, Callable]): Activation function to use in MLP.
+            regularization_rate (float): L2 regularization rate
+            use_gamma: Whether to use the learnable scaling factor (default: True)
+            use_global_gamma: Whether to use a global or per-channel scaling factor (default: True)
+            use_soft_orthonormal_regularization (bool): if True use soft_orthonormal regularization
             **kwargs: Additional keyword arguments for the keras.layers.Layer.
         """
         super().__init__(**kwargs)
 
-        # Validate dimensions
-        if dim % num_heads != 0:
-            raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
-
         # Store initialization parameters
         self.dim = dim
+        self.seed = seed
+        self.use_bias = use_bias
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
         self.dropout_rate = dropout_rate
         self.attention_dropout = attention_dropout
-        self.use_scale = use_scale
-        self.conv_kernel_size = conv_kernel_size
         self.activation_str = activation
-        self.activation = activation
-        self.head_dim = dim // num_heads
-        self.regularization_rate = 1e-3
+        self.activation = activation_wrapper(activation)
+        self.regularization_rate = regularization_rate
+        self.use_soft_orthonormal_regularization = use_soft_orthonormal_regularization
 
         # Initialize layer attributes as None
-        self.q_conv = None
-        self.k_conv = None
-        self.v_conv = None
         self.attention = None
-        self.proj = None
         self.mlp = None
         self.norm1 = None
         self.norm2 = None
-        self.dropout_layer = None
+        # Validate dimensions
+        if dim % num_heads != 0:
+            raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
+
+        # Setup learnable multiplier
+        self.gamma = None
+        self.use_gamma = use_gamma
+        self.use_global_gamma = use_global_gamma
 
     def build(self, input_shape: tf.TensorShape) -> None:
         """
-        Build the layer when the input shape is known.
+        Build the layer components when the input shape is known.
 
         Args:
-            input_shape (tf.TensorShape): Shape of the input tensor.
+            input_shape: Shape of the input tensor.
         """
-        # Convolutional projections for Q, K, V
-        self.q_conv = keras.layers.Conv2D(
-            self.dim, self.conv_kernel_size,
-            padding="same",
-            groups=self.num_heads,
-            name="query_conv",
-            kernel_regularizer=keras.regularizers.l2(self.regularization_rate)
-        )
-        self.k_conv = keras.layers.Conv2D(
-            self.dim, self.conv_kernel_size,
-            padding="same",
-            groups=self.num_heads,
-            name="key_conv",
-            kernel_regularizer=keras.regularizers.l2(self.regularization_rate)
-        )
-        self.v_conv = keras.layers.Conv2D(
-            self.dim, self.conv_kernel_size,
-            padding="same",
-            groups=self.num_heads,
-            name="value_conv",
-            kernel_regularizer=keras.regularizers.l2(self.regularization_rate)
-        )
 
-        # Attention layer
-        self.attention = keras.layers.Attention(
-            use_scale=self.use_scale,
-            dropout=self.attention_dropout,
-            name="attention"
-        )
+        logger.info(f"self.use_bias: {self.use_bias}")
+        logger.info(f"self.use_soft_orthonormal_regularization: {self.use_soft_orthonormal_regularization}")
 
-        # Output projection
-        self.proj = keras.layers.Conv2D(
-            self.dim, 1,
-            name="output_projection",
-            kernel_regularizer=keras.regularizers.l2(self.regularization_rate))
-
-        # Feed-Forward Network
-        mlp_hidden_dim = int(self.dim * self.mlp_ratio)
-        self.mlp = keras.Sequential([
-            keras.layers.Dense(
-                mlp_hidden_dim,
-                name="mlp_dense_1",
-                kernel_regularizer=keras.regularizers.l2(self.regularization_rate)),
-            keras.layers.Activation(self.activation, name="mlp_activation"),
-            keras.layers.Dropout(rate=self.dropout_rate, name="mlp_dropout_1"),
-            keras.layers.Dense(
-                self.dim,
-                name="mlp_dense_2",
-                kernel_regularizer=keras.regularizers.l2(self.regularization_rate))
-        ], name="mlp")
+        if self.use_soft_orthonormal_regularization:
+            regularizer = SoftOrthonormalConstraintRegularizer()
+        else:
+            regularizer = tf.keras.regularizers.l2(self.regularization_rate)
 
         # Layer Normalization
-        self.norm1 = keras.layers.LayerNormalization(epsilon=1e-6, name="norm1")
-        self.norm2 = keras.layers.LayerNormalization(epsilon=1e-6, name="norm2")
+        self.norm1 = (
+            keras.layers.LayerNormalization(
+                epsilon=1e-6,
+                scale=True,
+                center=self.use_bias,
+                name="norm1")
+        )
 
-        # Dropout
-        self.dropout_layer = keras.layers.Dropout(rate=self.dropout_rate, name="proj_dropout")
+        self.attention = (
+            keras.layers.MultiHeadAttention(
+                num_heads=self.num_heads,
+                key_dim=self.dim // self.num_heads,
+                dropout=self.attention_dropout,
+                name="attention",
+                use_bias=self.use_bias,
+                kernel_initializer=keras.initializers.truncated_normal(
+                    stddev=DEFAULT_SOFTORTHOGONAL_STDDEV, seed=self.seed),
+                kernel_regularizer=keras.regularizers.l2(self.regularization_rate)
+            )
+        )
+
+        # Layer Normalization
+        self.norm2 = (
+            keras.layers.LayerNormalization(
+                epsilon=1e-6,
+                scale=True,
+                center=self.use_bias,
+                name="norm2")
+        )
+
+        # Feed-Forward Network
+        self.mlp = keras.Sequential([
+            keras.layers.Conv2D(
+                filters=int(self.dim * self.mlp_ratio),
+                kernel_size=1,
+                name="mlp_dense_1",
+                use_bias=self.use_bias,
+                kernel_initializer=keras.initializers.truncated_normal(
+                    stddev=DEFAULT_SOFTORTHOGONAL_STDDEV, seed=self.seed),
+                kernel_regularizer=copy.deepcopy(regularizer)
+            ),
+            keras.layers.Activation(self.activation, name="mlp_activation_2"),
+            keras.layers.Dropout(rate=self.dropout_rate, name="mlp_dropout_1"),
+            keras.layers.Conv2D(
+                filters=self.dim,
+                kernel_size=1,
+                name="mlp_dense_2",
+                use_bias=self.use_bias,
+                kernel_initializer=keras.initializers.truncated_normal(
+                    stddev=DEFAULT_SOFTORTHOGONAL_STDDEV, seed=self.seed),
+                kernel_regularizer=copy.deepcopy(regularizer)
+            )
+        ], name="mlp")
+
+        # Setup learnable scaling factor (gamma)
+        if self.use_gamma:
+            if self.use_global_gamma:
+                self.gamma = LearnableMultiplier(
+                    name="gamma",
+                    capped=True,
+                    regularizer=keras.regularizers.L2(1e-2),
+                    multiplier_type=MultiplierType.Global
+                )
+            else:
+                self.gamma = LearnableMultiplier(
+                    name="gamma",
+                    capped=True,
+                    regularizer=keras.regularizers.L2(1e-2),
+                    multiplier_type=MultiplierType.Channel
+                )
+        else:
+            # If no gamma, use identity function
+            self.gamma = lambda x, training=None: x
 
         super().build(input_shape)
 
-    def _reshape_for_attention(self, x: tf.Tensor) -> tf.Tensor:
-        """
-        Reshape spatial dimensions to sequence dimension.
-
-        Args:
-            x: Input tensor of shape [batch_size, height, width, channels]
-
-        Returns:
-            Reshaped tensor of shape [batch_size, height * width, channels]
-        """
-        batch_size, height, width, channels = tf.shape(x)[0], tf.shape(x)[1], tf.shape(x)[2], tf.shape(x)[3]
-        return tf.reshape(x, [batch_size, height * width, channels])
-
-    def _reshape_from_attention(self, x: tf.Tensor, height: int, width: int) -> tf.Tensor:
-        """
-        Reshape sequence dimension back to spatial dimensions.
-
-        Args:
-            x: Input tensor of shape [batch_size, height * width, channels]
-            height: Original height
-            width: Original width
-
-        Returns:
-            Reshaped tensor of shape [batch_size, height, width, channels]
-        """
-        batch_size = tf.shape(x)[0]
-        return tf.reshape(x, [batch_size, height, width, self.dim])
-
     def call(self, inputs: tf.Tensor, training: Optional[bool] = None) -> tf.Tensor:
-        """
-        Forward pass of the Convolutional Transformer Block.
+        b, h, w, c = tf.unstack(tf.shape(inputs))
 
-        Args:
-            inputs (tf.Tensor): Input tensor of shape (batch_size, height, width, channels).
-            training (Optional[bool]): Whether the call is for training or inference.
+        # (1) Pre-norm
+        x_norm = self.norm1(inputs, training=training)
 
-        Returns:
-            tf.Tensor: Output tensor of the same shape as input.
-        """
-        batch_size, height, width = tf.shape(inputs)[0], tf.shape(inputs)[1], tf.shape(inputs)[2]
-        x = inputs
+        # (2) Flatten for attention
+        x_norm = tf.reshape(x_norm, [b, h * w, c])  # shape => (batch, seq=H*W, channels)
 
-        # Generate Q, K, V using convolutions
-        q = self.q_conv(x)
-        k = self.k_conv(x)
-        v = self.v_conv(x)
-
-        # Reshape for attention
-        q_seq = self._reshape_for_attention(q)
-        k_seq = self._reshape_for_attention(k)
-        v_seq = self._reshape_for_attention(v)
-
-        # Apply attention
+        # (3) MultiHeadAttention (now correct shape)
         attention_output = self.attention(
-            [q_seq, v_seq, k_seq],
-            training=training
+            query=x_norm,
+            value=x_norm,
+            training=training,
+            use_causal_mask=False,
+            return_attention_scores=False,
         )
 
-        # Reshape back to spatial dimensions
-        attention_output = self._reshape_from_attention(attention_output, height, width)
-        attention_output = self.proj(attention_output)
-        attention_output = self.dropout_layer(attention_output, training=training)
+        # (4) Reshape back
+        attention_output = tf.reshape(attention_output, [b, h, w, c])
 
-        # First residual connection
-        x = inputs + attention_output
-        x = self.norm1(x)
+        # --- Apply learnable scaling factor (gamma)
+        attention_output = self.gamma(attention_output, training=training)
 
-        # Feed-forward network
-        mlp_output = self.mlp(x, training=training)
+        x = inputs + attention_output  # residual
 
-        # Second residual connection
-        x = x + mlp_output
-        x = self.norm2(x)
-        return x
+        # (5) Pre-norm for MLP
+        x_norm2 = self.norm2(x, training=training)
+
+        # (6) MLP is Conv2D-based, so that shape is correct
+        mlp_output = self.mlp(x_norm2, training=training)
+
+        # --- Apply learnable scaling factor (gamma)
+        mlp_output = self.gamma(mlp_output, training=training)
+
+        return x + mlp_output
 
     def get_config(self) -> dict:
         """
@@ -304,13 +298,14 @@ class ConvolutionalTransformerBlock(keras.layers.Layer):
         config = super().get_config()
         config.update({
             'dim': self.dim,
+            'use_bias': self.use_bias,
             'num_heads': self.num_heads,
             'mlp_ratio': self.mlp_ratio,
+            'use_gamma': self.use_gamma,
             'dropout_rate': self.dropout_rate,
-            'attention_dropout': self.attention_dropout,
-            'use_scale': self.use_scale,
-            'conv_kernel_size': self.conv_kernel_size,
             'activation': self.activation_str,
+            'attention_dropout': self.attention_dropout,
+            'use_soft_orthonormal_regularization': self.use_soft_orthonormal_regularization
         })
         return config
 
@@ -326,61 +321,6 @@ class ConvolutionalTransformerBlock(keras.layers.Layer):
             ConvolutionalTransformerBlock: A new instance of the layer.
         """
         return cls(**config)
-
-# ---------------------------------------------------------------------
-
-
-def create_convolutional_transformer_model(
-        input_shape: Tuple[int, int, int],
-        num_classes: int,
-        num_blocks: int = 6,
-        dim: int = 256,
-        num_heads: int = 8,
-        mlp_ratio: float = 4.0,
-        dropout_rate: float = 0.1,
-        attention_dropout: float = 0.1,
-        activation: Union[str, Callable] = "relu",
-) -> keras.Model:
-    """
-    Create a Convolutional Transformer model for vision applications.
-
-    Args:
-        input_shape (Tuple[int, int, int]): Shape of the input image (height, width, channels).
-        num_classes (int): Number of output classes.
-        num_blocks (int): Number of Convolutional Transformer Blocks.
-        dim (int): Dimension of the model.
-        num_heads (int): Number of attention heads.
-        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
-        dropout_rate (float): Dropout rate.
-        attention_dropout (float): Dropout rate for attention.
-        activation (Union[str, Callable]): Activation function to use in MLPs.
-
-    Returns:
-        keras.Model: A Keras model with the Convolutional Transformer architecture.
-    """
-    inputs = keras.Input(shape=input_shape)
-
-    # Initial convolution
-    x = keras.layers.Conv2D(dim, kernel_size=7, strides=2, padding="same")(inputs)
-    x = keras.layers.LayerNormalization(epsilon=1e-6)(x)
-
-    # Convolutional Transformer Blocks
-    for i in range(num_blocks):
-        x = ConvolutionalTransformerBlock(
-            dim=dim,
-            num_heads=num_heads,
-            mlp_ratio=mlp_ratio,
-            dropout_rate=dropout_rate,
-            attention_dropout=attention_dropout,
-            activation=activation,
-            name=f"conv_transformer_block_{i}"
-        )(x)
-
-    # Classification head
-    x = keras.layers.GlobalAveragePooling2D(name="global_pool")(x)
-    outputs = keras.layers.Dense(num_classes, activation="softmax", name="classifier")(x)
-
-    return keras.Model(inputs, outputs, name="ConvolutionalTransformer")
 
 # ---------------------------------------------------------------------
 

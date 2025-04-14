@@ -1,3 +1,38 @@
+"""
+Custom Keras Layers for Scaling and Multiplication Operations
+============================================================
+
+This module provides specialized Keras layers for learnable scaling operations:
+
+- LayerScale: Implements per-channel scaling factors for stabilizing deep networks
+- LearnableMultiplier: Creates trainable multipliers (global or per-channel) with
+  configurable constraints
+
+These layers are particularly useful in deep neural network architectures where
+controlling the scale of activations is critical for training stability and performance.
+Both layers are serializable for model saving/loading.
+
+Example:
+    ```python
+    # Using LayerScale
+    layer_scale = LayerScale(init_values=0.1, projection_dim=64)
+    scaled_features = layer_scale(features)
+
+    # Using LearnableMultiplier
+    multiplier = LearnableMultiplier(
+        multiplier_type="CHANNEL",
+        capped=True,
+        initializer=keras.initializers.TruncatedNormal(mean=0.0, stddev=0.01),
+        regularizer=keras.regularizers.L2(l2=1e-3)
+    )
+    adjusted_features = multiplier(features)
+    ```
+
+Notes:
+    - LayerScale is inspired by techniques used in transformer architectures
+    - LearnableMultiplier provides flexible scaling with regularization to keep values near 1.0
+"""
+
 import keras
 from enum import Enum
 import tensorflow as tf

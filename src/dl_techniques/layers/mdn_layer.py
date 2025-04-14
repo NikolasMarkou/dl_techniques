@@ -90,6 +90,221 @@ def elu_plus_one_plus_epsilon(x: tf.Tensor) -> tf.Tensor:
 
 # ---------------------------------------------------------------------
 
+
+def get_point_estimate(
+        model: keras.Model,
+        x_data: np.ndarray,
+        mdn_layer: Any
+) -> np.ndarray:
+    """
+    Calculate point estimates from MDN outputs as the weighted average of mixture components.
+
+    This function computes the expected value of the mixture distribution by taking
+    the weighted average of the component means. The weights come from the mixture
+    probabilities (pi values).
+
+    Parameters
+    ----------
+    model : keras.Model
+        Trained model with MDN layer
+    x_data : np.ndarray
+        Input data for prediction, shape [batch_size, input_dim]
+    mdn_layer : MDNLayer
+        The MDN layer instance used in the model
+
+    Returns
+    -------
+    np.ndarray
+        Point estimates with shape [batch_size, output_dim]
+
+    Notes
+    -----
+    The point estimate represents the expected value of the predicted distribution,
+    which is the sum of each component mean weighted by its mixture probability.
+
+    Examples
+    --------
+    >>> point_estimates = get_point_estimate(model, x_test, mdn_layer)
+    >>> print(f"Point prediction shape: {point_estimates.shape}")
+    """
+    # Get model predictions
+    y_pred = model.predict(x_data)
+
+    # Split the mixture parameters
+    mu, sigma, pi_logits = mdn_layer.split_mixture_params(y_pred)
+
+    # Convert pi_logits to probabilities
+    # Shape: [batch_size, num_mixtures]
+    pi = tf.nn.softmax(pi_logits, axis=-1).numpy()
+
+    # Expand pi dimensions for broadcasting
+    # Shape: [batch_size, num_mixtures, 1]
+    pi_expanded = np.expand_dims(pi, axis=-1)
+
+    # Compute weighted average of means (expected value of the mixture)
+    # Shape: [batch_size, num_mixtures, output_dim]
+    weighted_mu = mu.numpy() * pi_expanded
+
+    # Sum over mixture components to get point estimates
+    # Shape: [batch_size, output_dim]
+    point_estimates = np.sum(weighted_mu, axis=1)
+
+    return point_estimates
+
+# ---------------------------------------------------------------------
+
+
+def get_uncertainty(
+        model: keras.Model,
+        x_data: np.ndarray,
+        mdn_layer: Any,
+        point_estimates: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Calculate uncertainty estimates from MDN parameters.
+
+    This function decomposes predictive uncertainty into aleatoric uncertainty
+    (data noise) and epistemic uncertainty (model uncertainty). The total
+    predictive variance is the sum of these two components.
+
+    Parameters
+    ----------
+    model : keras.Model
+        Trained model with MDN layer
+    x_data : np.ndarray
+        Input data for prediction, shape [batch_size, input_dim]
+    mdn_layer : MDNLayer
+        The MDN layer instance used in the model
+    point_estimates : np.ndarray
+        Point estimates calculated from the model outputs, shape [batch_size, output_dim]
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        A tuple containing:
+            - total_variance: Total predictive variance, shape [batch_size, output_dim]
+            - aleatoric_variance: Aleatoric uncertainty component, shape [batch_size, output_dim]
+
+    Notes
+    -----
+    The uncertainty is decomposed as:
+    1. Aleatoric uncertainty: Captured by the variance of each Gaussian component
+    2. Epistemic uncertainty: Captured by the variance of the means across components
+
+    The total predictive variance is the sum of these two components.
+
+    Examples
+    --------
+    >>> total_var, aleatoric_var = get_uncertainty(model, x_test, mdn_layer, point_estimates)
+    >>> epistemic_var = total_var - aleatoric_var
+    >>> print(f"Average uncertainty: {np.mean(total_var):.4f}")
+    """
+    # Get model predictions
+    # Shape: [batch_size, (2*output_dim*num_mixtures + num_mixtures)]
+    y_pred = model.predict(x_data)
+
+    # Split the mixture parameters
+    # Shapes: mu, sigma: [batch_size, num_mixtures, output_dim], pi_logits: [batch_size, num_mixtures]
+    mu, sigma, pi_logits = mdn_layer.split_mixture_params(y_pred)
+    mu = mu.numpy()
+    sigma = sigma.numpy()
+
+    # Convert pi_logits to probabilities
+    # Shape: [batch_size, num_mixtures]
+    pi = tf.nn.softmax(pi_logits, axis=-1).numpy()
+
+    # Expand pi dimensions for broadcasting
+    # Shape: [batch_size, num_mixtures, 1]
+    pi_expanded = np.expand_dims(pi, axis=-1)
+
+    # Expand point estimates for broadcasting
+    # Shape: [batch_size, 1, output_dim]
+    point_expanded = np.expand_dims(point_estimates, axis=1)
+
+    # 1. Aleatoric uncertainty (inherent data noise)
+    # Weighted average of variances from each component
+    # Shape: [batch_size, output_dim]
+    aleatoric_variance = np.sum(pi_expanded * sigma ** 2, axis=1)
+
+    # 2. Epistemic uncertainty (model uncertainty)
+    # Weighted variance of means around expected value
+    # Shape: [batch_size, num_mixtures, output_dim]
+    squared_diff = (mu - point_expanded) ** 2
+
+    # Shape: [batch_size, output_dim]
+    epistemic_variance = np.sum(pi_expanded * squared_diff, axis=1)
+
+    # Total predictive variance (sum of aleatoric and epistemic)
+    # Shape: [batch_size, output_dim]
+    total_variance = aleatoric_variance + epistemic_variance
+
+    return total_variance, aleatoric_variance
+
+# ---------------------------------------------------------------------
+
+
+def get_prediction_intervals(
+        point_estimates: np.ndarray,
+        total_variance: np.ndarray,
+        confidence_level: float = 0.95
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Calculate prediction intervals for MDN outputs.
+
+    This function computes lower and upper bounds for prediction intervals
+    based on the point estimates and their associated uncertainty.
+
+    Parameters
+    ----------
+    point_estimates : np.ndarray
+        Point estimates from the model, shape [batch_size, output_dim]
+    total_variance : np.ndarray
+        Total variance of predictions, shape [batch_size, output_dim]
+    confidence_level : float, optional
+        Desired confidence level, default is 0.95 (95% confidence interval)
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        A tuple containing:
+            - lower_bound: Lower bounds of prediction intervals, shape [batch_size, output_dim]
+            - upper_bound: Upper bounds of prediction intervals, shape [batch_size, output_dim]
+
+    Notes
+    -----
+    The function assumes a Gaussian distribution for the prediction intervals.
+    The bounds are calculated as point_estimate ± z_score * sqrt(variance),
+    where z_score is derived from the inverse error function based on the
+    specified confidence level.
+
+    Examples
+    --------
+    >>> lower, upper = get_prediction_intervals(point_estimates, total_variance, 0.95)
+    >>> print(f"Average interval width: {np.mean(upper - lower):.4f}")
+    """
+    # Calculate z-score for the given confidence level using the inverse error function
+    # For 95% confidence, z_score ≈ 1.96
+    z_score = tf.cast(
+        tf.abs(tf.math.erfinv(confidence_level) * tf.sqrt(2.0)),
+        tf.float32
+    )
+
+    # Calculate standard deviation from variance
+    # Shape: [batch_size, output_dim]
+    std_dev = np.sqrt(total_variance)
+
+    # Calculate lower bounds of prediction intervals
+    # Shape: [batch_size, output_dim]
+    lower_bound = point_estimates - z_score * std_dev
+
+    # Calculate upper bounds of prediction intervals
+    # Shape: [batch_size, output_dim]
+    upper_bound = point_estimates + z_score * std_dev
+
+    return lower_bound, upper_bound
+
+# ---------------------------------------------------------------------
+
 @tf.function
 def gaussian_probability(y: tf.Tensor, mu: tf.Tensor, sigma: tf.Tensor) -> tf.Tensor:
     """Compute Gaussian probability density.
@@ -461,220 +676,5 @@ class MDNLayer(layers.Layer):
             config_copy["kernel_regularizer"] = keras.regularizers.deserialize(config["kernel_regularizer"])
         return cls(**config_copy)
 
-# ---------------------------------------------------------------------
-
-
-def get_point_estimate(
-        model: keras.Model,
-        x_data: np.ndarray,
-        mdn_layer: Any
-) -> np.ndarray:
-    """
-    Calculate point estimates from MDN outputs as the weighted average of mixture components.
-
-    This function computes the expected value of the mixture distribution by taking
-    the weighted average of the component means. The weights come from the mixture
-    probabilities (pi values).
-
-    Parameters
-    ----------
-    model : keras.Model
-        Trained model with MDN layer
-    x_data : np.ndarray
-        Input data for prediction, shape [batch_size, input_dim]
-    mdn_layer : MDNLayer
-        The MDN layer instance used in the model
-
-    Returns
-    -------
-    np.ndarray
-        Point estimates with shape [batch_size, output_dim]
-
-    Notes
-    -----
-    The point estimate represents the expected value of the predicted distribution,
-    which is the sum of each component mean weighted by its mixture probability.
-
-    Examples
-    --------
-    >>> point_estimates = get_point_estimate(model, x_test, mdn_layer)
-    >>> print(f"Point prediction shape: {point_estimates.shape}")
-    """
-    # Get model predictions
-    y_pred = model.predict(x_data)
-
-    # Split the mixture parameters
-    mu, sigma, pi_logits = mdn_layer.split_mixture_params(y_pred)
-
-    # Convert pi_logits to probabilities
-    # Shape: [batch_size, num_mixtures]
-    pi = tf.nn.softmax(pi_logits, axis=-1).numpy()
-
-    # Expand pi dimensions for broadcasting
-    # Shape: [batch_size, num_mixtures, 1]
-    pi_expanded = np.expand_dims(pi, axis=-1)
-
-    # Compute weighted average of means (expected value of the mixture)
-    # Shape: [batch_size, num_mixtures, output_dim]
-    weighted_mu = mu.numpy() * pi_expanded
-
-    # Sum over mixture components to get point estimates
-    # Shape: [batch_size, output_dim]
-    point_estimates = np.sum(weighted_mu, axis=1)
-
-    return point_estimates
 
 # ---------------------------------------------------------------------
-
-
-def get_uncertainty(
-        model: keras.Model,
-        x_data: np.ndarray,
-        mdn_layer: Any,
-        point_estimates: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Calculate uncertainty estimates from MDN parameters.
-
-    This function decomposes predictive uncertainty into aleatoric uncertainty
-    (data noise) and epistemic uncertainty (model uncertainty). The total
-    predictive variance is the sum of these two components.
-
-    Parameters
-    ----------
-    model : keras.Model
-        Trained model with MDN layer
-    x_data : np.ndarray
-        Input data for prediction, shape [batch_size, input_dim]
-    mdn_layer : MDNLayer
-        The MDN layer instance used in the model
-    point_estimates : np.ndarray
-        Point estimates calculated from the model outputs, shape [batch_size, output_dim]
-
-    Returns
-    -------
-    Tuple[np.ndarray, np.ndarray]
-        A tuple containing:
-            - total_variance: Total predictive variance, shape [batch_size, output_dim]
-            - aleatoric_variance: Aleatoric uncertainty component, shape [batch_size, output_dim]
-
-    Notes
-    -----
-    The uncertainty is decomposed as:
-    1. Aleatoric uncertainty: Captured by the variance of each Gaussian component
-    2. Epistemic uncertainty: Captured by the variance of the means across components
-
-    The total predictive variance is the sum of these two components.
-
-    Examples
-    --------
-    >>> total_var, aleatoric_var = get_uncertainty(model, x_test, mdn_layer, point_estimates)
-    >>> epistemic_var = total_var - aleatoric_var
-    >>> print(f"Average uncertainty: {np.mean(total_var):.4f}")
-    """
-    # Get model predictions
-    # Shape: [batch_size, (2*output_dim*num_mixtures + num_mixtures)]
-    y_pred = model.predict(x_data)
-
-    # Split the mixture parameters
-    # Shapes: mu, sigma: [batch_size, num_mixtures, output_dim], pi_logits: [batch_size, num_mixtures]
-    mu, sigma, pi_logits = mdn_layer.split_mixture_params(y_pred)
-    mu = mu.numpy()
-    sigma = sigma.numpy()
-
-    # Convert pi_logits to probabilities
-    # Shape: [batch_size, num_mixtures]
-    pi = tf.nn.softmax(pi_logits, axis=-1).numpy()
-
-    # Expand pi dimensions for broadcasting
-    # Shape: [batch_size, num_mixtures, 1]
-    pi_expanded = np.expand_dims(pi, axis=-1)
-
-    # Expand point estimates for broadcasting
-    # Shape: [batch_size, 1, output_dim]
-    point_expanded = np.expand_dims(point_estimates, axis=1)
-
-    # 1. Aleatoric uncertainty (inherent data noise)
-    # Weighted average of variances from each component
-    # Shape: [batch_size, output_dim]
-    aleatoric_variance = np.sum(pi_expanded * sigma ** 2, axis=1)
-
-    # 2. Epistemic uncertainty (model uncertainty)
-    # Weighted variance of means around expected value
-    # Shape: [batch_size, num_mixtures, output_dim]
-    squared_diff = (mu - point_expanded) ** 2
-
-    # Shape: [batch_size, output_dim]
-    epistemic_variance = np.sum(pi_expanded * squared_diff, axis=1)
-
-    # Total predictive variance (sum of aleatoric and epistemic)
-    # Shape: [batch_size, output_dim]
-    total_variance = aleatoric_variance + epistemic_variance
-
-    return total_variance, aleatoric_variance
-
-# ---------------------------------------------------------------------
-
-
-def get_prediction_intervals(
-        point_estimates: np.ndarray,
-        total_variance: np.ndarray,
-        confidence_level: float = 0.95
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Calculate prediction intervals for MDN outputs.
-
-    This function computes lower and upper bounds for prediction intervals
-    based on the point estimates and their associated uncertainty.
-
-    Parameters
-    ----------
-    point_estimates : np.ndarray
-        Point estimates from the model, shape [batch_size, output_dim]
-    total_variance : np.ndarray
-        Total variance of predictions, shape [batch_size, output_dim]
-    confidence_level : float, optional
-        Desired confidence level, default is 0.95 (95% confidence interval)
-
-    Returns
-    -------
-    Tuple[np.ndarray, np.ndarray]
-        A tuple containing:
-            - lower_bound: Lower bounds of prediction intervals, shape [batch_size, output_dim]
-            - upper_bound: Upper bounds of prediction intervals, shape [batch_size, output_dim]
-
-    Notes
-    -----
-    The function assumes a Gaussian distribution for the prediction intervals.
-    The bounds are calculated as point_estimate ± z_score * sqrt(variance),
-    where z_score is derived from the inverse error function based on the
-    specified confidence level.
-
-    Examples
-    --------
-    >>> lower, upper = get_prediction_intervals(point_estimates, total_variance, 0.95)
-    >>> print(f"Average interval width: {np.mean(upper - lower):.4f}")
-    """
-    # Calculate z-score for the given confidence level using the inverse error function
-    # For 95% confidence, z_score ≈ 1.96
-    z_score = tf.cast(
-        tf.abs(tf.math.erfinv(confidence_level) * tf.sqrt(2.0)),
-        tf.float32
-    )
-
-    # Calculate standard deviation from variance
-    # Shape: [batch_size, output_dim]
-    std_dev = np.sqrt(total_variance)
-
-    # Calculate lower bounds of prediction intervals
-    # Shape: [batch_size, output_dim]
-    lower_bound = point_estimates - z_score * std_dev
-
-    # Calculate upper bounds of prediction intervals
-    # Shape: [batch_size, output_dim]
-    upper_bound = point_estimates + z_score * std_dev
-
-    return lower_bound, upper_bound
-
-# ---------------------------------------------------------------------
-
