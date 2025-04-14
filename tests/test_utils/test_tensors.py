@@ -5,7 +5,7 @@ from numpy.testing import assert_allclose
 from typing import Tuple
 
 from dl_techniques.utils.tensors import \
-    power_iteration, wt_x_w_normalize, gram_matrix, reshape_to_2d
+    power_iteration, wt_x_w_normalize, gram_matrix, reshape_to_2d, gaussian_kernel
 
 
 @pytest.fixture
@@ -179,6 +179,7 @@ class TestPowerIteration:
         assert_allclose(result_base, result_more, rtol=1e-3)
         assert_allclose(result_more, result_most, rtol=1e-3)
 
+class TestReshape:
     def test_reshape_to_2d_with_2d_input(self, random_weights_2d: tf.Tensor) -> None:
         """Test reshape_to_2d with 2D input."""
         reshaped = reshape_to_2d(random_weights_2d)
@@ -195,6 +196,7 @@ class TestPowerIteration:
                                      random_weights_4d.shape[1] *
                                      random_weights_4d.shape[2])
 
+class TestGram:
     def test_wt_x_w_computation(self, random_weights_2d: tf.Tensor) -> None:
         """Test wt_x_w computation."""
         result = gram_matrix(random_weights_2d)
@@ -203,3 +205,34 @@ class TestPowerIteration:
             random_weights_2d
         )
         assert tf.reduce_all(tf.abs(result - expected) < 1e-5)
+
+
+class TestGaussianKernel:
+    def test_gaussian_kernel_shape(self):
+        """Test if gaussian_kernel produces correct shapes."""
+        kernel_size = (5, 5)
+        nsig = (2.0, 2.0)
+        kernel = gaussian_kernel(kernel_size, nsig)
+        assert kernel.shape == kernel_size
+
+
+    def test_gaussian_kernel_normalization(self):
+        """Test if gaussian_kernel is properly normalized."""
+        kernel_size = (7, 7)
+        nsig = (1.5, 1.5)
+        kernel = gaussian_kernel(kernel_size, nsig)
+        assert np.abs(np.sum(kernel) - 1.0) < 1e-6
+
+
+    def test_gaussian_kernel_symmetry(self):
+        """Test if gaussian_kernel is symmetric."""
+        kernel_size = (5, 5)
+        nsig = (2.0, 2.0)
+        kernel = gaussian_kernel(kernel_size, nsig)
+        assert np.allclose(kernel, kernel.T)
+
+
+    def test_gaussian_kernel_invalid_inputs(self):
+        """Test if gaussian_kernel handles invalid inputs correctly."""
+        with pytest.raises(ValueError):
+            gaussian_kernel((3,), (1.0,))  # Invalid tuple lengths

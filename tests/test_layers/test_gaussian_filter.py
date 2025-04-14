@@ -13,7 +13,6 @@ import tensorflow as tf
 from typing import Tuple, List
 
 from dl_techniques.layers.gaussian_filter import (
-    gaussian_kernel,
     depthwise_gaussian_kernel,
     GaussianFilter
 )
@@ -37,37 +36,6 @@ def sample_image() -> tf.Tensor:
     """Generate a sample image for testing."""
     # Create a simple 4D tensor (batch_size=1, height=32, width=32, channels=3)
     return tf.random.uniform((1, 32, 32, 3))
-
-
-# Test gaussian_kernel function
-def test_gaussian_kernel_shape():
-    """Test if gaussian_kernel produces correct shapes."""
-    kernel_size = (5, 5)
-    nsig = (2.0, 2.0)
-    kernel = gaussian_kernel(kernel_size, nsig)
-    assert kernel.shape == kernel_size
-
-
-def test_gaussian_kernel_normalization():
-    """Test if gaussian_kernel is properly normalized."""
-    kernel_size = (7, 7)
-    nsig = (1.5, 1.5)
-    kernel = gaussian_kernel(kernel_size, nsig)
-    assert np.abs(np.sum(kernel) - 1.0) < 1e-6
-
-
-def test_gaussian_kernel_symmetry():
-    """Test if gaussian_kernel is symmetric."""
-    kernel_size = (5, 5)
-    nsig = (2.0, 2.0)
-    kernel = gaussian_kernel(kernel_size, nsig)
-    assert np.allclose(kernel, kernel.T)
-
-
-def test_gaussian_kernel_invalid_inputs():
-    """Test if gaussian_kernel handles invalid inputs correctly."""
-    with pytest.raises(ValueError):
-        gaussian_kernel((3,), (1.0,))  # Invalid tuple lengths
 
 
 # Test depthwise_gaussian_kernel function
