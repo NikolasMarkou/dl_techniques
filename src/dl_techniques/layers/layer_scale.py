@@ -38,6 +38,8 @@ from enum import Enum
 import tensorflow as tf
 from typing import Dict, Any, Optional, Tuple, Union
 
+from dl_techniques.regularizers.binary_preference import BinaryPreferenceRegularizer
+
 # ---------------------------------------------------------------------
 
 
@@ -154,40 +156,25 @@ class LearnableMultiplier(keras.layers.Layer):
 
     Args:
         multiplier_type: Type of multiplier ('GLOBAL' or 'CHANNEL').
-        capped: Whether to cap multiplier values (default: True).
-        initializer: Weight initializer (default: truncated normal).
-        regularizer: Weight regularizer (default: L2).
+        initializer: Weight initializer (default: constant 1).
+        regularizer: Weight regularizer (default: binary preference).
         **kwargs: Additional layer arguments.
     """
 
     def __init__(
             self,
             multiplier_type: Union[MultiplierType, str],
-            capped: bool = True,
-            initializer: Optional[keras.initializers.Initializer] = None,
-            regularizer: Optional[keras.regularizers.Regularizer] = None,
+            initializer: Optional[keras.initializers.Initializer] = keras.initializers.Constant(0.5),
+            regularizer: Optional[keras.regularizers.Regularizer] = BinaryPreferenceRegularizer(),
             **kwargs: Any
     ) -> None:
         """Initialize the LearnableMultiplier layer."""
         super().__init__(**kwargs)
 
-        # Handle default initializer
-        if initializer is None:
-            initializer = keras.initializers.TruncatedNormal(
-                mean=0.0,
-                stddev=0.01,
-                seed=0
-            )
-
-        # Handle default regularizer
-        if regularizer is None:
-            regularizer = keras.regularizers.L2(l2=1e-2)
-
-        self.capped = capped
         self.initializer = initializer
         self.regularizer = regularizer
         self.multiplier_type = MultiplierType.from_string(multiplier_type)
-        self.w_multiplier = None
+        self.gamma = None
 
     def build(self, input_shape: tf.TensorShape) -> None:
         """
@@ -201,9 +188,11 @@ class LearnableMultiplier(keras.layers.Layer):
             weight_shape = [1] * len(input_shape)
         elif self.multiplier_type == MultiplierType.CHANNEL:
             weight_shape = [1] * (len(input_shape) - 1) + [input_shape[-1]]
+        else:
+            raise ValueError(f"invalid multiplier_type: [{self.multiplier_type}")
 
-        self.w_multiplier = self.add_weight(
-            name="w_multiplier",
+        self.gamma = self.add_weight(
+            name="gamma",
             shape=weight_shape,
             initializer=self.initializer,
             regularizer=self.regularizer,
@@ -233,22 +222,13 @@ class LearnableMultiplier(keras.layers.Layer):
             Tensor with multipliers applied.
         """
         # Compute base multiplier using tanh transformation
-        base_multiplier = tf.nn.tanh((4 * self.w_multiplier + 1.5) + 1) * 0.5
-
-        if self.capped:
-            multiplier = base_multiplier
-        else:
-            # Allow values > 1.0 when uncapped
-            multiplier = base_multiplier * (1.0 + self.w_multiplier)
-
-        return tf.multiply(multiplier, inputs)
+        return tf.multiply(self.gamma, inputs)
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration."""
         config = super().get_config()
         config.update({
             "multiplier_type": self.multiplier_type.to_string(),
-            "capped": self.capped,
             "regularizer": keras.regularizers.serialize(self.regularizer),
             "initializer": keras.initializers.serialize(self.initializer)
         })

@@ -129,34 +129,4 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
         """
         return cls(**config)
 
-
-def get_binary_regularizer(
-        multiplier: Optional[float] = 1.0,
-        scale: Optional[float] = 1.0
-) -> BinaryPreferenceRegularizer:
-    """
-    Factory function to create a binary preference regularizer instance.
-
-    Args:
-        multiplier (Optional[float]): multiplier factor for the regularization term.
-                                Higher values create stronger binarization.
-                                Defaults to 1.0.
-        scale (Optional[float]): squeezes or expands the signal
-    Returns:
-        BinaryPreferenceRegularizer: An instance of the binary regularizer.
-
-    Example:
-        >>> # Create regularizer with default scaling
-        >>> regularizer = get_binary_regularizer()
-        >>> # Add to model layer
-        >>> model.add(Dense(64, kernel_regularizer=regularizer))
-        >>>
-        >>> # Create regularizer with custom scaling
-        >>> strong_regularizer = get_binary_regularizer(scale=2.0)
-        >>> model.add(Dense(32, kernel_regularizer=strong_regularizer))
-    """
-    return BinaryPreferenceRegularizer(
-        multiplier=multiplier,
-        scale=scale)
-
 # ---------------------------------------------------------------------
