@@ -72,7 +72,11 @@ following Keras best practices for custom layer development.
 import copy
 import keras
 import tensorflow as tf
-from typing import Optional, Union, Callable
+from typing import Optional, Union, Callable, Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.layer_scale import (
@@ -100,7 +104,7 @@ class ConvolutionalTransformerBlock(keras.layers.Layer):
     def __init__(
             self,
             dim: int,
-            use_bias: bool,
+            use_bias: bool = True,
             num_heads: int = 8,
             mlp_ratio: float = 4.0,
             dropout_rate: float = 0.0,
@@ -108,7 +112,6 @@ class ConvolutionalTransformerBlock(keras.layers.Layer):
             activation: Union[str, Callable] = "relu",
             regularization_rate: float = 1e-4,
             use_gamma: bool = False,
-            use_global_gamma: bool = False,
             use_soft_orthonormal_regularization: bool = False,
             seed: int = 1,
             **kwargs
@@ -125,7 +128,6 @@ class ConvolutionalTransformerBlock(keras.layers.Layer):
             activation (Union[str, Callable]): Activation function to use in MLP.
             regularization_rate (float): L2 regularization rate
             use_gamma: Whether to use the learnable scaling factor (default: True)
-            use_global_gamma: Whether to use a global or per-channel scaling factor (default: True)
             use_soft_orthonormal_regularization (bool): if True use soft_orthonormal regularization
             **kwargs: Additional keyword arguments for the keras.layers.Layer.
         """
@@ -156,7 +158,6 @@ class ConvolutionalTransformerBlock(keras.layers.Layer):
         # Setup learnable multiplier
         self.gamma = None
         self.use_gamma = use_gamma
-        self.use_global_gamma = use_global_gamma
 
     def build(self, input_shape: tf.TensorShape) -> None:
         """
@@ -172,7 +173,7 @@ class ConvolutionalTransformerBlock(keras.layers.Layer):
         if self.use_soft_orthonormal_regularization:
             regularizer = SoftOrthonormalConstraintRegularizer()
         else:
-            regularizer = tf.keras.regularizers.l2(self.regularization_rate)
+            regularizer = keras.regularizers.l2(self.regularization_rate)
 
         # Layer Normalization
         self.norm1 = (
@@ -231,20 +232,11 @@ class ConvolutionalTransformerBlock(keras.layers.Layer):
 
         # Setup learnable scaling factor (gamma)
         if self.use_gamma:
-            if self.use_global_gamma:
-                self.gamma = LearnableMultiplier(
-                    name="gamma",
-                    capped=True,
-                    regularizer=keras.regularizers.L2(1e-2),
-                    multiplier_type=MultiplierType.Global
-                )
-            else:
-                self.gamma = LearnableMultiplier(
-                    name="gamma",
-                    capped=True,
-                    regularizer=keras.regularizers.L2(1e-2),
-                    multiplier_type=MultiplierType.Channel
-                )
+            self.gamma = LearnableMultiplier(
+                name="gamma",
+                regularizer=keras.regularizers.L2(1e-2),
+                multiplier_type="CHANNEL"
+            )
         else:
             # If no gamma, use identity function
             self.gamma = lambda x, training=None: x
@@ -323,4 +315,56 @@ class ConvolutionalTransformerBlock(keras.layers.Layer):
         return cls(**config)
 
 # ---------------------------------------------------------------------
+
+def create_convolutional_transformer_model(
+        input_shape: Tuple[int, int, int],
+        num_classes: int,
+        num_blocks: int = 6,
+        dim: int = 256,
+        num_heads: int = 8,
+        mlp_ratio: float = 4.0,
+        dropout_rate: float = 0.1,
+        attention_dropout: float = 0.1,
+        activation: Union[str, Callable] = "relu",
+) -> keras.Model:
+    """
+    Create a Convolutional Transformer model for vision applications.
+
+    Args:
+        input_shape (Tuple[int, int, int]): Shape of the input image (height, width, channels).
+        num_classes (int): Number of output classes.
+        num_blocks (int): Number of Convolutional Transformer Blocks.
+        dim (int): Dimension of the model.
+        num_heads (int): Number of attention heads.
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
+        dropout_rate (float): Dropout rate.
+        attention_dropout (float): Dropout rate for attention.
+        activation (Union[str, Callable]): Activation function to use in MLPs.
+
+    Returns:
+        keras.Model: A Keras model with the Convolutional Transformer architecture.
+    """
+    inputs = keras.Input(shape=input_shape)
+
+    # Initial convolution
+    x = keras.layers.Conv2D(dim, kernel_size=7, strides=2, padding="same")(inputs)
+    x = keras.layers.LayerNormalization(epsilon=1e-6)(x)
+
+    # Convolutional Transformer Blocks
+    for i in range(num_blocks):
+        x = ConvolutionalTransformerBlock(
+            dim=dim,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            dropout_rate=dropout_rate,
+            attention_dropout=attention_dropout,
+            activation=activation,
+            name=f"conv_transformer_block_{i}"
+        )(x)
+
+    # Classification head
+    x = keras.layers.GlobalAveragePooling2D(name="global_pool")(x)
+    outputs = keras.layers.Dense(num_classes, activation="softmax", name="classifier")(x)
+
+    return keras.Model(inputs, outputs, name="ConvolutionalTransformer")
 

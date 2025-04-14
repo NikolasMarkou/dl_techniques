@@ -35,8 +35,7 @@ def block_params() -> Dict[str, Any]:
         "mlp_ratio": 4.0,
         "dropout_rate": 0.1,
         "attention_dropout": 0.1,
-        "use_scale": True,
-        "conv_kernel_size": 3,
+        "use_gamma": True,
         "activation": "gelu"
     }
 

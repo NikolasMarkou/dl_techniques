@@ -11,8 +11,7 @@ from keras.api.layers import Dense
 from keras.api.models import Sequential
 
 from dl_techniques.regularizers.binary_preference import (
-    BinaryPreferenceRegularizer,
-    get_binary_regularizer
+    BinaryPreferenceRegularizer
 )
 
 
@@ -94,21 +93,9 @@ def test_config_serialization():
     assert new_reg.multiplier == original_reg.multiplier
 
 
-def test_factory_function():
-    """Test the get_binary_regularizer factory function."""
-    # Test default parameters
-    reg1 = get_binary_regularizer()
-    assert isinstance(reg1, BinaryPreferenceRegularizer)
-    assert reg1.multiplier == 1.0
-
-    # Test custom multiplier
-    reg2 = get_binary_regularizer(multiplier=2.0)
-    assert reg2.multiplier == 2.0
-
-
 def test_keras_integration():
     """Test integration with Keras model."""
-    regularizer = get_binary_regularizer(scale=1.0)
+    regularizer = BinaryPreferenceRegularizer(scale=1.0)
 
     # Create simple model with regularizer
     model = Sequential([

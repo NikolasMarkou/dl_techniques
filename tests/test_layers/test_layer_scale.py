@@ -10,7 +10,6 @@ behavior, serialization, and edge cases.
 
 import pytest
 import tensorflow as tf
-import numpy as np
 from typing import Tuple, Dict, Any
 
 from dl_techniques.layers.layer_scale import (
@@ -61,40 +60,27 @@ class TestLearnableMultiplier:
         """Default parameters for LearnableMultiplier."""
         return {
             "multiplier_type": "GLOBAL",
-            "capped": True
         }
 
     def test_initialization(self, layer_params: Dict[str, Any]) -> None:
         """Test LearnableMultiplier initialization."""
         layer = LearnableMultiplier(**layer_params)
-        assert layer.capped == layer_params["capped"]
         assert layer.multiplier_type == MultiplierType.GLOBAL
-        assert layer.w_multiplier is None
+        assert layer.gamma is None
 
     def test_build_global(self, layer_params: Dict[str, Any], sample_shape: Tuple[int, int, int, int]) -> None:
         """Test build with global multiplier."""
         layer = LearnableMultiplier(**layer_params)
         layer.build(sample_shape)
-        assert layer.w_multiplier.shape == (1, 1, 1, 1)
+        assert layer.gamma.shape == (1, 1, 1, 1)
 
     def test_build_channel(self, layer_params: Dict[str, Any], sample_shape: Tuple[int, int, int, int]) -> None:
         """Test build with channel multiplier."""
         layer_params["multiplier_type"] = "CHANNEL"
         layer = LearnableMultiplier(**layer_params)
         layer.build(sample_shape)
-        assert layer.w_multiplier.shape == (1, 1, 1, sample_shape[-1])
+        assert layer.gamma.shape == (1, 1, 1, sample_shape[-1])
 
-    @pytest.mark.parametrize("capped", [True, False])
-    def test_call_modes(self, layer_params: Dict[str, Any], sample_input: tf.Tensor, capped: bool) -> None:
-        """Test different call modes."""
-        layer_params["capped"] = capped
-        layer = LearnableMultiplier(**layer_params)
-        output = layer(sample_input)
-        assert output.shape == sample_input.shape
-
-        # Values should be within expected range
-        if capped:
-            assert tf.reduce_max(output) <= tf.reduce_max(sample_input)
 
     def test_training_behavior(self, layer_params: Dict[str, Any], sample_input: tf.Tensor) -> None:
         """Test training behavior and gradient flow."""
@@ -114,7 +100,6 @@ class TestLearnableMultiplier:
 
         # Recreate from config
         new_layer = LearnableMultiplier.from_config(config)
-        assert new_layer.capped == layer.capped
         assert new_layer.multiplier_type == layer.multiplier_type
 
 
