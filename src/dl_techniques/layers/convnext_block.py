@@ -29,7 +29,7 @@ The ConvNext block consists of:
 4. Optional learnable scaling
 
 The computation flow is:
-input -> depthwise_conv -> layer_norm -> activation ->
+input -> depthwise_conv -> layer_norm ->
         pointwise_conv1 -> activation -> dropout ->
         pointwise_conv2 -> gamma_scale -> output
 
@@ -98,14 +98,7 @@ from .layer_scale import LearnableMultiplier
 from dl_techniques.regularizers.soft_orthogonal import \
     SoftOrthogonalConstraintRegularizer, \
     SoftOrthonormalConstraintRegularizer
-
-# ---------------------------------------------------------------------
-
-
-class MultiplierType(Enum):
-    """Type of learnable multiplier to use."""
-    Global = "global"
-    Channel = "channel"
+from ..constraints.value_range_constraint import ValueRangeConstraint
 
 
 # ---------------------------------------------------------------------
@@ -142,7 +135,6 @@ class ConvNextBlock(keras.layers.Layer):
         dropout_rate: Optional dropout rate
         spatial_dropout_rate: Optional spatial dropout rate
         use_gamma: Whether to use learnable multiplier
-        use_global_gamma: Whether to use global or per-channel multiplier
         kernel_regularization: Type of kernel regularization to use
         name: Name of the layer
     """
@@ -153,7 +145,6 @@ class ConvNextBlock(keras.layers.Layer):
             dropout_rate: Optional[float] = None,
             spatial_dropout_rate: Optional[float] = None,
             use_gamma: bool = True,
-            use_global_gamma: bool = True,
             kernel_regularization: Optional[str] = None,
             name: Optional[str] = None,
     ):
@@ -164,7 +155,6 @@ class ConvNextBlock(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.spatial_dropout_rate = spatial_dropout_rate
         self.use_gamma = use_gamma
-        self.use_global_gamma = use_global_gamma
         self.kernel_regularization = kernel_regularization
 
         # Initialize layers
@@ -225,18 +215,25 @@ class ConvNextBlock(keras.layers.Layer):
         # Dropout layers
         if self.dropout_rate is not None:
             self.dropout = keras.layers.Dropout(self.dropout_rate)
+        else:
+            self.dropout =keras.layers.Lambda(lambda x: x)
         if self.spatial_dropout_rate is not None:
             self.spatial_dropout = keras.layers.SpatialDropout2D(
                 self.spatial_dropout_rate
             )
+        else:
+            self.spatial_dropout = keras.layers.Lambda(lambda x: x)
 
         # Learnable multiplier
         if self.use_gamma:
             self.gamma = LearnableMultiplier(
-                multiplier_type=MultiplierType.Global if self.use_global_gamma else MultiplierType.Channel,
-                capped=True,
-                regularizer=keras.regularizers.l2(1e-2),
+                multiplier_type="CHANNEL",
+                regularizer=keras.regularizers.L2(1e-5),
+                initializer=keras.initializers.Constant(1.0),
+                constraint=ValueRangeConstraint(min_value=0.0, max_value=1.0),
             )
+        else:
+            self.gamma = keras.layers.Lambda(lambda x: x)
 
     def call(
             self,
@@ -253,30 +250,24 @@ class ConvNextBlock(keras.layers.Layer):
             Processed tensor
         """
         # Depthwise convolution
-        x = self.conv_1(inputs)
+        x = self.conv_1(inputs, training=training)
 
         # Normalization (following proper order)
         x = self.norm(x, training=training)
 
-        # First activation
-        x = self.activation(x)
-
         # First pointwise convolution
-        x = self.conv_2(x)
-        x = self.activation(x)
+        x = self.conv_2(x, training=training)
+        x = self.activation(x, training=training)
 
         # Apply dropouts if specified
-        if hasattr(self, 'dropout'):
-            x = self.dropout(x, training=training)
-        if hasattr(self, 'spatial_dropout'):
-            x = self.spatial_dropout(x, training=training)
+        x = self.dropout(x, training=training)
+        x = self.spatial_dropout(x, training=training)
 
         # Second pointwise convolution
-        x = self.conv_3(x)
+        x = self.conv_3(x, training=training)
 
         # Apply learnable multiplier if specified
-        if self.use_gamma:
-            x = self.gamma(x)
+        x = self.gamma(x, training=training)
 
         return x
 
@@ -292,7 +283,6 @@ class ConvNextBlock(keras.layers.Layer):
             "dropout_rate": self.dropout_rate,
             "spatial_dropout_rate": self.spatial_dropout_rate,
             "use_gamma": self.use_gamma,
-            "use_global_gamma": self.use_global_gamma,
             "kernel_regularization": self.kernel_regularization,
         })
         return config
