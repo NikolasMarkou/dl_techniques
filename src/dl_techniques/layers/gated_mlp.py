@@ -67,17 +67,15 @@ Key differences from standard attention mechanisms:
 4. Often more parameter-efficient than self-attention
 """
 
-import copy
 import keras
 import tensorflow as tf
-from keras import layers
-from typing import Optional, Union, Literal, Dict, Any, Tuple, Callable
+from typing import Optional, Union, Literal, Dict, Any
 
 
 # ---------------------------------------------------------------------
 
 @keras.utils.register_keras_serializable()
-class GatedMLP(layers.Layer):
+class GatedMLP(keras.layers.Layer):
     """
     A Gated MLP layer implementation using 1x1 convolutions.
 
@@ -95,19 +93,6 @@ class GatedMLP(layers.Layer):
         attention_activation (str): Activation function for the gate and up projections.
         output_activation (str): Activation function for the output.
         **kwargs: Additional arguments passed to the parent Layer class.
-
-    Example:
-        ```python
-        # Create a GatedMLP layer with 64 filters
-        gated_mlp = GatedMLP(
-            filters=64,
-            use_bias=True,
-            kernel_initializer="he_normal",
-            kernel_regularizer=keras.regularizers.L2(1e-5),
-            attention_activation="gelu",
-            output_activation="linear"
-        )
-        ```
     """
 
     def __init__(
@@ -160,9 +145,9 @@ class GatedMLP(layers.Layer):
         }
 
         # Create the convolution layers
-        self.conv_gate = layers.Conv2D(**conv_params)
-        self.conv_up = layers.Conv2D(**conv_params)
-        self.conv_down = layers.Conv2D(**conv_params)
+        self.conv_gate = keras.layers.Conv2D(**conv_params)
+        self.conv_up = keras.layers.Conv2D(**conv_params)
+        self.conv_down = keras.layers.Conv2D(**conv_params)
 
         # Set up activation functions
         self.attention_activation_fn = activation_wrapper(activation=self.attention_activation)

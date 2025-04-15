@@ -5,6 +5,77 @@ Differential Transformer (DIFF Transformer) Implementation in TensorFlow
 This implementation is based on the paper:
 "DIFFERENTIAL TRANSFORMER: Amplifying attention to the relevant context while canceling noise"
 
+Architecture Schematic:
+--------------------
+                        DIFFERENTIAL TRANSFORMER
+                               ARCHITECTURE
+
+    Input                                      Output
+     │                                           ▲
+     ▼                                           │
+┌────────────┐                             ┌───────────┐
+│  Embedding │                             │ Classifier │
+└────────────┘                             └───────────┘
+     │                                           ▲
+     ▼                                           │
+┌────────────┐                             ┌───────────┐
+│ Positional │                             │ Final Norm │
+│ Embedding  │                             └───────────┘
+└────────────┘                                   ▲
+     │                                           │
+     ▼                                           │
+┌─────────────────────────┐                ┌───────────┐
+│   Transformer Block 1   │                │  Pooling  │
+└─────────────────────────┘                └───────────┘
+     │                                           ▲
+     ▼                                           │
+┌─────────────────────────┐                      │
+│         ...             │                      │
+└─────────────────────────┘                      │
+     │                                           │
+     ▼                                           │
+┌─────────────────────────┐                      │
+│   Transformer Block N   │─────────────────────┘
+└─────────────────────────┘
+
+TRANSFORMER BLOCK STRUCTURE:                    DIFFERENTIAL ATTENTION:
+
+Input                                          MHA1        MHA2
+  │                                             │           │
+  ▼                                             ▼           ▼
+┌──────────┐                                 ┌─────────┐ ┌─────────┐
+│ PreNorm  │                                 │ Attn 1  │ │ Attn 2  │
+└──────────┘                                 └─────────┘ └─────────┘
+  │                                              │         │
+  ▼                                              │   λ×    │
+┌──────────────┐                                 ▼   ▼     ▼
+│ Differential │                          Output = Attn1 - λ·Attn2
+│  Attention   │                                     │
+└──────────────┘                                     ▼
+  │                                           ┌────────────┐
+  ▼                                           │  Project   │
+┌──────────┐                                  └────────────┘
+│ Residual │                                        │
+└──────────┘                                        ▼
+  │                                              Output
+  ▼
+┌──────────┐
+│ PreNorm  │
+└──────────┘
+  │
+  ▼
+┌──────────┐
+│    FFN   │
+└──────────┘
+  │
+  ▼
+┌──────────┐
+│ Residual │
+└──────────┘
+  │
+  ▼
+ Output
+
 Key Findings from the Paper:
 ---------------------------
 1. Performance Improvements:
@@ -27,18 +98,19 @@ Key Findings from the Paper:
 Implementation Details:
 ---------------------
 1. Attention Mechanism:
-   - Uses dual softmax attention computation
+   - Uses dual MultiHeadAttention layers with separate projection matrices
    - Incorporates learnable scalar λ for attention map balancing
    - λ initialization: 0.8 - 0.6 * exp(-0.3 * (layer_idx - 1))
-   - Applies GroupNorm to each attention head independently
+   - Uses standard Keras layers for improved compatibility and performance
 
 2. Key Components:
-   - Pre-RMSNorm for layer normalization
+   - Pre-LayerNormalization for layer normalization
    - SwiGLU activation in feed-forward networks
    - Global Response Normalization
    - Differential attention with noise cancellation
 """
 
+import keras
 import numpy as np
 import tensorflow as tf
 from keras.api import Model
@@ -46,314 +118,15 @@ from keras.api import layers
 from keras.api import losses
 from keras.api import optimizers
 from keras.api import initializers
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple, Union
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.tensors import safe_divide, create_causal_mask
-
-# ---------------------------------------------------------------------
-
-
-class LayerNorm(layers.Layer):
-    """Custom Layer Normalization with safe division."""
-
-    def __init__(self, dim: int, eps: float = 1e-5) -> None:
-        super().__init__()
-        self.dim = dim
-        self.eps = eps
-        self.gamma = self.add_weight(
-            "gamma",
-            shape=(dim,),
-            initializer="ones",
-            trainable=True
-        )
-        self.beta = self.add_weight(
-            "beta",
-            shape=(dim,),
-            initializer="zeros",
-            trainable=True
-        )
-
-    def call(self, x: tf.Tensor) -> tf.Tensor:
-        means = tf.reduce_mean(x, axis=-1, keepdims=True)
-        variance = tf.reduce_mean(tf.square(x - means), axis=-1, keepdims=True)
-        x = safe_divide(x - means, tf.sqrt(variance + self.eps))
-        return x * self.gamma + self.beta
-
-# ---------------------------------------------------------------------
-
-
-class GlobalResponseNorm(layers.Layer):
-    """Global Response Normalization with enhanced stability."""
-
-    def __init__(
-            self,
-            dim: int,
-            eps: float = 1e-6,
-            init_scale: float = 1.0,
-            norm_clip: float = 1e3
-    ) -> None:
-        """
-        Args:
-            dim: Input dimension
-            eps: Small constant for numerical stability
-            init_scale: Initial scale for gamma parameter
-            norm_clip: Maximum norm value for stability
-        """
-        super().__init__()
-        if dim <= 0:
-            raise ValueError(f"Dimension must be positive, got {dim}")
-
-        self.dim = dim
-        self.eps = eps
-        self.norm_clip = norm_clip
-
-        self.gamma = self.add_weight(
-            "gamma",
-            shape=(dim,),
-            initializer=initializers.Constant(init_scale),
-            trainable=True
-        )
-        self.beta = self.add_weight(
-            "beta",
-            shape=(dim,),
-            initializer="zeros",
-            trainable=True
-        )
-
-    def call(self, x: tf.Tensor) -> tf.Tensor:
-        if not tf.is_tensor(x):
-            raise TypeError(f"Input must be a tensor, got {type(x)}")
-
-        if x.shape[-1] != self.dim:
-            raise ValueError(
-                f"Input dimension {x.shape[-1]} does not match layer dimension {self.dim}"
-            )
-
-        # Compute global L2 norm with stability
-        square_sum = tf.reduce_sum(tf.square(x), axis=(1, 2), keepdims=True)
-        square_sum = tf.clip_by_value(square_sum, self.eps, self.norm_clip)
-        gx = tf.sqrt(square_sum)
-
-        # Normalize by mean norm safely
-        mean_norm = tf.reduce_mean(gx, axis=-1, keepdims=True)
-        nx = safe_divide(gx, mean_norm)
-        nx = tf.clip_by_value(nx, -self.norm_clip, self.norm_clip)
-
-        return self.gamma * (x * nx) + self.beta + x
-
-    def get_config(self) -> Dict[str, Any]:
-        return {
-            "dim": self.dim,
-            "eps": self.eps,
-            "norm_clip": self.norm_clip
-        }
-
-# ---------------------------------------------------------------------
-
-
-class DifferentialAttention(layers.Layer):
-    """Differential attention with comprehensive stability features."""
-
-    def __init__(
-            self,
-            dim: int,
-            num_heads: int,
-            head_dim: int,
-            dropout: float = 0.0,
-            attention_dropout: float = 0.0,
-            lambda_init: float = 0.8,
-            max_position_bias: float = 1e2,
-            qkv_bias: bool = False,
-            attn_clip: float = 1e2
-    ) -> None:
-        """
-        Args:
-            dim: Input dimension
-            num_heads: Number of attention heads
-            head_dim: Dimension of each attention head
-            dropout: Output dropout rate
-            attention_dropout: Attention matrix dropout rate
-            lambda_init: Initial value for λ parameter
-            max_position_bias: Maximum position embedding value
-            qkv_bias: Whether to use bias in QKV projection
-            attn_clip: Maximum attention score value
-        """
-        super().__init__()
-
-        if dim % num_heads != 0:
-            raise ValueError(f"dim {dim} must be divisible by num_heads {num_heads}")
-
-        self.dim = dim
-        self.num_heads = num_heads
-        self.head_dim = head_dim
-        self.max_position_bias = max_position_bias
-        self.attn_clip = attn_clip
-
-        # Initialize attention components
-        self.scale = head_dim ** -0.5
-
-        # QKV projection with careful initialization
-        self.qkv = layers.Dense(
-            3 * num_heads * head_dim,
-            use_bias=qkv_bias,
-            kernel_initializer=initializers.VarianceScaling(
-                scale=2.0,
-                mode='fan_out',
-                distribution='truncated_normal'
-            )
-        )
-
-        # Output projection
-        self.proj = layers.Dense(
-            dim,
-            kernel_initializer=initializers.VarianceScaling(
-                scale=2.0,
-                mode='fan_in',
-                distribution='truncated_normal'
-            ),
-            bias_initializer="zeros"
-        )
-
-        # Dropout layers
-        self.dropout = layers.Dropout(dropout)
-        self.attn_dropout = layers.Dropout(attention_dropout)
-
-        # Initialize λ parameters
-        self._init_lambda_params(head_dim, lambda_init)
-
-    def _init_lambda_params(self, head_dim: int, lambda_init: float) -> None:
-        """Initialize λ parameters with careful initialization."""
-        init_val = np.log(lambda_init / 4) / head_dim
-
-        self.lambda_q1 = self.add_weight(
-            "lambda_q1",
-            shape=(head_dim,),
-            initializer=initializers.Constant(init_val),
-            trainable=True
-        )
-        self.lambda_k1 = self.add_weight(
-            "lambda_k1",
-            shape=(head_dim,),
-            initializer=initializers.Constant(init_val),
-            trainable=True
-        )
-        self.lambda_q2 = self.add_weight(
-            "lambda_q2",
-            shape=(head_dim,),
-            initializer=initializers.Constant(-init_val),
-            trainable=True
-        )
-        self.lambda_k2 = self.add_weight(
-            "lambda_k2",
-            shape=(head_dim,),
-            initializer=initializers.Constant(-init_val),
-            trainable=True
-        )
-
-    def get_lambda(self, layer_idx: int = 0) -> tf.Tensor:
-        """Compute λ value with stability controls."""
-        # Safe exponential initialization
-        layer_factor = tf.clip_by_value(
-            tf.cast(layer_idx, tf.float32) * 0.3,
-            0.0,
-            5.0
-        )
-        lambda_init = 0.8 - 0.6 * tf.exp(-layer_factor)
-
-        # Compute λ components safely
-        lambda_1 = tf.clip_by_value(
-            tf.reduce_sum(self.lambda_q1 * self.lambda_k1),
-            -10.0,
-            10.0
-        )
-        lambda_2 = tf.clip_by_value(
-            tf.reduce_sum(self.lambda_q2 * self.lambda_k2),
-            -10.0,
-            10.0
-        )
-
-        lambda_val = tf.exp(lambda_1) - tf.exp(lambda_2) + lambda_init
-        return tf.clip_by_value(lambda_val, 0.1, 5.0)
-
-    def _compute_attention(
-            self,
-            q: tf.Tensor,
-            k: tf.Tensor,
-            v: tf.Tensor,
-            mask: Optional[tf.Tensor] = None,
-            training: bool = False
-    ) -> tf.Tensor:
-        """Compute attention with stability controls and masking."""
-        # Scaled dot product attention
-        attn = tf.matmul(q, k, transpose_b=True) * self.scale
-
-        # Clip extreme values
-        attn = tf.clip_by_value(attn, -self.attn_clip, self.attn_clip)
-
-        # Apply mask if provided
-        if mask is not None:
-            big_neg = -1e9
-            attn = tf.where(mask == 0, big_neg, attn)
-
-        # Safe softmax
-        max_score = tf.reduce_max(attn, axis=-1, keepdims=True)
-        exp_scores = tf.exp(attn - max_score)
-        attn = safe_divide(exp_scores, tf.reduce_sum(exp_scores, axis=-1, keepdims=True))
-
-        # Apply dropout
-        attn = self.attn_dropout(attn, training=training)
-
-        return tf.matmul(attn, v)
-
-    def call(
-            self,
-            x: tf.Tensor,
-            mask: Optional[tf.Tensor] = None,
-            layer_idx: int = 0,
-            training: bool = False
-    ) -> tf.Tensor:
-        """Apply differential attention with comprehensive error checking."""
-        if not tf.is_tensor(x):
-            raise TypeError(f"Input must be a tensor, got {type(x)}")
-
-        batch_size = tf.shape(x)[0]
-        seq_len = tf.shape(x)[1]
-
-        # Project and reshape QKV
-        qkv = self.qkv(x)
-        qkv = tf.reshape(
-            qkv,
-            (batch_size, seq_len, 3, self.num_heads, self.head_dim)
-        )
-        qkv = tf.transpose(qkv, (2, 0, 3, 1, 4))
-
-        # Safe unstack
-        try:
-            q1, q2, k1, k2, v = tf.unstack(qkv[:5], axis=0)
-        except tf.errors.InvalidArgumentError as e:
-            raise ValueError(f"Failed to unstack QKV tensor: {e}")
-
-        # Compute differential attention
-        lambda_val = self.get_lambda(layer_idx)
-        attn1 = self._compute_attention(q1, k1, v, mask, training)
-        attn2 = self._compute_attention(q2, k2, v, mask, training)
-
-        # Combine with safe scaling
-        x = attn1 - lambda_val * attn2
-
-        # Reshape and project output
-        x = tf.transpose(x, (0, 2, 1, 3))
-        x = tf.reshape(x, (batch_size, seq_len, -1))
-
-        # Final projection and dropout
-        x = self.proj(x)
-        x = self.dropout(x, training=training)
-
-        return x
+from dl_techniques.layers.stochastic_depth import StochasticDepth
+from dl_techniques.layers.positional_embedding import PositionalEmbedding
+from dl_techniques.layers.differential_attention import DifferentialMultiHeadAttention
 
 # ---------------------------------------------------------------------
 
@@ -367,34 +140,59 @@ class FeedForward(layers.Layer):
             hidden_dim: int,
             dropout: float = 0.0,
             activation: str = "swish",
-            init_scale: float = 2.0
+            init_scale: float = 2.0,
+            **kwargs
     ) -> None:
-        super().__init__()
+        super().__init__(**kwargs)
+        self.dim = dim
+        self.hidden_dim = hidden_dim
+        self.dropout_rate = dropout
+        self.activation = activation
+        self.init_scale = init_scale
+        self.fc1 = None
+        self.fc2 = None
+        self.dropout = None
 
+    def build(self, input_shape):
         self.fc1 = layers.Dense(
-            hidden_dim,
-            activation=activation,
+            self.hidden_dim,
+            activation=self.activation,
             kernel_initializer=initializers.VarianceScaling(
-                scale=init_scale,
+                scale=self.init_scale,
                 mode='fan_out',
                 distribution='truncated_normal'
             )
         )
         self.fc2 = layers.Dense(
-            dim,
+            self.dim,
             kernel_initializer=initializers.VarianceScaling(
-                scale=init_scale,
+                scale=self.init_scale,
                 mode='fan_in',
                 distribution='truncated_normal'
             )
         )
-        self.dropout = layers.Dropout(dropout)
+        self.dropout = layers.Dropout(self.dropout_rate)
+
+        super().build(input_shape)
 
     def call(self, x: tf.Tensor, training: bool = False) -> tf.Tensor:
         x = self.fc1(x)
         x = self.fc2(x)
         x = self.dropout(x, training=training)
         return x
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get layer configuration."""
+        config = super().get_config()
+        config.update({
+            "dim": self.dim,
+            "dim": self.dim,
+            "hidden_dim": self.hidden_dim,
+            "dropout": self.dropout_rate,
+            "activation": self.activation,
+            "init_scale": self.init_scale
+        })
+        return config
 
 # ---------------------------------------------------------------------
 
@@ -413,7 +211,8 @@ class TransformerBlock(layers.Layer):
             mlp_dim: int,
             dropout: float = 0.0,
             attention_dropout: float = 0.0,
-            path_dropout: float = 0.0
+            path_dropout: float = 0.0,
+            **kwargs
     ) -> None:
         """
         Args:
@@ -425,44 +224,40 @@ class TransformerBlock(layers.Layer):
             attention_dropout: Dropout rate for attention matrix
             path_dropout: Stochastic depth rate for residual paths
         """
-        super().__init__()
+        super().__init__(**kwargs)
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.mlp_dim = mlp_dim
+        self.dropout_rate = dropout
+        self.attention_dropout_rate = attention_dropout
+        self.path_dropout_rate = path_dropout
+        self.attn = None
 
+
+    def build(self, input_shape):
         # Main layers
-        self.attn = DifferentialAttention(
-            dim=dim,
-            num_heads=num_heads,
-            head_dim=head_dim,
-            dropout=dropout,
-            attention_dropout=attention_dropout
+        self.attn = DifferentialMultiHeadAttention(
+            dim=self.dim,
+            num_heads=self.num_heads,
+            head_dim=self.head_dim,
+            dropout=self.dropout_rate,
+            attention_dropout=self.attention_dropout_rate
         )
         self.ff = FeedForward(
-            dim=dim,
-            hidden_dim=mlp_dim,
-            dropout=dropout
+            dim=self.dim,
+            hidden_dim=self.mlp_dim,
+            dropout=self.dropout_rate
         )
 
-        # Normalization layers
-        self.norm1 = GlobalResponseNorm(dim)
-        self.norm2 = GlobalResponseNorm(dim)
+        # Normalization layers - using standard LayerNormalization
+        self.norm1 = layers.LayerNormalization(epsilon=1e-6)
+        self.norm2 = layers.LayerNormalization(epsilon=1e-6)
 
         # Stochastic depth for training stability
-        self.path_dropout = path_dropout
+        self.stochastic_depth = StochasticDepth(self.path_dropout_rate) if self.path_dropout_rate > 0 else None
 
-    def stochastic_path(
-            self,
-            x: tf.Tensor,
-            residual: tf.Tensor,
-            training: bool = False
-    ) -> tf.Tensor:
-        """Apply stochastic depth to residual connection."""
-        if training and self.path_dropout > 0:
-            keep_prob = 1.0 - self.path_dropout
-            mask = tf.cast(
-                tf.random.uniform([tf.shape(x)[0], 1, 1]) < keep_prob,
-                x.dtype
-            )
-            return x * mask + residual
-        return x + residual
+        super().build(input_shape)
 
     def call(
             self,
@@ -490,76 +285,36 @@ class TransformerBlock(layers.Layer):
         residual = x
         x = self.norm1(x)
         x = self.attn(x, mask=mask, layer_idx=layer_idx, training=training)
-        x = self.stochastic_path(x, residual, training)
+        if self.stochastic_depth is not None:
+            x = self.stochastic_depth([x, residual], training=training)
+        else:
+            x = x + residual
 
         # Feed-forward with pre-norm
         residual = x
         x = self.norm2(x)
         x = self.ff(x, training=training)
-        x = self.stochastic_path(x, residual, training)
+        if self.stochastic_depth is not None:
+            x = self.stochastic_depth([x, residual], training=training)
+        else:
+            x = x + residual
 
         return x
 
-# ---------------------------------------------------------------------
+    def get_config(self) -> Dict[str, Any]:
+        """Get layer configuration."""
+        config = super().get_config()
+        config.update({
+            "dim": self.dim,
+            "num_heads": self.num_heads,
+            "head_dim": self.head_dim,
+            "mlp_dim": self.mlp_dim,
+            "dropout": self.dropout_rate,
+            "attention_dropout": self.attention_dropout_rate,
+            "path_dropout": self.path_dropout_rate
+        })
+        return config
 
-
-class PositionalEmbedding(layers.Layer):
-    """Learned positional embedding with enhanced stability."""
-
-    def __init__(
-            self,
-            max_seq_len: int,
-            dim: int,
-            dropout: float = 0.0,
-            scale: float = 0.02
-    ) -> None:
-        """
-        Args:
-            max_seq_len: Maximum sequence length
-            dim: Embedding dimension
-            dropout: Dropout rate
-            scale: Initialization scale for embeddings
-        """
-        super().__init__()
-
-        self.max_seq_len = max_seq_len
-        self.dim = dim
-
-        # Initialize embeddings with truncated normal
-        self.pos_embedding = self.add_weight(
-            "pos_embedding",
-            shape=(1, max_seq_len, dim),
-            initializer=initializers.TruncatedNormal(stddev=scale),
-            trainable=True
-        )
-
-        self.dropout = layers.Dropout(dropout)
-
-    def call(
-            self,
-            x: tf.Tensor,
-            training: bool = False
-    ) -> tf.Tensor:
-        """Add positional embeddings to input.
-
-        Args:
-            x: Input tensor [batch_size, seq_len, dim]
-            training: Whether in training mode
-
-        Returns:
-            Tensor with positional information added
-        """
-        seq_len = tf.shape(x)[1]
-        if seq_len > self.max_seq_len:
-            raise ValueError(
-                f"Input sequence length {seq_len} exceeds maximum length {self.max_seq_len}"
-            )
-
-        # Add positions
-        positions = self.pos_embedding[:, :seq_len, :]
-        x = x + positions
-
-        return self.dropout(x, training=training)
 
 # ---------------------------------------------------------------------
 
@@ -579,7 +334,8 @@ class DifferentialTransformer(Model):
             dropout: float = 0.0,
             attention_dropout: float = 0.0,
             path_dropout: float = 0.0,
-            embedding_dropout: float = 0.0
+            embedding_dropout: float = 0.0,
+            **kwargs
     ) -> None:
         """
         Args:
@@ -595,50 +351,24 @@ class DifferentialTransformer(Model):
             path_dropout: Stochastic depth rate
             embedding_dropout: Dropout rate for embeddings
         """
-        super().__init__()
+        super().__init__(**kwargs)
 
         # Validate dimensions
         if dim % num_heads != 0:
             raise ValueError(f"dim {dim} must be divisible by num_heads {num_heads}")
 
-        # Input embedding with proper initialization
-        self.embedding = layers.Dense(
-            dim,
-            kernel_initializer=initializers.TruncatedNormal(stddev=0.02)
-        )
-
-        # Positional embedding
-        self.pos_embedding = PositionalEmbedding(
-            max_seq_len=max_seq_len,
-            dim=dim,
-            dropout=embedding_dropout
-        )
-
-        # Transformer layers with increasing path dropout
-        self.layers = []
-        for i in range(depth):
-            # Increase path dropout linearly with depth
-            layer_path_dropout = path_dropout * float(i) / (depth - 1)
-
-            self.layers.append(
-                TransformerBlock(
-                    dim=dim,
-                    num_heads=num_heads,
-                    head_dim=head_dim,
-                    mlp_dim=mlp_dim,
-                    dropout=dropout,
-                    attention_dropout=attention_dropout,
-                    path_dropout=layer_path_dropout
-                )
-            )
-
-        # Output head
-        self.norm = GlobalResponseNorm(dim)
-        self.fc = layers.Dense(
-            num_classes,
-            kernel_initializer=initializers.TruncatedNormal(stddev=0.02),
-            bias_initializer="zeros"
-        )
+        # Store configuration
+        self.num_classes = num_classes
+        self.dim = dim
+        self.depth = depth
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.mlp_dim = mlp_dim
+        self.max_seq_len = max_seq_len
+        self.dropout_rate = dropout
+        self.attention_dropout_rate = attention_dropout
+        self.path_dropout_rate = path_dropout
+        self.embedding_dropout_rate = embedding_dropout
 
         # Save config for serialization
         self.config = {
@@ -648,8 +378,55 @@ class DifferentialTransformer(Model):
             "num_heads": num_heads,
             "head_dim": head_dim,
             "mlp_dim": mlp_dim,
-            "max_seq_len": max_seq_len
+            "max_seq_len": max_seq_len,
+            "dropout": dropout,
+            "attention_dropout": attention_dropout,
+            "path_dropout": path_dropout,
+            "embedding_dropout": embedding_dropout
         }
+
+    def build(self, input_shape):
+        """Build the model layers based on input shape."""
+        # Input embedding with proper initialization
+        self.embedding = layers.Dense(
+            self.dim,
+            kernel_initializer=initializers.TruncatedNormal(stddev=0.02)
+        )
+
+        # Positional embedding
+        self.pos_embedding = PositionalEmbedding(
+            max_seq_len=self.max_seq_len,
+            dim=self.dim,
+            dropout=self.embedding_dropout_rate
+        )
+
+        # Transformer layers with increasing path dropout
+        self.layers = []
+        for i in range(self.depth):
+            # Increase path dropout linearly with depth
+            layer_path_dropout = self.path_dropout_rate * float(i) / max(1, self.depth - 1)
+
+            self.layers.append(
+                TransformerBlock(
+                    dim=self.dim,
+                    num_heads=self.num_heads,
+                    head_dim=self.head_dim,
+                    mlp_dim=self.mlp_dim,
+                    dropout=self.dropout_rate,
+                    attention_dropout=self.attention_dropout_rate,
+                    path_dropout=layer_path_dropout
+                )
+            )
+
+        # Output head
+        self.norm = layers.LayerNormalization(epsilon=1e-6)
+        self.fc = layers.Dense(
+            self.num_classes,
+            kernel_initializer=initializers.TruncatedNormal(stddev=0.02),
+            bias_initializer="zeros"
+        )
+
+        super().build(input_shape)
 
     def call(
             self,
@@ -672,9 +449,9 @@ class DifferentialTransformer(Model):
             raise TypeError(f"Input must be a tensor, got {type(x)}")
 
         seq_len = tf.shape(x)[1]
-        if seq_len > self.config["max_seq_len"]:
+        if seq_len > self.max_seq_len:
             raise ValueError(
-                f"Input sequence length {seq_len} exceeds maximum length {self.config['max_seq_len']}"
+                f"Input sequence length {seq_len} exceeds maximum length {self.max_seq_len}"
             )
 
         # Add embeddings
@@ -739,6 +516,10 @@ def create_diff_transformer(
     Returns:
         Configured DifferentialTransformer model
     """
+    # Create input to force model building
+    dummy_input = keras.Input(shape=(None, dim))
+
+    # Create model
     model = DifferentialTransformer(
         num_classes=num_classes,
         dim=dim,
@@ -753,6 +534,9 @@ def create_diff_transformer(
         embedding_dropout=embedding_dropout
     )
 
+    # Build model with dummy input
+    _ = model(dummy_input)
+
     # Configure optimizer with weight decay fix
     optimizer = optimizers.AdamW(
         learning_rate=learning_rate,
@@ -765,15 +549,153 @@ def create_diff_transformer(
     # Compile with loss and metrics
     model.compile(
         optimizer=optimizer,
-        loss=losses.SparseCategoricalCrossentropy(
-            from_logits=True,
-            reduction=losses.Reduction.NONE  # For custom loss scaling
-        ),
-        metrics=['accuracy']
+        loss=losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics=['accuracy',
+                 losses.SparseCategoricalCrossentropy(from_logits=True, name='sparse_categorical_crossentropy'),
+                 'top_k_categorical_accuracy']
     )
 
     return model
 
 # ---------------------------------------------------------------------
 
+def test_differential_transformer():
+    """Test function for DifferentialTransformer model.
 
+    This function creates a small test model and checks if it runs without errors.
+    """
+    batch_size = 2
+    seq_len = 16
+    feature_dim = 32
+
+    # Create test inputs
+    x = tf.random.normal((batch_size, seq_len, feature_dim))
+
+    # Create small test model
+    model = create_diff_transformer(
+        num_classes=10,
+        dim=32,
+        depth=2,
+        num_heads=4,
+        head_dim=8,
+        mlp_dim=64,
+        max_seq_len=32
+    )
+
+    # Run forward pass
+    outputs = model(x, training=True)
+
+    # Check output shape
+    expected_shape = (batch_size, 10)
+    assert outputs.shape == expected_shape, f"Expected shape {expected_shape}, got {outputs.shape}"
+
+    print("DifferentialTransformer test passed!")
+    return model
+
+# ---------------------------------------------------------------------
+
+def create_diff_transformer_for_vision(
+        input_shape=(32, 32, 3),
+        patch_size=4,
+        num_classes=1000,
+        dim=768,
+        depth=12,
+        num_heads=12,
+        head_dim=64,
+        mlp_dim=3072,
+        dropout=0.1,
+        attention_dropout=0.1,
+        path_dropout=0.1,
+        embedding_dropout=0.1,
+):
+    """
+    Create a Vision Transformer using the Differential Transformer architecture.
+
+    Args:
+        input_shape: Input image shape (height, width, channels)
+        patch_size: Size of image patches
+        num_classes: Number of classification classes
+        dim: Embedding dimension
+        depth: Number of transformer layers
+        num_heads: Number of attention heads
+        head_dim: Dimension of each attention head
+        mlp_dim: Hidden dimension of feed-forward network
+        dropout: Dropout rate
+        attention_dropout: Attention-specific dropout rate
+        path_dropout: Stochastic depth rate
+        embedding_dropout: Embedding dropout rate
+
+    Returns:
+        A Keras Model for image classification
+    """
+    # Calculate number of patches
+    h, w, c = input_shape
+    num_patches = (h // patch_size) * (w // patch_size)
+
+    # Create data augmentation layers
+    data_augmentation = keras.Sequential([
+        layers.Normalization(),
+        layers.RandomFlip("horizontal"),
+        layers.RandomRotation(factor=0.02),
+        layers.RandomZoom(height_factor=0.2, width_factor=0.2),
+    ], name="data_augmentation")
+
+    # Create the model inputs
+    inputs = layers.Input(shape=input_shape)
+
+    # Augment data
+    x = data_augmentation(inputs)
+
+    # Create patches
+    patches = keras.ops.image.extract_patches(x, size=patch_size)
+    patches = keras.ops.reshape(
+        patches,
+        (-1, num_patches, patch_size * patch_size * c)
+    )
+
+    # Patch embedding
+    x = layers.Dense(dim)(patches)
+
+    # Add positional embeddings
+    positions = layers.Embedding(
+        input_dim=num_patches,
+        output_dim=dim
+    )(keras.ops.arange(start=0, stop=num_patches, step=1))
+    positions = keras.ops.expand_dims(positions, axis=0)
+    x = x + positions
+    x = layers.Dropout(embedding_dropout)(x)
+
+    # Create transformer blocks
+    for i in range(depth):
+        # Calculate path dropout rate based on depth
+        layer_path_dropout = path_dropout * float(i) / max(1, depth - 1)
+
+        # Create transformer block
+        x = TransformerBlock(
+            dim=dim,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            mlp_dim=mlp_dim,
+            dropout=dropout,
+            attention_dropout=attention_dropout,
+            path_dropout=layer_path_dropout
+        )(x, layer_idx=i)
+
+    # Create output head
+    x = layers.LayerNormalization(epsilon=1e-6)(x)
+    x = layers.GlobalAveragePooling1D()(x)
+    x = layers.Dropout(0.5)(x)
+
+    # MLP head
+    x = layers.Dense(mlp_dim // 2, activation=keras.activations.gelu)(x)
+    x = layers.Dropout(0.5)(x)
+    x = layers.Dense(mlp_dim // 4, activation=keras.activations.gelu)(x)
+    x = layers.Dropout(0.5)(x)
+    outputs = layers.Dense(num_classes)(x)
+
+    # Create the model
+    model = keras.Model(inputs=inputs, outputs=outputs)
+
+    return model
+
+# ---------------------------------------------------------------------
