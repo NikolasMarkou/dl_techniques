@@ -49,12 +49,12 @@ class GlobalResponseNormalization(keras.layers.Layer):
         """Initialize the GRN layer with specified parameters."""
         super().__init__(dtype=dtype, name=name, **kwargs)
 
-        # Validate epsilon
+        # Validate eps
         if eps <= 0:
-            raise ValueError(f"epsilon must be positive, got {eps}")
+            raise ValueError(f"eps must be positive, got {eps}")
 
         # Store configuration
-        self.epsilon = eps
+        self.eps = eps
         self.gamma_initializer = keras.initializers.get(gamma_initializer)
         self.beta_initializer = keras.initializers.get(beta_initializer)
 
@@ -145,11 +145,11 @@ class GlobalResponseNormalization(keras.layers.Layer):
 
         # Step 2: Compute L2 norm across spatial dimensions (axis=1)
         norm_squared = keras.ops.sum(keras.ops.square(reshaped), axis=1, keepdims=True)
-        norm = keras.ops.sqrt(norm_squared + self.epsilon)  # Add epsilon for numerical stability
+        norm = keras.ops.sqrt(norm_squared + self.eps)  # Add epsilon for numerical stability
 
         # Step 3: Normalize by mean norm across channels
         mean_norm = keras.ops.mean(norm, axis=-1, keepdims=True)
-        norm_channels = norm / (mean_norm + self.epsilon)  # Add epsilon for numerical stability
+        norm_channels = norm / (mean_norm + self.eps)  # Add epsilon for numerical stability
 
         # Step 4: Reshape norm back to (batch, 1, 1, channels) for broadcasting
         norm_spatial = self._reshape_to_spatial(norm_channels)
@@ -175,7 +175,7 @@ class GlobalResponseNormalization(keras.layers.Layer):
         """
         config = super().get_config()
         config.update({
-            "epsilon": float(self.epsilon),
+            "eps": float(self.eps),
             "gamma_initializer": keras.initializers.serialize(self.gamma_initializer),
             "beta_initializer": keras.initializers.serialize(self.beta_initializer)
         })
@@ -202,6 +202,6 @@ class GlobalResponseNormalization(keras.layers.Layer):
 
         # Handle backward compatibility with old config key "eps"
         if "eps" in config:
-            config["epsilon"] = config.pop("eps")
+            config["eps"] = config.pop("eps")
 
         return cls(**config)
