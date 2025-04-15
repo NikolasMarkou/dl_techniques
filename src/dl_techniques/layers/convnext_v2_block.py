@@ -1,88 +1,82 @@
 """
-ConvNext Block Implementation
-===========================
+ConvNextV2 Block Implementation
+===============================
 
-A modern implementation of the ConvNext block architecture as described in:
-"A ConvNet for the 2020s" (Liu et al., 2022)
-https://arxiv.org/abs/2201.03545
+A modern implementation of the ConvNextV2 block architecture as described in:
+"ConvNeXt V2: Co-designing and Scaling ConvNets with Masked Autoencoders" (Woo et al., 2023)
+https://arxiv.org/abs/2301.00808
 
 Key Features:
 ------------
-- Depthwise convolution with large kernels
-- Inverted bottleneck design
-- Proper normalization strategy (LayerNorm)
-- GELU activation by default
-- Configurable dropout (both standard and spatial)
-- Optional learnable scaling (gamma)
-- Support for various kernel regularization strategies
+- Depthwise convolution with large kernels (7x7)
+- Proper layer normalization
+- Inverted bottleneck design (expand-reduce pattern)
+- GELU activation function
+- Global Response Normalization (GRN) for enhanced feature competition
+- Flexible dropout options (standard and spatial)
+- Residual connections throughout
+- Customizable regularization strategy
 
 Architecture:
 ------------
-The ConvNext block consists of:
+The ConvNextV2 block consists of:
 1. Depthwise Conv (7x7) for local feature extraction
 2. LayerNorm for feature normalization
-3. Two-layer MLP for feature transformation:
-   - Expansion layer (pointwise conv, 4x channels)
-   - GELU activation
-   - Optional dropout
-   - Reduction layer (pointwise conv, back to input channels)
-4. Optional learnable scaling
+3. Pointwise Conv (1x1) for channel expansion (4x)
+4. GELU activation function
+5. Global Response Normalization (GRN) - key innovation in V2
+6. Optional dropout for regularization
+7. Pointwise Conv (1x1) for channel reduction
 
 The computation flow is:
-input -> depthwise_conv -> layer_norm ->
-        pointwise_conv1 -> activation -> dropout ->
-        pointwise_conv2 -> gamma_scale -> output
+input → depthwise_conv → layernorm → pointwise_conv1 → activation →
+        GRN → dropout → pointwise_conv2 → (+ input) → output
 
-Configuration:
--------------
-Supports extensive customization through ConvNextConfig:
-- Kernel sizes and filter counts
-- Stride configuration
-- Activation functions
-- Regularization strategies
-- Bias terms
+Improvements over ConvNextV1:
+----------------------------
+- Global Response Normalization (GRN) enhances inter-channel feature competition
+- Improved normalization strategy
+- Enhanced feature representation capacity
+- Better generalization to downstream tasks
 
-Features two types of dropout:
-- Standard dropout for feature regularization
-- Spatial dropout for structured regularization
-
-Supports different multiplier types:
-- Global: Single scaling factor
-- Channel-wise: Per-channel scaling
+Primary difference from V1 is the GRN layer, which:
+1. Computes L2 norm across spatial dimensions
+2. Normalizes by mean of L2 norm
+3. Applies learnable scaling (gamma) and bias (beta)
+4. Includes residual connection
 
 Usage Examples:
 -------------
 ```python
 # Basic configuration
-config = ConvNextConfig(
+config = ConvNextV2Config(
     kernel_size=7,
     filters=64,
     activation="gelu"
 )
-block = ConvNextBlock(config)
+block = ConvNextV2Block(config)
 
 # Advanced configuration with regularization
-config = ConvNextConfig(
+config = ConvNextV2Config(
     kernel_size=7,
     filters=128,
     kernel_regularizer=keras.regularizers.L2(0.01)
 )
-block = ConvNextBlock(
+block = ConvNextV2Block(
     conv_config=config,
     dropout_rate=0.1,
-    spatial_dropout_rate=0.1,
-    kernel_regularization="orthogonal"
+    spatial_dropout_rate=0.05
 )
 ```
 
 Notes:
 -----
-- The block implements proper normalization ordering
+- Follows proper normalization ordering (Linear/Conv → Norm → Activation)
 - Uses truncated normal initialization (μ=0, σ=0.02)
-- Supports serialization and deserialization
-- Implements ResNet-style skip connections
+- Implements full serialization support
 - Compatible with TF/Keras model saving
 """
+
 import copy
 import keras
 import tensorflow as tf
@@ -101,12 +95,13 @@ from dl_techniques.regularizers.soft_orthogonal import (
 from dl_techniques.constraints.value_range_constraint import (
     ValueRangeConstraint
 )
+from dl_techniques.layers.global_response_norm import GlobalResponseNormalization
 
 
 # ---------------------------------------------------------------------
 
 @dataclass
-class ConvNextConfig:
+class ConvNextV2Config:
     """Configuration for ConvNext block parameters.
 
     Args:
@@ -143,7 +138,7 @@ class ConvNextBlock(keras.layers.Layer):
 
     def __init__(
             self,
-            conv_config: ConvNextConfig,
+            conv_config: ConvNextV2Config,
             dropout_rate: Optional[float] = 0.0,
             spatial_dropout_rate: Optional[float] = 0.0,
             use_gamma: bool = True,
@@ -168,6 +163,7 @@ class ConvNextBlock(keras.layers.Layer):
         self.dropout = None
         self.spatial_dropout = None
         self.gamma= None
+        self.grn = None
 
     def build(self, input_shape) -> None:
         """Initialize all layers with proper configuration."""
@@ -242,6 +238,10 @@ class ConvNextBlock(keras.layers.Layer):
         else:
             self.gamma = keras.layers.Lambda(lambda x: x)
 
+        # Global Response Normalization (GRN) - key feature of ConvNeXt V2
+        self.grn = GlobalResponseNormalization(eps=1e-6)
+
+
     def call(
             self,
             inputs: tf.Tensor,
@@ -265,6 +265,9 @@ class ConvNextBlock(keras.layers.Layer):
         # First pointwise convolution
         x = self.conv_2(x, training=training)
         x = self.activation(x, training=training)
+
+        # Global Response Normalization - key ConvNeXt V2 feature
+        x = self.grn(x, training=training)
 
         # Apply dropouts if specified
         x = self.dropout(x, training=training)
@@ -306,7 +309,7 @@ class ConvNextBlock(keras.layers.Layer):
         conv_config_dict = config_copy.pop("conv_config", {})
 
         # Recreate the ConvNextConfig object
-        conv_config = ConvNextConfig(**conv_config_dict)
+        conv_config = ConvNextV2Config(**conv_config_dict)
 
         # Create the ConvNextBlock with the recreated ConvNextConfig
         return cls(conv_config=conv_config, **config_copy)
