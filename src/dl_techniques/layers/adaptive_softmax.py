@@ -108,114 +108,39 @@ Usage Guidelines:
    - Monitor entropy values for tuning
    - Consider batch statistics for threshold selection
 
-Performance Considerations:
-------------------------
-1. Computational Cost:
-   - Two softmax operations vs one in standard version
-   - Additional entropy computation
-   - Polynomial evaluation for temperature
-   - Overall minimal overhead compared to attention computation
-
-2. Memory Usage:
-   - Additional temporary tensors for entropy and temperature
-   - No persistent memory overhead
-   - Batch-friendly implementation
-   - Efficient use of broadcasting
-
-3. Numerical Precision:
-   - Uses float32 precision
-   - Epsilon padding for stability
-   - Bounded temperature ranges
-   - Safe polynomial evaluation
-
-4. Optimization Opportunities:
-   - Batch-wise temperature computation
-   - Cached polynomial coefficients
-   - Fused operations where possible
-   - Early exit for low-entropy cases
-
-Extension Points:
----------------
-1. Alternative Temperature Functions:
-   - Could replace polynomial fit with neural network
-   - Experiment with different entropy mappings
-   - Add input-dependent adaptation
-   - Consider learnable coefficients
-
-2. Additional Metrics:
-   - Monitor dispersion statistics
-   - Track adaptation frequency
-   - Measure sharpness metrics
-   - Profile temperature distribution
-
-3. Advanced Features:
-   - Multi-head specific temperatures
-   - Layer-wise adaptation strategies
-   - Input modality specific tuning
-   - Gradient-based temperature optimization
-
-4. Integration Options:
-   - Custom training loops
-   - Distributed training support
-   - Mixed precision compatibility
-   - Framework-specific optimizations
-
-Error Handling:
--------------
-1. Input Validation:
-   - Positive temperature range checks
-   - Valid threshold values
-   - Proper tensor shapes
-   - Dtype compatibility
-
-2. Runtime Checks:
-   - Numerical stability monitoring
-   - NaN detection
-   - Probability sum verification
-   - Temperature bounds enforcement
-
-3. Error Recovery:
-   - Fallback to standard softmax
-   - Warning generation
-   - Logging support
-   - Graceful degradation
-
-4. Debug Support:
-   - Entropy monitoring
-   - Temperature tracking
-   - Distribution statistics
-   - Performance profiling
-
 References:
 ----------
 1. Original Paper: "Softmax is not enough (for sharp out-of-distribution)"
-2. Implementation inspired by JAX/Flax design patterns
-3. TensorFlow best practices and conventions
-4. Numerical computing stability guidelines
-
-Note on Customization:
---------------------
-The implementation can be customized for specific use cases by:
-1. Modifying the polynomial coefficients
-2. Adjusting the temperature range
-3. Changing the entropy threshold
-4. Adding custom monitoring
-5. Implementing alternative temperature functions
-6. Integrating with different attention mechanisms
-7. Adding task-specific adaptations
-8. Optimizing for particular hardware
 """
 
 import keras
 import tensorflow as tf
-from keras import Layer
-from typing import Optional, Union, Tuple
+from typing import Optional, Union, Tuple, Dict, Any
 
-class AdaptiveTemperatureSoftmax(Layer):
+@keras.utils.register_keras_serializable()
+class AdaptiveTemperatureSoftmax(keras.layers.Layer):
     """Adaptive Temperature Softmax layer.
 
-    Dynamically adjusts temperature based on entropy to maintain
-    sharpness with increasing input size.
+    This layer provides an enhanced version of the softmax function that dynamically
+    adjusts its temperature parameter based on the entropy of the input distribution.
+    The goal is to maintain sharpness in the output probabilities even as the input
+    size grows, addressing a fundamental limitation of standard softmax.
+
+    Args:
+        min_temp: float
+            Minimum temperature value (default: 0.1)
+        max_temp: float
+            Maximum temperature value (default: 1.0)
+        entropy_threshold: float
+            Entropy threshold for applying adaptation (default: 0.5)
+        polynomial_coeffs: Optional[list]
+            Coefficients for the polynomial temperature function
+        **kwargs:
+            Additional layer arguments
+
+    Raises:
+        ValueError: If temperature values are invalid or min_temp > max_temp
+
     """
 
     def __init__(
@@ -223,8 +148,10 @@ class AdaptiveTemperatureSoftmax(Layer):
         min_temp: float = 0.1,
         max_temp: float = 1.0,
         entropy_threshold: float = 0.5,
+        eps: float = keras.backend.epsilon(),
+        polynomial_coeffs: Optional[list] = None,
         **kwargs
-    ) -> None:
+    ):
         super().__init__(**kwargs)
 
         if min_temp <= 0 or max_temp <= 0:
@@ -234,48 +161,68 @@ class AdaptiveTemperatureSoftmax(Layer):
 
         self.min_temp = min_temp
         self.max_temp = max_temp
-        self.entropy_threshold = entropy_threshold
+        self.entropy_threshold = tf.constant(entropy_threshold)
+        self.eps = eps
+        # Default polynomial coefficients for temperature adaptation
+        self.polynomial_coeffs = polynomial_coeffs or [-1.791, 4.917, -2.3, 0.481, -0.037]
 
-        # Polynomial coefficients in the order for tf.polyval:
-        # c_0 + c_1*x + c_2*x^2 + ...
-        # Adjust as needed to reflect the correct polynomial shape
-        self.poly_coeffs = tf.constant(
-            [-1.791, 4.917, -2.3, 0.481, -0.037], dtype=tf.float32
-        )
+    def build(self, input_shape: tf.TensorShape) -> None:
+        """Build the layer based on input shape.
+
+        Args:
+            input_shape: TensorShape
+                Shape of the input tensor
+        """
+
+        super().build(input_shape)
 
     def compute_entropy(self, probs: tf.Tensor) -> tf.Tensor:
         """Compute Shannon entropy across the last dimension of probs.
            Returns shape = probs.shape[:-1] (with keepdims=True)."""
-        eps = keras.backend.epsilon()
         entropy = -tf.reduce_sum(
-            probs * tf.math.log(probs + eps), axis=-1, keepdims=True
+            probs * tf.math.log(probs + self.eps), axis=-1, keepdims=True
         )
         return entropy
 
     def compute_temperature(self, entropy: tf.Tensor) -> tf.Tensor:
-        """Compute adaptive temperature using polynomial fit,
-           then clamp to [min_temp, max_temp]."""
-        # 1. Identify if adaptation is needed
-        should_adapt = tf.cast(entropy > self.entropy_threshold, tf.float32)
+        """Compute adaptive temperature using polynomial fit.
+
+        Args:
+            entropy: tf.Tensor
+                Entropy values
+
+        Returns:
+            tf.Tensor: Temperature values clamped to [min_temp, max_temp]
+        """
+        # 1. Identify if adaptation is needed based on threshold
+        should_adapt = tf.cast(entropy > self.entropy_threshold, entropy.dtype)
 
         # 2. Compute raw polynomial value
-        raw_temp = tf.polyval(self.poly_coeffs, entropy)
+        raw_temp = tf.math.polyval(coeffs=self.polynomial_coeffs, x=entropy)
 
-        # 3. Clamp polynomial to [0, 1] (assuming that’s your chosen domain)
+        # 3. Clamp polynomial to [0, 1]
         raw_temp = tf.clip_by_value(raw_temp, 0.0, 1.0)
 
         # 4. Scale up to [min_temp, max_temp]
         scaled_temp = self.min_temp + (self.max_temp - self.min_temp) * raw_temp
 
-        # 5. If we don’t adapt, use T=1.0 (standard softmax); else use scaled_temp
-        #    (or invert logic if your approach wants T < 1.0 for large entropies).
-        temperature = tf.where(should_adapt > 0, scaled_temp, 1.0)
+        # 5. Apply adaptation conditionally:
+        # - If entropy > threshold: use scaled temperature
+        # - Otherwise: use standard softmax (T=1.0)
+        temperature = tf.where(should_adapt > 0, scaled_temp, tf.ones_like(scaled_temp))
 
         return temperature
 
     def call(self, logits: tf.Tensor) -> tf.Tensor:
         """Apply adaptive temperature softmax to input logits.
-           Expects logits.shape = (..., num_classes)."""
+
+        Args:
+            logits: tf.Tensor
+                Input logits with shape = (..., num_classes)
+
+        Returns:
+            tf.Tensor: Output probabilities with same shape as input
+        """
         # 1. Initial probability distribution
         probs = tf.nn.softmax(logits, axis=-1)
 
@@ -285,10 +232,42 @@ class AdaptiveTemperatureSoftmax(Layer):
         # 3. Compute temperature
         temperature = self.compute_temperature(entropy)
 
-        # 4. Scale logits: need the same shape so broadcast along last dim
-        inv_temp = 1.0 / (temperature + 1e-7)  # safe to avoid div-by-zero
+        # 4. Scale logits with inverse temperature
+        # Add small epsilon to avoid division by zero
+        inv_temp = tf.math.reciprocal_no_nan(temperature)
         scaled_logits = logits * inv_temp
 
         # 5. Final probabilities
         return tf.nn.softmax(scaled_logits, axis=-1)
+
+    def compute_output_shape(self, input_shape: tf.TensorShape) -> tf.TensorShape:
+        """Compute the output shape of the layer.
+
+        Args:
+            input_shape: tf.TensorShape
+                Shape of the input tensor
+
+        Returns:
+            tf.TensorShape: Shape of the output tensor (same as input)
+        """
+        return input_shape
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get the layer configuration.
+
+        Returns:
+            Dict[str, Any]: Layer configuration dictionary
+        """
+        config = super().get_config()
+        config.update({
+            'min_temp': self.min_temp,
+            'max_temp': self.max_temp,
+            'entropy_threshold': self.entropy_threshold,
+            'polynomial_coeffs': self.polynomial_coeffs,
+            'eps': self.eps
+        })
+        return config
+
+
+
 
