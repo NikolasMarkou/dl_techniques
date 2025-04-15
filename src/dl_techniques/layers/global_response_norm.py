@@ -11,30 +11,30 @@ Initializer = Union[str, keras.initializers.Initializer]
 
 # ---------------------------------------------------------------------
 
-
 @keras.utils.register_keras_serializable()
 class GlobalResponseNormalization(keras.layers.Layer):
     """
-    Optimized Global Response Normalization (GRN) layer.
+    Global Response Normalization (GRN) layer using standard Keras operations.
 
-    This layer implements an optimized version of GRN with improved numerical stability,
-    memory efficiency, and XLA optimization. It normalizes features across spatial
-    dimensions and applies learnable scale and bias.
+    This layer implements the GRN operation from the ConvNeXt V2 paper, which enhances
+    inter-channel feature competition. It normalizes features across spatial dimensions
+    and applies learnable scale and bias parameters.
 
-    Attributes:
-        eps: Small constant for numerical stability
-        gamma: Learnable scale parameter
-        beta: Learnable bias parameter
-        _channels: Number of input channels (set during build)
-        _eps_tensor: Cached epsilon tensor for improved performance
-        _input_spec: Input shape specification for validation
+    The operation flow is:
+    1. Compute L2 norm across spatial dimensions for each channel
+    2. Normalize by the mean of the L2 norm across channels
+    3. Apply learnable scaling (gamma) and bias (beta)
+    4. Add the result to the input (residual connection)
 
     Args:
-        eps: Float value for numerical stability (default: 1e-6)
+        eps: Small constant for numerical stability (default: 1e-6)
         gamma_initializer: Initializer for gamma weights (default: 'ones')
         beta_initializer: Initializer for beta weights (default: 'zeros')
         dtype: Data type for layer computations
-        name: Optional name for the layer
+        name: Name for the layer
+
+    References:
+        - ConvNeXt V2 paper: https://arxiv.org/abs/2301.00808
     """
 
     def __init__(
@@ -49,49 +49,56 @@ class GlobalResponseNormalization(keras.layers.Layer):
         """Initialize the GRN layer with specified parameters."""
         super().__init__(dtype=dtype, name=name, **kwargs)
 
+        # Validate epsilon
         if eps <= 0:
-            raise ValueError(f"eps must be positive, got {eps}")
+            raise ValueError(f"epsilon must be positive, got {eps}")
 
-        self.eps = eps
+        # Store configuration
+        self.epsilon = eps
         self.gamma_initializer = keras.initializers.get(gamma_initializer)
         self.beta_initializer = keras.initializers.get(beta_initializer)
 
-        # Initialize instance variables
-        self.gamma: Optional[tf.Variable] = None
-        self.beta: Optional[tf.Variable] = None
-        self._channels: Optional[int] = None
-        self._eps_tensor: Optional[tf.Tensor] = None
-        self._input_spec: Optional[keras.layers.InputSpec] = None
+        # Initialize instance variables (will be set in build)
+        self.gamma = None
+        self.beta = None
+        self._channels = None
+        self._reshape_to_pixels = None
+        self._reshape_to_spatial = None
 
     def build(self, input_shape: Shape) -> None:
         """
-        Build the layer by creating weights and validating input shape.
+        Build the layer by creating weights and layers.
 
         Args:
             input_shape: Tuple of integers defining the input shape
 
         Raises:
-            ValueError: If input shape is invalid or channel dimension is undefined
             TypeError: If input_shape is not a tuple or list
+            ValueError: If input shape is invalid
         """
         if self.built:
             return
 
+        # Input validation
         if not isinstance(input_shape, (tuple, list)):
             raise TypeError(f"Expected tuple or list, got {type(input_shape)}")
 
         if len(input_shape) != 4:
             raise ValueError(f"Input shape must be 4D (batch, height, width, channels), "
-                           f"got {len(input_shape)}D")
+                             f"got {len(input_shape)}D")
 
+        # Get number of channels
         channels = input_shape[-1]
         if channels is None:
             raise ValueError("Channel dimension must be defined")
 
         self._channels = channels
-        self._eps_tensor = tf.constant(self.eps, dtype=self.dtype)
 
-        # Create weights with proper shape and initialization
+        # Create reshape layers (reused across calls for efficiency)
+        self._reshape_to_pixels = keras.layers.Reshape((-1, channels))
+        self._reshape_to_spatial = keras.layers.Reshape((1, 1, channels))
+
+        # Create trainable parameters
         self.gamma = self.add_weight(
             name="gamma",
             shape=(1, 1, 1, channels),
@@ -108,84 +115,55 @@ class GlobalResponseNormalization(keras.layers.Layer):
             dtype=self.dtype
         )
 
-        # Set input spec for shape validation
-        self._input_spec = keras.layers.InputSpec(
+        # Set input spec for automatic shape validation
+        self.input_spec = keras.layers.InputSpec(
             ndim=4, axes={-1: channels}
         )
 
         self.built = True
 
-    @tf.function
     def call(
             self,
             inputs: tf.Tensor,
-            training: Optional[bool] = None,
-            **kwargs: Any
+            training: Optional[bool] = None
     ) -> tf.Tensor:
         """
         Apply global response normalization to the input tensor.
 
-        This implementation uses XLA-optimized operations and proper numerical
-        stability techniques. It includes memory optimizations and improved error checking.
-
         Args:
             inputs: Input tensor of shape (batch_size, height, width, channels)
-            training: Whether the layer is in training mode (unused)
-            **kwargs: Additional arguments (unused)
+            training: Whether in training mode (unused, included for API compatibility)
 
         Returns:
-            tf.Tensor: Normalized tensor of the same shape as input
-
-        Raises:
-            ValueError: If layer has not been built
-            tf.errors.InvalidArgumentError: If input rank is not 4
+            Normalized tensor of the same shape as input
         """
-        if not self.built:
-            raise ValueError("Layer has not been built. Call 'build()' first.")
+        # Cast inputs to layer dtype for consistency
+        inputs = keras.ops.cast(inputs, self.dtype)
 
-        tf.debugging.assert_rank(inputs, 4, "Input tensor must be 4-dimensional")
+        # Step 1: Reshape to (batch_size, pixels, channels) for efficient norm calculation
+        reshaped = self._reshape_to_pixels(inputs)
 
-        # Ensure input dtype matches layer dtype and has correct shape
-        inputs = tf.cast(inputs, self.dtype)
-        tf.debugging.assert_shapes([
-            (inputs, ('N', 'H', 'W', self._channels))
-        ])
+        # Step 2: Compute L2 norm across spatial dimensions (axis=1)
+        norm_squared = keras.ops.sum(keras.ops.square(reshaped), axis=1, keepdims=True)
+        norm = keras.ops.sqrt(norm_squared + self.epsilon)  # Add epsilon for numerical stability
 
-        # Pre-compute shapes for efficiency
-        shape = tf.shape(inputs)
-        batch_size, height, width = shape[0], shape[1], shape[2]
+        # Step 3: Normalize by mean norm across channels
+        mean_norm = keras.ops.mean(norm, axis=-1, keepdims=True)
+        norm_channels = norm / (mean_norm + self.epsilon)  # Add epsilon for numerical stability
 
-        with tf.control_dependencies([inputs]):
-            # Compute L2 norm efficiently using fused operation
-            # Reshape to combine spatial dimensions for faster computation
-            reshaped_input = tf.reshape(inputs, [batch_size, -1, self._channels])
-            norm_squared = tf.reduce_sum(tf.square(reshaped_input), axis=1, keepdims=True)
-            norm = tf.sqrt(norm_squared + self._eps_tensor)
+        # Step 4: Reshape norm back to (batch, 1, 1, channels) for broadcasting
+        norm_spatial = self._reshape_to_spatial(norm_channels)
 
-            # Normalize by mean norm (with numerical stability)
-            mean_norm = tf.reduce_mean(norm, axis=-1, keepdims=True)
-            norm_channels = norm / (mean_norm + self._eps_tensor)
+        # Step 5: Apply scale and bias with residual connection
+        # Original formula: output = x + gamma * (x * normalized) + beta
+        scaled = inputs * norm_spatial * self.gamma
+        biased = scaled + self.beta
+        output = inputs + biased
 
-            # Reshape norm back to original spatial dimensions
-            norm_channels = tf.reshape(norm_channels, [batch_size, 1, 1, self._channels])
-
-            # Apply scale and bias with residual connection using fused operations
-            scaled = tf.raw_ops.Mul(x=inputs * norm_channels, y=self.gamma)
-            biased = tf.raw_ops.AddV2(x=scaled, y=self.beta)
-            output = tf.raw_ops.AddV2(x=inputs, y=biased)
-
-            return output
+        return output
 
     def compute_output_shape(self, input_shape: Shape) -> Shape:
-        """
-        Compute the output shape of the layer.
-
-        Args:
-            input_shape: Tuple of integers or None defining the input shape
-
-        Returns:
-            Tuple defining the output shape
-        """
+        """Return output shape (same as input shape)."""
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
@@ -197,7 +175,7 @@ class GlobalResponseNormalization(keras.layers.Layer):
         """
         config = super().get_config()
         config.update({
-            "eps": float(self.eps),
+            "epsilon": float(self.epsilon),
             "gamma_initializer": keras.initializers.serialize(self.gamma_initializer),
             "beta_initializer": keras.initializers.serialize(self.beta_initializer)
         })
@@ -215,10 +193,15 @@ class GlobalResponseNormalization(keras.layers.Layer):
             A new instance of the layer
         """
         config = config.copy()  # Prevent modifications to original config
-        config["gamma_initializer"] = keras.initializers.deserialize(
-            config["gamma_initializer"])
-        config["beta_initializer"] = keras.initializers.deserialize(
-            config["beta_initializer"])
-        return cls(**config)
 
-# ---------------------------------------------------------------------
+        # Deserialize initializers
+        config["gamma_initializer"] = keras.initializers.deserialize(
+            config.pop("gamma_initializer"))
+        config["beta_initializer"] = keras.initializers.deserialize(
+            config.pop("beta_initializer"))
+
+        # Handle backward compatibility with old config key "eps"
+        if "eps" in config:
+            config["epsilon"] = config.pop("eps")
+
+        return cls(**config)

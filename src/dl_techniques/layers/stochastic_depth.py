@@ -1,6 +1,6 @@
-from typing import Optional, Dict, Any, Union
-import tensorflow as tf
 import keras
+import tensorflow as tf
+from typing import Optional, Dict, Any, Union
 
 # ---------------------------------------------------------------------
 
@@ -20,15 +20,6 @@ class StochasticDepth(keras.layers.Layer):
 
     Raises:
         ValueError: If drop_path_rate is not in the interval [0, 1).
-
-    Example:
-        >>> import tensorflow as tf
-        >>> import keras
-        >>> layer = StochasticDepth(drop_path_rate=0.2)
-        >>> inputs = tf.random.normal((4, 32, 32, 64))
-        >>> outputs = layer(inputs, training=True)
-        >>> outputs.shape
-        TensorShape([4, 32, 32, 64])
 
     References:
         - Deep Networks with Stochastic Depth (https://arxiv.org/abs/1603.09382)
@@ -132,4 +123,3 @@ class StochasticDepth(keras.layers.Layer):
         return {**base_config, **config}
 
 # ---------------------------------------------------------------------
-

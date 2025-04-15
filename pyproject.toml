@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dl_techniques"
+version = "0.1.0"
+description = "A versatile library of advanced deep learning techniques for Keras/TensorFlow."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name="Nikolas Markou", email="nikolasmarkou@gmail.com" }
+]
+requires-python = ">=3.11"
+
+# These are your core runtime dependencies:
+dependencies = [
+    "tensorflow==2.18.0",
+    "keras>=3.8.0,<4.0",
+    "numpy>=1.22,<3.0",
+    "matplotlib>=3.10,<4.0",
+    "seaborn>=0.13.2,<1.0",
+    "scipy>=1.15.1,<2.0",
+    "scikit-learn>=1.6.1,<2.0",
+    "pandas>=2.2.3,<3.0",
+    "tqdm"
+]
+
+# Trove classifiers (optional but recommended)
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent"
+]
+
+# Optional groups of extra dependencies for dev/test/docs
+[project.optional-dependencies]
+dev = [
+    "twine",
+    "build",
+    "pytest",
+    "pytest-cov",
+    "pylint",
+    "pre-commit"
+]
+
+[tool.setuptools]
+# Tells setuptools the source code is in src/
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+# Actually find packages in these directories
+where = ["src"]
+
+[tool.pytest]
+pythonpath = [
+    "src"
+]
+testpaths = [
+    "tests"
+]
+
+[tool.pylint.main]
+recursive = true
+ignore = "CVS"
