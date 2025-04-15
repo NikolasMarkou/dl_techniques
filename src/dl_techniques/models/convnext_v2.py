@@ -241,7 +241,6 @@ def ConvNextV2BlockFunc(
         # Apply ConvNextV2Block
         x = ConvNextV2Block(
             conv_config=block_config,
-            dropout_rate=0.0,  # We handle dropout with StochasticDepth
             name=name
         )(inputs)
 
@@ -705,3 +704,5 @@ def decode_predictions(preds, top=5):
         One list of tuples per sample in batch input.
     """
     return imagenet_utils.decode_predictions(preds, top=top)
+
+# ---------------------------------------------------------------------

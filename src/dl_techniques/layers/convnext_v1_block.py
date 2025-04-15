@@ -106,7 +106,7 @@ from dl_techniques.constraints.value_range_constraint import (
 # ---------------------------------------------------------------------
 
 @dataclass
-class ConvNextConfig:
+class ConvNextV1Config:
     """Configuration for ConvNext block parameters.
 
     Args:
@@ -129,7 +129,7 @@ class ConvNextConfig:
 
 
 @keras.utils.register_keras_serializable()
-class ConvNextBlock(keras.layers.Layer):
+class ConvNextV1Block(keras.layers.Layer):
     """Implementation of ConvNext block with modern best practices.
 
     Args:
@@ -143,7 +143,7 @@ class ConvNextBlock(keras.layers.Layer):
 
     def __init__(
             self,
-            conv_config: ConvNextConfig,
+            conv_config: ConvNextV1Config,
             dropout_rate: Optional[float] = 0.0,
             spatial_dropout_rate: Optional[float] = 0.0,
             use_gamma: bool = True,
@@ -278,6 +278,41 @@ class ConvNextBlock(keras.layers.Layer):
 
         return x
 
+    def compute_output_shape(self, input_shape):
+        """Computes the output shape of the ConvNeXt block.
+
+        Args:
+            input_shape: Shape tuple (tuple of integers)
+                representing the input shape (batch_size, height, width, channels).
+
+        Returns:
+            tuple: Output shape after applying the ConvNeXt block,
+            considering strides and output channels from conv_config.
+
+        Raises:
+            ValueError: If input shape doesn't have 4 dimensions.
+        """
+        if isinstance(input_shape, list):
+            return [self.compute_output_shape(shape) for shape in input_shape]
+
+        if len(input_shape) != 4:
+            raise ValueError(f"Expected 4D input tensor, got shape: {input_shape}")
+
+        # Extract dimensions (NHWC format)
+        batch_size, height, width, _ = input_shape
+
+        # Get strides from conv_config if it exists
+        strides = getattr(self.conv_config, 'strides', (1, 1))
+
+        # Calculate new height and width based on strides
+        new_height = height // strides[0]
+        new_width = width // strides[1]
+
+        # Output channels determined by the conv_config
+        output_channels = getattr(self.conv_config, 'filters', -1)
+
+        return (batch_size, new_height, new_width, output_channels)
+
     def get_config(self) -> Dict:
         """Returns the config of the layer for serialization.
 
@@ -305,8 +340,8 @@ class ConvNextBlock(keras.layers.Layer):
         # Extract the conv_config dictionary
         conv_config_dict = config_copy.pop("conv_config", {})
 
-        # Recreate the ConvNextConfig object
-        conv_config = ConvNextConfig(**conv_config_dict)
+        # Recreate the ConvNextV1Config object
+        conv_config = ConvNextV1Config(**conv_config_dict)
 
         # Create the ConvNextBlock with the recreated ConvNextConfig
         return cls(conv_config=conv_config, **config_copy)
