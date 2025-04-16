@@ -112,8 +112,8 @@ References:
 Shazeer, N. (2020). GLU Variants Improve Transformer. arXiv preprint.
 """
 
+import keras
 import tensorflow as tf
-from keras import layers
 from keras.api.regularizers import Regularizer
 from keras.api.initializers import Initializer
 from typing import Callable, Optional, Union, Tuple
@@ -121,8 +121,9 @@ from typing import Callable, Optional, Union, Tuple
 
 # ---------------------------------------------------------------------
 
+
 @keras.utils.register_keras_serializable()
-class GLUFFN(layers.Layer):
+class GLUFFN(keras.layers.Layer):
     """
     Gated Linear Unit Feed Forward Network as described in "GLU Variants Improve Transformer" (Shazeer, 2020).
 
@@ -165,7 +166,7 @@ class GLUFFN(layers.Layer):
         self.use_bias = use_bias
 
         # Define the layers
-        self.gate_proj = layers.Dense(
+        self.gate_proj = keras.layers.Dense(
             hidden_dim,
             activation=None,
             use_bias=use_bias,
@@ -175,7 +176,7 @@ class GLUFFN(layers.Layer):
             name="gate_proj"
         )
 
-        self.value_proj = layers.Dense(
+        self.value_proj = keras.layers.Dense(
             hidden_dim,
             activation=None,
             use_bias=use_bias,
@@ -185,7 +186,7 @@ class GLUFFN(layers.Layer):
             name="value_proj"
         )
 
-        self.output_proj = layers.Dense(
+        self.output_proj = keras.layers.Dense(
             output_dim,
             activation=None,
             use_bias=use_bias,
@@ -195,7 +196,7 @@ class GLUFFN(layers.Layer):
             name="output_proj"
         )
 
-        self.dropout = layers.Dropout(dropout_rate)
+        self.dropout = keras.layers.Dropout(dropout_rate)
 
     def call(self, inputs: tf.Tensor, training: bool = False) -> tf.Tensor:
         """
@@ -230,131 +231,6 @@ class GLUFFN(layers.Layer):
     def get_config(self) -> dict:
         """Get layer configuration."""
         config = super(GLUFFN, self).get_config()
-        config.update({
-            'hidden_dim': self.hidden_dim,
-            'output_dim': self.output_dim,
-            'activation': self.activation,
-            'dropout_rate': self.dropout_rate,
-            'kernel_initializer': self.kernel_initializer,
-            'kernel_regularizer': self.kernel_regularizer,
-            'bias_initializer': self.bias_initializer,
-            'use_bias': self.use_bias,
-        })
-        return config
-
-
-class Conv2DGLUFFN(layers.Layer):
-    """
-    Gated Linear Unit Feed Forward Network using Conv2D with 1x1 kernels.
-
-    This implementation is functionally equivalent to the Dense-based GLU FFN
-    but uses 1x1 convolutions instead of dense layers.
-
-    Args:
-        hidden_dim: int, dimension of the hidden layer
-        output_dim: int, dimension of the output
-        activation: Callable, activation function to use in the gate (default: sigmoid)
-        dropout_rate: float, dropout rate (default: 0.0)
-        kernel_initializer: Union[str, Initializer], initializer for kernel weights (default: 'glorot_uniform')
-        kernel_regularizer: Optional[Regularizer], regularizer for kernel weights (default: None)
-        bias_initializer: Union[str, Initializer], initializer for bias (default: 'zeros')
-        use_bias: bool, whether to use bias (default: True)
-        name: Optional[str], name for the layer (default: None)
-    """
-
-    def __init__(
-            self,
-            hidden_dim: int,
-            output_dim: int,
-            activation: Callable = tf.nn.sigmoid,
-            dropout_rate: float = 0.0,
-            kernel_initializer: Union[str, Initializer] = 'glorot_uniform',
-            kernel_regularizer: Optional[Regularizer] = None,
-            bias_initializer: Union[str, Initializer] = 'zeros',
-            use_bias: bool = True,
-            name: Optional[str] = None,
-            **kwargs
-    ):
-        """Initialize the Conv2D GLU FFN layer."""
-        super(Conv2DGLUFFN, self).__init__(name=name, **kwargs)
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
-        self.activation = activation
-        self.dropout_rate = dropout_rate
-        self.kernel_initializer = kernel_initializer
-        self.kernel_regularizer = kernel_regularizer
-        self.bias_initializer = bias_initializer
-        self.use_bias = use_bias
-
-        # Define the layers with 1x1 convolutions
-        self.gate_proj = layers.Conv2D(
-            filters=hidden_dim,
-            kernel_size=1,
-            activation=None,
-            use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            bias_initializer=bias_initializer,
-            name="gate_proj"
-        )
-
-        self.value_proj = layers.Conv2D(
-            filters=hidden_dim,
-            kernel_size=1,
-            activation=None,
-            use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            bias_initializer=bias_initializer,
-            name="value_proj"
-        )
-
-        self.output_proj = layers.Conv2D(
-            filters=output_dim,
-            kernel_size=1,
-            activation=None,
-            use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            bias_initializer=bias_initializer,
-            name="output_proj"
-        )
-
-        self.dropout = layers.Dropout(dropout_rate)
-
-    def call(self, inputs: tf.Tensor, training: bool = False) -> tf.Tensor:
-        """
-        Forward pass for the Conv2D GLU FFN.
-
-        Args:
-            inputs: tf.Tensor, input tensor with shape [batch, height, width, channels]
-            training: bool, whether in training mode
-
-        Returns:
-            tf.Tensor: Output tensor with shape [batch, height, width, output_dim]
-        """
-        # Project inputs for gate and value using 1x1 convolutions
-        gate = self.gate_proj(inputs)
-        value = self.value_proj(inputs)
-
-        # Apply activation to gate
-        gate = self.activation(gate)
-
-        # Element-wise multiplication of gate and value
-        hidden = gate * value
-
-        # Apply dropout (if any)
-        if self.dropout_rate > 0:
-            hidden = self.dropout(hidden, training=training)
-
-        # Project to output dimension
-        output = self.output_proj(hidden)
-
-        return output
-
-    def get_config(self) -> dict:
-        """Get layer configuration."""
-        config = super(Conv2DGLUFFN, self).get_config()
         config.update({
             'hidden_dim': self.hidden_dim,
             'output_dim': self.output_dim,
