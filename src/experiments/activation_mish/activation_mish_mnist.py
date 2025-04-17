@@ -10,7 +10,7 @@ This script implements a comparison of different activation functions:
 The experiment uses a 3-level CNN architecture on the MNIST dataset with L2 regularization.
 """
 
-from typing import Dict, List, Tuple, Optional, Any, Callable
+
 import os
 import numpy as np
 import tensorflow as tf
@@ -19,13 +19,12 @@ from keras.api.datasets import mnist
 from keras.api.layers import (
     Conv2D, MaxPooling2D, Dense, Flatten, Input, BatchNormalization, Dropout
 )
-from keras.api.activations import gelu
-import matplotlib.pyplot as plt
-import seaborn as sns
 from scipy import stats
-from dataclasses import dataclass
-
+import matplotlib.pyplot as plt
+from dataclasses import dataclass, field
+from keras.api.activations import gelu, relu, tanh
 from dl_techniques.layers.mish import Mish,SaturatedMish
+from typing import Dict, List, Tuple, Optional, Any, Callable
 
 
 # ---------------------------------------------------------------------
@@ -34,12 +33,20 @@ from dl_techniques.layers.mish import Mish,SaturatedMish
 @dataclass
 class ExperimentConfig:
     """Configuration for the experiment."""
+    epochs: int = 10
     batch_size: int = 128
-    epochs: int = 30
     learning_rate: float = 0.001
-    l2_regularization: float = 0.01
     validation_split: float = 0.1
+    l2_regularization: float = 0.0001
     kernel_initializer: str = 'he_normal'
+    activations: Dict[str, Callable] = field(default_factory=lambda: {
+        'relu': relu,
+        'tanh': tanh,
+        'gelu': gelu,
+        'mish': Mish(),
+        'scaled_mish_1': SaturatedMish(alpha=1.0),
+        'scaled_mish_2': SaturatedMish(alpha=2.0)
+    })
 
 
 # ---------------------------------------------------------------------
@@ -56,7 +63,7 @@ class ActivationExperiment:
         """
         self.config = config
         self._prepare_data()
-        self.activations = self._setup_activations()
+        self.activations = config.activations
         self.histories: Dict[str, Any] = {}
         self.models: Dict[str, keras.Model] = {}
 
@@ -72,14 +79,6 @@ class ActivationExperiment:
         self.y_train = keras.utils.to_categorical(y_train, 10)
         self.y_test = keras.utils.to_categorical(y_test, 10)
 
-    def _setup_activations(self) -> Dict[str, Callable]:
-        """Setup different activation functions for comparison."""
-        return {
-            'gelu': gelu,
-            'mish': Mish(),
-            'scaled_mish': SaturatedMish(alpha=2.0)
-        }
-
     def create_model(self, activation: Callable) -> keras.Model:
         """Create a 3-level CNN model with the specified activation.
 
@@ -93,38 +92,41 @@ class ActivationExperiment:
 
         # First convolutional block
         x = Conv2D(
-            16, (3, 3),
+            filters=16,
+            kernel_size=(5, 5),
             padding='same',
+            strides=(2, 2),
             kernel_initializer=self.config.kernel_initializer,
             kernel_regularizer=keras.regularizers.L2(self.config.l2_regularization)
         )(inputs)
-        x = activation(x)
         x = BatchNormalization()(x)
-        x = MaxPooling2D((2, 2))(x)
+        x = activation(x)
         x = Dropout(0.25)(x)
 
         # Second convolutional block
         x = Conv2D(
-            32, (3, 3),
+            filters=32,
+            kernel_size=(5, 5),
             padding='same',
+            strides=(2, 2),
             kernel_initializer=self.config.kernel_initializer,
             kernel_regularizer=keras.regularizers.L2(self.config.l2_regularization)
         )(x)
-        x = activation(x)
         x = BatchNormalization()(x)
-        x = MaxPooling2D((2, 2))(x)
+        x = activation(x)
         x = Dropout(0.25)(x)
 
         # Third convolutional block
         x = Conv2D(
-            64, (3, 3),
+            filters=64,
+            kernel_size=(5, 5),
             padding='same',
+            strides=(2, 2),
             kernel_initializer=self.config.kernel_initializer,
             kernel_regularizer=keras.regularizers.L2(self.config.l2_regularization)
         )(x)
-        x = activation(x)
         x = BatchNormalization()(x)
-        x = MaxPooling2D((2, 2))(x)
+        x = activation(x)
         x = Dropout(0.25)(x)
 
         # Dense layers

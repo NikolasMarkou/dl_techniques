@@ -1,3 +1,66 @@
+"""
+OrthonormalInitializer: A Keras initializer for generating orthonormal vectors.
+
+This module implements a custom Keras initializer that creates sets of orthonormal vectors
+using QR decomposition. Orthonormal vectors are particularly useful in machine learning
+applications such as:
+
+1. Clustering algorithms (e.g., k-means) where orthogonal centroids can improve convergence
+2. Self-organizing maps where orthogonal weight initialization can lead to better space coverage
+3. Representation learning where orthogonal bases can improve feature disentanglement
+4. Deep neural networks where orthogonal weight matrices help mitigate vanishing/exploding gradients
+
+The implementation follows these key steps:
+1. Generate a random matrix using NumPy's random number generator
+2. Apply QR decomposition to obtain orthogonal vectors (Q matrix)
+3. Ensure numerical stability by fixing the signs based on the diagonal of R
+4. Extract the first n_clusters rows to get the desired number of orthogonal vectors
+
+This approach guarantees that the resulting vectors are orthonormal (orthogonal and unit length)
+and provides better numerical stability compared to simpler approaches like Gram-Schmidt
+orthogonalization.
+
+Mathematical background:
+A set of vectors {v₁, v₂, ..., vₙ} is orthonormal if:
+- ⟨vᵢ, vⱼ⟩ = 0 for all i ≠ j (orthogonality)
+- ‖vᵢ‖ = 1 for all i (unit length)
+
+Where ⟨·,·⟩ denotes the inner product and ‖·‖ the Euclidean norm.
+
+References:
+    [1] Saxe, A. M., McClelland, J. L., & Ganguli, S. (2013). Exact solutions to the
+        nonlinear dynamics of learning in deep linear neural networks.
+        arXiv preprint arXiv:1312.6120.
+
+    [2] Hu, T., Pehlevan, C., & Chklovskii, D. B. (2014). A Hebbian/anti-Hebbian network
+        for online sparse dictionary learning derived from symmetric matrix factorization.
+        In 2014 48th Asilomar Conference on Signals, Systems and Computers (pp. 613-619). IEEE.
+
+    [3] Mishkin, D., & Matas, J. (2015). All you need is a good init.
+        arXiv preprint arXiv:1511.06422.
+
+    [4] Bansal, N., Chen, X., & Wang, Z. (2018). Can we gain more from orthogonality
+        regularizations in training deep networks?
+        Advances in Neural Information Processing Systems, 31.
+
+Note:
+    The implementation enforces that the number of clusters (n_clusters) must be less than
+    or equal to the feature dimensions. This is a mathematical constraint as you cannot
+    have more than n orthogonal vectors in an n-dimensional space.
+
+Example usage:
+    ```python
+    # Initialize a Dense layer with orthonormal weights
+    dense = keras.layers.Dense(
+        units=64,
+        kernel_initializer=OrthonormalInitializer(seed=42)
+    )
+
+    # Initialize clustering centroids orthogonally
+    centroids = OrthonormalInitializer(seed=123)((10, 128))
+    ```
+"""
+
 import keras
 import numpy as np
 import tensorflow as tf
@@ -5,6 +68,7 @@ from typing import Optional, Union, Literal, List, Any, Tuple, Dict
 
 # ---------------------------------------------------------------------
 
+@keras.utils.register_keras_serializable()
 class OrthonormalInitializer(keras.initializers.Initializer):
     """Custom initializer for orthonormal centroids.
 

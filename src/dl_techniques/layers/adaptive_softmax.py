@@ -117,6 +117,8 @@ import keras
 import tensorflow as tf
 from typing import Optional, Union, Tuple, Dict, Any
 
+# ---------------------------------------------------------------------
+
 @keras.utils.register_keras_serializable()
 class AdaptiveTemperatureSoftmax(keras.layers.Layer):
     """Adaptive Temperature Softmax layer.
@@ -268,6 +270,4 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
         })
         return config
 
-
-
-
+# ---------------------------------------------------------------------

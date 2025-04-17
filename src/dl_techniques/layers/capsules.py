@@ -1,55 +1,249 @@
 """
-Modern Keras implementation of Capsule Networks (CapsNet).
+# Capsule Networks (CapsNet) Implementation
 
-This module provides a Keras-based implementation of Capsule Networks,
-following the architecture proposed in the paper "Dynamic Routing Between Capsules"
-by Sabour et al.
+A comprehensive Keras-based implementation of Capsule Networks as proposed by
+Sabour et al. in "Dynamic Routing Between Capsules" (2017).
 
-Key Differences Between Capsules and Traditional Neurons:
+## Architecture Overview
 
-1. Input/Output Nature:
-   - Traditional Neuron: Takes scalar inputs (x_i) and produces scalar output (h)
-   - Capsule: Takes vector inputs (u_i) and produces vector output (v_j)
+```
+Input --> Conv Layers --> Primary Capsule --> CapsuleBlock
+                                               |
+                                               +--> RoutingCapsule
+                                               |      |
+                                               |      +--> Dynamic Routing
+                                               |
+                                               +--> (Optional)
+                                                      |
+                                                      +--> Dropout
+                                                      |
+                                                      +--> LayerNorm
+```
 
-2. Transformation Process:
-   a) Linear Transformation:
-      - Traditional: Simple scalar multiplication and bias addition (a_ji = w_ij*x_i + b_j)
-      - Capsule: Matrix multiplication with weight matrix W_ij and bias B_j (û_j|i = W_ij*u_i + B_j)
+## Core Components
 
-   b) Weighting & Summation:
-      - Traditional: Scalar weighted sum with learned weights (z_j = Σ w_ij*x_i)
-      - Capsule: Vector weighted sum using coupling coefficients c_ij (s_j = Σ c_ij*û_j|i)
-        * Coupling coefficients are dynamically computed through routing algorithm
+### 1. Primary Capsule Layer
+Transforms traditional CNN features into capsule vectors.
 
-3. Activation Function:
-   - Traditional: Element-wise non-linearity (sigmoid, tanh, ReLU)
-   - Capsule: "Squash" function that preserves vector orientation while normalizing length:
-     squash(s) = ||s||² / (1 + ||s||²) * (s / ||s||)
-     * Ensures output vector length is in [0,1] representing probability
-     * Preserves vector orientation to maintain feature representation
+```
+        [Input: Feature Maps]
+               ↓
+        ┌─────────────────┐
+        │   Conv2D Layer  │  ← Kernel size, strides, padding
+        └─────────────────┘
+               ↓
+        ┌─────────────────┐
+        │     Reshape     │  ← To [batch, num_capsules*h*w, dim_capsules]
+        └─────────────────┘
+               ↓
+        ┌─────────────────┐
+        │  Squash Function│  ← Non-linearity for capsules
+        └─────────────────┘
+               ↓
+[Output: Primary Capsules Vectors]
+```
 
-4. Information Encoding:
-   - Traditional: Activity scalar represents feature presence
-   - Capsule: Vector properties encode feature attributes:
-     * Vector length: Probability of feature existence
-     * Vector orientation: Feature properties/parameters
+### 2. Routing Capsule Layer
+Implements dynamic routing mechanism between capsule layers.
 
-5. Key Implementation Aspects:
-   - Dynamic Routing: Iterative process to determine coupling coefficients
-   - Agreement Mechanism: Vectors "vote" for higher-level features
-   - Hierarchical Structure: Lower-level capsules feed into higher-level ones
+```
+    [Input: Lower-level Capsules]
+               ↓
+┌─────────────────────────────────┐
+│      Transformation Matrix      │ ← W_ij transforms u_i to û_j|i
+└─────────────────────────────────┘
+               ↓
+┌─────────────────────────────────┐
+│      Initialize Routing         │ ← b_ij = 0
+│         Coefficients            │
+└─────────────────────────────────┘
+               ↓
+┌─────────────────────────────────┐
+│      Routing Iterations         │
+│                                 │
+│    ┌───────────────────────┐    │
+│    │ Softmax to get c_ij   │    │ ← c_ij = softmax(b_ij)
+│    └───────────────────────┘    │
+│               ↓                 │
+│    ┌───────────────────────┐    │
+│    │ Weighted sum to get   │    │ ← s_j = Σ c_ij * û_j|i
+│    │ capsule input s_j     │    │
+│    └───────────────────────┘    │
+│               ↓                 │
+│    ┌───────────────────────┐    │
+│    │ Squash to get capsule │    │ ← v_j = squash(s_j)
+│    │ output v_j            │    │
+│    └───────────────────────┘    │
+│               ↓                 │
+│    ┌───────────────────────┐    │
+│    │ Update routing logits │    │ ← b_ij += v_j • û_j|i
+│    └───────────────────────┘    │
+│                                 │
+└─────────────────────────────────┘
+               ↓
+   [Output: Higher-level Capsules]
+```
 
-References:
-    - Sabour, S., Frosst, N., & Hinton, G. E. (2017).
-      Dynamic routing between capsules. In Advances in Neural
-      Information Processing Systems (pp. 3856-3866).
+### 3. Capsule Block
+A complete block combining routing capsules with regularization.
+
+```
+    [Input: Lower-level Capsules]
+               ↓
+    ┌─────────────────────────┐
+    │     Routing Capsule     │
+    └─────────────────────────┘
+               ↓
+    ┌─────────────────────────┐
+    │     Dropout (Opt.)      │
+    └─────────────────────────┘
+               ↓
+    ┌─────────────────────────┐
+    │   Layer Norm (Opt.)     │
+    └─────────────────────────┘
+               ↓
+   [Output: Higher-level Capsules]
+```
+
+## Capsules vs. Convolutional Networks
+
+### Key Differences Between Capsules and Traditional Neurons
+
+```
+┌────────────────────────────┬───────────────────────────────────────┐
+│                            │                                       │
+│    Traditional Neuron      │              Capsule                  │
+│                            │                                       │
+├────────────────────────────┼───────────────────────────────────────┤
+│                            │                                       │
+│    Input/Output:           │    Input/Output:                      │
+│    Scalars: x_i → h        │    Vectors: u_i → v_j                 │
+│                            │                                       │
+├────────────────────────────┼───────────────────────────────────────┤
+│                            │                                       │
+│    Transformation:         │    Transformation:                    │
+│    a_ji = w_ij*x_i + b_j   │    û_j|i = W_ij*u_i + B_j            │
+│                            │                                       │
+├────────────────────────────┼───────────────────────────────────────┤
+│                            │                                       │
+│    Weighting:              │    Weighting:                         │
+│    Fixed weights w_ij      │    Dynamic coupling c_ij              │
+│                            │    (computed via routing)             │
+│                            │                                       │
+├────────────────────────────┼───────────────────────────────────────┤
+│                            │                                       │
+│    Activation:             │    Activation:                        │
+│    Element-wise non-       │    "Squash" function preserves        │
+│    linearity (ReLU,        │    orientation while normalizing      │
+│    sigmoid, etc.)          │    length to [0,1] range              │
+│                            │                                       │
+└────────────────────────────┴───────────────────────────────────────┘
+```
+
+### Capsules vs. Convolutions: Conceptual Differences
+
+```
+┌───────────────────────────────┬───────────────────────────────────┐
+│                               │                                   │
+│    Convolutional Networks     │       Capsule Networks            │
+│                               │                                   │
+├───────────────────────────────┼───────────────────────────────────┤
+│                               │                                   │
+│  REPRESENTATION               │  REPRESENTATION                   │
+│  • Feature presence only      │  • Feature presence AND properties│
+│  • Activation scalar indicates│  • Vector length: probability     │
+│    "if" feature exists        │  • Vector direction: properties   │
+│                               │    (pose, texture, deformation)   │
+│                               │                                   │
+├───────────────────────────────┼───────────────────────────────────┤
+│                               │                                   │
+│  SPATIAL RELATIONSHIPS        │  SPATIAL RELATIONSHIPS            │
+│  • Relies on pooling to build │  • Explicitly preserves spatial   │
+│    translation invariance     │    hierarchies via agreements     │
+│  • Loses precise spatial      │    between capsules               │
+│    relationships              │  • Part-whole relationships are   │
+│  • Limited viewpoint          │    encoded in transformation      │
+│    generalization             │    matrices                       │
+│                               │                                   │
+├───────────────────────────────┼───────────────────────────────────┤
+│                               │                                   │
+│  FEATURE AGGREGATION          │  FEATURE AGGREGATION              │
+│  • Max/average pooling        │  • Dynamic routing by agreement   │
+│  • Information loss during    │  • Higher-level capsules receive  │
+│    pooling operations         │    input from lower capsules      │
+│  • No explicit mechanism for  │    based on agreement             │
+│    consistency between layers │  • Parts must agree on the whole  │
+│                               │                                   │
+├───────────────────────────────┼───────────────────────────────────┤
+│                               │                                   │
+│  EQUIVARIANCE                 │  EQUIVARIANCE                     │
+│  • Translation invariance     │  • Maintains equivariance         │
+│    (same output regardless    │    (transformations of input      │
+│    of feature position)       │    lead to predictable            │
+│  • Poor at handling rotations,│    transformations of output)     │
+│    scaling, and viewpoint     │  • Better handling of viewpoint   │
+│    changes                    │    changes and affine transforms  │
+│                               │                                   │
+└───────────────────────────────┴───────────────────────────────────┘
+```
+
+### Why Capsules Address CNN Limitations
+
+1. **The Pooling Problem**: CNNs use pooling to achieve translation invariance, but this discards precise spatial information. Capsules preserve spatial relationships through transformation matrices and routing.
+
+2. **Viewpoint Invariance vs. Equivariance**: CNNs struggle with viewpoint changes because they seek invariance (same output regardless of viewpoint). Capsules achieve equivariance - the network understands how viewpoint changes affect the representation.
+
+3. **Robust Part-Whole Relationships**: In CNNs, a feature detector that fires strongly might indicate presence anywhere in the region. In capsules, parts must agree on the existence and properties of the whole object through routing, leading to more robust object detection.
+
+4. **Data Efficiency**: Because capsules encode feature properties in vector directions, they can generalize to new viewpoints with less training data than CNNs.
+
+5. **Handling Occlusion**: Capsule networks can recognize partially occluded objects better because they rely on agreement among parts rather than the presence of all features.
+
+## Squash Function
+
+The squash function is a non-linearity that ensures the length of the output vector is between 0 and 1:
+
+```
+             ||s||²
+squash(s) = --------- * (s / ||s||)
+            1 + ||s||²
+```
+
+Where:
+- s is the input vector
+- ||s|| is the Euclidean norm of s
+- The output vector has the same orientation as the input but with length compressed to [0,1]
+
+## Margin Loss
+
+For class k:
+
+```
+L_k = T_k * max(0, m⁺ - ||v_k||)² + λ(1-T_k) * max(0, ||v_k|| - m⁻)²
+```
+
+Where:
+- T_k = 1 if class k is present
+- m⁺ = 0.9 (margin for correct class)
+- m⁻ = 0.1 (margin for incorrect classes)
+- λ = 0.5 (down-weighting factor for absent classes)
+
+## Implementation Notes
+
+1. Base Capsule Layer: Provides common functionality for all capsule layers
+2. Primary Capsule Layer: Converts feature maps to primary capsules
+3. Routing Capsule Layer: Implements dynamic routing algorithm
+4. Capsule Block: Combines routing with optional dropout and normalization
+
+## References
+
+Sabour, S., Frosst, N., & Hinton, G. E. (2017). Dynamic routing between capsules.
+In Advances in Neural Information Processing Systems (pp. 3856-3866).
 """
-
-from __future__ import annotations
 
 import keras
 import tensorflow as tf
-from typing import Optional, Tuple, Union, Dict, Any, List, Callable, TypeVar, Type, cast
+from typing import Optional, Tuple, Union, Dict, Any, TypeVar, Type
 
 # Type variables for improved type hinting
 T = TypeVar('T', bound='BaseCapsuleLayer')
@@ -133,10 +327,9 @@ def margin_loss(
     return tf.reduce_mean(tf.reduce_sum(L, axis=1))
 
 
-# ======================================================================
-# Core Capsule Layers
-# ======================================================================
+# ---------------------------------------------------------------------
 
+@keras.utils.register_keras_serializable()
 class BaseCapsuleLayer(keras.layers.Layer):
     """Base class for all capsule layers.
 
@@ -216,7 +409,10 @@ class BaseCapsuleLayer(keras.layers.Layer):
         # Create new instance
         return cls(**config)
 
+# ---------------------------------------------------------------------
 
+
+@keras.utils.register_keras_serializable()
 class PrimaryCapsule(BaseCapsuleLayer):
     """Primary Capsule Layer implementation.
 
@@ -367,6 +563,7 @@ class PrimaryCapsule(BaseCapsuleLayer):
         return config
 
 
+@keras.utils.register_keras_serializable()
 class RoutingCapsule(BaseCapsuleLayer):
     """Capsule layer with dynamic routing.
 
@@ -579,7 +776,10 @@ class RoutingCapsule(BaseCapsuleLayer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
+
+@keras.utils.register_keras_serializable()
 class CapsuleBlock(BaseCapsuleLayer):
     """
     A complete capsule block with optional dropout and normalization.
@@ -722,3 +922,5 @@ class CapsuleBlock(BaseCapsuleLayer):
             "use_layer_norm": self.use_layer_norm
         })
         return config
+
+# ---------------------------------------------------------------------

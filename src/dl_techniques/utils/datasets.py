@@ -2,7 +2,13 @@ import numpy as np
 from keras import datasets, utils
 from typing import Tuple, Optional, NamedTuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .logger import logger
+
+# ---------------------------------------------------------------------
 
 
 class MNISTData(NamedTuple):
@@ -18,6 +24,8 @@ class MNISTData(NamedTuple):
     y_train: np.ndarray
     x_test: np.ndarray
     y_test: np.ndarray
+
+# ---------------------------------------------------------------------
 
 
 def normalize_images(
@@ -45,6 +53,8 @@ def normalize_images(
         raise ValueError("Image array contains NaN or Inf values")
 
     return images.astype(dtype) / scale
+
+# ---------------------------------------------------------------------
 
 
 def load_and_preprocess_mnist(
@@ -109,6 +119,8 @@ def load_and_preprocess_mnist(
         logger.error(f"Error loading or preprocessing MNIST dataset: {str(e)}")
         raise RuntimeError("Failed to load or preprocess MNIST dataset") from e
 
+# ---------------------------------------------------------------------
+
 
 def get_data_shape(data: MNISTData) -> Tuple[Tuple[int, ...], ...]:
     """Get shapes of all arrays in the dataset.
@@ -120,3 +132,6 @@ def get_data_shape(data: MNISTData) -> Tuple[Tuple[int, ...], ...]:
         Tuple of shapes for all arrays
     """
     return tuple(arr.shape for arr in data)
+
+# ---------------------------------------------------------------------
+
