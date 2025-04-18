@@ -192,17 +192,17 @@
   3. Hamilton, W. L., Ying, R., & Leskovec, J. (2017). "Inductive representation learning on large graphs." *Advances in Neural Information Processing Systems*, 30.
   4. Veličković, P., Cucurull, G., Casanova, A., Romero, A., Liò, P., & Bengio, Y. (2018). "Graph attention networks." *International Conference on Learning Representations (ICLR)*.
 
-## 16. AlexNet (2012)
-- **Key Innovation**: Deep CNN with ReLU activations, dropout regularization, and GPU implementation
-- **Application Areas**: Image classification, feature extraction, transfer learning
-- **Advantages**: Breakthrough performance, practical scalability, revitalized deep learning research
-- **Limitations**: High computational requirements, overfitting on smaller datasets
-- **Historical Impact**: Won the 2012 ImageNet competition by a large margin, kickstarted the modern deep learning era
+## 16. Deep Neural Networks (2012)
+- **Key Innovation**: Multiple stacked layers with nonlinear activations, effective training techniques, and GPU acceleration
+- **Application Areas**: Computer vision, image classification, feature extraction, transfer learning, object detection
+- **Advantages**: Superior representation learning, hierarchical feature extraction, unprecedented performance
+- **Limitations**: High computational requirements, data hunger, black-box nature, overfitting risks
+- **Examples**: AlexNet (2012), VGG, ZFNet, NIN, Inception, DenseNet
 - **Key References**: 
   1. Krizhevsky, A., Sutskever, I., & Hinton, G. E. (2012). "ImageNet classification with deep convolutional neural networks." *Advances in Neural Information Processing Systems*, 25, 1097-1105.
-  2. Deng, J., Dong, W., Socher, R., Li, L. J., Li, K., & Fei-Fei, L. (2009). "ImageNet: A large-scale hierarchical image database." *IEEE Conference on Computer Vision and Pattern Recognition*, 248-255.
-  3. Zeiler, M. D., & Fergus, R. (2014). "Visualizing and understanding convolutional networks." *European Conference on Computer Vision*, 818-833.
-  4. Russakovsky, O., Deng, J., Su, H., et al. (2015). "ImageNet Large Scale Visual Recognition Challenge." *International Journal of Computer Vision*, 115(3), 211-252.
+  2. Simonyan, K., & Zisserman, A. (2014). "Very deep convolutional networks for large-scale image recognition." *arXiv preprint arXiv:1409.1556*.
+  3. Szegedy, C., Liu, W., Jia, Y., et al. (2015). "Going deeper with convolutions." *Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition*, 1-9.
+  4. He, K., Zhang, X., Ren, S., & Sun, J. (2015). "Delving deep into rectifiers: Surpassing human-level performance on ImageNet classification." *Proceedings of the IEEE International Conference on Computer Vision*, 1026-1034.
 
 ## 17. Variational Autoencoders (VAEs) (2013)
 - **Key Innovation**: Probabilistic latent space with variational inference
