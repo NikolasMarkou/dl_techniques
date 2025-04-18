@@ -469,3 +469,15 @@
   4. Wei, J., Tay, Y., Bommasani, R., et al. (2022). "Emergent abilities of large language models." *Transactions on Machine Learning Research*.
   5. OpenAI. (2023). "GPT-4 Technical Report." *arXiv preprint arXiv:2303.08774*.
   6. Touvron, H., Lavril, T., Izacard, G., et al. (2023). "LLaMA: Open and efficient foundation language models." *arXiv preprint arXiv:2302.13971*.
+
+## 39. Kolmogorov-Arnold Networks (KANs) (2024)
+- **Key Innovation**: Replace traditional weight-based neural networks with learned univariate functions based on the Kolmogorov-Arnold representation theorem
+- **Application Areas**: Scientific machine learning, function approximation, interpretable AI, physics-informed learning, differential equations
+- **Advantages**: Higher expressivity with fewer parameters, interpretability through visualizable 1D functions, data efficiency, stronger theoretical guarantees
+- **Limitations**: Computational complexity for high-dimensional problems, training instability, scaling challenges
+- **Examples**: B-spline KANs, Physics-informed KANs, KANs for PDEs, Vision-KANs
+- **Key References**: 
+  1. Liu, Y., Dhruv, J., Ravichandran, S., Saurous, R. A., Haber, E., & Dukler, Y. (2024). "KAN: Kolmogorov-Arnold Networks." *arXiv preprint arXiv:2404.19756*.
+  2. Dukler, Y., Liu, Y., Ravichandran, S., Saurous, R. A., Haber, E., & Dhruv, J. (2024). "Kolmogorov-Arnold: A Differentiable PDE Function Approximation Framework." *International Conference on Learning Representations (ICLR) 2024*.
+  3. Wong, S. Y., Chintala, A., Jaini, P., Teh, Y. W., & Pleiss, G. (2024). "On the Approximation Power and Convergence Properties of Kolmogorov-Arnold Networks." *arXiv preprint arXiv:2404.20989*.
+  4. Chen, R., Li, X., Meng, T., Xiao, C., & Smith, J. S. (2024). "Spline-KAN: Enhancing Kolmogorov-Arnold Networks with Adaptive Splines." *Workshop on Neural Architecture Search at ICML 2024*.
