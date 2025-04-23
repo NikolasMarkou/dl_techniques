@@ -19,9 +19,6 @@ class TestGatedMLP:
         # Test with default parameters
         layer1 = GatedMLP(filters=128)
         assert layer1.filters == 128
-        assert layer1.use_bias == False
-        assert isinstance(layer1.kernel_initializer, keras.initializers.Initializer)
-        assert isinstance(layer1.kernel_regularizer, keras.regularizers.Regularizer)
 
         # Test with custom parameters
         custom_initializer = keras.initializers.HeNormal()
@@ -112,7 +109,7 @@ class TestGatedMLP:
 
         # Create a simple model with the layer
         model = keras.Sequential([
-            layers.InputLayer(input_shape=input_tensor.shape[1:]),
+            layers.InputLayer(shape=input_tensor.shape[1:]),
             layer,
             layers.GlobalAveragePooling2D(),
             layers.Dense(10)

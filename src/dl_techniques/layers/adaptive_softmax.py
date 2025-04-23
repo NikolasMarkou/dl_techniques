@@ -115,7 +115,7 @@ References:
 
 import keras
 import tensorflow as tf
-from typing import Optional, Union, Tuple, Dict, Any
+from typing import Optional, Dict, Any
 
 # ---------------------------------------------------------------------
 

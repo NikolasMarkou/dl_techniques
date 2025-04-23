@@ -12,11 +12,16 @@ import numpy as np
 import tensorflow as tf
 from typing import Tuple, List
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.gaussian_filter import (
     depthwise_gaussian_kernel,
     GaussianFilter
 )
 
+# ---------------------------------------------------------------------
 
 # Test fixtures
 @pytest.fixture
@@ -68,8 +73,8 @@ def test_depthwise_kernel_channel_independence():
 def test_gaussian_filter_initialization():
     """Test GaussianFilter initialization with various parameters."""
     layer = GaussianFilter(kernel_size=(5, 5), strides=(2, 2))
-    assert layer._kernel_size == (5, 5)
-    assert layer._strides == [1, 2, 2, 1]
+    assert layer.kernel_size == (5, 5)
+    assert layer.strides == (2, 2)
 
 
 def test_gaussian_filter_invalid_kernel_size():
@@ -83,7 +88,7 @@ def test_gaussian_filter_auto_sigma():
     kernel_size = (5, 5)
     layer = GaussianFilter(kernel_size=kernel_size, sigma=-1)
     expected_sigma = ((kernel_size[0] - 1) / 2, (kernel_size[1] - 1) / 2)
-    assert layer._sigma == expected_sigma
+    assert layer.sigma == expected_sigma
 
 
 def test_gaussian_filter_output_shape(sample_image):
@@ -116,15 +121,15 @@ def test_gaussian_filter_serialization():
     recreated_layer = GaussianFilter.from_config(config)
 
     # Compare kernel_size and strides
-    assert recreated_layer._kernel_size == layer._kernel_size
-    assert recreated_layer._strides == layer._strides
+    assert recreated_layer.kernel_size == layer.kernel_size
+    assert recreated_layer.strides == layer.strides
 
     # Compare sigma values - they may be converted to tuples
-    if isinstance(layer._sigma, tuple):
-        assert recreated_layer._sigma == layer._sigma
+    if isinstance(layer.sigma, tuple):
+        assert recreated_layer.sigma == layer.sigma
     else:
         # If sigma was a single float, it gets converted to a tuple
-        assert recreated_layer._sigma == (layer._sigma, layer._sigma)
+        assert recreated_layer.sigma == (layer.sigma, layer.sigma)
 
 
 def test_gaussian_filter_training_inference():
@@ -183,10 +188,15 @@ def test_gaussian_filter_different_configs(kernel_size, sigma):
     assert not tf.reduce_any(tf.math.is_nan(output))
 
 
-def test_gaussian_filter_gradient():
+@pytest.mark.parametrize("batch,kernel_size,sigma", [
+    (1, (3, 3), 1.0),
+    (2, (5, 5), 2.0),
+    (4, (7, 7), 3.0)
+])
+def test_gaussian_filter_gradient(batch, kernel_size, sigma):
     """Test if gradients can flow through the GaussianFilter layer."""
-    layer = GaussianFilter()
-    test_input = tf.random.uniform((1, 32, 32, 3))
+    layer = GaussianFilter(kernel_size=kernel_size, sigma=sigma)
+    test_input = tf.random.uniform((batch, 32, 32, 3))
 
     with tf.GradientTape() as tape:
         tape.watch(test_input)

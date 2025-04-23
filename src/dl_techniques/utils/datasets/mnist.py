@@ -6,7 +6,7 @@ from typing import Tuple, Optional, NamedTuple
 # local imports
 # ---------------------------------------------------------------------
 
-from .logger import logger
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

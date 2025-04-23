@@ -5,116 +5,123 @@ Implementation of the Gated MLP (gMLP) architecture from the paper:
 This module implements a Gated Multi-Layer Perceptron (MLP) layer for use in
 neural networks. The layer combines gating mechanisms with 1x1 convolutions
 to create a powerful feature transformation block without self-attention.
-
-Key Features:
-------------
-- Spatial Gating Unit (SGU) to enable cross-token interactions
-- 1x1 convolutions for feature transformation
-- Configurable activation functions for attention and output
-- Support for kernel regularization and initialization
-- Bias-optional operation
-
-Architecture:
-------------
-                   +------------------+
-                   |      Input       |
-                   +--------+---------+
-                            |
-                 +----------+-----------+
-      +----------+       Split         +-----------+
-      |          +--------------------+            |
-      |                                            |
-+-----v------+                             +-------v-----+
-| Gate Conv  |                             |   Up Conv   |
-| (1x1 Conv) |                             | (1x1 Conv)  |
-+-----+------+                             +-------+-----+
-      |                                            |
-+-----v------+                             +-------v-----+
-| Activation |                             | Activation  |
-| (ReLU/GELU)|                             | (ReLU/GELU) |
-+-----+------+                             +-------+-----+
-      |                                            |
-      |          +--------------------+            |
-      +----------> Element-wise       <------------+
-                 |  Multiplication    |
-                 +----------+---------+
-                            |
-                 +----------v---------+
-                 |    Down Conv       |
-                 |    (1x1 Conv)      |
-                 +----------+---------+
-                            |
-                 +----------v---------+
-                 |    Activation      |
-                 | (Linear/ReLU/etc.) |
-                 +----------+---------+
-                            |
-                 +----------v---------+
-                 |      Output        |
-                 +--------------------+
-
-The computation flow is:
-input -> (gate_conv, up_conv) -> activation -> multiply -> down_conv -> activation -> output
-
-As described in the paper, gMLP is a simple variant of MLPs with gating that can
-perform comparably to Transformers in language and vision tasks, demonstrating that
-self-attention is not always necessary for achieving strong performance.
-
-Key differences from standard attention mechanisms:
-1. No token-to-token interactions via dot products
-2. Simplified architecture with purely MLP-based components
-3. Spatial gating rather than query-key-value attention
-4. Often more parameter-efficient than self-attention
 """
 
 import keras
-import tensorflow as tf
-from typing import Optional, Union, Literal, Dict, Any
+from typing import Optional, Union, Literal, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.layers.conv2d_builder import activation_wrapper
 
 # ---------------------------------------------------------------------
 
-@keras.utils.register_keras_serializable()
+
+@keras.saving.register_keras_serializable()
 class GatedMLP(keras.layers.Layer):
-    """
-    A Gated MLP layer implementation using 1x1 convolutions.
+    """A Gated MLP layer implementation using 1x1 convolutions.
 
     This layer implements a gated MLP architecture where the input is processed through
     three separate 1x1 convolution paths: gate, up, and down projections. The gating
     mechanism allows the network to selectively focus on relevant features.
 
+    Architecture:
+    ------------
+                       +------------------+
+                       |      Input       |
+                       +--------+---------+
+                                |
+                     +----------+-----------+
+          +----------+       Split         +-----------+
+          |          +--------------------+            |
+          |                                            |
+    +-----v------+                             +-------v-----+
+    | Gate Conv  |                             |   Up Conv   |
+    | (1x1 Conv) |                             | (1x1 Conv)  |
+    +-----+------+                             +-------+-----+
+          |                                            |
+    +-----v------+                             +-------v-----+
+    | Activation |                             | Activation  |
+    | (ReLU/GELU)|                             | (ReLU/GELU) |
+    +-----+------+                             +-------+-----+
+          |                                            |
+          |          +--------------------+            |
+          +----------> Element-wise       <------------+
+                     |  Multiplication    |
+                     +----------+---------+
+                                |
+                     +----------v---------+
+                     |    Down Conv       |
+                     |    (1x1 Conv)      |
+                     +----------+---------+
+                                |
+                     +----------v---------+
+                     |    Activation      |
+                     | (Linear/ReLU/etc.) |
+                     +----------+---------+
+                                |
+                     +----------v---------+
+                     |      Output        |
+                     +--------------------+
+
     Args:
-        filters (int): Number of filters for the output convolution.
-        use_bias (bool): Whether to use bias in the convolution layers.
-        kernel_initializer (Union[str, keras.initializers.Initializer]): Initializer for the kernel
-            weights matrices. Defaults to "glorot_normal".
-        kernel_regularizer (Union[str, keras.regularizers.Regularizer]): Regularizer function applied
-            to the kernel weights matrices. Defaults to L2(1e-4).
-        attention_activation (str): Activation function for the gate and up projections.
-        output_activation (str): Activation function for the output.
+        filters: Number of filters for the output convolution.
+        use_bias: Whether to use bias in the convolution layers.
+        kernel_initializer: Initializer for the kernel weights matrices.
+        bias_initializer: Initializer for the bias vectors.
+        kernel_regularizer: Regularizer function applied to kernel weights.
+        bias_regularizer: Regularizer function applied to bias vectors.
+        attention_activation: Activation function for the gate and up projections.
+        output_activation: Activation function for the output.
+        data_format: String, either "channels_last" or "channels_first".
         **kwargs: Additional arguments passed to the parent Layer class.
+
+    Input shape:
+        4D tensor with shape:
+        - If data_format="channels_last": (batch_size, height, width, channels)
+        - If data_format="channels_first": (batch_size, channels, height, width)
+
+    Output shape:
+        4D tensor with shape:
+        - Same as input shape but with 'filters' output channels
+
+    Example:
+        >>> x = np.random.rand(4, 32, 32, 64)  # Input feature map
+        >>> gmlp = GatedMLP(filters=128, attention_activation="gelu")
+        >>> y = gmlp(x)
+        >>> print(y.shape)
+        (4, 32, 32, 128)
     """
 
     def __init__(
             self,
             filters: int,
-            use_bias: bool = False,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_normal",
-            kernel_regularizer: Union[str, keras.regularizers.Regularizer] = keras.regularizers.L2(1e-4),
+            use_bias: bool = True,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+            bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+            bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
             attention_activation: Literal["relu", "gelu", "swish", "linear"] = "relu",
             output_activation: Literal["relu", "gelu", "swish", "linear"] = "linear",
+            data_format: Optional[str] = None,
             **kwargs: Any
     ) -> None:
-        """Initialize the GatedMLP layer."""
         super().__init__(**kwargs)
 
         self.filters = filters
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.attention_activation = attention_activation
         self.output_activation = output_activation
+        self.data_format = data_format or keras.backend.image_data_format()
+
+        if self.data_format not in {"channels_first", "channels_last"}:
+            raise ValueError(f"data_format must be 'channels_first' or 'channels_last', got {data_format}")
 
         # Will be defined in build()
         self.conv_gate = None
@@ -123,49 +130,71 @@ class GatedMLP(keras.layers.Layer):
         self.attention_activation_fn = None
         self.output_activation_fn = None
 
-    def build(self, input_shape: tf.TensorShape) -> None:
-        """
-        Build the GatedMLP layer.
+    def build(self, input_shape):
+        """Build the GatedMLP layer.
 
         Args:
-            input_shape: The input shape as a TensorShape object.
+            input_shape: Shape tuple of the input tensor.
         """
-        from .conv2d_builder import activation_wrapper
-
-        # Base parameters for conv layers
-        conv_params: Dict[str, Any] = {
-            "filters": self.filters,
-            "kernel_size": (1, 1),
-            "strides": (1, 1),
-            "padding": "same",
-            "activation": None,
-            "use_bias": self.use_bias,
-            "kernel_initializer": self.kernel_initializer,
-            "kernel_regularizer": self.kernel_regularizer,
-        }
-
         # Create the convolution layers
-        self.conv_gate = keras.layers.Conv2D(**conv_params)
-        self.conv_up = keras.layers.Conv2D(**conv_params)
-        self.conv_down = keras.layers.Conv2D(**conv_params)
+        self.conv_gate = keras.layers.Conv2D(
+            filters=self.filters,
+            kernel_size=(1, 1),
+            strides=(1, 1),
+            padding="same",
+            data_format=self.data_format,
+            activation=None,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+        )
+
+        self.conv_up = keras.layers.Conv2D(
+            filters=self.filters,
+            kernel_size=(1, 1),
+            strides=(1, 1),
+            padding="same",
+            data_format=self.data_format,
+            activation=None,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+        )
+
+        self.conv_down = keras.layers.Conv2D(
+            filters=self.filters,
+            kernel_size=(1, 1),
+            strides=(1, 1),
+            padding="same",
+            data_format=self.data_format,
+            activation=None,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+        )
 
         # Set up activation functions
-        self.attention_activation_fn = activation_wrapper(activation=self.attention_activation)
-        self.output_activation_fn = activation_wrapper(activation=self.output_activation)
+        self.attention_activation_fn = activation_wrapper(self.attention_activation)
+        self.output_activation_fn =activation_wrapper(self.output_activation)
 
         super().build(input_shape)
 
-    def call(self, inputs: tf.Tensor, training: Optional[bool] = None) -> tf.Tensor:
-        """
-        Forward pass for the GatedMLP layer.
+    def call(self, inputs, training=None):
+        """Forward pass for the GatedMLP layer.
 
         Args:
-            inputs (tf.Tensor): Input tensor.
-            training (Optional[bool]): Boolean indicating whether the layer should behave in
+            inputs: Input tensor.
+            training: Boolean indicating whether the layer should behave in
                 training mode or inference mode.
 
         Returns:
-            tf.Tensor: The output tensor after applying the Gated MLP operations.
+            The output tensor after applying the Gated MLP operations.
         """
         # Gate branch
         x_gate = self.conv_gate(inputs, training=training)
@@ -186,33 +215,37 @@ class GatedMLP(keras.layers.Layer):
 
         return output
 
-    def compute_output_shape(self, input_shape: tf.TensorShape) -> tf.TensorShape:
-        """
-        Compute the output shape of the layer.
+    def compute_output_shape(self, input_shape):
+        """Compute the output shape of the layer.
 
         Args:
-            input_shape (tf.TensorShape): Shape of the input.
+            input_shape: Shape of the input.
 
         Returns:
-            tf.TensorShape: Output shape, which matches the input shape for this layer.
+            Output shape.
         """
-        return tf.TensorShape(input_shape)
+        if self.data_format == "channels_last":
+            return (*input_shape[:-1], self.filters)
+        else:  # channels_first
+            return (input_shape[0], self.filters, *input_shape[2:])
 
-    def get_config(self) -> Dict[str, Any]:
-        """
-        Return the configuration of the layer for serialization.
+    def get_config(self):
+        """Return the configuration of the layer for serialization.
 
         Returns:
-            Dict[str, Any]: Dictionary containing the configuration of the layer.
+            Dictionary containing the configuration of the layer.
         """
         config = super().get_config()
         config.update({
             "filters": self.filters,
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
             "attention_activation": self.attention_activation,
             "output_activation": self.output_activation,
+            "data_format": self.data_format,
         })
         return config
 
