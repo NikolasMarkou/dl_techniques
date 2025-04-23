@@ -10,14 +10,15 @@ The implementations follow the paper:
 "Decoupling MaxLogit for Out-of-Distribution Detection"
 """
 
+import keras
 import tensorflow as tf
-from keras import Layer
 from typing import Optional, Tuple, Dict, Any, Union, Literal
 
 # ---------------------------------------------------------------------
 
 
-class MaxLogitNorm(Layer):
+@keras.utils.register_keras_serializable()
+class MaxLogitNorm(keras.layers.Layer):
     """
     Basic MaxLogit normalization layer.
 
@@ -87,7 +88,8 @@ class MaxLogitNorm(Layer):
 # ---------------------------------------------------------------------
 
 
-class DecoupledMaxLogit(Layer):
+@keras.utils.register_keras_serializable()
+class DecoupledMaxLogit(keras.layers.Layer):
     """
     Decoupled MaxLogit (DML) normalization layer.
 
@@ -176,7 +178,8 @@ class DecoupledMaxLogit(Layer):
 # ---------------------------------------------------------------------
 
 
-class DMLPlus:
+@keras.utils.register_keras_serializable()
+class DMLPlus(keras.layers.Layer):
     """
     DML+ implementation that uses separate models for cosine and norm components.
 
@@ -189,7 +192,8 @@ class DMLPlus:
             self,
             model_type: Literal["focal", "center"],
             axis: int = -1,
-            epsilon: float = 1e-7
+            epsilon: float = 1e-7,
+            **kwargs
     ):
         """
         Initialize DML+ model.
@@ -199,6 +203,7 @@ class DMLPlus:
             axis: Dimension along which to normalize
             epsilon: Small constant for numerical stability
         """
+        super().__init__(**kwargs)
         self.model_type = model_type
         self.axis = axis
         self.epsilon = epsilon

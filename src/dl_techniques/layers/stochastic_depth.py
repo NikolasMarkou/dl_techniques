@@ -78,6 +78,8 @@ class StochasticDepth(keras.layers.Layer):
             noise_shape=noise_shape
         )
 
+        self.dropout.build(input_shape)
+
     def call(
             self,
             inputs: tf.Tensor,

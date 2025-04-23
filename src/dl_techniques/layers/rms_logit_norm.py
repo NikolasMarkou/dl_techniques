@@ -119,14 +119,13 @@ When choosing a normalization layer, consider:
 
 import keras
 import tensorflow as tf
-from keras.api.layers import Layer
 from typing import Optional, Union, Tuple, Dict, Any
 
 
 # ---------------------------------------------------------------------
 
 @keras.utils.register_keras_serializable()
-class RMSNorm(Layer):
+class RMSNorm(keras.layers.Layer):
     """
     Root Mean Square Normalization layer for classification tasks.
 
@@ -228,7 +227,7 @@ class RMSNorm(Layer):
 
 # ---------------------------------------------------------------------
 @keras.utils.register_keras_serializable()
-class LogitNorm(Layer):
+class LogitNorm(keras.layers.Layer):
     """
     LogitNorm layer for classification tasks.
 
@@ -311,7 +310,7 @@ class LogitNorm(Layer):
 # ---------------------------------------------------------------------
 
 @keras.utils.register_keras_serializable()
-class CoupledLogitNorm(Layer):
+class CoupledLogitNorm(keras.layers.Layer):
     """
     Coupled LogitNorm layer for multi-label classification.
 
@@ -398,7 +397,7 @@ class CoupledLogitNorm(Layer):
 # ---------------------------------------------------------------------
 
 
-class CoupledMultiLabelHead(Layer):
+class CoupledMultiLabelHead(keras.layers.Layer):
     """
     Multi-label classification head with coupled logit normalization.
 
@@ -427,7 +426,7 @@ class CoupledMultiLabelHead(Layer):
 # ---------------------------------------------------------------------
 
 @keras.utils.register_keras_serializable()
-class DynamicCoupledLogitNorm(Layer):
+class DynamicCoupledLogitNorm(keras.layers.Layer):
     """
     Dynamic Coupled LogitNorm layer for multi-label classification.
 
@@ -615,7 +614,7 @@ class DynamicCoupledLogitNorm(Layer):
 # ---------------------------------------------------------------------
 
 @keras.utils.register_keras_serializable()
-class OODRobustLogitNorm(Layer):
+class OODRobustLogitNorm(keras.layers.Layer):
     """
     LogitNorm layer specifically designed for OOD robustness.
 
@@ -686,7 +685,7 @@ class OODRobustLogitNorm(Layer):
 # ---------------------------------------------------------------------
 
 @keras.utils.register_keras_serializable()
-class HybridLogitRMSNorm(Layer):
+class HybridLogitRMSNorm(keras.layers.Layer):
     """
     Hybrid normalization layer combining LogitNorm and RMSNorm approaches.
 
