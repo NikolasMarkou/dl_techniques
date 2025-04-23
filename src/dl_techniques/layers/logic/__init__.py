@@ -1,7 +1,6 @@
-# Import advanced fuzzy logic gates
-from .logical_operations import LogicSystem, LogicalOperations
-from .advanced_logic_gate import AdvancedLogicGateLayer, BoundsLayer
-from .advanced_gates import (
+from .logic_operations import LogicSystem, LogicalOperations
+from .logic_gates import AdvancedLogicGateLayer, BoundsLayer
+from .fuzzy_gates import (
     FuzzyANDGateLayer,
     FuzzyORGateLayer,
     FuzzyNOTGateLayer,

@@ -1,13 +1,19 @@
 """
 Advanced logic gate base layer with support for fuzzy logic systems,
-truth bounds, and bidirectional reasoning.
+truth bounds, and bidirectional reasoning for Keras 3.x.
 """
 
 import keras
-import tensorflow as tf
-from typing import Optional, Union, Callable
+from keras import ops
+from typing import Optional, Union, Callable, Any, Tuple, List, Dict
 
-from .logical_operations import LogicSystem
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from .logic_operations import LogicSystem
+
+# ---------------------------------------------------------------------
 
 
 class AdvancedLogicGateLayer(keras.layers.Layer):
@@ -34,6 +40,15 @@ class AdvancedLogicGateLayer(keras.layers.Layer):
         activity_regularizer: Regularizer for layer output
         kernel_constraint: Constraint for kernel weights
         bias_constraint: Constraint for bias vector
+        **kwargs: Additional keyword arguments for the base Layer
+
+    Input shape:
+        Single tensor or list of tensors with shape (batch_size, ...), or
+        tuples of (lower_bound, upper_bound) tensors if using bounds.
+
+    Output shape:
+        Tensor with shape matching input shape, or tuple of
+        (lower_bound, upper_bound) tensors if using bounds.
     """
 
     def __init__(
@@ -57,7 +72,19 @@ class AdvancedLogicGateLayer(keras.layers.Layer):
         """Initialize the advanced logic gate layer."""
         super().__init__(activity_regularizer=activity_regularizer, **kwargs)
         self.operation = operation
-        self.logic_system = logic_system
+
+        # Convert string to enum if needed
+        if isinstance(logic_system, str):
+            try:
+                self.logic_system = LogicSystem(logic_system.lower())
+            except ValueError:
+                valid_systems = [system.value for system in LogicSystem]
+                raise ValueError(
+                    f"Invalid logic system: {logic_system}. Must be one of {valid_systems}"
+                )
+        else:
+            self.logic_system = logic_system
+
         self.use_bounds = use_bounds
         self.trainable_weights_flag = trainable_weights
         self.initial_weight = initial_weight
@@ -79,7 +106,7 @@ class AdvancedLogicGateLayer(keras.layers.Layer):
         self.bias = None
         self.weights_var = None
 
-    def build(self, input_shape):
+    def build(self, input_shape: Union[List, Tuple, Any]) -> None:
         """
         Build the layer based on input shape.
 
@@ -118,9 +145,20 @@ class AdvancedLogicGateLayer(keras.layers.Layer):
                 trainable=False,
             )
 
+        # Add bias if used
+        if self.use_bias:
+            self.bias = self.add_weight(
+                name='bias',
+                shape=(1,),
+                initializer=self.bias_initializer,
+                regularizer=self.bias_regularizer,
+                constraint=self.bias_constraint,
+                trainable=True,
+            )
+
         self.built = True
 
-    def call(self, inputs, training=None):
+    def call(self, inputs: Any, training: Optional[bool] = None) -> Any:
         """
         Forward pass for the logic gate.
 
@@ -140,15 +178,13 @@ class AdvancedLogicGateLayer(keras.layers.Layer):
         # Update truth bounds if using them
         if self.use_bounds and training:
             if isinstance(result, tuple):
-                self.lower_bound.assign(result[0])
-                self.upper_bound.assign(result[1])
+                self._update_bounds(result[0], result[1])
             else:
-                self.lower_bound.assign(result)
-                self.upper_bound.assign(result)
+                self._update_bounds(result, result)
 
         return result
 
-    def _process_inputs(self, inputs):
+    def _process_inputs(self, inputs: Any) -> Any:
         """
         Process inputs, handling lists and applying weights if needed.
 
@@ -186,7 +222,7 @@ class AdvancedLogicGateLayer(keras.layers.Layer):
 
         return inputs
 
-    def _apply_operation(self, x):
+    def _apply_operation(self, x: Any) -> Any:
         """
         Apply the logical operation to the inputs.
 
@@ -207,24 +243,49 @@ class AdvancedLogicGateLayer(keras.layers.Layer):
         elif isinstance(x, list):
             # Check if we have a unary operation
             if len(x) == 1:
-                return self.operation(x[0], logic_system=self.logic_system, temperature=self.temperature)
-
+                result = self.operation(x[0], logic_system=self.logic_system, temperature=self.temperature)
             # Apply binary operation to first two elements
             elif len(x) == 2:
-                return self.operation(x[0], x[1], logic_system=self.logic_system, temperature=self.temperature)
-
+                result = self.operation(x[0], x[1], logic_system=self.logic_system, temperature=self.temperature)
             # For more than two inputs, apply operation sequentially
             else:
                 result = x[0]
                 for i in range(1, len(x)):
                     result = self.operation(result, x[i], logic_system=self.logic_system, temperature=self.temperature)
-                return result
 
+            # Apply bias if used
+            if self.use_bias and self.bias is not None:
+                result = result + self.bias
+
+            return result
         else:
             # Single tensor input (for unary operations like NOT)
-            return self.operation(x, logic_system=self.logic_system, temperature=self.temperature)
+            result = self.operation(x, logic_system=self.logic_system, temperature=self.temperature)
 
-    def get_bounds(self):
+            # Apply bias if used
+            if self.use_bias and self.bias is not None:
+                result = result + self.bias
+
+            return result
+
+    def _update_bounds(self, lower: Any, upper: Any) -> None:
+        """
+        Update the truth bounds based on new values.
+
+        Args:
+            lower: Lower bound tensor
+            upper: Upper bound tensor
+        """
+        if self.lower_bound is not None and self.upper_bound is not None:
+            # Ensure bounds are updated correctly with backend-agnostic operations
+            new_lower = ops.minimum(self.lower_bound, ops.reduce_min(lower))
+            new_upper = ops.maximum(self.upper_bound, ops.reduce_max(upper))
+
+            # Update the weights
+            self.lower_bound.assign(new_lower)
+            self.upper_bound.assign(new_upper)
+
+    def get_bounds(self) -> Optional[Tuple[Any, Any]]:
         """
         Get the current truth bounds of this gate.
 
@@ -235,7 +296,7 @@ class AdvancedLogicGateLayer(keras.layers.Layer):
             return self.lower_bound.numpy(), self.upper_bound.numpy()
         return None
 
-    def get_config(self):
+    def get_config(self) -> Dict[str, Any]:
         """
         Get the configuration of the layer.
 
@@ -244,7 +305,7 @@ class AdvancedLogicGateLayer(keras.layers.Layer):
         """
         config = super().get_config()
         config.update({
-            'logic_system': self.logic_system,
+            'logic_system': self.logic_system.value if isinstance(self.logic_system, LogicSystem) else self.logic_system,
             'use_bounds': self.use_bounds,
             'trainable_weights_flag': self.trainable_weights_flag,
             'initial_weight': self.initial_weight,
@@ -254,13 +315,36 @@ class AdvancedLogicGateLayer(keras.layers.Layer):
             'bias_initializer': keras.initializers.serialize(self.bias_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
             'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
-            'activity_regularizer': keras.regularizers.serialize(self.activity_regularizer),
             'kernel_constraint': keras.constraints.serialize(self.kernel_constraint),
             'bias_constraint': keras.constraints.serialize(self.bias_constraint),
         })
         # Note: We don't serialize 'operation' because functions aren't directly serializable
         # It will need to be provided when loading the model
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any], custom_objects: Optional[Dict[str, Any]] = None) -> 'AdvancedLogicGateLayer':
+        """
+        Create a layer from its config.
+
+        Args:
+            config: Layer configuration dictionary
+            custom_objects: Dictionary mapping names to custom objects
+
+        Returns:
+            A new instance of the layer
+
+        Note:
+            This implementation requires manually providing the 'operation' when loading
+            since functions cannot be directly serialized.
+        """
+        # The operation needs to be provided manually when loading
+        if 'operation' not in config and custom_objects and 'operation' in custom_objects:
+            config['operation'] = custom_objects['operation']
+        else:
+            raise ValueError("The 'operation' function must be provided in custom_objects when loading the model")
+
+        return cls(**config)
 
 
 class BoundsLayer(keras.layers.Layer):
@@ -274,6 +358,20 @@ class BoundsLayer(keras.layers.Layer):
         initial_lower: Initial lower bound value
         initial_upper: Initial upper bound value
         trainable: Whether bounds are trainable
+        **kwargs: Additional keyword arguments for the base Layer
+
+    Input shape:
+        Tensor of shape (batch_size, ...)
+
+    Output shape:
+        Tuple of tensors (lower_bound, upper_bound) each with shape (batch_size, ...)
+
+    Example:
+        >>> bounds_layer = BoundsLayer(initial_lower=0.1, initial_upper=0.9)
+        >>> x = keras.random.uniform((4, 5), 0, 1)
+        >>> lower, upper = bounds_layer(x)
+        >>> print(lower.shape, upper.shape)
+        (4, 5) (4, 5)
     """
 
     def __init__(
@@ -287,9 +385,9 @@ class BoundsLayer(keras.layers.Layer):
         super().__init__(**kwargs)
         self.initial_lower = initial_lower
         self.initial_upper = initial_upper
-        self.trainable = trainable
+        self.trainable_bounds = trainable  # Renamed to avoid conflict with Layer.trainable
 
-    def build(self, input_shape):
+    def build(self, input_shape: Any) -> None:
         """
         Build the layer.
 
@@ -300,19 +398,19 @@ class BoundsLayer(keras.layers.Layer):
             name='lower_bound',
             shape=(1,),
             initializer=keras.initializers.Constant(self.initial_lower),
-            trainable=self.trainable,
+            trainable=self.trainable_bounds,
         )
 
         self.upper_bound = self.add_weight(
             name='upper_bound',
             shape=(1,),
             initializer=keras.initializers.Constant(self.initial_upper),
-            trainable=self.trainable,
+            trainable=self.trainable_bounds,
         )
 
         self.built = True
 
-    def call(self, inputs, training=None):
+    def call(self, inputs: Any, training: Optional[bool] = None) -> Tuple[Any, Any]:
         """
         Forward pass of the bounds layer.
 
@@ -325,13 +423,21 @@ class BoundsLayer(keras.layers.Layer):
         """
         # Update bounds based on input
         if training:
-            # In training, update bounds based on input
-            self.lower_bound.assign(tf.minimum(self.lower_bound, inputs))
-            self.upper_bound.assign(tf.maximum(self.upper_bound, inputs))
+            # In training, update bounds based on input using backend-agnostic operations
+            new_lower = ops.minimum(self.lower_bound, ops.reduce_min(inputs))
+            new_upper = ops.maximum(self.upper_bound, ops.reduce_max(inputs))
 
-        return (self.lower_bound, self.upper_bound)
+            # Update the weights
+            self.lower_bound.assign(new_lower)
+            self.upper_bound.assign(new_upper)
 
-    def get_bounds(self):
+        # Broadcast bounds to match input shape
+        broadcast_lower = ops.broadcast_to(self.lower_bound, ops.shape(inputs))
+        broadcast_upper = ops.broadcast_to(self.upper_bound, ops.shape(inputs))
+
+        return (broadcast_lower, broadcast_upper)
+
+    def get_bounds(self) -> Tuple[Any, Any]:
         """
         Get the current truth bounds.
 
@@ -340,7 +446,7 @@ class BoundsLayer(keras.layers.Layer):
         """
         return self.lower_bound.numpy(), self.upper_bound.numpy()
 
-    def get_config(self):
+    def get_config(self) -> Dict[str, Any]:
         """
         Get the configuration of the layer.
 
@@ -351,6 +457,6 @@ class BoundsLayer(keras.layers.Layer):
         config.update({
             'initial_lower': self.initial_lower,
             'initial_upper': self.initial_upper,
-            'trainable': self.trainable,
+            'trainable': self.trainable_bounds,
         })
         return config
