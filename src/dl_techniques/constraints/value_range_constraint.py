@@ -4,7 +4,7 @@ from typing import Dict, Union, Optional
 
 # ---------------------------------------------------------------------
 
-@keras.utils.register_keras_serializable()
+@keras.saving.register_keras_serializable()
 class ValueRangeConstraint(keras.constraints.Constraint):
     """Constrains weights to be within specified minimum and maximum values.
 

@@ -59,9 +59,8 @@ References
 
 
 import keras
-import tensorflow as tf
-from keras.api.layers import Layer
-from typing import Tuple, Any, Optional, Union
+from keras import ops
+from typing import Any, Dict, Optional, Union
 
 # ---------------------------------------------------------------------
 # local imports
@@ -72,7 +71,8 @@ from dl_techniques.constraints.value_range_constraint import ValueRangeConstrain
 # ---------------------------------------------------------------------
 
 
-class RBFLayer(Layer):
+@keras.saving.register_keras_serializable()
+class RBFLayer(keras.layers.Layer):
     """
     Enhanced Radial Basis Function Layer with Stable Center Repulsion.
 
@@ -108,7 +108,7 @@ class RBFLayer(Layer):
             trainable_gamma: bool = True,
             safety_margin: float = 0.2,
             **kwargs: Any
-    ) -> None:
+    ):
         """Initialize the RBF layer with enhanced parameters."""
         # Input validation
         if units < 1:
@@ -145,12 +145,12 @@ class RBFLayer(Layer):
         self.gamma = None
         self._feature_dim = None  # Store dimensionality for scaling
 
-    def build(self, input_shape: Tuple[int, ...]) -> None:
+    def build(self, input_shape):
         """
         Create the layer's weights with improved initialization.
 
         Args:
-            input_shape: Tuple of integers, the shape of input tensor.
+            input_shape: Shape tuple indicating the input shape of the layer.
 
         Raises:
             ValueError: If input_shape has less than 2 dimensions.
@@ -170,28 +170,26 @@ class RBFLayer(Layer):
             initializer=self.center_initializer,
             constraint=self.center_constraint,
             trainable=True,
-            dtype=self.dtype
         )
 
         # Create gamma (precision) parameter with non-negativity constraint
         self.gamma = self.add_weight(
             name='gamma',
             shape=(self.units,),
-            initializer=tf.constant_initializer(self.gamma_init),
+            initializer=keras.initializers.Constant(self.gamma_init),
             constraint=ValueRangeConstraint(min_value=1e-5, max_value=None, clip_gradients=False),
             regularizer=keras.regularizers.L2(1e-5),
             trainable=self.trainable_gamma,
-            dtype=self.dtype
         )
 
-        super().build(input_shape)
+        self.built = True
 
     def _compute_pairwise_distances(
             self,
-            x: tf.Tensor,
-            y: tf.Tensor,
+            x,
+            y,
             epsilon: float = 1e-12
-    ) -> tf.Tensor:
+    ):
         """
         Compute pairwise squared Euclidean distances with improved stability.
 
@@ -204,22 +202,22 @@ class RBFLayer(Layer):
             Tensor of shape (n, m) containing squared distances.
         """
         # Compute squared norms
-        x_norm = tf.reduce_sum(tf.square(x), axis=-1)
-        y_norm = tf.reduce_sum(tf.square(y), axis=-1)
+        x_norm = ops.sum(ops.square(x), axis=-1)
+        y_norm = ops.sum(ops.square(y), axis=-1)
 
         # Reshape for broadcasting
-        x_norm = tf.reshape(x_norm, [-1, 1])  # Shape: (n, 1)
-        y_norm = tf.reshape(y_norm, [1, -1])  # Shape: (1, m)
+        x_norm = ops.reshape(x_norm, [-1, 1])  # Shape: (n, 1)
+        y_norm = ops.reshape(y_norm, [1, -1])  # Shape: (1, m)
 
         # Compute cross term
-        cross_term = 2 * tf.matmul(x, y, transpose_b=True)
+        cross_term = 2 * ops.matmul(x, ops.transpose(y))
 
         # Combine terms with numeric stability
         distances = x_norm - cross_term + y_norm + epsilon
 
-        return tf.maximum(distances, 0.0)  # Ensure non-negative
+        return ops.maximum(distances, 0.0)  # Ensure non-negative
 
-    def _compute_repulsion(self, centers: tf.Tensor) -> tf.Tensor:
+    def _compute_repulsion(self, centers):
         """
         Compute the enhanced repulsion regularization term.
 
@@ -237,25 +235,21 @@ class RBFLayer(Layer):
         # Compute pairwise distances with stability
         distances = self._compute_pairwise_distances(centers, centers)
 
-        # Create mask to exclude self-distances
-        mask = tf.ones_like(distances) - tf.eye(self.units)
+        # Create mask to exclude self-distances (diagonal elements)
+        mask = ops.ones_like(distances) - ops.eye(self.units)
 
         # Compute repulsion with improved formula
-        sqrt_dist = tf.sqrt(distances)
-        repulsion = tf.square(tf.maximum(0.0, effective_min_dist - sqrt_dist))
+        sqrt_dist = ops.sqrt(distances)
+        repulsion = ops.square(ops.maximum(0.0, effective_min_dist - sqrt_dist))
 
         # Scale repulsion by dimensionality
-        dim_scale = tf.cast(self._feature_dim, tf.float32)
+        dim_scale = ops.cast(self._feature_dim, 'float32')
         scaled_repulsion = self.repulsion_strength * dim_scale * \
-                           tf.reduce_mean(repulsion * mask)
+                           ops.mean(repulsion * mask)
 
         return scaled_repulsion
 
-    def call(
-            self,
-            inputs: tf.Tensor,
-            training: Optional[bool] = None
-    ) -> tf.Tensor:
+    def call(self, inputs, training=None):
         """
         Forward pass with improved numerical stability.
 
@@ -270,8 +264,14 @@ class RBFLayer(Layer):
         distances = self._compute_pairwise_distances(inputs, self.centers)
 
         # Compute RBF activations with stable exponentiation
-        gamma_expanded = tf.expand_dims(self.gamma, 0)  # Shape: (1, units)
-        activations = tf.exp(-tf.minimum(gamma_expanded * distances, 50.0))
+        # First expand gamma to match the shape needed for broadcasting
+        gamma_expanded = ops.expand_dims(self.gamma, 0)  # Shape: (1, units)
+
+        # Cap the exponent to prevent numerical overflow
+        bounded_exponent = ops.minimum(gamma_expanded * distances, 50.0)
+
+        # Calculate activations: exp(-γ||x-c||²)
+        activations = ops.exp(-bounded_exponent)
 
         # Add repulsion loss in training mode
         if training:
@@ -279,8 +279,22 @@ class RBFLayer(Layer):
 
         return activations
 
-    def get_config(self) -> dict:
-        """Return layer configuration."""
+    def compute_output_shape(self, input_shape):
+        """
+        Compute the output shape based on input shape.
+
+        Args:
+            input_shape: Shape of the input tensor
+
+        Returns:
+            Output shape with last dimension replaced by units
+        """
+        output_shape = list(input_shape)
+        output_shape[-1] = self.units
+        return tuple(output_shape)
+
+    def get_config(self):
+        """Return layer configuration for serialization."""
         config = super().get_config()
         config.update({
             'units': self.units,
@@ -297,11 +311,11 @@ class RBFLayer(Layer):
         return config
 
     @property
-    def center_positions(self) -> tf.Tensor:
+    def center_positions(self):
         """Get current positions of RBF centers."""
-        return tf.identity(self.centers)
+        return self.centers
 
     @property
-    def width_values(self) -> tf.Tensor:
+    def width_values(self):
         """Get current width (gamma) values."""
-        return tf.identity(self.gamma)
+        return self.gamma

@@ -10,13 +10,7 @@ to create a powerful feature transformation block without self-attention.
 import keras
 from typing import Optional, Union, Literal, Any
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.layers.conv2d_builder import activation_wrapper
-
-# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -123,12 +117,13 @@ class GatedMLP(keras.layers.Layer):
         if self.data_format not in {"channels_first", "channels_last"}:
             raise ValueError(f"data_format must be 'channels_first' or 'channels_last', got {data_format}")
 
-        # Will be defined in build()
+        # These will be initialized in build()
         self.conv_gate = None
         self.conv_up = None
         self.conv_down = None
-        self.attention_activation_fn = None
-        self.output_activation_fn = None
+
+        # Store the build shape for serialization
+        self._build_input_shape = None
 
     def build(self, input_shape):
         """Build the GatedMLP layer.
@@ -136,6 +131,9 @@ class GatedMLP(keras.layers.Layer):
         Args:
             input_shape: Shape tuple of the input tensor.
         """
+        # Store input shape for serialization
+        self._build_input_shape = input_shape
+
         # Create the convolution layers
         self.conv_gate = keras.layers.Conv2D(
             filters=self.filters,
@@ -150,6 +148,7 @@ class GatedMLP(keras.layers.Layer):
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
         )
+        self.conv_gate.build(input_shape)
 
         self.conv_up = keras.layers.Conv2D(
             filters=self.filters,
@@ -164,6 +163,14 @@ class GatedMLP(keras.layers.Layer):
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
         )
+        self.conv_up.build(input_shape)
+
+        # Calculate the shape for the intermediate tensor after gate and up paths
+        input_shape_list = list(input_shape)
+        if self.data_format == "channels_last":
+            intermediate_shape = tuple(input_shape_list[:-1] + [self.filters])
+        else:  # channels_first
+            intermediate_shape = tuple([input_shape_list[0], self.filters] + input_shape_list[2:])
 
         self.conv_down = keras.layers.Conv2D(
             filters=self.filters,
@@ -178,10 +185,11 @@ class GatedMLP(keras.layers.Layer):
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
         )
+        self.conv_down.build(intermediate_shape)
 
-        # Set up activation functions
+        # Set up activation functions directly instead of using external function
         self.attention_activation_fn = activation_wrapper(self.attention_activation)
-        self.output_activation_fn =activation_wrapper(self.output_activation)
+        self.output_activation_fn = activation_wrapper(self.output_activation)
 
         super().build(input_shape)
 
@@ -224,10 +232,13 @@ class GatedMLP(keras.layers.Layer):
         Returns:
             Output shape.
         """
+        # Convert input_shape to a list if it's a tuple or TensorShape
+        input_shape_list = list(input_shape)
+
         if self.data_format == "channels_last":
-            return (*input_shape[:-1], self.filters)
+            return tuple(input_shape_list[:-1] + [self.filters])
         else:  # channels_first
-            return (input_shape[0], self.filters, *input_shape[2:])
+            return tuple([input_shape_list[0], self.filters] + input_shape_list[2:])
 
     def get_config(self):
         """Return the configuration of the layer for serialization.
@@ -249,4 +260,23 @@ class GatedMLP(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
+    def get_build_config(self):
+        """Get the config needed to build the layer from a config.
+
+        This method is needed for proper model saving and loading.
+
+        Returns:
+            Dictionary containing the build configuration.
+        """
+        return {
+            "input_shape": self._build_input_shape,
+        }
+
+    def build_from_config(self, config):
+        """Build the layer from a config created with get_build_config.
+
+        Args:
+            config: Dictionary containing the build configuration.
+        """
+        if config.get("input_shape") is not None:
+            self.build(config["input_shape"])
