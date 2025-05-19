@@ -1,3 +1,123 @@
+"""
+# SparseAttention Layer
+
+A Keras layer implementing sparse attention mechanisms to improve efficiency and interpretability
+of transformer models by reducing the number of non-zero attention weights.
+
+## Conceptual Overview
+
+Standard transformer attention creates a dense attention matrix where every query token attends to
+every key token, leading to quadratic complexity with sequence length. Sparse attention introduces
+controlled sparsity by keeping only the most important connections and pruning low-importance weights.
+
+This implementation offers two sparsification strategies:
+
+1. **Direct Thresholding**: Apply a single threshold to softmax outputs, preserving only weights
+   above the threshold and renormalizing.
+2. **Iterative Sparsification (Variant B)**: Progressively increase the threshold over iterations,
+   converging toward a near-one-hot distribution.
+
+### Mathematical Description:
+
+#### Direct Thresholding:
+* Apply softmax: `p = softmax(QK^T / sqrt(d_k))`
+* Apply threshold: `p_sparse = where(p >= threshold, p, 0)`
+* Renormalize: `p_final = p_sparse / sum(p_sparse)`
+
+#### Iterative Sparsification (Variant B):
+* **Iteration 0**:
+  * Apply softmax: `p = softmax(QK^T / sqrt(d_k))`
+  * Initial threshold τ₀ = 1/N (where N is sequence length)
+  * Prune weights: `p = where(p >= τ₀, p, 0)`
+  * Renormalize: `p = p / sum(p)`
+
+* **Iterations 1...max_iterations**:
+  * Increase threshold: τᵢ = 1/(α^i × N) where α ∈ (0,1)
+  * Prune weights: `p = where(p >= τᵢ, p, 0)`
+  * Ensure argmax fallback for all-zero rows
+  * Renormalize: `p = p / sum(p)`
+  * Stop if all rows have ≤ 1 non-zero element
+
+### Key Benefits:
+
+1. **Computational Efficiency**: Reduced number of attention connections may lead to computational savings.
+2. **Improved Interpretability**: Sparser attention maps provide clearer visibility into which tokens are relevant.
+3. **Better Representations**: By focusing on key relationships, sparse attention can produce cleaner feature representations.
+4. **Automatic Statistical Threshold**: Using 1/N as threshold has a sound interpretation - values below
+   uniform distribution are "no better than random".
+
+## Implementation Details
+
+This layer is designed for full compatibility with Keras and TensorFlow's XLA compilation:
+
+* **Graph-Mode Compatible**: All operations are designed for `@tf.function` and XLA compilation.
+* **Hardware Accelerator Optimized**: Tensor operations leverage efficient XLA fusion patterns.
+* **Numerically Stable**: All division operations include epsilon terms to prevent divide-by-zero.
+* **Memory Efficient**: Conditional computation for one-hot fallbacks only when needed.
+* **Backend Agnostic**: Uses `keras.ops` for compatibility across TensorFlow/JAX/PyTorch.
+* **Serialization Support**: Complete get_config() and build_from_config() implementations.
+* **Per-Sample Early Stopping**: Allows different samples to reach convergence independently.
+
+The layer can be used as a drop-in replacement for `keras.layers.MultiHeadAttention` with the
+added benefit of sparsification.
+
+## Usage Examples:
+
+```python
+# Basic usage with default settings
+attention = SparseAttention(
+    num_heads=8,
+    key_dim=64
+)
+
+# With statistical threshold and direct sparsification
+attention = SparseAttention(
+    num_heads=8,
+    key_dim=64,
+    threshold="auto",
+    iterative_sparsification=False
+)
+
+# Aggressive iterative sparsification
+attention = SparseAttention(
+    num_heads=8,
+    key_dim=64,
+    iterative_sparsification=True,
+    alpha=0.5,  # More aggressive reduction
+    max_iterations=5
+)
+
+# In a transformer encoder
+def transformer_encoder_block(inputs, training=None):
+    attention_output = SparseAttention(
+        num_heads=8,
+        key_dim=64,
+        dropout=0.1,
+        causal=False
+    )(inputs, training=training)
+    attention_output = layers.LayerNormalization()(inputs + attention_output)
+    ffn_output = feed_forward_network(attention_output)
+    return layers.LayerNormalization()(attention_output + ffn_output)
+```
+
+## Performance Considerations:
+
+* **Memory**: Sparse attention still allocates the full attention matrix before sparsification.
+* **Speed**: For short sequences (<512 tokens), the overhead of sparsification may outweigh benefits.
+* **Sparsity Level**: Threshold of 0.1-0.5 typically provides good sparsity with minimal accuracy impact.
+* **Alpha Value**: Higher alpha (0.8-0.9) provides gentler progression, while lower alpha (0.4-0.6)
+  aggressively converges to one-hot attention.
+* **Iterations**: 2-4 iterations are typically sufficient; more iterations increase sparsity but add computation.
+
+## Implementation Efficiency Notes:
+
+* The iterative sparsification algorithm is fully vectorized for TPU/GPU acceleration.
+* Conditional computation is used to avoid wasteful calculations.
+* Early stopping is implemented on a per-sample basis for efficiency.
+* Tensor operations are carefully structured to enable compiler fusion.
+* All operations are numerically stable with proper epsilon handling.
+"""
+
 import keras
 from keras import ops
 from typing import Optional, Union, Any
