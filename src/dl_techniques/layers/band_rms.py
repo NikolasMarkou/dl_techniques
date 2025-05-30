@@ -77,7 +77,7 @@ class BandRMS(keras.layers.Layer):
 
     def __init__(
             self,
-            max_band_width: float = 0.2,
+            max_band_width: float = 0.1,
             axis: int = -1,
             epsilon: float = 1e-7,
             band_regularizer: Optional[keras.regularizers.Regularizer] = None,

@@ -1,23 +1,127 @@
 """
-MNIST CNN Normalization Comparison
-================================
+MNIST CNN Normalization Comparison Experiment
+===========================================
 
-This module implements a configurable experiment for comparing different
-normalization techniques in CNN models for MNIST digit classification.
+This module implements a comprehensive experiment to evaluate and compare the effectiveness
+of different normalization techniques applied to Convolutional Neural Networks (CNNs) for
+MNIST digit classification. The experiment systematically compares three model variants:
+baseline (no normalization), RMS normalization, and Logit normalization.
 
-Features:
-- Multiple normalization types (RMS, Logit)
-- Configurable model architectures
-- Comprehensive visualization
-- Detailed analysis tools
+EXPERIMENT OVERVIEW
+------------------
+The experiment trains three CNN models with identical architectures but different
+normalization strategies applied to the final layer before softmax activation:
+
+1. **Baseline Model**: Standard CNN without additional normalization
+2. **RMS Normalization**: Applies Root Mean Square normalization to stabilize outputs
+3. **Logit Normalization**: Applies temperature-scaled logit normalization for calibrated predictions*
+4. **Band RMS Normalization**: Root Mean Square Normalization with Bounded Spherical Shell Constraints*
+
+METHODOLOGY
+-----------
+Each model follows the same training protocol:
+- Architecture: 4 convolutional blocks (16, 32, 64, 128 filters) with batch normalization
+- Dense layer: Single hidden layer with 32 units
+- Regularization: Dropout layers and L2 weight decay
+- Training: Adam optimizer with early stopping based on validation accuracy
+- Evaluation: Comprehensive performance and weight distribution analysis
+
+MODEL ARCHITECTURE
+------------------
+- Input: 28x28x1 grayscale MNIST images
+- Conv Blocks: Conv2D → BatchNorm → ReLU → MaxPool2D → Dropout
+- Dense Block: Dense → BatchNorm → ReLU → Dropout
+- Output: Dense(10) → [Optional Normalization] → Softmax
+- Regularization: L2 weight decay (0.01) and dropout (0.25-0.5)
+
+ANALYSIS OUTPUTS
+---------------
+The experiment generates comprehensive analysis across multiple dimensions:
+
+**Training Analysis:**
+- Training/validation accuracy and loss curves for all models
+- Early stopping behavior and convergence patterns
+- Comparative performance metrics
+
+**Weight Distribution Analysis:**
+- L1, L2, and RMS norm distributions across layers
+- Layer-wise weight statistics comparison
+- Weight distribution heatmaps and histograms
+- Bias term analysis for all normalization variants
+
+**Model Performance Analysis:**
+- Confusion matrices for each model variant
+- Classification accuracy, precision, recall, F1-scores
+- Model comparison visualizations
+- Performance metric summaries
+
+**Visualization Outputs:**
+- Training history plots (accuracy/loss over epochs)
+- Weight norm distribution comparisons
+- Layer-wise statistical analysis plots
+- Confusion matrix heatmaps
+- Weight histogram distributions
+
+CONFIGURATION
+------------
+All experiment parameters are centralized in the Config class:
+- Model architecture parameters (filters, units, dropout rates)
+- Training hyperparameters (epochs, batch size, learning rate)
+- Normalization settings (temperature for LogitNorm)
+- Analysis options (which metrics to compute, plot formats)
+- Output directory and experiment naming
+
+USAGE
+-----
+To run with default settings:
+    python mnist_normalization_experiment.py
+
+To customize the experiment, modify the Config class parameters:
+    config = Config()
+    config.epochs = 10
+    config.batch_size = 256
+    config.conv_filters = [32, 64, 128, 256]
+    results = run_experiment(config)
+
+DEPENDENCIES
+-----------
+- TensorFlow/Keras for deep learning models
+- NumPy for numerical computations
+- Custom dl_techniques package for:
+  - RMSNorm and LogitNorm layers
+  - Training utilities and model analysis
+  - Visualization and weight analysis tools
+  - MNIST data preprocessing utilities
+
+OUTPUT STRUCTURE
+---------------
+results/
+├── mnist_normalization_with_weight_analysis_TIMESTAMP/
+│   ├── baseline/          # Baseline model checkpoints and logs
+│   ├── rms/              # RMS normalized model outputs
+│   ├── logit/            # Logit normalized model outputs
+│   ├── visualizations/   # Training plots and comparisons
+│   └── weight_analysis/  # Weight distribution analysis plots
+
+RESEARCH APPLICATIONS
+--------------------
+This experiment framework is designed for:
+- Comparing normalization technique effectiveness
+- Analyzing training stability and convergence
+- Understanding weight distribution patterns
+- Evaluating model calibration and confidence
+- Benchmarking custom normalization methods
+
+The modular design allows easy extension to additional normalization techniques,
+different datasets, or alternative model architectures while maintaining
+comprehensive analysis capabilities.
 
 Organization:
 1. Imports and type definitions
-2. Configuration classes
+2. Single configuration class
 3. Model building utilities
-4. Analysis utilities
-5. Experiment runner
-6. Main execution
+4. Experiment runner
+5. Main execution
 """
 
 # ------------------------------------------------------------------------------
@@ -33,57 +137,25 @@ from typing import Dict, Any, Optional, List, Literal, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.model_analyzer import ModelAnalyzer
+from dl_techniques.layers.band_rms import BandRMS
 from dl_techniques.layers.rms_logit_norm import RMSNorm, LogitNorm
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.utils.datasets import load_and_preprocess_mnist
 from dl_techniques.utils.weight_analyzer import WeightAnalyzerConfig, WeightAnalyzer
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 
-
-
 # ------------------------------------------------------------------------------
-# 2. Configuration Classes
+# 2. Single Configuration Class
 # ------------------------------------------------------------------------------
 
 @dataclass
-class WeightAnalysisConfig:
-    """Configuration for weight distribution analysis.
+class Config:
+    """Unified configuration for the MNIST normalization experiment.
 
-    Attributes:
-        compute_l1_norm: Whether to compute L1 norms
-        compute_l2_norm: Whether to compute L2 norms
-        compute_rms_norm: Whether to compute RMS norms
-        analyze_biases: Whether to analyze bias terms
-        save_plots: Whether to save analysis plots
-        plot_format: Format for saving plots
-        plot_style: Style for matplotlib plots
+    Contains all parameters for model architecture, training, visualization,
+    and weight analysis in a single consolidated configuration class.
     """
-    compute_l1_norm: bool = True
-    compute_l2_norm: bool = True
-    compute_rms_norm: bool = True
-    analyze_biases: bool = True
-    save_plots: bool = True
-    plot_format: str = 'png'
-    plot_style: str = 'default'  # Using default style for better compatibility
-
-
-@dataclass
-class ModelConfig:
-    """Configuration for model architecture and training.
-
-    Attributes:
-        input_shape: Shape of input images (height, width, channels)
-        num_classes: Number of classification categories
-        conv_filters: Number of filters in each convolutional layer
-        dense_units: Number of units in each dense layer
-        dropout_rates: Dropout rate for each layer (conv and dense)
-        kernel_size: Size of convolutional kernels
-        pool_size: Size of max pooling windows
-        weight_decay: L2 regularization factor
-        norm_type: Type of normalization to apply ('rms', 'logit', or None)
-        gaussian_noise_std: Standard deviation for Gaussian noise
-        temperature: Temperature parameter for LogitNorm
-    """
+    # Model Architecture Parameters
     input_shape: Tuple[int, ...] = (28, 28, 1)
     num_classes: int = 10
     conv_filters: List[int] = (16, 32, 64, 128)
@@ -92,38 +164,40 @@ class ModelConfig:
     kernel_size: Union[int, Tuple[int, int]] = (3, 3)
     pool_size: Union[int, Tuple[int, int]] = (2, 2)
     weight_decay: float = 0.01
-    norm_type: Optional[Literal[None, 'rms', 'logit']] = None
     gaussian_noise_std: float = 0.1
     temperature: float = 0.04
 
+    # Training Parameters
+    epochs: int = 3
+    batch_size: int = 128
+    early_stopping_patience: int = 5
+    monitor_metric: str = 'val_accuracy'
+    learning_rate: float = 0.001
 
-@dataclass
-class ExperimentConfig:
-    """Configuration for the overall experiment.
+    # Weight Analysis Parameters
+    compute_l1_norm: bool = True
+    compute_l2_norm: bool = True
+    compute_rms_norm: bool = True
+    analyze_biases: bool = True
+    save_plots: bool = True
+    plot_format: str = 'png'
+    plot_style: str = 'default'
 
-    Attributes:
-        model_configs: Dictionary mapping model names to their configurations
-        training: Configuration for model training parameters
-        visualization: Configuration for visualization settings
-        weight_analysis: Configuration for weight analysis
-        output_dir: Directory for saving experiment outputs
-        experiment_name: Name of the experiment for logging and saving
-    """
-    model_configs: Dict[str, ModelConfig]
-    training: TrainingConfig
-    visualization: VisualizationConfig
-    weight_analysis: WeightAnalysisConfig
-    output_dir: Path
-    experiment_name: str
+    # Experiment Parameters
+    output_dir: Path = Path("results")
+    experiment_name: str = "mnist_normalization_with_weight_analysis"
 
+    # Model variants to test
+    normalization_types: List[Optional[Literal['rms', 'logit']]] = (None, 'rms', 'logit', 'band_rms')
 
 # ------------------------------------------------------------------------------
 # 3. Model Building Utilities
 # ------------------------------------------------------------------------------
+
 def build_conv_block(
         inputs: keras.layers.Layer,
         filters: int,
-        config: ModelConfig,
+        config: Config,
         block_index: int
 ) -> keras.layers.Layer:
     """Build a convolutional block with normalization and activation.
@@ -131,7 +205,7 @@ def build_conv_block(
     Args:
         inputs: Input tensor
         filters: Number of filters for conv layer
-        config: Model configuration
+        config: Unified configuration
         block_index: Index of the block for naming and dropout rate
 
     Returns:
@@ -157,7 +231,7 @@ def build_conv_block(
 def build_dense_block(
         inputs: keras.layers.Layer,
         units: int,
-        config: ModelConfig,
+        config: Config,
         dropout_rate: float
 ) -> keras.layers.Layer:
     """Build a dense block with normalization and activation.
@@ -165,7 +239,7 @@ def build_dense_block(
     Args:
         inputs: Input tensor
         units: Number of dense units
-        config: Model configuration
+        config: Unified configuration
         dropout_rate: Dropout rate to apply
 
     Returns:
@@ -181,11 +255,12 @@ def build_dense_block(
     return keras.layers.Dropout(dropout_rate)(x)
 
 
-def build_model(config: ModelConfig) -> keras.Model:
+def build_model(config: Config, norm_type: Optional[Literal['rms', 'logit', 'band_rms']] = None) -> keras.Model:
     """Build complete CNN model with specified configuration.
 
     Args:
-        config: Model configuration
+        config: Unified configuration
+        norm_type: Type of normalization to apply ('rms', 'logit', 'band_rms', or None)
 
     Returns:
         Compiled Keras model
@@ -210,16 +285,18 @@ def build_model(config: ModelConfig) -> keras.Model:
     )(x)
 
     # Add normalization if specified
-    if config.norm_type == 'rms':
+    if norm_type == 'rms':
         x = RMSNorm()(x)
-    elif config.norm_type == 'logit':
+    elif norm_type == 'logit':
         x = LogitNorm(temperature=config.temperature)(x)
+    elif norm_type == 'band_rms':
+        x = BandRMS()(x)
 
     outputs = keras.layers.Activation('softmax')(x)
     model = keras.Model(inputs=inputs, outputs=outputs)
 
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=0.001),
+        optimizer=keras.optimizers.Adam(learning_rate=config.learning_rate),
         loss='categorical_crossentropy',
         metrics=['accuracy']
     )
@@ -230,11 +307,12 @@ def build_model(config: ModelConfig) -> keras.Model:
 # ------------------------------------------------------------------------------
 # 4. Experiment Runner
 # ------------------------------------------------------------------------------
-def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
+
+def run_experiment(config: Config) -> Dict[str, Any]:
     """Run the complete normalization comparison experiment with weight analysis.
 
     Args:
-        config: Experiment configuration
+        config: Unified experiment configuration
 
     Returns:
         Dictionary containing experiment results including weight analysis
@@ -244,9 +322,10 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     experiment_dir = config.output_dir / f"{config.experiment_name}_{timestamp}"
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
+    vis_config = VisualizationConfig()
     vis_manager = VisualizationManager(
         output_dir=experiment_dir / "visualizations",
-        config=config.visualization
+        config=vis_config
     )
 
     # Load and preprocess data
@@ -261,16 +340,30 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         'val_loss': {}
     }
 
+    # Create model names based on normalization types
+    model_names = {
+        None: 'baseline',
+        'rms': 'rms',
+        'logit': 'logit',
+        'band_rms': 'band_rms'
+    }
+
     # Training phase
-    for name, model_config in config.model_configs.items():
+    for norm_type in config.normalization_types:
+        name = model_names[norm_type]
         logger.info(f"Training {name} model...")
-        model = build_model(model_config)
+        model = build_model(config, norm_type)
         model.summary(print_fn=logger.info)
 
         # Configure training for this model
-        model_training_config = config.training
-        model_training_config.model_name = name
-        model_training_config.output_dir = experiment_dir / name
+        training_config = TrainingConfig(
+            epochs=config.epochs,
+            batch_size=config.batch_size,
+            early_stopping_patience=config.early_stopping_patience,
+            monitor_metric=config.monitor_metric,
+            model_name=name,
+            output_dir=experiment_dir / name
+        )
 
         # Train the model
         history = train_model(
@@ -279,7 +372,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             mnist_data.y_train,
             mnist_data.x_test,
             mnist_data.y_test,
-            model_training_config
+            training_config
         )
 
         # Store the model
@@ -295,12 +388,12 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
     # Configure weight analyzer
     analysis_config = WeightAnalyzerConfig(
-        compute_l1_norm=config.weight_analysis.compute_l1_norm,
-        compute_l2_norm=config.weight_analysis.compute_l2_norm,
-        compute_rms_norm=config.weight_analysis.compute_rms_norm,
-        analyze_biases=config.weight_analysis.analyze_biases,
-        save_plots=config.weight_analysis.save_plots,
-        export_format=config.weight_analysis.plot_format,
+        compute_l1_norm=config.compute_l1_norm,
+        compute_l2_norm=config.compute_l2_norm,
+        compute_rms_norm=config.compute_rms_norm,
+        analyze_biases=config.analyze_biases,
+        save_plots=config.save_plots,
+        export_format=config.plot_format,
         plot_style='seaborn-darkgrid',
         color_palette='deep'
     )
@@ -369,45 +462,11 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
 def main():
     """Main execution function for running the experiment."""
-    # Define model configurations
-    base_model_config = ModelConfig()
-    model_configs = {
-        'baseline': base_model_config,
-        'rms': ModelConfig(norm_type='rms'),
-        'logit': ModelConfig(norm_type='logit')
-    }
-
-    # Define training configuration
-    training_config = TrainingConfig(
-        epochs=1,
-        batch_size=128,
-        early_stopping_patience=5,
-        monitor_metric='val_accuracy'
-    )
-
-    # Define weight analysis configuration
-    weight_analysis_config = WeightAnalysisConfig(
-        compute_l1_norm=True,
-        compute_l2_norm=True,
-        compute_rms_norm=True,
-        analyze_biases=True,
-        save_plots=True,
-        plot_format='png',
-        plot_style='default'  # Using default matplotlib style
-    )
-
-    # Create experiment configuration
-    experiment_config = ExperimentConfig(
-        model_configs=model_configs,
-        training=training_config,
-        visualization=VisualizationConfig(),
-        weight_analysis=weight_analysis_config,
-        output_dir=Path("results"),
-        experiment_name="mnist_normalization_with_weight_analysis"
-    )
+    # Create unified configuration
+    config = Config()
 
     # Run experiment and print results
-    results = run_experiment(experiment_config)
+    results = run_experiment(config)
 
     logger.info("Experiment Results:")
 
@@ -417,15 +476,6 @@ def main():
         logger.info(f"{model_name} Model:")
         for metric, value in metrics.items():
             logger.info(f"{metric}: {value:.4f}")
-
-    # Print weight analysis statistical results
-    # logger.info("\nWeight Analysis Statistical Tests:")
-    # for test_name, result in results['weight_analysis']['statistical_tests'].items():
-    #     logger.info(f"\n{test_name}:")
-    #     logger.info(f"  Statistic: {result['statistic']:.4f}")
-    #     logger.info(f"  p-value: {result['p_value']:.4f}")
-
-# ------------------------------------------------------------------------------
 
 
 if __name__ == "__main__":
