@@ -325,7 +325,8 @@ def run_experiment(config: Config) -> Dict[str, Any]:
     vis_config = VisualizationConfig()
     vis_manager = VisualizationManager(
         output_dir=experiment_dir / "visualizations",
-        config=vis_config
+        config=vis_config,
+        timestamp_dirs=False
     )
 
     # Load and preprocess data
