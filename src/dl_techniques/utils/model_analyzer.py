@@ -13,6 +13,15 @@ The ModelAnalyzer provides two main analysis workflows:
 1. **Activation Visualization**: Traditional CNN layer activation analysis and visualization
 2. **Probability Distribution Analysis**: Comprehensive statistical analysis of model confidence patterns
 
+EFFICIENCY OPTIMIZATIONS
+------------------------
+The analyzer is designed for computational efficiency through:
+- **Consolidated Inference**: All model predictions are computed once at the beginning and reused
+- **Batch Processing**: Noisy samples and stability analysis are processed in batches
+- **Pre-computation**: Complex analyses like stability testing pre-compute all required predictions
+- **Silent Execution**: All Keras inference is silent with tqdm progress bars for clear status
+- **Memory Efficient**: Uses smaller sample sizes for computationally intensive analyses
+
 ACTIVATION ANALYSIS FEATURES
 ---------------------------
 - **Activation Map Extraction**: Extracts and visualizes intermediate layer activations
@@ -58,6 +67,45 @@ The enhanced analyzer provides deep insights into model confidence patterns thro
    - Margin vs Gini coefficient plots colored by confidence
    - Reveals complex relationships between uncertainty measures
 
+6. **Model Agreement Analysis**
+   - Agreement matrices showing where models agree/disagree
+   - Class-wise disagreement patterns
+   - Confidence analysis for agreed vs disagreed predictions
+   - Disagreement strength distributions
+
+7. **Statistical Distance Analysis**
+   - KL Divergence and Jensen-Shannon divergence matrices between models
+   - Per-class distance analysis revealing model behavior differences
+   - Distribution distance patterns for systematic comparison
+
+8. **ROC Analysis for Confidence**
+   - ROC curves treating confidence as correctness predictor
+   - Precision-Recall analysis for confidence quality assessment
+   - Optimal threshold determination using Youden's index
+   - AUC comparisons across models
+
+9. **Prediction Stability Analysis**
+   - Stability analysis across different noise levels (efficiently pre-computed)
+   - Confidence change patterns with input perturbations
+   - Sample-level stability distributions
+   - Correlation analysis between stability and original confidence
+
+10. **Confidence Correlation Analysis**
+    - Correlation matrices between different confidence metrics
+    - Multi-dimensional relationship visualization
+    - Per-model metric dependency analysis
+
+11. **Per-Class Calibration Analysis**
+    - Individual calibration curves for each class
+    - Class-specific calibration error quantification
+    - Binary classification approach for detailed analysis
+
+12. **Multi-Threshold Analysis**
+    - Coverage vs accuracy trade-off curves
+    - Rejection curve analysis for selective prediction
+    - Threshold sensitivity analysis with F1 scores
+    - Optimal operating point determination
+
 OUT-OF-DISTRIBUTION DETECTION CAPABILITIES
 -----------------------------------------
 The probability analysis is specifically designed to identify OOD samples through:
@@ -72,10 +120,15 @@ The probability analysis is specifically designed to identify OOD samples throug
 - Poor alignment between confidence and accuracy
 - Unusual probability distribution shapes
 
-**Anomaly Pattern Recognition:**
-- Samples that fall outside normal confidence ranges
-- Unusual combinations of confidence metrics
-- Class-specific confidence anomalies
+**Model Agreement Patterns:**
+- Samples where models strongly disagree (often OOD indicators)
+- Consensus confidence analysis
+- Systematic disagreement patterns
+
+**Stability Analysis:**
+- Samples with unstable predictions under noise
+- Confidence degradation patterns
+- Correlation between stability and original confidence
 
 USAGE PATTERNS
 -------------
@@ -102,10 +155,29 @@ analyzer.create_comprehensive_visualization(mnist_data, sample_digits=[0,1,2])
 ```python
 # Get detailed confidence metrics for further analysis
 x_sample = data.x_test[:1000]
-predictions = model.predict(x_sample)
+predictions = model.predict(x_sample, verbose=0)
 confidence_metrics = analyzer._compute_confidence_metrics(predictions)
 # Returns: max_probability, entropy, margin, gini_coefficient arrays
 ```
+
+COMPUTATIONAL EFFICIENCY
+-----------------------
+The analyzer is optimized for speed through several strategies:
+
+**Consolidated Inference Phase:**
+- All model predictions are computed once at the beginning
+- Predictions are reused across all analysis functions
+- No redundant inference calls during visualization generation
+
+**Batch Processing:**
+- Stability analysis processes samples in batches rather than individually
+- Noisy sample generation is batched for efficiency
+- Memory-efficient processing of large datasets
+
+**Smart Sampling:**
+- Uses appropriate sample sizes for different analyses (1000 for main analysis, 300 for stability)
+- Balances statistical power with computational efficiency
+- Progress tracking with tqdm for clear status updates
 
 OUTPUT STRUCTURE
 ---------------
@@ -114,13 +186,20 @@ All visualizations are automatically saved through the VisualizationManager:
 ```
 output_directory/
 ├── model_comparison/
-│   └── comprehensive_analysis.png    # Activation maps and probability bars
+│   └── comprehensive_analysis.png              # Activation maps and probability bars
 └── probability_analysis/
     ├── probability_distributions_by_class.png  # Class-wise probability histograms
     ├── confidence_analysis.png                 # Violin plots of confidence metrics
     ├── calibration_analysis.png               # Calibration curves and confidence distributions
     ├── class_wise_confidence.png              # Confidence matrix heatmaps
-    └── uncertainty_landscapes.png             # Multi-metric scatter plots
+    ├── uncertainty_landscapes.png             # Multi-metric scatter plots
+    ├── model_agreement_analysis.png           # Agreement/disagreement patterns
+    ├── distribution_distances.png             # Statistical distance analysis
+    ├── confidence_roc_analysis.png            # ROC analysis for confidence
+    ├── prediction_stability.png               # Stability analysis results
+    ├── confidence_correlations.png            # Metric correlation analysis
+    ├── per_class_calibration.png              # Class-specific calibration
+    └── threshold_analysis.png                 # Multi-threshold analysis
 ```
 
 ANALYSIS RESULTS
@@ -132,7 +211,7 @@ The `analyze_models()` method returns a dictionary containing:
 
 DEPENDENCIES
 -----------
-- **Core**: keras, numpy, matplotlib, seaborn
+- **Core**: keras, numpy, matplotlib, seaborn, tqdm
 - **Statistics**: scipy.stats for advanced statistical analysis
 - **Calibration**: sklearn.metrics.calibration_curve for reliability assessment
 - **Custom**: visualization_manager for consistent plot management
@@ -147,31 +226,34 @@ This analyzer is designed for:
 - **Uncertainty Quantification**: Understanding model confidence patterns
 - **Failure Analysis**: Investigating why models make incorrect predictions
 - **Robustness Assessment**: Evaluating model behavior on edge cases
+- **Deployment Planning**: Determining optimal confidence thresholds
 
 The modular design allows easy extension to other datasets, model architectures,
-or additional confidence metrics while maintaining comprehensive visualization capabilities.
+or additional confidence metrics while maintaining comprehensive visualization capabilities
+and computational efficiency.
 
 Classes:
     ModelAnalyzer: Main analyzer class for CNN model comparison and analysis
 
 Methods:
-    analyze_models(): Complete analysis workflow
+    analyze_models(): Complete analysis workflow with consolidated inference
     create_comprehensive_visualization(): Activation map visualization
-    create_probability_distribution_analysis(): Statistical confidence analysis
+    create_probability_distribution_analysis(): Statistical confidence analysis with pre-computed predictions
 """
 
 import keras
 import numpy as np
+from tqdm import tqdm
 import matplotlib.pyplot as plt
 from typing import Union, Optional, Tuple, Dict, Any, List
+from scipy.spatial.distance import jensenshannon
 from sklearn.calibration import calibration_curve
+from sklearn.metrics import roc_curve, auc, precision_recall_curve
 
-# ------------------------------------------------------------------------------
 
 from .datasets import MNISTData
 from .visualization_manager import VisualizationManager
 
-# ------------------------------------------------------------------------------
 
 class ModelAnalyzer:
     """Enhanced analyzer for model comparison with detailed visualization support."""
@@ -225,7 +307,7 @@ class ModelAnalyzer:
         """
         model = self.activation_models[model_name]
         image_batch = np.expand_dims(image, 0)
-        activations, predictions = model.predict(image_batch)
+        activations, predictions = model.predict(image_batch, verbose=0)
 
         # Average activation maps across channels
         mean_activation = np.mean(activations[0], axis=-1)
@@ -253,7 +335,7 @@ class ModelAnalyzer:
         # Gini coefficient (concentration measure)
         sorted_probs_desc = np.sort(probabilities, axis=1)[:, ::-1]
         n_classes = probabilities.shape[1]
-        gini = 1 - np.sum(sorted_probs_desc ** 2, axis=1)
+        gini = 1 - np.sum(sorted_probs_desc**2, axis=1)
 
         return {
             'max_probability': max_prob,
@@ -273,28 +355,119 @@ class ModelAnalyzer:
             data: MNIST dataset splits
             n_samples: Number of samples to analyze
         """
-        # Get predictions from all models
-        model_predictions = {}
-        model_confidences = {}
-
         # Sample data for analysis
         indices = np.random.choice(len(data.x_test), min(n_samples, len(data.x_test)), replace=False)
         x_sample = data.x_test[indices]
         y_sample = data.y_test[indices]
         y_true = np.argmax(y_sample, axis=1)
 
-        # Get predictions and confidence metrics for each model
-        for model_name, model in self.models.items():
-            predictions = model.predict(x_sample)
+        # CONSOLIDATED INFERENCE PHASE - DO ALL PREDICTIONS AT ONCE
+        print("🔮 Performing consolidated model inference (this may take a moment)...")
+
+        # 1. Original predictions for all models
+        model_predictions = {}
+        model_confidences = {}
+
+        for model_name, model in tqdm(self.models.items(), desc="Original Predictions"):
+            predictions = model.predict(x_sample, verbose=0)
             model_predictions[model_name] = predictions
             model_confidences[model_name] = self._compute_confidence_metrics(predictions)
 
-        # Create comprehensive visualization
+        # 2. Predictions for stability analysis (pre-compute noisy samples)
+        print("🔄 Pre-computing predictions for stability analysis...")
+        noise_levels = [0.01, 0.05, 0.1]
+        stability_predictions = {}
+
+        # Use smaller subset for stability analysis for efficiency
+        n_stability_samples = min(300, len(x_sample))
+        stability_indices = np.random.choice(len(x_sample), n_stability_samples, replace=False)
+        x_stability = x_sample[stability_indices]
+        y_stability = y_true[stability_indices]
+
+        for model_name, model in tqdm(self.models.items(), desc="Stability Predictions"):
+            stability_predictions[model_name] = {
+                'original': model.predict(x_stability, verbose=0),
+                'noisy': {}
+            }
+
+            # Pre-compute predictions for different noise levels
+            for noise_std in noise_levels:
+                noisy_x = x_stability + np.random.normal(0, noise_std, x_stability.shape)
+                noisy_x = np.clip(noisy_x, 0, 1)
+                stability_predictions[model_name]['noisy'][noise_std] = model.predict(noisy_x, verbose=0)
+
+        # 3. Sample-level stability analysis (batch process)
+        print("🎯 Computing sample-level stability predictions...")
+        sample_stability_data = {}
+        first_model_name = list(self.models.keys())[0]
+        first_model = self.models[first_model_name]
+
+        # Create batch of noisy samples (10 noise realizations per sample)
+        n_realizations = 10
+        noise_std = 0.05
+        batch_size = min(100, n_stability_samples)  # Process in smaller batches
+
+        sample_stabilities = []
+        original_preds_stability = stability_predictions[first_model_name]['original']
+        original_classes_stability = np.argmax(original_preds_stability, axis=1)
+
+        for i in tqdm(range(0, n_stability_samples, batch_size), desc="Sample Stability Batches"):
+            end_idx = min(i + batch_size, n_stability_samples)
+            batch_x = x_stability[i:end_idx]
+
+            # Create all noisy versions for this batch
+            noisy_batch = []
+            for sample_idx in range(len(batch_x)):
+                for _ in range(n_realizations):
+                    noisy_sample = batch_x[sample_idx:sample_idx+1] + np.random.normal(0, noise_std, batch_x[sample_idx:sample_idx+1].shape)
+                    noisy_sample = np.clip(noisy_sample, 0, 1)
+                    noisy_batch.append(noisy_sample[0])
+
+            # Batch predict all noisy samples
+            if noisy_batch:
+                noisy_batch = np.array(noisy_batch)
+                batch_predictions = first_model.predict(noisy_batch, verbose=0)
+                batch_classes = np.argmax(batch_predictions, axis=1)
+
+                # Process results for each original sample
+                for sample_idx in range(len(batch_x)):
+                    original_class = original_classes_stability[i + sample_idx]
+                    start_pred = sample_idx * n_realizations
+                    end_pred = start_pred + n_realizations
+                    sample_pred_classes = batch_classes[start_pred:end_pred]
+
+                    stability = np.mean(sample_pred_classes == original_class)
+                    sample_stabilities.append(stability)
+
+        sample_stability_data = {
+            'stabilities': np.array(sample_stabilities),
+            'original_confidence': np.max(original_preds_stability[:len(sample_stabilities)], axis=1)
+        }
+
+        print("✅ All predictions computed! Generating visualizations...")
+
+        # Create comprehensive visualization using pre-computed predictions
         self._plot_probability_distributions(model_predictions, y_true)
         self._plot_confidence_analysis(model_confidences, y_true)
         self._plot_calibration_analysis(model_predictions, y_true)
         self._plot_class_wise_confidence(model_predictions, y_true)
         self._plot_uncertainty_landscapes(model_confidences)
+
+        # New comprehensive analyses using pre-computed predictions
+        print("🤝 Analyzing model agreement patterns...")
+        self._plot_model_agreement_analysis(model_predictions, y_true)
+        print("📏 Computing statistical distribution distances...")
+        self._plot_distribution_distances(model_predictions)
+        print("📊 Performing ROC analysis for confidence...")
+        self._plot_confidence_roc_analysis(model_predictions, y_true)
+        print("🔄 Analyzing prediction stability...")
+        self._plot_prediction_stability_consolidated(stability_predictions, y_stability, sample_stability_data, noise_levels)
+        print("🔗 Analyzing confidence metric correlations...")
+        self._plot_confidence_correlations(model_confidences)
+        print("🎯 Computing per-class calibration curves...")
+        self._plot_per_class_calibration(model_predictions, y_true)
+        print("⚖️ Performing threshold analysis...")
+        self._plot_threshold_analysis(model_predictions, y_true)
 
     def _plot_probability_distributions(
             self,
@@ -305,7 +478,7 @@ class ModelAnalyzer:
         n_models = len(model_predictions)
         n_classes = 10
 
-        fig, axes = plt.subplots(n_classes, n_models, figsize=(4 * n_models, 2 * n_classes))
+        fig, axes = plt.subplots(n_classes, n_models, figsize=(4*n_models, 2*n_classes))
         if n_models == 1:
             axes = axes.reshape(-1, 1)
 
@@ -320,14 +493,14 @@ class ModelAnalyzer:
 
                     # Plot histogram of probabilities for this class
                     ax.hist(class_probs, bins=30, alpha=0.7, density=True,
-                            color=plt.cm.Set3(model_idx))
+                           color=plt.cm.Set3(model_idx))
 
                     # Add statistics
                     mean_prob = np.mean(class_probs)
                     std_prob = np.std(class_probs)
                     ax.axvline(mean_prob, color='red', linestyle='--', alpha=0.8)
                     ax.set_title(f'Class {class_idx}\n{model_name}\n'
-                                 f'μ={mean_prob:.3f}, σ={std_prob:.3f}')
+                               f'μ={mean_prob:.3f}, σ={std_prob:.3f}')
 
                 ax.set_xlim(0, 1)
                 if class_idx == n_classes - 1:
@@ -387,7 +560,7 @@ class ModelAnalyzer:
 
         # Add legend
         handles = [plt.Line2D([0], [0], color=plt.cm.Set3(i), lw=4, alpha=0.7)
-                   for i, model_name in enumerate(model_confidences.keys())]
+                  for i, model_name in enumerate(model_confidences.keys())]
         labels = list(model_confidences.keys())
         fig.legend(handles, labels, loc='upper right')
 
@@ -418,7 +591,7 @@ class ModelAnalyzer:
             )
 
             ax1.plot(mean_predicted_value, fraction_of_positives, 's-',
-                     label=model_name, alpha=0.8, linewidth=2)
+                    label=model_name, alpha=0.8, linewidth=2)
 
         ax1.plot([0, 1], [0, 1], 'k--', alpha=0.8, label='Perfect Calibration')
         ax1.set_xlabel('Mean Predicted Probability')
@@ -438,10 +611,10 @@ class ModelAnalyzer:
 
             color = plt.cm.Set3(model_idx)
             ax2.hist(confidence[correct_mask], bins=30, alpha=0.5,
-                     label=f'{model_name} - Correct', color=color, density=True)
+                    label=f'{model_name} - Correct', color=color, density=True)
             ax2.hist(confidence[incorrect_mask], bins=30, alpha=0.5,
-                     label=f'{model_name} - Incorrect', color=color,
-                     density=True, linestyle='--', histtype='step', linewidth=2)
+                    label=f'{model_name} - Incorrect', color=color,
+                    density=True, linestyle='--', histtype='step', linewidth=2)
 
         ax2.set_xlabel('Confidence (Max Probability)')
         ax2.set_ylabel('Density')
@@ -464,7 +637,7 @@ class ModelAnalyzer:
         """Plot class-wise confidence patterns."""
         n_models = len(model_predictions)
 
-        fig, axes = plt.subplots(2, n_models, figsize=(5 * n_models, 10))
+        fig, axes = plt.subplots(2, n_models, figsize=(5*n_models, 10))
         if n_models == 1:
             axes = axes.reshape(-1, 1)
 
@@ -521,7 +694,7 @@ class ModelAnalyzer:
         """Plot uncertainty landscape analysis."""
         n_models = len(model_confidences)
 
-        fig, axes = plt.subplots(2, n_models, figsize=(5 * n_models, 10))
+        fig, axes = plt.subplots(2, n_models, figsize=(5*n_models, 10))
         if n_models == 1:
             axes = axes.reshape(-1, 1)
 
@@ -529,7 +702,7 @@ class ModelAnalyzer:
             # Confidence vs Entropy scatter plot
             ax1 = axes[0, model_idx]
             scatter = ax1.scatter(confidences['max_probability'], confidences['entropy'],
-                                  alpha=0.6, c=confidences['margin'], cmap='viridis', s=20)
+                                alpha=0.6, c=confidences['margin'], cmap='viridis', s=20)
             ax1.set_xlabel('Max Probability (Confidence)')
             ax1.set_ylabel('Entropy (Uncertainty)')
             ax1.set_title(f'{model_name}\nConfidence vs Uncertainty\n(colored by margin)')
@@ -539,7 +712,7 @@ class ModelAnalyzer:
             # Margin vs Gini coefficient
             ax2 = axes[1, model_idx]
             scatter2 = ax2.scatter(confidences['margin'], confidences['gini_coefficient'],
-                                   alpha=0.6, c=confidences['max_probability'], cmap='plasma', s=20)
+                                 alpha=0.6, c=confidences['max_probability'], cmap='plasma', s=20)
             ax2.set_xlabel('Margin (Top-2 Difference)')
             ax2.set_ylabel('Gini Coefficient')
             ax2.set_title(f'{model_name}\nMargin vs Concentration\n(colored by confidence)')
@@ -550,6 +723,654 @@ class ModelAnalyzer:
         self.vis_manager.save_figure(
             fig,
             "uncertainty_landscapes",
+            "probability_analysis"
+        )
+
+    def _plot_model_agreement_analysis(
+            self,
+            model_predictions: Dict[str, np.ndarray],
+            y_true: np.ndarray
+    ) -> None:
+        """Analyze where models agree/disagree - key indicator of OOD samples."""
+        model_names = list(model_predictions.keys())
+        n_models = len(model_names)
+
+        if n_models < 2:
+            return
+
+        # Get predicted classes for each model
+        model_pred_classes = {}
+        for name, preds in model_predictions.items():
+            model_pred_classes[name] = np.argmax(preds, axis=1)
+
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+
+        # Agreement matrix
+        ax1 = axes[0, 0]
+        agreement_matrix = np.zeros((n_models, n_models))
+        for i, name1 in enumerate(model_names):
+            for j, name2 in enumerate(model_names):
+                if i != j:
+                    agreement = np.mean(model_pred_classes[name1] == model_pred_classes[name2])
+                    agreement_matrix[i, j] = agreement
+                else:
+                    agreement_matrix[i, j] = 1.0
+
+        im1 = ax1.imshow(agreement_matrix, cmap='viridis', vmin=0, vmax=1)
+        ax1.set_title('Model Agreement Matrix')
+        ax1.set_xticks(range(n_models))
+        ax1.set_yticks(range(n_models))
+        ax1.set_xticklabels(model_names)
+        ax1.set_yticklabels(model_names)
+        plt.colorbar(im1, ax=ax1)
+
+        # Add text annotations
+        for i in range(n_models):
+            for j in range(n_models):
+                ax1.text(j, i, f'{agreement_matrix[i, j]:.3f}',
+                        ha='center', va='center', color='white', fontweight='bold')
+
+        # Disagreement analysis by class
+        ax2 = axes[0, 1]
+        class_disagreement = np.zeros(10)
+        for class_idx in range(10):
+            class_mask = (y_true == class_idx)
+            if np.sum(class_mask) > 0:
+                class_preds = [model_pred_classes[name][class_mask] for name in model_names]
+                # Calculate pairwise disagreement
+                disagreements = []
+                for i in range(len(class_preds)):
+                    for j in range(i+1, len(class_preds)):
+                        disagreement = np.mean(class_preds[i] != class_preds[j])
+                        disagreements.append(disagreement)
+                class_disagreement[class_idx] = np.mean(disagreements) if disagreements else 0
+
+        ax2.bar(range(10), class_disagreement, color='coral', alpha=0.7)
+        ax2.set_title('Model Disagreement by True Class')
+        ax2.set_xlabel('True Class')
+        ax2.set_ylabel('Average Disagreement Rate')
+        ax2.set_xticks(range(10))
+
+        # Confidence when models agree vs disagree
+        ax3 = axes[1, 0]
+        for model_name, predictions in model_predictions.items():
+            confidences = np.max(predictions, axis=1)
+
+            # Find samples where all models agree
+            all_preds = [model_pred_classes[name] for name in model_names]
+            agreement_mask = np.ones(len(y_true), dtype=bool)
+            for i in range(len(all_preds)):
+                for j in range(i+1, len(all_preds)):
+                    agreement_mask &= (all_preds[i] == all_preds[j])
+
+            ax3.hist(confidences[agreement_mask], bins=30, alpha=0.5,
+                    label=f'{model_name} - Agree', density=True)
+            ax3.hist(confidences[~agreement_mask], bins=30, alpha=0.5,
+                    label=f'{model_name} - Disagree', density=True, histtype='step', linewidth=2)
+
+        ax3.set_title('Confidence: Model Agreement vs Disagreement')
+        ax3.set_xlabel('Confidence')
+        ax3.set_ylabel('Density')
+        ax3.legend()
+
+        # Disagreement strength analysis
+        ax4 = axes[1, 1]
+        disagreement_strength = np.zeros(len(y_true))
+        for i in range(len(y_true)):
+            sample_preds = [model_pred_classes[name][i] for name in model_names]
+            unique_preds = len(set(sample_preds))
+            disagreement_strength[i] = (unique_preds - 1) / (n_models - 1)
+
+        ax4.hist(disagreement_strength, bins=20, alpha=0.7, color='orange')
+        ax4.set_title('Distribution of Disagreement Strength')
+        ax4.set_xlabel('Disagreement Strength (0=all agree, 1=max disagreement)')
+        ax4.set_ylabel('Frequency')
+
+        plt.tight_layout()
+        self.vis_manager.save_figure(
+            fig,
+            "model_agreement_analysis",
+            "probability_analysis"
+        )
+
+    def _plot_distribution_distances(
+            self,
+            model_predictions: Dict[str, np.ndarray]
+    ) -> None:
+        """Compare probability distributions using statistical distances."""
+        model_names = list(model_predictions.keys())
+        n_models = len(model_names)
+
+        if n_models < 2:
+            return
+
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+
+        # KL Divergence matrix
+        ax1 = axes[0, 0]
+        kl_matrix = np.zeros((n_models, n_models))
+        for i, name1 in enumerate(model_names):
+            for j, name2 in enumerate(model_names):
+                if i != j:
+                    # Average KL divergence across samples
+                    kl_divs = []
+                    for k in range(len(model_predictions[name1])):
+                        p = model_predictions[name1][k] + 1e-8
+                        q = model_predictions[name2][k] + 1e-8
+                        kl_div = np.sum(p * np.log(p / q))
+                        kl_divs.append(kl_div)
+                    kl_matrix[i, j] = np.mean(kl_divs)
+
+        im1 = ax1.imshow(kl_matrix, cmap='plasma')
+        ax1.set_title('KL Divergence Matrix')
+        ax1.set_xticks(range(n_models))
+        ax1.set_yticks(range(n_models))
+        ax1.set_xticklabels(model_names)
+        ax1.set_yticklabels(model_names)
+        plt.colorbar(im1, ax=ax1)
+
+        # Jensen-Shannon divergence matrix
+        ax2 = axes[0, 1]
+        js_matrix = np.zeros((n_models, n_models))
+        for i, name1 in enumerate(model_names):
+            for j, name2 in enumerate(model_names):
+                if i != j:
+                    js_divs = []
+                    for k in range(len(model_predictions[name1])):
+                        p = model_predictions[name1][k]
+                        q = model_predictions[name2][k]
+                        js_div = jensenshannon(p, q)**2
+                        js_divs.append(js_div)
+                    js_matrix[i, j] = np.mean(js_divs)
+
+        im2 = ax2.imshow(js_matrix, cmap='viridis')
+        ax2.set_title('Jensen-Shannon Divergence Matrix')
+        ax2.set_xticks(range(n_models))
+        ax2.set_yticks(range(n_models))
+        ax2.set_xticklabels(model_names)
+        ax2.set_yticklabels(model_names)
+        plt.colorbar(im2, ax=ax2)
+
+        # Per-class distance analysis
+        ax3 = axes[1, 0]
+        if n_models >= 2:
+            # Take first two models for per-class analysis
+            name1, name2 = model_names[0], model_names[1]
+            class_distances = []
+
+            for class_idx in range(10):
+                # Get average predictions for this class
+                pred1_class = np.mean(model_predictions[name1], axis=0)
+                pred2_class = np.mean(model_predictions[name2], axis=0)
+
+                js_dist = jensenshannon(pred1_class, pred2_class)**2
+                class_distances.append(js_dist)
+
+            ax3.bar(range(10), class_distances, color='teal', alpha=0.7)
+            ax3.set_title(f'JS Distance by Class: {name1} vs {name2}')
+            ax3.set_xlabel('Class')
+            ax3.set_ylabel('Jensen-Shannon Distance')
+            ax3.set_xticks(range(10))
+
+        # Distance distribution
+        ax4 = axes[1, 1]
+        all_distances = []
+        for i, name1 in enumerate(model_names):
+            for j, name2 in enumerate(model_names[i+1:], i+1):
+                distances = []
+                for k in range(len(model_predictions[name1])):
+                    p = model_predictions[name1][k]
+                    q = model_predictions[name2][k]
+                    dist = jensenshannon(p, q)**2
+                    distances.append(dist)
+                all_distances.extend(distances)
+
+        if all_distances:
+            ax4.hist(all_distances, bins=50, alpha=0.7, color='purple')
+            ax4.set_title('Distribution of JS Distances Between Models')
+            ax4.set_xlabel('Jensen-Shannon Distance')
+            ax4.set_ylabel('Frequency')
+
+        plt.tight_layout()
+        self.vis_manager.save_figure(
+            fig,
+            "distribution_distances",
+            "probability_analysis"
+        )
+
+    def _plot_confidence_roc_analysis(
+            self,
+            model_predictions: Dict[str, np.ndarray],
+            y_true: np.ndarray
+    ) -> None:
+        """Treat confidence as binary classifier for correct/incorrect predictions."""
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+
+        # ROC curves for confidence predicting correctness
+        ax1 = axes[0, 0]
+        for model_name, predictions in model_predictions.items():
+            y_pred = np.argmax(predictions, axis=1)
+            confidence = np.max(predictions, axis=1)
+            correctness = (y_pred == y_true).astype(int)
+
+            fpr, tpr, _ = roc_curve(correctness, confidence)
+            roc_auc = auc(fpr, tpr)
+
+            ax1.plot(fpr, tpr, label=f'{model_name} (AUC = {roc_auc:.3f})', linewidth=2)
+
+        ax1.plot([0, 1], [0, 1], 'k--', alpha=0.8, label='Random')
+        ax1.set_xlabel('False Positive Rate')
+        ax1.set_ylabel('True Positive Rate')
+        ax1.set_title('ROC: Confidence Predicting Correctness')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # Precision-Recall curves
+        ax2 = axes[0, 1]
+        for model_name, predictions in model_predictions.items():
+            y_pred = np.argmax(predictions, axis=1)
+            confidence = np.max(predictions, axis=1)
+            correctness = (y_pred == y_true).astype(int)
+
+            precision, recall, _ = precision_recall_curve(correctness, confidence)
+            pr_auc = auc(recall, precision)
+
+            ax2.plot(recall, precision, label=f'{model_name} (AUC = {pr_auc:.3f})', linewidth=2)
+
+        ax2.set_xlabel('Recall')
+        ax2.set_ylabel('Precision')
+        ax2.set_title('Precision-Recall: Confidence Predicting Correctness')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+
+        # Optimal threshold analysis
+        ax3 = axes[1, 0]
+        for model_name, predictions in model_predictions.items():
+            y_pred = np.argmax(predictions, axis=1)
+            confidence = np.max(predictions, axis=1)
+            correctness = (y_pred == y_true).astype(int)
+
+            fpr, tpr, thresholds = roc_curve(correctness, confidence)
+            # Youden's index for optimal threshold
+            youdens_index = tpr - fpr
+            optimal_idx = np.argmax(youdens_index)
+            optimal_threshold = thresholds[optimal_idx]
+
+            ax3.plot(thresholds, tpr, label=f'{model_name} TPR', alpha=0.7)
+            ax3.plot(thresholds, 1-fpr, label=f'{model_name} TNR', alpha=0.7, linestyle='--')
+            ax3.axvline(optimal_threshold, color=plt.cm.Set3(list(model_predictions.keys()).index(model_name)),
+                       linestyle=':', alpha=0.8, label=f'{model_name} Optimal: {optimal_threshold:.3f}')
+
+        ax3.set_xlabel('Threshold')
+        ax3.set_ylabel('Rate')
+        ax3.set_title('ROC Threshold Analysis')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+
+        # AUC comparison
+        ax4 = axes[1, 1]
+        model_aucs = []
+        model_labels = []
+        for model_name, predictions in model_predictions.items():
+            y_pred = np.argmax(predictions, axis=1)
+            confidence = np.max(predictions, axis=1)
+            correctness = (y_pred == y_true).astype(int)
+
+            fpr, tpr, _ = roc_curve(correctness, confidence)
+            roc_auc = auc(fpr, tpr)
+            model_aucs.append(roc_auc)
+            model_labels.append(model_name)
+
+        bars = ax4.bar(model_labels, model_aucs, color=plt.cm.Set3(np.arange(len(model_labels))), alpha=0.7)
+        ax4.set_title('ROC AUC Comparison')
+        ax4.set_ylabel('AUC Score')
+        ax4.set_ylim(0, 1)
+
+        # Add value labels on bars
+        for bar, auc_val in zip(bars, model_aucs):
+            ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                    f'{auc_val:.3f}', ha='center', va='bottom', fontweight='bold')
+
+        plt.tight_layout()
+        self.vis_manager.save_figure(
+            fig,
+            "confidence_roc_analysis",
+            "probability_analysis"
+        )
+
+    def _plot_prediction_stability_consolidated(
+            self,
+            stability_predictions: Dict[str, Dict],
+            y_true: np.ndarray,
+            sample_stability_data: Dict[str, np.ndarray],
+            noise_levels: List[float]
+    ) -> None:
+        """Analyze prediction stability using pre-computed predictions."""
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+
+        # Stability vs noise level (using pre-computed predictions)
+        ax1 = axes[0, 0]
+        for model_name, pred_data in stability_predictions.items():
+            original_classes = np.argmax(pred_data['original'], axis=1)
+
+            stabilities = []
+            for noise_std in noise_levels:
+                noisy_classes = np.argmax(pred_data['noisy'][noise_std], axis=1)
+                stability = np.mean(original_classes == noisy_classes)
+                stabilities.append(stability)
+
+            ax1.plot(noise_levels, stabilities, 'o-', label=model_name, linewidth=2)
+
+        ax1.set_xlabel('Noise Level (std)')
+        ax1.set_ylabel('Prediction Stability')
+        ax1.set_title('Prediction Stability vs Noise Level')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # Confidence change with noise (using pre-computed predictions)
+        ax2 = axes[0, 1]
+        noise_std = 0.05  # Fixed noise level for this analysis
+        for model_name, pred_data in stability_predictions.items():
+            original_conf = np.max(pred_data['original'], axis=1)
+            noisy_conf = np.max(pred_data['noisy'][noise_std], axis=1)
+            confidence_change = noisy_conf - original_conf
+
+            ax2.hist(confidence_change, bins=30, alpha=0.6, label=model_name, density=True)
+
+        ax2.set_xlabel('Confidence Change')
+        ax2.set_ylabel('Density')
+        ax2.set_title(f'Confidence Change with Noise (σ={noise_std})')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+
+        # Sample-level stability distribution (using pre-computed data)
+        ax3 = axes[1, 0]
+        sample_stabilities = sample_stability_data['stabilities']
+
+        ax3.hist(sample_stabilities, bins=20, alpha=0.7, color='green')
+        ax3.set_xlabel('Sample Stability')
+        ax3.set_ylabel('Frequency')
+        ax3.set_title('Distribution of Sample-Level Stability')
+        ax3.grid(True, alpha=0.3)
+
+        # Stability vs original confidence (using pre-computed data)
+        ax4 = axes[1, 1]
+        original_conf = sample_stability_data['original_confidence']
+
+        ax4.scatter(original_conf, sample_stabilities, alpha=0.6, color='purple')
+        ax4.set_xlabel('Original Confidence')
+        ax4.set_ylabel('Stability')
+        ax4.set_title('Stability vs Original Confidence')
+        ax4.grid(True, alpha=0.3)
+
+        # Add correlation coefficient
+        if len(original_conf) > 0 and len(sample_stabilities) > 0:
+            corr_coef = np.corrcoef(original_conf, sample_stabilities)[0, 1]
+            ax4.text(0.05, 0.95, f'Correlation: {corr_coef:.3f}',
+                    transform=ax4.transAxes, fontsize=12,
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+        plt.tight_layout()
+        self.vis_manager.save_figure(
+            fig,
+            "prediction_stability",
+            "probability_analysis"
+        )
+
+    def _plot_confidence_correlations(
+            self,
+            model_confidences: Dict[str, Dict[str, np.ndarray]]
+    ) -> None:
+        """Analyze relationships between different confidence metrics."""
+        metrics = ['max_probability', 'entropy', 'margin', 'gini_coefficient']
+        n_models = len(model_confidences)
+
+        fig, axes = plt.subplots(n_models, 2, figsize=(15, 5*n_models))
+        if n_models == 1:
+            axes = axes.reshape(1, -1)
+
+        for model_idx, (model_name, confidences) in enumerate(model_confidences.items()):
+            # Correlation matrix
+            ax1 = axes[model_idx, 0]
+            corr_data = np.array([confidences[metric] for metric in metrics]).T
+            corr_matrix = np.corrcoef(corr_data.T)
+
+            im = ax1.imshow(corr_matrix, cmap='coolwarm', vmin=-1, vmax=1)
+            ax1.set_title(f'{model_name}: Confidence Metrics Correlation')
+            ax1.set_xticks(range(len(metrics)))
+            ax1.set_yticks(range(len(metrics)))
+            ax1.set_xticklabels([m.replace('_', '\n') for m in metrics], rotation=45)
+            ax1.set_yticklabels([m.replace('_', '\n') for m in metrics])
+
+            # Add correlation values
+            for i in range(len(metrics)):
+                for j in range(len(metrics)):
+                    ax1.text(j, i, f'{corr_matrix[i, j]:.2f}',
+                            ha='center', va='center',
+                            color='white' if abs(corr_matrix[i, j]) > 0.5 else 'black',
+                            fontweight='bold')
+
+            plt.colorbar(im, ax=ax1)
+
+            # Pairwise scatter plot (entropy vs max_probability)
+            ax2 = axes[model_idx, 1]
+            scatter = ax2.scatter(confidences['max_probability'], confidences['entropy'],
+                                alpha=0.6, c=confidences['margin'], cmap='viridis', s=20)
+            ax2.set_xlabel('Max Probability')
+            ax2.set_ylabel('Entropy')
+            ax2.set_title(f'{model_name}: Confidence vs Uncertainty')
+            plt.colorbar(scatter, ax=ax2, label='Margin')
+            ax2.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        self.vis_manager.save_figure(
+            fig,
+            "confidence_correlations",
+            "probability_analysis"
+        )
+
+    def _plot_per_class_calibration(
+            self,
+            model_predictions: Dict[str, np.ndarray],
+            y_true: np.ndarray
+    ) -> None:
+        """Detailed calibration analysis per class."""
+        n_models = len(model_predictions)
+        n_classes = 10
+
+        fig, axes = plt.subplots(n_classes, n_models, figsize=(5*n_models, 2*n_classes))
+        if n_models == 1:
+            axes = axes.reshape(-1, 1)
+
+        for class_idx in range(n_classes):
+            class_mask = (y_true == class_idx)
+
+            for model_idx, (model_name, predictions) in enumerate(model_predictions.items()):
+                ax = axes[class_idx, model_idx]
+
+                if np.sum(class_mask) > 10:  # Need sufficient samples
+                    # Binary classification: this class vs others
+                    y_binary = (y_true == class_idx).astype(int)
+                    confidence_class = predictions[:, class_idx]
+
+                    try:
+                        fraction_of_positives, mean_predicted_value = calibration_curve(
+                            y_binary, confidence_class, n_bins=5, strategy='uniform'
+                        )
+
+                        ax.plot(mean_predicted_value, fraction_of_positives, 's-',
+                               linewidth=2, markersize=8, alpha=0.8)
+                        ax.plot([0, 1], [0, 1], 'k--', alpha=0.8)
+
+                        # Calculate calibration error
+                        cal_error = np.mean(np.abs(fraction_of_positives - mean_predicted_value))
+
+                        ax.set_title(f'Class {class_idx}\n{model_name}\nCal Error: {cal_error:.3f}')
+
+                    except:
+                        ax.text(0.5, 0.5, 'Insufficient\nData', ha='center', va='center',
+                               transform=ax.transAxes)
+                        ax.set_title(f'Class {class_idx}\n{model_name}')
+                else:
+                    ax.text(0.5, 0.5, 'Insufficient\nSamples', ha='center', va='center',
+                           transform=ax.transAxes)
+                    ax.set_title(f'Class {class_idx}\n{model_name}')
+
+                ax.set_xlim(0, 1)
+                ax.set_ylim(0, 1)
+                ax.grid(True, alpha=0.3)
+
+                if class_idx == n_classes - 1:
+                    ax.set_xlabel('Mean Predicted Probability')
+                if model_idx == 0:
+                    ax.set_ylabel('Fraction of Positives')
+
+        plt.tight_layout()
+        self.vis_manager.save_figure(
+            fig,
+            "per_class_calibration",
+            "probability_analysis"
+        )
+
+    def _plot_threshold_analysis(
+            self,
+            model_predictions: Dict[str, np.ndarray],
+            y_true: np.ndarray
+    ) -> None:
+        """Comprehensive analysis across confidence thresholds."""
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+
+        thresholds = np.linspace(0.1, 0.99, 20)
+
+        # Coverage vs Accuracy curves
+        ax1 = axes[0, 0]
+        for model_name, predictions in model_predictions.items():
+            y_pred = np.argmax(predictions, axis=1)
+            confidence = np.max(predictions, axis=1)
+
+            coverages = []
+            accuracies = []
+
+            for threshold in thresholds:
+                mask = confidence >= threshold
+                if np.sum(mask) > 0:
+                    coverage = np.mean(mask)
+                    accuracy = np.mean(y_pred[mask] == y_true[mask])
+                else:
+                    coverage = 0
+                    accuracy = 0
+
+                coverages.append(coverage)
+                accuracies.append(accuracy)
+
+            ax1.plot(coverages, accuracies, 'o-', label=model_name, linewidth=2)
+
+        ax1.set_xlabel('Coverage (Fraction of Samples)')
+        ax1.set_ylabel('Accuracy')
+        ax1.set_title('Coverage vs Accuracy Trade-off')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # Rejection curves
+        ax2 = axes[0, 1]
+        for model_name, predictions in model_predictions.items():
+            y_pred = np.argmax(predictions, axis=1)
+            confidence = np.max(predictions, axis=1)
+
+            rejection_rates = []
+            remaining_accuracies = []
+
+            for threshold in thresholds:
+                mask = confidence >= threshold
+                rejection_rate = 1 - np.mean(mask)
+
+                if np.sum(mask) > 0:
+                    remaining_accuracy = np.mean(y_pred[mask] == y_true[mask])
+                else:
+                    remaining_accuracy = 0
+
+                rejection_rates.append(rejection_rate)
+                remaining_accuracies.append(remaining_accuracy)
+
+            ax2.plot(rejection_rates, remaining_accuracies, 's-', label=model_name, linewidth=2)
+
+        ax2.set_xlabel('Rejection Rate')
+        ax2.set_ylabel('Remaining Accuracy')
+        ax2.set_title('Rejection Curve Analysis')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+
+        # Threshold sensitivity
+        ax3 = axes[1, 0]
+        for model_name, predictions in model_predictions.items():
+            y_pred = np.argmax(predictions, axis=1)
+            confidence = np.max(predictions, axis=1)
+
+            f1_scores = []
+            precisions = []
+            recalls = []
+
+            for threshold in thresholds:
+                mask = confidence >= threshold
+
+                if np.sum(mask) > 0 and np.sum(~mask) > 0:
+                    # Treat high confidence as positive class
+                    tp = np.sum((y_pred == y_true) & mask)
+                    fp = np.sum((y_pred != y_true) & mask)
+                    fn = np.sum((y_pred == y_true) & ~mask)
+
+                    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+                    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+                    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+                else:
+                    precision = recall = f1 = 0
+
+                precisions.append(precision)
+                recalls.append(recall)
+                f1_scores.append(f1)
+
+            ax3.plot(thresholds, f1_scores, 'o-', label=f'{model_name} F1', linewidth=2)
+
+        ax3.set_xlabel('Confidence Threshold')
+        ax3.set_ylabel('F1 Score')
+        ax3.set_title('Threshold Sensitivity Analysis')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+
+        # Optimal operating points
+        ax4 = axes[1, 1]
+        model_optimal_thresholds = []
+        model_labels = []
+
+        for model_name, predictions in model_predictions.items():
+            y_pred = np.argmax(predictions, axis=1)
+            confidence = np.max(predictions, axis=1)
+            correctness = (y_pred == y_true).astype(int)
+
+            # Find threshold that maximizes Youden's index
+            fpr, tpr, thresh = roc_curve(correctness, confidence)
+            youdens_index = tpr - fpr
+            optimal_idx = np.argmax(youdens_index)
+            optimal_threshold = thresh[optimal_idx]
+
+            model_optimal_thresholds.append(optimal_threshold)
+            model_labels.append(model_name)
+
+        bars = ax4.bar(model_labels, model_optimal_thresholds,
+                      color=plt.cm.Set3(np.arange(len(model_labels))), alpha=0.7)
+        ax4.set_title('Optimal Confidence Thresholds')
+        ax4.set_ylabel('Optimal Threshold')
+        ax4.set_ylim(0, 1)
+
+        # Add value labels
+        for bar, threshold in zip(bars, model_optimal_thresholds):
+            ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                    f'{threshold:.3f}', ha='center', va='bottom', fontweight='bold')
+
+        plt.tight_layout()
+        self.vis_manager.save_figure(
+            fig,
+            "threshold_analysis",
             "probability_analysis"
         )
 
@@ -660,11 +1481,13 @@ class ModelAnalyzer:
         results = {}
 
         # Model evaluation
-        for name, model in self.models.items():
-            evaluation = model.evaluate(data.x_test, data.y_test)
+        print("📈 Evaluating model performance...")
+        for name, model in tqdm(self.models.items(), desc="Model Evaluation"):
+            evaluation = model.evaluate(data.x_test, data.y_test, verbose=0)
             results[name] = dict(zip(model.metrics_names, evaluation))
 
         # Create comprehensive visualization
+        print("🖼️ Creating activation map visualizations...")
         self.create_comprehensive_visualization(
             data,
             sample_digits,
@@ -672,8 +1495,8 @@ class ModelAnalyzer:
         )
 
         # Create probability distribution analysis
+        print("🧠 Starting comprehensive probability distribution analysis...")
         self.create_probability_distribution_analysis(data)
 
+        print("✅ Model analysis completed! All visualizations saved.")
         return results
-
-# ------------------------------------------------------------------------------
