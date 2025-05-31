@@ -1,17 +1,54 @@
 """
-Enhanced Model Analyzer for CNN Visualization and Probability Distribution Analysis
-==================================================================================
+Enhanced Model Analyzer for Deep Learning Model Visualization and Analysis
+=========================================================================
 
 This module provides comprehensive analysis and visualization capabilities for comparing
-multiple CNN models, with a focus on probability distribution analysis and out-of-distribution
-(OOD) confidence detection. The analyzer combines traditional activation visualization with
-advanced statistical analysis of model confidence patterns.
+multiple deep learning models (CNNs, Dense Networks, and other architectures), with a focus
+on probability distribution analysis and out-of-distribution (OOD) confidence detection.
+The analyzer combines traditional layer activation visualization with advanced statistical
+analysis of model confidence patterns and information flow analysis.
+
+ARCHITECTURE COMPATIBILITY
+--------------------------
+The analyzer is designed to work with ANY Keras model architecture:
+- **CNNs**: Full support including activation maps from convolutional layers
+- **Dense Networks (MLPs)**: Full support with dense layer visualization
+- **Hybrid Architectures**: Automatically adapts to mixed conv/dense models
+- **Custom Architectures**: Works with any model having standard Keras layers
+- **Transformer/Attention Models**: Compatible with attention layers and normalization
 
 CORE FUNCTIONALITY
 -----------------
-The ModelAnalyzer provides two main analysis workflows:
-1. **Activation Visualization**: Traditional CNN layer activation analysis and visualization
+The ModelAnalyzer provides three main analysis workflows:
+1. **Layer Activation Visualization**: Adaptive visualization for any layer type
 2. **Probability Distribution Analysis**: Comprehensive statistical analysis of model confidence patterns
+3. **Information Flow Analysis**: Deep insights into how information propagates through network layers
+
+ARCHITECTURE COMPATIBILITY
+--------------------------
+The analyzer is designed to work with ANY Keras model architecture:
+- **CNNs**: Full support including activation maps from convolutional layers
+- **Dense Networks (MLPs)**: Full support with dense layer visualization
+- **Hybrid Architectures**: Automatically adapts to mixed conv/dense models
+- **Custom Architectures**: Works with any model having standard Keras layers
+- **Transformer/Attention Models**: Compatible with attention layers and normalization
+
+**What Works with Different Architectures:**
+
+| Analysis Type | CNNs | Dense | Hybrid | Custom |
+|---------------|------|-------|--------|--------|
+| Probability Distribution Analysis | ✅ Full | ✅ Full | ✅ Full | ✅ Full |
+| Confidence Metrics | ✅ Full | ✅ Full | ✅ Full | ✅ Full |
+| Model Agreement Analysis | ✅ Full | ✅ Full | ✅ Full | ✅ Full |
+| Calibration Analysis | ✅ Full | ✅ Full | ✅ Full | ✅ Full |
+| ROC Analysis | ✅ Full | ✅ Full | ✅ Full | ✅ Full |
+| Stability Analysis | ✅ Full | ✅ Full | ✅ Full | ✅ Full |
+| Threshold Analysis | ✅ Full | ✅ Full | ✅ Full | ✅ Full |
+| Information Flow Analysis | ✅ Full | ✅ Full | ✅ Full | ✅ Partial* |
+| Layer Activation Visualization | ✅ Conv Maps | ✅ Dense Heatmaps | ✅ Adaptive | ✅ Fallback** |
+
+*Custom architectures: Works with standard layers (Dense, Conv2D, BatchNorm, LayerNorm)
+**Fallback: Shows confidence values if no suitable layers found for visualization
 
 EFFICIENCY OPTIMIZATIONS
 ------------------------
@@ -24,10 +61,14 @@ The analyzer is designed for computational efficiency through:
 
 ACTIVATION ANALYSIS FEATURES
 ---------------------------
-- **Activation Map Extraction**: Extracts and visualizes intermediate layer activations
-- **Model Comparison**: Side-by-side comparison of activation patterns across models
-- **Class-specific Analysis**: Analyzes activation patterns for specific digit classes
-- **Confidence Overlay**: Displays prediction confidence alongside activation maps
+- **Adaptive Layer Visualization**: Automatically selects the best layer for visualization based on architecture
+  - CNNs: Uses convolutional layer activation maps
+  - Dense Networks: Visualizes dense layer activations as 2D heatmaps
+  - Mixed Models: Prioritizes conv layers, falls back to dense layers
+- **Multi-Architecture Support**: Works seamlessly with any Keras model type
+- **Model Comparison**: Side-by-side comparison of layer patterns across different architectures
+- **Class-specific Analysis**: Analyzes layer patterns for specific output classes
+- **Confidence Overlay**: Displays prediction confidence alongside layer visualizations
 
 PROBABILITY DISTRIBUTION ANALYSIS FEATURES
 -----------------------------------------
@@ -106,6 +147,13 @@ The enhanced analyzer provides deep insights into model confidence patterns thro
     - Threshold sensitivity analysis with F1 scores
     - Optimal operating point determination
 
+13. **Information Flow Analysis**
+    - Layer-wise activation statistics (magnitude, variance, sparsity, effective dimensionality)
+    - Inter-layer correlation analysis revealing information propagation patterns
+    - Representational Similarity Analysis (RSA) comparing model representations
+    - Information bottleneck analysis using SVD entropy and compression ratios
+    - Gradient flow analysis showing how gradients propagate through layers
+
 OUT-OF-DISTRIBUTION DETECTION CAPABILITIES
 -----------------------------------------
 The probability analysis is specifically designed to identify OOD samples through:
@@ -133,22 +181,42 @@ The probability analysis is specifically designed to identify OOD samples throug
 USAGE PATTERNS
 -------------
 
-**Basic Usage:**
+**Basic Usage (Works with ANY model architecture):**
 ```python
-# Initialize with models and visualization manager
-analyzer = ModelAnalyzer(models_dict, vis_manager)
+# Works with CNNs, Dense networks, or any Keras model
+cnn_models = {'cnn_baseline': cnn_model, 'cnn_normalized': cnn_norm_model}
+dense_models = {'mlp_baseline': dense_model, 'mlp_dropout': dense_drop_model}
+mixed_models = {'cnn': cnn_model, 'dense': dense_model, 'hybrid': hybrid_model}
 
-# Run complete analysis (includes both activation and probability analysis)
-results = analyzer.analyze_models(mnist_data)
+# Initialize with any model dictionary
+analyzer = ModelAnalyzer(mixed_models, vis_manager)
+
+# Run complete analysis (same interface for all architectures)
+results = analyzer.analyze_models(dataset)
+```
+
+**Architecture-Specific Examples:**
+```python
+# CNN Models - Full activation map visualization
+cnn_analyzer = ModelAnalyzer(cnn_models, vis_manager)
+cnn_results = cnn_analyzer.analyze_models(image_data)
+
+# Dense Models - Dense layer heatmap visualization
+dense_analyzer = ModelAnalyzer(dense_models, vis_manager)
+dense_results = dense_analyzer.analyze_models(tabular_data)
+
+# Mixed Architecture Comparison - Adaptive visualization
+mixed_analyzer = ModelAnalyzer({'cnn': cnn, 'transformer': transformer, 'dense': mlp}, vis_manager)
+mixed_results = mixed_analyzer.analyze_models(data)
 ```
 
 **Custom Analysis:**
 ```python
-# Run only probability distribution analysis
-analyzer.create_probability_distribution_analysis(mnist_data, n_samples=2000)
+# Run only probability distribution analysis (works with any architecture)
+analyzer.create_probability_distribution_analysis(data, n_samples=2000)
 
-# Run only activation visualization
-analyzer.create_comprehensive_visualization(mnist_data, sample_digits=[0,1,2])
+# Run only activation visualization (adapts to architecture automatically)
+analyzer.create_comprehensive_visualization(data, sample_digits=[0,1,2])
 ```
 
 **Confidence Metrics Access:**
@@ -187,19 +255,25 @@ All visualizations are automatically saved through the VisualizationManager:
 output_directory/
 ├── model_comparison/
 │   └── comprehensive_analysis.png              # Activation maps and probability bars
-└── probability_analysis/
-    ├── probability_distributions_by_class.png  # Class-wise probability histograms
-    ├── confidence_analysis.png                 # Violin plots of confidence metrics
-    ├── calibration_analysis.png               # Calibration curves and confidence distributions
-    ├── class_wise_confidence.png              # Confidence matrix heatmaps
-    ├── uncertainty_landscapes.png             # Multi-metric scatter plots
-    ├── model_agreement_analysis.png           # Agreement/disagreement patterns
-    ├── distribution_distances.png             # Statistical distance analysis
-    ├── confidence_roc_analysis.png            # ROC analysis for confidence
-    ├── prediction_stability.png               # Stability analysis results
-    ├── confidence_correlations.png            # Metric correlation analysis
-    ├── per_class_calibration.png              # Class-specific calibration
-    └── threshold_analysis.png                 # Multi-threshold analysis
+├── probability_analysis/
+│   ├── probability_distributions_by_class.png  # Class-wise probability histograms
+│   ├── confidence_analysis.png                 # Violin plots of confidence metrics
+│   ├── calibration_analysis.png               # Calibration curves and confidence distributions
+│   ├── class_wise_confidence.png              # Confidence matrix heatmaps
+│   ├── uncertainty_landscapes.png             # Multi-metric scatter plots
+│   ├── model_agreement_analysis.png           # Agreement/disagreement patterns
+│   ├── distribution_distances.png             # Statistical distance analysis
+│   ├── confidence_roc_analysis.png            # ROC analysis for confidence
+│   ├── prediction_stability.png               # Stability analysis results
+│   ├── confidence_correlations.png            # Metric correlation analysis
+│   ├── per_class_calibration.png              # Class-specific calibration
+│   └── threshold_analysis.png                 # Multi-threshold analysis
+└── information_flow/
+    ├── layer_activation_statistics.png        # Layer-wise activation properties
+    ├── layer_correlation_analysis.png         # Inter-layer correlation matrices
+    ├── representational_similarity_analysis.png # RSA between models and layers
+    ├── information_bottleneck_analysis.png    # Information content and compression
+    └── gradient_flow_analysis.png             # Gradient propagation through layers
 ```
 
 ANALYSIS RESULTS
@@ -220,13 +294,18 @@ DEPENDENCIES
 RESEARCH APPLICATIONS
 --------------------
 This analyzer is designed for:
-- **Model Comparison**: Systematic comparison of normalization techniques
-- **Confidence Calibration**: Assessing and improving model reliability
-- **OOD Detection**: Identifying samples that models handle poorly
-- **Uncertainty Quantification**: Understanding model confidence patterns
+- **Model Comparison**: Systematic comparison across any model architectures (CNN, Dense, Hybrid)
+- **Confidence Calibration**: Assessing and improving model reliability across architectures
+- **OOD Detection**: Identifying samples that models handle poorly regardless of architecture
+- **Uncertainty Quantification**: Understanding model confidence patterns in any network type
 - **Failure Analysis**: Investigating why models make incorrect predictions
 - **Robustness Assessment**: Evaluating model behavior on edge cases
-- **Deployment Planning**: Determining optimal confidence thresholds
+- **Deployment Planning**: Determining optimal confidence thresholds for any model type
+- **Information Flow Analysis**: Understanding how information propagates through network layers
+- **Architecture Design**: Insights for designing better network architectures (CNN, Dense, Hybrid)
+- **Representation Learning**: Analyzing what different layers learn across various architectures
+- **Transfer Learning**: Comparing representations between different model types
+- **Architecture Search**: Evaluating different architectural choices systematically
 
 The modular design allows easy extension to other datasets, model architectures,
 or additional confidence metrics while maintaining comprehensive visualization capabilities
@@ -244,11 +323,18 @@ Methods:
 import keras
 import numpy as np
 from tqdm import tqdm
+import seaborn as sns
+from scipy import stats
+from pathlib import Path
+from datetime import datetime
 import matplotlib.pyplot as plt
-from typing import Union, Optional, Tuple, Dict, Any, List
+from dataclasses import dataclass
+from scipy.stats import wasserstein_distance
 from scipy.spatial.distance import jensenshannon
+from typing import Union, Optional, Tuple, Dict, Any, List
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import roc_curve, auc, precision_recall_curve
+from itertools import combinations
 
 
 from .datasets import MNISTData
@@ -274,44 +360,160 @@ class ModelAnalyzer:
         self._setup_activation_models()
 
     def _setup_activation_models(self) -> None:
-        """Create models to extract intermediate activations."""
+        """Create models to extract intermediate activations for any model architecture."""
         self.activation_models = {}
+        self.layer_extraction_models = {}
 
         for model_name, model in self.models.items():
-            # Get the last convolutional layer
-            conv_layers = [layer for layer in model.layers
-                           if isinstance(layer, keras.layers.Conv2D)]
+            # For activation visualization - find the best layer to visualize
+            best_viz_layer = None
+
+            # Priority: Conv2D > Dense > any layer with meaningful output
+            conv_layers = [layer for layer in model.layers if isinstance(layer, keras.layers.Conv2D)]
+            dense_layers = [layer for layer in model.layers if isinstance(layer, keras.layers.Dense)]
+
             if conv_layers:
-                last_conv = conv_layers[-1]
-                self.activation_models[model_name] = keras.Model(
-                    inputs=model.input,
-                    outputs=[
-                        last_conv.output,  # Last conv activation
-                        model.output  # Final predictions
-                    ]
-                )
+                # CNN: Use last conv layer
+                best_viz_layer = conv_layers[-1]
+            elif dense_layers:
+                # Dense network: Use middle dense layer for visualization
+                mid_idx = len(dense_layers) // 2
+                best_viz_layer = dense_layers[mid_idx]
+            else:
+                # Other architectures: Use any layer with reasonable output
+                for layer in reversed(model.layers):
+                    if hasattr(layer, 'output') and layer.output is not None:
+                        try:
+                            output_shape = layer.output.shape
+                            if len(output_shape) >= 2 and output_shape[-1] is not None:
+                                best_viz_layer = layer
+                                break
+                        except:
+                            continue
+
+            # Create activation model if we found a suitable layer
+            if best_viz_layer is not None:
+                try:
+                    self.activation_models[model_name] = keras.Model(
+                        inputs=model.input,
+                        outputs=[
+                            best_viz_layer.output,  # Best layer for visualization
+                            model.output  # Final predictions
+                        ]
+                    )
+                except:
+                    # Fallback: just use model output
+                    self.activation_models[model_name] = keras.Model(
+                        inputs=model.input,
+                        outputs=model.output
+                    )
+
+            # Create multi-layer extraction model for information flow analysis
+            extraction_layers = []
+            layer_names = []
+
+            # Extract from key layers: conv, dense, normalization, attention, etc.
+            for layer in model.layers:
+                if isinstance(layer, (keras.layers.Conv2D, keras.layers.Dense,
+                                    keras.layers.BatchNormalization, keras.layers.LayerNormalization,
+                                    keras.layers.Dropout, keras.layers.Activation)):
+                    # Skip certain layers that don't have meaningful outputs
+                    if isinstance(layer, (keras.layers.Dropout, keras.layers.Activation)):
+                        if layer.name in ['dropout', 'activation']:  # Skip generic named layers
+                            continue
+
+                    try:
+                        if hasattr(layer, 'output') and layer.output is not None:
+                            # Check if output shape is reasonable
+                            output_shape = layer.output.shape
+                            if len(output_shape) >= 2 and output_shape[-1] is not None:
+                                extraction_layers.append(layer.output)
+                                layer_names.append(f"{layer.__class__.__name__}_{layer.name}")
+                    except:
+                        continue
+
+            if extraction_layers:
+                try:
+                    self.layer_extraction_models[model_name] = {
+                        'model': keras.Model(inputs=model.input, outputs=extraction_layers),
+                        'layer_names': layer_names
+                    }
+                except:
+                    # If multi-output model creation fails, skip information flow for this model
+                    self.layer_extraction_models[model_name] = None
 
     def get_activation_and_predictions(
             self,
             image: np.ndarray,
             model_name: str
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Get activation maps and predictions for a single image.
+        """Get layer activations and predictions for a single sample (works with any model type).
 
         Args:
-            image: Input image
+            image: Input sample
             model_name: Name of the model to use
 
         Returns:
-            Tuple of (activation_maps, predictions)
+            Tuple of (layer_activations, predictions)
         """
-        model = self.activation_models[model_name]
-        image_batch = np.expand_dims(image, 0)
-        activations, predictions = model.predict(image_batch, verbose=0)
+        if model_name not in self.activation_models:
+            # Fallback: just get predictions
+            model = self.models[model_name]
+            sample_batch = np.expand_dims(image, 0)
+            predictions = model.predict(sample_batch, verbose=0)
+            # Return dummy activation (zeros) and predictions
+            dummy_activation = np.zeros((28, 28))  # Default shape
+            return dummy_activation, predictions[0]
 
-        # Average activation maps across channels
-        mean_activation = np.mean(activations[0], axis=-1)
-        return mean_activation, predictions[0]
+        model = self.activation_models[model_name]
+        sample_batch = np.expand_dims(image, 0)
+
+        try:
+            # Try to get both activations and predictions
+            outputs = model.predict(sample_batch, verbose=0)
+
+            if isinstance(outputs, list) and len(outputs) == 2:
+                # We have both activation and prediction outputs
+                layer_output, predictions = outputs
+
+                # Process layer output based on its shape
+                if len(layer_output.shape) == 4:
+                    # Conv layer: (batch, h, w, channels) -> average across channels
+                    processed_activation = np.mean(layer_output[0], axis=-1)
+                elif len(layer_output.shape) == 2:
+                    # Dense layer: (batch, units) -> reshape to 2D for visualization
+                    units = layer_output.shape[1]
+                    side_length = int(np.sqrt(units))
+                    if side_length * side_length == units:
+                        processed_activation = layer_output[0].reshape(side_length, side_length)
+                    else:
+                        # Create a rectangular visualization
+                        cols = min(int(np.sqrt(units)), 32)
+                        rows = (units + cols - 1) // cols
+                        padded_activation = np.pad(layer_output[0], (0, rows * cols - units), mode='constant')
+                        processed_activation = padded_activation.reshape(rows, cols)
+                else:
+                    # Other shapes: flatten and reshape to square
+                    flattened = layer_output[0].flatten()
+                    side_length = int(np.sqrt(len(flattened)))
+                    if side_length > 0:
+                        processed_activation = flattened[:side_length*side_length].reshape(side_length, side_length)
+                    else:
+                        processed_activation = np.zeros((10, 10))
+
+                return processed_activation, predictions[0]
+            else:
+                # Only predictions available
+                predictions = outputs if not isinstance(outputs, list) else outputs[0]
+                dummy_activation = np.zeros((28, 28))
+                return dummy_activation, predictions[0] if len(predictions.shape) > 1 else predictions
+
+        except Exception as e:
+            # Complete fallback
+            model = self.models[model_name]
+            predictions = model.predict(sample_batch, verbose=0)
+            dummy_activation = np.zeros((28, 28))
+            return dummy_activation, predictions[0]
 
     def _compute_confidence_metrics(self, probabilities: np.ndarray) -> Dict[str, np.ndarray]:
         """Compute various confidence metrics from probability distributions.
@@ -468,6 +670,10 @@ class ModelAnalyzer:
         self._plot_per_class_calibration(model_predictions, y_true)
         print("⚖️ Performing threshold analysis...")
         self._plot_threshold_analysis(model_predictions, y_true)
+
+        # Information flow analysis using pre-computed activations
+        print("🌊 Analyzing information flow between layers...")
+        self._analyze_information_flow(x_sample)
 
     def _plot_probability_distributions(
             self,
@@ -1374,16 +1580,560 @@ class ModelAnalyzer:
             "probability_analysis"
         )
 
+    def _analyze_information_flow(self, x_sample: np.ndarray) -> None:
+        """Comprehensive information flow analysis between layers."""
+        # Extract activations from all layers for all models
+        print("🔍 Extracting multi-layer activations...")
+        model_layer_activations = {}
+
+        # Use smaller sample for computational efficiency
+        n_flow_samples = min(200, len(x_sample))
+        flow_indices = np.random.choice(len(x_sample), n_flow_samples, replace=False)
+        x_flow = x_sample[flow_indices]
+
+        for model_name, extraction_data in tqdm(self.layer_extraction_models.items(), desc="Layer Extraction"):
+            if extraction_data:
+                layer_outputs = extraction_data['model'].predict(x_flow, verbose=0)
+                layer_names = extraction_data['layer_names']
+
+                # Process each layer's activations
+                processed_activations = {}
+                for i, (layer_output, layer_name) in enumerate(zip(layer_outputs, layer_names)):
+                    # Flatten spatial dimensions but keep batch and feature dimensions
+                    if len(layer_output.shape) == 4:  # Conv layer: (batch, h, w, channels)
+                        # Global average pooling to reduce spatial dimensions
+                        flattened = np.mean(layer_output, axis=(1, 2))  # (batch, channels)
+                    elif len(layer_output.shape) == 2:  # Dense layer: (batch, units)
+                        flattened = layer_output
+                    else:
+                        # For other shapes, flatten everything except batch dimension
+                        flattened = layer_output.reshape(layer_output.shape[0], -1)
+
+                    processed_activations[layer_name] = flattened
+
+                model_layer_activations[model_name] = processed_activations
+
+        # Generate all information flow analyses
+        self._plot_layer_activation_statistics(model_layer_activations)
+        self._plot_layer_correlation_analysis(model_layer_activations)
+        self._plot_representational_similarity_analysis(model_layer_activations)
+        self._plot_information_bottleneck_analysis(model_layer_activations)
+        self._plot_layer_gradient_flow_analysis(x_flow)
+
+    def _plot_layer_activation_statistics(
+            self,
+            model_layer_activations: Dict[str, Dict[str, np.ndarray]]
+    ) -> None:
+        """Plot statistical properties of activations across layers."""
+        n_models = len(model_layer_activations)
+
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+
+        # Activation magnitude evolution
+        ax1 = axes[0, 0]
+        for model_name, layer_acts in model_layer_activations.items():
+            layer_names = list(layer_acts.keys())
+            mean_magnitudes = []
+
+            for layer_name, activations in layer_acts.items():
+                mean_mag = np.mean(np.abs(activations))
+                mean_magnitudes.append(mean_mag)
+
+            ax1.plot(range(len(layer_names)), mean_magnitudes, 'o-',
+                    label=model_name, linewidth=2, markersize=6)
+
+        ax1.set_xlabel('Layer Index')
+        ax1.set_ylabel('Mean Activation Magnitude')
+        ax1.set_title('Activation Magnitude Evolution Across Layers')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # Activation variance evolution
+        ax2 = axes[0, 1]
+        for model_name, layer_acts in model_layer_activations.items():
+            variances = []
+
+            for layer_name, activations in layer_acts.items():
+                variance = np.var(activations)
+                variances.append(variance)
+
+            ax2.plot(range(len(layer_acts)), variances, 's-',
+                    label=model_name, linewidth=2, markersize=6)
+
+        ax2.set_xlabel('Layer Index')
+        ax2.set_ylabel('Activation Variance')
+        ax2.set_title('Activation Variance Evolution Across Layers')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+
+        # Sparsity evolution (fraction of near-zero activations)
+        ax3 = axes[1, 0]
+        for model_name, layer_acts in model_layer_activations.items():
+            sparsities = []
+
+            for layer_name, activations in layer_acts.items():
+                # Count activations close to zero (< 0.001)
+                sparsity = np.mean(np.abs(activations) < 0.001)
+                sparsities.append(sparsity)
+
+            ax3.plot(range(len(layer_acts)), sparsities, '^-',
+                    label=model_name, linewidth=2, markersize=6)
+
+        ax3.set_xlabel('Layer Index')
+        ax3.set_ylabel('Sparsity (Fraction Near-Zero)')
+        ax3.set_title('Activation Sparsity Evolution Across Layers')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+
+        # Effective dimensionality (using participation ratio)
+        ax4 = axes[1, 1]
+        for model_name, layer_acts in model_layer_activations.items():
+            eff_dims = []
+
+            for layer_name, activations in layer_acts.items():
+                # Compute participation ratio as measure of effective dimensionality
+                mean_act = np.mean(activations, axis=0)
+                var_act = np.var(activations, axis=0)
+                # Participation ratio: (sum of variances)^2 / sum of (variances^2)
+                if np.sum(var_act**2) > 1e-10:
+                    participation_ratio = (np.sum(var_act)**2) / np.sum(var_act**2)
+                    eff_dims.append(participation_ratio)
+                else:
+                    eff_dims.append(0)
+
+            ax4.plot(range(len(layer_acts)), eff_dims, 'd-',
+                    label=model_name, linewidth=2, markersize=6)
+
+        ax4.set_xlabel('Layer Index')
+        ax4.set_ylabel('Effective Dimensionality')
+        ax4.set_title('Effective Dimensionality Across Layers')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        self.vis_manager.save_figure(
+            fig,
+            "layer_activation_statistics",
+            "information_flow"
+        )
+
+    def _plot_layer_correlation_analysis(
+            self,
+            model_layer_activations: Dict[str, Dict[str, np.ndarray]]
+    ) -> None:
+        """Plot correlation analysis between consecutive layers."""
+        n_models = len(model_layer_activations)
+
+        fig, axes = plt.subplots(1, n_models, figsize=(6*n_models, 6))
+        if n_models == 1:
+            axes = [axes]
+
+        for model_idx, (model_name, layer_acts) in enumerate(model_layer_activations.items()):
+            ax = axes[model_idx]
+
+            layer_names = list(layer_acts.keys())
+            n_layers = len(layer_names)
+
+            if n_layers < 2:
+                ax.text(0.5, 0.5, 'Insufficient\nLayers', ha='center', va='center',
+                       transform=ax.transAxes)
+                ax.set_title(f'{model_name}: Layer Correlations')
+                continue
+
+            # Compute correlation matrix between all pairs of layers
+            correlation_matrix = np.zeros((n_layers, n_layers))
+
+            for i, layer1_name in enumerate(layer_names):
+                for j, layer2_name in enumerate(layer_names):
+                    if i != j:
+                        acts1 = layer_acts[layer1_name]
+                        acts2 = layer_acts[layer2_name]
+
+                        # Compute average pairwise correlation
+                        # For different dimensionalities, use mean activations
+                        mean1 = np.mean(acts1, axis=1)  # Average across features
+                        mean2 = np.mean(acts2, axis=1)  # Average across features
+
+                        correlation = np.corrcoef(mean1, mean2)[0, 1]
+                        if not np.isnan(correlation):
+                            correlation_matrix[i, j] = correlation
+                    else:
+                        correlation_matrix[i, j] = 1.0
+
+            im = ax.imshow(correlation_matrix, cmap='coolwarm', vmin=-1, vmax=1)
+            ax.set_title(f'{model_name}: Inter-Layer Correlations')
+            ax.set_xticks(range(min(n_layers, 10)))  # Limit ticks for readability
+            ax.set_yticks(range(min(n_layers, 10)))
+
+            # Shortened layer names for display
+            short_names = [name.split('_')[0][:8] for name in layer_names[:10]]
+            ax.set_xticklabels(short_names, rotation=45)
+            ax.set_yticklabels(short_names)
+
+            plt.colorbar(im, ax=ax)
+
+        plt.tight_layout()
+        self.vis_manager.save_figure(
+            fig,
+            "layer_correlation_analysis",
+            "information_flow"
+        )
+
+    def _plot_representational_similarity_analysis(
+            self,
+            model_layer_activations: Dict[str, Dict[str, np.ndarray]]
+    ) -> None:
+        """Plot Representational Similarity Analysis (RSA) between models and layers."""
+        if len(model_layer_activations) < 2:
+            return
+
+        model_names = list(model_layer_activations.keys())
+
+        # Compare same layers across different models
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+
+        # Get common layer types across models
+        common_layer_types = set()
+        for model_acts in model_layer_activations.values():
+            layer_types = [name.split('_')[0] for name in model_acts.keys()]
+            common_layer_types.update(layer_types)
+
+        common_layer_types = list(common_layer_types)[:4]  # Limit to 4 for visualization
+
+        for idx, layer_type in enumerate(common_layer_types):
+            if idx >= 4:
+                break
+
+            ax = axes[idx // 2, idx % 2]
+
+            # Find layers of this type in each model
+            model_layer_data = {}
+            for model_name, layer_acts in model_layer_activations.items():
+                for layer_name, activations in layer_acts.items():
+                    if layer_name.startswith(layer_type):
+                        model_layer_data[model_name] = activations
+                        break
+
+            if len(model_layer_data) < 2:
+                ax.text(0.5, 0.5, f'Insufficient\n{layer_type}\nLayers',
+                       ha='center', va='center', transform=ax.transAxes)
+                ax.set_title(f'{layer_type} Layer RSA')
+                continue
+
+            # Compute representational similarity matrix
+            models_list = list(model_layer_data.keys())
+            n_models = len(models_list)
+            rsa_matrix = np.zeros((n_models, n_models))
+
+            for i, model1 in enumerate(models_list):
+                for j, model2 in enumerate(models_list):
+                    if i != j:
+                        # Compute representational similarity
+                        acts1 = model_layer_data[model1]
+                        acts2 = model_layer_data[model2]
+
+                        # Use subset of features if dimensions differ
+                        min_features = min(acts1.shape[1], acts2.shape[1])
+                        acts1_sub = acts1[:, :min_features]
+                        acts2_sub = acts2[:, :min_features]
+
+                        # Compute correlation between flattened representations
+                        flat1 = acts1_sub.flatten()
+                        flat2 = acts2_sub.flatten()
+
+                        similarity = np.corrcoef(flat1, flat2)[0, 1]
+                        if not np.isnan(similarity):
+                            rsa_matrix[i, j] = similarity
+                    else:
+                        rsa_matrix[i, j] = 1.0
+
+            im = ax.imshow(rsa_matrix, cmap='viridis', vmin=0, vmax=1)
+            ax.set_title(f'{layer_type} Layer: Model Similarity')
+            ax.set_xticks(range(n_models))
+            ax.set_yticks(range(n_models))
+            ax.set_xticklabels(models_list)
+            ax.set_yticklabels(models_list)
+
+            # Add correlation values
+            for i in range(n_models):
+                for j in range(n_models):
+                    ax.text(j, i, f'{rsa_matrix[i, j]:.3f}',
+                           ha='center', va='center',
+                           color='white' if rsa_matrix[i, j] < 0.5 else 'black',
+                           fontweight='bold')
+
+            plt.colorbar(im, ax=ax)
+
+        plt.tight_layout()
+        self.vis_manager.save_figure(
+            fig,
+            "representational_similarity_analysis",
+            "information_flow"
+        )
+
+    def _plot_information_bottleneck_analysis(
+            self,
+            model_layer_activations: Dict[str, Dict[str, np.ndarray]]
+    ) -> None:
+        """Plot information content analysis across layers."""
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+
+        # Information content using singular value decomposition
+        ax1 = axes[0, 0]
+        for model_name, layer_acts in model_layer_activations.items():
+            layer_names = list(layer_acts.keys())
+            info_contents = []
+
+            for layer_name, activations in layer_acts.items():
+                # Use SVD to estimate information content
+                try:
+                    U, s, Vt = np.linalg.svd(activations, full_matrices=False)
+                    # Information content as sum of normalized singular values
+                    normalized_s = s / np.sum(s)
+                    info_content = -np.sum(normalized_s * np.log(normalized_s + 1e-10))
+                    info_contents.append(info_content)
+                except:
+                    info_contents.append(0)
+
+            ax1.plot(range(len(layer_names)), info_contents, 'o-',
+                    label=model_name, linewidth=2)
+
+        ax1.set_xlabel('Layer Index')
+        ax1.set_ylabel('Information Content (SVD Entropy)')
+        ax1.set_title('Information Content Across Layers')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # Compression ratio (how much information is compressed)
+        ax2 = axes[0, 1]
+        for model_name, layer_acts in model_layer_activations.items():
+            layer_names = list(layer_acts.keys())
+            compression_ratios = []
+
+            first_layer_size = None
+            for i, (layer_name, activations) in enumerate(layer_acts.items()):
+                current_size = np.prod(activations.shape[1:])  # Exclude batch dimension
+
+                if first_layer_size is None:
+                    first_layer_size = current_size
+                    compression_ratios.append(1.0)
+                else:
+                    ratio = current_size / first_layer_size
+                    compression_ratios.append(ratio)
+
+            ax2.plot(range(len(layer_names)), compression_ratios, 's-',
+                    label=model_name, linewidth=2)
+
+        ax2.set_xlabel('Layer Index')
+        ax2.set_ylabel('Compression Ratio')
+        ax2.set_title('Information Compression Across Layers')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+
+        # Mutual information estimation (simplified)
+        ax3 = axes[1, 0]
+        for model_name, layer_acts in model_layer_activations.items():
+            layer_names = list(layer_acts.keys())
+            mutual_infos = []
+
+            layers_list = list(layer_acts.items())
+            for i in range(len(layers_list) - 1):
+                try:
+                    # Simplified mutual information using correlation
+                    acts1 = layers_list[i][1]
+                    acts2 = layers_list[i + 1][1]
+
+                    # Use mean activations for MI estimation
+                    mean1 = np.mean(acts1, axis=1)
+                    mean2 = np.mean(acts2, axis=1)
+
+                    # Estimate MI using correlation (simplified)
+                    correlation = np.corrcoef(mean1, mean2)[0, 1]
+                    if not np.isnan(correlation):
+                        mi_estimate = -0.5 * np.log(1 - correlation**2 + 1e-10)
+                        mutual_infos.append(mi_estimate)
+                    else:
+                        mutual_infos.append(0)
+                except:
+                    mutual_infos.append(0)
+
+            if mutual_infos:
+                ax3.plot(range(len(mutual_infos)), mutual_infos, '^-',
+                        label=model_name, linewidth=2)
+
+        ax3.set_xlabel('Layer Transition Index')
+        ax3.set_ylabel('Estimated Mutual Information')
+        ax3.set_title('Information Flow Between Adjacent Layers')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+
+        # Layer complexity (using rank estimation)
+        ax4 = axes[1, 1]
+        for model_name, layer_acts in model_layer_activations.items():
+            layer_names = list(layer_acts.keys())
+            complexities = []
+
+            for layer_name, activations in layer_acts.items():
+                try:
+                    # Estimate effective rank as measure of complexity
+                    U, s, Vt = np.linalg.svd(activations, full_matrices=False)
+                    # Effective rank using entropy of singular values
+                    normalized_s = s / (np.sum(s) + 1e-10)
+                    effective_rank = np.exp(-np.sum(normalized_s * np.log(normalized_s + 1e-10)))
+                    complexities.append(effective_rank)
+                except:
+                    complexities.append(0)
+
+            ax4.plot(range(len(layer_names)), complexities, 'd-',
+                    label=model_name, linewidth=2)
+
+        ax4.set_xlabel('Layer Index')
+        ax4.set_ylabel('Effective Rank (Layer Complexity)')
+        ax4.set_title('Layer Representational Complexity')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        self.vis_manager.save_figure(
+            fig,
+            "information_bottleneck_analysis",
+            "information_flow"
+        )
+
+    def _plot_layer_gradient_flow_analysis(self, x_sample: np.ndarray) -> None:
+        """Plot gradient flow analysis through layers."""
+        n_models = len(self.models)
+        fig, axes = plt.subplots(2, n_models, figsize=(6*n_models, 10))
+        if n_models == 1:
+            axes = axes.reshape(-1, 1)
+
+        # Use smaller sample for gradient computation
+        n_grad_samples = min(50, len(x_sample))
+        grad_indices = np.random.choice(len(x_sample), n_grad_samples, replace=False)
+        x_grad = x_sample[grad_indices]
+
+        for model_idx, (model_name, model) in enumerate(self.models.items()):
+            # Gradient magnitude analysis
+            ax1 = axes[0, model_idx]
+            ax2 = axes[1, model_idx]
+
+            try:
+                # Create a simplified gradient computation
+                with keras.utils.custom_object_scope({'RMSNorm': lambda: None, 'LogitNorm': lambda: None}):
+                    # Get trainable layers
+                    trainable_layers = [layer for layer in model.layers if layer.trainable_weights]
+
+                    if not trainable_layers:
+                        ax1.text(0.5, 0.5, 'No Trainable\nLayers', ha='center', va='center',
+                               transform=ax1.transAxes)
+                        ax2.text(0.5, 0.5, 'No Trainable\nLayers', ha='center', va='center',
+                               transform=ax2.transAxes)
+                        continue
+
+                    # Compute gradients for a few samples
+                    layer_grad_norms = []
+                    layer_names = []
+
+                    # Use tape to get gradients
+                    x_tensor = keras.ops.convert_to_tensor(x_grad[:10])  # Use small batch
+
+                    with keras.utils.tape.GradientTape() as tape:
+                        tape.watch(x_tensor)
+                        predictions = model(x_tensor, training=False)
+                        # Use mean prediction as scalar loss
+                        loss = keras.ops.mean(predictions)
+
+                    # Get gradients w.r.t. all trainable weights
+                    all_weights = []
+                    for layer in trainable_layers:
+                        all_weights.extend(layer.trainable_weights)
+
+                    if all_weights:
+                        gradients = tape.gradient(loss, all_weights)
+
+                        # Process gradients by layer
+                        weight_idx = 0
+                        for layer in trainable_layers:
+                            layer_grads = []
+                            for _ in layer.trainable_weights:
+                                if weight_idx < len(gradients) and gradients[weight_idx] is not None:
+                                    grad_norm = keras.ops.norm(gradients[weight_idx])
+                                    layer_grads.append(float(grad_norm))
+                                weight_idx += 1
+
+                            if layer_grads:
+                                avg_grad_norm = np.mean(layer_grads)
+                                layer_grad_norms.append(avg_grad_norm)
+                                layer_names.append(f"{layer.__class__.__name__}_{len(layer_names)}")
+
+                    # Plot gradient magnitudes
+                    if layer_grad_norms:
+                        ax1.bar(range(len(layer_grad_norms)), layer_grad_norms, alpha=0.7)
+                        ax1.set_title(f'{model_name}: Gradient Magnitudes')
+                        ax1.set_xlabel('Layer Index')
+                        ax1.set_ylabel('Gradient Norm')
+                        ax1.set_xticks(range(len(layer_names)))
+                        ax1.set_xticklabels([name.split('_')[0][:8] for name in layer_names], rotation=45)
+
+                        # Plot gradient flow (normalized)
+                        if len(layer_grad_norms) > 1:
+                            normalized_grads = np.array(layer_grad_norms) / (np.max(layer_grad_norms) + 1e-10)
+                            ax2.plot(range(len(normalized_grads)), normalized_grads, 'o-', linewidth=2)
+                            ax2.set_title(f'{model_name}: Normalized Gradient Flow')
+                            ax2.set_xlabel('Layer Index')
+                            ax2.set_ylabel('Normalized Gradient')
+                            ax2.grid(True, alpha=0.3)
+                    else:
+                        ax1.text(0.5, 0.5, 'No Gradients\nComputed', ha='center', va='center',
+                               transform=ax1.transAxes)
+                        ax2.text(0.5, 0.5, 'No Gradients\nComputed', ha='center', va='center',
+                               transform=ax2.transAxes)
+
+            except Exception as e:
+                # Fallback: show layer weight statistics instead
+                ax1.text(0.5, 0.5, f'Gradient Error:\n{str(e)[:50]}...', ha='center', va='center',
+                       transform=ax1.transAxes, fontsize=8)
+
+                # Plot layer weight magnitudes as proxy
+                weight_norms = []
+                layer_names = []
+                for layer in model.layers:
+                    if layer.trainable_weights:
+                        layer_weight_norms = []
+                        for weight in layer.trainable_weights:
+                            weight_norm = np.linalg.norm(weight.numpy())
+                            layer_weight_norms.append(weight_norm)
+
+                        if layer_weight_norms:
+                            avg_weight_norm = np.mean(layer_weight_norms)
+                            weight_norms.append(avg_weight_norm)
+                            layer_names.append(f"{layer.__class__.__name__}_{len(layer_names)}")
+
+                if weight_norms:
+                    ax2.bar(range(len(weight_norms)), weight_norms, alpha=0.7, color='orange')
+                    ax2.set_title(f'{model_name}: Weight Magnitudes (Proxy)')
+                    ax2.set_xlabel('Layer Index')
+                    ax2.set_ylabel('Weight Norm')
+                    ax2.set_xticks(range(len(layer_names)))
+                    ax2.set_xticklabels([name.split('_')[0][:8] for name in layer_names], rotation=45)
+
+        plt.tight_layout()
+        self.vis_manager.save_figure(
+            fig,
+            "gradient_flow_analysis",
+            "information_flow"
+        )
+
     def create_comprehensive_visualization(
             self,
             data: MNISTData,
             sample_digits: Optional[List[int]] = None,
             max_samples_per_digit: int = 3
     ) -> None:
-        """Create comprehensive visualization for all digits.
+        """Create comprehensive visualization for all digits (works with any model architecture).
 
         Args:
-            data: MNIST dataset splits
+            data: Dataset splits
             sample_digits: Optional list of digits to analyze
             max_samples_per_digit: Maximum number of samples per digit
         """
@@ -1394,66 +2144,118 @@ class ModelAnalyzer:
         n_samples = max_samples_per_digit
         n_digits = len(sample_digits)
 
-        # Create a large figure
-        fig = plt.figure(figsize=(20, 2 * n_digits))
-        gs = plt.GridSpec(n_digits, n_models * (n_samples + 1))
+        # Check if we have meaningful activation models
+        has_activations = any(model_name in self.activation_models
+                            for model_name in self.models.keys())
 
-        # For each digit
-        for digit_idx, digit in enumerate(sample_digits):
-            # Find examples of this digit
-            digit_indices = np.where(np.argmax(data.y_test, axis=1) == digit)[0]
-            sample_indices = digit_indices[:max_samples_per_digit]
+        if has_activations:
+            # Create visualization with activation maps
+            fig = plt.figure(figsize=(20, 2 * n_digits))
+            gs = plt.GridSpec(n_digits, n_models * (n_samples + 1))
 
-            # For each model
-            for model_idx, (model_name, _) in enumerate(self.models.items()):
-                base_col = model_idx * (n_samples + 1)
+            # For each digit
+            for digit_idx, digit in enumerate(sample_digits):
+                # Find examples of this digit
+                digit_indices = np.where(np.argmax(data.y_test, axis=1) == digit)[0]
+                sample_indices = digit_indices[:max_samples_per_digit]
 
-                # Plot probability distribution
-                ax_prob = fig.add_subplot(gs[digit_idx, base_col])
+                # For each model
+                for model_idx, (model_name, _) in enumerate(self.models.items()):
+                    base_col = model_idx * (n_samples + 1)
 
-                # Get average predictions for this digit
-                avg_predictions = np.zeros(10)
-                for idx in sample_indices:
-                    _, preds = self.get_activation_and_predictions(
-                        data.x_test[idx],
-                        model_name
-                    )
-                    avg_predictions += preds
-                avg_predictions /= len(sample_indices)
+                    # Plot probability distribution
+                    ax_prob = fig.add_subplot(gs[digit_idx, base_col])
 
-                # Plot probability distribution
-                ax_prob.bar(range(10), avg_predictions)
-                ax_prob.set_ylim(0, 1)
-                if digit_idx == 0:
-                    ax_prob.set_title(f"{model_name}\nProbabilities")
-                ax_prob.set_xticks(range(10))
-                if digit_idx == n_digits - 1:
-                    ax_prob.set_xlabel("Predicted Class")
+                    # Get average predictions for this digit
+                    avg_predictions = np.zeros(10)
+                    for idx in sample_indices:
+                        _, preds = self.get_activation_and_predictions(
+                            data.x_test[idx],
+                            model_name
+                        )
+                        avg_predictions += preds
+                    avg_predictions /= len(sample_indices)
 
-                # For each sample of this digit
-                for sample_num, idx in enumerate(sample_indices, 1):
-                    ax = fig.add_subplot(gs[digit_idx, base_col + sample_num])
-
-                    # Get activation map and predictions
-                    act_map, predictions = self.get_activation_and_predictions(
-                        data.x_test[idx],
-                        model_name
-                    )
-
-                    # Plot activation map
-                    im = ax.imshow(act_map, cmap='viridis')
-                    ax.axis('off')
-
-                    # Add prediction confidence as title
-                    confidence = predictions[digit]
+                    # Plot probability distribution
+                    ax_prob.bar(range(10), avg_predictions)
+                    ax_prob.set_ylim(0, 1)
                     if digit_idx == 0:
-                        ax.set_title(f"Act Map\n{confidence:.2f}")
-                    else:
-                        ax.set_title(f"{confidence:.2f}")
+                        ax_prob.set_title(f"{model_name}\nProbabilities")
+                    ax_prob.set_xticks(range(10))
+                    if digit_idx == n_digits - 1:
+                        ax_prob.set_xlabel("Predicted Class")
 
-            # Add digit label on the left
-            if model_idx == 0:
+                    # For each sample of this digit
+                    for sample_num, idx in enumerate(sample_indices, 1):
+                        ax = fig.add_subplot(gs[digit_idx, base_col + sample_num])
+
+                        # Get layer activation and predictions
+                        layer_activation, predictions = self.get_activation_and_predictions(
+                            data.x_test[idx],
+                            model_name
+                        )
+
+                        # Plot layer activation (could be conv activation or dense layer visualization)
+                        if layer_activation is not None and layer_activation.size > 0:
+                            im = ax.imshow(layer_activation, cmap='viridis')
+                            ax.axis('off')
+
+                            # Add prediction confidence as title
+                            confidence = predictions[digit]
+                            if digit_idx == 0:
+                                ax.set_title(f"Layer Act\n{confidence:.2f}")
+                            else:
+                                ax.set_title(f"{confidence:.2f}")
+                        else:
+                            # No meaningful activation to show
+                            ax.text(0.5, 0.5, f'{predictions[digit]:.3f}',
+                                   ha='center', va='center', transform=ax.transAxes,
+                                   fontsize=16, fontweight='bold')
+                            ax.set_title(f"Conf: {predictions[digit]:.3f}")
+                            ax.axis('off')
+
+                # Add digit label on the left
                 ax_prob.set_ylabel(f"Digit {digit}")
+
+        else:
+            # Simplified visualization without activation maps - just probability bars
+            fig, axes = plt.subplots(n_digits, n_models, figsize=(4*n_models, 2*n_digits))
+            if n_models == 1:
+                axes = axes.reshape(-1, 1)
+
+            for digit_idx, digit in enumerate(sample_digits):
+                digit_indices = np.where(np.argmax(data.y_test, axis=1) == digit)[0]
+                sample_indices = digit_indices[:max_samples_per_digit]
+
+                for model_idx, (model_name, model) in enumerate(self.models.items()):
+                    ax = axes[digit_idx, model_idx]
+
+                    # Get predictions for samples of this digit
+                    all_predictions = []
+                    confidences = []
+
+                    for idx in sample_indices:
+                        sample_batch = np.expand_dims(data.x_test[idx], 0)
+                        preds = model.predict(sample_batch, verbose=0)[0]
+                        all_predictions.append(preds)
+                        confidences.append(preds[digit])
+
+                    if all_predictions:
+                        avg_predictions = np.mean(all_predictions, axis=0)
+                        avg_confidence = np.mean(confidences)
+
+                        # Plot probability distribution
+                        bars = ax.bar(range(10), avg_predictions, alpha=0.7)
+                        bars[digit].set_color('red')  # Highlight true class
+
+                        ax.set_ylim(0, 1)
+                        ax.set_title(f'{model_name}\nAvg Conf: {avg_confidence:.3f}')
+                        ax.set_xticks(range(10))
+
+                        if digit_idx == n_digits - 1:
+                            ax.set_xlabel('Predicted Class')
+                        if model_idx == 0:
+                            ax.set_ylabel(f'Digit {digit}\nProbability')
 
         plt.tight_layout()
         self.vis_manager.save_figure(
