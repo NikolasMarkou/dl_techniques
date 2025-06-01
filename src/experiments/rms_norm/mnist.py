@@ -5,7 +5,7 @@ MNIST CNN Normalization Comparison Experiment
 This module implements a comprehensive experiment to evaluate and compare the effectiveness
 of different normalization techniques applied to Convolutional Neural Networks (CNNs) for
 MNIST digit classification. The experiment systematically compares three model variants:
-baseline (no normalization), RMS normalization, and Logit normalization.
+baseline (no normalization), RMS normalization, Logit normalization, Band RMS normalization
 
 EXPERIMENT OVERVIEW
 ------------------
@@ -29,8 +29,8 @@ Each model follows the same training protocol:
 MODEL ARCHITECTURE
 ------------------
 - Input: 28x28x1 grayscale MNIST images
-- Conv Blocks: Conv2D → BatchNorm → ReLU → MaxPool2D → Dropout
-- Dense Block: Dense → BatchNorm → ReLU → Dropout
+- Conv Blocks: Conv2D → LayerNorm → GeLU → Dropout
+- Dense Block: Dense → LayerNorm → GeLU → Dropout
 - Output: Dense(10) → [Optional Normalization] → Softmax
 - Regularization: L2 weight decay (0.01) and dropout (0.25-0.5)
 
@@ -135,21 +135,27 @@ from datetime import datetime
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List, Literal, Tuple, Union
 
+# ------------------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.model_analyzer import ModelAnalyzer
-from dl_techniques.layers.band_rms import BandRMS
-from dl_techniques.layers.rms_logit_norm import RMSNorm, LogitNorm
 from dl_techniques.utils.train import TrainingConfig, train_model
-from dl_techniques.utils.datasets import load_and_preprocess_mnist
 from dl_techniques.utils.weight_analyzer import WeightAnalyzerConfig, WeightAnalyzer
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
+
+from dl_techniques.layers.norms import (
+    LogitNorm, BandLogitNorm, RMSNorm, BandRMS)
+
+from dl_techniques.utils.datasets import load_and_preprocess_mnist
 
 # ------------------------------------------------------------------------------
 # 2. Single Configuration Class
 # ------------------------------------------------------------------------------
 
 @dataclass
-class Config:
+class ExperimentConfig:
     """Unified configuration for the MNIST normalization experiment.
 
     Contains all parameters for model architecture, training, visualization,
@@ -158,19 +164,18 @@ class Config:
     # Model Architecture Parameters
     input_shape: Tuple[int, ...] = (28, 28, 1)
     num_classes: int = 10
-    conv_filters: List[int] = (16, 32, 64, 128)
+    conv_filters: List[int] = (16, 32, 64)
     dense_units: List[int] = (32,)
-    dropout_rates: List[float] = (0.25, 0.25, 0.25, 0.25, 0.5)
-    kernel_size: Union[int, Tuple[int, int]] = (3, 3)
+    dropout_rates: List[float] = (0.25, 0.25, 0.25, 0.25)
+    kernel_size: Union[int, Tuple[int, int]] = (5, 5)
     pool_size: Union[int, Tuple[int, int]] = (2, 2)
-    weight_decay: float = 0.01
-    gaussian_noise_std: float = 0.1
+    weight_decay: float = 0.001
     temperature: float = 0.04
 
     # Training Parameters
-    epochs: int = 3
+    epochs: int = 1
     batch_size: int = 128
-    early_stopping_patience: int = 5
+    early_stopping_patience: int = 10
     monitor_metric: str = 'val_accuracy'
     learning_rate: float = 0.001
 
@@ -188,7 +193,7 @@ class Config:
     experiment_name: str = "mnist_normalization_with_weight_analysis"
 
     # Model variants to test
-    normalization_types: List[Optional[Literal['rms', 'logit']]] = (None, 'rms', 'logit', 'band_rms')
+    normalization_types: List[Optional[Literal['rms', 'logit', 'band_rms', 'band_logit']]] = (None, 'rms', 'logit', 'band_rms', 'band_logit')
 
 # ------------------------------------------------------------------------------
 # 3. Model Building Utilities
@@ -197,7 +202,7 @@ class Config:
 def build_conv_block(
         inputs: keras.layers.Layer,
         filters: int,
-        config: Config,
+        config: ExperimentConfig,
         block_index: int
 ) -> keras.layers.Layer:
     """Build a convolutional block with normalization and activation.
@@ -216,12 +221,12 @@ def build_conv_block(
         kernel_size=config.kernel_size,
         padding='same',
         kernel_initializer='he_normal',
+        strides=config.pool_size,
         kernel_regularizer=keras.regularizers.L2(config.weight_decay),
         name=f'conv{block_index + 1}'
     )(inputs)
-    x = keras.layers.BatchNormalization()(x)
-    x = keras.layers.ReLU()(x)
-    x = keras.layers.MaxPooling2D(pool_size=config.pool_size)(x)
+    x = keras.layers.LayerNormalization()(x)
+    x = keras.activations.gelu(x)
     dropout_rate = config.dropout_rates[block_index]
     if dropout_rate is not None and dropout_rate > 0.0:
         x = keras.layers.Dropout(config.dropout_rates[block_index])(x)
@@ -231,7 +236,7 @@ def build_conv_block(
 def build_dense_block(
         inputs: keras.layers.Layer,
         units: int,
-        config: Config,
+        config: ExperimentConfig,
         dropout_rate: float
 ) -> keras.layers.Layer:
     """Build a dense block with normalization and activation.
@@ -250,12 +255,14 @@ def build_dense_block(
         kernel_initializer='he_normal',
         kernel_regularizer=keras.regularizers.L2(config.weight_decay)
     )(inputs)
-    x = keras.layers.BatchNormalization()(x)
-    x = keras.layers.ReLU()(x)
-    return keras.layers.Dropout(dropout_rate)(x)
+    x = keras.layers.LayerNormalization()(x)
+    x = keras.activations.gelu(x)
+    if dropout_rate > 0:
+        x = keras.layers.Dropout(dropout_rate)(x)
+    return x
 
 
-def build_model(config: Config, norm_type: Optional[Literal['rms', 'logit', 'band_rms']] = None) -> keras.Model:
+def build_model(config: ExperimentConfig, norm_type: Optional[Literal['rms', 'logit', 'band_rms']] = None) -> keras.Model:
     """Build complete CNN model with specified configuration.
 
     Args:
@@ -289,6 +296,8 @@ def build_model(config: Config, norm_type: Optional[Literal['rms', 'logit', 'ban
         x = RMSNorm()(x)
     elif norm_type == 'logit':
         x = LogitNorm(temperature=config.temperature)(x)
+    elif norm_type == 'band_logit':
+        x = BandLogitNorm()(x)
     elif norm_type == 'band_rms':
         x = BandRMS()(x)
 
@@ -308,7 +317,7 @@ def build_model(config: Config, norm_type: Optional[Literal['rms', 'logit', 'ban
 # 4. Experiment Runner
 # ------------------------------------------------------------------------------
 
-def run_experiment(config: Config) -> Dict[str, Any]:
+def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     """Run the complete normalization comparison experiment with weight analysis.
 
     Args:
@@ -346,7 +355,8 @@ def run_experiment(config: Config) -> Dict[str, Any]:
         None: 'baseline',
         'rms': 'rms',
         'logit': 'logit',
-        'band_rms': 'band_rms'
+        'band_rms': 'band_rms',
+        'band_logit': 'band_logit'
     }
 
     # Training phase
@@ -384,33 +394,43 @@ def run_experiment(config: Config) -> Dict[str, Any]:
             all_histories[metric][name] = history.history[metric]
             all_histories[f'val_{metric}'][name] = history.history[f'val_{metric}']
 
-    # Weight Analysis phase
+    # Weight Analysis phase with improved error handling
     logger.info("Performing weight distribution analysis...")
 
-    # Configure weight analyzer
-    analysis_config = WeightAnalyzerConfig(
-        compute_l1_norm=config.compute_l1_norm,
-        compute_l2_norm=config.compute_l2_norm,
-        compute_rms_norm=config.compute_rms_norm,
-        analyze_biases=config.analyze_biases,
-        save_plots=config.save_plots,
-        export_format=config.plot_format,
-        plot_style='seaborn-darkgrid',
-        color_palette='deep'
-    )
+    try:
+        # Test first
+        analysis_config = WeightAnalyzerConfig(
+            compute_l1_norm=config.compute_l1_norm,
+            compute_l2_norm=config.compute_l2_norm,
+            compute_rms_norm=config.compute_rms_norm,
+            analyze_biases=config.analyze_biases,
+            save_plots=config.save_plots,
+            export_format=config.plot_format
+        )
 
-    # Initialize and run weight analyzer
-    weight_analyzer = WeightAnalyzer(
-        models=models,
-        config=analysis_config,
-        output_dir=experiment_dir / "weight_analysis"
-    )
+        weight_analyzer = WeightAnalyzer(
+            models=models,
+            config=analysis_config,
+            output_dir=experiment_dir / "weight_analysis"
+        )
 
-    # Generate standard analysis plots
-    weight_analyzer.plot_norm_distributions()
-    weight_analyzer.plot_layer_comparisons(['mean', 'std', 'l2_norm'])
-    weight_analyzer.plot_weight_distributions_heatmap(n_bins=50)
-    weight_analyzer.plot_layer_weight_histograms()
+        # Check if analysis was successful
+        summary = weight_analyzer.get_analysis_summary()
+        logger.info(f"Weight analysis summary: {summary}")
+
+        if weight_analyzer.has_valid_analysis():
+            # Generate comprehensive analysis
+            weight_analyzer.plot_comprehensive_dashboard()
+            weight_analyzer.plot_norm_distributions()
+            weight_analyzer.plot_layer_comparisons(['mean', 'std', 'l2_norm'])
+            weight_analyzer.save_analysis_results()
+            logger.info("✅ Weight analysis completed successfully!")
+        else:
+            logger.warning("❌ No valid weight data found for analysis")
+
+    except Exception as e:
+        logger.error(f"Weight analysis failed: {e}")
+        logger.info("Continuing with experiment without weight analysis...")
 
     # Generate visualizations for training history
     for metric in ['accuracy', 'loss']:
@@ -464,7 +484,7 @@ def run_experiment(config: Config) -> Dict[str, Any]:
 def main():
     """Main execution function for running the experiment."""
     # Create unified configuration
-    config = Config()
+    config = ExperimentConfig()
 
     # Run experiment and print results
     results = run_experiment(config)
@@ -478,6 +498,7 @@ def main():
         for metric, value in metrics.items():
             logger.info(f"{metric}: {value:.4f}")
 
+# ------------------------------------------------------------------------------
 
 if __name__ == "__main__":
     main()
