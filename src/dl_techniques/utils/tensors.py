@@ -1,6 +1,7 @@
+import keras
 import numpy as np
 import tensorflow as tf
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple
 
 # ---------------------------------------------------------------------
 
@@ -260,5 +261,37 @@ def depthwise_gaussian_kernel(
         kernel = kernel.astype(dtype)
 
     return kernel
+
+# ---------------------------------------------------------------------
+
+
+def compute_prediction_entropy(
+        y_pred: keras.KerasTensor,
+        temperature: float = 1.0,
+        epsilon: float = 1e-8
+) -> keras.KerasTensor:
+    """
+    Compute the entropy of predictions for calibration analysis.
+
+    This utility helps analyze how well-calibrated the model's predictions are,
+    which is crucial for understanding Goodhart's Law effects.
+
+    Args:
+        y_pred: Predicted logits, shape (batch_size, num_classes)
+        temperature: Temperature scaling factor. Default: 1.0
+        epsilon: Small constant for numerical stability. Default: 1e-8
+    Returns:
+        Entropy values for each prediction, shape (batch_size,)
+
+    Example:
+        >>> entropies = compute_prediction_entropy(y_pred, temperature=2.0)
+        >>> mean_entropy = keras.ops.mean(entropies)
+        >>> print(f"Average prediction entropy: {mean_entropy:.4f}")
+    """
+    scaled_logits = y_pred / temperature
+    probs = keras.ops.softmax(scaled_logits, axis=-1)
+    probs = keras.ops.clip(probs, x_min=epsilon, x_max=1.0 - epsilon)
+    entropy = -keras.ops.sum(probs * keras.ops.log(probs), axis=-1)
+    return entropy
 
 # ---------------------------------------------------------------------
