@@ -30,72 +30,103 @@ gradient descent.
 """
 
 import keras
-import tensorflow as tf
-from typing import Union, Optional
+from keras import ops
+from typing import Optional, Dict, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
 
+@keras.saving.register_keras_serializable()
 class TriStatePreferenceRegularizer(keras.regularizers.Regularizer):
-    """
-    A regularizer that encourages weights to converge to -1, 0, or 1.
+    """A regularizer that encourages weights to converge to -1, 0, or 1.
 
     The regularizer implements a 6th order polynomial cost function that creates
     stable points at -1, 0, and 1, with smooth transitions and strong penalties
     for weights outside [-1, 1].
 
+    Args:
+        multiplier: Multiplier factor for the regularization term.
+            Higher values create stronger pressure towards -1, 0, 1.
+        scale: Scaling factor applied to weights before regularization.
+            Controls the width of the regularization effect.
+
     Attributes:
-        scale (float): Scaling factor for the regularization term.
-                      Higher values create stronger quantization pressure.
+        multiplier (float): The regularization strength multiplier.
+        scale (float): The weight scaling factor.
+        base_coefficient (float): Base coefficient for exact maxima of 1.0.
     """
 
     def __init__(self, multiplier: float = 1.0, scale: float = 1.0) -> None:
-        """
-        Initialize the tri-state preference regularizer.
+        """Initialize the tri-state preference regularizer.
 
         Args:
-            multiplier (float): multiplier factor for the regularization term.
-                          Higher values create stronger pressure towards -1, 0, 1.
-                          Defaults to 1.0.
-            scale (float): scales the signal
-                          Defaults to 1.0.
+            multiplier: Multiplier factor for the regularization term.
+                Higher values create stronger pressure towards -1, 0, 1.
+                Defaults to 1.0.
+            scale: Scaling factor applied to weights before regularization.
+                Defaults to 1.0.
+
+        Raises:
+            ValueError: If multiplier or scale are not positive numbers.
         """
-        self.multiplier = tf.constant(multiplier)
-        self.scale = tf.constant(scale)
+        if multiplier <= 0:
+            raise ValueError(f"multiplier must be positive, got {multiplier}")
+        if scale <= 0:
+            raise ValueError(f"scale must be positive, got {scale}")
+
+        self.multiplier = float(multiplier)
+        self.scale = float(scale)
         self.base_coefficient = 32.0 / 4.5  # Coefficient for exact maxima of 1
 
-    def __call__(self, weights: tf.Tensor) -> tf.Tensor:
-        """
-        Calculate the regularization cost for given weights.
+        logger.info(
+            f"Initialized TriStatePreferenceRegularizer with "
+            f"multiplier={self.multiplier}, scale={self.scale}"
+        )
+
+    def __call__(self, weights) -> keras.KerasTensor:
+        """Calculate the regularization cost for given weights.
 
         The cost is zero at -1, 0, and 1, reaches maxima of 1.0 at -0.5 and 0.5,
         and increases rapidly outside [-1, 1].
 
         Args:
-            weights (tf.Tensor): Input tensor containing the weights
-                               to be regularized.
+            weights: Input tensor containing the weights to be regularized.
 
         Returns:
-            tf.Tensor: The calculated regularization cost.
+            The calculated regularization cost as a scalar tensor.
         """
-        # Calculate the polynomial terms: x²(x+1)²(x-1)²
+        # Scale the weights
         x = self.scale * weights
-        x_squared = tf.square(x)
-        plus_one_squared = tf.square(x + 1)
-        minus_one_squared = tf.square(x - 1)
+
+        # Calculate the polynomial terms: x²(x+1)²(x-1)²
+        x_squared = ops.square(x)
+        plus_one_squared = ops.square(x + 1.0)
+        minus_one_squared = ops.square(x - 1.0)
 
         # Combine terms and apply base coefficient
-        cost = self.base_coefficient * x_squared * plus_one_squared * minus_one_squared
+        cost = (
+            self.base_coefficient *
+            x_squared *
+            plus_one_squared *
+            minus_one_squared
+        )
 
         # Apply multiplier and return mean cost
-        return self.multiplier * tf.reduce_mean(cost)
+        regularization_loss = self.multiplier * ops.mean(cost)
 
-    def get_config(self) -> dict:
-        """
-        Return the configuration of the regularizer.
+        return regularization_loss
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return the configuration of the regularizer.
 
         Returns:
-            dict: Configuration dictionary containing the scale parameter.
+            Configuration dictionary containing the regularizer parameters.
         """
         return {
             'multiplier': self.multiplier,
@@ -103,44 +134,73 @@ class TriStatePreferenceRegularizer(keras.regularizers.Regularizer):
         }
 
     @classmethod
-    def from_config(cls, config: dict) -> 'TriStatePreferenceRegularizer':
-        """
-        Create a regularizer instance from configuration dictionary.
+    def from_config(cls, config: Dict[str, Any]) -> 'TriStatePreferenceRegularizer':
+        """Create a regularizer instance from configuration dictionary.
 
         Args:
-            config (dict): Configuration dictionary containing the scale parameter.
+            config: Configuration dictionary containing the regularizer parameters.
 
         Returns:
-            TriStatePreferenceRegularizer: A new instance of the regularizer.
+            A new instance of the TriStatePreferenceRegularizer.
         """
         return cls(**config)
 
+    def __repr__(self) -> str:
+        """Return string representation of the regularizer.
+
+        Returns:
+            String representation including key parameters.
+        """
+        return (
+            f"TriStatePreferenceRegularizer("
+            f"multiplier={self.multiplier}, "
+            f"scale={self.scale})"
+        )
+
 
 def get_tri_state_regularizer(
-        multiplier: Optional[float] = 1.0,
-        scale: Optional[float] = 1.0
+    multiplier: Optional[float] = 1.0,
+    scale: Optional[float] = 1.0
 ) -> TriStatePreferenceRegularizer:
-    """
-    Factory function to create a tri-state preference regularizer instance.
+    """Factory function to create a tri-state preference regularizer instance.
+
+    This function provides a convenient way to create regularizer instances
+    with sensible defaults and parameter validation.
 
     Args:
-        multiplier (Optional[float]): multiplier factor for the regularization term.
-                                Higher values create stronger quantization.
-                                Defaults to 1.0.
-        scale (Optional[float]): scales the signal.
-                                Defaults to 1.0.
+        multiplier: Multiplier factor for the regularization term.
+            Higher values create stronger quantization pressure.
+            Defaults to 1.0.
+        scale: Scaling factor applied to weights before regularization.
+            Controls the effective range of the regularization.
+            Defaults to 1.0.
+
     Returns:
-        TriStatePreferenceRegularizer: An instance of the tri-state regularizer.
+        An instance of the TriStatePreferenceRegularizer.
+
+    Raises:
+        ValueError: If multiplier or scale are not positive numbers.
 
     Example:
-        >>> # Create regularizer with default scaling
+        >>> # Create regularizer with default parameters
         >>> regularizer = get_tri_state_regularizer()
-        >>> model.add(Dense(64, kernel_regularizer=regularizer))
+        >>> dense_layer = keras.layers.Dense(64, kernel_regularizer=regularizer)
         >>>
-        >>> # Create regularizer with stronger quantization
-        >>> strong_regularizer = get_tri_state_regularizer(scale=2.0)
-        >>> model.add(Dense(32, kernel_regularizer=strong_regularizer))
+        >>> # Create regularizer with stronger quantization pressure
+        >>> strong_regularizer = get_tri_state_regularizer(multiplier=2.0)
+        >>> conv_layer = keras.layers.Conv2D(
+        ...     32, 3, kernel_regularizer=strong_regularizer
+        ... )
+        >>>
+        >>> # Create regularizer with different scaling
+        >>> scaled_regularizer = get_tri_state_regularizer(
+        ...     multiplier=1.5, scale=0.8
+        ... )
     """
     return TriStatePreferenceRegularizer(multiplier=multiplier, scale=scale)
+
+
+# Alias for backward compatibility
+tri_state_regularizer = get_tri_state_regularizer
 
 # ---------------------------------------------------------------------

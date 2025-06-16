@@ -11,44 +11,50 @@ by minimizing the spectral norm of W^T W - I.
 """
 
 import keras
-import tensorflow as tf
-from typing import Optional, Dict, Any, Union, Tuple
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.tensors import power_iteration
+from keras import ops
+from typing import Optional, Dict, Any, Union
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
 
-@keras.utils.register_keras_serializable()
+@keras.saving.register_keras_serializable()
 class SRIPRegularizer(keras.regularizers.Regularizer):
-    """
-    Spectral Restricted Isometry Property (SRIP) regularizer.
+    """Spectral Restricted Isometry Property (SRIP) regularizer.
 
     Enforces near-orthogonality of weight matrices using spectral norm minimization.
-    Supports both dense and convolutional layers.
+    Supports both dense and convolutional layers by reshaping convolutional kernels
+    into 2D matrices and computing the spectral norm of the Gram matrix W^T W - I.
+
+    The regularizer includes a lambda scheduling mechanism that allows the regularization
+    strength to be adjusted during training. The update_lambda method should be called
+    externally (e.g., via a Keras callback) to update the regularization strength.
+
+    Args:
+        lambda_init: Initial regularization strength. Must be non-negative.
+        power_iterations: Number of power iterations for spectral norm computation.
+            Higher values give more accurate results but increase computation time.
+        epsilon: Small constant for numerical stability. Must be positive.
+        lambda_schedule: Optional dictionary mapping epochs to lambda values.
+            Used for decay scheduling. Values must be non-negative.
 
     Attributes:
-        lambda_init: Initial regularization strength
-        power_iterations: Number of power iterations for spectral norm computation
-        epsilon: Small constant for numerical stability
-        lambda_schedule: Dictionary mapping epochs to lambda values
-        current_lambda: Current regularization strength (updated during training)
+        lambda_init (float): The initial regularization strength.
+        power_iterations (int): Number of power iteration steps.
+        epsilon (float): Numerical stability constant.
+        lambda_schedule (Dict[int, float]): Mapping of epochs to lambda values.
+        current_lambda (float): Current regularization strength (read-only property).
     """
 
     def __init__(
-            self,
-            lambda_init: float = 0.1,
-            power_iterations: int = 2,
-            epsilon: float = 1e-7,
-            lambda_schedule: Optional[Dict[int, float]] = None,
-            **kwargs: Any
+        self,
+        lambda_init: float = 0.1,
+        power_iterations: int = 2,
+        epsilon: float = 1e-7,
+        lambda_schedule: Optional[Dict[int, float]] = None,
+        **kwargs: Any
     ) -> None:
-        """
-        Initialize SRIP regularizer.
+        """Initialize SRIP regularizer.
 
         Args:
             lambda_init: Initial regularization strength. Must be non-negative.
@@ -64,12 +70,12 @@ class SRIPRegularizer(keras.regularizers.Regularizer):
         """
         super().__init__(**kwargs)
 
-        # Validate and store parameters
+        # Validate parameters
         self._validate_init_params(lambda_init, power_iterations, epsilon, lambda_schedule)
 
-        self.lambda_init = lambda_init
-        self.power_iterations = power_iterations
-        self.epsilon = epsilon
+        self.lambda_init = float(lambda_init)
+        self.power_iterations = int(power_iterations)
+        self.epsilon = float(epsilon)
         self.lambda_schedule = lambda_schedule or {
             20: 1e-3,
             50: 1e-4,
@@ -77,37 +83,37 @@ class SRIPRegularizer(keras.regularizers.Regularizer):
             120: 0.0
         }
 
-        # Initialize lambda variable for training
-        self._current_lambda = tf.Variable(
-            lambda_init,
-            trainable=False,
-            dtype=tf.float32,
-            name='srip_lambda'
+        # Current lambda value (will be updated via update_lambda method)
+        self._current_lambda = self.lambda_init
+
+        logger.info(
+            f"Initialized SRIPRegularizer with lambda_init={self.lambda_init}, "
+            f"power_iterations={self.power_iterations}, epsilon={self.epsilon}, "
+            f"lambda_schedule={self.lambda_schedule}"
         )
 
     @property
-    def current_lambda(self) -> tf.Tensor:
+    def current_lambda(self) -> float:
         """Current regularization strength."""
         return self._current_lambda
 
     def _validate_init_params(
-            self,
-            lambda_init: float,
-            power_iterations: int,
-            epsilon: float,
-            lambda_schedule: Optional[Dict[int, float]]
+        self,
+        lambda_init: float,
+        power_iterations: int,
+        epsilon: float,
+        lambda_schedule: Optional[Dict[int, float]]
     ) -> None:
-        """
-        Validate initialization parameters.
+        """Validate initialization parameters.
 
         Args:
-            lambda_init: Initial regularization strength
-            power_iterations: Number of power iterations
-            epsilon: Numerical stability constant
-            lambda_schedule: Optional lambda decay schedule
+            lambda_init: Initial regularization strength.
+            power_iterations: Number of power iterations.
+            epsilon: Numerical stability constant.
+            lambda_schedule: Optional lambda decay schedule.
 
         Raises:
-            ValueError: If any parameters are invalid
+            ValueError: If any parameters are invalid.
         """
         if lambda_init < 0:
             raise ValueError(f"lambda_init must be non-negative, got {lambda_init}")
@@ -122,117 +128,267 @@ class SRIPRegularizer(keras.regularizers.Regularizer):
             if not all(isinstance(v, (int, float)) and v >= 0 for v in lambda_schedule.values()):
                 raise ValueError("Lambda schedule values must be non-negative")
 
-    def _reshape_kernel(self, kernel: tf.Tensor) -> tf.Tensor:
-        """
-        Reshape kernel for gram matrix computation.
+    def _reshape_kernel(self, kernel) -> keras.KerasTensor:
+        """Reshape kernel for gram matrix computation.
+
+        Converts convolutional kernels from 4D (H, W, C_in, C_out) to 2D
+        (H*W*C_in, C_out) format for matrix operations.
 
         Args:
-            kernel: Input kernel tensor
+            kernel: Input kernel tensor.
 
         Returns:
-            Reshaped kernel tensor
+            Reshaped kernel tensor as 2D matrix.
         """
-        if len(kernel.shape) == 4:  # Conv2D kernel
-            kernel_shape = tf.shape(kernel)
+        kernel_shape = ops.shape(kernel)
+
+        if len(kernel.shape) == 4:  # Conv2D kernel (H, W, C_in, C_out)
+            # Flatten spatial and input channel dimensions
             flattened_size = kernel_shape[0] * kernel_shape[1] * kernel_shape[2]
-            return tf.reshape(kernel, [flattened_size, kernel_shape[3]])
-        return kernel
+            return ops.reshape(kernel, [flattened_size, kernel_shape[3]])
+        elif len(kernel.shape) == 2:  # Dense kernel (input_dim, output_dim)
+            return kernel
+        else:
+            # For other kernel shapes, flatten all but the last dimension
+            flattened_size = ops.prod(kernel_shape[:-1])
+            return ops.reshape(kernel, [flattened_size, kernel_shape[-1]])
 
-    def _safe_normalize(self, vector: tf.Tensor) -> tf.Tensor:
-        """
-        Safely normalize a vector with numerical stability.
+    def _safe_normalize(self, vector) -> keras.KerasTensor:
+        """Safely normalize a vector with numerical stability.
 
         Args:
-            vector: Input tensor to normalize
+            vector: Input tensor to normalize.
 
         Returns:
-            Normalized tensor with unit L2 norm
+            Normalized tensor with unit L2 norm.
         """
         # Compute L2 norm with epsilon for stability
-        squared_norm = tf.reduce_sum(tf.square(vector), axis=0)
-        safe_norm = tf.sqrt(squared_norm + self.epsilon)
+        squared_norm = ops.sum(ops.square(vector), axis=0, keepdims=True)
+        safe_norm = ops.sqrt(squared_norm + self.epsilon)
         normalized = vector / safe_norm
-
         return normalized
 
-    def _power_iteration(self, matrix: tf.Tensor) -> tf.Tensor:
-        """
-        Compute spectral norm using power iteration.
+    def _power_iteration(self, matrix) -> keras.KerasTensor:
+        """Compute spectral norm using power iteration method.
+
+        This implementation follows the original power iteration algorithm,
+        using forward and backward multiplication in each iteration to find
+        the largest singular value.
 
         Args:
-            matrix: Input matrix
+            matrix: Input 2D matrix for which to compute spectral norm.
 
         Returns:
-            Spectral norm (largest singular value)
-        """
-        return power_iteration(matrix=matrix, iterations=self.power_iterations, epsilon=self.epsilon)
+            Spectral norm (largest singular value) of the input matrix.
 
-    @tf.function
-    def __call__(self, weights: tf.Tensor) -> tf.Tensor:
+        Raises:
+            ValueError: If input matrix is not 2-dimensional.
         """
-        Compute SRIP regularization term.
+        if len(matrix.shape) != 2:
+            raise ValueError("Input matrix must be 2-dimensional")
+
+        matrix_shape = ops.shape(matrix)
+
+        # Initialize random vector
+        # Use a deterministic initialization based on matrix shape for reproducibility
+        init_seed = ops.sum(matrix_shape) % 2147483647  # Large prime for seed
+        vector = keras.random.normal(
+            shape=[matrix_shape[1], 1],
+            seed=int(init_seed),
+            dtype=matrix.dtype
+        )
+
+        # Normalize initial vector
+        vector_norm = ops.sqrt(ops.sum(ops.square(vector)) + self.epsilon)
+        vector = vector / vector_norm
+
+        # Multiple iterations for convergence
+        for _ in range(self.power_iterations):
+            # Compute matrix-vector product (forward)
+            product = ops.matmul(matrix, vector)
+            product_norm = ops.sqrt(ops.sum(ops.square(product)) + self.epsilon)
+            vector = product / product_norm
+
+            # Compute transpose multiplication (backward)
+            product = ops.matmul(ops.transpose(matrix), vector)
+            product_norm = ops.sqrt(ops.sum(ops.square(product)) + self.epsilon)
+            vector = product / product_norm
+
+        # Final power iteration step
+        product = ops.matmul(matrix, vector)
+
+        # Compute spectral norm using the ratio of norms
+        product_norm = ops.sqrt(ops.sum(ops.square(product)))
+        vector_norm = ops.sqrt(ops.sum(ops.square(vector)) + self.epsilon)
+
+        spectral_norm = product_norm / vector_norm
+        return spectral_norm
+
+    def __call__(self, weights) -> keras.KerasTensor:
+        """Compute SRIP regularization term.
+
+        The regularization loss is computed as:
+        lambda_reg * ||W^T W - I||_2 (spectral norm)
 
         Args:
-            weights: Weight tensor to regularize
+            weights: Weight tensor to regularize.
 
         Returns:
-            Regularization loss value
-        """
-        if tf.reduce_all(tf.abs(weights) < self.epsilon):
-            return self.epsilon
+            Regularization loss value as a scalar tensor.
 
-        # For numerical stability with large weights, normalize the input
-        weights_norm = tf.norm(weights)
+        Raises:
+            ValueError: If weights tensor has invalid shape.
+        """
+        # Handle edge case of very small weights
+        weights_abs_max = ops.max(ops.abs(weights))
+        if weights_abs_max < self.epsilon:
+            return ops.cast(self.epsilon, dtype=weights.dtype)
+
+        # Numerical stability: normalize very large weights
+        weights_norm = ops.sqrt(ops.sum(ops.square(weights)))
         if weights_norm > 1e8:  # Threshold for "large" weights
             weights = weights / weights_norm
+            logger.debug(f"Normalized large weights with norm {weights_norm}")
 
-        # Reshape weights if needed
-        weights = self._reshape_kernel(weights)
+        # Reshape weights if needed (handles both Dense and Conv layers)
+        try:
+            weights_2d = self._reshape_kernel(weights)
+        except Exception as e:
+            logger.error(f"Failed to reshape weights with shape {weights.shape}: {e}")
+            raise ValueError(f"Cannot reshape weights with shape {weights.shape}")
+
+        # Ensure we have a valid 2D matrix
+        if len(weights_2d.shape) != 2:
+            raise ValueError(f"Expected 2D matrix after reshaping, got shape {weights_2d.shape}")
 
         # Compute gram matrix (W^T W - I)
-        gram = tf.matmul(weights, weights, transpose_a=True)
-        identity = tf.eye(tf.shape(gram)[0], dtype=weights.dtype)
+        gram = ops.matmul(ops.transpose(weights_2d), weights_2d)
+        identity = ops.eye(ops.shape(gram)[0], dtype=weights.dtype)
         gram_centered = gram - identity
 
-        # Compute spectral norm
+        # Compute spectral norm of the centered gram matrix
         spec_norm = self._power_iteration(gram_centered)
-        return self.current_lambda * spec_norm
+
+        # Apply regularization strength
+        regularization_loss = self.current_lambda * spec_norm
+
+        return regularization_loss
 
     def update_lambda(self, epoch: int) -> None:
-        """
-        Update lambda value based on current epoch.
+        """Update lambda value based on current epoch.
+
+        This method should be called externally (e.g., via a callback) to update
+        the regularization strength according to the defined schedule.
 
         Args:
-            epoch: Current training epoch
+            epoch: Current training epoch.
         """
         current_lambda = self.lambda_init
         for e, lambda_val in sorted(self.lambda_schedule.items()):
             if epoch >= e:
                 current_lambda = lambda_val
-        self._current_lambda.assign(current_lambda)
 
-    def get_config(self):
-        config = {}
-        config.update({
+        if current_lambda != self._current_lambda:
+            logger.info(f"Updated SRIP lambda from {self._current_lambda} to {current_lambda} at epoch {epoch}")
+            self._current_lambda = current_lambda
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return the configuration of the regularizer.
+
+        Returns:
+            Configuration dictionary containing the regularizer parameters.
+        """
+        return {
             'lambda_init': self.lambda_init,
             'power_iterations': self.power_iterations,
             'epsilon': self.epsilon,
             'lambda_schedule': {int(k): float(v) for k, v in self.lambda_schedule.items()}
-        })
-        return config
+        }
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'SRIPRegularizer':
-        """
-        Create regularizer instance from configuration dictionary.
+        """Create regularizer instance from configuration dictionary.
 
         Args:
-            config: Dictionary containing configuration parameters
+            config: Dictionary containing configuration parameters.
 
         Returns:
-            New regularizer instance
+            New SRIPRegularizer instance.
         """
         if 'lambda_schedule' in config:
             config['lambda_schedule'] = {int(k): float(v)
                                          for k, v in config['lambda_schedule'].items()}
         return cls(**config)
+
+    def __repr__(self) -> str:
+        """Return string representation of the regularizer.
+
+        Returns:
+            String representation including key parameters.
+        """
+        return (
+            f"SRIPRegularizer("
+            f"lambda_init={self.lambda_init}, "
+            f"power_iterations={self.power_iterations}, "
+            f"epsilon={self.epsilon}, "
+            f"current_lambda={self.current_lambda})"
+        )
+
+
+def get_srip_regularizer(
+    lambda_init: Optional[float] = 0.1,
+    power_iterations: Optional[int] = 2,
+    epsilon: Optional[float] = 1e-7,
+    lambda_schedule: Optional[Dict[int, float]] = None
+) -> SRIPRegularizer:
+    """Factory function to create a SRIP regularizer instance.
+
+    This function provides a convenient way to create SRIP regularizer instances
+    with sensible defaults and parameter validation.
+
+    Args:
+        lambda_init: Initial regularization strength. Higher values enforce stronger
+            orthogonality constraints. Defaults to 0.1.
+        power_iterations: Number of power iterations for spectral norm computation.
+            Higher values give more accurate spectral norms but increase computation.
+            Defaults to 2.
+        epsilon: Small constant for numerical stability. Defaults to 1e-7.
+        lambda_schedule: Optional dictionary mapping epochs to lambda values for
+            decay scheduling. If None, uses default schedule.
+
+    Returns:
+        An instance of the SRIPRegularizer.
+
+    Raises:
+        ValueError: If any parameters have invalid values.
+
+    Example:
+        >>> # Create SRIP regularizer with default parameters
+        >>> regularizer = get_srip_regularizer()
+        >>> conv_layer = keras.layers.Conv2D(64, 3, kernel_regularizer=regularizer)
+        >>>
+        >>> # Create SRIP regularizer with stronger initial orthogonality constraint
+        >>> strong_regularizer = get_srip_regularizer(lambda_init=0.5)
+        >>> dense_layer = keras.layers.Dense(128, kernel_regularizer=strong_regularizer)
+        >>>
+        >>> # Create SRIP regularizer with custom decay schedule
+        >>> custom_schedule = {10: 0.05, 30: 0.01, 50: 0.001}
+        >>> scheduled_regularizer = get_srip_regularizer(
+        ...     lambda_init=0.1, lambda_schedule=custom_schedule
+        ... )
+        >>>
+        >>> # Update lambda during training (e.g., in a callback)
+        >>> # scheduled_regularizer.update_lambda(current_epoch)
+    """
+    return SRIPRegularizer(
+        lambda_init=lambda_init,
+        power_iterations=power_iterations,
+        epsilon=epsilon,
+        lambda_schedule=lambda_schedule
+    )
+
+
+# Alias for backward compatibility
+srip_regularizer = get_srip_regularizer
+
+# ---------------------------------------------------------------------
