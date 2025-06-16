@@ -131,7 +131,7 @@ from typing import Tuple, List, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.rms_logit_norm import CoupledMultiLabelHead
+from dl_techniques.layers.norms import CoupledMultiLabelHead
 
 
 # ---------------------------------------------------------------------

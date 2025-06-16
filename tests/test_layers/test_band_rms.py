@@ -7,7 +7,7 @@ from typing import Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.band_rms import BandRMS
+from dl_techniques.layers.norms import BandRMS
 
 # ---------------------------------------------------------------------
 
