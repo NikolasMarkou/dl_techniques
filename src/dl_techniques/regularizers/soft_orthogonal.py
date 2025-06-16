@@ -80,30 +80,31 @@ Usage Guidelines
 - Matrix scaling is recommended for networks with varying layer sizes
 """
 import keras
-import tensorflow as tf
-from typing import Dict, Any
+from keras import ops
+from typing import Dict, Any, Optional, Union
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 from dl_techniques.utils.tensors import gram_matrix
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------
 
-EPSILON = 1e-12
+EPSILON: float = 1e-12
 DEFAULT_SOFTORTHOGONAL_L1: float = 0.0
 DEFAULT_SOFTORTHOGONAL_L2: float = 1e-4
 DEFAULT_SOFTORTHOGONAL_LAMBDA: float = 1e-3
 DEFAULT_SOFTORTHOGONAL_STDDEV: float = 0.02
 
 # String constants
-STR_FRO = "fro"
-STR_L1_COEFFICIENT = "l1_coefficient"
-STR_L2_COEFFICIENT = "l2_coefficient"
-STR_LAMBDA_COEFFICIENT = "lambda_coefficient"
-STR_USE_MATRIX_SCALING = "use_matrix_scaling"
+STR_FRO: str = "fro"
+STR_L1_COEFFICIENT: str = "l1_coefficient"
+STR_L2_COEFFICIENT: str = "l2_coefficient"
+STR_LAMBDA_COEFFICIENT: str = "lambda_coefficient"
+STR_USE_MATRIX_SCALING: str = "use_matrix_scaling"
 
 
 # ---------------------------------------------------------------------
@@ -114,6 +115,30 @@ class SoftOrthogonalConstraintRegularizer(keras.regularizers.Regularizer):
 
     This regularizer penalizes deviations from orthogonality in weight matrices
     by minimizing ||W^T * W - I||_F where I is zero for off-diagonal elements.
+
+    Parameters
+    ----------
+    lambda_coefficient : float, optional
+        Weight for Frobenius norm term, by default DEFAULT_SOFTORTHOGONAL_LAMBDA
+    l1_coefficient : float, optional
+        Weight for L1 regularization, by default DEFAULT_SOFTORTHOGONAL_L1
+    l2_coefficient : float, optional
+        Weight for L2 regularization, by default DEFAULT_SOFTORTHOGONAL_L2
+    use_matrix_scaling : bool, optional
+        Whether to scale regularization by matrix size for consistent effect
+        across different sized layers, by default False
+    **kwargs : Any
+        Additional arguments passed to parent regularizer
+
+    Notes
+    -----
+    The regularizer computes the Gram matrix (W^T * W) and penalizes deviations
+    from orthogonality by minimizing the off-diagonal elements.
+
+    Examples
+    --------
+    >>> regularizer = SoftOrthogonalConstraintRegularizer(lambda_coefficient=1e-3)
+    >>> dense_layer = keras.layers.Dense(64, kernel_regularizer=regularizer)
     """
 
     def __init__(
@@ -124,97 +149,144 @@ class SoftOrthogonalConstraintRegularizer(keras.regularizers.Regularizer):
             use_matrix_scaling: bool = False,
             **kwargs: Any
     ) -> None:
-        """Initialize regularizer.
+        """Initialize the soft orthogonal constraint regularizer.
 
-        Args:
-            lambda_coefficient: Weight for Frobenius norm term
-            l1_coefficient: Weight for L1 regularization
-            l2_coefficient: Weight for L2 regularization
-            use_matrix_scaling: Whether to scale regularization by matrix size
-                                for consistent effect across different sized layers
-            **kwargs: Additional arguments passed to parent
+        Parameters
+        ----------
+        lambda_coefficient : float, optional
+            Weight for Frobenius norm term, by default DEFAULT_SOFTORTHOGONAL_LAMBDA
+        l1_coefficient : float, optional
+            Weight for L1 regularization, by default DEFAULT_SOFTORTHOGONAL_L1
+        l2_coefficient : float, optional
+            Weight for L2 regularization, by default DEFAULT_SOFTORTHOGONAL_L2
+        use_matrix_scaling : bool, optional
+            Whether to scale regularization by matrix size, by default False
+        **kwargs : Any
+            Additional arguments passed to parent regularizer
+
+        Raises
+        ------
+        ValueError
+            If any coefficient is negative
         """
         super().__init__(**kwargs)
+
+        # Validate input parameters
+        if lambda_coefficient < 0.0:
+            raise ValueError(f"lambda_coefficient must be non-negative, got {lambda_coefficient}")
+        if l1_coefficient < 0.0:
+            raise ValueError(f"l1_coefficient must be non-negative, got {l1_coefficient}")
+        if l2_coefficient < 0.0:
+            raise ValueError(f"l2_coefficient must be non-negative, got {l2_coefficient}")
+
         self._lambda_coefficient = lambda_coefficient
         self._l1_coefficient = l1_coefficient
         self._l2_coefficient = l2_coefficient
         self._use_matrix_scaling = use_matrix_scaling
 
-        # Cache function and flags for performance
+        # Cache flags for performance optimization
         self._use_lambda = self._lambda_coefficient > 0.0
         self._use_l1 = self._l1_coefficient > 0.0
         self._use_l2 = self._l2_coefficient > 0.0
 
-        # Create L1/L2 regularizers once
+        # Initialize L1/L2 regularizers once for efficiency
+        self._l1: Optional[keras.regularizers.L1] = None
+        self._l2: Optional[keras.regularizers.L2] = None
+
         if self._use_l1:
             self._l1 = keras.regularizers.L1(l1=self._l1_coefficient)
         if self._use_l2:
             self._l2 = keras.regularizers.L2(l2=self._l2_coefficient)
 
-    def __call__(self, x: tf.Tensor) -> tf.Tensor:
-        """Compute regularization for given weights.
+        logger.debug(
+            f"Initialized SoftOrthogonalConstraintRegularizer with "
+            f"lambda={lambda_coefficient}, l1={l1_coefficient}, "
+            f"l2={l2_coefficient}, scaling={use_matrix_scaling}"
+        )
 
-        Args:
-            x: Weight tensor to regularize
+    def __call__(self, x: Union[keras.KerasTensor, Any]) -> Union[keras.KerasTensor, Any]:
+        """Compute regularization loss for given weights.
 
-        Returns:
+        Parameters
+        ----------
+        x : Union[keras.KerasTensor, Any]
+            Weight tensor to regularize
+
+        Returns
+        -------
+        Union[keras.KerasTensor, Any]
             Scalar regularization loss value
+
+        Notes
+        -----
+        The regularization loss is computed as:
+        - Frobenius norm of off-diagonal elements of W^T * W
+        - Optional L1/L2 regularization terms
+        - Optional matrix scaling for size-invariant regularization
         """
-        # Compute W^T * W
+        # Compute Gram matrix W^T * W
         wt_w = gram_matrix(x)
 
-        # Get shape information for scaling
-        rank = tf.shape(wt_w)[0]
+        # Get matrix rank for scaling calculations
+        rank = ops.shape(wt_w)[0]
 
-        # Mask diagonal elements
-        eye = tf.eye(rank)
-        wt_w_masked = tf.math.multiply(wt_w, 1.0 - eye)
+        # Create identity matrix and mask for off-diagonal elements
+        eye = ops.eye(rank, dtype=wt_w.dtype)
+        off_diagonal_mask = ops.subtract(ops.cast(1.0, dtype=wt_w.dtype), eye)
+        wt_w_masked = ops.multiply(wt_w, off_diagonal_mask)
 
-        # Initialize result
-        result = tf.constant(0.0, dtype=tf.float32)
+        # Initialize regularization loss
+        result = ops.cast(0.0, dtype=x.dtype)
 
         # Add Frobenius norm term if enabled
         if self._use_lambda:
-            # Calculate Frobenius norm
-            frob_norm = tf.square(tf.norm(wt_w_masked, ord=STR_FRO, axis=(0, 1)))
+            # Calculate squared Frobenius norm of off-diagonal elements
+            frob_norm = ops.square(ops.norm(wt_w_masked, ord=STR_FRO, axis=(0, 1)))
 
-            # Apply matrix scaling if enabled
             if self._use_matrix_scaling:
-                # For orthogonal regularizer (off-diagonal elements)
-                # Total number of off-diagonal elements is rank^2 - rank
-                off_diag_elements = tf.cast(rank * rank - rank, dtype=tf.float32)
-
-                # Add epsilon to prevent division by zero
-                scaling_factor = tf.maximum(off_diag_elements, EPSILON)
-
-                # Scale by number of off-diagonal elements
-                result += (self._lambda_coefficient * frob_norm) / scaling_factor
+                # Scale by number of off-diagonal elements for size invariance
+                off_diag_elements = ops.cast(ops.subtract(ops.multiply(rank, rank), rank), dtype=x.dtype)
+                scaling_factor = ops.maximum(off_diag_elements, ops.cast(EPSILON, dtype=x.dtype))
+                scaled_loss = ops.divide(ops.multiply(self._lambda_coefficient, frob_norm), scaling_factor)
+                result = ops.add(result, scaled_loss)
             else:
-                # Original behavior (no scaling)
-                result += self._lambda_coefficient * frob_norm
+                # Original behavior without scaling
+                lambda_loss = ops.multiply(self._lambda_coefficient, frob_norm)
+                result = ops.add(result, lambda_loss)
 
         # Add L1 regularization if enabled
-        if self._use_l1:
-            result += self._l1(wt_w_masked)
+        if self._use_l1 and self._l1 is not None:
+            l1_loss = self._l1(wt_w_masked)
+            result = ops.add(result, l1_loss)
 
         # Add L2 regularization if enabled
-        if self._use_l2:
-            result += self._l2(wt_w_masked)
+        if self._use_l2 and self._l2 is not None:
+            l2_loss = self._l2(wt_w_masked)
+            result = ops.add(result, l2_loss)
 
         return result
 
     def get_config(self) -> Dict[str, Any]:
-        """Get configuration for serialization.
+        """Get regularizer configuration for serialization.
 
-        Returns:
+        Returns
+        -------
+        Dict[str, Any]
             Dictionary containing configuration parameters
+
+        Notes
+        -----
+        This method is required for proper serialization and deserialization
+        of models containing this regularizer.
         """
-        return {
+        config = {}
+        config.update({
             STR_L1_COEFFICIENT: self._l1_coefficient,
             STR_L2_COEFFICIENT: self._l2_coefficient,
             STR_LAMBDA_COEFFICIENT: self._lambda_coefficient,
             STR_USE_MATRIX_SCALING: self._use_matrix_scaling
-        }
+        })
+        return config
 
 
 # ---------------------------------------------------------------------
@@ -226,6 +298,30 @@ class SoftOrthonormalConstraintRegularizer(keras.regularizers.Regularizer):
 
     This regularizer penalizes deviations from orthonormality in weight matrices
     by minimizing ||W^T * W - I||_F where I is the identity matrix.
+
+    Parameters
+    ----------
+    lambda_coefficient : float, optional
+        Weight for Frobenius norm term, by default DEFAULT_SOFTORTHOGONAL_LAMBDA
+    l1_coefficient : float, optional
+        Weight for L1 regularization, by default DEFAULT_SOFTORTHOGONAL_L1
+    l2_coefficient : float, optional
+        Weight for L2 regularization, by default DEFAULT_SOFTORTHOGONAL_L2
+    use_matrix_scaling : bool, optional
+        Whether to scale regularization by matrix size for consistent effect
+        across different sized layers, by default False
+    **kwargs : Any
+        Additional arguments passed to parent regularizer
+
+    Notes
+    -----
+    The regularizer computes the Gram matrix (W^T * W) and penalizes deviations
+    from the identity matrix, encouraging both orthogonality and unit norm.
+
+    Examples
+    --------
+    >>> regularizer = SoftOrthonormalConstraintRegularizer(lambda_coefficient=1e-3)
+    >>> conv_layer = keras.layers.Conv2D(32, 3, kernel_regularizer=regularizer)
     """
 
     def __init__(
@@ -236,93 +332,140 @@ class SoftOrthonormalConstraintRegularizer(keras.regularizers.Regularizer):
             use_matrix_scaling: bool = False,
             **kwargs: Any
     ) -> None:
-        """Initialize regularizer.
+        """Initialize the soft orthonormal constraint regularizer.
 
-        Args:
-            lambda_coefficient: Weight for Frobenius norm term
-            l1_coefficient: Weight for L1 regularization
-            l2_coefficient: Weight for L2 regularization
-            use_matrix_scaling: Whether to scale regularization by matrix size
-                                for consistent effect across different sized layers
-            **kwargs: Additional arguments passed to parent
+        Parameters
+        ----------
+        lambda_coefficient : float, optional
+            Weight for Frobenius norm term, by default DEFAULT_SOFTORTHOGONAL_LAMBDA
+        l1_coefficient : float, optional
+            Weight for L1 regularization, by default DEFAULT_SOFTORTHOGONAL_L1
+        l2_coefficient : float, optional
+            Weight for L2 regularization, by default DEFAULT_SOFTORTHOGONAL_L2
+        use_matrix_scaling : bool, optional
+            Whether to scale regularization by matrix size, by default False
+        **kwargs : Any
+            Additional arguments passed to parent regularizer
+
+        Raises
+        ------
+        ValueError
+            If any coefficient is negative
         """
         super().__init__(**kwargs)
+
+        # Validate input parameters
+        if lambda_coefficient < 0.0:
+            raise ValueError(f"lambda_coefficient must be non-negative, got {lambda_coefficient}")
+        if l1_coefficient < 0.0:
+            raise ValueError(f"l1_coefficient must be non-negative, got {l1_coefficient}")
+        if l2_coefficient < 0.0:
+            raise ValueError(f"l2_coefficient must be non-negative, got {l2_coefficient}")
+
         self._lambda_coefficient = lambda_coefficient
         self._l1_coefficient = l1_coefficient
         self._l2_coefficient = l2_coefficient
         self._use_matrix_scaling = use_matrix_scaling
 
-        # Cache function and flags for performance
+        # Cache flags for performance optimization
         self._use_lambda = self._lambda_coefficient > 0.0
         self._use_l1 = self._l1_coefficient > 0.0
         self._use_l2 = self._l2_coefficient > 0.0
 
-        # Create L1/L2 regularizers once
+        # Initialize L1/L2 regularizers once for efficiency
+        self._l1: Optional[keras.regularizers.L1] = None
+        self._l2: Optional[keras.regularizers.L2] = None
+
         if self._use_l1:
             self._l1 = keras.regularizers.L1(l1=self._l1_coefficient)
         if self._use_l2:
             self._l2 = keras.regularizers.L2(l2=self._l2_coefficient)
 
-    def __call__(self, x: tf.Tensor) -> tf.Tensor:
-        """Compute regularization for given weights.
+        logger.debug(
+            f"Initialized SoftOrthonormalConstraintRegularizer with "
+            f"lambda={lambda_coefficient}, l1={l1_coefficient}, "
+            f"l2={l2_coefficient}, scaling={use_matrix_scaling}"
+        )
 
-        Args:
-            x: Weight tensor to regularize
+    def __call__(self, x: Union[keras.KerasTensor, Any]) -> Union[keras.KerasTensor, Any]:
+        """Compute regularization loss for given weights.
 
-        Returns:
+        Parameters
+        ----------
+        x : Union[keras.KerasTensor, Any]
+            Weight tensor to regularize
+
+        Returns
+        -------
+        Union[keras.KerasTensor, Any]
             Scalar regularization loss value
+
+        Notes
+        -----
+        The regularization loss is computed as:
+        - Frobenius norm of (W^T * W - I)
+        - Optional L1/L2 regularization terms
+        - Optional matrix scaling for size-invariant regularization
         """
-        # Compute W^T * W
+        # Compute Gram matrix W^T * W
         wt_w = gram_matrix(x)
 
-        # Get shape information for scaling
-        rank = tf.shape(wt_w)[0]
-        eye = tf.eye(rank)
+        # Get matrix rank and create identity matrix
+        rank = ops.shape(wt_w)[0]
+        eye = ops.eye(rank, dtype=wt_w.dtype)
 
-        # Initialize result
-        result = tf.constant(0.0, dtype=tf.float32)
+        # Initialize regularization loss
+        result = ops.cast(0.0, dtype=x.dtype)
 
         # Add Frobenius norm term if enabled
         if self._use_lambda:
-            # Calculate Frobenius norm
-            frob_norm = tf.square(tf.norm(wt_w - eye, ord=STR_FRO, axis=(0, 1)))
+            # Calculate squared Frobenius norm of (W^T*W - I)
+            deviation = ops.subtract(wt_w, eye)
+            frob_norm = ops.square(ops.norm(deviation, ord=STR_FRO, axis=(0, 1)))
 
-            # Apply matrix scaling if enabled
             if self._use_matrix_scaling:
-                # For orthonormal regularizer (full matrix minus diagonal)
-                # Total number of elements is rank^2 - rank
-                total_elements = tf.cast(rank * rank - rank, dtype=tf.float32)
-
-                # Add epsilon to prevent division by zero
-                scaling_factor = tf.maximum(total_elements, EPSILON)
-
-                # Scale by total number of elements
-                result += (self._lambda_coefficient * frob_norm) / scaling_factor
+                # Scale by total number of matrix elements for size invariance
+                total_elements = ops.cast(ops.multiply(rank, rank), dtype=x.dtype)
+                scaling_factor = ops.maximum(total_elements, ops.cast(EPSILON, dtype=x.dtype))
+                scaled_loss = ops.divide(ops.multiply(self._lambda_coefficient, frob_norm), scaling_factor)
+                result = ops.add(result, scaled_loss)
             else:
-                # Original behavior (no scaling)
-                result += self._lambda_coefficient * frob_norm
+                # Original behavior without scaling
+                lambda_loss = ops.multiply(self._lambda_coefficient, frob_norm)
+                result = ops.add(result, lambda_loss)
 
         # Add L1 regularization if enabled
-        if self._use_l1:
-            result += self._l1(wt_w)
+        if self._use_l1 and self._l1 is not None:
+            l1_loss = self._l1(wt_w)
+            result = ops.add(result, l1_loss)
 
         # Add L2 regularization if enabled
-        if self._use_l2:
-            result += self._l2(wt_w)
+        if self._use_l2 and self._l2 is not None:
+            l2_loss = self._l2(wt_w)
+            result = ops.add(result, l2_loss)
 
         return result
 
     def get_config(self) -> Dict[str, Any]:
-        """Get configuration for serialization.
+        """Get regularizer configuration for serialization.
 
-        Returns:
+        Returns
+        -------
+        Dict[str, Any]
             Dictionary containing configuration parameters
+
+        Notes
+        -----
+        This method is required for proper serialization and deserialization
+        of models containing this regularizer.
         """
-        return {
+        config = {}
+        config.update({
             STR_L1_COEFFICIENT: self._l1_coefficient,
             STR_L2_COEFFICIENT: self._l2_coefficient,
             STR_LAMBDA_COEFFICIENT: self._lambda_coefficient,
             STR_USE_MATRIX_SCALING: self._use_matrix_scaling
-        }
+        })
+        return config
 
 # ---------------------------------------------------------------------

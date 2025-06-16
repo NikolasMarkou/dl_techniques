@@ -22,111 +22,269 @@ creates a "binarizing pressure" on the weights. This can be particularly useful 
 3. Reducing effective model complexity by simplifying weight distributions
 4. Problems where binary-like decisions are inherently beneficial
 
-The regularizer can be scaled through a 'scale' parameter to control the strength
-of the binarizing effect during training.
+The regularizer can be scaled through a 'multiplier' parameter to control the strength
+of the binarizing effect during training, and a 'scale' parameter to adjust the
+effective binary target range.
 
 Example Usage:
 ------------
-    >>> regularizer = get_binary_regularizer(scale=1.0)
-    >>> model.add(Dense(64, kernel_regularizer=regularizer))
+    >>> regularizer = get_binary_preference_regularizer(multiplier=1.0)
+    >>> model.add(keras.layers.Dense(64, kernel_regularizer=regularizer))
 
 Note: The convergence behavior and final weight distributions may be significantly
       different from traditional regularizers. Consider starting with a small
-      scale value and gradually increasing it if needed.
+      multiplier value and gradually increasing it if needed.
 """
 
 import keras
-import tensorflow as tf
-from typing import Union, Optional
+from keras import ops
+from typing import Dict, Any, Union, Optional
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------
+
+DEFAULT_BINARY_MULTIPLIER: float = 1.0
+DEFAULT_BINARY_SCALE: float = 1.0
+BINARY_CENTER_POINT: float = 0.5
+BINARY_NORMALIZATION: float = 0.25
+
+# String constants for serialization
+STR_MULTIPLIER: str = "multiplier"
+STR_SCALE: str = "scale"
 
 
 # ---------------------------------------------------------------------
 
-
+@keras.utils.register_keras_serializable()
 class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
-    """
-    A regularizer that encourages weights to move towards binary values (0 or 1).
+    """A regularizer that encourages weights to move towards binary values (0 or 1).
 
     The regularizer implements the cost function:
-    y = (1 - ((x-0.5)^2)/0.25)^2
+    y = (1 - ((scale*x - 0.5)^2)/0.25)^2
 
-    Key properties:
-    - Cost is zero when weights are 0 or 1
-    - Maximum cost (1.0) occurs at weight = 0.5
-    - Symmetric around 0.5
-    - Creates a binarizing effect by penalizing non-binary weights
+    This creates a unique regularization profile where:
+    - Cost is zero when weights are at binary values (0 or 1 when scale=1)
+    - Maximum cost (1.0) occurs at the midpoint (0.5 when scale=1)
+    - Symmetric penalty around the midpoint
+    - Creates a binarizing effect by penalizing intermediate weight values
 
+    Parameters
+    ----------
+    multiplier : float, optional
+        Scaling factor for the regularization term. Higher values create
+        stronger binarization pressure, by default DEFAULT_BINARY_MULTIPLIER
+    scale : float, optional
+        Scales the effective range of binary targets. When scale=1, targets
+        are 0 and 1. Different scales shift the binary target range,
+        by default DEFAULT_BINARY_SCALE
+    **kwargs : Any
+        Additional arguments passed to parent regularizer
+
+    Raises
+    ------
+    ValueError
+        If multiplier is negative or scale is non-positive
+
+    Notes
+    -----
     This regularizer can be useful for:
     - Training networks with binary-like weights
     - Encouraging sparse, interpretable representations
     - Reducing model complexity by pushing weights to extreme values
+    - Creating networks with clear on/off decision patterns
 
-    Attributes:
-        multiplier (float): Scaling factor for the regularization term
+    The mathematical foundation creates a smooth, differentiable function
+    that naturally guides weights toward binary values without hard constraints.
+
+    Examples
+    --------
+    >>> # Basic binary regularization
+    >>> regularizer = BinaryPreferenceRegularizer(multiplier=1.0)
+    >>> layer = keras.layers.Dense(64, kernel_regularizer=regularizer)
+
+    >>> # Stronger binarization pressure
+    >>> regularizer = BinaryPreferenceRegularizer(multiplier=2.0)
+    >>> layer = keras.layers.Conv2D(32, 3, kernel_regularizer=regularizer)
     """
 
-    def __init__(self, multiplier: float = 1.0, scale: float = 1.0) -> None:
-        """
-        Initialize the binary preference regularizer.
+    def __init__(
+        self,
+        multiplier: float = DEFAULT_BINARY_MULTIPLIER,
+        scale: float = DEFAULT_BINARY_SCALE,
+        **kwargs: Any
+    ) -> None:
+        """Initialize the binary preference regularizer.
 
-        Args:
-            multiplier (float): multiplier factor for the regularization term.
-                          Higher values create stronger binarization pressure.
-                          Defaults to 1.0.
-            scale (float): Squeezes or expands the signature
-              Defaults to 1.0.
+        Parameters
+        ----------
+        multiplier : float, optional
+            Multiplier factor for the regularization term. Higher values create
+            stronger binarization pressure, by default DEFAULT_BINARY_MULTIPLIER
+        scale : float, optional
+            Scales the effective range of binary targets, by default DEFAULT_BINARY_SCALE
+        **kwargs : Any
+            Additional arguments passed to parent regularizer
+
+        Raises
+        ------
+        ValueError
+            If multiplier is negative or scale is non-positive
         """
-        if scale <= 0:
-            raise ValueError("scale must be > 0")
+        super().__init__(**kwargs)
+
+        # Validate input parameters
+        if multiplier < 0.0:
+            raise ValueError(f"multiplier must be non-negative, got {multiplier}")
+        if scale <= 0.0:
+            raise ValueError(f"scale must be positive, got {scale}")
+
         self.multiplier = multiplier
         self.scale = scale
 
-    def __call__(self, weights: tf.Tensor) -> tf.Tensor:
+        logger.debug(
+            f"Initialized BinaryPreferenceRegularizer with "
+            f"multiplier={multiplier}, scale={scale}"
+        )
+
+    def __call__(self, weights: Union[keras.KerasTensor, Any]) -> Union[keras.KerasTensor, Any]:
+        """Calculate the regularization cost for given weights.
+
+        The cost function creates a binarizing pressure by penalizing weights
+        that are far from the binary target values. The cost is zero for weights
+        at the binary targets and maximum at the midpoint.
+
+        Parameters
+        ----------
+        weights : Union[keras.KerasTensor, Any]
+            Input tensor containing the weights to be regularized
+
+        Returns
+        -------
+        Union[keras.KerasTensor, Any]
+            The calculated regularization cost (scalar tensor)
+
+        Notes
+        -----
+        The implementation follows these steps:
+        1. Scale weights and center around 0.5: (scale * weights - 0.5)
+        2. Compute normalized squared deviation: ((scaled_weights)^2) / 0.25
+        3. Apply the binary preference function: (1 - normalized)^2
+        4. Take mean across all weights and apply multiplier
         """
-        Calculate the regularization cost for given weights.
+        # Step 1: Scale weights and center around the binary midpoint
+        scaled_weights = ops.subtract(
+            ops.multiply(ops.cast(self.scale, dtype=weights.dtype), weights),
+            ops.cast(BINARY_CENTER_POINT, dtype=weights.dtype)
+        )
 
-        The cost is zero for weights at 0 or 1, and maximum (1.0 * scale)
-        for weights at 0.5.
+        # Step 2: Calculate normalized squared deviation from center
+        # This gives us the ((x-0.5)^2)/0.25 term
+        squared_deviation = ops.square(scaled_weights)
+        normalized_deviation = ops.divide(
+            squared_deviation,
+            ops.cast(BINARY_NORMALIZATION, dtype=weights.dtype)
+        )
 
-        Args:
-            weights (tf.Tensor): Input tensor containing the weights
-                               to be regularized.
+        # Step 3: Apply the binary preference function: (1 - normalized)^2
+        # This creates the characteristic shape with zeros at binary values
+        one_tensor = ops.cast(1.0, dtype=weights.dtype)
+        preference_term = ops.subtract(one_tensor, normalized_deviation)
+        cost_per_weight = ops.square(preference_term)
 
-        Returns:
-            tf.Tensor: The calculated regularization cost.
+        # Step 4: Compute mean cost and apply multiplier
+        mean_cost = ops.mean(cost_per_weight)
+        multiplier_tensor = ops.cast(self.multiplier, dtype=weights.dtype)
+
+        return ops.multiply(multiplier_tensor, mean_cost)
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return the configuration of the regularizer for serialization.
+
+        Returns
+        -------
+        Dict[str, Any]
+            Configuration dictionary containing regularizer parameters
+
+        Notes
+        -----
+        This method is required for proper serialization and deserialization
+        of models containing this regularizer.
         """
-        # Calculate (x - 0.5)^2 / 0.25
-        normalized = tf.square(self.scale * weights - 0.5) / 0.25
+        config = {}
+        config.update({
+            STR_MULTIPLIER: self.multiplier,
+            STR_SCALE: self.scale
+        })
+        return config
 
-        # Calculate (1 - normalized)^2
-        cost = tf.square(1.0 - normalized)
 
-        # Apply scaling and return mean cost
-        return self.multiplier * tf.reduce_mean(cost)
+# ---------------------------------------------------------------------
 
-    def get_config(self) -> dict:
-        """
-        Return the configuration of the regularizer.
+def get_binary_preference_regularizer(
+    multiplier: float = DEFAULT_BINARY_MULTIPLIER,
+    scale: float = DEFAULT_BINARY_SCALE,
+    **kwargs: Any
+) -> BinaryPreferenceRegularizer:
+    """Factory function to create binary preference regularizers.
 
-        Returns:
-            dict: Configuration dictionary containing the scale parameter.
-        """
-        return {
-            'multiplier': self.multiplier,
-            'scale': self.scale
-        }
+    This convenience function provides a simple interface for creating
+    binary preference regularizers with validation and logging.
 
-    @classmethod
-    def from_config(cls, config: dict) -> 'BinaryPreferenceRegularizer':
-        """
-        Create a regularizer instance from configuration dictionary.
+    Parameters
+    ----------
+    multiplier : float, optional
+        Multiplier factor for the regularization term, by default DEFAULT_BINARY_MULTIPLIER
+    scale : float, optional
+        Scales the effective range of binary targets, by default DEFAULT_BINARY_SCALE
+    **kwargs : Any
+        Additional arguments passed to BinaryPreferenceRegularizer
 
-        Args:
-            config (dict): Configuration dictionary containing the scale parameter.
+    Returns
+    -------
+    BinaryPreferenceRegularizer
+        Configured BinaryPreferenceRegularizer instance
 
-        Returns:
-            BinaryPreferenceRegularizer: A new instance of the regularizer.
-        """
-        return cls(**config)
+    Raises
+    ------
+    ValueError
+        If multiplier is negative or scale is non-positive
+
+    Examples
+    --------
+    >>> # Create a standard binary preference regularizer
+    >>> reg = get_binary_preference_regularizer(multiplier=1.0)
+
+    >>> # Create with stronger binarization pressure
+    >>> reg = get_binary_preference_regularizer(multiplier=2.0, scale=1.5)
+
+    Notes
+    -----
+    This factory function provides the same functionality as directly
+    instantiating BinaryPreferenceRegularizer but with additional
+    logging and a consistent interface pattern.
+    """
+    # Validate parameters
+    if multiplier < 0.0:
+        raise ValueError(f"multiplier must be non-negative, got {multiplier}")
+    if scale <= 0.0:
+        raise ValueError(f"scale must be positive, got {scale}")
+
+    logger.debug(
+        f"Creating BinaryPreferenceRegularizer with "
+        f"multiplier={multiplier}, scale={scale}"
+    )
+
+    return BinaryPreferenceRegularizer(
+        multiplier=multiplier,
+        scale=scale,
+        **kwargs
+    )
+
 
 # ---------------------------------------------------------------------
