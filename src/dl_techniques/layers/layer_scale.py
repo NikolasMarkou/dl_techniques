@@ -9,93 +9,162 @@ This module provides specialized Keras layers for learnable scaling operations:
 """
 
 import keras
+from keras import ops
 from enum import Enum
-import tensorflow as tf
-from typing import Dict, Any, Optional, Tuple, Union
+from typing import Dict, Any, Optional, Union, Tuple
 
 # ---------------------------------------------------------------------
 # Local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
-from dl_techniques.regularizers.binary_preference import BinaryPreferenceRegularizer
+from dl_techniques.utils.logger import logger
+# Note: If ValueRangeConstraint is not available, use keras.constraints.NonNeg() instead
+# from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
 
 # ---------------------------------------------------------------------
 
-class MultiplierType(Enum):
-    GLOBAL = 0
 
+class MultiplierType(Enum):
+    """Enumeration for multiplier types."""
+
+    GLOBAL = 0
     CHANNEL = 1
 
     @staticmethod
     def from_string(type_str: Union[str, "MultiplierType"]) -> "MultiplierType":
-        # --- argument checking
+        """
+        Convert string to MultiplierType enum.
+
+        Args:
+            type_str: String representation of multiplier type or MultiplierType instance.
+
+        Returns:
+            MultiplierType enum value.
+
+        Raises:
+            ValueError: If type_str is invalid.
+        """
         if type_str is None:
             raise ValueError("type_str must not be null")
         if isinstance(type_str, MultiplierType):
             return type_str
         if not isinstance(type_str, str):
             raise ValueError("type_str must be string")
-        # --- clean string and get
+
+        # Clean string and get enum value
         type_str = type_str.strip().upper()
         if len(type_str) <= 0:
             raise ValueError("stripped type_str must not be empty")
-        return MultiplierType[type_str]
+
+        try:
+            return MultiplierType[type_str]
+        except KeyError:
+            raise ValueError(f"Invalid multiplier type: {type_str}")
 
     def to_string(self) -> str:
+        """
+        Convert enum to string representation.
+
+        Returns:
+            String representation of the enum.
+        """
         return self.name
 
 
 # ---------------------------------------------------------------------
 
 
-@keras.utils.register_keras_serializable()
+@keras.saving.register_keras_serializable()
 class LearnableMultiplier(keras.layers.Layer):
     """
     Layer implementing learnable multipliers.
 
     The multipliers can be either global (single value) or per-channel.
+    This layer multiplies the input tensor with learnable parameters that
+    can be constrained and regularized.
 
     Args:
         multiplier_type: Type of multiplier ('GLOBAL' or 'CHANNEL').
-        initializer: Weight initializer (default: constant 1).
-        regularizer: Weight regularizer (default: None).
-        constraint: Constraint of the weights
-        **kwargs: Additional layer arguments.
+            - GLOBAL: Single multiplier applied to entire tensor
+            - CHANNEL: Separate multiplier for each channel
+        initializer: Weight initializer for the multiplier parameters.
+            Defaults to constant 1.0.
+        regularizer: Optional regularizer for the multiplier weights.
+        constraint: Optional constraint for the multiplier weights.
+            Defaults to NonNeg constraint (values >= 0).
+        **kwargs: Additional keyword arguments for the Layer base class.
+
+    Input shape:
+        Arbitrary. Use the keyword argument `input_shape` (tuple of integers,
+        does not include the batch axis) when using this layer as the first
+        layer in a model.
+
+    Output shape:
+        Same shape as input.
+
+    Example:
+        >>> # Global multiplier
+        >>> layer = LearnableMultiplier(multiplier_type='GLOBAL')
+        >>> x = keras.random.normal((2, 10, 10, 3))
+        >>> y = layer(x)
+        >>> print(y.shape)
+        (2, 10, 10, 3)
+
+        >>> # Per-channel multiplier
+        >>> layer = LearnableMultiplier(multiplier_type='CHANNEL')
+        >>> x = keras.random.normal((2, 10, 10, 3))
+        >>> y = layer(x)
+        >>> print(y.shape)
+        (2, 10, 10, 3)
     """
 
     def __init__(
-            self,
-            multiplier_type: Union[MultiplierType, str] = MultiplierType.CHANNEL,
-            initializer: Optional[keras.initializers.Initializer] = keras.initializers.Constant(1.0),
-            regularizer: Optional[keras.regularizers.Regularizer] = None,
-            constraint: Optional[keras.constraints.Constraint] = ValueRangeConstraint(min_value=0.0, max_value=1.0),
-            **kwargs: Any
+        self,
+        multiplier_type: Union[MultiplierType, str] = MultiplierType.CHANNEL,
+        initializer: Union[str, keras.initializers.Initializer] = "ones",
+        regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        constraint: Optional[Union[str, keras.constraints.Constraint]] = "non_neg",
+        **kwargs: Any
     ) -> None:
         """Initialize the LearnableMultiplier layer."""
         super().__init__(**kwargs)
 
-        self.initializer = initializer
-        self.regularizer = regularizer
-        self.constraint = constraint
+        # Store configuration parameters
         self.multiplier_type = MultiplierType.from_string(multiplier_type)
-        self.gamma = None
+        self.initializer = keras.initializers.get(initializer)
+        self.regularizer = keras.regularizers.get(regularizer)
+        self.constraint = keras.constraints.get(constraint)
 
-    def build(self, input_shape: tf.TensorShape) -> None:
+        # Will be initialized in build()
+        self.gamma = None
+        self._build_input_shape = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Build the layer by creating the multiplier weights.
 
         Args:
-            input_shape: Shape of input tensor.
+            input_shape: Shape tuple of the input tensor.
         """
-        # Create shape with ones except for channel dimension if needed
-        if self.multiplier_type == MultiplierType.GLOBAL:
-            weight_shape = [1] * len(input_shape)
-        elif self.multiplier_type == MultiplierType.CHANNEL:
-            weight_shape = [1] * (len(input_shape) - 1) + [input_shape[-1]]
-        else:
-            raise ValueError(f"invalid multiplier_type: [{self.multiplier_type}")
+        # Store input shape for serialization
+        self._build_input_shape = input_shape
 
+        # Determine weight shape based on multiplier type
+        if self.multiplier_type == MultiplierType.GLOBAL:
+            # Global multiplier: single scalar value broadcasted
+            weight_shape = (1,)
+        elif self.multiplier_type == MultiplierType.CHANNEL:
+            # Per-channel multiplier: shape matches last dimension (channels)
+            if len(input_shape) < 2:
+                raise ValueError(
+                    f"Input must have at least 2 dimensions for CHANNEL multiplier, "
+                    f"got shape: {input_shape}"
+                )
+            weight_shape = (input_shape[-1],)
+        else:
+            raise ValueError(f"Invalid multiplier_type: {self.multiplier_type}")
+
+        # Create the multiplier weight
         self.gamma = self.add_weight(
             name="gamma",
             shape=weight_shape,
@@ -106,43 +175,76 @@ class LearnableMultiplier(keras.layers.Layer):
             dtype=self.dtype
         )
 
+        super().build(input_shape)
+
     def call(
-            self,
-            inputs: tf.Tensor,
-            training: Optional[bool] = None,
-            **kwargs: Any
-    ) -> tf.Tensor:
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None,
+        **kwargs: Any
+    ) -> keras.KerasTensor:
         """
         Apply the learnable multipliers to inputs.
 
-        The multipliers are transformed using tanh to constrain their values.
-        When capped=True, values are constrained to [0, 1].
-        When capped=False, values can exceed 1.0.
-
         Args:
             inputs: Input tensor.
-            training: Whether in training mode (unused).
+            training: Boolean indicating whether the layer should behave in
+                training mode or inference mode.
             **kwargs: Additional call arguments.
 
         Returns:
-            Tensor with multipliers applied.
+            Output tensor with multipliers applied element-wise.
         """
-        # Compute base multiplier using tanh transformation
-        return tf.multiply(self.gamma, inputs)
+        # Use keras.ops for backend compatibility
+        return ops.multiply(inputs, self.gamma)
+
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute output shape (same as input shape).
+
+        Args:
+            input_shape: Shape tuple of the input.
+
+        Returns:
+            Output shape tuple (same as input).
+        """
+        return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
+        """
+        Get layer configuration for serialization.
+
+        Returns:
+            Dictionary containing the layer configuration.
+        """
         config = super().get_config()
         config.update({
             "multiplier_type": self.multiplier_type.to_string(),
-            "regularizer": keras.regularizers.serialize(self.regularizer),
             "initializer": keras.initializers.serialize(self.initializer),
+            "regularizer": keras.regularizers.serialize(self.regularizer),
             "constraint": keras.constraints.serialize(self.constraint),
         })
         return config
 
-    def compute_output_shape(self, input_shape: tf.TensorShape) -> tf.TensorShape:
-        """Compute output shape (same as input shape)."""
-        return input_shape
+    def get_build_config(self) -> Dict[str, Any]:
+        """
+        Get build configuration for proper serialization.
+
+        Returns:
+            Dictionary containing the build configuration.
+        """
+        return {
+            "input_shape": self._build_input_shape,
+        }
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """
+        Build the layer from a build configuration.
+
+        Args:
+            config: Dictionary containing the build configuration.
+        """
+        if config.get("input_shape") is not None:
+            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------
