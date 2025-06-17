@@ -13,10 +13,19 @@ Key Features:
     - Memory-efficient tensor operations
 """
 
-
-import tensorflow as tf
+import keras
+from keras import ops
 from dataclasses import dataclass
-from typing import Optional, Union, Tuple
+from typing import Optional, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
+
 
 @dataclass
 class LossConfig:
@@ -58,14 +67,25 @@ class SegmentationLosses:
 
     Raises:
         ValueError: If invalid configuration parameters are provided
+
+    Example:
+        >>> config = LossConfig(num_classes=3, focal_gamma=2.0)
+        >>> losses = SegmentationLosses(config)
+        >>> dice_loss = losses.dice_loss(y_true, y_pred)
     """
 
     def __init__(self, config: LossConfig) -> None:
+        """Initialize the SegmentationLosses class.
+
+        Args:
+            config: Configuration parameters for loss functions
+        """
         self._validate_config(config)
         self.config = config
+        logger.info(f"Initialized SegmentationLosses with {config.num_classes} classes")
 
     def _validate_config(self, config: LossConfig) -> None:
-        """Validates the configuration parameters.
+        """Validate the configuration parameters.
 
         Args:
             config: LossConfig instance to validate
@@ -81,14 +101,18 @@ class SegmentationLosses:
             raise ValueError(f"focal_gamma must be non-negative, got {config.focal_gamma}")
         if not 0 <= config.focal_alpha <= 1:
             raise ValueError(f"focal_alpha must be in [0, 1], got {config.focal_alpha}")
+        if config.tversky_alpha < 0 or config.tversky_beta < 0:
+            raise ValueError(f"Tversky parameters must be non-negative")
+        if config.combo_alpha < 0 or config.combo_beta < 0:
+            raise ValueError(f"Combo parameters must be non-negative")
 
     @staticmethod
     def _validate_inputs(
-            y_true: tf.Tensor,
-            y_pred: tf.Tensor,
-            weights: Optional[tf.Tensor] = None
+            y_true: Any,
+            y_pred: Any,
+            weights: Optional[Any] = None
     ) -> None:
-        """Validates input tensors.
+        """Validate input tensors.
 
         Args:
             y_true: Ground truth tensor
@@ -111,11 +135,11 @@ class SegmentationLosses:
 
     def cross_entropy_loss(
             self,
-            y_true: tf.Tensor,
-            y_pred: tf.Tensor,
-            weights: Optional[tf.Tensor] = None
-    ) -> tf.Tensor:
-        """Implements weighted cross-entropy loss.
+            y_true: Any,
+            y_pred: Any,
+            weights: Optional[Any] = None
+    ) -> Any:
+        """Implement weighted cross-entropy loss.
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
@@ -123,109 +147,118 @@ class SegmentationLosses:
             weights: Optional class weights (num_classes,)
 
         Returns:
-            Weighted cross-entropy loss
+            Weighted cross-entropy loss tensor
 
         Raises:
             ValueError: If input tensors have invalid shapes
         """
         self._validate_inputs(y_true, y_pred, weights)
-        y_true = tf.cast(y_true, tf.float32)
+        y_true = ops.cast(y_true, "float32")
 
         # Add epsilon to prevent log(0)
-        epsilon = tf.keras.backend.epsilon()
-        y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
+        epsilon = 1e-7
+        y_pred = ops.clip(y_pred, epsilon, 1.0 - epsilon)
 
-        ce_loss = -tf.reduce_sum(y_true * tf.math.log(y_pred), axis=-1)
+        ce_loss = -ops.sum(y_true * ops.log(y_pred), axis=-1)
 
         if weights is not None:
-            weights = tf.cast(weights, tf.float32)
-            ce_loss *= tf.reduce_sum(y_true * weights, axis=-1)
+            weights = ops.cast(weights, "float32")
+            ce_loss = ce_loss * ops.sum(y_true * weights, axis=-1)
 
-        return tf.reduce_mean(ce_loss)
+        return ops.mean(ce_loss)
 
     def dice_loss(
             self,
-            y_true: tf.Tensor,
-            y_pred: tf.Tensor
-    ) -> tf.Tensor:
-        """Implements Dice loss.
+            y_true: Any,
+            y_pred: Any
+    ) -> Any:
+        """Implement Dice loss.
+
+        The Dice loss is based on the Dice coefficient, which measures the overlap
+        between predicted and ground truth segmentations.
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
             y_pred: Predicted probabilities (batch_size, height, width, num_classes)
 
         Returns:
-            Dice loss
+            Dice loss tensor
 
         Raises:
             ValueError: If input tensors have invalid shapes
         """
         self._validate_inputs(y_true, y_pred)
-        y_true = tf.cast(y_true, tf.float32)
+        y_true = ops.cast(y_true, "float32")
 
-        numerator = 2 * tf.reduce_sum(y_true * y_pred, axis=[1, 2])
+        numerator = 2 * ops.sum(y_true * y_pred, axis=[1, 2])
         denominator = (
-                tf.reduce_sum(y_true, axis=[1, 2]) +
-                tf.reduce_sum(y_pred, axis=[1, 2])
+                ops.sum(y_true, axis=[1, 2]) +
+                ops.sum(y_pred, axis=[1, 2])
         )
 
         dice_coef = (numerator + self.config.smooth_factor) / (
                 denominator + self.config.smooth_factor
         )
-        return 1.0 - tf.reduce_mean(dice_coef)
+        return 1.0 - ops.mean(dice_coef)
 
     def focal_loss(
             self,
-            y_true: tf.Tensor,
-            y_pred: tf.Tensor
-    ) -> tf.Tensor:
-        """Implements Focal loss.
+            y_true: Any,
+            y_pred: Any
+    ) -> Any:
+        """Implement Focal loss.
+
+        Focal loss addresses class imbalance by down-weighting easy examples
+        and focusing on hard examples.
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
             y_pred: Predicted probabilities (batch_size, height, width, num_classes)
 
         Returns:
-            Focal loss
+            Focal loss tensor
 
         Raises:
             ValueError: If input tensors have invalid shapes
         """
         self._validate_inputs(y_true, y_pred)
-        y_true = tf.cast(y_true, tf.float32)
+        y_true = ops.cast(y_true, "float32")
 
-        epsilon = tf.keras.backend.epsilon()
-        y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
+        epsilon = 1e-7
+        y_pred = ops.clip(y_pred, epsilon, 1.0 - epsilon)
 
-        cross_entropy = -y_true * tf.math.log(y_pred)
-        focal_factor = tf.pow(1. - y_pred, self.config.focal_gamma)
+        cross_entropy = -y_true * ops.log(y_pred)
+        focal_factor = ops.power(1.0 - y_pred, self.config.focal_gamma)
 
         focal_ce = self.config.focal_alpha * focal_factor * cross_entropy
-        return tf.reduce_mean(tf.reduce_sum(focal_ce, axis=-1))
+        return ops.mean(ops.sum(focal_ce, axis=-1))
 
     def tversky_loss(
             self,
-            y_true: tf.Tensor,
-            y_pred: tf.Tensor
-    ) -> tf.Tensor:
-        """Implements Tversky loss.
+            y_true: Any,
+            y_pred: Any
+    ) -> Any:
+        """Implement Tversky loss.
+
+        Tversky loss is a generalization of Dice loss that allows for different
+        weighting of false positives and false negatives.
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
             y_pred: Predicted probabilities (batch_size, height, width, num_classes)
 
         Returns:
-            Tversky loss
+            Tversky loss tensor
 
         Raises:
             ValueError: If input tensors have invalid shapes
         """
         self._validate_inputs(y_true, y_pred)
-        y_true = tf.cast(y_true, tf.float32)
+        y_true = ops.cast(y_true, "float32")
 
-        numerator = tf.reduce_sum(y_true * y_pred, axis=[1, 2])
-        false_positives = tf.reduce_sum((1 - y_true) * y_pred, axis=[1, 2])
-        false_negatives = tf.reduce_sum(y_true * (1 - y_pred), axis=[1, 2])
+        numerator = ops.sum(y_true * y_pred, axis=[1, 2])
+        false_positives = ops.sum((1 - y_true) * y_pred, axis=[1, 2])
+        false_negatives = ops.sum(y_true * (1 - y_pred), axis=[1, 2])
 
         denominator = (
                 numerator +
@@ -236,98 +269,129 @@ class SegmentationLosses:
         tversky_coef = (numerator + self.config.smooth_factor) / (
                 denominator + self.config.smooth_factor
         )
-        return 1.0 - tf.reduce_mean(tversky_coef)
+        return 1.0 - ops.mean(tversky_coef)
 
     def focal_tversky_loss(
             self,
-            y_true: tf.Tensor,
-            y_pred: tf.Tensor
-    ) -> tf.Tensor:
-        """Implements Focal Tversky loss.
+            y_true: Any,
+            y_pred: Any
+    ) -> Any:
+        """Implement Focal Tversky loss.
+
+        Combines the benefits of both Focal loss and Tversky loss by applying
+        the focal mechanism to the Tversky index.
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
             y_pred: Predicted probabilities (batch_size, height, width, num_classes)
 
         Returns:
-            Focal Tversky loss
+            Focal Tversky loss tensor
 
         Raises:
             ValueError: If input tensors have invalid shapes
         """
-        tversky_coef = 1.0 - self.tversky_loss(y_true, y_pred)
-        focal_tversky = tf.pow(1.0 - tversky_coef, self.config.focal_tversky_gamma)
-        return tf.reduce_mean(focal_tversky)
+        # Calculate Tversky coefficient first
+        y_true_cast = ops.cast(y_true, "float32")
+        numerator = ops.sum(y_true_cast * y_pred, axis=[1, 2])
+        false_positives = ops.sum((1 - y_true_cast) * y_pred, axis=[1, 2])
+        false_negatives = ops.sum(y_true_cast * (1 - y_pred), axis=[1, 2])
+
+        denominator = (
+                numerator +
+                self.config.tversky_alpha * false_positives +
+                self.config.tversky_beta * false_negatives
+        )
+
+        tversky_coef = (numerator + self.config.smooth_factor) / (
+                denominator + self.config.smooth_factor
+        )
+
+        # Apply focal mechanism
+        focal_tversky = ops.power(1.0 - tversky_coef, self.config.focal_tversky_gamma)
+        return ops.mean(focal_tversky)
 
     def lovasz_softmax_loss(
             self,
-            y_true: tf.Tensor,
-            y_pred: tf.Tensor
-    ) -> tf.Tensor:
-        """Implements Lovász-Softmax loss.
+            y_true: Any,
+            y_pred: Any
+    ) -> Any:
+        """Implement Lovász-Softmax loss.
+
+        The Lovász-Softmax loss is based on the Lovász extension of submodular
+        losses for multi-class segmentation.
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
             y_pred: Predicted probabilities (batch_size, height, width, num_classes)
 
         Returns:
-            Lovász-Softmax loss
+            Lovász-Softmax loss tensor
 
         Raises:
             ValueError: If input tensors have invalid shapes
         """
         self._validate_inputs(y_true, y_pred)
 
-        def lovasz_grad(gt_sorted: tf.Tensor) -> tf.Tensor:
-            """Computes Lovász gradient.
+        def lovasz_grad(gt_sorted: Any) -> Any:
+            """Compute Lovász gradient.
 
             Args:
                 gt_sorted: Sorted ground truth values
 
             Returns:
-                Lovász gradient
+                Lovász gradient tensor
             """
-            gts = tf.reduce_sum(gt_sorted)
-            intersection = gts - tf.cumsum(gt_sorted)
-            union = gts + tf.cumsum(1. - gt_sorted)
-            jaccard = 1. - intersection / union
-            jaccard = tf.concat(
-                (jaccard[0:1], jaccard[1:] - jaccard[:-1]), 0
-            )
-            return jaccard
+            gts = ops.sum(gt_sorted)
+            intersection = gts - ops.cumsum(gt_sorted, axis=0)
+            union = gts + ops.cumsum(1.0 - gt_sorted, axis=0)
+            jaccard = 1.0 - intersection / (union + self.config.smooth_factor)
 
-        y_true = tf.cast(y_true, tf.float32)
+            # Compute differences for gradient
+            jaccard_diff = ops.concatenate([
+                jaccard[0:1],
+                jaccard[1:] - jaccard[:-1]
+            ], axis=0)
+            return jaccard_diff
+
+        y_true = ops.cast(y_true, "float32")
         losses = []
 
         for c in range(self.config.num_classes):
             target_c = y_true[..., c]
             pred_c = y_pred[..., c]
 
-            # Sort predictions by target values
-            sorted_indices = tf.argsort(
-                tf.reshape(target_c, [-1]),
-                direction='DESCENDING'
-            )
-            pred_sorted = tf.gather(tf.reshape(pred_c, [-1]), sorted_indices)
+            # Flatten tensors for sorting
+            target_flat = ops.reshape(target_c, [-1])
+            pred_flat = ops.reshape(pred_c, [-1])
 
-            loss_c = tf.reduce_mean(lovasz_grad(pred_sorted))
-            losses.append(loss_c)
+            # Sort by prediction values in descending order
+            # Since argsort doesn't support direction, we negate values to sort descending
+            sorted_indices = ops.argsort(-pred_flat)
+            target_sorted = ops.take(target_flat, sorted_indices)
 
-        return tf.reduce_mean(losses)
+            grad = lovasz_grad(target_sorted)
+            loss_c = ops.sum(grad * ops.take(-pred_flat, sorted_indices))  # Use negated values
+            losses.append(-loss_c)  # Negate back to get correct sign
+
+        return ops.mean(ops.stack(losses))
 
     def combo_loss(
             self,
-            y_true: tf.Tensor,
-            y_pred: tf.Tensor
-    ) -> tf.Tensor:
-        """Implements Combo loss (combination of Dice and Cross-Entropy).
+            y_true: Any,
+            y_pred: Any
+    ) -> Any:
+        """Implement Combo loss (combination of Dice and Cross-Entropy).
+
+        Combo loss combines the benefits of both Dice loss and Cross-Entropy loss
+        for better segmentation performance.
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
             y_pred: Predicted probabilities (batch_size, height, width, num_classes)
 
         Returns:
-            Combo loss
+            Combo loss tensor
 
         Raises:
             ValueError: If input tensors have invalid shapes
@@ -341,115 +405,186 @@ class SegmentationLosses:
 
     def boundary_loss(
             self,
-            y_true: tf.Tensor,
-            y_pred: tf.Tensor
-    ) -> tf.Tensor:
-        """Implements Boundary loss.
+            y_true: Any,
+            y_pred: Any
+    ) -> Any:
+        """Implement Boundary loss.
+
+        Boundary loss focuses on the boundaries between different classes,
+        using a simplified distance-based approach.
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
             y_pred: Predicted probabilities (batch_size, height, width, num_classes)
 
         Returns:
-            Boundary loss
+            Boundary loss tensor
 
         Raises:
             ValueError: If input tensors have invalid shapes
         """
         self._validate_inputs(y_true, y_pred)
-        y_true = tf.cast(y_true, tf.float32)
+        y_true = ops.cast(y_true, "float32")
 
-        # Compute distance transform
-        kernel = tf.ones((3, 3, 1))
-        dt = tf.nn.erosion2d(
-            y_true,
-            kernel=kernel,
-            strides=[1, 1, 1, 1],
-            padding="SAME",
-            data_format="NHWC"
-        )
+        # Compute boundary map using gradient magnitude
+        # This is a simplified version using difference operations instead of convolution
+        def compute_boundary_map(mask: Any) -> Any:
+            """Compute boundary map using difference-based edge detection.
 
-        # Normalize distance transform
-        dt = tf.clip_by_value(dt, 0, self.config.boundary_theta)
-        dt = dt / self.config.boundary_theta
+            Args:
+                mask: Input mask tensor
 
-        boundary_loss = tf.reduce_mean(dt * tf.square(1 - y_pred))
+            Returns:
+                Boundary map tensor
+            """
+            # Use simple differences to approximate gradients
+            # Pad the tensor to handle boundaries
+            padded_mask = ops.pad(mask, [[0, 0], [1, 1], [1, 1], [0, 0]], mode='constant')
+
+            # Compute gradients using differences
+            grad_x = padded_mask[:, 1:-1, 2:, :] - padded_mask[:, 1:-1, :-2, :]
+            grad_y = padded_mask[:, 2:, 1:-1, :] - padded_mask[:, :-2, 1:-1, :]
+
+            # Compute gradient magnitude
+            magnitude = ops.sqrt(grad_x**2 + grad_y**2 + self.config.smooth_factor)
+
+            return magnitude
+
+        boundary_map = compute_boundary_map(y_true)
+
+        # Normalize boundary map
+        boundary_map = ops.clip(boundary_map, 0, self.config.boundary_theta)
+        boundary_map = boundary_map / self.config.boundary_theta
+
+        boundary_loss = ops.mean(boundary_map * ops.square(1 - y_pred))
         return boundary_loss
 
     def hausdorff_distance_loss(
             self,
-            y_true: tf.Tensor,
-            y_pred: tf.Tensor
-    ) -> tf.Tensor:
-        """Implements an approximation of Hausdorff Distance loss.
+            y_true: Any,
+            y_pred: Any
+    ) -> Any:
+        """Implement an approximation of Hausdorff Distance loss.
+
+        This implements a simplified version of Hausdorff distance using
+        morphological operations approximated with pooling.
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
             y_pred: Predicted probabilities (batch_size, height, width, num_classes)
 
         Returns:
-            Approximated Hausdorff Distance loss
+            Approximated Hausdorff Distance loss tensor
 
         Raises:
             ValueError: If input tensors have invalid shapes
         """
         self._validate_inputs(y_true, y_pred)
-        y_true = tf.cast(y_true, tf.float32)
+        y_true = ops.cast(y_true, "float32")
 
-        # Compute distance transforms
-        kernel = tf.ones((3, 3, 1))
-        dt_true = tf.nn.erosion2d(
-            y_true,
-            kernel=kernel,
-            strides=[1, 1, 1, 1],
-            padding="SAME",
-            data_format="NHWC"
-        )
-        dt_pred = tf.nn.erosion2d(
-            y_pred,
-            kernel=kernel,
-            strides=[1, 1, 1, 1],
-            padding="SAME",
-            data_format="NHWC"
-        )
+        # Simplified distance approximation using difference operations
+        def approximate_distance_transform(mask: Any) -> Any:
+            """Approximate distance transform using morphological operations.
 
-        # Compute Hausdorff distances
-        hd_true_pred = tf.reduce_max(dt_true * y_pred, axis=[1, 2])
-        hd_pred_true = tf.reduce_max(dt_pred * y_true, axis=[1, 2])
+            Args:
+                mask: Input mask tensor
+
+            Returns:
+                Approximated distance transform
+            """
+            # Use iterative dilation approximation with difference operations
+            result = mask
+            for iteration in range(3):  # Apply multiple iterations for distance approximation
+                # Pad tensor for boundary handling
+                padded = ops.pad(result, [[0, 0], [1, 1], [1, 1], [0, 0]], mode='constant')
+
+                # Approximate dilation using maximum of neighboring pixels
+                dilated = ops.maximum(
+                    ops.maximum(
+                        ops.maximum(padded[:, :-2, 1:-1, :], padded[:, 2:, 1:-1, :]),
+                        ops.maximum(padded[:, 1:-1, :-2, :], padded[:, 1:-1, 2:, :])
+                    ),
+                    result
+                )
+                result = dilated
+
+            return result
+
+        dt_true = approximate_distance_transform(y_true)
+        dt_pred = approximate_distance_transform(y_pred)
+
+        # Compute approximate Hausdorff distances
+        hd_true_pred = ops.max(dt_true * y_pred, axis=[1, 2])
+        hd_pred_true = ops.max(dt_pred * y_true, axis=[1, 2])
 
         # Symmetric Hausdorff distance
-        hd = tf.maximum(hd_true_pred, hd_pred_true)
-        return tf.reduce_mean(hd)
+        hd = ops.maximum(hd_true_pred, hd_pred_true)
+        return ops.mean(hd)
 
 
 def create_loss_function(
         loss_name: str,
         config: Optional[LossConfig] = None
-) -> tf.keras.losses.Loss:
-    """Creates a Keras loss function from the specified loss.
+) -> keras.losses.Loss:
+    """Create a Keras loss function from the specified loss.
 
     Args:
-        loss_name: Name of the loss function to create
+        loss_name: Name of the loss function to create. Available options:
+            'cross_entropy', 'dice', 'focal', 'tversky', 'focal_tversky',
+            'lovasz', 'combo', 'boundary', 'hausdorff'
         config: Optional LossConfig instance for loss parameters
 
     Returns:
-        Keras loss function
+        Keras loss function ready to use in model compilation
 
     Raises:
         ValueError: If loss_name is not recognized
+
+    Example:
+        >>> config = LossConfig(num_classes=3, focal_gamma=2.0)
+        >>> loss_fn = create_loss_function('focal', config)
+        >>> model.compile(optimizer='adam', loss=loss_fn)
     """
     if config is None:
         config = LossConfig(num_classes=1)  # Default single-class config
+        logger.info("Using default LossConfig with single class")
 
     losses = SegmentationLosses(config)
 
-    class WrappedLoss(tf.keras.losses.Loss):
-        def __init__(self, loss_fn, name=loss_name):
+    class WrappedLoss(keras.losses.Loss):
+        """Wrapper class to make segmentation losses compatible with Keras."""
+
+        def __init__(self, loss_fn: callable, name: str = loss_name):
+            """Initialize the wrapped loss function.
+
+            Args:
+                loss_fn: The actual loss function to wrap
+                name: Name of the loss function
+            """
             super().__init__(name=name)
             self.loss_fn = loss_fn
 
-        def call(self, y_true, y_pred):
+        def call(self, y_true: Any, y_pred: Any) -> Any:
+            """Call the wrapped loss function.
+
+            Args:
+                y_true: Ground truth labels
+                y_pred: Predicted probabilities
+
+            Returns:
+                Loss value
+            """
             return self.loss_fn(y_true, y_pred)
+
+        def get_config(self) -> dict:
+            """Get configuration for serialization.
+
+            Returns:
+                Configuration dictionary
+            """
+            config = super().get_config()
+            config.update({'name': self.name})
+            return config
 
     loss_map = {
         'cross_entropy': losses.cross_entropy_loss,
@@ -464,15 +599,18 @@ def create_loss_function(
     }
 
     if loss_name not in loss_map:
+        available_losses = list(loss_map.keys())
+        logger.error(f"Unknown loss function: {loss_name}. Available: {available_losses}")
         raise ValueError(
             f"Unknown loss function: {loss_name}. "
-            f"Available losses: {list(loss_map.keys())}"
+            f"Available losses: {available_losses}"
         )
 
+    logger.info(f"Created {loss_name} loss function")
     return WrappedLoss(loss_map[loss_name])
 
 
-# Example usage
+# Example usage and testing
 if __name__ == "__main__":
     import numpy as np
 
@@ -490,19 +628,19 @@ if __name__ == "__main__":
     )
 
     # Create random sample tensors
-    y_true = tf.random.uniform(
+    y_true = ops.random.uniform(
         (batch_size, height, width, num_classes),
         minval=0,
         maxval=1
     )
-    y_pred = tf.random.uniform(
+    y_pred = ops.random.uniform(
         (batch_size, height, width, num_classes),
         minval=0,
         maxval=1
     )
 
     # Normalize predictions to create valid probability distribution
-    y_pred = tf.nn.softmax(y_pred, axis=-1)
+    y_pred = ops.softmax(y_pred, axis=-1)
 
     # Initialize loss functions
     losses = SegmentationLosses(config)
@@ -520,11 +658,12 @@ if __name__ == "__main__":
         'Hausdorff': losses.hausdorff_distance_loss(y_true, y_pred)
     }
 
-    # Print results
-    print("\nLoss Values:")
+    # Log results
+    logger.info("Loss function test results:")
     for name, value in results.items():
-        print(f"{name:15s}: {value:0.4f}")
+        logger.info(f"{name:15s}: {float(value):0.4f}")
 
     # Example of creating a Keras loss function
     keras_loss = create_loss_function('combo', config)
-    print("\nKeras loss value:", keras_loss(y_true, y_pred).numpy())
+    keras_loss_value = keras_loss(y_true, y_pred)
+    logger.info(f"Keras loss value: {float(keras_loss_value):0.4f}")
