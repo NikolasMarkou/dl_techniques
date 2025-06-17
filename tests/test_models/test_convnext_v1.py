@@ -1,5 +1,7 @@
 """Tests for ConvNeXt V1 model implementations."""
 
+import os
+import tempfile
 import keras
 import pytest
 import numpy as np
@@ -133,12 +135,11 @@ class TestConvNextV1:
             input_shape=(224, 224, 3)
         )
 
-        # Save model to temporary file
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix='.keras') as f:
-            model.save(f.name, save_format="keras")
-            # Load the model back
-            loaded_model = keras.models.load_model(f.name)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model_path = os.path.join(tmp_dir, 'model.keras')
+            model.save(model_path)
+            loaded_model = keras.models.load_model(model_path)
+
 
         # Check that loaded model has the same architecture
         assert len(model.layers) == len(loaded_model.layers)
