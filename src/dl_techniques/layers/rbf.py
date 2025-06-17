@@ -60,7 +60,7 @@ References
 
 import keras
 from keras import ops
-from typing import Any, Dict, Optional, Union
+from typing import Any, Optional, Union
 
 # ---------------------------------------------------------------------
 # local imports
