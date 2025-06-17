@@ -12,7 +12,7 @@ import keras
 import pytest
 import numpy as np
 import tensorflow as tf
-from typing import Tuple, List
+
 
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 
