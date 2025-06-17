@@ -11,29 +11,28 @@ These loss functions allow direct optimization of model calibration during train
 complementing the AnyLoss framework for comprehensive model evaluation.
 
 Key Benefits:
-------------
-1. Direct optimization of probability calibration
-2. No approximation functions needed (works directly with probabilities)
-3. Addresses both accuracy and reliability of probability predictions
-4. Can be combined with other loss functions for multi-objective optimization
+    - Direct optimization of probability calibration
+    - No approximation functions needed (works directly with probabilities)
+    - Addresses both accuracy and reliability of probability predictions
+    - Can be combined with other loss functions for multi-objective optimization
 
-Usage:
------
-```python
-model = keras.Sequential([...])
-model.compile(
-    optimizer=keras.optimizers.Adam(learning_rate=0.001),
-    loss=BrierScoreLoss(),  # Or SpiegelhalterZLoss() or CombinedCalibrationLoss()
-    metrics=['accuracy']
-)
-```
+Example:
+    >>> model = keras.Sequential([...])
+    >>> model.compile(
+    ...     optimizer=keras.optimizers.Adam(learning_rate=0.001),
+    ...     loss=BrierScoreLoss(),  # Or SpiegelhalterZLoss() or CombinedCalibrationLoss()
+    ...     metrics=['accuracy']
+    ... )
 """
 
 import keras
-import tensorflow as tf
+from keras import ops
 from typing import Dict, Optional, Any
 
+# ---------------------------------------------------------------------
 
+
+@keras.saving.register_keras_serializable()
 class BrierScoreLoss(keras.losses.Loss):
     """Differentiable Brier Score loss function for model calibration.
 
@@ -63,11 +62,11 @@ class BrierScoreLoss(keras.losses.Loss):
     """
 
     def __init__(
-            self,
-            from_logits: bool = False,
-            reduction: str = 'sum_over_batch_size',
-            name: Optional[str] = None,
-            **kwargs: Any
+        self,
+        from_logits: bool = False,
+        reduction: str = 'sum_over_batch_size',
+        name: Optional[str] = None,
+        **kwargs: Any
     ) -> None:
         """Initialize the BrierScoreLoss.
 
@@ -84,7 +83,7 @@ class BrierScoreLoss(keras.losses.Loss):
         )
         self.from_logits = from_logits
 
-    def call(self, y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
+    def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
         """Compute the Brier Score loss.
 
         Args:
@@ -96,24 +95,31 @@ class BrierScoreLoss(keras.losses.Loss):
         """
         # Apply sigmoid if predictions are logits
         if self.from_logits:
-            y_pred = tf.nn.sigmoid(y_pred)
+            y_pred = ops.sigmoid(y_pred)
 
         # Ensure y_true is of correct type
-        y_true = tf.cast(y_true, dtype=y_pred.dtype)
+        y_true = ops.cast(y_true, dtype=y_pred.dtype)
 
         # Compute Brier Score: mean squared difference
-        squared_diff = tf.square(y_pred - y_true)
-        brier_score = tf.reduce_mean(squared_diff)
+        squared_diff = ops.square(y_pred - y_true)
+        brier_score = ops.mean(squared_diff)
 
         return brier_score
 
     def get_config(self) -> Dict[str, Any]:
-        """Get loss configuration for serialization."""
+        """Get loss configuration for serialization.
+
+        Returns:
+            Dictionary containing the loss configuration.
+        """
         config = super().get_config()
         config.update({"from_logits": self.from_logits})
         return config
 
+# ---------------------------------------------------------------------
 
+
+@keras.saving.register_keras_serializable()
 class SpiegelhalterZLoss(keras.losses.Loss):
     """Differentiable Spiegelhalter's Z-test loss function for model calibration.
 
@@ -144,12 +150,12 @@ class SpiegelhalterZLoss(keras.losses.Loss):
     """
 
     def __init__(
-            self,
-            use_squared: bool = True,
-            from_logits: bool = False,
-            reduction: str = 'sum_over_batch_size',
-            name: Optional[str] = None,
-            **kwargs: Any
+        self,
+        use_squared: bool = True,
+        from_logits: bool = False,
+        reduction: str = 'sum_over_batch_size',
+        name: Optional[str] = None,
+        **kwargs: Any
     ) -> None:
         """Initialize the SpiegelhalterZLoss.
 
@@ -168,7 +174,7 @@ class SpiegelhalterZLoss(keras.losses.Loss):
         self.use_squared = use_squared
         self.from_logits = from_logits
 
-    def call(self, y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
+    def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
         """Compute the Spiegelhalter Z-test loss.
 
         Args:
@@ -180,10 +186,10 @@ class SpiegelhalterZLoss(keras.losses.Loss):
         """
         # Apply sigmoid if predictions are logits
         if self.from_logits:
-            y_pred = tf.nn.sigmoid(y_pred)
+            y_pred = ops.sigmoid(y_pred)
 
         # Ensure y_true is of correct type
-        y_true = tf.cast(y_true, dtype=y_pred.dtype)
+        y_true = ops.cast(y_true, dtype=y_pred.dtype)
 
         # Compute residuals: observed - predicted
         residuals = y_true - y_pred
@@ -193,25 +199,29 @@ class SpiegelhalterZLoss(keras.losses.Loss):
         variances = y_pred * (1.0 - y_pred)
 
         # Sum of residuals (numerator of Z-statistic)
-        residual_sum = tf.reduce_sum(residuals)
+        residual_sum = ops.sum(residuals)
 
         # Standard deviation of residual sum (denominator of Z-statistic)
         # Add small epsilon for numerical stability
         epsilon = keras.backend.epsilon()
-        variance_sum = tf.reduce_sum(variances) + epsilon
-        residual_std = tf.sqrt(variance_sum)
+        variance_sum = ops.sum(variances) + epsilon
+        residual_std = ops.sqrt(variance_sum)
 
         # Compute Z-statistic
         z_stat = residual_sum / residual_std
 
         # Return Z² or |Z| depending on configuration
         if self.use_squared:
-            return tf.square(z_stat)
+            return ops.square(z_stat)
         else:
-            return tf.abs(z_stat)
+            return ops.abs(z_stat)
 
     def get_config(self) -> Dict[str, Any]:
-        """Get loss configuration for serialization."""
+        """Get loss configuration for serialization.
+
+        Returns:
+            Dictionary containing the loss configuration.
+        """
         config = super().get_config()
         config.update({
             "use_squared": self.use_squared,
@@ -219,7 +229,10 @@ class SpiegelhalterZLoss(keras.losses.Loss):
         })
         return config
 
+# ---------------------------------------------------------------------
 
+
+@keras.saving.register_keras_serializable()
 class CombinedCalibrationLoss(keras.losses.Loss):
     """Combined loss function using both Brier Score and Spiegelhalter's Z-test.
 
@@ -252,13 +265,13 @@ class CombinedCalibrationLoss(keras.losses.Loss):
     """
 
     def __init__(
-            self,
-            alpha: float = 0.5,
-            use_squared_z: bool = True,
-            from_logits: bool = False,
-            reduction: str = 'sum_over_batch_size',
-            name: Optional[str] = None,
-            **kwargs: Any
+        self,
+        alpha: float = 0.5,
+        use_squared_z: bool = True,
+        from_logits: bool = False,
+        reduction: str = 'sum_over_batch_size',
+        name: Optional[str] = None,
+        **kwargs: Any
     ) -> None:
         """Initialize the CombinedCalibrationLoss.
 
@@ -293,7 +306,7 @@ class CombinedCalibrationLoss(keras.losses.Loss):
             reduction='none'
         )
 
-    def call(self, y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
+    def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
         """Compute the combined calibration loss.
 
         Args:
@@ -309,7 +322,11 @@ class CombinedCalibrationLoss(keras.losses.Loss):
         return self.alpha * brier_component + (1 - self.alpha) * z_component
 
     def get_config(self) -> Dict[str, Any]:
-        """Get loss configuration for serialization."""
+        """Get loss configuration for serialization.
+
+        Returns:
+            Dictionary containing the loss configuration.
+        """
         config = super().get_config()
         config.update({
             "alpha": self.alpha,
@@ -318,71 +335,186 @@ class CombinedCalibrationLoss(keras.losses.Loss):
         })
         return config
 
+# ---------------------------------------------------------------------
 
-# Custom metric implementations for monitoring during training
+
+@keras.saving.register_keras_serializable()
 class BrierScoreMetric(keras.metrics.Metric):
-    """Brier Score metric for monitoring calibration during training."""
+    """Brier Score metric for monitoring calibration during training.
 
-    def __init__(self, name='brier_score', from_logits=False, **kwargs):
+    The Brier Score measures the mean squared difference between predicted
+    probabilities and actual outcomes. Lower values indicate better calibration.
+
+    Args:
+        name: String name of the metric instance.
+        from_logits: Whether predictions are logits (not passed through sigmoid).
+        **kwargs: Additional keyword arguments passed to the parent class.
+    """
+
+    def __init__(
+        self,
+        name: str = 'brier_score',
+        from_logits: bool = False,
+        **kwargs: Any
+    ) -> None:
+        """Initialize the BrierScoreMetric.
+
+        Args:
+            name: Name of the metric.
+            from_logits: Whether predictions are logits.
+            **kwargs: Additional keyword arguments passed to the parent class.
+        """
         super().__init__(name=name, **kwargs)
         self.from_logits = from_logits
         self.total_score = self.add_weight(name='total_score', initializer='zeros')
         self.count = self.add_weight(name='count', initializer='zeros')
 
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        if self.from_logits:
-            y_pred = tf.nn.sigmoid(y_pred)
+    def update_state(
+        self,
+        y_true: keras.KerasTensor,
+        y_pred: keras.KerasTensor,
+        sample_weight: Optional[keras.KerasTensor] = None
+    ) -> None:
+        """Update the metric state.
 
-        y_true = tf.cast(y_true, y_pred.dtype)
-        brier_scores = tf.square(y_pred - y_true)
+        Args:
+            y_true: Ground truth binary labels.
+            y_pred: Predicted probabilities or logits.
+            sample_weight: Optional sample weights.
+        """
+        if self.from_logits:
+            y_pred = ops.sigmoid(y_pred)
+
+        y_true = ops.cast(y_true, y_pred.dtype)
+        brier_scores = ops.square(y_pred - y_true)
 
         if sample_weight is not None:
-            sample_weight = tf.cast(sample_weight, self.dtype)
-            brier_scores = tf.multiply(brier_scores, sample_weight)
+            sample_weight = ops.cast(sample_weight, self.dtype)
+            brier_scores = ops.multiply(brier_scores, sample_weight)
 
-        self.total_score.assign_add(tf.reduce_sum(brier_scores))
-        self.count.assign_add(tf.cast(tf.size(y_true), self.dtype))
+        self.total_score.assign_add(ops.sum(brier_scores))
+        self.count.assign_add(ops.cast(ops.size(y_true), self.dtype))
 
-    def result(self):
-        return tf.math.divide_no_nan(self.total_score, self.count)
+    def result(self) -> keras.KerasTensor:
+        """Compute the final metric result.
 
-    def reset_state(self):
+        Returns:
+            The Brier Score value.
+        """
+        # Avoid division by zero
+        return ops.where(
+            ops.equal(self.count, 0.0),
+            0.0,
+            self.total_score / self.count
+        )
+
+    def reset_state(self) -> None:
+        """Reset the metric state."""
         self.total_score.assign(0.0)
         self.count.assign(0.0)
 
+    def get_config(self) -> Dict[str, Any]:
+        """Get metric configuration for serialization.
 
+        Returns:
+            Dictionary containing the metric configuration.
+        """
+        config = super().get_config()
+        config.update({"from_logits": self.from_logits})
+        return config
+
+# ---------------------------------------------------------------------
+
+
+@keras.saving.register_keras_serializable()
 class SpiegelhalterZMetric(keras.metrics.Metric):
-    """Spiegelhalter Z-statistic metric for monitoring calibration during training."""
+    """Spiegelhalter Z-statistic metric for monitoring calibration during training.
 
-    def __init__(self, name='spiegelhalter_z', from_logits=False, **kwargs):
+    The Z-statistic measures systematic bias in probability predictions.
+    Values close to 0 indicate good calibration.
+
+    Args:
+        name: String name of the metric instance.
+        from_logits: Whether predictions are logits (not passed through sigmoid).
+        **kwargs: Additional keyword arguments passed to the parent class.
+    """
+
+    def __init__(
+        self,
+        name: str = 'spiegelhalter_z',
+        from_logits: bool = False,
+        **kwargs: Any
+    ) -> None:
+        """Initialize the SpiegelhalterZMetric.
+
+        Args:
+            name: Name of the metric.
+            from_logits: Whether predictions are logits.
+            **kwargs: Additional keyword arguments passed to the parent class.
+        """
         super().__init__(name=name, **kwargs)
         self.from_logits = from_logits
         self.residual_sum = self.add_weight(name='residual_sum', initializer='zeros')
         self.variance_sum = self.add_weight(name='variance_sum', initializer='zeros')
 
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        if self.from_logits:
-            y_pred = tf.nn.sigmoid(y_pred)
+    def update_state(
+        self,
+        y_true: keras.KerasTensor,
+        y_pred: keras.KerasTensor,
+        sample_weight: Optional[keras.KerasTensor] = None
+    ) -> None:
+        """Update the metric state.
 
-        y_true = tf.cast(y_true, y_pred.dtype)
+        Args:
+            y_true: Ground truth binary labels.
+            y_pred: Predicted probabilities or logits.
+            sample_weight: Optional sample weights.
+        """
+        if self.from_logits:
+            y_pred = ops.sigmoid(y_pred)
+
+        y_true = ops.cast(y_true, y_pred.dtype)
         residuals = y_true - y_pred
         variances = y_pred * (1.0 - y_pred)
 
         if sample_weight is not None:
-            sample_weight = tf.cast(sample_weight, self.dtype)
-            residuals = tf.multiply(residuals, sample_weight)
-            variances = tf.multiply(variances, sample_weight)
+            sample_weight = ops.cast(sample_weight, self.dtype)
+            residuals = ops.multiply(residuals, sample_weight)
+            variances = ops.multiply(variances, sample_weight)
 
-        self.residual_sum.assign_add(tf.reduce_sum(residuals))
-        self.variance_sum.assign_add(tf.reduce_sum(variances))
+        self.residual_sum.assign_add(ops.sum(residuals))
+        self.variance_sum.assign_add(ops.sum(variances))
 
-    def result(self):
+    def result(self) -> keras.KerasTensor:
+        """Compute the final metric result.
+
+        Returns:
+            The Spiegelhalter Z-statistic value.
+        """
         epsilon = keras.backend.epsilon()
-        return tf.math.divide_no_nan(
-            self.residual_sum,
-            tf.sqrt(self.variance_sum + epsilon)
+        variance_sum_safe = self.variance_sum + epsilon
+
+        # Avoid division by zero
+        return ops.where(
+            ops.equal(variance_sum_safe, epsilon),
+            0.0,
+            self.residual_sum / ops.sqrt(variance_sum_safe)
         )
 
-    def reset_state(self):
+    def reset_state(self) -> None:
+        """Reset the metric state."""
         self.residual_sum.assign(0.0)
         self.variance_sum.assign(0.0)
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get metric configuration for serialization.
+
+        Returns:
+            Dictionary containing the metric configuration.
+        """
+        config = super().get_config()
+        config.update({"from_logits": self.from_logits})
+        return config
+
+# ---------------------------------------------------------------------
+
