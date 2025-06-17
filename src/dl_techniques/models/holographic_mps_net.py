@@ -1,78 +1,119 @@
 """
-Holographic Encoder-Decoder with Entropy-Based Architecture
+Holographic Encoder-Decoder with Entropy-Guided Architecture
 
-This implementation creates a neural network inspired by concepts from quantum information
-theory and holographic principles, providing an alternative approach to traditional neural networks
-that doesn't rely on attention mechanisms or common gradient optimization tricks.
+This file implements an experimental encoder-decoder model. Its architecture is
+inspired by analogies from quantum information theory and the holographic principle.
+The primary goal is to structure the flow of information through the network in a
+deliberate way, rather than relying solely on standard layers and gradient descent.
 
-## Key Concepts Explained
-### Entanglement Entropy
-Originally from quantum mechanics, entanglement entropy measures how strongly different
-parts of a system are correlated with each other. In our neural network context:
-- It quantifies the information shared between different parts of the network
-- High entanglement suggests strong correlations between features
-- Low entanglement suggests more independent features
-We use this concept to guide how information flows through the network.
+This is achieved by using custom `MPSLayer` layers and a unique `EntropyRegularizer`
+that guides how different parts of the network learn.
 
-### Holographic Principle
-The holographic principle, borrowed from theoretical physics, suggests that information
-about a system can be encoded on its boundary. In our network:
-- Information is distributed across different "scales" or "layers" of the architecture
-- Each scale captures different aspects of the input data
-- The full information is preserved across these scales, not just in a single layer
+Key Concepts & Mechanisms Explained
+===================================
 
-### Entropic Geometry
-This refers to using information theory principles (particularly entropy) to structure
-the architecture of neural networks:
-- We use entropy regularization to shape how information is distributed
-- Different parts of the network are encouraged to have specific entropy profiles
-- This creates a structured way for information to flow through the network
+This model does NOT simulate quantum physics. It uses concepts from that field as
+inspiration for its architecture. Here is how those concepts are translated into code:
 
-## Calculation Details
+1. Singular Value Entropy & Information Flow
+------------------------------------------
+Instead of the abstract "Entanglement Entropy," this model operationalizes the idea
+using the Shannon entropy of a layer's singular values.
+
+- A layer's weight matrix can be decomposed (via SVD) into singular values, which
+  describe the "strength" of its primary transformation axes.
+- **Low Entropy (Low-Rank):** If a few singular values are large and the rest are near zero,
+  the layer performs a simple, low-rank transformation. It can only capture dominant,
+  global, or coarse-grained features.
+- **High Entropy (High-Rank):** If many singular values are of similar magnitude, the
+  layer performs a complex, high-rank transformation, allowing it to capture fine-grained,
+  local details.
+- The `EntropyRegularizer` adds a penalty to the loss function, pushing the singular
+  value entropy of a layer's weight matrix towards a specified target.
+
+2. Multi-Scale Holographic Decoding
+----------------------------------
+This is the model's implementation of the "holographic principle." The decoder is
+composed of multiple, parallel branches. The single latent vector is fed into all of them.
+
+- Each branch is assigned a different `target_entropy` by its regularizer, ranging
+  from low to high.
+- **Low-Entropy Branches:** Forced to learn global, coarse features.
+- **High-Entropy Branches:** Forced to learn local, detailed features.
+- The final output is created by combining the representations from all these "scales."
+
+The decoding process can be visualized as:
+
+.. math::
+    z &= Encoder(x) \\
+    y_i &= Decoder\_Branch_i(z) \\text{ where each branch has a different entropy target} \\
+    y_{combined} &= concatenate(y_1, y_2, ..., y_N)
+
+This creates a "holographic" representation where the complete information is distributed
+across specialized feature sets.
+
+3. MPS-Based Layers (`MPSLayer`)
+--------------------------------
+The encoder and decoder branches use `MPSLayer`, inspired by Matrix Product States from
+physics. In a machine learning context, an MPS layer is:
+- A parameter-efficient way to represent a large linear transformation.
+- Well-suited for 1D sequence data, as it is designed to capture local and
+  long-range correlations along a chain.
+- Its complexity is controlled by the `bond_dim` hyperparameter.
 
 
+Architectural Summary & Data Flow
+=================================
+1.  **Input Flattening:** The input (e.g., an image) is flattened into a 1D vector.
+    (Note: This discards crucial spatial information).
+2.  **Encoding:** The `MPSLayer` encoder compresses this vector into a latent representation.
+3.  **Parallel Decoding:** The latent vector is processed by multiple decoder branches
+    simultaneously, each regularized to a different entropy target.
+4.  **Combination:** The outputs of all branches are concatenated.
+5.  **Projection:** A final dense layer maps the combined features to the desired output shape.
 
-### Multi-Scale Holographic Decoding
-The decoder uses multiple branches, each with a different entropy target:
-    y_i = MPS_decoder_i(z) for i=1...N
-The outputs are then combined:
-    y_combined = concatenate(y_1, y_2, ..., y_N)
-This creates a holographic-like representation where information is distributed
-across different "scales" with low-entropy branches capturing global features and
-high-entropy branches encoding local details.
 
-## Practical Applications
+Potential Strengths & Weaknesses
+================================
 
-This approach may offer benefits for:
-- Problems requiring long-range correlations between input features
-- Tasks where traditional attention mechanisms are computationally expensive
-- Scenarios where model interpretability through information flow is important
-- Applications where capturing hierarchical structure in data is beneficial
+Strengths:
+----------
+- **Structured Inductive Bias:** Forces the model to learn a separation of features
+  (global vs. local), which could improve generalization.
+- **Potential for Interpretability:** Analyzing the output of individual branches could
+  reveal what kind of features the model is learning at different scales.
+- **Alternative to Attention:** The `MPSLayer` provides a computationally different
+  (O(N)) approach for modeling long-range dependencies in sequences compared to
+  attention (O(N^2)).
 
-## Implementation Notes
-
-The model consists of:
-1. An encoder using MPS-inspired tensor contractions
-2. A multi-branch decoder with different entropy targets
-3. Custom regularizers that shape the information distribution
-
-Rather than allowing network structure to emerge solely through gradient descent,
-this architecture explicitly incorporates information-theoretic principles into
-its design.
+Weaknesses:
+-----------
+- **Loss of Spatial Structure:** Flattening the input is a major drawback for data like
+  images, where spatial proximity is key. This model is likely to underperform
+  CNNs on such tasks.
+- **Computational Cost:** The `EntropyRegularizer` requires computing an SVD at each
+  training step, which can significantly slow down training.
+- **Experimental Nature:** As a non-standard architecture, it lacks the extensive
+  community support, pre-trained models, and best practices of models like Transformers or ResNets.
 """
-
-from typing import Tuple, Optional, List, Union, Dict, Any, Callable
-import numpy as np
-import tensorflow as tf
 import keras
-import math
+import numpy as np
+from keras import ops
+from typing import Tuple, Optional, Union, Dict, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+
+from dl_techniques.utils.logger import logger
 from dl_techniques.layers.mps_layer import MPSLayer
 from dl_techniques.regularizers.entropy_regularizer import EntropyRegularizer
 
+# ---------------------------------------------------------------------
 
 
-
+@keras.saving.register_keras_serializable()
 class HolographicEncoderDecoder(keras.Model):
     """
     Holographic Encoder-Decoder inspired by quantum information theory.
@@ -80,16 +121,44 @@ class HolographicEncoderDecoder(keras.Model):
     This model attempts to capture the idea of holographic encoding where information
     about the whole system is encoded in a way that respects entropy scaling principles.
 
-    Args:
-        input_shape: Shape of the input data.
-        latent_dim: Dimension of the latent space.
-        output_shape: Shape of the output data. If None, uses input_shape.
-        bond_dim: Bond dimension for MPS layers.
-        num_branches: Number of decoder branches.
-        regularization_strength: Strength of the entropy regularization.
-        use_bias: Whether to use bias in layers.
-        kernel_initializer: Initializer for kernels.
-        kernel_regularizer: Additional regularizer for kernels.
+    Parameters
+    ----------
+    input_shape : Tuple[int, ...]
+        Shape of the input data.
+    latent_dim : int, default=64
+        Dimension of the latent space.
+    output_shape : Optional[Tuple[int, ...]], default=None
+        Shape of the output data. If None, uses input_shape.
+    bond_dim : int, default=16
+        Bond dimension for MPS layers.
+    num_branches : int, default=3
+        Number of decoder branches.
+    regularization_strength : float, default=0.01
+        Strength of the entropy regularization.
+    use_bias : bool, default=True
+        Whether to use bias in layers.
+    kernel_initializer : Union[str, keras.initializers.Initializer], default="he_normal"
+        Initializer for kernels.
+    kernel_regularizer : Optional[keras.regularizers.Regularizer], default=None
+        Additional regularizer for kernels.
+
+    Raises
+    ------
+    ValueError
+        If input dimensions are invalid or configuration parameters are out of range.
+
+    Examples
+    --------
+    >>> model = HolographicEncoderDecoder(
+    ...     input_shape=(28, 28, 1),
+    ...     latent_dim=64,
+    ...     bond_dim=16,
+    ...     num_branches=3
+    ... )
+    >>> x = keras.random.normal((32, 28, 28, 1))
+    >>> y = model(x)
+    >>> print(y.shape)
+    (32, 28, 28, 1)
     """
 
     def __init__(
@@ -105,59 +174,105 @@ class HolographicEncoderDecoder(keras.Model):
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs
     ) -> None:
-        """Initialize the model.
+        """
+        Initialize the HolographicEncoderDecoder model.
 
-        Args:
-            input_shape: Shape of the input data.
-            latent_dim: Dimension of the latent space.
-            output_shape: Shape of the output data. If None, uses input_shape.
-            bond_dim: Bond dimension for MPS layers.
-            num_branches: Number of decoder branches.
-            regularization_strength: Strength of the entropy regularization.
-            use_bias: Whether to use bias in layers.
-            kernel_initializer: Initializer for kernels.
-            kernel_regularizer: Additional regularizer for kernels.
+        Parameters
+        ----------
+        input_shape : Tuple[int, ...]
+            Shape of the input data.
+        latent_dim : int, default=64
+            Dimension of the latent space.
+        output_shape : Optional[Tuple[int, ...]], default=None
+            Shape of the output data. If None, uses input_shape.
+        bond_dim : int, default=16
+            Bond dimension for MPS layers.
+        num_branches : int, default=3
+            Number of decoder branches.
+        regularization_strength : float, default=0.01
+            Strength of the entropy regularization.
+        use_bias : bool, default=True
+            Whether to use bias in layers.
+        kernel_initializer : Union[str, keras.initializers.Initializer], default="he_normal"
+            Initializer for kernels.
+        kernel_regularizer : Optional[keras.regularizers.Regularizer], default=None
+            Additional regularizer for kernels.
+        **kwargs
+            Additional keyword arguments for the Model base class.
+
+        Raises
+        ------
+        ValueError
+            If input dimensions are invalid or configuration parameters are out of range.
         """
         super().__init__(**kwargs)
 
+        # Validate inputs
+        if not input_shape or any(dim <= 0 for dim in input_shape):
+            raise ValueError("input_shape must contain positive integers")
+        if latent_dim <= 0:
+            raise ValueError("latent_dim must be positive")
+        if bond_dim <= 0:
+            raise ValueError("bond_dim must be positive")
+        if num_branches <= 0:
+            raise ValueError("num_branches must be positive")
+        if not 0.0 <= regularization_strength <= 1.0:
+            raise ValueError("regularization_strength must be between 0 and 1")
+
         # Store configuration
-        self.input_shape = input_shape
-        self.input_dim = np.prod(input_shape)
+        self._input_shape = input_shape
+        self.input_dim = int(np.prod(input_shape))
         self.latent_dim = latent_dim
-        self.output_shape = output_shape if output_shape is not None else input_shape
-        self.output_dim = np.prod(self.output_shape)
+        self._output_shape = output_shape if output_shape is not None else input_shape
+        self.output_dim = int(np.prod(self._output_shape))
         self.bond_dim = bond_dim
         self.num_branches = num_branches
         self.regularization_strength = regularization_strength
         self.use_bias = use_bias
-        self.kernel_initializer = kernel_initializer
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # Initialize sublayer attributes
+        # Initialize sublayer attributes - will be created in build()
         self.encoder_mps = None
         self.decoder_branches = []
         self.output_projection = None
+        self._build_input_shape = None
+
+        logger.info(
+            f"Initialized HolographicEncoderDecoder with input_shape={input_shape}, "
+            f"latent_dim={latent_dim}, num_branches={num_branches}"
+        )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the model components.
-
-        Args:
-            input_shape: Shape of the input tensor including batch dimension.
         """
+        Build the model components.
+
+        This method creates all the sublayers of the model including:
+        - Encoder MPS layer for latent encoding
+        - Multiple decoder branches with different entropy targets
+        - Output projection layer
+
+        Parameters
+        ----------
+        input_shape : Tuple[Optional[int], ...]
+            Shape of the input tensor including batch dimension.
+        """
+        # Store for serialization
+        self._build_input_shape = input_shape
+
+        logger.info(f"Building HolographicEncoderDecoder with input_shape={input_shape}")
+
         # Create entropy regularizer
         entropy_reg = EntropyRegularizer(strength=self.regularization_strength)
 
-        # Combine regularizers
+        # Combine regularizers if provided
         if self.kernel_regularizer is not None:
-            combined_regularizer = keras.regularizers.L1L2.from_config({
-                **keras.regularizers.get(self.kernel_regularizer).get_config(),
-                'l1': 0.0,  # Default in case the provided regularizer doesn't have l1
-                'l2': 0.0,  # Default in case the provided regularizer doesn't have l2
-            })
+            # Create a simple combination approach
+            combined_regularizer = self.kernel_regularizer
         else:
             combined_regularizer = keras.regularizers.L2(1e-4)
 
-        # Encoder layers
+        # Encoder layer
         self.encoder_mps = MPSLayer(
             output_dim=self.latent_dim,
             bond_dim=self.bond_dim,
@@ -173,14 +288,19 @@ class HolographicEncoderDecoder(keras.Model):
         self.decoder_branches = []
         for i in range(self.num_branches):
             # Each branch has a different entropy target
-            target_entropy = 0.3 + (0.6 * i / (self.num_branches - 1))
+            # Linear interpolation from low to high entropy
+            target_entropy = 0.3 + (0.6 * i / max(1, self.num_branches - 1))
+
             branch_reg = EntropyRegularizer(
                 strength=self.regularization_strength,
                 target_entropy=target_entropy
             )
 
+            # Calculate branch output dimension
+            branch_output_dim = max(1, self.output_dim // self.num_branches)
+
             branch = MPSLayer(
-                output_dim=self.output_dim // self.num_branches,
+                output_dim=branch_output_dim,
                 bond_dim=self.bond_dim,
                 use_bias=self.use_bias,
                 kernel_initializer=self.kernel_initializer,
@@ -200,17 +320,25 @@ class HolographicEncoderDecoder(keras.Model):
         )
 
         super().build(input_shape)
+        logger.info("HolographicEncoderDecoder build completed")
 
-    def call(self, inputs: tf.Tensor, training: Optional[bool] = None) -> tf.Tensor:
-        """Forward pass through the holographic encoder-decoder model.
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Forward pass through the holographic encoder-decoder model.
 
         This method implements the holographic encoding-decoding process:
+
         1. Flatten input data to 2D tensor (batch_size, input_dim)
         2. Encode data through MPS layer to latent representation
         3. Decode through multiple branches with different entropy targets
         4. Combine multi-scale features and project to output space
 
         The multi-branch decoding is key to the holographic principle implementation:
+
         - Each branch has a different entropy target (from low to high)
         - Low-entropy branches capture global, coarse-grained features
         - High-entropy branches encode local, fine-grained features
@@ -218,165 +346,126 @@ class HolographicEncoderDecoder(keras.Model):
           distributed across different "scales" or "layers"
 
         Mathematically, the process is:
-        1. z = MPS_encoder(flatten(x))  # Latent encoding
-        2. y_i = MPS_decoder_i(z) for i=1...N  # Multi-branch decoding
-        3. y_combined = concatenate(y_1, y_2, ..., y_N)  # Combine scales
-        4. y = projection(y_combined)  # Final output projection
+
+        .. math::
+            z &= MPS_{encoder}(flatten(x)) \\\\
+            y_i &= MPS_{decoder_i}(z) \\text{ for } i=1...N \\\\
+            y_{combined} &= concatenate(y_1, y_2, ..., y_N) \\\\
+            y &= projection(y_{combined})
 
         This multi-scale approach resembles holographic principles where information
         about a system is encoded at different "scales" or "regions" of the representation,
         with the complete information recoverable from the entire set.
 
-        Args:
-            inputs: Input tensor of original shape.
-            training: Whether the model is in training mode.
+        Parameters
+        ----------
+        inputs : keras.KerasTensor
+            Input tensor of original shape.
+        training : Optional[bool], default=None
+            Whether the model is in training mode.
 
-        Returns:
+        Returns
+        -------
+        keras.KerasTensor
             Output tensor of shape [batch_size, *output_shape].
         """
-        # Flatten input to 2D tensor
-        batch_size = tf.shape(inputs)[0]
-        x = tf.reshape(inputs, [batch_size, -1])  # Shape: [batch_size, input_dim]
+        # Flatten input to 2D tensor using keras.ops
+        batch_size = ops.shape(inputs)[0]
+        x = ops.reshape(inputs, [batch_size, -1])  # Shape: [batch_size, input_dim]
 
         # Encode using MPS layer to latent representation
-        latent = self.encoder_mps(x)  # Shape: [batch_size, latent_dim]
+        latent = self.encoder_mps(x, training=training)  # Shape: [batch_size, latent_dim]
 
         # Decode through multiple branches with different entropy targets
         # Each branch has a different entropy regularization target
         # This creates a holographic-like encoding across different "scales"
-        branch_outputs = [branch(latent) for branch in self.decoder_branches]
+        branch_outputs = []
+        for branch in self.decoder_branches:
+            branch_output = branch(latent, training=training)
+            branch_outputs.append(branch_output)
 
         # Concatenate branch outputs to combine information from different scales
-        multi_scale_features = tf.concat(branch_outputs, axis=-1)
+        multi_scale_features = ops.concatenate(branch_outputs, axis=-1)
 
         # Final projection to output dimension
-        output = self.output_projection(multi_scale_features)
+        output = self.output_projection(multi_scale_features, training=training)
 
-        # Reshape to original output shape
-        output = tf.reshape(output, [batch_size] + list(self.output_shape))
+        # Reshape to original output shape using keras.ops
+        output_shape_list = [batch_size] + list(self._output_shape)
+        output = ops.reshape(output, output_shape_list)
 
         return output
 
     def get_config(self) -> Dict[str, Any]:
-        """Get the model configuration.
+        """
+        Get the model configuration for serialization.
 
-        Returns:
+        Returns
+        -------
+        Dict[str, Any]
             Dictionary containing the model configuration.
         """
-        config = {
-            'input_shape': self.input_shape,
+        config = super().get_config()
+        config.update({
+            'input_shape': self._input_shape,
             'latent_dim': self.latent_dim,
-            'output_shape': self.output_shape,
+            'output_shape': self._output_shape,
             'bond_dim': self.bond_dim,
             'num_branches': self.num_branches,
             'regularization_strength': self.regularization_strength,
             'use_bias': self.use_bias,
-            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer) if isinstance(
-                self.kernel_initializer, keras.initializers.Initializer) else self.kernel_initializer,
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
-        }
+        })
         return config
 
-
-class ModelConfig:
-    """Configuration class for model hyperparameters.
-
-    Args:
-        input_shape: Shape of input data.
-        num_classes: Number of output classes.
-        learning_rate: Initial learning rate.
-        weight_decay: L2 regularization factor.
-        latent_dim: Dimension of the latent space.
-        bond_dim: Bond dimension for MPS layers.
-        num_branches: Number of decoder branches.
-    """
-
-    def __init__(
-            self,
-            input_shape: Tuple[int, ...],
-            num_classes: int,
-            learning_rate: float = 0.001,
-            weight_decay: float = 0.0001,
-            latent_dim: int = 64,
-            bond_dim: int = 16,
-            num_branches: int = 3
-    ) -> None:
-        """Initialize the configuration.
-
-        Args:
-            input_shape: Shape of input data.
-            num_classes: Number of output classes.
-            learning_rate: Initial learning rate.
-            weight_decay: L2 regularization factor.
-            latent_dim: Dimension of the latent space.
-            bond_dim: Bond dimension for MPS layers.
-            num_branches: Number of decoder branches.
+    def get_build_config(self) -> Dict[str, Any]:
         """
-        self.input_shape = input_shape
-        self.num_classes = num_classes
-        self.learning_rate = learning_rate
-        self.weight_decay = weight_decay
-        self.latent_dim = latent_dim
-        self.bond_dim = bond_dim
-        self.num_branches = num_branches
+        Get the build configuration for proper serialization.
 
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary containing the build configuration.
+        """
+        return {
+            "input_shape": self._build_input_shape,
+        }
 
-def create_holographic_model(config: ModelConfig) -> keras.Model:
-    """Creates a holographic encoder-decoder model.
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """
+        Build the model from a configuration.
 
-    Args:
-        config: ModelConfig instance containing model parameters.
+        Parameters
+        ----------
+        config : Dict[str, Any]
+            Dictionary containing build configuration.
+        """
+        if config.get("input_shape") is not None:
+            self.build(config["input_shape"])
 
-    Returns:
-        Configured holographic model.
-    """
-    # Create model
-    model = HolographicEncoderDecoder(
-        input_shape=config.input_shape,
-        latent_dim=config.latent_dim,
-        bond_dim=config.bond_dim,
-        num_branches=config.num_branches,
-        regularization_strength=config.weight_decay,
-        kernel_initializer="he_normal",
-        kernel_regularizer=keras.regularizers.L2(config.weight_decay)
-    )
+    @property
+    def input_shape_property(self) -> Tuple[int, ...]:
+        """
+        Get the input shape.
 
-    # Compile model
-    optimizer = keras.optimizers.Adam(learning_rate=config.learning_rate)
+        Returns
+        -------
+        Tuple[int, ...]
+            Input shape tuple.
+        """
+        return self._input_shape
 
-    model.compile(
-        optimizer=optimizer,
-        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-        metrics=[keras.metrics.SparseCategoricalAccuracy(name="accuracy")]
-    )
+    @property
+    def output_shape_property(self) -> Tuple[int, ...]:
+        """
+        Get the output shape.
 
-    return model
+        Returns
+        -------
+        Tuple[int, ...]
+            Output shape tuple.
+        """
+        return self._output_shape
 
-
-def save_model(model: keras.Model, filepath: str) -> None:
-    """Saves model in .keras format.
-
-    Args:
-        model: Keras model to save.
-        filepath: Path to save the model.
-    """
-    model.save(filepath, save_format="keras")
-
-
-def load_model(filepath: str) -> keras.Model:
-    """Loads model from .keras format.
-
-    Args:
-        filepath: Path to saved model.
-
-    Returns:
-        Loaded Keras model.
-    """
-    # Register custom objects to ensure loading works
-    custom_objects = {
-        'EntropyRegularizer': EntropyRegularizer,
-        'MPSLayer': MPSLayer,
-        'HolographicEncoderDecoder': HolographicEncoderDecoder
-    }
-    return keras.models.load_model(filepath, custom_objects=custom_objects)
-
+# ---------------------------------------------------------------------

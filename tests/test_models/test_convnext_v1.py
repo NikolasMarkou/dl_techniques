@@ -165,3 +165,6 @@ class TestConvNextV1:
         # Check that output is a probability distribution
         assert np.isclose(np.sum(y[0]), 1.0, rtol=1e-5)
         assert np.all(y >= 0) and np.all(y <= 1)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

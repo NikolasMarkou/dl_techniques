@@ -475,3 +475,6 @@ class TestCapsNetIntegration:
         # Check that we can get class predictions
         class_predictions = np.argmax(predictions["length"], axis=1)
         assert class_predictions.shape == (batch_size,)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])
