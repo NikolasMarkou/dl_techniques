@@ -7,11 +7,14 @@ are commonly used in deep learning preprocessing and postprocessing steps.
 
 import numpy as np
 import tensorflow as tf
-from typing import Union, Optional
+from typing import Union
 from numpy.typing import ArrayLike
+
+# ---------------------------------------------------------------------
 
 NumericTensor = Union[tf.Tensor, np.ndarray, ArrayLike]
 
+# ---------------------------------------------------------------------
 
 def clip_tensor(
         input_tensor: NumericTensor,
@@ -42,6 +45,8 @@ def clip_tensor(
         clip_value_max=clip_max
     )
 
+# ---------------------------------------------------------------------
+
 
 def clip_unnormalized_tensor(
         input_tensor: NumericTensor,
@@ -62,6 +67,8 @@ def clip_unnormalized_tensor(
     """
     return clip_tensor(input_tensor, v_min, v_max)
 
+# ---------------------------------------------------------------------
+
 
 def clip_normalized_tensor(
         input_tensor: NumericTensor,
@@ -81,6 +88,8 @@ def clip_normalized_tensor(
         tf.Tensor: Clipped tensor with values in [v_min, v_max].
     """
     return clip_tensor(input_tensor, v_min, v_max)
+
+# ---------------------------------------------------------------------
 
 
 def normalize_tensor(
@@ -123,6 +132,8 @@ def normalize_tensor(
     # Scale to target range
     return x_normalized * (target_max - target_min) + target_min
 
+# ---------------------------------------------------------------------
+
 
 def denormalize_tensor(
         input_tensor: NumericTensor,
@@ -151,7 +162,11 @@ def denormalize_tensor(
         target_max=target_max,
     )
 
+# ---------------------------------------------------------------------
+
 
 # Aliases for backward compatibility
 layer_normalize = normalize_tensor
 layer_denormalize = denormalize_tensor
+
+# ---------------------------------------------------------------------

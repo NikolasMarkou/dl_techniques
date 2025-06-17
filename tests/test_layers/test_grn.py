@@ -4,12 +4,11 @@ import keras
 import tensorflow as tf
 from typing import Tuple, Any, List
 from dataclasses import dataclass
-import json
 import tempfile
 import os
 
 # Import the layer to test
-from dl_techniques.layers.global_response_norm import GlobalResponseNormalization  # Update with correct import
+from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization  # Update with correct import
 
 
 @dataclass

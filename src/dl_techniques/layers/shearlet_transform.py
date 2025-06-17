@@ -23,13 +23,7 @@ import keras
 import numpy as np
 import tensorflow as tf
 from keras.api.layers import Layer
-from typing import List, Tuple, Optional, Union, Dict, Any
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.logger import logger
+from typing import List, Tuple, Optional, Dict, Any
 
 
 # ---------------------------------------------------------------------

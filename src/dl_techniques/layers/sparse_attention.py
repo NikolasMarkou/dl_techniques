@@ -60,62 +60,6 @@ This layer is designed for full compatibility with Keras and TensorFlow's XLA co
 
 The layer can be used as a drop-in replacement for `keras.layers.MultiHeadAttention` with the
 added benefit of sparsification.
-
-## Usage Examples:
-
-```python
-# Basic usage with default settings
-attention = SparseAttention(
-    num_heads=8,
-    key_dim=64
-)
-
-# With statistical threshold and direct sparsification
-attention = SparseAttention(
-    num_heads=8,
-    key_dim=64,
-    threshold="auto",
-    iterative_sparsification=False
-)
-
-# Aggressive iterative sparsification
-attention = SparseAttention(
-    num_heads=8,
-    key_dim=64,
-    iterative_sparsification=True,
-    alpha=0.5,  # More aggressive reduction
-    max_iterations=5
-)
-
-# In a transformer encoder
-def transformer_encoder_block(inputs, training=None):
-    attention_output = SparseAttention(
-        num_heads=8,
-        key_dim=64,
-        dropout=0.1,
-        causal=False
-    )(inputs, training=training)
-    attention_output = layers.LayerNormalization()(inputs + attention_output)
-    ffn_output = feed_forward_network(attention_output)
-    return layers.LayerNormalization()(attention_output + ffn_output)
-```
-
-## Performance Considerations:
-
-* **Memory**: Sparse attention still allocates the full attention matrix before sparsification.
-* **Speed**: For short sequences (<512 tokens), the overhead of sparsification may outweigh benefits.
-* **Sparsity Level**: Threshold of 0.1-0.5 typically provides good sparsity with minimal accuracy impact.
-* **Alpha Value**: Higher alpha (0.8-0.9) provides gentler progression, while lower alpha (0.4-0.6)
-  aggressively converges to one-hot attention.
-* **Iterations**: 2-4 iterations are typically sufficient; more iterations increase sparsity but add computation.
-
-## Implementation Efficiency Notes:
-
-* The iterative sparsification algorithm is fully vectorized for TPU/GPU acceleration.
-* Conditional computation is used to avoid wasteful calculations.
-* Early stopping is implemented on a per-sample basis for efficiency.
-* Tensor operations are carefully structured to enable compiler fusion.
-* All operations are numerically stable with proper epsilon handling.
 """
 
 import keras

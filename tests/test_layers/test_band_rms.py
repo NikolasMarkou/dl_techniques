@@ -16,17 +16,17 @@ def test_initialization():
     """Test layer initialization with default and custom parameters."""
     # Test default initialization
     layer = BandRMS()
-    assert layer.max_band_width == 0.2
+    assert layer.max_band_width == 0.1
     assert layer.axis == -1
     assert layer.epsilon == 1e-7
 
     # Test custom initialization
     custom_layer = BandRMS(
-        max_band_width=0.1,
+        max_band_width=0.2,
         axis=1,
         epsilon=1e-6
     )
-    assert custom_layer.max_band_width == 0.1
+    assert custom_layer.max_band_width == 0.2
     assert custom_layer.axis == 1
     assert custom_layer.epsilon == 1e-6
 

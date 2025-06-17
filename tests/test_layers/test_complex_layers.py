@@ -415,7 +415,7 @@ def generate_complex_data(
 
 
 @pytest.mark.integration
-def test_complex_model_training() -> None:
+def test_complex_model_training(tmp_path) -> None:
     """Integration test for training complex model.
     Tests the full training loop with all complex layers integrated into
     a single model using the Keras API.
@@ -449,26 +449,27 @@ def test_complex_model_training() -> None:
         "Loss should not be infinite"
 
     # Test model save/load using temporary file
-    with tempfile.NamedTemporaryFile(suffix='.keras') as model_file, \
-         tempfile.NamedTemporaryFile(suffix='.weights.h5') as weights_file:
-        # Save model and weights
-        model_original.save(model_file.name)
-        model_original.save_weights(weights_file.name)
+    model_file = tmp_path / "complex_model.keras"
+    weights_file = tmp_path / "complex_model.weights.h5"
 
-        # Load model
-        model_loaded = create_complex_model(config)
-        model_loaded.build(np.shape(x_train)[0:])
-        model_loaded.load_weights(weights_file.name)
+    # Save model and weights
+    model_original.save(model_file)
+    model_original.save_weights(weights_file)
 
-        # Verify loaded model predictions match original
-        original_pred = model_original.predict(x_train[:1])
-        loaded_pred = model_loaded.predict(x_train[:1])
-        np.testing.assert_allclose(
-            original_pred,
-            loaded_pred,
-            rtol=1e-5,
-            atol=1e-5
-        )
+    # Load model
+    model_loaded = create_complex_model(config)
+    model_loaded.build(np.shape(x_train)[0:])
+    model_loaded.load_weights(weights_file)
+
+    # Verify loaded model predictions match original
+    original_pred = model_original.predict(x_train[:1])
+    loaded_pred = model_loaded.predict(x_train[:1])
+    np.testing.assert_allclose(
+        original_pred,
+        loaded_pred,
+        rtol=1e-5,
+        atol=1e-5
+    )
 
 
 if __name__ == '__main__':
