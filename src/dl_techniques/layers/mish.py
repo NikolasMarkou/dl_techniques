@@ -3,6 +3,18 @@ from keras import ops
 from typing import Any, Dict, Optional, Union
 import numpy as np
 
+# ---------------------------------------------------------------------
+
+def mish(inputs):
+    # Calculate softplus: log(1 + exp(x))
+    softplus = ops.softplus(inputs)
+    # Calculate tanh of softplus
+    tanh_softplus = ops.tanh(softplus)
+    # Return x * tanh(softplus(x))
+    return inputs * tanh_softplus
+
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class Mish(keras.layers.Layer):
@@ -46,12 +58,7 @@ class Mish(keras.layers.Layer):
             A tensor with the same shape as input after applying the
             Mish activation function.
         """
-        # Calculate softplus: log(1 + exp(x))
-        softplus = ops.softplus(inputs)
-        # Calculate tanh of softplus
-        tanh_softplus = ops.tanh(softplus)
-        # Return x * tanh(softplus(x))
-        return inputs * tanh_softplus
+        return mish(inputs)
 
     def compute_output_shape(self, input_shape):
         """Compute the output shape of the layer.
@@ -71,6 +78,23 @@ class Mish(keras.layers.Layer):
             Dictionary containing the layer configuration.
         """
         return super().get_config()
+
+# ---------------------------------------------------------------------
+
+
+def saturated_mish(inputs, alpha:float = 3.0, beta:float = 0.5, mish_at_alpha:float = 1.0):
+    tmp_mish = mish(inputs)
+
+    # Create a smooth sigmoid-based blending factor
+    # Note: Using ops.sigmoid for backend compatibility
+    blend_factor = ops.sigmoid((inputs - alpha) / beta)
+
+    # Combine both regions with smooth blending
+    # For x <= alpha: mostly standard Mish
+    # For x > alpha: gradually approach mish_at_alpha
+    return tmp_mish * (1.0 - blend_factor) + mish_at_alpha * blend_factor
+
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -150,19 +174,7 @@ class SaturatedMish(keras.layers.Layer):
             A tensor with the same shape as input after applying the
             SaturatedMish activation function.
         """
-        # Standard Mish activation
-        softplus = ops.softplus(inputs)
-        tanh_softplus = ops.tanh(softplus)
-        mish = inputs * tanh_softplus
-
-        # Create a smooth sigmoid-based blending factor
-        # Note: Using ops.sigmoid for backend compatibility
-        blend_factor = ops.sigmoid((inputs - self.alpha) / self.beta)
-
-        # Combine both regions with smooth blending
-        # For x <= alpha: mostly standard Mish
-        # For x > alpha: gradually approach mish_at_alpha
-        return mish * (1.0 - blend_factor) + self.mish_at_alpha * blend_factor
+        return saturated_mish(inputs, alpha=self.alpha, beta=self.beta, mish_at_alpha=self.mish_at_alpha)
 
     def compute_output_shape(self, input_shape):
         """Compute the output shape of the layer.

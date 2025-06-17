@@ -140,8 +140,8 @@ Organization:
 # 1. Imports and Dependencies
 # ------------------------------------------------------------------------------
 
-import os
 from pathlib import Path
+from functools import partial
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Dict, Any, Callable, List, Tuple
@@ -152,13 +152,12 @@ from scipy import stats
 import matplotlib.pyplot as plt
 from keras.api.activations import gelu, relu, tanh
 
-
 # ------------------------------------------------------------------------------
 # local imports
 # ------------------------------------------------------------------------------
 
-from dl_techniques.layers.mish import Mish, SaturatedMish
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.mish import mish, saturated_mish
 from dl_techniques.utils.model_analyzer import ModelAnalyzer
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.utils.weight_analyzer import WeightAnalyzerConfig, WeightAnalyzer
@@ -200,9 +199,9 @@ class ExperimentConfig:
         'relu': relu,
         'tanh': tanh,
         'gelu': gelu,
-        'mish': Mish(),
-        'saturated_mish_1': SaturatedMish(alpha=1.0),
-        'saturated_mish_2': SaturatedMish(alpha=2.0)
+        'mish': mish,
+        'saturated_mish_1': partial(saturated_mish, alpha=1.0),
+        'saturated_mish_2': partial(saturated_mish, alpha=2.0)
     })
 
     # Weight Analysis Parameters
@@ -649,37 +648,37 @@ def main() -> None:
     results = run_experiment(config)
 
     # Print comprehensive results
-    logger.info("\n" + "="*80)
+    logger.info("="*80)
     logger.info("EXPERIMENT RESULTS SUMMARY")
     logger.info("="*80)
 
     # Print activation function performance comparison
-    logger.info("\nModel Performance Comparison:")
+    logger.info("Model Performance Comparison:")
     logger.info("-" * 50)
     for model_name, metrics in results['performance_analysis'].items():
-        logger.info(f"\n{model_name.upper()} ACTIVATION:")
+        logger.info(f"{model_name.upper()} ACTIVATION:")
         for metric, value in metrics.items():
             if isinstance(value, (int, float)):
                 logger.info(f"  {metric}: {value:.4f}")
 
     # Print activation analysis if available
     if 'activation_analysis' in results:
-        logger.info("\nActivation Pattern Analysis:")
+        logger.info("Activation Pattern Analysis:")
         logger.info("-" * 50)
         for model_name, stats in results['activation_analysis'].items():
-            logger.info(f"\n{model_name.upper()} ACTIVATIONS:")
+            logger.info(f"{model_name.upper()} ACTIVATIONS:")
             for metric, value in stats.items():
                 logger.info(f"  {metric}: {value:.4f}")
 
     # Print final training metrics
-    logger.info("\nFinal Training Metrics:")
+    logger.info("Final Training Metrics:")
     logger.info("-" * 50)
     for model_name in results['models'].keys():
         final_val_acc = results['histories']['val_accuracy'][model_name][-1]
         final_val_loss = results['histories']['val_loss'][model_name][-1]
         logger.info(f"{model_name}: Val Acc = {final_val_acc:.4f}, Val Loss = {final_val_loss:.4f}")
 
-    logger.info("\n" + "="*80)
+    logger.info("="*80)
     logger.info("Experiment completed successfully! Check results directory for detailed analysis.")
     logger.info("="*80)
 
