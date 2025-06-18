@@ -96,7 +96,8 @@ class ExperimentConfig:
     loss_functions: Dict[str, Callable] = field(default_factory=lambda: {
         'goodhart_aware': lambda: GoodhartAwareLoss(
             entropy_weight=0.1,
-            mi_weight=0.01
+            mi_weight=0.01,
+            from_logits=True
         ),
         'crossentropy': lambda: keras.losses.CategoricalCrossentropy(from_logits=True),
         'label_smoothing': lambda: keras.losses.CategoricalCrossentropy(
