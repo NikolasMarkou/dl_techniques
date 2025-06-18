@@ -21,14 +21,7 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from sklearn.metrics import confusion_matrix
-from typing import Union, Optional, Tuple, Dict, Any, List
-
-# ------------------------------------------------------------------------------
-# local imports
-# ------------------------------------------------------------------------------
-
-from .logger import logger
-from .datasets import MNISTData
+from typing import Union, Optional, Tuple, Dict, List
 
 # ------------------------------------------------------------------------------
 
