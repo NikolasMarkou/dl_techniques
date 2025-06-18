@@ -318,27 +318,20 @@ def validate_orthonormality(
     -------
     bool
         True if the vectors are orthonormal within the specified tolerance.
-
-    Examples
-    --------
-    >>> initializer = OrthonormalInitializer(seed=42)
-    >>> vectors = initializer((5, 10))
-    >>> is_orthonormal = validate_orthonormality(vectors)
-    >>> print(f"Vectors are orthonormal: {is_orthonormal}")
     """
     # Compute Gram matrix (inner products)
-    gram_matrix = ops.matmul(vectors, ops.transpose(vectors))
+    vectors_gram_matrix = ops.matmul(vectors, ops.transpose(vectors))
 
     # Create identity matrix of same size and dtype
     n_vectors = ops.shape(vectors)[0]
     identity = ops.eye(n_vectors, dtype=vectors.dtype)
 
     # Ensure both tensors have the same dtype before subtraction
-    gram_matrix = ops.cast(gram_matrix, dtype=vectors.dtype)
+    vectors_gram_matrix = ops.cast(vectors_gram_matrix, dtype=vectors.dtype)
     identity = ops.cast(identity, dtype=vectors.dtype)
 
     # Check if Gram matrix is close to identity
-    diff = ops.numpy.abs(gram_matrix - identity)
+    diff = ops.numpy.abs(vectors_gram_matrix - identity)
     max_diff = ops.numpy.max(diff)
 
     # Convert to numpy for comparison
