@@ -1,7 +1,8 @@
 import keras
 import numpy as np
+from keras import ops
 import tensorflow as tf
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 
 # ---------------------------------------------------------------------
 
@@ -293,5 +294,56 @@ def compute_prediction_entropy(
     probs = keras.ops.clip(probs, x_min=epsilon, x_max=1.0 - epsilon)
     entropy = -keras.ops.sum(probs * keras.ops.log(probs), axis=-1)
     return entropy
+
+# ---------------------------------------------------------------------
+
+
+def validate_orthonormality(
+        vectors: Any,
+        rtol: float = 1e-5,
+        atol: float = 1e-8
+) -> bool:
+    """Validate that a set of vectors is orthonormal.
+
+    Parameters
+    ----------
+    vectors : tensor
+        Matrix where each row is a vector to check.
+    rtol : float, optional
+        Relative tolerance for numerical comparisons.
+    atol : float, optional
+        Absolute tolerance for numerical comparisons.
+
+    Returns
+    -------
+    bool
+        True if the vectors are orthonormal within the specified tolerance.
+
+    Examples
+    --------
+    >>> initializer = OrthonormalInitializer(seed=42)
+    >>> vectors = initializer((5, 10))
+    >>> is_orthonormal = validate_orthonormality(vectors)
+    >>> print(f"Vectors are orthonormal: {is_orthonormal}")
+    """
+    # Compute Gram matrix (inner products)
+    gram_matrix = ops.matmul(vectors, ops.transpose(vectors))
+
+    # Create identity matrix of same size and dtype
+    n_vectors = ops.shape(vectors)[0]
+    identity = ops.eye(n_vectors, dtype=vectors.dtype)
+
+    # Ensure both tensors have the same dtype before subtraction
+    gram_matrix = ops.cast(gram_matrix, dtype=vectors.dtype)
+    identity = ops.cast(identity, dtype=vectors.dtype)
+
+    # Check if Gram matrix is close to identity
+    diff = ops.numpy.abs(gram_matrix - identity)
+    max_diff = ops.numpy.max(diff)
+
+    # Convert to numpy for comparison
+    max_diff_val = float(ops.convert_to_numpy(max_diff))
+
+    return max_diff_val <= (atol + rtol * 1.0)
 
 # ---------------------------------------------------------------------
