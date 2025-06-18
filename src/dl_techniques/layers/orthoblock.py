@@ -1,11 +1,16 @@
 import keras
 from keras import ops
 from keras.api.layers import Dense, Layer
-from typing import Optional, Union, Any, Dict, Tuple, List
+from typing import Optional, Union, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from .layer_scale import LearnableMultiplier
 from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
-from dl_techniques.layers.layer_scale import LearnableMultiplier
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class OrthonomalRegularizer(keras.regularizers.Regularizer):
@@ -38,6 +43,8 @@ class OrthonomalRegularizer(keras.regularizers.Regularizer):
     @classmethod
     def from_config(cls, config):
         return cls(**config)
+
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -85,6 +92,8 @@ class CenteringNormalization(Layer):
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
 
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class LogitNormalization(Layer):
@@ -131,6 +140,8 @@ class LogitNormalization(Layer):
     def build_from_config(self, config):
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class OrthoCenterBlock(keras.layers.Layer):
@@ -300,3 +311,4 @@ class OrthoCenterBlock(keras.layers.Layer):
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
 
+# ---------------------------------------------------------------------
