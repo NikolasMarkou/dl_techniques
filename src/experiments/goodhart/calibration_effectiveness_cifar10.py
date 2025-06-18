@@ -1,10 +1,10 @@
 """
-Colored MNIST Spurious Correlation Experiment: GoodhartAwareLoss vs. Baselines
+Colored CIFAR10 Spurious Correlation Experiment: GoodhartAwareLoss vs. Baselines
 ================================================================================
 
 This module implements a comprehensive experiment to evaluate and compare the robustness
 of different loss functions against spurious correlations. The experiment uses a synthetic
-Colored MNIST dataset to test whether models can avoid "gaming the metric" by exploiting
+Colored CIFAR10 dataset to test whether models can avoid "gaming the metric" by exploiting
 dataset artifacts, a key manifestation of Goodhart's Law in machine learning.
 
 The experiment systematically compares loss function variants using the project's
@@ -23,7 +23,7 @@ loss functions applied during training:
 
 SPURIOUS CORRELATION DESIGN
 ---------------------------
-A synthetic Colored MNIST dataset is generated with a controlled distribution shift
+A synthetic Colored CIFAR10 dataset is generated with a controlled distribution shift
 between the training and test sets:
 
 - **Training Set (High Correlation)**: A strong, spurious correlation (e.g., 95%) is
@@ -53,7 +53,7 @@ Each model follows an identical training and evaluation protocol to ensure a fai
 - **Architecture**: A standard CNN optimized for 28x28 images. All models share the
   exact same architecture and weight initialization. The model outputs raw logits for
   numerical stability.
-- **Dataset**: The generated Colored MNIST dataset with a 95% train / 0% test correlation.
+- **Dataset**: The generated Colored CIFAR10 dataset with a 95% train / 0% test correlation.
 - **Training**: All models are trained using the project's standard `train_model` utility,
   ensuring identical optimizers, learning rate schedules, and epochs.
 - **Evaluation**: Robustness is quantified by measuring the test set accuracy and the
