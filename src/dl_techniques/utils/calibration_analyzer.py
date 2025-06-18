@@ -1,3 +1,148 @@
+"""
+Model Calibration Analysis Module.
+
+This module provides comprehensive tools for analyzing and visualizing the calibration
+effectiveness of machine learning models. Model calibration refers to how well the
+predicted probabilities of a model reflect the true likelihood of the predicted outcomes.
+
+Mathematical Foundations:
+
+1. **Expected Calibration Error (ECE)**:
+   Formula: ECE = Σ(i=1 to M) (n_i/n) × |acc_i - conf_i|
+
+   Where:
+   - M = number of confidence bins (default: 10)
+   - n_i = number of samples in bin i
+   - n = total number of samples
+   - acc_i = accuracy of predictions in bin i
+   - conf_i = average confidence (max probability) in bin i
+
+   Interpretation:
+   - Measures the weighted average of absolute differences between confidence and accuracy
+   - Range: [0, 1], where 0 indicates perfect calibration
+   - Penalizes both overconfidence (conf > acc) and underconfidence (conf < acc)
+   - Weights bins by sample count, giving more importance to frequently occurring confidence levels
+
+2. **Brier Score**:
+   Formula: BS = (1/N) × Σ(i=1 to N) Σ(j=1 to K) (y_ij - p_ij)²
+
+   Where:
+   - N = number of samples
+   - K = number of classes
+   - y_ij = 1 if sample i belongs to class j, 0 otherwise (one-hot encoding)
+   - p_ij = predicted probability that sample i belongs to class j
+
+   Interpretation:
+   - Measures the mean squared difference between predicted probabilities and true outcomes
+   - Range: [0, 2] for binary classification, [0, 1] for well-calibrated multi-class
+   - Lower scores indicate better calibration and accuracy combined
+   - Decomposable into reliability, resolution, and uncertainty components
+   - Sensitive to both calibration quality and discriminative ability
+
+3. **Prediction Entropy**:
+   Formula: H(p_i) = -Σ(j=1 to K) p_ij × log₂(p_ij)
+
+   Where:
+   - p_ij = predicted probability for sample i and class j
+   - K = number of classes
+   - log₂ denotes logarithm base 2 (bits of information)
+
+   Statistics Computed:
+   - Mean Entropy: (1/N) × Σ(i=1 to N) H(p_i)
+   - Standard Deviation of Entropy: std(H(p_i))
+   - Median Entropy: median(H(p_i))
+
+   Interpretation:
+   - Measures uncertainty/randomness in predictions
+   - Range: [0, log₂(K)], where 0 = completely certain, log₂(K) = maximum uncertainty
+   - High entropy: model is uncertain (probabilities spread across classes)
+   - Low entropy: model is confident (probability concentrated on few classes)
+   - Well-calibrated models should show entropy patterns consistent with true uncertainty
+
+4. **Reliability Diagram Components**:
+   For each confidence bin i:
+   - Bin boundaries: [i/M, (i+1)/M] where M is number of bins
+   - Bin center: (i + 0.5)/M
+   - Bin accuracy: acc_i = (# correct predictions in bin i) / (# samples in bin i)
+   - Bin confidence: conf_i = average of max probabilities in bin i
+   - Bin count: n_i = number of samples in bin i
+
+   Perfect Calibration Line:
+   - y = x (45-degree line)
+   - Points on this line indicate perfect calibration
+   - Deviations above: underconfidence
+   - Deviations below: overconfidence
+
+Calibration Quality Indicators:
+
+- **Well-Calibrated Model**:
+  * ECE ≈ 0, Brier Score is low
+  * Reliability diagram points lie close to perfect calibration line
+  * Prediction entropy reflects true uncertainty in the data
+
+- **Overconfident Model**:
+  * ECE > 0, points in reliability diagram below perfect line
+  * Low entropy but high error rate
+  * High confidence in incorrect predictions
+
+- **Underconfident Model**:
+  * ECE > 0, points in reliability diagram above perfect line
+  * High entropy even for easy predictions
+  * Low confidence in correct predictions
+
+Example:
+    >>> import keras
+    >>> from pathlib import Path
+    >>>
+    >>> # Load your trained models
+    >>> models = {
+    ...     'baseline_model': keras.models.load_model('baseline.keras'),
+    ...     'calibrated_model': keras.models.load_model('calibrated.keras')
+    ... }
+    >>>
+    >>> # Initialize analyzer with 15 bins for finer calibration analysis
+    >>> analyzer = CalibrationAnalyzer(models, calibration_bins=15)
+    >>>
+    >>> # Analyze calibration (y_test should be one-hot encoded)
+    >>> metrics = analyzer.analyze_calibration(x_test, y_test)
+    >>>
+    >>> # Expected output format:
+    >>> # {
+    >>> #     'baseline_model': {
+    >>> #         'ece': 0.0234,  # 2.34% calibration error
+    >>> #         'brier_score': 0.1456,  # Lower is better
+    >>> #         'mean_entropy': 1.234,  # Average prediction uncertainty
+    >>> #         'std_entropy': 0.456,   # Variability in uncertainty
+    >>> #         'median_entropy': 1.123  # Median prediction uncertainty
+    >>> #     },
+    >>> #     'calibrated_model': {...}
+    >>> # }
+    >>>
+    >>> # Generate comprehensive visualizations
+    >>> output_dir = Path('calibration_analysis')
+    >>> analyzer.plot_reliability_diagrams(output_dir)
+    >>> analyzer.plot_calibration_metrics_comparison(output_dir)
+    >>> analyzer.save_calibration_analysis(output_dir)
+    >>>
+    >>> # Identify best calibrated model
+    >>> best_model = analyzer.get_best_calibrated_model('ece')
+    >>> print(f"Best calibrated model: {best_model}")
+
+Practical Applications:
+    - Medical diagnosis: Ensuring probability predictions reflect true risk levels
+    - Financial modeling: Risk assessment accuracy for investment decisions
+    - Autonomous systems: Reliable confidence estimates for safety-critical decisions
+    - A/B testing: Comparing calibration quality of different model architectures
+
+Notes:
+    - Input data should be properly preprocessed and normalized
+    - Target data (y_test) must be one-hot encoded for multi-class problems
+    - Larger bin counts (15-20) provide finer calibration analysis but require more data
+    - ECE and Brier Score: lower values indicate better calibration
+    - Entropy statistics should be interpreted relative to the number of classes and data complexity
+    - Consider both calibration metrics and standard accuracy when evaluating models
+"""
+
 import keras
 import numpy as np
 from pathlib import Path
@@ -15,7 +160,6 @@ from .calibration_metrics import (
     compute_reliability_data,
     compute_prediction_entropy_stats
 )
-
 
 # ------------------------------------------------------------------------------
 
@@ -201,8 +345,8 @@ class CalibrationAnalyzer:
     def plot_calibration_metrics_comparison(self, output_dir: Path) -> None:
         """Plot comparison of calibration metrics across models.
 
-        Creates bar charts comparing ECE, Brier Score, and mean entropy
-        across all models.
+        Creates a single figure with bar charts comparing ECE, Brier Score,
+        and mean entropy across all models.
 
         Args:
             output_dir: Directory to save plots. Will be created if it doesn't exist
@@ -216,33 +360,41 @@ class CalibrationAnalyzer:
         metrics_to_plot = ['ece', 'brier_score', 'mean_entropy']
         metric_labels = ['Expected Calibration Error', 'Brier Score', 'Mean Prediction Entropy']
 
-        for metric, label in zip(metrics_to_plot, metric_labels):
-            plt.figure(figsize=(10, 6))
+        # Create figure with subplots
+        fig, axes = plt.subplots(1, 3, figsize=(15, 6))
 
-            models = list(self.calibration_metrics.keys())
+        models = list(self.calibration_metrics.keys())
+        model_names = [m.replace('_', ' ').title() for m in models]
+
+        for i, (metric, label) in enumerate(zip(metrics_to_plot, metric_labels)):
+            ax = axes[i]
+
             values = [self.calibration_metrics[model][metric] for model in models]
 
-            bars = plt.bar([m.replace('_', ' ').title() for m in models], values)
-            plt.title(f'{label} Comparison')
-            plt.ylabel(label)
-            plt.xticks(rotation=45)
+            bars = ax.bar(model_names, values, alpha=0.7)
+            ax.set_title(label, fontsize=12, fontweight='bold')
+            ax.set_ylabel(label, fontsize=10)
+            ax.tick_params(axis='x', rotation=45, labelsize=9)
+            ax.grid(True, alpha=0.3, axis='y')
 
             # Add value labels on bars
             for bar, value in zip(bars, values):
-                plt.text(
+                ax.text(
                     bar.get_x() + bar.get_width() / 2,
-                    bar.get_height(),
+                    bar.get_height() + ax.get_ylim()[1] * 0.01,
                     f'{value:.4f}',
                     ha='center',
-                    va='bottom'
+                    va='bottom',
+                    fontsize=9
                 )
 
-            plt.tight_layout()
-            plt.savefig(output_dir / f'{metric}_comparison.{self.plot_format}',
-                        dpi=300, bbox_inches='tight')
-            plt.close()
+        plt.suptitle('Calibration Metrics Comparison', fontsize=16, fontweight='bold', y=1.02)
+        plt.tight_layout()
+        plt.savefig(output_dir / f'calibration_metrics_comparison.{self.plot_format}',
+                    dpi=300, bbox_inches='tight')
+        plt.close()
 
-        logger.info(f"Saved calibration metrics plots to {output_dir}")
+        logger.info(f"Saved calibration metrics comparison plot to {output_dir}")
 
     def save_calibration_analysis(self, output_dir: Path) -> None:
         """Save calibration analysis results to a text file.
