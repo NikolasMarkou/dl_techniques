@@ -1,8 +1,14 @@
 import keras
 from keras import ops
 from typing import Dict, Union, Optional, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class ValueRangeConstraint(keras.constraints.Constraint):
@@ -137,3 +143,5 @@ class ValueRangeConstraint(keras.constraints.Constraint):
         else:
             return (f"ValueRangeConstraint(min_value={self.min_value}, "
                     f"clip_gradients={self.clip_gradients})")
+
+# ---------------------------------------------------------------------
