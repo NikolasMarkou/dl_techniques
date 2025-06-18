@@ -105,7 +105,9 @@ from dl_techniques.losses.goodhart_loss import GoodhartAwareLoss
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.utils.datasets import load_and_preprocess_cifar10
 from dl_techniques.utils.calibration_analyzer import CalibrationAnalyzer
+from dl_techniques.utils.weight_analyzer import WeightAnalyzerConfig, WeightAnalyzer
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
+
 
 # ------------------------------------------------------------------------------
 # 1. Single Configuration Class
@@ -338,8 +340,37 @@ def run_calibration_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         )
         prediction_models[name] = prediction_model
 
-    # Weight Analysis phase (uses original models with logits)
-    # This can remain as is, it does not depend on model output for metrics.
+    # Weight Analysis phase
+    logger.info("📊 Performing weight distribution analysis...")
+
+    try:
+        analysis_config = WeightAnalyzerConfig(
+            compute_l1_norm=True,
+            compute_l2_norm=True,
+            compute_rms_norm=True,
+            analyze_biases=True,
+            save_plots=True,
+            export_format="png"
+        )
+
+        weight_analyzer = WeightAnalyzer(
+            models=models,
+            config=analysis_config,
+            output_dir=experiment_dir / "weight_analysis"
+        )
+
+        if weight_analyzer.has_valid_analysis():
+            weight_analyzer.plot_comprehensive_dashboard()
+            weight_analyzer.plot_norm_distributions()
+            weight_analyzer.plot_layer_comparisons(['mean', 'std', 'l2_norm'])
+            weight_analyzer.save_analysis_results()
+            logger.info("✅ Weight analysis completed successfully!")
+        else:
+            logger.warning("❌ No valid weight data found for analysis")
+
+    except Exception as e:
+        logger.error(f"Weight analysis failed: {e}")
+        logger.info("Continuing with experiment without weight analysis...")
 
     # Calibration Analysis phase (uses prediction_models with softmax)
     calibration_metrics = {}
@@ -356,7 +387,21 @@ def run_calibration_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             logger.error(f"Calibration analysis failed: {e}")
 
     # Generate training history visualizations
-    # This part is fine as it uses the `histories` object from training.
+    for metric in ['accuracy', 'loss']:
+        combined_histories = {
+            name: {
+                metric: all_histories[metric][name],
+                f'val_{metric}': all_histories[f'val_{metric}'][name]
+            }
+            for name in models.keys()
+        }
+
+        vis_manager.plot_history(
+            combined_histories,
+            [metric],
+            f'training_{metric}_comparison',
+            title=f'Loss Functions {metric.capitalize()} Comparison'
+        )
 
     # Generate predictions for confusion matrices (uses prediction_models with softmax)
     model_predictions = {name: model.predict(cifar10_data.x_test, verbose=0) for name, model in prediction_models.items()}
