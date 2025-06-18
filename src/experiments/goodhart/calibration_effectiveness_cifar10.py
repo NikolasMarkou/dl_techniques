@@ -1,39 +1,87 @@
 """
-CIFAR-10 Calibration Effectiveness Experiment: GoodhartAwareLoss vs Label Smoothing
-=================================================================================
+Colored MNIST Spurious Correlation Experiment: GoodhartAwareLoss vs. Baselines
+================================================================================
 
-This module implements a comprehensive experiment to evaluate and compare the calibration
-effectiveness of different loss functions applied to Convolutional Neural Networks (CNNs)
-for CIFAR-10 classification. The experiment systematically compares loss function variants
-with comprehensive analysis tools following the project's standard analysis framework.
+This module implements a comprehensive experiment to evaluate and compare the robustness
+of different loss functions against spurious correlations. The experiment uses a synthetic
+Colored MNIST dataset to test whether models can avoid "gaming the metric" by exploiting
+dataset artifacts, a key manifestation of Goodhart's Law in machine learning.
+
+The experiment systematically compares loss function variants using the project's
+standard analysis framework, focusing on metrics that quantify robustness to
+distributional shifts.
 
 EXPERIMENT OVERVIEW
 ------------------
 The experiment trains multiple CNN models with identical architectures but different
 loss functions applied during training:
 
-1. **Standard Cross-Entropy**: Baseline cross-entropy loss
-2. **Label Smoothing**: Cross-entropy with label smoothing (α=0.1)
-3. **GoodhartAwareLoss**: Information-theoretic loss combining entropy regularization
-   and mutual information constraints.
+1. **Standard Cross-Entropy**: A baseline model expected to overfit to spurious features.
+2. **Label Smoothing**: A common regularization technique tested for its robustness benefits.
+3. **GoodhartAwareLoss**: An information-theoretic loss designed to prevent metric gaming
+   by regularizing the model's internal information flow and output uncertainty.
+
+SPURIOUS CORRELATION DESIGN
+---------------------------
+A synthetic Colored MNIST dataset is generated with a controlled distribution shift
+between the training and test sets:
+
+- **Training Set (High Correlation)**: A strong, spurious correlation (e.g., 95%) is
+  introduced between the digit's class and its color. For example, the digit '7' is
+  colored red 95% of the time. A model can achieve high training accuracy by simply
+  learning this color-to-class mapping.
+
+- **Test Set (Zero Correlation)**: The spurious correlation is completely removed.
+  Colors are assigned randomly, providing no information about the digit's class.
+  A model's performance on this set reveals whether it learned the true underlying
+  feature (digit shape) or relied on the spurious shortcut (color).
 
 RESEARCH HYPOTHESIS
 ------------------
 **Core Claims Being Tested:**
-- GoodhartAwareLoss should produce better-calibrated models (lower ECE)
-- GoodhartAwareLoss should maintain competitive accuracy on clean, in-distribution data
-- GoodhartAwareLoss should produce less overconfident predictions (higher entropy)
-- GoodhartAwareLoss should show better reliability diagram alignment with perfect calibration
+- GoodhartAwareLoss (GAL) should maintain higher test accuracy on the uncorrelated
+  test set, demonstrating superior robustness.
+- GAL should exhibit a smaller "generalization gap" (the drop in accuracy from the
+  training set to the test set), indicating less overfitting to spurious patterns.
+- GAL should force the model to learn the true, causal features (digit morphology)
+  instead of the easy, spurious ones (color).
 
 METHODOLOGY
 -----------
-Each model follows identical training protocols using the project's standard training pipeline:
-- Architecture: ResNet-like CNN optimized for CIFAR-10. Model outputs raw logits.
-- Dataset: CIFAR-10 (50k train, 10k test, 10 classes)
-- Training: Same optimizer, learning rate schedule, epochs, and data augmentation. All
-  loss functions are configured to work with logits for numerical stability.
-- Evaluation: Comprehensive calibration and performance analysis using project tools. A
-  softmax layer is appended to the trained models before analysis.
+Each model follows an identical training and evaluation protocol to ensure a fair comparison:
+
+- **Architecture**: A standard CNN optimized for 28x28 images. All models share the
+  exact same architecture and weight initialization. The model outputs raw logits for
+  numerical stability.
+- **Dataset**: The generated Colored MNIST dataset with a 95% train / 0% test correlation.
+- **Training**: All models are trained using the project's standard `train_model` utility,
+  ensuring identical optimizers, learning rate schedules, and epochs.
+- **Evaluation**: Robustness is quantified by measuring the test set accuracy and the
+  generalization gap. A modular `RobustnessAnalyzer` handles the evaluation.
+
+ROBUSTNESS METRICS
+------------------
+**Test Set Accuracy (Primary Metric):**
+- The model's accuracy on the "fair" test set where the color correlation is broken.
+- This is the single most important measure of a model's robustness. Higher is better.
+
+**Generalization Gap:**
+- Defined as: `Train Accuracy - Test Accuracy`.
+- Measures the degree to which a model has overfitted to the spurious correlations
+  present only in the training data. A smaller gap indicates more robust learning.
+
+ANALYSIS OUTPUTS
+---------------
+The experiment produces a set of comparative analyses and visualizations:
+
+**Robustness Analysis:**
+- A bar chart comparing the Test Accuracy and Generalization Gap across all tested
+  loss functions.
+- A clear, data-driven summary verdict on the research hypothesis.
+
+**Training Analysis:**
+- Training and validation accuracy/loss curves for all models, managed by the
+  `train_model` utility.
 """
 
 # ------------------------------------------------------------------------------
