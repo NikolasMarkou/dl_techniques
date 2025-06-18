@@ -205,11 +205,11 @@ class GoodhartAwareLoss(keras.losses.Loss):
         # Input validation
         y_true = ops.cast(y_true, dtype=y_pred.dtype)
 
-        # Check for NaN or Inf in inputs
-        if ops.any(ops.logical_not(ops.isfinite(y_pred))):
-            raise ValueError("y_pred contains NaN or Inf values")
-        if ops.any(ops.logical_not(ops.isfinite(y_true))):
-            raise ValueError("y_true contains NaN or Inf values")
+        # # Check for NaN or Inf in inputs
+        # if ops.any(ops.logical_not(ops.isfinite(y_pred))):
+        #     raise ValueError("y_pred contains NaN or Inf values")
+        # if ops.any(ops.logical_not(ops.isfinite(y_true))):
+        #     raise ValueError("y_true contains NaN or Inf values")
 
         # Component 1: Temperature-scaled cross-entropy loss
         ce_loss = self._temperature_scaled_cross_entropy(y_true, y_pred)

@@ -1,36 +1,37 @@
 """
-CIFAR-10 Calibration Experiment: GoodhartAwareLoss vs Label Smoothing
-====================================================================
+CIFAR-10 Calibration Effectiveness Experiment: GoodhartAwareLoss vs Label Smoothing
+=================================================================================
 
 This module implements a comprehensive experiment to evaluate and compare the calibration
-effectiveness of GoodhartAwareLoss against Label Smoothing on CIFAR-10 classification.
-The experiment systematically tests the core claims of Goodhart's Law-aware training
-by measuring calibration quality and in-distribution performance.
+effectiveness of different loss functions applied to Convolutional Neural Networks (CNNs)
+for CIFAR-10 classification. The experiment systematically compares loss function variants
+with comprehensive analysis tools following the project's standard analysis framework.
 
 EXPERIMENT OVERVIEW
 ------------------
-The experiment trains two CNN models with identical architectures but different
+The experiment trains multiple CNN models with identical architectures but different
 loss functions applied during training:
 
-1. **Label Smoothing (LS)**: Standard cross-entropy with label smoothing (α=0.1)
-2. **GoodhartAwareLoss (GAL)**: Information-theoretic loss combining temperature scaling,
+1. **Standard Cross-Entropy**: Baseline cross-entropy loss
+2. **Label Smoothing**: Cross-entropy with label smoothing (α=0.1)
+3. **GoodhartAwareLoss**: Information-theoretic loss combining temperature scaling,
    entropy regularization, and mutual information constraints
 
 RESEARCH HYPOTHESIS
 ------------------
 **Core Claims Being Tested:**
-- GAL should produce better-calibrated models (lower ECE)
-- GAL should maintain competitive accuracy on clean, in-distribution data
-- GAL should produce less overconfident predictions (higher entropy)
-- GAL should show better reliability diagram alignment with perfect calibration
+- GoodhartAwareLoss should produce better-calibrated models (lower ECE)
+- GoodhartAwareLoss should maintain competitive accuracy on clean, in-distribution data
+- GoodhartAwareLoss should produce less overconfident predictions (higher entropy)
+- GoodhartAwareLoss should show better reliability diagram alignment with perfect calibration
 
 METHODOLOGY
 -----------
-Each model follows identical training protocols:
+Each model follows identical training protocols using the project's standard training pipeline:
 - Architecture: ResNet-like CNN optimized for CIFAR-10
 - Dataset: CIFAR-10 (50k train, 10k test, 10 classes)
 - Training: Same optimizer, learning rate schedule, epochs, and data augmentation
-- Evaluation: Comprehensive calibration and performance analysis
+- Evaluation: Comprehensive calibration and performance analysis using project tools
 
 MODEL ARCHITECTURE
 ------------------
@@ -45,57 +46,56 @@ CALIBRATION METRICS
 ------------------
 **Expected Calibration Error (ECE):**
 - Primary metric for measuring calibration quality
-- ECE = Σ (|confidence - accuracy|) × proportion_in_bin
 - Lower values indicate better calibration (perfect = 0.0)
 
 **Reliability Diagram:**
 - Visual representation of calibration quality
 - Perfect calibration follows y=x diagonal
-- Shows confidence vs accuracy across probability bins
-
-**Average Prediction Entropy:**
-- H(p) = -Σ p_i × log(p_i) averaged over test set
-- Higher entropy indicates appropriate uncertainty
-- Lower entropy may indicate overconfidence
 
 **Brier Score:**
 - Proper scoring rule measuring prediction quality
-- BS = (1/N) Σ (p_predicted - p_true)²
 - Lower values indicate better probabilistic predictions
+
+**Average Prediction Entropy:**
+- Higher entropy indicates appropriate uncertainty
+- Lower entropy may indicate overconfidence
 
 ANALYSIS OUTPUTS
 ---------------
+**Training Analysis:**
+- Training/validation accuracy and loss curves for all models
+- Early stopping behavior and convergence patterns
+- Comparative performance metrics using ModelAnalyzer
+
+**Weight Distribution Analysis:**
+- L1, L2, and RMS norm distributions across layers using WeightAnalyzer
+- Layer-wise weight statistics comparison
+- Weight distribution heatmaps and histograms
+
 **Calibration Analysis:**
 - Expected Calibration Error comparison
-- Reliability diagrams for both models
-- Confidence distribution histograms
+- Reliability diagrams for all models
+- Confidence distribution analysis
 - Prediction entropy analysis
 
-**Performance Analysis:**
-- Top-1 accuracy on CIFAR-10 test set
-- Loss curves during training
-- Confusion matrices
-- Per-class performance metrics
-
-**Statistical Analysis:**
-- Confidence intervals for all metrics
-- Statistical significance tests
-- Goodhart's Law effect quantification
-- Calibration improvement measurement
+**Model Performance Analysis:**
+- Confusion matrices for each loss function
+- Classification accuracy, precision, recall, F1-scores using ModelAnalyzer
+- Model comparison visualizations using VisualizationManager
 
 CONFIGURATION
 ------------
 All experiment parameters are centralized in the ExperimentConfig class:
-- Model architecture (filters, layers, regularization)
+- Model architecture parameters (filters, layers, regularization)
 - Training hyperparameters (epochs, batch size, learning rate)
 - Loss function parameters (GAL weights, label smoothing alpha)
 - Calibration analysis settings (number of bins, confidence thresholds)
-- Output and visualization options
+- Analysis options (which metrics to compute, plot formats)
 
 USAGE
 -----
 To run with default settings:
-    python calibration_experiment.py
+    python cifar10_calibration_experiment.py
 
 To customize hyperparameters:
     config = ExperimentConfig()
@@ -103,72 +103,41 @@ To customize hyperparameters:
     config.gal_entropy_weight = 0.15
     config.epochs = 200
     results = run_calibration_experiment(config)
-
-DEPENDENCIES
------------
-- TensorFlow/Keras for deep learning models
-- NumPy for numerical computations
-- Matplotlib/Seaborn for calibration visualizations
-- SciPy for statistical tests
-- Custom GoodhartAwareLoss implementation
-
-OUTPUT STRUCTURE
----------------
-results/
-├── cifar10_calibration_experiment_TIMESTAMP/
-│   ├── label_smoothing/       # LS model checkpoints and logs
-│   ├── goodhart_aware/        # GAL model checkpoints and logs
-│   ├── calibration_analysis/   # ECE, reliability diagrams, entropy analysis
-│   ├── performance_analysis/   # Accuracy, confusion matrices, training curves
-│   └── statistical_analysis/   # Significance tests, effect sizes
-
-RESEARCH APPLICATIONS
---------------------
-This experiment framework enables:
-- Validating Goodhart's Law mitigation in ML
-- Comparing calibration techniques
-- Measuring overconfidence reduction
-- Benchmarking information-theoretic loss functions
-- Studying the accuracy-calibration trade-off
-
-The results provide empirical evidence for or against the theoretical claims
-of information-theoretic approaches to preventing metric gaming in ML.
-
-Organization:
-1. Imports and dependencies
-2. Configuration class
-3. Model building utilities
-4. Calibration metrics implementation
-5. Experiment runner
-6. Main execution
 """
 
 # ------------------------------------------------------------------------------
 # 1. Imports and Dependencies
 # ------------------------------------------------------------------------------
 
-import keras
-import warnings
-import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
-
 from pathlib import Path
 from datetime import datetime
-from dataclasses import dataclass
-from typing import Dict, Any, Optional, List, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Tuple, Callable
+
+import keras
+import numpy as np
+import matplotlib.pyplot as plt
 
 # ------------------------------------------------------------------------------
-# local imports
+# Local imports
 # ------------------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
 from dl_techniques.losses.goodhart_loss import GoodhartAwareLoss
-from dl_techniques.utils.tensors import compute_prediction_entropy
-
-warnings.filterwarnings('ignore')
+from dl_techniques.utils.model_analyzer import ModelAnalyzer
+from dl_techniques.utils.train import TrainingConfig, train_model
+from dl_techniques.utils.weight_analyzer import WeightAnalyzerConfig, WeightAnalyzer
+from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
+from dl_techniques.utils.datasets import load_and_preprocess_cifar10
+from dl_techniques.utils.calibration_metrics import (
+    compute_ece,
+    compute_brier_score,
+    compute_reliability_data,
+    compute_prediction_entropy_stats
+)
 
 # ------------------------------------------------------------------------------
-# 2. Configuration Class
+# 2. Single Configuration Class
 # ------------------------------------------------------------------------------
 
 @dataclass
@@ -176,7 +145,8 @@ class ExperimentConfig:
     """Unified configuration for the CIFAR-10 calibration experiment.
 
     Contains all parameters for model architecture, training, loss functions,
-    and calibration analysis in a single consolidated configuration class.
+    calibration analysis, weight analysis, and visualization in a single
+    consolidated configuration class.
     """
     # Dataset Configuration
     dataset_name: str = "cifar10"
@@ -185,15 +155,18 @@ class ExperimentConfig:
     validation_split: float = 0.1
 
     # Model Architecture Parameters
-    conv_filters: List[int] = (64, 128, 256, 512)
-    dense_units: int = 512
-    dropout_rate: float = 0.3
+    conv_filters: List[int] = (32, 64, 128, 256)
+    dense_units: List[int] = (128,)
+    dropout_rates: List[float] = (0.25, 0.25, 0.3, 0.4, 0.5)  # conv layers + dense
+    kernel_size: Tuple[int, int] = (3, 3)
+    pool_size: Tuple[int, int] = (2, 2)
     weight_decay: float = 1e-4
+    kernel_initializer: str = 'he_normal'
     use_batch_norm: bool = True
     use_residual: bool = True
 
     # Training Parameters
-    epochs: int = 100
+    epochs: int = 1
     batch_size: int = 128
     learning_rate: float = 0.001
     early_stopping_patience: int = 15
@@ -201,10 +174,19 @@ class ExperimentConfig:
     reduce_lr_factor: float = 0.5
     monitor_metric: str = 'val_accuracy'
 
-    # Label Smoothing Configuration
-    label_smoothing_alpha: float = 0.1
+    # Loss Functions to Test
+    loss_functions: Dict[str, Callable] = field(default_factory=lambda: {
+        'goodhart_aware': lambda: GoodhartAwareLoss(
+            temperature=2.0,
+            entropy_weight=0.1,
+            mi_weight=0.01
+        ),
+        'crossentropy': lambda: keras.losses.CategoricalCrossentropy(),
+        'label_smoothing': lambda: keras.losses.CategoricalCrossentropy(label_smoothing=0.1)
+    })
 
-    # GoodhartAwareLoss Configuration
+    # Loss Function Specific Parameters
+    label_smoothing_alpha: float = 0.1
     gal_temperature: float = 2.0
     gal_entropy_weight: float = 0.1
     gal_mi_weight: float = 0.01
@@ -213,14 +195,18 @@ class ExperimentConfig:
     calibration_bins: int = 15
     confidence_threshold: float = 0.5
     bootstrap_samples: int = 1000
+    analyze_calibration: bool = True
 
-    # Experiment Parameters
-    output_dir: Path = Path("results")
-    experiment_name: str = "cifar10_calibration_experiment"
-    save_models: bool = True
+    # Weight Analysis Parameters
+    compute_l1_norm: bool = True
+    compute_l2_norm: bool = True
+    compute_rms_norm: bool = True
+    analyze_biases: bool = True
+
+    # Visualization Parameters
     save_plots: bool = True
     plot_format: str = 'png'
-    random_seed: int = 42
+    plot_style: str = 'default'
 
     # Data Augmentation
     use_data_augmentation: bool = True
@@ -229,40 +215,70 @@ class ExperimentConfig:
     height_shift_range: float = 0.1
     horizontal_flip: bool = True
 
+    # Experiment Parameters
+    output_dir: Path = Path("results")
+    experiment_name: str = "cifar10_calibration_experiment"
+    random_seed: int = 42
 
 # ------------------------------------------------------------------------------
 # 3. Model Building Utilities
 # ------------------------------------------------------------------------------
 
-def build_residual_block(x: keras.layers.Layer, filters: int, config: ExperimentConfig) -> keras.layers.Layer:
+def build_residual_block(
+    inputs: keras.layers.Layer,
+    filters: int,
+    config: ExperimentConfig,
+    block_index: int
+) -> keras.layers.Layer:
     """Build a residual block for improved gradient flow.
 
     Args:
-        x: Input tensor
+        inputs: Input tensor
         filters: Number of filters
         config: Experiment configuration
+        block_index: Index of the block for naming and dropout rate
 
     Returns:
         Output tensor after residual block
     """
-    shortcut = x
+    shortcut = inputs
 
     # First conv layer
-    x = keras.layers.Conv2D(filters, (3, 3), padding='same',
-                            kernel_regularizer=keras.regularizers.L2(config.weight_decay))(x)
+    x = keras.layers.Conv2D(
+        filters=filters,
+        kernel_size=config.kernel_size,
+        padding='same',
+        kernel_initializer=config.kernel_initializer,
+        kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+        name=f'conv{block_index}_1'
+    )(inputs)
+
     if config.use_batch_norm:
         x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Activation('relu')(x)
 
     # Second conv layer
-    x = keras.layers.Conv2D(filters, (3, 3), padding='same',
-                            kernel_regularizer=keras.regularizers.L2(config.weight_decay))(x)
+    x = keras.layers.Conv2D(
+        filters=filters,
+        kernel_size=config.kernel_size,
+        padding='same',
+        kernel_initializer=config.kernel_initializer,
+        kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+        name=f'conv{block_index}_2'
+    )(x)
+
     if config.use_batch_norm:
         x = keras.layers.BatchNormalization()(x)
 
     # Adjust shortcut if needed
     if shortcut.shape[-1] != filters:
-        shortcut = keras.layers.Conv2D(filters, (1, 1), padding='same')(shortcut)
+        shortcut = keras.layers.Conv2D(
+            filters=filters,
+            kernel_size=(1, 1),
+            padding='same',
+            kernel_initializer=config.kernel_initializer,
+            kernel_regularizer=keras.regularizers.L2(config.weight_decay)
+        )(shortcut)
         if config.use_batch_norm:
             shortcut = keras.layers.BatchNormalization()(shortcut)
 
@@ -273,391 +289,362 @@ def build_residual_block(x: keras.layers.Layer, filters: int, config: Experiment
     return x
 
 
-def build_cnn_model(config: ExperimentConfig, loss_type: str = 'crossentropy') -> keras.Model:
-    """Build CNN model optimized for CIFAR-10.
+def build_conv_block(
+    inputs: keras.layers.Layer,
+    filters: int,
+    config: ExperimentConfig,
+    block_index: int
+) -> keras.layers.Layer:
+    """Build a convolutional block with specified configuration.
+
+    Args:
+        inputs: Input tensor
+        filters: Number of filters for conv layer
+        config: Experiment configuration
+        block_index: Index of the block for naming and dropout rate
+
+    Returns:
+        Output tensor after applying conv block
+    """
+    if config.use_residual and block_index > 0:
+        x = build_residual_block(inputs, filters, config, block_index)
+    else:
+        x = keras.layers.Conv2D(
+            filters=filters,
+            kernel_size=config.kernel_size,
+            padding='same',
+            kernel_initializer=config.kernel_initializer,
+            kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+            name=f'conv{block_index}'
+        )(inputs)
+
+        if config.use_batch_norm:
+            x = keras.layers.BatchNormalization()(x)
+        x = keras.layers.Activation('relu')(x)
+
+    # Pooling and dropout
+    if block_index < len(config.conv_filters) - 1:  # Don't pool after last conv block
+        x = keras.layers.MaxPooling2D(config.pool_size)(x)
+
+    dropout_rate = config.dropout_rates[block_index] if block_index < len(config.dropout_rates) else 0.0
+    if dropout_rate > 0:
+        x = keras.layers.Dropout(dropout_rate)(x)
+
+    return x
+
+
+def build_model(config: ExperimentConfig, loss_fn: Callable, name: str) -> keras.Model:
+    """Build CNN model optimized for CIFAR-10 with specified loss function.
 
     Args:
         config: Experiment configuration
-        loss_type: Type of loss function ('crossentropy', 'label_smoothing', 'goodhart_aware')
+        loss_fn: Loss function to use for training
+        name: Name identifier for the model
 
     Returns:
         Compiled Keras model
     """
-    inputs = keras.layers.Input(shape=config.input_shape)
+    inputs = keras.layers.Input(shape=config.input_shape, name=f'{name}_input')
     x = inputs
 
     # Initial conv layer
-    x = keras.layers.Conv2D(config.conv_filters[0], (3, 3), padding='same',
-                            kernel_regularizer=keras.regularizers.L2(config.weight_decay))(x)
+    x = keras.layers.Conv2D(
+        filters=config.conv_filters[0],
+        kernel_size=config.kernel_size,
+        padding='same',
+        kernel_initializer=config.kernel_initializer,
+        kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+        name='initial_conv'
+    )(x)
+
     if config.use_batch_norm:
         x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Activation('relu')(x)
 
-    # Convolutional blocks with optional residual connections
+    # Convolutional blocks
     for i, filters in enumerate(config.conv_filters):
-        if config.use_residual and i > 0:
-            x = build_residual_block(x, filters, config)
-        else:
-            x = keras.layers.Conv2D(filters, (3, 3), padding='same',
-                                    kernel_regularizer=keras.regularizers.L2(config.weight_decay))(x)
-            if config.use_batch_norm:
-                x = keras.layers.BatchNormalization()(x)
-            x = keras.layers.Activation('relu')(x)
-
-        # Pooling and dropout
-        if i < len(config.conv_filters) - 1:  # Don't pool after last conv block
-            x = keras.layers.MaxPooling2D((2, 2))(x)
-
-        if config.dropout_rate > 0:
-            x = keras.layers.Dropout(config.dropout_rate)(x)
+        x = build_conv_block(x, filters, config, i)
 
     # Global average pooling instead of flatten
     x = keras.layers.GlobalAveragePooling2D()(x)
 
-    # Dense layer
-    if config.dense_units > 0:
-        x = keras.layers.Dense(config.dense_units,
-                               kernel_regularizer=keras.regularizers.L2(config.weight_decay))(x)
+    # Dense layers
+    for j, units in enumerate(config.dense_units):
+        x = keras.layers.Dense(
+            units=units,
+            kernel_initializer=config.kernel_initializer,
+            kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+            name=f'dense_{j}'
+        )(x)
+
         if config.use_batch_norm:
             x = keras.layers.BatchNormalization()(x)
         x = keras.layers.Activation('relu')(x)
-        if config.dropout_rate > 0:
-            x = keras.layers.Dropout(config.dropout_rate)(x)
+
+        # Apply dropout to dense layers
+        dense_dropout_idx = len(config.conv_filters) + j
+        if dense_dropout_idx < len(config.dropout_rates):
+            dropout_rate = config.dropout_rates[dense_dropout_idx]
+            if dropout_rate > 0:
+                x = keras.layers.Dropout(dropout_rate)(x)
 
     # Output layer (logits)
-    logits = keras.layers.Dense(config.num_classes,
-                                kernel_regularizer=keras.regularizers.L2(config.weight_decay),
-                                name='logits')(x)
+    logits = keras.layers.Dense(
+        config.num_classes,
+        kernel_initializer=config.kernel_initializer,
+        kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+        name='logits'
+    )(x)
 
     # Apply softmax for predictions
     outputs = keras.layers.Activation('softmax', name='predictions')(logits)
 
-    model = keras.Model(inputs=inputs, outputs=outputs)
+    model = keras.Model(inputs=inputs, outputs=outputs, name=f'{name}_model')
 
-    # Configure loss function and optimizer
+    # Compile model
     optimizer = keras.optimizers.Adam(learning_rate=config.learning_rate)
-
-    if loss_type == 'label_smoothing':
-        loss = keras.losses.CategoricalCrossentropy(label_smoothing=config.label_smoothing_alpha)
-    elif loss_type == 'goodhart_aware':
-        loss = GoodhartAwareLoss(
-            temperature=config.gal_temperature,
-            entropy_weight=config.gal_entropy_weight,
-            mi_weight=config.gal_mi_weight
-        )
-    else:
-        loss = keras.losses.CategoricalCrossentropy()
 
     model.compile(
         optimizer=optimizer,
-        loss=loss,
+        loss=loss_fn,
         metrics=['accuracy', 'top_k_categorical_accuracy']
     )
 
     return model
 
-
 # ------------------------------------------------------------------------------
-# 4. Calibration Metrics Implementation
-# ------------------------------------------------------------------------------
-
-def compute_ece(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 15) -> float:
-    """Compute Expected Calibration Error.
-
-    Args:
-        y_true: True class labels (not one-hot)
-        y_prob: Predicted probabilities
-        n_bins: Number of bins for calibration curve
-
-    Returns:
-        Expected Calibration Error
-    """
-    # Get predicted class and confidence
-    y_pred = np.argmax(y_prob, axis=1)
-    confidences = np.max(y_prob, axis=1)
-    accuracies = (y_pred == y_true).astype(float)
-
-    # Create bins
-    bin_boundaries = np.linspace(0, 1, n_bins + 1)
-    bin_lowers = bin_boundaries[:-1]
-    bin_uppers = bin_boundaries[1:]
-
-    ece = 0.0
-    for bin_lower, bin_upper in zip(bin_lowers, bin_uppers):
-        # Find samples in this bin
-        in_bin = (confidences > bin_lower) & (confidences <= bin_upper)
-        prop_in_bin = in_bin.mean()
-
-        if prop_in_bin > 0:
-            accuracy_in_bin = accuracies[in_bin].mean()
-            avg_confidence_in_bin = confidences[in_bin].mean()
-            ece += np.abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
-
-    return ece
-
-
-def compute_reliability_data(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 15) -> Dict[str, np.ndarray]:
-    """Compute data for reliability diagram.
-
-    Args:
-        y_true: True class labels (not one-hot)
-        y_prob: Predicted probabilities
-        n_bins: Number of bins for calibration curve
-
-    Returns:
-        Dictionary with bin centers, accuracies, confidences, and counts
-    """
-    y_pred = np.argmax(y_prob, axis=1)
-    confidences = np.max(y_prob, axis=1)
-    accuracies = (y_pred == y_true).astype(float)
-
-    bin_boundaries = np.linspace(0, 1, n_bins + 1)
-    bin_lowers = bin_boundaries[:-1]
-    bin_uppers = bin_boundaries[1:]
-    bin_centers = (bin_lowers + bin_uppers) / 2
-
-    bin_accuracies = []
-    bin_confidences = []
-    bin_counts = []
-
-    for bin_lower, bin_upper in zip(bin_lowers, bin_uppers):
-        in_bin = (confidences > bin_lower) & (confidences <= bin_upper)
-        prop_in_bin = in_bin.mean()
-
-        if prop_in_bin > 0:
-            bin_accuracies.append(accuracies[in_bin].mean())
-            bin_confidences.append(confidences[in_bin].mean())
-            bin_counts.append(in_bin.sum())
-        else:
-            bin_accuracies.append(0.0)
-            bin_confidences.append(bin_centers[len(bin_accuracies)])
-            bin_counts.append(0)
-
-    return {
-        'bin_centers': bin_centers,
-        'bin_accuracies': np.array(bin_accuracies),
-        'bin_confidences': np.array(bin_confidences),
-        'bin_counts': np.array(bin_counts)
-    }
-
-
-def compute_brier_score(y_true_onehot: np.ndarray, y_prob: np.ndarray) -> float:
-    """Compute Brier Score.
-
-    Args:
-        y_true_onehot: True labels (one-hot encoded)
-        y_prob: Predicted probabilities
-
-    Returns:
-        Brier Score
-    """
-    return np.mean(np.sum((y_prob - y_true_onehot) ** 2, axis=1))
-
-
-def compute_prediction_entropy_stats(y_prob: np.ndarray) -> Dict[str, float]:
-    """Compute prediction entropy statistics.
-
-    Args:
-        y_prob: Predicted probabilities
-
-    Returns:
-        Dictionary with entropy statistics
-    """
-    # Compute entropy for each prediction
-    epsilon = 1e-8
-    y_prob_clipped = np.clip(y_prob, epsilon, 1 - epsilon)
-    entropies = -np.sum(y_prob_clipped * np.log(y_prob_clipped), axis=1)
-
-    return {
-        'mean_entropy': np.mean(entropies),
-        'std_entropy': np.std(entropies),
-        'median_entropy': np.median(entropies),
-        'max_entropy': np.max(entropies),
-        'min_entropy': np.min(entropies)
-    }
-
-
-# ------------------------------------------------------------------------------
-# 5. Visualization Utilities
+# 4. Calibration Analysis Utilities
 # ------------------------------------------------------------------------------
 
-def plot_reliability_diagram(reliability_data: Dict[str, np.ndarray],
-                             model_name: str,
-                             save_path: Optional[Path] = None) -> None:
-    """Plot reliability diagram for calibration visualization.
+class CalibrationAnalyzer:
+    """Analyzer for model calibration effectiveness and reliability."""
 
-    Args:
-        reliability_data: Data from compute_reliability_data
-        model_name: Name of the model for title
-        save_path: Path to save the plot
-    """
-    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+    def __init__(self, models: Dict[str, keras.Model], config: ExperimentConfig):
+        """Initialize the calibration analyzer.
 
-    # Plot perfect calibration line
-    ax.plot([0, 1], [0, 1], 'k--', alpha=0.6, label='Perfect Calibration')
+        Args:
+            models: Dictionary of trained models
+            config: Experiment configuration
+        """
+        self.models = models
+        self.config = config
+        self.calibration_metrics: Dict[str, Dict[str, float]] = {}
+        self.reliability_data: Dict[str, Dict[str, np.ndarray]] = {}
 
-    # Plot model calibration
-    bin_centers = reliability_data['bin_centers']
-    bin_accuracies = reliability_data['bin_accuracies']
-    bin_counts = reliability_data['bin_counts']
+    def analyze_calibration(
+        self,
+        x_test: np.ndarray,
+        y_test: np.ndarray
+    ) -> Dict[str, Dict[str, float]]:
+        """Analyze calibration for all models.
 
-    # Use bin counts for marker sizes
-    sizes = 100 * bin_counts / np.max(bin_counts + 1)
+        Args:
+            x_test: Test input data
+            y_test: Test target data (one-hot encoded)
 
-    scatter = ax.scatter(bin_centers, bin_accuracies, s=sizes, alpha=0.7,
-                         label=f'{model_name} Calibration', color='red')
+        Returns:
+            Dictionary containing calibration metrics for each model
+        """
+        logger.info("Analyzing calibration effectiveness...")
 
-    ax.set_xlabel('Confidence', fontsize=12)
-    ax.set_ylabel('Accuracy', fontsize=12)
-    ax.set_title(f'Reliability Diagram - {model_name}', fontsize=14)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.set_xlim([0, 1])
-    ax.set_ylim([0, 1])
+        y_true_classes = np.argmax(y_test, axis=1)
 
-    # Add colorbar for bin counts
-    cbar = plt.colorbar(scatter, ax=ax)
-    cbar.set_label('Number of Samples', rotation=270, labelpad=15)
+        for name, model in self.models.items():
+            logger.info(f"Computing calibration metrics for {name} model...")
 
-    plt.tight_layout()
+            # Get predictions
+            y_pred_proba = model.predict(x_test, verbose=0)
 
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            # Compute calibration metrics
+            ece = compute_ece(y_true_classes, y_pred_proba, self.config.calibration_bins)
+            reliability_data = compute_reliability_data(
+                y_true_classes,
+                y_pred_proba,
+                self.config.calibration_bins
+            )
+            brier_score = compute_brier_score(y_test, y_pred_proba)
+            entropy_stats = compute_prediction_entropy_stats(y_pred_proba)
+
+            self.calibration_metrics[name] = {
+                'ece': ece,
+                'brier_score': brier_score,
+                'mean_entropy': entropy_stats['mean_entropy'],
+                'std_entropy': entropy_stats['std_entropy'],
+                'median_entropy': entropy_stats['median_entropy']
+            }
+
+            self.reliability_data[name] = reliability_data
+
+            logger.info(f"Calibration metrics for {name}:")
+            logger.info(f"  ECE: {ece:.4f}")
+            logger.info(f"  Brier Score: {brier_score:.4f}")
+            logger.info(f"  Mean Entropy: {entropy_stats['mean_entropy']:.4f}")
+
+        return self.calibration_metrics
+
+    def plot_reliability_diagrams(self, output_dir: Path) -> None:
+        """Plot reliability diagrams for all models.
+
+        Args:
+            output_dir: Directory to save plots
+        """
+        if not self.reliability_data:
+            logger.warning("No reliability data available for plotting")
+            return
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Individual reliability diagrams
+        for model_name, reliability_data in self.reliability_data.items():
+            plt.figure(figsize=(8, 8))
+
+            # Plot perfect calibration line
+            plt.plot([0, 1], [0, 1], 'k--', alpha=0.6, label='Perfect Calibration')
+
+            # Plot model calibration
+            bin_centers = reliability_data['bin_centers']
+            bin_accuracies = reliability_data['bin_accuracies']
+            bin_counts = reliability_data['bin_counts']
+
+            # Use bin counts for marker sizes
+            sizes = 100 * bin_counts / np.max(bin_counts + 1)
+
+            scatter = plt.scatter(
+                bin_centers,
+                bin_accuracies,
+                s=sizes,
+                alpha=0.7,
+                label=f'{model_name.replace("_", " ").title()} Calibration',
+                color='red'
+            )
+
+            plt.xlabel('Confidence', fontsize=12)
+            plt.ylabel('Accuracy', fontsize=12)
+            plt.title(f'Reliability Diagram - {model_name.replace("_", " ").title()}', fontsize=14)
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            plt.xlim([0, 1])
+            plt.ylim([0, 1])
+
+            # Add colorbar for bin counts
+            cbar = plt.colorbar(scatter)
+            cbar.set_label('Number of Samples', rotation=270, labelpad=15)
+
+            plt.tight_layout()
+            plt.savefig(output_dir / f'reliability_{model_name}.{self.config.plot_format}',
+                       dpi=300, bbox_inches='tight')
+            plt.close()
+
+        # Comparison reliability diagram
+        plt.figure(figsize=(10, 8))
+
+        # Perfect calibration line
+        plt.plot([0, 1], [0, 1], 'k--', alpha=0.6, linewidth=2, label='Perfect Calibration')
+
+        colors = ['blue', 'red', 'green', 'orange', 'purple']
+        markers = ['o', 's', '^', 'D', 'v']
+
+        for i, (model_name, reliability_data) in enumerate(self.reliability_data.items()):
+            color = colors[i % len(colors)]
+            marker = markers[i % len(markers)]
+
+            plt.plot(
+                reliability_data['bin_centers'],
+                reliability_data['bin_accuracies'],
+                marker=marker,
+                markersize=8,
+                linewidth=2,
+                label=model_name.replace('_', ' ').title(),
+                color=color,
+                alpha=0.8
+            )
+
+        plt.xlabel('Confidence', fontsize=14)
+        plt.ylabel('Accuracy', fontsize=14)
+        plt.title('Calibration Comparison: Loss Functions', fontsize=16)
+        plt.legend(fontsize=12)
+        plt.grid(True, alpha=0.3)
+        plt.xlim([0, 1])
+        plt.ylim([0, 1])
+
+        plt.tight_layout()
+        plt.savefig(output_dir / f'calibration_comparison.{self.config.plot_format}',
+                   dpi=300, bbox_inches='tight')
         plt.close()
-    else:
-        plt.show()
 
+        logger.info(f"Saved reliability diagrams to {output_dir}")
 
-def plot_calibration_comparison(ls_reliability: Dict[str, np.ndarray],
-                                gal_reliability: Dict[str, np.ndarray],
-                                save_path: Optional[Path] = None) -> None:
-    """Plot comparison of calibration between Label Smoothing and GoodhartAwareLoss.
+    def plot_calibration_metrics_comparison(self, output_dir: Path) -> None:
+        """Plot comparison of calibration metrics across models.
 
-    Args:
-        ls_reliability: Reliability data for Label Smoothing model
-        gal_reliability: Reliability data for GoodhartAwareLoss model
-        save_path: Path to save the plot
-    """
-    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+        Args:
+            output_dir: Directory to save plots
+        """
+        if not self.calibration_metrics:
+            logger.warning("No calibration metrics available for plotting")
+            return
 
-    # Perfect calibration line
-    ax.plot([0, 1], [0, 1], 'k--', alpha=0.6, linewidth=2, label='Perfect Calibration')
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Label Smoothing
-    ax.plot(ls_reliability['bin_centers'], ls_reliability['bin_accuracies'],
-            'o-', markersize=8, linewidth=2, label='Label Smoothing', color='blue', alpha=0.8)
+        metrics_to_plot = ['ece', 'brier_score', 'mean_entropy']
+        metric_labels = ['Expected Calibration Error', 'Brier Score', 'Mean Prediction Entropy']
 
-    # GoodhartAwareLoss
-    ax.plot(gal_reliability['bin_centers'], gal_reliability['bin_accuracies'],
-            's-', markersize=8, linewidth=2, label='GoodhartAwareLoss', color='red', alpha=0.8)
+        for metric, label in zip(metrics_to_plot, metric_labels):
+            plt.figure(figsize=(10, 6))
 
-    ax.set_xlabel('Confidence', fontsize=14)
-    ax.set_ylabel('Accuracy', fontsize=14)
-    ax.set_title('Calibration Comparison: Label Smoothing vs GoodhartAwareLoss', fontsize=16)
-    ax.legend(fontsize=12)
-    ax.grid(True, alpha=0.3)
-    ax.set_xlim([0, 1])
-    ax.set_ylim([0, 1])
+            models = list(self.calibration_metrics.keys())
+            values = [self.calibration_metrics[model][metric] for model in models]
 
-    plt.tight_layout()
+            bars = plt.bar([m.replace('_', ' ').title() for m in models], values)
+            plt.title(f'{label} Comparison')
+            plt.ylabel(label)
+            plt.xticks(rotation=45)
 
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-    else:
-        plt.show()
+            # Add value labels on bars
+            for bar, value in zip(bars, values):
+                plt.text(
+                    bar.get_x() + bar.get_width()/2,
+                    bar.get_height(),
+                    f'{value:.4f}',
+                    ha='center',
+                    va='bottom'
+                )
 
+            plt.tight_layout()
+            plt.savefig(output_dir / f'{metric}_comparison.{self.config.plot_format}',
+                       dpi=300, bbox_inches='tight')
+            plt.close()
 
-def plot_entropy_comparison(ls_entropy_stats: Dict[str, float],
-                            gal_entropy_stats: Dict[str, float],
-                            save_path: Optional[Path] = None) -> None:
-    """Plot comparison of prediction entropy statistics.
+        logger.info(f"Saved calibration metrics plots to {output_dir}")
 
-    Args:
-        ls_entropy_stats: Entropy statistics for Label Smoothing
-        gal_entropy_stats: Entropy statistics for GoodhartAwareLoss
-        save_path: Path to save the plot
-    """
-    metrics = ['mean_entropy', 'std_entropy', 'median_entropy']
-    ls_values = [ls_entropy_stats[m] for m in metrics]
-    gal_values = [gal_entropy_stats[m] for m in metrics]
+    def save_calibration_analysis(self, output_dir: Path) -> None:
+        """Save calibration analysis results to file.
 
-    x = np.arange(len(metrics))
-    width = 0.35
+        Args:
+            output_dir: Directory to save results
+        """
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+        # Save calibration statistics
+        with open(output_dir / 'calibration_statistics.txt', 'w') as f:
+            f.write("Calibration Analysis Results\n")
+            f.write("=" * 50 + "\n\n")
 
-    ax.bar(x - width / 2, ls_values, width, label='Label Smoothing', color='blue', alpha=0.7)
-    ax.bar(x + width / 2, gal_values, width, label='GoodhartAwareLoss', color='red', alpha=0.7)
+            for model_name, metrics in self.calibration_metrics.items():
+                f.write(f"{model_name.upper().replace('_', ' ')} MODEL:\n")
+                f.write("-" * 30 + "\n")
+                for metric, value in metrics.items():
+                    f.write(f"{metric.replace('_', ' ').title()}: {value:.6f}\n")
+                f.write("\n")
 
-    ax.set_xlabel('Entropy Metrics', fontsize=12)
-    ax.set_ylabel('Entropy Value', fontsize=12)
-    ax.set_title('Prediction Entropy Comparison', fontsize=14)
-    ax.set_xticks(x)
-    ax.set_xticklabels([m.replace('_', ' ').title() for m in metrics])
-    ax.legend()
-    ax.grid(True, alpha=0.3, axis='y')
-
-    # Add value labels on bars
-    for i, (ls_val, gal_val) in enumerate(zip(ls_values, gal_values)):
-        ax.text(i - width / 2, ls_val + 0.01, f'{ls_val:.3f}', ha='center', va='bottom')
-        ax.text(i + width / 2, gal_val + 0.01, f'{gal_val:.3f}', ha='center', va='bottom')
-
-    plt.tight_layout()
-
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-    else:
-        plt.show()
-
+        logger.info(f"Saved calibration analysis to {output_dir}")
 
 # ------------------------------------------------------------------------------
-# 6. Data Loading and Preprocessing
-# ------------------------------------------------------------------------------
-
-def load_and_preprocess_cifar10(config: ExperimentConfig) -> Tuple[Tuple[np.ndarray, ...], keras.utils.Sequence]:
-    """Load and preprocess CIFAR-10 dataset.
-
-    Args:
-        config: Experiment configuration
-
-    Returns:
-        Tuple of (train_data, test_data) and data generator
-    """
-    # Load CIFAR-10
-    (x_train, y_train), (x_test, y_test) = keras.datasets.cifar10.load_data()
-
-    # Normalize pixel values
-    x_train = x_train.astype('float32') / 255.0
-    x_test = x_test.astype('float32') / 255.0
-
-    # Convert labels to categorical
-    y_train = keras.utils.to_categorical(y_train, config.num_classes)
-    y_test = keras.utils.to_categorical(y_test, config.num_classes)
-
-    # Create data generator with augmentation
-    if config.use_data_augmentation:
-        datagen = keras.preprocessing.image.ImageDataGenerator(
-            rotation_range=config.rotation_range,
-            width_shift_range=config.width_shift_range,
-            height_shift_range=config.height_shift_range,
-            horizontal_flip=config.horizontal_flip,
-            validation_split=config.validation_split
-        )
-        datagen.fit(x_train)
-    else:
-        datagen = None
-
-    return (x_train, y_train, x_test, y_test), datagen
-
-
-# ------------------------------------------------------------------------------
-# 7. Experiment Runner
+# 5. Experiment Runner
 # ------------------------------------------------------------------------------
 
 def run_calibration_experiment(config: ExperimentConfig) -> Dict[str, Any]:
-    """Run the complete calibration experiment comparing Label Smoothing vs GoodhartAwareLoss.
+    """Run the complete calibration experiment with comprehensive analysis.
 
     Args:
         config: Experiment configuration
@@ -668,196 +655,191 @@ def run_calibration_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     # Set random seed for reproducibility
     keras.utils.set_random_seed(config.random_seed)
 
-    # Setup directories
+    # Setup directories and managers
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     experiment_dir = config.output_dir / f"{config.experiment_name}_{timestamp}"
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"🚀 Starting CIFAR-10 Calibration Experiment")
-    print(f"📁 Results will be saved to: {experiment_dir}")
-    print("=" * 80)
+    vis_config = VisualizationConfig()
+    vis_manager = VisualizationManager(
+        output_dir=experiment_dir / "visualizations",
+        config=vis_config,
+        timestamp_dirs=False
+    )
+
+    logger.info("🚀 Starting CIFAR-10 Calibration Experiment")
+    logger.info(f"📁 Results will be saved to: {experiment_dir}")
+    logger.info("=" * 80)
 
     # Load and preprocess data
-    print("📊 Loading CIFAR-10 dataset...")
-    (x_train, y_train, x_test, y_test), datagen = load_and_preprocess_cifar10(config)
+    logger.info("📊 Loading CIFAR-10 dataset...")
+    cifar10_data = load_and_preprocess_cifar10()
 
-    print(f"✅ Dataset loaded:")
-    print(f"   Training samples: {x_train.shape[0]}")
-    print(f"   Test samples: {x_test.shape[0]}")
-    print(f"   Input shape: {x_train.shape[1:]}")
-    print(f"   Number of classes: {config.num_classes}")
+    logger.info(f"✅ Dataset loaded:")
+    logger.info(f"   Training samples: {cifar10_data.x_train.shape[0]}")
+    logger.info(f"   Test samples: {cifar10_data.x_test.shape[0]}")
+    logger.info(f"   Input shape: {cifar10_data.x_train.shape[1:]}")
+    logger.info(f"   Number of classes: {config.num_classes}")
 
-    # Prepare validation split
-    val_split_idx = int(len(x_train) * (1 - config.validation_split))
-    x_val = x_train[val_split_idx:]
-    y_val = y_train[val_split_idx:]
-    x_train = x_train[:val_split_idx]
-    y_train = y_train[:val_split_idx]
-
-    print(f"   Training samples (after val split): {x_train.shape[0]}")
-    print(f"   Validation samples: {x_val.shape[0]}")
-
-    # Store results
-    results = {
-        'config': config,
-        'models': {},
-        'histories': {},
-        'predictions': {},
-        'calibration_metrics': {},
-        'performance_metrics': {}
+    # Train models
+    models = {}
+    all_histories = {
+        'accuracy': {},
+        'loss': {},
+        'val_accuracy': {},
+        'val_loss': {}
     }
 
-    # Train both models
-    model_configs = [
-        ('label_smoothing', 'Label Smoothing'),
-        ('goodhart_aware', 'GoodhartAwareLoss')
-    ]
-
-    for model_type, model_name in model_configs:
-        print(f"\n🏗️  Building and training {model_name} model...")
-        print("-" * 50)
+    # Training phase
+    for loss_name, loss_fn_factory in config.loss_functions.items():
+        logger.info(f"\n🏗️  Building and training {loss_name} model...")
+        logger.info("-" * 50)
 
         # Build model
-        model = build_cnn_model(config, loss_type=model_type)
-        print(f"✅ Model built with {model.count_params():,} parameters")
+        loss_fn = loss_fn_factory()
+        model = build_model(config, loss_fn, loss_name)
 
-        # Setup callbacks
-        callbacks = [
-            keras.callbacks.EarlyStopping(
-                monitor=config.monitor_metric,
-                patience=config.early_stopping_patience,
-                restore_best_weights=True,
-                verbose=1
-            ),
-            keras.callbacks.ReduceLROnPlateau(
-                monitor=config.monitor_metric,
-                factor=config.reduce_lr_factor,
-                patience=config.reduce_lr_patience,
-                verbose=1,
-                min_lr=1e-7
-            )
-        ]
+        logger.info(f"✅ Model built with {model.count_params():,} parameters")
 
-        if config.save_models:
-            model_dir = experiment_dir / model_type
-            model_dir.mkdir(exist_ok=True)
-            callbacks.append(
-                keras.callbacks.ModelCheckpoint(
-                    filepath=str(model_dir / 'best_model.keras'),
-                    monitor=config.monitor_metric,
-                    save_best_only=True,
-                    verbose=1
-                )
-            )
+        # Configure training for this model
+        training_config = TrainingConfig(
+            epochs=config.epochs,
+            batch_size=config.batch_size,
+            early_stopping_patience=config.early_stopping_patience,
+            monitor_metric=config.monitor_metric,
+            model_name=loss_name,
+            output_dir=experiment_dir / loss_name
+        )
 
-        # Train model
-        print(f"🏃 Training {model_name} model...")
-        if config.use_data_augmentation and datagen is not None:
-            history = model.fit(
-                datagen.flow(x_train, y_train, batch_size=config.batch_size, subset='training'),
-                epochs=config.epochs,
-                validation_data=(x_val, y_val),
-                callbacks=callbacks,
-                verbose=1
-            )
+        # Train the model
+        logger.info(f"🏃 Training {loss_name} model...")
+        history = train_model(
+            model,
+            cifar10_data.x_train,
+            cifar10_data.y_train,
+            cifar10_data.x_test,
+            cifar10_data.y_test,
+            training_config
+        )
+
+        # Store the model and history
+        models[loss_name] = model
+        for metric in ['accuracy', 'loss']:
+            all_histories[metric][loss_name] = history.history[metric]
+            all_histories[f'val_{metric}'][loss_name] = history.history[f'val_{metric}']
+
+        logger.info(f"✅ {loss_name} training completed!")
+        logger.info(f"   Best val accuracy: {max(history.history['val_accuracy']):.4f}")
+        logger.info(f"   Final val loss: {min(history.history['val_loss']):.4f}")
+
+    # Weight Analysis phase
+    logger.info("\n📊 Performing weight distribution analysis...")
+
+    try:
+        analysis_config = WeightAnalyzerConfig(
+            compute_l1_norm=config.compute_l1_norm,
+            compute_l2_norm=config.compute_l2_norm,
+            compute_rms_norm=config.compute_rms_norm,
+            analyze_biases=config.analyze_biases,
+            save_plots=config.save_plots,
+            export_format=config.plot_format
+        )
+
+        weight_analyzer = WeightAnalyzer(
+            models=models,
+            config=analysis_config,
+            output_dir=experiment_dir / "weight_analysis"
+        )
+
+        if weight_analyzer.has_valid_analysis():
+            weight_analyzer.plot_comprehensive_dashboard()
+            weight_analyzer.plot_norm_distributions()
+            weight_analyzer.plot_layer_comparisons(['mean', 'std', 'l2_norm'])
+            weight_analyzer.save_analysis_results()
+            logger.info("✅ Weight analysis completed successfully!")
         else:
-            history = model.fit(
-                x_train, y_train,
-                batch_size=config.batch_size,
-                epochs=config.epochs,
-                validation_data=(x_val, y_val),
-                callbacks=callbacks,
-                verbose=1
+            logger.warning("❌ No valid weight data found for analysis")
+
+    except Exception as e:
+        logger.error(f"Weight analysis failed: {e}")
+        logger.info("Continuing with experiment without weight analysis...")
+
+    # Calibration Analysis phase
+    if config.analyze_calibration:
+        logger.info("\n🎯 Performing calibration effectiveness analysis...")
+
+        try:
+            calibration_analyzer = CalibrationAnalyzer(models, config)
+            calibration_metrics = calibration_analyzer.analyze_calibration(
+                cifar10_data.x_test,
+                cifar10_data.y_test
             )
 
-        # Store model and history
-        results['models'][model_type] = model
-        results['histories'][model_type] = history.history
+            # Generate calibration visualizations
+            calibration_dir = experiment_dir / "calibration_analysis"
+            calibration_analyzer.plot_reliability_diagrams(calibration_dir)
+            calibration_analyzer.plot_calibration_metrics_comparison(calibration_dir)
+            calibration_analyzer.save_calibration_analysis(calibration_dir)
 
-        print(f"✅ {model_name} training completed!")
-        print(f"   Best val accuracy: {max(history.history['val_accuracy']):.4f}")
-        print(f"   Final val loss: {min(history.history['val_loss']):.4f}")
+            logger.info("✅ Calibration analysis completed successfully!")
 
-    # Evaluation phase
-    print(f"\n📈 Evaluating models and computing calibration metrics...")
-    print("=" * 80)
+        except Exception as e:
+            logger.error(f"Calibration analysis failed: {e}")
+            calibration_metrics = {}
 
-    for model_type, model_name in model_configs:
-        model = results['models'][model_type]
-
-        # Get predictions
-        print(f"\n🔍 Analyzing {model_name}...")
-        y_pred_proba = model.predict(x_test, verbose=0)
-        y_pred_classes = np.argmax(y_pred_proba, axis=1)
-        y_true_classes = np.argmax(y_test, axis=1)
-
-        results['predictions'][model_type] = {
-            'probabilities': y_pred_proba,
-            'classes': y_pred_classes
+    # Generate training history visualizations
+    for metric in ['accuracy', 'loss']:
+        combined_histories = {
+            name: {
+                metric: all_histories[metric][name],
+                f'val_{metric}': all_histories[f'val_{metric}'][name]
+            }
+            for name in models.keys()
         }
 
-        # Compute performance metrics
-        accuracy = np.mean(y_pred_classes == y_true_classes)
-        top5_accuracy = keras.metrics.top_k_categorical_accuracy(y_test, y_pred_proba, k=5).numpy().mean()
-
-        results['performance_metrics'][model_type] = {
-            'accuracy': accuracy,
-            'top5_accuracy': top5_accuracy,
-        }
-
-        # Compute calibration metrics
-        ece = compute_ece(y_true_classes, y_pred_proba, config.calibration_bins)
-        reliability_data = compute_reliability_data(y_true_classes, y_pred_proba, config.calibration_bins)
-        brier_score = compute_brier_score(y_test, y_pred_proba)
-        entropy_stats = compute_prediction_entropy_stats(y_pred_proba)
-
-        results['calibration_metrics'][model_type] = {
-            'ece': ece,
-            'brier_score': brier_score,
-            'reliability_data': reliability_data,
-            'entropy_stats': entropy_stats
-        }
-
-        print(f"   📊 Performance Metrics:")
-        print(f"      Accuracy: {accuracy:.4f}")
-        print(f"      Top-5 Accuracy: {top5_accuracy:.4f}")
-        print(f"   🎯 Calibration Metrics:")
-        print(f"      ECE: {ece:.4f}")
-        print(f"      Brier Score: {brier_score:.4f}")
-        print(f"      Mean Entropy: {entropy_stats['mean_entropy']:.4f}")
-
-    # Generate visualizations
-    if config.save_plots:
-        print(f"\n📊 Generating visualizations...")
-        viz_dir = experiment_dir / "visualizations"
-        viz_dir.mkdir(exist_ok=True)
-
-        # Plot reliability diagrams
-        for model_type, model_name in model_configs:
-            reliability_data = results['calibration_metrics'][model_type]['reliability_data']
-            plot_reliability_diagram(
-                reliability_data,
-                model_name,
-                viz_dir / f"reliability_{model_type}.{config.plot_format}"
-            )
-
-        # Plot calibration comparison
-        plot_calibration_comparison(
-            results['calibration_metrics']['label_smoothing']['reliability_data'],
-            results['calibration_metrics']['goodhart_aware']['reliability_data'],
-            viz_dir / f"calibration_comparison.{config.plot_format}"
+        vis_manager.plot_history(
+            combined_histories,
+            [metric],
+            f'training_{metric}_comparison',
+            title=f'Loss Functions {metric.capitalize()} Comparison'
         )
 
-        # Plot entropy comparison
-        plot_entropy_comparison(
-            results['calibration_metrics']['label_smoothing']['entropy_stats'],
-            results['calibration_metrics']['goodhart_aware']['entropy_stats'],
-            viz_dir / f"entropy_comparison.{config.plot_format}"
-        )
+    # Generate predictions for confusion matrices
+    model_predictions = {}
+    for name, model in models.items():
+        predictions = model.predict(cifar10_data.x_test, verbose=0)
+        model_predictions[name] = predictions
 
-        print(f"✅ Visualizations saved to {viz_dir}")
+    # Plot confusion matrices comparison
+    class_names = ['airplane', 'automobile', 'bird', 'cat', 'deer',
+                   'dog', 'frog', 'horse', 'ship', 'truck']
 
-    # Print summary results
+    vis_manager.plot_confusion_matrices_comparison(
+        y_true=np.argmax(cifar10_data.y_test, axis=1),
+        model_predictions=model_predictions,
+        name='loss_function_confusion_matrices',
+        subdir='model_comparison',
+        normalize=True,
+        class_names=class_names
+    )
+
+    # Analyze model performance
+    logger.info("\n📈 Analyzing model performance...")
+    analyzer = ModelAnalyzer(models, vis_manager)
+    performance_results = analyzer.analyze_models(cifar10_data)
+
+    # Combine all results
+    results = {
+        'models': models,
+        'histories': all_histories,
+        'performance_analysis': performance_results,
+        'experiment_config': config
+    }
+
+    if config.analyze_calibration:
+        results['calibration_analysis'] = calibration_metrics
+
+    # Print comprehensive results summary
     print_experiment_summary(results)
 
     return results
@@ -869,137 +851,93 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     Args:
         results: Dictionary containing all experiment results
     """
-    print(f"\n" + "=" * 80)
-    print(f"📋 EXPERIMENT SUMMARY")
-    print(f"=" * 80)
+    logger.info("\n" + "=" * 80)
+    logger.info("📋 EXPERIMENT SUMMARY")
+    logger.info("=" * 80)
 
     # Performance comparison
-    print(f"\n🎯 PERFORMANCE METRICS:")
-    print(f"{'Metric':<20} {'Label Smoothing':<18} {'GoodhartAwareLoss':<18} {'Difference':<12}")
-    print(f"-" * 70)
+    logger.info("\n🎯 PERFORMANCE METRICS:")
+    logger.info(f"{'Model':<20} {'Accuracy':<12} {'Top-5 Acc':<12}")
+    logger.info("-" * 50)
 
-    ls_perf = results['performance_metrics']['label_smoothing']
-    gal_perf = results['performance_metrics']['goodhart_aware']
-
-    accuracy_diff = gal_perf['accuracy'] - ls_perf['accuracy']
-    top5_diff = gal_perf['top5_accuracy'] - ls_perf['top5_accuracy']
-
-    print(f"{'Accuracy':<20} {ls_perf['accuracy']:<18.4f} {gal_perf['accuracy']:<18.4f} {accuracy_diff:<+12.4f}")
-    print(
-        f"{'Top-5 Accuracy':<20} {ls_perf['top5_accuracy']:<18.4f} {gal_perf['top5_accuracy']:<18.4f} {top5_diff:<+12.4f}")
+    for model_name, metrics in results['performance_analysis'].items():
+        if isinstance(metrics, dict):
+            accuracy = metrics.get('accuracy', 0.0)
+            top5_acc = metrics.get('top5_accuracy', 0.0)
+            logger.info(f"{model_name:<20} {accuracy:<12.4f} {top5_acc:<12.4f}")
 
     # Calibration comparison
-    print(f"\n🎯 CALIBRATION METRICS:")
-    print(f"{'Metric':<20} {'Label Smoothing':<18} {'GoodhartAwareLoss':<18} {'Difference':<12}")
-    print(f"-" * 70)
+    if 'calibration_analysis' in results:
+        logger.info("\n🎯 CALIBRATION METRICS:")
+        logger.info(f"{'Model':<20} {'ECE':<12} {'Brier Score':<15} {'Mean Entropy':<12}")
+        logger.info("-" * 65)
 
-    ls_cal = results['calibration_metrics']['label_smoothing']
-    gal_cal = results['calibration_metrics']['goodhart_aware']
+        for model_name, cal_metrics in results['calibration_analysis'].items():
+            logger.info(
+                f"{model_name:<20} "
+                f"{cal_metrics['ece']:<12.4f} "
+                f"{cal_metrics['brier_score']:<15.4f} "
+                f"{cal_metrics['mean_entropy']:<12.4f}"
+            )
 
-    ece_diff = gal_cal['ece'] - ls_cal['ece']
-    brier_diff = gal_cal['brier_score'] - ls_cal['brier_score']
-    entropy_diff = gal_cal['entropy_stats']['mean_entropy'] - ls_cal['entropy_stats']['mean_entropy']
+    # Final training metrics
+    logger.info("\n🏁 FINAL TRAINING METRICS:")
+    logger.info(f"{'Model':<20} {'Val Accuracy':<15} {'Val Loss':<12}")
+    logger.info("-" * 50)
 
-    print(f"{'ECE':<20} {ls_cal['ece']:<18.4f} {gal_cal['ece']:<18.4f} {ece_diff:<+12.4f}")
-    print(f"{'Brier Score':<20} {ls_cal['brier_score']:<18.4f} {gal_cal['brier_score']:<18.4f} {brier_diff:<+12.4f}")
-    print(
-        f"{'Mean Entropy':<20} {ls_cal['entropy_stats']['mean_entropy']:<18.4f} {gal_cal['entropy_stats']['mean_entropy']:<18.4f} {entropy_diff:<+12.4f}")
+    for model_name in results['models'].keys():
+        final_val_acc = results['histories']['val_accuracy'][model_name][-1]
+        final_val_loss = results['histories']['val_loss'][model_name][-1]
+        logger.info(f"{model_name:<20} {final_val_acc:<15.4f} {final_val_loss:<12.4f}")
 
-    # Interpretation
-    print(f"\n🔍 INTERPRETATION:")
-
-    # Accuracy interpretation
-    if abs(accuracy_diff) < 0.01:
-        accuracy_verdict = "✅ Similar accuracy (good)"
-    elif accuracy_diff < -0.02:
-        accuracy_verdict = "⚠️  GAL accuracy notably lower"
-    else:
-        accuracy_verdict = "✅ GAL accuracy maintained or improved"
-
-    # ECE interpretation (lower is better)
-    if ece_diff < -0.01:
-        ece_verdict = "✅ GAL significantly better calibrated"
-    elif ece_diff < 0.01:
-        ece_verdict = "✅ Similar calibration"
-    else:
-        ece_verdict = "❌ GAL worse calibrated"
-
-    # Entropy interpretation (higher is generally better for avoiding overconfidence)
-    if entropy_diff > 0.1:
-        entropy_verdict = "✅ GAL less overconfident"
-    elif entropy_diff > 0.05:
-        entropy_verdict = "✅ GAL slightly less overconfident"
-    else:
-        entropy_verdict = "➖ Similar confidence levels"
-
-    print(f"   Accuracy: {accuracy_verdict}")
-    print(f"   Calibration: {ece_verdict}")
-    print(f"   Overconfidence: {entropy_verdict}")
-
-    # Overall verdict
-    print(f"\n🏆 OVERALL VERDICT:")
-    calibration_improved = ece_diff < -0.005
-    accuracy_maintained = accuracy_diff > -0.02
-    entropy_improved = entropy_diff > 0.05
-
-    if calibration_improved and accuracy_maintained:
-        if entropy_improved:
-            verdict = "🎉 STRONG SUPPORT for GoodhartAwareLoss: Better calibration, maintained accuracy, reduced overconfidence"
-        else:
-            verdict = "✅ SUPPORT for GoodhartAwareLoss: Better calibration with maintained accuracy"
-    elif calibration_improved:
-        verdict = "⚠️  MIXED RESULTS: Better calibration but accuracy trade-off"
-    else:
-        verdict = "❌ LIMITED SUPPORT: No clear calibration improvement"
-
-    print(f"   {verdict}")
-    print(f"=" * 80)
-
+    logger.info("=" * 80)
 
 # ------------------------------------------------------------------------------
-# 8. Main Execution
+# 6. Main Execution
 # ------------------------------------------------------------------------------
 
-def main():
+def main() -> None:
     """Main execution function for running the calibration experiment."""
-    print("🚀 CIFAR-10 Calibration Experiment: GoodhartAwareLoss vs Label Smoothing")
-    print("=" * 80)
+    logger.info("🚀 CIFAR-10 Calibration Experiment: Loss Function Comparison")
+    logger.info("=" * 80)
 
     # Create configuration
     config = ExperimentConfig()
 
     # Display configuration
-    print("⚙️  EXPERIMENT CONFIGURATION:")
-    print(f"   Dataset: {config.dataset_name.upper()}")
-    print(f"   Epochs: {config.epochs}")
-    print(f"   Batch Size: {config.batch_size}")
-    print(f"   Learning Rate: {config.learning_rate}")
-    print(f"   Label Smoothing α: {config.label_smoothing_alpha}")
-    print(f"   GAL Temperature: {config.gal_temperature}")
-    print(f"   GAL Entropy Weight: {config.gal_entropy_weight}")
-    print(f"   GAL MI Weight: {config.gal_mi_weight}")
-    print(f"   Calibration Bins: {config.calibration_bins}")
-    print()
+    logger.info("⚙️  EXPERIMENT CONFIGURATION:")
+    logger.info(f"   Dataset: {config.dataset_name.upper()}")
+    logger.info(f"   Epochs: {config.epochs}")
+    logger.info(f"   Batch Size: {config.batch_size}")
+    logger.info(f"   Learning Rate: {config.learning_rate}")
+    logger.info(f"   Loss Functions: {list(config.loss_functions.keys())}")
+    logger.info(f"   Label Smoothing α: {config.label_smoothing_alpha}")
+    logger.info(f"   GAL Temperature: {config.gal_temperature}")
+    logger.info(f"   GAL Entropy Weight: {config.gal_entropy_weight}")
+    logger.info(f"   GAL MI Weight: {config.gal_mi_weight}")
+    logger.info(f"   Calibration Bins: {config.calibration_bins}")
+    logger.info("")
 
     # Run experiment
     try:
         results = run_calibration_experiment(config)
-        print(f"\n✅ Experiment completed successfully!")
+        logger.info("\n✅ Experiment completed successfully!")
 
         # Save results summary
-        summary_path = Path(results['config'].output_dir) / "experiment_summary.txt"
+        summary_path = results['experiment_config'].output_dir / "experiment_summary.txt"
         with open(summary_path, 'w') as f:
             f.write("CIFAR-10 Calibration Experiment Results\n")
             f.write("=" * 50 + "\n\n")
-            f.write(f"Configuration:\n")
-            for key, value in results['config'].__dict__.items():
-                f.write(f"  {key}: {value}\n")
+            f.write("Configuration:\n")
+            for key, value in results['experiment_config'].__dict__.items():
+                if not callable(value):
+                    f.write(f"  {key}: {value}\n")
             f.write(f"\nResults saved to: {summary_path.parent}\n")
 
         return results
 
     except Exception as e:
-        print(f"❌ Experiment failed with error: {e}")
+        logger.error(f"❌ Experiment failed with error: {e}")
         raise
 
 

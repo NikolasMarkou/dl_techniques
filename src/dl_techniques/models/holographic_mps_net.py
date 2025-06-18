@@ -42,13 +42,6 @@ composed of multiple, parallel branches. The single latent vector is fed into al
 - **High-Entropy Branches:** Forced to learn local, detailed features.
 - The final output is created by combining the representations from all these "scales."
 
-The decoding process can be visualized as:
-
-.. math::
-    z &= Encoder(x) \\
-    y_i &= Decoder\_Branch_i(z) \\text{ where each branch has a different entropy target} \\
-    y_{combined} &= concatenate(y_1, y_2, ..., y_N)
-
 This creates a "holographic" representation where the complete information is distributed
 across specialized feature sets.
 
@@ -344,14 +337,6 @@ class HolographicEncoderDecoder(keras.Model):
         - High-entropy branches encode local, fine-grained features
         - Together they form a holographic representation where information is
           distributed across different "scales" or "layers"
-
-        Mathematically, the process is:
-
-        .. math::
-            z &= MPS_{encoder}(flatten(x)) \\\\
-            y_i &= MPS_{decoder_i}(z) \\text{ for } i=1...N \\\\
-            y_{combined} &= concatenate(y_1, y_2, ..., y_N) \\\\
-            y &= projection(y_{combined})
 
         This multi-scale approach resembles holographic principles where information
         about a system is encoded at different "scales" or "regions" of the representation,

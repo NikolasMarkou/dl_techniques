@@ -11,6 +11,7 @@ from keras import ops
 from enum import Enum
 from typing import Union, Callable, Dict, List
 
+# ---------------------------------------------------------------------
 
 class CorruptionSeverity(Enum):
     """
@@ -29,6 +30,8 @@ class CorruptionSeverity(Enum):
     STRONG = 4
     SEVERE = 5
 
+# ---------------------------------------------------------------------
+
 
 class CorruptionType(Enum):
     """
@@ -44,6 +47,8 @@ class CorruptionType(Enum):
     BRIGHTNESS = "brightness"
     CONTRAST = "contrast"
     SATURATE = "saturate"
+
+# ---------------------------------------------------------------------
 
 
 def _create_gaussian_kernel_1d(size: int, sigma: float) -> keras.KerasTensor:
@@ -67,6 +72,7 @@ def _create_gaussian_kernel_1d(size: int, sigma: float) -> keras.KerasTensor:
 
     return kernel
 
+# ---------------------------------------------------------------------
 
 def _apply_separable_gaussian_blur(image: keras.KerasTensor, sigma: float) -> keras.KerasTensor:
     """
@@ -134,6 +140,7 @@ def _apply_separable_gaussian_blur(image: keras.KerasTensor, sigma: float) -> ke
 
     return blurred
 
+# ---------------------------------------------------------------------
 
 def apply_gaussian_noise(image: keras.KerasTensor, severity: CorruptionSeverity) -> keras.KerasTensor:
     """
@@ -158,6 +165,7 @@ def apply_gaussian_noise(image: keras.KerasTensor, severity: CorruptionSeverity)
     noise = keras.random.normal(ops.shape(image), mean=0.0, stddev=noise_std, dtype=image.dtype)
     return ops.clip(image + noise, ops.cast(0, image.dtype), ops.cast(1, image.dtype))
 
+# ---------------------------------------------------------------------
 
 def apply_impulse_noise(image: keras.KerasTensor, severity: CorruptionSeverity) -> keras.KerasTensor:
     """
@@ -200,6 +208,7 @@ def apply_impulse_noise(image: keras.KerasTensor, severity: CorruptionSeverity) 
 
     return corrupted
 
+# ---------------------------------------------------------------------
 
 def apply_shot_noise(image: keras.KerasTensor, severity: CorruptionSeverity) -> keras.KerasTensor:
     """
@@ -244,6 +253,7 @@ def apply_shot_noise(image: keras.KerasTensor, severity: CorruptionSeverity) -> 
 
     return ops.clip(noisy_image, 0, 1)
 
+# ---------------------------------------------------------------------
 
 def apply_gaussian_blur(image: keras.KerasTensor, severity: CorruptionSeverity) -> keras.KerasTensor:
     """
@@ -267,6 +277,7 @@ def apply_gaussian_blur(image: keras.KerasTensor, severity: CorruptionSeverity) 
     sigma = sigma_values[severity]
     return _apply_separable_gaussian_blur(image, sigma)
 
+# ---------------------------------------------------------------------
 
 def apply_motion_blur(image: keras.KerasTensor, severity: CorruptionSeverity) -> keras.KerasTensor:
     """
@@ -337,6 +348,7 @@ def apply_motion_blur(image: keras.KerasTensor, severity: CorruptionSeverity) ->
 
     return ops.clip(blurred, ops.cast(0, image.dtype), ops.cast(1, image.dtype))
 
+# ---------------------------------------------------------------------
 
 def apply_pixelate(image: keras.KerasTensor, severity: CorruptionSeverity) -> keras.KerasTensor:
     """
@@ -433,6 +445,7 @@ def apply_pixelate(image: keras.KerasTensor, severity: CorruptionSeverity) -> ke
 
     return result
 
+# ---------------------------------------------------------------------
 
 def apply_quantize(image: keras.KerasTensor, severity: CorruptionSeverity) -> keras.KerasTensor:
     """
@@ -462,6 +475,7 @@ def apply_quantize(image: keras.KerasTensor, severity: CorruptionSeverity) -> ke
 
     return ops.clip(quantized, ops.cast(0, image.dtype), ops.cast(1, image.dtype))
 
+# ---------------------------------------------------------------------
 
 def apply_brightness(image: keras.KerasTensor, severity: CorruptionSeverity) -> keras.KerasTensor:
     """
@@ -486,6 +500,7 @@ def apply_brightness(image: keras.KerasTensor, severity: CorruptionSeverity) -> 
     brightness_factor = ops.cast(brightness_factor, image.dtype)
     return ops.clip(image * brightness_factor, ops.cast(0, image.dtype), ops.cast(1, image.dtype))
 
+# ---------------------------------------------------------------------
 
 def apply_contrast(image: keras.KerasTensor, severity: CorruptionSeverity) -> keras.KerasTensor:
     """
@@ -511,6 +526,7 @@ def apply_contrast(image: keras.KerasTensor, severity: CorruptionSeverity) -> ke
     midpoint = ops.cast(0.5, image.dtype)
     return ops.clip((image - midpoint) * contrast_factor + midpoint, ops.cast(0, image.dtype), ops.cast(1, image.dtype))
 
+# ---------------------------------------------------------------------
 
 def apply_saturate(image: keras.KerasTensor, severity: CorruptionSeverity) -> keras.KerasTensor:
     """
@@ -542,6 +558,7 @@ def apply_saturate(image: keras.KerasTensor, severity: CorruptionSeverity) -> ke
 
     return ops.clip(saturated, ops.cast(0, image.dtype), ops.cast(1, image.dtype))
 
+# ---------------------------------------------------------------------
 
 def get_corruption_function(corruption_type: Union[CorruptionType, str]) -> Callable[[keras.KerasTensor, CorruptionSeverity], keras.KerasTensor]:
     """
@@ -582,6 +599,7 @@ def get_corruption_function(corruption_type: Union[CorruptionType, str]) -> Call
 
     return corruption_functions[corruption_type]
 
+# ---------------------------------------------------------------------
 
 def apply_corruption(
     image: keras.KerasTensor,
@@ -602,6 +620,7 @@ def apply_corruption(
     corruption_fn = get_corruption_function(corruption_type)
     return corruption_fn(image, severity)
 
+# ---------------------------------------------------------------------
 
 def get_all_corruption_types() -> List[CorruptionType]:
     """
@@ -612,6 +631,7 @@ def get_all_corruption_types() -> List[CorruptionType]:
     """
     return list(CorruptionType)
 
+# ---------------------------------------------------------------------
 
 def get_all_severity_levels() -> List[CorruptionSeverity]:
     """
@@ -621,3 +641,7 @@ def get_all_severity_levels() -> List[CorruptionSeverity]:
         List of all severity levels
     """
     return list(CorruptionSeverity)
+
+# ---------------------------------------------------------------------
+
+

@@ -12,17 +12,17 @@ from .common import normalize_images, get_data_shape, Dataset
 
 # ---------------------------------------------------------------------
 
-MNISTData = Dataset
+CIFAR10Data = Dataset
 
 # ---------------------------------------------------------------------
 
 
-def load_and_preprocess_mnist(
+def load_and_preprocess_cifar10(
         num_classes: int = 10,
-        add_channel_dim: bool = True,
+        add_channel_dim: bool = False,
         validation_split: Optional[float] = None
-) -> MNISTData:
-    """Load and preprocess MNIST dataset.
+) -> CIFAR10Data:
+    """Load and preprocess CIFAR10 dataset.
 
     Args:
         num_classes: Number of output classes for one-hot encoding
@@ -30,15 +30,15 @@ def load_and_preprocess_mnist(
         validation_split: Optional fraction of training data to use as validation
 
     Returns:
-        MNISTData containing preprocessed training and test splits
+        CIFAR10Data containing preprocessed training and test splits
 
     Raises:
         ValueError: If validation_split is not in range [0, 1]
         RuntimeError: If dataset loading fails
     """
     try:
-        logger.info("Loading MNIST dataset...")
-        (x_train, y_train), (x_test, y_test) = datasets.mnist.load_data()
+        logger.info("Loading CIFAR10 dataset...")
+        (x_train, y_train), (x_test, y_test) = datasets.cifar10.load_data()
 
         # Normalize pixel values
         logger.info("Normalizing pixel values...")
@@ -71,13 +71,13 @@ def load_and_preprocess_mnist(
             x_train = x_train[:split_idx]
             y_train = y_train[:split_idx]
 
-            return MNISTData(x_train, y_train, x_val, y_val)
+            return CIFAR10Data(x_train, y_train, x_val, y_val)
 
-        return MNISTData(x_train, y_train, x_test, y_test)
+        return CIFAR10Data(x_train, y_train, x_test, y_test)
 
     except Exception as e:
-        logger.error(f"Error loading or preprocessing MNIST dataset: {str(e)}")
-        raise RuntimeError("Failed to load or preprocess MNIST dataset") from e
+        logger.error(f"Error loading or preprocessing CIFAR10Data dataset: {str(e)}")
+        raise RuntimeError("Failed to load or preprocess CIFAR10Data dataset") from e
 
 # ---------------------------------------------------------------------
 

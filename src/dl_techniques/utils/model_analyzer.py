@@ -323,22 +323,21 @@ Methods:
 import keras
 import numpy as np
 from tqdm import tqdm
-import seaborn as sns
-from scipy import stats
-from pathlib import Path
-from datetime import datetime
 import matplotlib.pyplot as plt
-from dataclasses import dataclass
-from scipy.stats import wasserstein_distance
 from scipy.spatial.distance import jensenshannon
-from typing import Union, Optional, Tuple, Dict, Any, List
+from typing import Optional, Tuple, Dict, Any, List
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import roc_curve, auc, precision_recall_curve
-from itertools import combinations
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
+from .logger import logger
 from .datasets import MNISTData
 from .visualization_manager import VisualizationManager
+
+# ---------------------------------------------------------------------
 
 
 class ModelAnalyzer:
@@ -564,7 +563,7 @@ class ModelAnalyzer:
         y_true = np.argmax(y_sample, axis=1)
 
         # CONSOLIDATED INFERENCE PHASE - DO ALL PREDICTIONS AT ONCE
-        print("🔮 Performing consolidated model inference (this may take a moment)...")
+        logger.info("🔮 Performing consolidated model inference (this may take a moment)...")
 
         # 1. Original predictions for all models
         model_predictions = {}
@@ -576,7 +575,7 @@ class ModelAnalyzer:
             model_confidences[model_name] = self._compute_confidence_metrics(predictions)
 
         # 2. Predictions for stability analysis (pre-compute noisy samples)
-        print("🔄 Pre-computing predictions for stability analysis...")
+        logger.info("🔄 Pre-computing predictions for stability analysis...")
         noise_levels = [0.01, 0.05, 0.1]
         stability_predictions = {}
 
@@ -599,7 +598,7 @@ class ModelAnalyzer:
                 stability_predictions[model_name]['noisy'][noise_std] = model.predict(noisy_x, verbose=0)
 
         # 3. Sample-level stability analysis (batch process)
-        print("🎯 Computing sample-level stability predictions...")
+        logger.info("🎯 Computing sample-level stability predictions...")
         sample_stability_data = {}
         first_model_name = list(self.models.keys())[0]
         first_model = self.models[first_model_name]
@@ -646,7 +645,7 @@ class ModelAnalyzer:
             'original_confidence': np.max(original_preds_stability[:len(sample_stabilities)], axis=1)
         }
 
-        print("✅ All predictions computed! Generating visualizations...")
+        logger.info("✅ All predictions computed! Generating visualizations...")
 
         # Create comprehensive visualization using pre-computed predictions
         self._plot_probability_distributions(model_predictions, y_true)
@@ -656,23 +655,23 @@ class ModelAnalyzer:
         self._plot_uncertainty_landscapes(model_confidences)
 
         # New comprehensive analyses using pre-computed predictions
-        print("🤝 Analyzing model agreement patterns...")
+        logger.info("🤝 Analyzing model agreement patterns...")
         self._plot_model_agreement_analysis(model_predictions, y_true)
-        print("📏 Computing statistical distribution distances...")
+        logger.info("📏 Computing statistical distribution distances...")
         self._plot_distribution_distances(model_predictions)
-        print("📊 Performing ROC analysis for confidence...")
+        logger.info("📊 Performing ROC analysis for confidence...")
         self._plot_confidence_roc_analysis(model_predictions, y_true)
-        print("🔄 Analyzing prediction stability...")
+        logger.info("🔄 Analyzing prediction stability...")
         self._plot_prediction_stability_consolidated(stability_predictions, y_stability, sample_stability_data, noise_levels)
-        print("🔗 Analyzing confidence metric correlations...")
+        logger.info("🔗 Analyzing confidence metric correlations...")
         self._plot_confidence_correlations(model_confidences)
-        print("🎯 Computing per-class calibration curves...")
+        logger.info("🎯 Computing per-class calibration curves...")
         self._plot_per_class_calibration(model_predictions, y_true)
-        print("⚖️ Performing threshold analysis...")
+        logger.info("⚖️ Performing threshold analysis...")
         self._plot_threshold_analysis(model_predictions, y_true)
 
         # Information flow analysis using pre-computed activations
-        print("🌊 Analyzing information flow between layers...")
+        logger.info("🌊 Analyzing information flow between layers...")
         self._analyze_information_flow(x_sample)
 
     def _plot_probability_distributions(
@@ -1583,7 +1582,7 @@ class ModelAnalyzer:
     def _analyze_information_flow(self, x_sample: np.ndarray) -> None:
         """Comprehensive information flow analysis between layers."""
         # Extract activations from all layers for all models
-        print("🔍 Extracting multi-layer activations...")
+        logger.info("🔍 Extracting multi-layer activations...")
         model_layer_activations = {}
 
         # Use smaller sample for computational efficiency
@@ -2283,13 +2282,13 @@ class ModelAnalyzer:
         results = {}
 
         # Model evaluation
-        print("📈 Evaluating model performance...")
+        logger.info("📈 Evaluating model performance...")
         for name, model in tqdm(self.models.items(), desc="Model Evaluation"):
             evaluation = model.evaluate(data.x_test, data.y_test, verbose=0)
             results[name] = dict(zip(model.metrics_names, evaluation))
 
         # Create comprehensive visualization
-        print("🖼️ Creating activation map visualizations...")
+        logger.info("🖼️ Creating activation map visualizations...")
         self.create_comprehensive_visualization(
             data,
             sample_digits,
@@ -2297,8 +2296,10 @@ class ModelAnalyzer:
         )
 
         # Create probability distribution analysis
-        print("🧠 Starting comprehensive probability distribution analysis...")
+        logger.info("🧠 Starting comprehensive probability distribution analysis...")
         self.create_probability_distribution_analysis(data)
 
-        print("✅ Model analysis completed! All visualizations saved.")
+        logger.info("✅ Model analysis completed! All visualizations saved.")
         return results
+
+# ---------------------------------------------------------------------
