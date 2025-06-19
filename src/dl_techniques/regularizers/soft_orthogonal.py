@@ -86,8 +86,9 @@ from typing import Dict, Any, Optional, Union
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
-from dl_techniques.utils.tensors import gram_matrix
+
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.tensors import gram_matrix
 
 # ---------------------------------------------------------------------
 # Constants
@@ -256,12 +257,12 @@ class SoftOrthogonalConstraintRegularizer(keras.regularizers.Regularizer):
 
         # Add L1 regularization if enabled
         if self._use_l1 and self._l1 is not None:
-            l1_loss = self._l1(wt_w_masked)
+            l1_loss = self._l1(x)
             result = ops.add(result, l1_loss)
 
         # Add L2 regularization if enabled
         if self._use_l2 and self._l2 is not None:
-            l2_loss = self._l2(wt_w_masked)
+            l2_loss = self._l2(x)
             result = ops.add(result, l2_loss)
 
         return result
@@ -436,12 +437,12 @@ class SoftOrthonormalConstraintRegularizer(keras.regularizers.Regularizer):
 
         # Add L1 regularization if enabled
         if self._use_l1 and self._l1 is not None:
-            l1_loss = self._l1(wt_w)
+            l1_loss = self._l1(x)
             result = ops.add(result, l1_loss)
 
         # Add L2 regularization if enabled
         if self._use_l2 and self._l2 is not None:
-            l2_loss = self._l2(wt_w)
+            l2_loss = self._l2(x)
             result = ops.add(result, l2_loss)
 
         return result
