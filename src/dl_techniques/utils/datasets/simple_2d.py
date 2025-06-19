@@ -24,13 +24,17 @@ Example usage:
 """
 
 import numpy as np
-from typing import Tuple, Optional, List, Union, Dict, Any
-from sklearn.datasets import make_blobs, make_moons, make_circles
-import matplotlib.pyplot as plt
 from enum import Enum
+import matplotlib.pyplot as plt
+from typing import Tuple, Optional, List, Union
+from sklearn.datasets import make_blobs, make_moons, make_circles
 
 #------------------------------------------------------------------------------
-# ENUMS
+# local imports
+#------------------------------------------------------------------------------
+
+from ..logger import logger
+
 #------------------------------------------------------------------------------
 
 class DatasetType(Enum):
@@ -44,8 +48,6 @@ class DatasetType(Enum):
     MIXTURE = "Gaussian Mixture"
     CHECKER = "Checkerboard"
 
-#------------------------------------------------------------------------------
-# CONSTANTS
 #------------------------------------------------------------------------------
 
 # Default dataset parameters
@@ -66,6 +68,8 @@ DPI = 300
 
 # Set random seed for reproducibility
 np.random.seed(DEFAULT_RANDOM_STATE)
+
+#------------------------------------------------------------------------------
 
 
 class DatasetGenerator:
@@ -577,12 +581,12 @@ def main():
     """
     Demonstrate usage by generating and visualizing all dataset types.
     """
-    print("Generating and visualizing datasets...")
+    logger.info("Generating and visualizing datasets...")
 
     # Generate and visualize each dataset type
     for dataset_type in DatasetType:
         title = f"{dataset_type.value} ({dataset_type.name.lower()})"
-        print(f"Processing {title}...")
+        logger.info(f"Processing {title}...")
 
         # Generate data
         if dataset_type == DatasetType.CLUSTERS:
@@ -612,10 +616,10 @@ def main():
             )
 
         # Print dataset statistics
-        print(f"  - Generated {X.shape[0]} samples with {X.shape[1]} features")
-        print(f"  - Class distribution: {np.bincount(y.astype(int))}")
+        logger.info(f"  - Generated {X.shape[0]} samples with {X.shape[1]} features")
+        logger.info(f"  - Class distribution: {np.bincount(y.astype(int))}")
 
-    print("\nAll datasets generated and visualized.")
+    logger.info("\nAll datasets generated and visualized.")
 
 
 if __name__ == "__main__":

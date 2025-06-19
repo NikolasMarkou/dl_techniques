@@ -22,12 +22,18 @@ Key Findings and Architectural Details:
    - MNv4-Hybrid: Combines UIB with Mobile MQA
 """
 
-
 import keras
-import tensorflow as tf
-from keras import regularizers, layers
-from typing import List, Tuple, Optional, Union, Dict, Any
+from keras import regularizers, layers, ops
+from typing import List, Tuple, Optional, Any, Dict, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+
+
+# ---------------------------------------------------------------------
 
 class ModelConfig:
     """Configuration class for MobileNetV4 hyperparameters.
@@ -61,6 +67,9 @@ class ModelConfig:
         self.kernel_initializer = kernel_initializer
 
 
+# ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable()
 class UIB(layers.Layer):
     """Universal Inverted Bottleneck (UIB) block.
 
@@ -88,8 +97,8 @@ class UIB(layers.Layer):
             use_dw1: bool = False,
             use_dw2: bool = True,
             block_type: str = 'IB',
-            kernel_initializer: str = "he_normal",
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ):
         super().__init__(**kwargs)
@@ -100,41 +109,104 @@ class UIB(layers.Layer):
         self.use_dw1 = use_dw1
         self.use_dw2 = use_dw2
         self.block_type = block_type
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.expanded_filters = filters * expansion_factor
+
+        # Initialize layer attributes to None - will be built in build()
+        self.expand_conv = None
+        self.bn1 = None
+        self.activation = None
+        self.dw1 = None
+        self.bn_dw1 = None
+        self.dw2 = None
+        self.bn_dw2 = None
+        self.project_conv = None
+        self.bn2 = None
+        self._build_input_shape = None
+
+    def build(self, input_shape: Tuple[int, ...]) -> None:
+        """Build the layer weights and sublayers.
+
+        Args:
+            input_shape: Shape of the input tensor
+        """
+        # Store for serialization
+        self._build_input_shape = input_shape
 
         # Layer configurations
         conv_config = {
-            "kernel_initializer": kernel_initializer,
-            "kernel_regularizer": kernel_regularizer,
+            "kernel_initializer": self.kernel_initializer,
+            "kernel_regularizer": self.kernel_regularizer,
             "padding": "same",
             "use_bias": False
         }
 
-        # Layers following proper normalization order: Conv/Linear -> Norm -> Activation
+        # Build sublayers following proper normalization order: Conv/Linear -> Norm -> Activation
         self.expand_conv = layers.Conv2D(self.expanded_filters, 1, **conv_config)
         self.bn1 = layers.BatchNormalization()
         self.activation = layers.ReLU()
 
-        if use_dw1:
+        if self.use_dw1:
             self.dw1 = layers.DepthwiseConv2D(
-                kernel_size,
-                stride,
+                self.kernel_size,
+                self.stride,
                 **conv_config
             )
             self.bn_dw1 = layers.BatchNormalization()
 
-        if use_dw2:
+        if self.use_dw2:
             self.dw2 = layers.DepthwiseConv2D(
-                kernel_size,
+                self.kernel_size,
                 1,
                 **conv_config
             )
             self.bn_dw2 = layers.BatchNormalization()
 
-        self.project_conv = layers.Conv2D(filters, 1, **conv_config)
+        self.project_conv = layers.Conv2D(self.filters, 1, **conv_config)
         self.bn2 = layers.BatchNormalization()
 
-    def call(self, inputs: tf.Tensor, training: bool = False) -> tf.Tensor:
+        # Build sublayers explicitly
+        self.expand_conv.build(input_shape)
+        self.bn1.build(input_shape[:-1] + (self.expanded_filters,))
+
+        if self.use_dw1:
+            dw1_input_shape = input_shape[:-1] + (self.expanded_filters,)
+            self.dw1.build(dw1_input_shape)
+            dw1_output_shape = self._compute_conv_output_shape(dw1_input_shape, self.stride)
+            self.bn_dw1.build(dw1_output_shape)
+
+        if self.use_dw2:
+            dw2_input_shape = input_shape[:-1] + (self.expanded_filters,)
+            if self.use_dw1:
+                dw2_input_shape = dw1_output_shape
+            self.dw2.build(dw2_input_shape)
+            self.bn_dw2.build(dw2_input_shape)
+
+        project_input_shape = input_shape[:-1] + (self.expanded_filters,)
+        self.project_conv.build(project_input_shape)
+        self.bn2.build(input_shape[:-1] + (self.filters,))
+
+        super().build(input_shape)
+
+    def _compute_conv_output_shape(self, input_shape: Tuple[int, ...], stride: int) -> Tuple[int, ...]:
+        """Compute output shape after convolution with given stride.
+
+        Args:
+            input_shape: Input shape
+            stride: Convolution stride
+
+        Returns:
+            Output shape
+        """
+        if input_shape[1] is None or input_shape[2] is None:
+            return input_shape
+
+        height = input_shape[1] // stride if input_shape[1] is not None else None
+        width = input_shape[2] // stride if input_shape[2] is not None else None
+        return input_shape[:1] + (height, width) + input_shape[3:]
+
+    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """Forward pass of the UIB block.
 
         Args:
@@ -161,11 +233,75 @@ class UIB(layers.Layer):
         x = self.project_conv(x)
         x = self.bn2(x, training=training)
 
-        if self.stride == 1 and inputs.shape[-1] == self.filters:
+        # Residual connection
+        if self.stride == 1 and ops.shape(inputs)[-1] == self.filters:
             return inputs + x
         return x
 
+    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+        """Compute the output shape of the layer.
 
+        Args:
+            input_shape: Shape of the input
+
+        Returns:
+            Output shape
+        """
+        input_shape_list = list(input_shape)
+
+        # Apply stride to spatial dimensions
+        if self.stride > 1:
+            if input_shape_list[1] is not None:
+                input_shape_list[1] = input_shape_list[1] // self.stride
+            if input_shape_list[2] is not None:
+                input_shape_list[2] = input_shape_list[2] // self.stride
+
+        # Update channel dimension
+        input_shape_list[-1] = self.filters
+
+        return tuple(input_shape_list)
+
+    def get_config(self) -> Dict[str, Any]:
+        """Returns the layer configuration for serialization.
+
+        Returns:
+            Dictionary containing the layer configuration
+        """
+        config = super().get_config()
+        config.update({
+            "filters": self.filters,
+            "expansion_factor": self.expansion_factor,
+            "stride": self.stride,
+            "kernel_size": self.kernel_size,
+            "use_dw1": self.use_dw1,
+            "use_dw2": self.use_dw2,
+            "block_type": self.block_type,
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+        })
+        return config
+
+    def get_build_config(self) -> Dict[str, Any]:
+        """Get the config needed to build the layer from a config.
+
+        Returns:
+            Dictionary containing the build configuration
+        """
+        return {
+            "input_shape": self._build_input_shape,
+        }
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Build the layer from a config created with get_build_config.
+
+        Args:
+            config: Dictionary containing the build configuration
+        """
+        if config.get("input_shape") is not None:
+            self.build(config["input_shape"])
+
+
+@keras.saving.register_keras_serializable()
 class MobileMQA(layers.Layer):
     """Mobile Multi-Query Attention (MQA) block.
 
@@ -185,8 +321,8 @@ class MobileMQA(layers.Layer):
             dim: int,
             num_heads: int = 8,
             use_downsampling: bool = False,
-            kernel_initializer: str = "he_normal",
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ):
         super().__init__(**kwargs)
@@ -194,27 +330,46 @@ class MobileMQA(layers.Layer):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.use_downsampling = use_downsampling
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.scale = self.head_dim ** -0.5
+
+        # Initialize layer attributes to None - will be built in build()
+        self.q_proj = None
+        self.kv_proj = None
+        self.o_proj = None
+        self.downsample = None
+        self.lambda_param = None
+        self._build_input_shape = None
+
+    def build(self, input_shape: Tuple[int, ...]) -> None:
+        """Build the layer weights and sublayers.
+
+        Args:
+            input_shape: Shape of the input tensor
+        """
+        # Store for serialization
+        self._build_input_shape = input_shape
 
         # Layer configurations
         dense_config = {
-            "kernel_initializer": kernel_initializer,
-            "kernel_regularizer": kernel_regularizer
+            "kernel_initializer": self.kernel_initializer,
+            "kernel_regularizer": self.kernel_regularizer
         }
 
-        self.q_proj = layers.Dense(dim, **dense_config)
-        self.kv_proj = layers.Dense(2 * dim, **dense_config)
-        self.o_proj = layers.Dense(dim, **dense_config)
+        self.q_proj = layers.Dense(self.dim, **dense_config)
+        self.kv_proj = layers.Dense(2 * self.dim, **dense_config)
+        self.o_proj = layers.Dense(self.dim, **dense_config)
 
-        if use_downsampling:
+        if self.use_downsampling:
             self.downsample = layers.DepthwiseConv2D(
                 3,
                 strides=2,
                 padding='same',
-                kernel_initializer=kernel_initializer,
-                kernel_regularizer=kernel_regularizer
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer
             )
 
-        self.scale = self.head_dim ** -0.5
         self.lambda_param = self.add_weight(
             "lambda",
             shape=(),
@@ -222,7 +377,17 @@ class MobileMQA(layers.Layer):
             trainable=True
         )
 
-    def call(self, x: tf.Tensor, training: bool = False) -> tf.Tensor:
+        # Build sublayers explicitly
+        self.q_proj.build(input_shape)
+        self.kv_proj.build(input_shape)
+        self.o_proj.build(input_shape)
+
+        if self.use_downsampling:
+            self.downsample.build(input_shape)
+
+        super().build(input_shape)
+
+    def call(self, x: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """Forward pass of the MobileMQA block.
 
         Args:
@@ -232,9 +397,9 @@ class MobileMQA(layers.Layer):
         Returns:
             Output tensor
         """
-        batch_size = tf.shape(x)[0]
-        height = tf.shape(x)[1]
-        width = tf.shape(x)[2]
+        batch_size = ops.shape(x)[0]
+        height = ops.shape(x)[1]
+        width = ops.shape(x)[2]
 
         q = self.q_proj(x)
         kv = self.kv_proj(x)
@@ -245,20 +410,70 @@ class MobileMQA(layers.Layer):
         else:
             kv_height, kv_width = height, width
 
-        k, v = tf.split(kv, 2, axis=-1)
+        # Split kv into k and v - using slice operation since tf.split isn't in keras.ops
+        k = kv[..., :self.dim]
+        v = kv[..., self.dim:]
 
-        q = tf.reshape(q, (batch_size, height * width, self.num_heads, self.head_dim))
-        k = tf.reshape(k, (batch_size, kv_height * kv_width, 1, self.head_dim))
-        v = tf.reshape(v, (batch_size, kv_height * kv_width, 1, self.head_dim))
+        q = ops.reshape(q, (batch_size, height * width, self.num_heads, self.head_dim))
+        k = ops.reshape(k, (batch_size, kv_height * kv_width, 1, self.head_dim))
+        v = ops.reshape(v, (batch_size, kv_height * kv_width, 1, self.head_dim))
 
-        attn = tf.matmul(q, k, transpose_b=True) * self.scale
-        attn = tf.nn.softmax(attn, axis=-1)
+        attn = ops.matmul(q, k, transpose_b=True) * self.scale
+        attn = ops.nn.softmax(attn, axis=-1)
 
-        out = tf.matmul(attn, v)
-        out = tf.reshape(out, (batch_size, height, width, self.dim))
+        out = ops.matmul(attn, v)
+        out = ops.reshape(out, (batch_size, height, width, self.dim))
 
         return self.o_proj(out)
 
+    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+        """Compute the output shape of the layer.
+
+        Args:
+            input_shape: Shape of the input
+
+        Returns:
+            Output shape
+        """
+        return input_shape
+
+    def get_config(self) -> Dict[str, Any]:
+        """Returns the layer configuration for serialization.
+
+        Returns:
+            Dictionary containing the layer configuration
+        """
+        config = super().get_config()
+        config.update({
+            "dim": self.dim,
+            "num_heads": self.num_heads,
+            "use_downsampling": self.use_downsampling,
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+        })
+        return config
+
+    def get_build_config(self) -> Dict[str, Any]:
+        """Get the config needed to build the layer from a config.
+
+        Returns:
+            Dictionary containing the build configuration
+        """
+        return {
+            "input_shape": self._build_input_shape,
+        }
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Build the layer from a config created with get_build_config.
+
+        Args:
+            config: Dictionary containing the build configuration
+        """
+        if config.get("input_shape") is not None:
+            self.build(config["input_shape"])
+
+
+# ---------------------------------------------------------------------
 
 def create_stem(
         config: ModelConfig,
@@ -290,6 +505,8 @@ def create_stem(
     return keras.Model(inputs, x, name="stem")
 
 
+# ---------------------------------------------------------------------
+
 def create_body(
         num_blocks: List[int],
         filters: List[int],
@@ -313,6 +530,8 @@ def create_body(
     x = inputs
 
     for i, (blocks, f, s) in enumerate(zip(num_blocks, filters, strides)):
+        logger.info(f"Creating stage {i+1} with {blocks} blocks, {f} filters, stride {s}")
+
         for j in range(blocks):
             stride = s if j == 0 else 1
             block_type = 'ExtraDW' if j == 0 else 'IB'
@@ -322,19 +541,24 @@ def create_body(
                 stride=stride,
                 block_type=block_type,
                 kernel_initializer=config.kernel_initializer,
-                kernel_regularizer=kernel_regularizer
+                kernel_regularizer=kernel_regularizer,
+                name=f"uib_stage{i+1}_block{j+1}"
             )(x)
 
         if config.use_attention and i == len(num_blocks) - 1:
+            logger.info(f"Adding Mobile MQA to final stage")
             x = MobileMQA(
                 f,
                 use_downsampling=True,
                 kernel_initializer=config.kernel_initializer,
-                kernel_regularizer=kernel_regularizer
+                kernel_regularizer=kernel_regularizer,
+                name=f"mobile_mqa_stage{i+1}"
             )(x)
 
     return keras.Model(inputs, x, name="body")
 
+
+# ---------------------------------------------------------------------
 
 def create_head(
         config: ModelConfig,
@@ -349,7 +573,7 @@ def create_head(
     Returns:
         Head model
     """
-    inputs = layers.Input(shape=(None, None, 256))
+    inputs = layers.Input(shape=(None, None, 320))  # Updated to match the last filter size
     x = layers.GlobalAveragePooling2D()(inputs)
 
     x = layers.Dense(
@@ -370,6 +594,8 @@ def create_head(
     return keras.Model(inputs, x, name="head")
 
 
+# ---------------------------------------------------------------------
+
 def MobileNetV4(config: ModelConfig) -> keras.Model:
     """Create MobileNetV4 model.
 
@@ -379,6 +605,10 @@ def MobileNetV4(config: ModelConfig) -> keras.Model:
     Returns:
         MobileNetV4 model
     """
+    logger.info("Creating MobileNetV4 model")
+    logger.info(f"Configuration: input_shape={config.input_shape}, num_classes={config.num_classes}")
+    logger.info(f"Width multiplier: {config.width_multiplier}, use_attention: {config.use_attention}")
+
     kernel_regularizer = regularizers.L2(config.weight_decay)
 
     # Define the architecture
@@ -388,6 +618,7 @@ def MobileNetV4(config: ModelConfig) -> keras.Model:
 
     # Apply width multiplier
     filters = [int(f * config.width_multiplier) for f in filters]
+    logger.info(f"Filter sizes after width multiplier: {filters}")
 
     # Create the model components
     stem = create_stem(config, kernel_regularizer)
@@ -400,8 +631,13 @@ def MobileNetV4(config: ModelConfig) -> keras.Model:
     x = body(x)
     outputs = head(x)
 
-    return keras.Model(inputs, outputs, name="MobileNetV4")
+    model = keras.Model(inputs, outputs, name="MobileNetV4")
+    logger.info(f"Created MobileNetV4 model with {model.count_params()} parameters")
 
+    return model
+
+
+# ---------------------------------------------------------------------
 
 def configure_model(model: keras.Model, config: ModelConfig) -> None:
     """Configure the model for training.
@@ -410,6 +646,8 @@ def configure_model(model: keras.Model, config: ModelConfig) -> None:
         model: The MobileNetV4 model to configure
         config: Model configuration
     """
+    logger.info("Configuring model for training")
+
     optimizer = keras.optimizers.AdamW(
         learning_rate=0.001,
         weight_decay=config.weight_decay
@@ -428,6 +666,10 @@ def configure_model(model: keras.Model, config: ModelConfig) -> None:
         metrics=metrics
     )
 
+    logger.info("Model compilation completed")
+
+
+# ---------------------------------------------------------------------
 
 def create_training_callbacks(model_name: str) -> List[keras.callbacks.Callback]:
     """Create callbacks for model training.
@@ -438,6 +680,8 @@ def create_training_callbacks(model_name: str) -> List[keras.callbacks.Callback]
     Returns:
         List of training callbacks
     """
+    logger.info(f"Creating training callbacks for model: {model_name}")
+
     callbacks = [
         keras.callbacks.ModelCheckpoint(
             filepath=f"{model_name}.keras",
@@ -461,13 +705,17 @@ def create_training_callbacks(model_name: str) -> List[keras.callbacks.Callback]
             histogram_freq=1
         )
     ]
+
+    logger.info(f"Created {len(callbacks)} training callbacks")
     return callbacks
 
 
+# ---------------------------------------------------------------------
+
 def train_model(
         model: keras.Model,
-        train_data: tf.data.Dataset,
-        val_data: tf.data.Dataset,
+        train_data: Any,  # Using Any to avoid tf.data.Dataset import
+        val_data: Any,
         config: ModelConfig,
         epochs: int = 300,
         initial_epoch: int = 0
@@ -485,6 +733,8 @@ def train_model(
     Returns:
         Training history
     """
+    logger.info(f"Starting training for {epochs} epochs")
+
     # Configure the model
     configure_model(model, config)
 
@@ -500,8 +750,11 @@ def train_model(
         callbacks=callbacks
     )
 
+    logger.info("Training completed")
     return history
 
+
+# ---------------------------------------------------------------------
 
 def create_data_augmentation() -> keras.Sequential:
     """Create a data augmentation pipeline.
@@ -519,11 +772,13 @@ def create_data_augmentation() -> keras.Sequential:
     ], name="data_augmentation")
 
 
+# ---------------------------------------------------------------------
+
 def prepare_dataset(
-        dataset: tf.data.Dataset,
+        dataset: Any,  # Using Any to avoid tf.data.Dataset import
         config: ModelConfig,
         is_training: bool = False
-) -> tf.data.Dataset:
+) -> Any:
     """Prepare dataset for training or validation.
 
     Args:
@@ -534,12 +789,15 @@ def prepare_dataset(
     Returns:
         Prepared dataset
     """
+    logger.info(f"Preparing {'training' if is_training else 'validation'} dataset")
+
     # Set up augmentation
     if is_training:
         augmentation = create_data_augmentation()
 
-    def prepare_sample(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+    def prepare_sample(image: keras.KerasTensor, label: keras.KerasTensor) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         # Resize image
+        import tensorflow as tf  # Only import where needed for dataset preparation
         image = tf.image.resize(image, config.input_shape[:2])
 
         # Apply augmentation during training
@@ -547,14 +805,15 @@ def prepare_dataset(
             image = augmentation(tf.expand_dims(image, 0))[0]
 
         # Normalize image
-        image = tf.cast(image, tf.float32) / 255.0
+        image = ops.cast(image, "float32") / 255.0
 
         # One-hot encode label
-        label = tf.one_hot(label, config.num_classes)
+        label = ops.nn.one_hot(label, config.num_classes)
 
         return image, label
 
     # Configure dataset
+    import tensorflow as tf  # Only import where needed for dataset preparation
     dataset = dataset.map(
         prepare_sample,
         num_parallel_calls=tf.data.AUTOTUNE
@@ -565,12 +824,16 @@ def prepare_dataset(
 
     dataset = dataset.batch(32).prefetch(tf.data.AUTOTUNE)
 
+    logger.info("Dataset preparation completed")
     return dataset
 
 
-# Example usage:
+# ---------------------------------------------------------------------
+
 def main() -> None:
     """Main function to demonstrate model usage."""
+    logger.info("Starting MobileNetV4 demonstration")
+
     # Create model configuration
     config = ModelConfig(
         input_shape=(224, 224, 3),
@@ -585,14 +848,11 @@ def main() -> None:
     model = MobileNetV4(config)
 
     # Print model summary
+    logger.info("Model summary:")
     model.summary()
 
-    # Note: To actually train the model, you would need to:
-    # 1. Prepare your datasets
-    # 2. Call train_model with your datasets
-    # 3. Save the trained model
-    # Example:
-    # train_data = prepare_dataset(raw_train_data, config, is_training=True)
-    # val_data = prepare_dataset(raw_val_data, config, is_training=False)
-    # history = train_model(model, train_data, val_data, config)
-    # model.save("mobilenetv4_model.keras")
+    logger.info("MobileNetV4 demonstration completed")
+
+
+if __name__ == "__main__":
+    main()

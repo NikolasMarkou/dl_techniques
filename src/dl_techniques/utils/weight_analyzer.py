@@ -26,10 +26,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans
-from scipy.cluster.hierarchy import dendrogram, linkage
-from scipy.spatial.distance import pdist, squareform
-from typing import Dict, List, Optional, Tuple, Union, Any
+from typing import Dict, List, Optional, Union, Any
 
 # ------------------------------------------------------------------------------
 # Enhanced Configuration

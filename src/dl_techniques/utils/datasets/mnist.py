@@ -7,8 +7,7 @@ from typing import Tuple, Optional
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-
-from .common import normalize_images, get_data_shape, Dataset
+from .common import normalize_images, Dataset
 
 # ---------------------------------------------------------------------
 

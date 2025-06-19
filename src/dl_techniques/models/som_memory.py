@@ -1,9 +1,103 @@
+"""
+A Keras model implementing a Self-Organizing Map (SOM) as an associative memory system.
+
+This model demonstrates how Self-Organizing Maps can function as topological memory structures
+that learn to organize and recall patterns in an unsupervised manner. The SOM creates a
+low-dimensional (2D grid) representation of high-dimensional input data while preserving
+topological relationships, making it an effective tool for data visualization, clustering,
+and associative memory tasks.
+
+**Core Functionality:**
+
+The SOMModel wraps a SOM2dLayer and provides a complete framework for:
+
+1. **Unsupervised Learning**: Trains on input data to create a topological map where
+   similar inputs activate nearby neurons in the grid, forming clusters of related memories.
+
+2. **Associative Memory**: Once trained, the model can recall stored "memories" by finding
+   the Best Matching Unit (BMU) for new inputs and retrieving similar patterns from the
+   learned representation.
+
+3. **Classification**: Can be extended for supervised learning by fitting class prototypes
+   to specific grid locations, enabling classification based on topological similarity.
+
+4. **Memory Visualization**: Provides extensive visualization tools to understand how
+   memories are organized, including grid visualization, class distribution maps,
+   U-matrices for cluster boundaries, and memory recall demonstrations.
+
+**Key Concepts:**
+
+- **Best Matching Unit (BMU)**: The neuron in the grid that most closely matches an input
+- **Topological Preservation**: Similar inputs map to nearby locations in the grid
+- **Neighborhood Learning**: Updates not only the BMU but also neighboring neurons
+- **Competitive Learning**: Neurons compete to represent different input patterns
+
+**Training Process:**
+
+1. For each input sample, find the BMU (neuron with weights closest to the input)
+2. Update the BMU and its neighbors to become more similar to the input
+3. Gradually reduce learning rate and neighborhood size over time
+4. Result: A organized map where similar patterns cluster together
+
+**Memory Retrieval:**
+
+1. Present a query pattern to the trained SOM
+2. Find the BMU that best matches the query
+3. Retrieve the stored prototype (neuron weights) and similar training samples
+4. Demonstrate associative recall by showing related memories
+
+**Applications:**
+
+- **Data Visualization**: Project high-dimensional data to 2D while preserving structure
+- **Clustering**: Discover natural groupings in data without supervision
+- **Dimensionality Reduction**: Create meaningful low-dimensional representations
+- **Anomaly Detection**: Identify patterns that don't fit the learned topology
+- **Classification**: Use topology for nearest-neighbor-like classification
+- **Memory Systems**: Model associative memory and pattern completion
+
+**Visualization Capabilities:**
+
+- **Grid Visualization**: Shows learned prototypes as a 2D grid (especially useful for image data)
+- **Class Distribution**: Maps how different classes are distributed across the topology
+- **U-Matrix**: Reveals cluster boundaries and data structure
+- **Hit Histogram**: Shows which areas of the memory space are most active
+- **Memory Recall**: Demonstrates how the SOM retrieves similar memories for a query
+
+**Example Use Cases:**
+
+1. **MNIST Digit Organization**: Train on handwritten digits to see how the SOM organizes
+   digit prototypes topologically, with similar digits (e.g., 6 and 8) located near each other.
+
+2. **Customer Segmentation**: Organize customer data to find natural market segments
+   while preserving relationships between similar customer types.
+
+3. **Color Organization**: Learn color relationships and create smooth transitions
+   across the color space in the 2D grid.
+
+4. **Gene Expression Analysis**: Organize genes or samples based on expression patterns
+   while maintaining biological relationships.
+
+**Memory System Analogy:**
+
+Think of the SOM as a library where books (data samples) are organized on shelves (grid neurons)
+such that similar books are placed near each other. When you want to find a book (query),
+you go to the most relevant shelf (BMU) and can also browse nearby shelves for related content.
+The librarian (training process) learns this organization by repeatedly placing books in
+locations that make sense based on their content similarity.
+
+This implementation extends the basic SOM concept by adding classification capabilities
+through class prototypes and comprehensive visualization tools for understanding the
+learned memory structure, making it particularly useful for educational purposes and
+research into associative memory systems.
+"""
+
 import time
 import keras
 import numpy as np
-import tensorflow as tf
+from keras import ops
+from collections import Counter
 import matplotlib.pyplot as plt
-from typing import Tuple, Optional, Union, List, Dict, Any, Callable
+from typing import Tuple, Optional, Union, List, Dict, Any
 
 # ---------------------------------------------------------------------
 # local imports
@@ -12,11 +106,10 @@ from typing import Tuple, Optional, Union, List, Dict, Any, Callable
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.som_2d_layer import SOM2dLayer
 
-
 # ---------------------------------------------------------------------
 
 
-@keras.utils.register_keras_serializable()
+@keras.saving.register_keras_serializable()
 class SOMModel(keras.Model):
     """
     A Keras model implementing a Self-Organizing Map as a memory structure.
@@ -38,12 +131,14 @@ class SOMModel(keras.Model):
     neighborhood_function : str, optional
         Type of neighborhood function to use ('gaussian' or 'bubble').
         Defaults to 'gaussian'.
-    weights_initializer : Union[str, initializers.Initializer], optional
+    weights_initializer : Union[str, keras.initializers.Initializer], optional
         Initialization method for weights. Defaults to 'random'.
-    regularizer : Optional[regularizers.Regularizer], optional
+    regularizer : Optional[keras.regularizers.Regularizer], optional
         Regularizer function applied to the weights. Defaults to None.
     name : str, optional
         Name of the model. Defaults to None.
+    **kwargs : Any
+        Additional keyword arguments for the base Model class.
     """
 
     def __init__(
@@ -56,13 +151,19 @@ class SOMModel(keras.Model):
             weights_initializer: Union[str, keras.initializers.Initializer] = 'random',
             regularizer: Optional[keras.regularizers.Regularizer] = None,
             name: Optional[str] = None,
-            **kwargs
-    ):
+            **kwargs: Any
+    ) -> None:
         """Initialize the SOM model."""
-        super(SOMModel, self).__init__(name=name, **kwargs)
+        super().__init__(name=name, **kwargs)
 
-        # Input layer
-        self.input_layer = keras.Input(shape=(input_dim,))
+        # Store configuration for serialization
+        self.map_size = map_size
+        self.input_dim = input_dim
+        self.initial_learning_rate = initial_learning_rate
+        self.sigma = sigma
+        self.neighborhood_function = neighborhood_function
+        self.weights_initializer = weights_initializer
+        self.regularizer = regularizer
 
         # Create the SOM layer
         self.som_layer = SOM2dLayer(
@@ -77,14 +178,34 @@ class SOMModel(keras.Model):
 
         # Class prototypes for classification and memory retrieval
         self.class_prototypes = None
+        self._is_built = False
 
-    def call(self, inputs: tf.Tensor, training: bool = None) -> Tuple[tf.Tensor, tf.Tensor]:
+    def build(self, input_shape: Tuple[int, ...]) -> None:
+        """
+        Build the model layers.
+
+        Parameters
+        ----------
+        input_shape : Tuple[int, ...]
+            Shape of the input tensor.
+        """
+        if not self._is_built:
+            # Build the SOM layer
+            self.som_layer.build(input_shape)
+            self._is_built = True
+        super().build(input_shape)
+
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
         Forward pass for the SOM model.
 
         Parameters
         ----------
-        inputs : tf.Tensor
+        inputs : keras.KerasTensor
             Input tensor of shape (batch_size, input_dim).
         training : bool, optional
             Boolean indicating whether the model should behave in
@@ -92,7 +213,7 @@ class SOMModel(keras.Model):
 
         Returns
         -------
-        Tuple[tf.Tensor, tf.Tensor]
+        Tuple[keras.KerasTensor, keras.KerasTensor]
             A tuple containing:
             - BMU coordinates of shape (batch_size, 2)
             - Quantization error of shape (batch_size,)
@@ -128,6 +249,11 @@ class SOMModel(keras.Model):
         Dict[str, List[float]]
             Training history containing 'quantization_error' per epoch.
         """
+        # Ensure the model is built
+        if not self._is_built:
+            sample_batch = x_train[:1].reshape(1, -1)
+            self.build(sample_batch.shape)
+
         # Set the max iterations
         total_iterations = epochs * (len(x_train) // batch_size)
         self.som_layer.max_iterations.assign(float(total_iterations))
@@ -151,12 +277,16 @@ class SOMModel(keras.Model):
             for i in range(0, len(x_train_shuffled), batch_size):
                 x_batch = x_train_shuffled[i:i + batch_size]
 
-                # Then flatten the data right before passing to the model
+                # Flatten the data right before passing to the model
                 x_batch = x_batch.reshape(x_batch.shape[0], -1)
+                x_batch_tensor = ops.convert_to_tensor(x_batch)
 
                 # Forward pass in training mode (weights are updated inside)
-                _, quant_errors = self.som_layer(x_batch, training=True)
-                epoch_quant_errors.append(tf.reduce_mean(quant_errors).numpy())
+                _, quant_errors = self.som_layer(x_batch_tensor, training=True)
+
+                # Use keras.ops for mean calculation
+                avg_error = ops.mean(quant_errors)
+                epoch_quant_errors.append(ops.convert_to_numpy(avg_error))
 
             # Compute average error for the epoch
             avg_error = np.mean(epoch_quant_errors)
@@ -164,8 +294,10 @@ class SOMModel(keras.Model):
 
             if verbose > 0 and (epoch % max(1, epochs // 10) == 0 or epoch == epochs - 1):
                 end_time = time.time()
-                logger.info(f"Epoch {epoch + 1}/{epochs} - Quantization Error: {avg_error:.6f} - "
-                      f"Time: {end_time - start_time:.2f}s")
+                logger.info(
+                    f"Epoch {epoch + 1}/{epochs} - Quantization Error: {avg_error:.6f} - "
+                    f"Time: {end_time - start_time:.2f}s"
+                )
 
         return history
 
@@ -184,19 +316,24 @@ class SOMModel(keras.Model):
         y_train : np.ndarray
             Training labels of shape (n_samples,).
         """
-        # Find BMU for each sample
-        bmu_indices, _ = self.som_layer(x_train, training=False)
-        bmu_indices = bmu_indices.numpy()
+        # Ensure the model is built
+        if not self._is_built:
+            sample_batch = x_train[:1].reshape(1, -1)
+            self.build(sample_batch.shape)
+
+        # Convert to tensor and find BMU for each sample
+        x_train_tensor = ops.convert_to_tensor(x_train.reshape(x_train.shape[0], -1))
+        bmu_indices, _ = self.som_layer(x_train_tensor, training=False)
+        bmu_indices = ops.convert_to_numpy(bmu_indices)
 
         # Unique classes
         unique_classes = np.unique(y_train)
 
         # Create class to BMU mapping
         class_to_bmu = {}
-        from collections import Counter
 
         for c in unique_classes:
-            # FIXED: Use np.where to get the indices where y_train == c
+            # Get indices where y_train == c
             class_indices = np.where(y_train == c)[0]
 
             # Get BMUs for this class using the indices
@@ -237,12 +374,15 @@ class SOMModel(keras.Model):
             If class prototypes have not been fitted yet.
         """
         if self.class_prototypes is None:
-            raise ValueError("Class prototypes have not been fitted. "
-                             "Call fit_class_prototypes() first.")
+            raise ValueError(
+                "Class prototypes have not been fitted. "
+                "Call fit_class_prototypes() first."
+            )
 
-        # Find BMU for each test sample
-        bmu_indices, _ = self.som_layer(x_test, training=False)
-        bmu_indices = bmu_indices.numpy()
+        # Convert to tensor and find BMU for each test sample
+        x_test_tensor = ops.convert_to_tensor(x_test.reshape(x_test.shape[0], -1))
+        bmu_indices, _ = self.som_layer(x_test_tensor, training=False)
+        bmu_indices = ops.convert_to_numpy(bmu_indices)
 
         # Convert BMUs to tuples
         bmu_tuples = [tuple(bmu) for bmu in bmu_indices]
@@ -250,21 +390,22 @@ class SOMModel(keras.Model):
         # Prepare a mapping from BMU to class
         bmu_to_class = {bmu: c for c, bmu in self.class_prototypes.items()}
 
-        # Predict classes - ensure we return integers
+        # Predict classes
         predictions = []
         for bmu in bmu_tuples:
             # Find the closest prototype if exact BMU was not seen in training
             if bmu not in bmu_to_class:
                 # Calculate distances to all prototypes
-                distances = {c: np.sum((np.array(bmu) - np.array(prototype)) ** 2)
-                             for c, prototype in self.class_prototypes.items()}
+                distances = {
+                    c: np.sum((np.array(bmu) - np.array(prototype)) ** 2)
+                    for c, prototype in self.class_prototypes.items()
+                }
                 # Find the closest
                 closest_class = min(distances, key=distances.get)
-                predictions.append(closest_class)  # Will be automatically cast to appropriate type
+                predictions.append(closest_class)
             else:
                 predictions.append(bmu_to_class[bmu])
 
-        # Convert to numpy array with same dtype as original labels to ensure compatibility
         return np.array(predictions)
 
     def visualize_som_grid(
@@ -288,7 +429,7 @@ class SOMModel(keras.Model):
         save_path : str, optional
             If provided, the visualization will be saved to this path.
         """
-        weights = self.som_layer.get_weights_as_grid().numpy()
+        weights = ops.convert_to_numpy(self.som_layer.get_weights_as_grid())
         grid_height, grid_width, input_dim = weights.shape
 
         plt.figure(figsize=figsize)
@@ -305,8 +446,10 @@ class SOMModel(keras.Model):
             for i in range(grid_height):
                 for j in range(grid_width):
                     neuron_weights = weights[i, j].reshape(side_length, side_length)
-                    full_grid[i * side_length:(i + 1) * side_length,
-                    j * side_length:(j + 1) * side_length] = neuron_weights
+                    full_grid[
+                    i * side_length:(i + 1) * side_length,
+                    j * side_length:(j + 1) * side_length
+                    ] = neuron_weights
 
             plt.imshow(full_grid, cmap='gray')
             plt.title('SOM Memory Grid - Prototype Digit Memories')
@@ -362,9 +505,10 @@ class SOMModel(keras.Model):
         save_path : str, optional
             If provided, the visualization will be saved to this path.
         """
-        # Find BMU for each sample
-        bmu_indices, _ = self.som_layer(x_data, training=False)
-        bmu_indices = bmu_indices.numpy()
+        # Convert to tensor and find BMU for each sample
+        x_data_tensor = ops.convert_to_tensor(x_data.reshape(x_data.shape[0], -1))
+        bmu_indices, _ = self.som_layer(x_data_tensor, training=False)
+        bmu_indices = ops.convert_to_numpy(bmu_indices)
 
         plt.figure(figsize=figsize)
 
@@ -380,21 +524,26 @@ class SOMModel(keras.Model):
 
         # Plot each class
         for i, c in enumerate(unique_classes):
-            # FIXED: Use np.where to get the indices where y_data_indices == c
+            # Get indices where y_data_indices == c
             class_indices = np.where(y_data_indices == c)[0]
 
             # Get BMUs for this class using the indices
             class_bmus = bmu_indices[class_indices]
 
-            plt.scatter(class_bmus[:, 1], class_bmus[:, 0],
-                        color=colors(i), label=f'Class {c}',
-                        alpha=alpha, s=marker_size)
+            plt.scatter(
+                class_bmus[:, 1], class_bmus[:, 0],
+                color=colors(i), label=f'Class {c}',
+                alpha=alpha, s=marker_size
+            )
 
         # Add class prototypes if available
         if self.class_prototypes is not None:
             for c, bmu in self.class_prototypes.items():
-                plt.scatter(bmu[1], bmu[0], color='black', marker='*',
-                            s=marker_size * 2, label=f'Prototype {c}' if c == unique_classes[0] else "")
+                plt.scatter(
+                    bmu[1], bmu[0], color='black', marker='*',
+                    s=marker_size * 2,
+                    label=f'Prototype {c}' if c == unique_classes[0] else ""
+                )
 
         plt.title('Class Distribution in SOM Memory Space')
         plt.xlabel('Grid Width')
@@ -428,7 +577,7 @@ class SOMModel(keras.Model):
         save_path : str, optional
             If provided, the visualization will be saved to this path.
         """
-        weights = self.som_layer.get_weights_as_grid().numpy()
+        weights = ops.convert_to_numpy(self.som_layer.get_weights_as_grid())
         grid_height, grid_width, _ = weights.shape
 
         # Create the U-Matrix
@@ -501,9 +650,10 @@ class SOMModel(keras.Model):
         np.ndarray
             The hit histogram array.
         """
-        # Find BMU for each sample
-        bmu_indices, _ = self.som_layer(x_data, training=False)
-        bmu_indices = bmu_indices.numpy()
+        # Convert to tensor and find BMU for each sample
+        x_data_tensor = ops.convert_to_tensor(x_data.reshape(x_data.shape[0], -1))
+        bmu_indices, _ = self.som_layer(x_data_tensor, training=False)
+        bmu_indices = ops.convert_to_numpy(bmu_indices)
 
         # Create a histogram
         hit_histogram = np.zeros((self.som_layer.grid_height, self.som_layer.grid_width))
@@ -538,8 +688,8 @@ class SOMModel(keras.Model):
             self,
             test_sample: np.ndarray,
             n_similar: int = 5,
-            x_train: np.ndarray = None,
-            y_train: np.ndarray = None,
+            x_train: Optional[np.ndarray] = None,
+            y_train: Optional[np.ndarray] = None,
             figsize: Tuple[int, int] = (15, 3),
             cmap: str = 'gray',
             save_path: Optional[str] = None
@@ -571,21 +721,25 @@ class SOMModel(keras.Model):
         if len(test_sample.shape) == 1:
             test_sample = test_sample.reshape(1, -1)
 
-        # Find the BMU for the test sample
-        bmu_indices, _ = self.som_layer(test_sample, training=False)
-        bmu_index = bmu_indices[0].numpy()
+        # Convert to tensor and find the BMU for the test sample
+        test_sample_tensor = ops.convert_to_tensor(test_sample)
+        bmu_indices, _ = self.som_layer(test_sample_tensor, training=False)
+        bmu_index = ops.convert_to_numpy(bmu_indices[0])
 
         # Get the weights of the BMU (the memory prototype)
-        bmu_weights = self.som_layer.weights_map[bmu_index[0], bmu_index[1]].numpy()
+        bmu_weights = ops.convert_to_numpy(
+            self.som_layer.weights_map[bmu_index[0], bmu_index[1]]
+        )
 
         # Check if we can find similar training samples
         similar_samples = []
         similar_labels = []
 
         if x_train is not None:
-            # Find BMUs for all training samples
-            train_bmu_indices, _ = self.som_layer(x_train, training=False)
-            train_bmu_indices = train_bmu_indices.numpy()
+            # Convert to tensor and find BMUs for all training samples
+            x_train_tensor = ops.convert_to_tensor(x_train.reshape(x_train.shape[0], -1))
+            train_bmu_indices, _ = self.som_layer(x_train_tensor, training=False)
+            train_bmu_indices = ops.convert_to_numpy(train_bmu_indices)
 
             # Find samples that map to the same or neighboring BMUs
             distances = np.sum((train_bmu_indices - bmu_index) ** 2, axis=1)
@@ -656,13 +810,45 @@ class SOMModel(keras.Model):
         Dict[str, Any]
             Configuration dictionary for the model.
         """
-        config = super(SOMModel, self).get_config()
+        config = super().get_config()
         config.update({
-            'map_size': self.som_layer.map_size,
-            'input_dim': self.som_layer.input_dim,
-            'initial_learning_rate': self.som_layer.initial_learning_rate,
-            'sigma': self.som_layer.sigma,
-            'neighborhood_function': self.som_layer.neighborhood_function,
-            'weights_initializer': self.som_layer.weights_initializer
+            'map_size': self.map_size,
+            'input_dim': self.input_dim,
+            'initial_learning_rate': self.initial_learning_rate,
+            'sigma': self.sigma,
+            'neighborhood_function': self.neighborhood_function,
+            'weights_initializer': keras.initializers.serialize(
+                keras.initializers.get(self.weights_initializer)
+            ),
+            'regularizer': keras.regularizers.serialize(self.regularizer) if self.regularizer else None,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> 'SOMModel':
+        """
+        Create a model from its configuration.
+
+        Parameters
+        ----------
+        config : Dict[str, Any]
+            Configuration dictionary.
+
+        Returns
+        -------
+        SOMModel
+            New instance of the model.
+        """
+        # Deserialize complex objects
+        if config.get('weights_initializer'):
+            config['weights_initializer'] = keras.initializers.deserialize(
+                config['weights_initializer']
+            )
+        if config.get('regularizer'):
+            config['regularizer'] = keras.regularizers.deserialize(
+                config['regularizer']
+            )
+
+        return cls(**config)
+
+# ---------------------------------------------------------------------
