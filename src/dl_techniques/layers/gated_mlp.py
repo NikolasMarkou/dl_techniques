@@ -10,6 +10,10 @@ to create a powerful feature transformation block without self-attention.
 import keras
 from typing import Optional, Union, Literal, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.conv2d_builder import activation_wrapper
 
 

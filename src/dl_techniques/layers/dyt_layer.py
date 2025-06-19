@@ -75,10 +75,16 @@ def transformer_block_with_dyt(
 """
 
 import keras
-from keras import ops, constraints, initializers, regularizers
 from typing import Optional, Union, Dict, Any, List
+from keras import ops, constraints, initializers, regularizers
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class DynamicTanh(keras.layers.Layer):
