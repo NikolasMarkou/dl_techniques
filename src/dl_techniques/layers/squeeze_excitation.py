@@ -54,22 +54,19 @@ se_block = SqueezeExcitation(
 """
 
 import keras
-import tensorflow as tf
-from keras import layers, activations
-from typing import Dict, Optional, Tuple, Union, Callable
-
+from keras import layers, activations, ops
+from typing import Dict, Optional, Tuple, Union, Callable, Any
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from .layer_scale import LearnableMultiplier
-
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
 
-@keras.utils.register_keras_serializable()
+@keras.saving.register_keras_serializable()
 class SqueezeExcitation(layers.Layer):
     """Squeeze-and-Excitation block for channel-wise feature recalibration.
 
@@ -88,9 +85,24 @@ class SqueezeExcitation(layers.Layer):
             Can be a string identifier or a callable. Defaults to "relu".
         use_bias: Boolean, whether the layer uses a bias vector.
             Defaults to False.
+        **kwargs: Additional keyword arguments for the base Layer class.
 
     Raises:
         ValueError: If reduction_ratio is not in the range (0, 1].
+
+    Input shape:
+        4D tensor with shape: ``(batch_size, height, width, channels)``
+
+    Output shape:
+        4D tensor with shape: ``(batch_size, height, width, channels)``
+        Same shape as input.
+
+    Example:
+        >>> inputs = keras.Input(shape=(32, 32, 64))
+        >>> se_layer = SqueezeExcitation(reduction_ratio=0.25)
+        >>> outputs = se_layer(inputs)
+        >>> print(outputs.shape)
+        (None, 32, 32, 64)
     """
 
     def __init__(
@@ -100,7 +112,7 @@ class SqueezeExcitation(layers.Layer):
             kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
             activation: Union[str, Callable] = "relu",
             use_bias: bool = False,
-            **kwargs
+            **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
@@ -109,7 +121,7 @@ class SqueezeExcitation(layers.Layer):
                 f"reduction_ratio must be in range (0, 1], got {reduction_ratio}"
             )
 
-        # Layer parameters
+        # Store configuration parameters
         self.reduction_ratio = reduction_ratio
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -122,18 +134,28 @@ class SqueezeExcitation(layers.Layer):
         self.global_pool: Optional[layers.Layer] = None
         self.conv_reduce: Optional[layers.Conv2D] = None
         self.conv_restore: Optional[layers.Conv2D] = None
-        self.scale: Optional[LearnableMultiplier] = None
+
+        # Store build input shape for serialization
+        self._build_input_shape: Optional[Tuple[int, ...]] = None
 
     def build(self, input_shape: Tuple[int, ...]) -> None:
         """Builds the layer with given input shape.
 
         Args:
             input_shape: Tuple of integers defining the input shape.
+                Expected format: (batch_size, height, width, channels)
         """
+        # Store input shape for serialization
+        self._build_input_shape = input_shape
+
         self.input_channels = input_shape[-1]
         self.bottleneck_channels = max(1, int(round(
             self.input_channels * self.reduction_ratio
         )))
+
+        logger.info(f"Building SqueezeExcitation layer: "
+                   f"input_channels={self.input_channels}, "
+                   f"bottleneck_channels={self.bottleneck_channels}")
 
         # Global pooling for squeeze operation
         self.global_pool = layers.GlobalAveragePooling2D(keepdims=True)
@@ -145,6 +167,7 @@ class SqueezeExcitation(layers.Layer):
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
+            name="conv_reduce"
         )
 
         # Channel restoration convolution
@@ -154,33 +177,49 @@ class SqueezeExcitation(layers.Layer):
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
+            name="conv_restore"
         )
+
+        super().build(input_shape)
 
     def call(
             self,
-            inputs: tf.Tensor,
+            inputs: keras.KerasTensor,
             training: Optional[bool] = None
-    ) -> tf.Tensor:
+    ) -> keras.KerasTensor:
         """Forward pass of the layer.
 
         Args:
-            inputs: Input tensor.
+            inputs: Input tensor with shape (batch_size, height, width, channels).
             training: Boolean indicating whether in training mode.
 
         Returns:
-            Output tensor after applying SE operations.
+            Output tensor after applying SE operations with same shape as input.
         """
-        # Squeeze operation
+        # Squeeze operation - global average pooling
         x = self.global_pool(inputs)
 
         # Excitation operation
         x = self.conv_reduce(x, training=training)
-        x = self.activation(x)  # Using configured activation
+        x = self.activation(x)
         x = self.conv_restore(x, training=training)
-        x = tf.nn.sigmoid(x)
-        return inputs * x
+        x = activations.sigmoid(x)
 
-    def get_config(self) -> Dict:
+        # Scale original inputs by attention weights
+        return ops.multiply(inputs, x)
+
+    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+        """Compute the output shape of the layer.
+
+        Args:
+            input_shape: Shape of the input tensor.
+
+        Returns:
+            Output shape tuple (same as input shape).
+        """
+        return input_shape
+
+    def get_config(self) -> Dict[str, Any]:
         """Returns the config of the layer.
 
         Returns:
@@ -195,5 +234,24 @@ class SqueezeExcitation(layers.Layer):
             "use_bias": self.use_bias,
         })
         return config
+
+    def get_build_config(self) -> Dict[str, Any]:
+        """Get the build configuration for serialization.
+
+        Returns:
+            Dictionary containing the build configuration.
+        """
+        return {
+            "input_shape": self._build_input_shape,
+        }
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Build the layer from a build configuration.
+
+        Args:
+            config: Dictionary containing the build configuration.
+        """
+        if config.get("input_shape") is not None:
+            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------
