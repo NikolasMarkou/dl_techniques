@@ -6,10 +6,7 @@ import numpy as np
 import tensorflow as tf
 
 from dl_techniques.layers.orthoblock import (
-    OrthonomalRegularizer,
-    CenteringNormalization,
-    LogitNormalization,
-    OrthoCenterBlock
+    OrthoBlock
 )
 
 
@@ -28,163 +25,12 @@ def sample_data_4d():
     return np.random.normal(size=(4, 8, 8, 3)).astype(np.float32)
 
 
-class TestOrthonomalRegularizer:
-    """Tests for the OrthonomalRegularizer class."""
-
-    def test_initialization(self):
-        """Test initialization with different parameters."""
-        reg = OrthonomalRegularizer(factor=0.1)
-        assert reg.factor == 0.1
-
-        reg = OrthonomalRegularizer(factor=0.5)
-        assert reg.factor == 0.5
-
-    def test_regularization_effect(self):
-        """Test that regularization penalizes non-orthogonal weights."""
-        reg = OrthonomalRegularizer(factor=0.1)
-
-        # Create a perfect orthonormal matrix (identity)
-        weights = np.eye(5, dtype=np.float32)
-        loss = reg(tf.convert_to_tensor(weights))
-        # Loss should be very close to zero for orthonormal weights
-        assert abs(loss.numpy()) < 1e-5
-
-        # Create a non-orthonormal matrix (ones)
-        weights = np.ones((5, 5), dtype=np.float32)
-        loss = reg(tf.convert_to_tensor(weights))
-        # Loss should be substantial for non-orthonormal weights
-        assert loss.numpy() > 1.0
-
-    def test_serialization(self):
-        """Test serialization and deserialization."""
-        reg = OrthonomalRegularizer(factor=0.1)
-        config = reg.get_config()
-
-        # Recreate from config
-        reg_new = OrthonomalRegularizer.from_config(config)
-        assert reg_new.factor == reg.factor
-
-
-class TestCenteringNormalization:
-    """Tests for the CenteringNormalization class."""
-
-    def test_initialization(self):
-        """Test initialization with different parameters."""
-        norm = CenteringNormalization(axis=-1)
-        assert norm.axis == [-1]
-
-        norm = CenteringNormalization(axis=[1, 2])
-        assert norm.axis == [1, 2]
-
-    def test_centering_effect_2d(self, sample_data_2d):
-        """Test that centering produces zero mean across feature dimension."""
-        norm = CenteringNormalization(axis=-1)
-        outputs = norm(tf.convert_to_tensor(sample_data_2d))
-
-        # Check outputs have zero mean along feature dimension
-        means = tf.reduce_mean(outputs, axis=-1)
-        assert np.allclose(means.numpy(), 0.0, atol=1e-6)
-
-        # Check shape is preserved
-        assert outputs.shape == sample_data_2d.shape
-
-        # Check variance is preserved (not scaled)
-        input_var = np.var(sample_data_2d, axis=-1)
-        output_var = np.var(outputs.numpy(), axis=-1)
-        assert np.allclose(input_var, output_var, rtol=1e-5)
-
-    def test_centering_effect_4d(self, sample_data_4d):
-        """Test centering on 4D data (like CNN feature maps)."""
-        norm = CenteringNormalization(axis=-1)
-        outputs = norm(tf.convert_to_tensor(sample_data_4d))
-
-        # Check outputs have zero mean across channels
-        means = tf.reduce_mean(outputs, axis=-1)
-        assert np.allclose(means.numpy(), 0.0, atol=1e-6)
-
-        # Check shape is preserved
-        assert outputs.shape == sample_data_4d.shape
-
-    def test_serialization(self):
-        """Test serialization and deserialization."""
-        norm = CenteringNormalization(axis=-1, epsilon=1e-5)
-
-        # Build the layer
-        norm.build((None, 10))
-
-        config = norm.get_config()
-        build_config = norm.get_build_config()
-
-        # Recreate from config
-        norm_new = CenteringNormalization.from_config(config)
-        norm_new.build_from_config(build_config)
-
-        assert norm_new.axis == norm.axis
-        assert norm_new.epsilon == norm.epsilon
-
-
-class TestLogitNormalization:
-    """Tests for the LogitNormalization class."""
-
-    def test_initialization(self):
-        """Test initialization with different parameters."""
-        norm = LogitNormalization(axis=-1)
-        assert norm.axis == -1
-
-        norm = LogitNormalization(axis=1, epsilon=1e-5)
-        assert norm.axis == 1
-        assert norm.epsilon == 1e-5
-
-    def test_normalization_effect(self, sample_data_2d):
-        """Test that logit normalization produces unit norm vectors."""
-        norm = LogitNormalization(axis=-1)
-        outputs = norm(tf.convert_to_tensor(sample_data_2d))
-
-        # Check outputs have unit norm along feature dimension
-        square_sum = tf.reduce_sum(tf.square(outputs), axis=-1)
-        norms = tf.sqrt(square_sum)
-        assert np.allclose(norms.numpy(), 1.0, atol=1e-6)
-
-        # Check shape is preserved
-        assert outputs.shape == sample_data_2d.shape
-
-    def test_direction_preservation(self, sample_data_2d):
-        """Test that logit normalization preserves direction but not magnitude."""
-        norm = LogitNormalization(axis=-1)
-        outputs = norm(tf.convert_to_tensor(sample_data_2d))
-
-        # Normalize the input data manually for comparison
-        norms = np.sqrt(np.sum(sample_data_2d ** 2, axis=-1, keepdims=True))
-        expected = sample_data_2d / (norms + 1e-7)
-
-        # Check direction is preserved (cosine similarity should be close to 1)
-        similarity = np.sum(outputs.numpy() * expected, axis=-1)
-        assert np.allclose(similarity, 1.0, atol=1e-5)
-
-    def test_serialization(self):
-        """Test serialization and deserialization."""
-        norm = LogitNormalization(axis=-1, epsilon=1e-5)
-
-        # Build the layer
-        norm.build((None, 10))
-
-        config = norm.get_config()
-        build_config = norm.get_build_config()
-
-        # Recreate from config
-        norm_new = LogitNormalization.from_config(config)
-        norm_new.build_from_config(build_config)
-
-        assert norm_new.axis == norm.axis
-        assert norm_new.epsilon == norm.epsilon
-
-
 class TestOrthoCenterBlock:
     """Tests for the complete OrthoCenterBlock."""
 
     def test_initialization(self):
         """Test initialization with different parameters."""
-        block = OrthoCenterBlock(
+        block = OrthoBlock(
             units=32,
             activation='relu',
             ortho_reg_factor=0.1
@@ -192,7 +38,7 @@ class TestOrthoCenterBlock:
         assert block.units == 32
         assert block.ortho_reg_factor == 0.1
 
-        block = OrthoCenterBlock(
+        block = OrthoBlock(
             units=64,
             activation=None,
             use_bias=False,
@@ -200,25 +46,9 @@ class TestOrthoCenterBlock:
         assert block.units == 64
         assert block.use_bias is False
 
-    def test_sublayers_initialization(self, sample_data_2d):
-        """Test that all sublayers are properly initialized after build."""
-        block = OrthoCenterBlock(units=16)
-
-        # Forward pass to build
-        outputs = block(tf.convert_to_tensor(sample_data_2d))
-
-        # Check all sublayers exist
-        assert block.dense is not None
-        assert block.centering is not None
-        assert block.logit_norm is not None
-        assert block.constrained_scale is not None
-
-        # Check output shape
-        assert outputs.shape == (sample_data_2d.shape[0], 16)
-
     def test_orthogonal_regularization(self, sample_data_2d):
         """Test that orthogonal regularization is applied."""
-        block = OrthoCenterBlock(
+        block = OrthoBlock(
             units=16,
             ortho_reg_factor=0.1
         )
@@ -234,35 +64,9 @@ class TestOrthoCenterBlock:
         # Check regularization losses exist
         assert len(model.losses) > 0
 
-    def test_full_pipeline(self, sample_data_2d):
-        """Test the complete transformation pipeline."""
-        # Create an input with known properties
-        centered_input = sample_data_2d - np.mean(sample_data_2d, axis=-1, keepdims=True)
-
-        # Create block with identity weights for testing
-        block = OrthoCenterBlock(
-            units=sample_data_2d.shape[1],  # Same dimensions for easier testing
-            activation=None,
-            use_bias=False,
-            ortho_reg_factor=0.0,  # No regularization for this test
-            kernel_initializer=keras.initializers.Identity(),
-            scale_initial_value=1.0  # All features fully active
-        )
-
-        # Forward pass
-        outputs = block(tf.convert_to_tensor(sample_data_2d))
-
-        # With identity weights, centering should make mean zero
-        output_means = tf.reduce_mean(outputs, axis=-1)
-        assert np.allclose(output_means.numpy(), 0.0, atol=1e-5)
-
-        # With identity weights and scale=1, all vectors should be unit norm
-        output_norms = tf.sqrt(tf.reduce_sum(tf.square(outputs), axis=-1))
-        assert np.allclose(output_norms.numpy(), 1.0, atol=1e-5)
-
     def test_gradient_flow(self, sample_data_2d):
         """Test gradient flow through the block."""
-        block = OrthoCenterBlock(units=16)
+        block = OrthoBlock(units=16)
 
         with tf.GradientTape() as tape:
             inputs = tf.Variable(sample_data_2d)
@@ -286,7 +90,7 @@ class TestOrthoCenterBlock:
         y_dummy = np.random.randint(0, num_classes, size=(sample_data_2d.shape[0],))
 
         # Create model with our block
-        block = OrthoCenterBlock(
+        block = OrthoBlock(
             units=16,
             activation='relu',
             ortho_reg_factor=0.1
@@ -316,7 +120,7 @@ class TestOrthoCenterBlock:
 
     def test_serialization_and_save_load(self, sample_data_2d):
         """Test serialization and model saving/loading."""
-        block = OrthoCenterBlock(
+        block = OrthoBlock(
             units=16,
             activation='relu',
             ortho_reg_factor=0.1
@@ -343,10 +147,7 @@ class TestOrthoCenterBlock:
 
             # Custom objects dict for loading
             custom_objects = {
-                'OrthoCenterBlock': OrthoCenterBlock,
-                'CenteringNormalization': CenteringNormalization,
-                'LogitNormalization': LogitNormalization,
-                'OrthonomalRegularizer': OrthonomalRegularizer
+                'OrthoCenterBlock': OrthoBlock
             }
 
             loaded_model = keras.models.load_model(
@@ -360,7 +161,7 @@ class TestOrthoCenterBlock:
 
     def test_scheduled_regularization(self, sample_data_2d):
         """Test the regularization scheduler."""
-        block = OrthoCenterBlock(
+        block = OrthoBlock(
             units=16,
             ortho_reg_factor=0.1
         )
