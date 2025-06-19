@@ -67,7 +67,7 @@ Where:
     - `H(Y)`: Entropy of the average prediction across the batch (measures prediction diversity).
     - `H(Y|X)`: Average entropy of individual predictions in the batch (measures model uncertainty).
 
-The hyperparameters `λ` (lambda) and `β` (beta) control the strength of the regularization terms.
+The hyperparameters `λ` (lambda, `entropy_weight`) and `β` (beta, `mi_weight`) control the strength of the regularization terms.
 
 ## 4. Experiment 1: Calibration on CIFAR-10
 
@@ -85,37 +85,52 @@ This experiment tests whether GAL can produce better-calibrated models than stan
 - **Dataset**: CIFAR-10
 - **Models Compared**:
     1.  Standard **Cross-Entropy** (Baseline)
-    2.  **Label Smoothing** (Common Regularization Technique)
-    3.  **GoodhartAwareLoss** (Our Method)
-- **Protocol**: All models share the same ResNet-like architecture, optimizer, and training schedule to ensure a fair comparison.
+    2.  **Label Smoothing**
+    3.  **Focal Loss**
+    4.  **GoodhartAwareLoss** (Our Method)
+- **Protocol**: All models share the same ResNet-like architecture, optimizer, and training schedule for 10 epochs to ensure a fair comparison.
 
 ### Results-1
 
-The results provide strong evidence in favor of `GoodhartAwareLoss`.
+The experimental results provide strong, quantitative evidence that `GoodhartAwareLoss` achieves its goal of superior calibration.
 
 #### Performance Metrics
 
 | Model             | Accuracy | Top-5 Accuracy |
 | ----------------- | :------: | :------------: |
-| Cross-Entropy     | **0.8220** |  **0.9912**    |
+| **Cross-Entropy**     | **0.8220** |  **0.9912**    |
 | Label Smoothing   |  0.8015  |     0.9883     |
-| GoodhartAwareLoss |  0.8046  |     0.9910     |
+| GoodhartAwareLoss |  0.7996  |     0.9869     |
+| Focal Loss        |  0.7667  |     0.9866     |
 
-_**Finding:** GAL maintains accuracy competitive with the baselines, with only a negligible ~1.7% drop._
+_**Finding:** The standard Cross-Entropy model achieves the highest accuracy. GAL remains highly competitive, experiencing only a minor ~2.7% drop in accuracy compared to the baseline, demonstrating that its regularization does not significantly harm task performance._
 
 #### Calibration Metrics
 
 | Model             | ECE (↓ is better) | Brier Score (↓) | Mean Entropy (↑) |
 | ----------------- | :---------------: | :-------------: | :--------------: |
+| **GoodhartAwareLoss** |   **0.0117**      |     0.2837      |      0.5630      |
 | Cross-Entropy     |      0.0386       |  **0.2569**     |      0.4040      |
-| Label Smoothing   |      0.0368       |     0.2820      |   **0.8106**     |
-| **GoodhartAwareLoss** |   **0.0232**      |     0.2776      |      0.5294      |
+| Label Smoothing   |      0.0368       |     0.2820      |      0.8106      |
+| Focal Loss        |      0.0961       |     0.3387      |   **0.9206**     |
 
-_**Finding:** GAL is the decisive winner on the primary calibration metric (ECE), achieving a **40% reduction** compared to the baseline Cross-Entropy. It successfully reduces overconfidence (higher entropy) without making the model overly uncertain like Label Smoothing._
+![Calibration Metrics Comparison](calibration_metrics_comparison.png)
+
+_**Finding:** `GoodhartAwareLoss` is the decisive winner on the primary calibration metric (ECE), achieving a value of **0.0117**. This represents a **~70% reduction in calibration error** compared to the Cross-Entropy baseline (0.0386). While the Cross-Entropy model has the best Brier score (a metric that combines calibration and accuracy), its poor ECE reveals significant overconfidence. GAL makes a highly favorable trade-off, slightly increasing the Brier score for a massive improvement in confidence reliability._
+
+#### Visual Analysis
+
+The reliability diagram below visually confirms these findings. A perfectly calibrated model's predictions would fall along the dashed diagonal line.
+
+![Calibration Comparison Chart](calibration_comparison.png)
+
+- **GoodhartAwareLoss (Blue)**: The line for GAL tracks the diagonal almost perfectly, showing that its confidence scores are a reliable indicator of its actual accuracy across all confidence levels.
+- **Crossentropy (Red)**: This line falls consistently below the diagonal, especially at high confidence levels. This is the classic signature of an overconfident model—it is less accurate than it "thinks" it is.
+- **Label Smoothing (Green) & Focal Loss (Orange)**: These models are generally underconfident, with their accuracy lines arching above the diagonal.
 
 ### Conclusion-1
 
-On the CIFAR-10 benchmark, **`GoodhartAwareLoss` successfully produces significantly better-calibrated models** than both standard Cross-Entropy and Label Smoothing, while preserving high task performance.
+On the CIFAR-10 benchmark, **`GoodhartAwareLoss` successfully produces significantly better-calibrated models** than standard Cross-Entropy, Label Smoothing, and Focal Loss. It achieves the best calibration (lowest ECE) by a wide margin while preserving high task performance, making its confidence outputs far more trustworthy for real-world applications.
 
 ---
 
@@ -149,7 +164,7 @@ _These are representative results based on the experiment's design._
 | Label Smoothing   |       0.650       |         0.310          |
 | **GoodhartAwareLoss** |   **0.850**       |      **0.110**         |
 
-![Robustness Comparison Chart](path/to/robustness_summary.png)
+![Robustness Comparison Chart](robustness_summary.png)
 
 _**Finding:** The baseline model collapses, as its accuracy drops from ~97% on the training set to 55% on the test set. `GoodhartAwareLoss` is far more resilient, maintaining a high test accuracy by successfully ignoring the spurious color feature and learning the true digit shapes._
 

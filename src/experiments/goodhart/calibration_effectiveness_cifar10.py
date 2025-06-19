@@ -149,9 +149,21 @@ class ExperimentConfig:
             mi_weight=0.01,
             from_logits=True
         ),
-        'crossentropy': lambda: keras.losses.CategoricalCrossentropy(from_logits=True),
+        'goodhart_aware_label_smoothing': lambda: GoodhartAwareLoss(
+            label_smoothing=0.01,
+            entropy_weight=0.1,
+            mi_weight=0.01,
+            from_logits=True
+        ),
+        'crossentropy': lambda: keras.losses.CategoricalCrossentropy(
+            from_logits=True
+        ),
         'label_smoothing': lambda: keras.losses.CategoricalCrossentropy(
             label_smoothing=0.1,
+            from_logits=True
+        ),
+        'focal_loss': lambda: keras.losses.CategoricalFocalCrossentropy(
+            gamma=2.0,
             from_logits=True
         )
     })

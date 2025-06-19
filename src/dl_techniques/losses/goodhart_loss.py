@@ -1,64 +1,66 @@
 """
-GoodhartAwareLoss: Information-Theoretic Loss Function for Robust Classification
-================================================================================
+GoodhartAwareLoss: Information-Theoretic Loss for Robust Classification
+=======================================================================
 
 This module implements a loss function that addresses Goodhart's Law
 ("When a measure becomes a target, it ceases to be a good measure") in machine
 learning classification tasks through information-theoretic principles.
 
-Goodhart's Law manifests in ML when models optimize for proxy metrics (like cross-entropy)
-in ways that don't improve the true underlying objective. This can lead to overconfident
-predictions, exploitation of spurious correlations, and poor generalization.
+Goodhart's Law manifests in ML when models optimize for proxy metrics (like
+cross-entropy) in ways that don't improve the true underlying objective. This can
+lead to overconfident predictions, exploitation of spurious correlations, and
+poor generalization.
 
-The GoodhartAwareLoss combines a standard cross-entropy loss with two information-theoretic
-regularizers to encourage more robust learning. This approach synthesizes established
-regularization techniques into a single, unified loss function designed to provide a more
-holistic training objective than cross-entropy alone.
+The ``GoodhartAwareLoss`` combines a standard cross-entropy loss with two
+information-theoretic regularizers to encourage more robust learning. This
+approach synthesizes established regularization techniques into a single,
+unified loss function designed to provide a more holistic training objective
+than cross-entropy alone.
 
-1. **Standard Cross-Entropy**: The primary task loss that drives the model to be accurate.
-   This implementation correctly operates on raw logits for numerical stability.
+Components
+----------
+1. **Cross-Entropy (CE)**: The primary task loss that drives the model to be
+   accurate. This implementation can optionally include label smoothing to
+   further regularize the model and prevent overconfidence.
 
-2. **Entropy Regularization** (λ = 0.01-0.2, default: 0.1): Explicitly encourages
-   prediction uncertainty by maximizing the entropy H(p) = -Σ p_i log p_i of the
-   output distribution. This prevents the model from collapsing to overly confident,
-   brittle solutions. This component is inspired by techniques used to improve model
-   calibration and exploration (e.g., Pereyra et al., 2017).
+2. **Entropy Regularization**: Explicitly encourages prediction uncertainty by
+   maximizing the Shannon entropy :math:`H(p) = -\\sum p_i \\log p_i` of the
+   output distribution. This prevents the model from collapsing to overly
+   confident, brittle solutions (Pereyra et al., 2017).
+   - **Rationale**: Acts as a "pressure valve" against over-optimization.
+     When the model tries to become too certain to minimize cross-entropy, the
+     entropy term pushes back, improving calibration and robustness.
 
-   **Rationale:** Acts as a "pressure valve" against over-optimization. When the model
-   tries to become too certain to minimize cross-entropy, the entropy term pushes back,
-   improving calibration and robustness to noisy labels.
+3. **Mutual Information (MI) Regularization**: Constrains the mutual information
+   :math:`I(X;\\hat{Y})` between the inputs (X) and the model's predictions (Ŷ),
+   based on the Information Bottleneck principle (Tishby et al., 2000). By
+   penalizing this mutual information, the model is forced to compress the
+   input, retaining only the most essential information required for the task.
+   - **Rationale**: Creates a "compression bottleneck" that forces the model
+     to discard irrelevant information and spurious correlations, leading to
+     better generalization.
 
-3. **Mutual Information Regularization** (β = 0.001-0.05, default: 0.01): Constrains
-   the mutual information I(X;Ŷ) between the inputs (X) and the model's predictions (Ŷ),
-   based on the Information Bottleneck principle (Tishby et al., 2000). By penalizing
-   this mutual information, the model is forced to compress the input, retaining only
-   the most essential information required for the task.
+Mathematical Foundation
+-----------------------
+The total loss is a weighted combination of the three components:
 
-   **Rationale:** Creates a "compression bottleneck" that forces the model to discard
-   irrelevant information and spurious correlations while preserving task-relevant
-   patterns, leading to better generalization.
+.. math::
+    L_{total} = L_{CE} - \\lambda H(p(\\hat{Y}|X)) + \\beta I(X; \\hat{Y})
 
-Mathematical Foundation:
-- Total Loss: L_total = L_ce - λ * H(p(Ŷ|X)) + β * I(X; Ŷ)
-- Cross-Entropy: L_ce = -Σ y_true * log(softmax(logits))
-- Entropy Regularization: -H(p(Ŷ|X)) = Σ p * log(p) (minimizing this maximizes entropy)
-- Mutual Information: I(X; Ŷ) ≈ H(Ŷ) - H(Ŷ|X), where H(Ŷ) is the entropy of the batch-averaged prediction.
+Where:
+- :math:`L_{CE}` is the categorical cross-entropy, optionally with label smoothing.
+- :math:`H(p(\\hat{Y}|X))` is the conditional entropy of the predictions. Minimizing
+  :math:`-H` maximizes the entropy, discouraging overconfidence.
+- :math:`I(X; \\hat{Y})` is the mutual information, approximated as :math:`H(\\hat{Y}) - H(\\hat{Y}|X)`.
+- :math:`\\lambda` and :math:`\\beta` are the weights for the regularization terms.
 
-Usage:
-    # Default usage with a model that outputs logits
-    loss_fn = GoodhartAwareLoss(from_logits=True)
-    model.compile(optimizer='adam', loss=loss_fn, metrics=['accuracy'])
-    
-    # Usage with a model that has a final softmax activation
-    loss_fn = GoodhartAwareLoss(from_logits=False)
-    model.compile(optimizer='adam', loss=loss_fn, metrics=['accuracy'])
-
-References:
+References
+----------
 - Goodhart's Law: https://en.wikipedia.org/wiki/Goodhart's_law
-- Information Bottleneck: Tishby, N., Pereira, F. C., & Bialek, W. (2000). The information bottleneck method.
-- Regularizing by Penalizing Confident Outputs: Pereyra, G., Tucker, G., Chorowski, J., Kaiser, Ł., & Hinton, G. (2017). Regularizing neural networks by penalizing confident output distributions.
-- Deep Variational Information Bottleneck: Alemi, A. A., Fischer, I., Dillon, J. V., & Murphy, K. (2017). Deep variational information bottleneck.
-- On Calibration of Modern Neural Networks: Guo, C., Pleiss, G., Sun, Y., & Weinberger, K. Q. (2017). On calibration of modern neural networks.
+- Information Bottleneck: Tishby, N., Pereira, F. C., & Bialek, W. (2000).
+- Regularizing by Penalizing Confident Outputs: Pereyra, G., et al. (2017).
+- Deep Variational Information Bottleneck: Alemi, A. A., et al. (2017).
+
 """
 
 import keras
@@ -71,235 +73,287 @@ from typing import Dict, Any
 @keras.saving.register_keras_serializable()
 class GoodhartAwareLoss(keras.losses.Loss):
     """
-    Information-theoretic loss function combining cross-entropy with regularization.
+    An information-theoretic loss combining cross-entropy with regularization.
 
-    This loss function combines standard cross-entropy with entropy and mutual
+    This loss function augments standard cross-entropy with entropy and mutual
     information regularization to encourage robust, well-calibrated models.
 
-    The total loss is:
-    L_total = CrossEntropy(y, y_pred) - λ_entropy * H(p(y_pred)) + λ_mi * I(X; y_pred)
-
-    Args:
-        entropy_weight (float): Weight for the entropy regularization term.
-            Controls how much the model is encouraged to maintain uncertainty in its
-            per-sample predictions. Higher values combat overconfidence more strongly.
-            Typical range: [0.001, 0.5]. Default: 0.1
-        mi_weight (float): Weight for the mutual information regularization term.
-            Controls the compression of input-output information flow. Higher values
-            force the model to be more "forgetful" of spurious details.
-            Typical range: [0.001, 0.1]. Default: 0.01
-            **Note**: The MI approximation is batch-dependent. Its effect may change
-            with batch size. You may need to scale this weight inversely with
-            batch size if you change it significantly.
-        from_logits (bool): Whether `y_pred` is a tensor of logits or probabilities.
-            Set to `True` (default) if your model does not have a final softmax
-            activation. Set to `False` if it does.
-        epsilon (float): Small constant for numerical stability in log operations.
-            Should be much smaller than 1/num_classes. Default: 1e-8
-        name (str): String name for the loss function. Default: 'goodhart_aware_loss'
-        reduction (str): Type of reduction to apply to loss. Default: 'sum_over_batch_size'
-
-    Raises:
-        ValueError: If any parameter is outside its valid range.
-
-    Practical Considerations:
-        - **Interaction**: The two regularizers have a complementary tension. Entropy
-          regularization encourages high uncertainty in *every* prediction. MI
-          regularization encourages low uncertainty in individual predictions
-          (`H(Y|X)`) but high uncertainty in the *average* prediction (`H(Y)`).
-          This balance helps the model become certain only when truly warranted.
-        - **When to Use**: This loss is most effective in scenarios prone to
-          overfitting on spurious features, such as datasets with known biases,
-          noisy labels, or when out-of-distribution (OOD) robustness is a primary
-          goal.
-        - **Hyperparameter Tuning**: Start with the defaults. If the model remains
-          overconfident (poorly calibrated), increase `entropy_weight`. If the model
-          seems to be overfitting to dataset-specific quirks (poor generalization),
-          increase `mi_weight`.
+    The total loss is calculated as:
+    ``L = CE(y, y_pred) - entropy_weight * H(y_pred) + mi_weight * I(X; y_pred)``
     """
 
     def __init__(
-            self,
-            entropy_weight: float = 0.1,
-            mi_weight: float = 0.01,
-            from_logits: bool = True,
-            epsilon: float = 1e-8,
-            name: str = 'goodhart_aware_loss',
-            reduction: str = 'sum_over_batch_size'
+        self,
+        label_smoothing: float = 0.0,
+        entropy_weight: float = 0.1,
+        mi_weight: float = 0.01,
+        from_logits: bool = True,
+        epsilon: float = 1e-8,
+        name: str = 'goodhart_aware_loss',
+        reduction: str = 'sum_over_batch_size'
     ) -> None:
+        """
+        Initializes the GoodhartAwareLoss.
+
+        :param label_smoothing: Factor for label smoothing, a regularization
+            technique applied to the cross-entropy component. Must be in the
+            range [0, 1). Defaults to 0.0 (no smoothing).
+        :type label_smoothing: float
+        :param entropy_weight: Weight (:math:`\\lambda`) for the entropy
+            regularization term. Controls how much the model is encouraged to
+            maintain uncertainty. Higher values combat overconfidence more
+            strongly. Typical range: [0.001, 0.5]. Defaults to 0.1.
+        :type entropy_weight: float
+        :param mi_weight: Weight (:math:`\\beta`) for the mutual information
+            regularization term. Controls the compression of input-output
+            information flow. Higher values force the model to be more
+            "forgetful" of spurious details. Typical range: [0.001, 0.1].
+            Defaults to 0.01.
+        :type mi_weight: float
+        :param from_logits: Whether `y_pred` is a tensor of logits or
+            probabilities. Set to ``True`` (default) if your model does not have
+            a final softmax activation.
+        :type from_logits: bool
+        :param epsilon: A small constant for numerical stability in log
+            operations. Should be much smaller than 1/num_classes.
+            Defaults to 1e-8.
+        :type epsilon: float
+        :param name: String name for the loss function.
+        :type name: str
+        :param reduction: Type of reduction to apply to loss.
+        :type reduction: str
+        :raises ValueError: If any parameter is outside its valid range.
+        """
         super().__init__(name=name, reduction=reduction)
 
-        # Parameter validation
-        if not isinstance(entropy_weight, (int, float)) or entropy_weight < 0:
-            raise ValueError(f"Entropy weight must be a non-negative number, got {entropy_weight}.")
-        if not isinstance(mi_weight, (int, float)) or mi_weight < 0:
-            raise ValueError(f"MI weight must be a non-negative number, got {mi_weight}.")
-        if not isinstance(epsilon, (int, float)) or epsilon <= 0 or epsilon >= 0.1:
-            raise ValueError(f"Epsilon must be a small positive number (0, 0.1), got {epsilon}.")
+        # --- Parameter Validation ---
+        if not (0 <= label_smoothing < 1):
+            raise ValueError(
+                f"label_smoothing must be in the range [0, 1), "
+                f"but got {label_smoothing}."
+            )
+        if not (isinstance(entropy_weight, (int, float)) and entropy_weight >= 0):
+            raise ValueError(
+                f"Entropy weight must be a non-negative number, "
+                f"but got {entropy_weight}."
+            )
+        if not (isinstance(mi_weight, (int, float)) and mi_weight >= 0):
+            raise ValueError(
+                f"MI weight must be a non-negative number, "
+                f"but got {mi_weight}."
+            )
+        if not (0 < epsilon < 0.1):
+            raise ValueError(
+                f"Epsilon must be a small positive number in (0, 0.1), "
+                f"but got {epsilon}."
+            )
 
         if entropy_weight > 1.0:
             warnings.warn(
-                f"Very high entropy weight ({entropy_weight}) may dominate training. "
-                f"Consider values in [0.001, 0.5]", UserWarning
+                f"High entropy_weight ({entropy_weight}) may dominate training. "
+                "Consider values in [0.001, 0.5].", UserWarning
+            )
+        if mi_weight > 0.1:
+            warnings.warn(
+                f"High mi_weight ({mi_weight}) may dominate training. "
+                "Consider values in [0.001, 0.1].", UserWarning
             )
 
+        self.label_smoothing = float(label_smoothing)
         self.entropy_weight = float(entropy_weight)
         self.mi_weight = float(mi_weight)
         self.from_logits = bool(from_logits)
         self.epsilon = float(epsilon)
 
     def call(
-            self,
-            y_true: keras.KerasTensor,
-            y_pred: keras.KerasTensor
+        self,
+        y_true: keras.KerasTensor,
+        y_pred: keras.KerasTensor
     ) -> keras.KerasTensor:
         """
-        Compute the Goodhart-aware loss.
+        Computes the Goodhart-aware loss for a batch.
 
-        Args:
-            y_true (KerasTensor): Ground truth labels, shape (batch_size, num_classes).
-            y_pred (KerasTensor): Predicted logits or probabilities, shape (batch_size, num_classes).
-
-        Returns:
-            KerasTensor: Scalar tensor representing the total loss for the batch.
+        :param y_true: Ground truth labels, shape (batch_size, num_classes).
+        :type y_true: keras.KerasTensor
+        :param y_pred: Predicted logits or probabilities, shape
+            (batch_size, num_classes).
+        :type y_pred: keras.KerasTensor
+        :return: A scalar tensor representing the total loss for the batch.
+        :rtype: keras.KerasTensor
         """
         y_true = ops.cast(y_true, dtype=y_pred.dtype)
 
-        # Component 1: Standard cross-entropy loss
-        # Handles both logits and probabilities based on the init flag.
+        # --- Component 1: Standard Cross-Entropy Loss ---
+        # This component drives task accuracy and incorporates label smoothing.
         ce_loss = keras.losses.categorical_crossentropy(
-            y_true,
-            y_pred,
-            from_logits=self.from_logits
+            y_true=y_true,
+            y_pred=y_pred,
+            from_logits=self.from_logits,
+            label_smoothing=self.label_smoothing
         )
 
         # For regularization, we always need probabilities.
         if self.from_logits:
             probs = ops.softmax(y_pred, axis=-1)
         else:
-            # If input is already probabilities, use it directly.
-            # Clipping ensures we don't pass exact 0s or 1s to log, even if the user provides them.
+            # Clip user-provided probabilities to avoid log(0) issues.
             probs = ops.clip(y_pred, self.epsilon, 1.0 - self.epsilon)
 
-        # Component 2: Entropy regularization loss (only if weight > 0)
-        entropy_loss = self._entropy_regularization(probs) if self.entropy_weight > 0 else 0.0
+        # --- Component 2: Entropy Regularization ---
+        # This term is added to penalize overconfident predictions.
+        entropy_term = 0.0
+        if self.entropy_weight > 0:
+            entropy_term = self.entropy_weight * self._entropy_regularization(probs)
 
-        # Component 3: Mutual information regularization loss (only if weight > 0)
-        mi_loss = self._mutual_information_regularization(probs) if self.mi_weight > 0 else 0.0
+        # --- Component 3: Mutual Information Regularization ---
+        # This term is added to penalize reliance on spurious features.
+        mi_term = 0.0
+        if self.mi_weight > 0:
+            mi_term = self.mi_weight * self._mutual_information_regularization(probs)
 
-        # Combine all components.
-        total_loss = (ce_loss +
-                      self.entropy_weight * entropy_loss +
-                      self.mi_weight * mi_loss)
+        # --- Combine all components ---
+        total_loss = ce_loss + entropy_term + mi_term
 
         return total_loss
 
     def _entropy_regularization(
-            self,
-            probs: keras.KerasTensor
+        self,
+        probs: keras.KerasTensor
     ) -> keras.KerasTensor:
         """
-        Compute entropy regularization loss from probabilities.
-        The goal is to maximize the conditional entropy H(Ŷ|X) for each sample.
-        We achieve this by minimizing its negative, -H(Ŷ|X).
+        Calculates the negative conditional entropy term to be minimized.
+
+        The goal is to maximize the conditional entropy :math:`H(\\hat{Y}|X)`.
+        We achieve this by minimizing its negative, :math:`-H(\\hat{Y}|X)`.
+
+        :param probs: The model's output probabilities.
+        :type probs: keras.KerasTensor
+        :return: The negative of the mean conditional entropy.
+        :rtype: keras.KerasTensor
         """
         probs = ops.clip(probs, self.epsilon, 1.0 - self.epsilon)
+        # H(Y|X) per sample = - sum(p * log(p))
         conditional_entropy_per_sample = -ops.sum(probs * ops.log(probs), axis=-1)
+        # We want to minimize -mean(H(Y|X)) to maximize entropy.
         return -ops.mean(conditional_entropy_per_sample)
 
     def _mutual_information_regularization(
-            self,
-            probs: keras.KerasTensor
+        self,
+        probs: keras.KerasTensor
     ) -> keras.KerasTensor:
         """
-        Approximate mutual information I(X;Ŷ) from probabilities.
-        I(X;Ŷ) ≈ H(Ŷ) - H(Ŷ|X)
+        Approximates the mutual information :math:`I(X; \\hat{Y})` to be minimized.
+
+        The approximation is :math:`I(X; \\hat{Y}) \\approx H(\\hat{Y}) - H(\\hat{Y}|X)`.
+
+        :param probs: The model's output probabilities.
+        :type probs: keras.KerasTensor
+        :return: The approximated mutual information.
+        :rtype: keras.KerasTensor
         """
         probs = ops.clip(probs, self.epsilon, 1.0 - self.epsilon)
 
-        # H(Ŷ|X): Expected conditional entropy.
+        # H(Y|X): Mean conditional entropy across the batch.
         h_y_given_x = -ops.mean(ops.sum(probs * ops.log(probs), axis=-1))
 
-        # H(Ŷ): Marginal entropy of the batch-averaged prediction.
+        # H(Y): Entropy of the batch-averaged prediction distribution.
         mean_probs = ops.mean(probs, axis=0)
         mean_probs = ops.clip(mean_probs, self.epsilon, 1.0 - self.epsilon)
         h_y = -ops.sum(mean_probs * ops.log(mean_probs))
 
-        # Approximate mutual information I(X;Ŷ)
+        # Approximate mutual information I(X;Y) = H(Y) - H(Y|X)
         mutual_information = h_y - h_y_given_x
 
-        # Clip at zero, as negative MI is not physically meaningful.
+        # MI cannot be negative, so clip at zero.
         return ops.maximum(0.0, mutual_information)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration dictionary for serialization."""
+        """
+        Returns the configuration dictionary for serialization.
+
+        :return: A dictionary of the loss function's configuration.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
+            'label_smoothing': self.label_smoothing,
             'entropy_weight': self.entropy_weight,
             'mi_weight': self.mi_weight,
             'from_logits': self.from_logits,
-            'epsilon': self.epsilon
+            'epsilon': self.epsilon,
         })
         return config
 
-# ---------------------------------------------------------------------
 
 def analyze_loss_components(
-        loss_fn: GoodhartAwareLoss,
-        y_true: keras.KerasTensor,
-        y_pred: keras.KerasTensor
+    loss_fn: GoodhartAwareLoss,
+    y_true: keras.KerasTensor,
+    y_pred: keras.KerasTensor
 ) -> Dict[str, float]:
     """
-    Analyze individual components of the GoodhartAwareLoss for debugging.
+    Analyzes individual components of the GoodhartAwareLoss for debugging.
 
-    Args:
-        loss_fn (GoodhartAwareLoss): The loss function instance.
-        y_true (KerasTensor): True labels.
-        y_pred (KerasTensor): Predicted logits or probabilities.
-
-    Returns:
-        Dict[str, float]: A dictionary with individual loss components.
+    :param loss_fn: An instance of the GoodhartAwareLoss function.
+    :type loss_fn: GoodhartAwareLoss
+    :param y_true: Ground truth labels.
+    :type y_true: keras.KerasTensor
+    :param y_pred: Predicted logits or probabilities.
+    :type y_pred: keras.KerasTensor
+    :return: A dictionary containing the unweighted and weighted values of each
+        loss component, as well as their percentage contribution.
+    :rtype: Dict[str, float]
     """
-    # Compute individual components
-    ce_loss = keras.losses.categorical_crossentropy(y_true, y_pred, from_logits=loss_fn.from_logits)
+    y_true = ops.cast(y_true, dtype=y_pred.dtype)
+
+    # Calculate individual components using the loss function's settings
+    ce_loss = keras.losses.categorical_crossentropy(
+        y_true=y_true,
+        y_pred=y_pred,
+        from_logits=loss_fn.from_logits,
+        label_smoothing=loss_fn.label_smoothing
+    )
 
     if loss_fn.from_logits:
         probs = ops.softmax(y_pred, axis=-1)
     else:
         probs = y_pred
 
-    entropy_loss = loss_fn._entropy_regularization(probs)
-    mi_loss = loss_fn._mutual_information_regularization(probs)
+    entropy_term_unweighted = loss_fn._entropy_regularization(probs)
+    mi_term_unweighted = loss_fn._mutual_information_regularization(probs)
 
     # Compute weighted contributions
-    weighted_entropy = loss_fn.entropy_weight * entropy_loss
-    weighted_mi = loss_fn.mi_weight * mi_loss
-    total_loss = ops.mean(ce_loss + weighted_entropy + weighted_mi)
+    entropy_term_weighted = loss_fn.entropy_weight * entropy_term_unweighted
+    mi_term_weighted = loss_fn.mi_weight * mi_term_unweighted
+    total_loss = ops.mean(ce_loss + entropy_term_weighted + mi_term_weighted)
 
     # Convert tensors to Python floats for easy inspection
     results = {
         'total_loss': float(ops.convert_to_numpy(total_loss)),
         'cross_entropy': float(ops.convert_to_numpy(ops.mean(ce_loss))),
-        'entropy_loss': float(ops.convert_to_numpy(entropy_loss)),
-        'mi_loss': float(ops.convert_to_numpy(mi_loss)),
-        'weighted_entropy': float(ops.convert_to_numpy(weighted_entropy)),
-        'weighted_mi': float(ops.convert_to_numpy(weighted_mi)),
+        'entropy_term_unweighted': float(ops.convert_to_numpy(entropy_term_unweighted)),
+        'mi_term_unweighted': float(ops.convert_to_numpy(mi_term_unweighted)),
+        'entropy_term_weighted': float(ops.convert_to_numpy(entropy_term_weighted)),
+        'mi_term_weighted': float(ops.convert_to_numpy(mi_term_weighted)),
+        'label_smoothing': loss_fn.label_smoothing,
         'entropy_weight': loss_fn.entropy_weight,
         'mi_weight': loss_fn.mi_weight
     }
+
+    # Calculate percentage contributions
     total_loss_val = results['total_loss']
-    if total_loss_val != 0:
+    if abs(total_loss_val) > 1e-9:  # Avoid division by zero
         results.update({
-            'ce_contribution_pct': (results['cross_entropy'] / total_loss_val) * 100,
-            'entropy_contribution_pct': (results['weighted_entropy'] / total_loss_val) * 100,
-            'mi_contribution_pct': (results['weighted_mi'] / total_loss_val) * 100
+            'ce_contrib_pct': (results['cross_entropy'] / total_loss_val) * 100,
+            'entropy_contrib_pct': (results['entropy_term_weighted'] / total_loss_val) * 100,
+            'mi_contrib_pct': (results['mi_term_weighted'] / total_loss_val) * 100
         })
     else:
         results.update({
-            'ce_contribution_pct': 0,
-            'entropy_contribution_pct': 0,
-            'mi_contribution_pct': 0
+            'ce_contrib_pct': 0.0,
+            'entropy_contrib_pct': 0.0,
+            'mi_contrib_pct': 0.0
         })
     return results
 
 # ---------------------------------------------------------------------
+
