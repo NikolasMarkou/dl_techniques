@@ -1,22 +1,28 @@
 """
-Metrics module for TensorFlow WeightWatcher
+Metrics module for WeightWatcher
 
 This module contains autonomous functions for calculating various metrics on neural network
-weight matrices, used by the TensorFlow WeightWatcher for analysis.
+weight matrices, used by the WeightWatcher for analysis.
 """
 
 import numpy as np
 from scipy import stats
+from scipy.linalg import eigh
 from scipy.sparse.linalg import svds
-from typing import Dict, List, Optional, Tuple, Union, Any
+from typing import Dict, List, Optional, Tuple
 
-# Import constants
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .constants import (
     EPSILON, EVALS_THRESH, OVER_TRAINED_THRESH, UNDER_TRAINED_THRESH,
     DEFAULT_MIN_EVALS, DEFAULT_MAX_EVALS, DEFAULT_BINS
 )
 
 from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
 
 def compute_eigenvalues(
         weight_matrices: List[np.ndarray],
@@ -29,18 +35,18 @@ def compute_eigenvalues(
     Compute the eigenvalues for all weight matrices combined.
 
     Args:
-        weight_matrices: List of weight matrices.
+        weight_matrices: List of weight matrices to analyze.
         N: Maximum dimension of matrices.
         M: Minimum dimension of matrices.
         n_comp: Number of components to consider.
-        normalize: Whether to normalize eigenvalues.
+        normalize: Whether to normalize eigenvalues by N.
 
     Returns:
         Tuple containing:
-        - Array of sorted eigenvalues.
-        - Maximum singular value.
-        - Minimum singular value.
-        - Rank loss.
+            - Array of sorted eigenvalues (ascending order).
+            - Maximum singular value across all matrices.
+            - Minimum singular value across all matrices.
+            - Total rank loss across all matrices.
     """
     all_evals = []
     max_sv = 0.0
@@ -59,11 +65,15 @@ def compute_eigenvalues(
             except Exception as e:
                 logger.warning(f"SVD failed: {e}, falling back to full SVD")
                 sv = np.linalg.svd(W, compute_uv=False)
-                sv = sv[-n_comp:] if len(sv) > n_comp else sv
+                # Fix: Take the largest n_comp singular values (descending order from SVD)
+                if len(sv) > n_comp:
+                    sv = sv[:n_comp]
         else:
             # Use full SVD for smaller matrices
             sv = np.linalg.svd(W, compute_uv=False)
-            sv = sv[-n_comp:] if len(sv) > n_comp else sv
+            # Fix: Take the largest n_comp singular values (descending order from SVD)
+            if len(sv) > n_comp:
+                sv = sv[:n_comp]
 
         # Calculate eigenvalues from singular values
         evals = sv * sv
@@ -72,12 +82,15 @@ def compute_eigenvalues(
             evals = evals / N
 
         all_evals.extend(evals)
-        max_sv = max(max_sv, np.max(sv))
+
+        # Update global min/max singular values
+        current_max_sv = np.max(sv) if len(sv) > 0 else 0.0
+        max_sv = max(max_sv, current_max_sv)
         if len(sv) > 0:
             min_sv = min(min_sv, np.min(sv))
 
-        # Calculate rank loss
-        tol = max_sv * np.finfo(np.float32).eps
+        # Calculate rank loss using current matrix's max singular value
+        tol = current_max_sv * np.finfo(W.dtype).eps
         rank = np.sum(sv > tol)
         rank_loss += len(sv) - rank
 
@@ -87,17 +100,21 @@ def compute_eigenvalues(
 
     return np.sort(np.array(all_evals)), max_sv, min_sv, rank_loss
 
+# ---------------------------------------------------------------------
 
 def calculate_matrix_entropy(singular_values: np.ndarray, N: int) -> float:
     """
     Calculate the matrix entropy from singular values.
 
+    The matrix entropy is computed as H = -sum(p_i * log(p_i)) / log(rank),
+    where p_i are the normalized eigenvalues and rank is the effective rank.
+
     Args:
-        singular_values: Array of singular values.
+        singular_values: Array of singular values from SVD.
         N: Maximum dimension of the matrix.
 
     Returns:
-        Matrix entropy (float).
+        Matrix entropy (float). Returns -1.0 if calculation fails.
     """
     try:
         # Calculate matrix rank
@@ -107,37 +124,46 @@ def calculate_matrix_entropy(singular_values: np.ndarray, N: int) -> float:
         # Calculate eigenvalues from singular values
         evals = singular_values * singular_values
 
-        # Calculate probabilities and entropy
-        p = evals / np.sum(evals) + EPSILON
-        rank = max(rank, 1) + EPSILON
-        entropy = -np.sum(p * np.log(p)) / np.log(rank)
+        # Calculate probabilities - add EPSILON to denominator to prevent division by zero
+        p = evals / (np.sum(evals) + EPSILON)
+
+        # Remove practically zero probabilities
+        p = p[p > 0]
+
+        # Ensure rank is at least 1
+        rank = max(rank, 1)
+
+        # Calculate entropy with proper log(rank) handling
+        log_rank = np.log(rank) if rank > 1 else np.log(2)  # Avoid log(1)=0 division
+        entropy = -np.sum(p * np.log(p)) / log_rank
 
         return entropy
     except Exception as e:
         logger.warning(f"Error calculating matrix entropy: {e}")
         return -1.0
 
+# ---------------------------------------------------------------------
 
 def fit_powerlaw(
         evals: np.ndarray,
         xmin: Optional[float] = None
 ) -> Tuple[float, float, float, float, int, str, str]:
     """
-    Fit eigenvalues to a power-law distribution.
+    Fit eigenvalues to a power-law distribution using maximum likelihood estimation.
 
     Args:
-        evals: Array of eigenvalues.
-        xmin: Minimum x value for fitting.
+        evals: Array of eigenvalues to fit.
+        xmin: Minimum x value for fitting. If None, automatically determined.
 
     Returns:
         Tuple containing:
-        - alpha: Power-law exponent.
-        - xmin: Minimum x value used.
-        - D: Kolmogorov-Smirnov statistic.
-        - sigma: Standard error of alpha.
-        - num_pl_spikes: Number of eigenvalues in power-law tail.
-        - status: Success or failure status.
-        - warning: Warning message (if any).
+            - alpha: Power-law exponent.
+            - xmin: Minimum x value used for fitting.
+            - D: Kolmogorov-Smirnov statistic.
+            - sigma: Standard error of alpha.
+            - num_pl_spikes: Number of eigenvalues in power-law tail.
+            - status: Success or failure status string.
+            - warning: Warning message string (if any).
     """
     # Initialize return values
     alpha = -1
@@ -187,16 +213,20 @@ def fit_powerlaw(
 
     return alpha, xmin, D, sigma, num_pl_spikes, status, warning
 
+# ---------------------------------------------------------------------
 
 def calculate_stable_rank(evals: np.ndarray) -> float:
     """
     Calculate the stable rank of a matrix from its eigenvalues.
 
+    The stable rank is defined as ||A||_F^2 / ||A||_2^2 = sum(σ_i^2) / σ_1^2,
+    where σ_i are the singular values.
+
     Args:
-        evals: Array of eigenvalues.
+        evals: Array of eigenvalues (squared singular values).
 
     Returns:
-        Stable rank (float).
+        Stable rank (float). Returns 0.0 if no eigenvalues provided.
     """
     if len(evals) == 0:
         return 0.0
@@ -204,6 +234,7 @@ def calculate_stable_rank(evals: np.ndarray) -> float:
     # Stable rank is the sum of eigenvalues divided by the largest eigenvalue
     return np.sum(evals) / np.max(evals)
 
+# ---------------------------------------------------------------------
 
 def calculate_spectral_metrics(evals: np.ndarray, alpha: float) -> Dict[str, float]:
     """
@@ -211,10 +242,17 @@ def calculate_spectral_metrics(evals: np.ndarray, alpha: float) -> Dict[str, flo
 
     Args:
         evals: Array of eigenvalues.
-        alpha: Power-law exponent.
+        alpha: Power-law exponent for alpha-weighted metrics.
 
     Returns:
-        Dictionary of spectral metrics.
+        Dictionary containing spectral metrics:
+            - norm: Frobenius norm squared (sum of eigenvalues).
+            - log_norm: Log10 of Frobenius norm squared.
+            - spectral_norm: Largest eigenvalue.
+            - log_spectral_norm: Log10 of largest eigenvalue.
+            - alpha_weighted: Alpha times log10 of spectral norm.
+            - log_alpha_norm: Log10 of sum of eigenvalues raised to alpha power.
+            - stable_rank: Stable rank (norm / spectral_norm).
     """
     if len(evals) == 0:
         return {
@@ -236,21 +274,25 @@ def calculate_spectral_metrics(evals: np.ndarray, alpha: float) -> Dict[str, flo
         "spectral_norm": spectral_norm,
         "log_spectral_norm": np.log10(spectral_norm),
         "alpha_weighted": alpha * np.log10(spectral_norm),
-        "log_alpha_norm": np.log10(np.sum([ev ** alpha for ev in evals])),
+        "log_alpha_norm": np.log10(np.sum(evals ** alpha)),  # Vectorized operation
         "stable_rank": norm / spectral_norm
     }
 
+# ---------------------------------------------------------------------
 
 def jensen_shannon_distance(p: np.ndarray, q: np.ndarray) -> float:
     """
     Calculate Jensen-Shannon distance between two distributions.
 
+    The Jensen-Shannon distance is the square root of the Jensen-Shannon divergence,
+    which is a symmetric measure of similarity between probability distributions.
+
     Args:
-        p: First distribution.
-        q: Second distribution.
+        p: First distribution (array of values).
+        q: Second distribution (array of values).
 
     Returns:
-        Jensen-Shannon distance.
+        Jensen-Shannon distance (float). Range: [0, 1].
     """
     # Create histograms with the same bins
     min_val = min(np.min(p), np.min(q))
@@ -259,18 +301,16 @@ def jensen_shannon_distance(p: np.ndarray, q: np.ndarray) -> float:
     p_hist, _ = np.histogram(p, bins=DEFAULT_BINS, range=(min_val, max_val), density=True)
     q_hist, _ = np.histogram(q, bins=DEFAULT_BINS, range=(min_val, max_val), density=True)
 
-    # Add small epsilon to avoid division by zero
-    p_hist = p_hist + EPSILON
-    q_hist = q_hist + EPSILON
-
-    # Normalize
-    p_hist = p_hist / np.sum(p_hist)
-    q_hist = q_hist / np.sum(q_hist)
+    # Normalize histograms to probability distributions
+    # Add EPSILON to denominator to prevent division by zero
+    p_hist = p_hist / (np.sum(p_hist) + EPSILON)
+    q_hist = q_hist / (np.sum(q_hist) + EPSILON)
 
     # Calculate m = (p+q)/2
     m = (p_hist + q_hist) / 2
 
     # Calculate Jensen-Shannon Divergence
+    # scipy.stats.entropy handles zero probabilities correctly
     divergence = (stats.entropy(p_hist, m) + stats.entropy(q_hist, m)) / 2
 
     # Calculate Jensen-Shannon Distance
@@ -278,22 +318,27 @@ def jensen_shannon_distance(p: np.ndarray, q: np.ndarray) -> float:
 
     return distance
 
+# ---------------------------------------------------------------------
 
 def compute_detX_constraint(evals: np.ndarray) -> int:
     """
     Identify the number of eigenvalues necessary to satisfy det(X) = 1.
 
+    This function determines how many of the largest eigenvalues are needed
+    such that their product is greater than or equal to 1.
+
     Args:
-        evals: Array of eigenvalues (sorted ascending).
+        evals: Array of eigenvalues (assumed to be sorted in ascending order).
 
     Returns:
-        Number of eigenvalues in the tail.
+        Number of eigenvalues in the tail needed to satisfy the constraint.
     """
     # Sort eigenvalues in ascending order
     sorted_evals = np.sort(evals)
     num_evals = len(sorted_evals)
 
     # Find first index where product of eigenvalues >= 1
+    # Start from the largest eigenvalue and work backwards
     prod = 1.0
     for idx in range(num_evals - 1, -1, -1):
         prod *= sorted_evals[idx]
@@ -302,17 +347,18 @@ def compute_detX_constraint(evals: np.ndarray) -> int:
 
     return num_evals  # If no constraint is satisfied, keep all eigenvalues
 
+# ---------------------------------------------------------------------
 
 def smooth_matrix(W: np.ndarray, n_comp: int) -> np.ndarray:
     """
-    Apply SVD smoothing to a weight matrix.
+    Apply SVD smoothing to a weight matrix by zeroing out small singular values.
 
     Args:
-        W: Weight matrix.
-        n_comp: Number of components to keep.
+        W: Weight matrix to smooth.
+        n_comp: Number of largest singular values to keep.
 
     Returns:
-        Smoothed weight matrix.
+        Smoothed weight matrix with the same shape as input.
     """
     # Ensure matrix has correct dimensions (larger dimension first)
     transpose = False
@@ -341,17 +387,239 @@ def smooth_matrix(W: np.ndarray, n_comp: int) -> np.ndarray:
         logger.warning(f"SVD failed: {e}, returning original matrix")
         return W
 
+# ---------------------------------------------------------------------
 
 def calculate_glorot_normalization_factor(N: int, M: int, rf: int) -> float:
     """
-    Calculate the Glorot normalization factor.
+    Calculate the Glorot normalization factor for weight initialization.
+
+    The Glorot factor is sqrt(2 / ((fan_in + fan_out) * receptive_field)),
+    used to maintain proper variance scaling in neural networks.
 
     Args:
-        N: Maximum dimension of matrix.
-        M: Minimum dimension of matrix.
+        N: Maximum dimension of matrix (fan_out).
+        M: Minimum dimension of matrix (fan_in).
         rf: Receptive field size.
 
     Returns:
-        Normalization factor.
+        Glorot normalization factor (float).
     """
     return np.sqrt(2 / ((N + M) * rf))
+
+# ---------------------------------------------------------------------
+
+def calculate_gini_coefficient(evals: np.ndarray) -> float:
+    """
+    Calculate the Gini coefficient of the eigenvalue distribution.
+
+    The Gini coefficient measures inequality in distribution:
+    - 0 indicates perfect equality (all eigenvalues are equal)
+    - 1 indicates perfect inequality (one eigenvalue dominates)
+
+    A high Gini coefficient indicates eigenvalue concentration in a few dominant values,
+    which can be a sign of rank collapse or "lottery ticket" phenomena.
+
+    Args:
+        evals: Array of eigenvalues.
+
+    Returns:
+        Gini coefficient between 0 and 1.
+    """
+    if len(evals) < 2:
+        return 0.0
+
+    # Ensure all values are non-negative and sort
+    sorted_evals = np.sort(np.abs(evals))
+    n = len(sorted_evals)
+
+    # Calculate Lorenz curve
+    cum_evals = np.cumsum(sorted_evals)
+
+    # Calculate Gini coefficient
+    # G = ((n+1)/n) - (2 * sum(cum_evals)) / (n * sum(sorted_evals))
+    denominator = n * sorted_evals.sum()
+    if denominator < EPSILON:
+        return 0.0
+
+    return ((n + 1) / n) - (2 * np.sum(cum_evals)) / denominator
+
+# ---------------------------------------------------------------------
+
+def calculate_dominance_ratio(evals: np.ndarray) -> float:
+    """
+    Calculate the ratio of the largest eigenvalue to the sum of all other eigenvalues.
+
+    This directly quantifies how much a single dimension dominates the spectrum.
+    High values indicate potential "black hole" behavior where one eigenvalue
+    captures most of the variance.
+
+    Args:
+        evals: Array of eigenvalues.
+
+    Returns:
+        Dominance ratio (λ_max / sum(λ_others)). Returns infinity if insufficient data.
+    """
+    if len(evals) < 2:
+        return float('inf')
+
+    lambda_max = np.max(evals)
+    sum_others = np.sum(evals) - lambda_max
+
+    if sum_others < EPSILON:
+        return float('inf')
+
+    return lambda_max / sum_others
+
+# ---------------------------------------------------------------------
+
+def calculate_participation_ratio(vector: np.ndarray) -> float:
+    """
+    Calculate the participation ratio of a vector, a measure of localization.
+
+    The participation ratio is defined as:
+    PR = (sum(v_i^2))^2 / sum(v_i^4)
+
+    A low participation ratio indicates the vector's energy is concentrated in
+    a few elements (localized) - a signature of "black hole" weights.
+
+    Args:
+        vector: Eigenvector or other vector to analyze.
+
+    Returns:
+        Participation ratio. Lower values indicate more localization.
+        Returns infinity if the vector is zero or calculation fails.
+    """
+    # Normalize the vector
+    vec_norm = np.linalg.norm(vector)
+    if vec_norm < EPSILON:
+        return float('inf')
+
+    vec = vector / vec_norm
+
+    # Calculate participation ratio
+    vec_sq = vec ** 2
+    numerator = np.sum(vec_sq) ** 2
+    denominator = np.sum(vec_sq ** 2)
+
+    if denominator < EPSILON:
+        return float('inf')
+
+    return numerator / denominator
+
+# ---------------------------------------------------------------------
+
+def get_top_eigenvectors(
+        weight_matrix: np.ndarray,
+        k: int = 1,
+        method: str = 'direct'
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Calculate the top k left singular vectors of a weight matrix.
+
+    Note: For a general matrix W, this function computes the eigenvalues and
+    eigenvectors of W @ W.T, which correspond to the left singular vectors of W.
+    This is useful for analyzing the row space of the weight matrix.
+
+    Args:
+        weight_matrix: Weight matrix to analyze.
+        k: Number of top eigenvectors to return.
+        method: Method to use ('direct' or 'power_iteration').
+
+    Returns:
+        Tuple containing:
+            - Array of eigenvalues (squared singular values).
+            - Array of eigenvectors (each column is an eigenvector).
+    """
+    n, m = weight_matrix.shape
+    min_dim = min(n, m)
+
+    k = min(k, min_dim - 1)
+
+    # Ensure matrix is square for eigendecomposition
+    if n == m:
+        # Square matrix - direct eigendecomposition of W @ W.T
+        try:
+            if method == 'direct':
+                eigenvalues, eigenvectors = eigh(
+                    weight_matrix @ weight_matrix.T,
+                    eigvals=(min_dim - k, min_dim - 1)
+                )
+                # Sort by eigenvalue magnitude (descending)
+                idx = np.argsort(eigenvalues)[::-1]
+                return eigenvalues[idx], eigenvectors[:, idx]
+            else:
+                # Use power iteration for very large matrices
+                return power_iteration(weight_matrix @ weight_matrix.T, k)
+        except Exception as e:
+            logger.error(f"Eigendecomposition failed: {e}")
+            return np.array([]), np.array([])
+    else:
+        # Non-square matrix - use SVD
+        try:
+            # Calculate SVD
+            u, s, vh = np.linalg.svd(weight_matrix, full_matrices=False)
+            # Return squared singular values and left singular vectors
+            return s[:k] ** 2, u[:, :k]
+        except Exception as e:
+            logger.error(f"SVD failed: {e}")
+            return np.array([]), np.array([])
+
+# ---------------------------------------------------------------------
+
+def power_iteration(
+        matrix: np.ndarray,
+        k: int = 1,
+        max_iter: int = 100,
+        tol: float = 1e-5
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Calculate the top k eigenvalues and eigenvectors using power iteration.
+
+    This is more efficient for very large matrices when we only need a few eigenvectors.
+    Uses deflation to compute multiple eigenvectors sequentially.
+
+    Args:
+        matrix: Square matrix to analyze.
+        k: Number of eigenvectors to compute.
+        max_iter: Maximum number of iterations per eigenvector.
+        tol: Convergence tolerance.
+
+    Returns:
+        Tuple containing:
+            - Array of eigenvalues.
+            - Array of eigenvectors (each column is an eigenvector).
+    """
+    n = matrix.shape[0]
+    eigvals = np.zeros(k)
+    eigvecs = np.zeros((n, k))
+
+    # Start with random vectors
+    Q = np.random.randn(n, k)
+    Q, _ = np.linalg.qr(Q)
+
+    for i in range(k):
+        q = Q[:, i].reshape(-1, 1)
+
+        # Deflate previously computed eigenvectors
+        for j in range(i):
+            q = q - eigvecs[:, j].reshape(-1, 1) @ (eigvecs[:, j].reshape(1, -1) @ q)
+
+        # Power iteration
+        for _ in range(max_iter):
+            z = matrix @ q
+            lambda_i = np.linalg.norm(z)
+            q_new = z / (lambda_i + EPSILON)
+
+            # Check convergence
+            if np.linalg.norm(q_new - q) < tol:
+                break
+
+            q = q_new
+
+        # Store results
+        eigvals[i] = lambda_i
+        eigvecs[:, i] = q.flatten()
+
+    return eigvals, eigvecs
+
+# ---------------------------------------------------------------------
