@@ -5,7 +5,7 @@ This module contains all constant values used throughout the TensorFlow WeightWa
 package, ensuring consistency and making the code more maintainable.
 """
 
-from enum import Enum, auto
+from enum import Enum
 
 # Numeric constants for numerical stability
 EPSILON = 1e-10  # Small value to avoid division by zero
@@ -51,12 +51,6 @@ class SmoothingMethod(str, Enum):
     LAMBDA_MIN = 'lambda_min'  # Truncation based on power-law xmin value
 
 
-class SVDMethod(str, Enum):
-    """Enum for SVD computation methods"""
-    FULL = 'full'  # Full SVD computation
-    TRUNCATED = 'truncated'  # Truncated SVD for large matrices
-
-
 class StatusCode(str, Enum):
     """Enum for analysis status codes"""
     SUCCESS = 'success'
@@ -67,6 +61,7 @@ class StatusCode(str, Enum):
 
 class MetricNames:
     """Class holding the standard names of metrics used in analysis"""
+    # Core spectral metrics
     ALPHA = 'alpha'
     STABLE_RANK = 'stable_rank'
     ENTROPY = 'entropy'
@@ -74,19 +69,36 @@ class MetricNames:
     LOG_SPECTRAL_NORM = 'log_spectral_norm'
     ALPHA_WEIGHTED = 'alpha_weighted'
     LOG_ALPHA_NORM = 'log_alpha_norm'
+
+    # Eigenvalue metrics
     NUM_EVALS = 'num_evals'
-    RANK_LOSS = 'rank_loss'
-    WEAK_RANK_LOSS = 'weak_rank_loss'
     LAMBDA_MAX = 'lambda_max'
+
+    # Singular value metrics
     SV_MAX = 'sv_max'
     SV_MIN = 'sv_min'
+
+    # Rank metrics
+    RANK_LOSS = 'rank_loss'
+    WEAK_RANK_LOSS = 'weak_rank_loss'
+
+    # Power-law fitting metrics
     XMIN = 'xmin'
     D = 'D'
     SIGMA = 'sigma'
     NUM_PL_SPIKES = 'num_pl_spikes'
+
+    # Status and metadata
     STATUS = 'status'
     WARNING = 'warning'
     HAS_ESD = 'has_esd'
+
+    # Concentration metrics (previously "black hole" metrics)
+    GINI_COEFFICIENT = 'gini_coefficient'
+    DOMINANCE_RATIO = 'dominance_ratio'
+    PARTICIPATION_RATIO = 'participation_ratio'
+    CONCENTRATION_SCORE = 'concentration_score'
+    CRITICAL_WEIGHT_COUNT = 'critical_weight_count'
 
 
 # Dictionary of default metrics to include in summary calculations
@@ -95,5 +107,14 @@ DEFAULT_SUMMARY_METRICS = [
     MetricNames.STABLE_RANK,
     MetricNames.ENTROPY,
     MetricNames.LOG_SPECTRAL_NORM,
-    MetricNames.LOG_NORM
+    MetricNames.LOG_NORM,
+    MetricNames.GINI_COEFFICIENT,
+    MetricNames.DOMINANCE_RATIO,
+    MetricNames.PARTICIPATION_RATIO,
+    MetricNames.CONCENTRATION_SCORE
 ]
+
+# Concentration analysis thresholds
+HIGH_CONCENTRATION_PERCENTILE = 0.8  # Percentile threshold for high concentration layers
+CRITICAL_WEIGHT_THRESHOLD = 0.1  # Threshold for identifying critical weights
+MAX_CRITICAL_WEIGHTS_REPORTED = 10  # Maximum number of critical weights to report per layer
