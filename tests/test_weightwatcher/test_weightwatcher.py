@@ -4,13 +4,12 @@ Basic pytest suite for WeightWatcher module
 Run with: pytest test_weightwatcher.py -v
 """
 
+import os
+import keras
 import pytest
+import tempfile
 import numpy as np
 import pandas as pd
-import keras
-import tempfile
-import os
-from unittest.mock import patch
 
 from dl_techniques.weightwatcher import (
     WeightWatcher, analyze_model, compare_models, get_critical_layers
