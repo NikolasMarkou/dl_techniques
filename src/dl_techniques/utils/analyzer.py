@@ -770,20 +770,33 @@ class ModelAnalyzer:
             logger.warning("Correlation matrix contains non-finite values, skipping clustermap")
             return
 
-        # Check if correlation matrix has enough variation
+        # Check if correlation matrix is large enough for clustering
         if corr_matrix.shape[0] < 2 or corr_matrix.shape[1] < 2:
             logger.warning("Correlation matrix too small for clustering")
             return
 
         try:
+            # Dynamically decide on annotations and figure size to improve readability
+            num_features = corr_matrix.shape[0]
+            show_annot = num_features <= 25  # Annotate only for smaller matrices
+
+            # Adjust figure size for better readability
+            figsize = (12, 12)
+
+            # Set font size for annotations if shown
+            annot_kws = {"size": 8} if show_annot else None
+
             # Create clustermap
             g = sns.clustermap(corr_matrix,
-                              annot=True, fmt='.2f',
-                              cmap='coolwarm', center=0,
-                              figsize=(8, 8),
-                              cbar_kws={'label': 'Correlation'})
+                               annot=show_annot,
+                               fmt='.2f',
+                               annot_kws=annot_kws,
+                               cmap='coolwarm', center=0,
+                               figsize=figsize,
+                               cbar_kws={'label': 'Correlation'})
 
-            g.fig.suptitle('Clustered Model Weight Pattern Correlations', y=0.98)
+            # Adjust title position to prevent overlap
+            g.fig.suptitle('Clustered Model Weight Pattern Correlations', y=1.02, fontsize=14)
 
             if self.config.save_plots:
                 self._save_figure(g.fig, 'weight_correlation_clustermap')
