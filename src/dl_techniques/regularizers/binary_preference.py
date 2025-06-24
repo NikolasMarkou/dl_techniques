@@ -38,7 +38,7 @@ Note: The convergence behavior and final weight distributions may be significant
 
 import keras
 from keras import ops
-from typing import Dict, Any, Union, Optional
+from typing import Dict, Any, Union
 
 # ---------------------------------------------------------------------
 # local imports

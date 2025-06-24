@@ -23,9 +23,10 @@
 #   )
 #   optimizer = keras.optimizers.Adam(learning_rate=lr_schedule)
 """
+
 import keras
 import tensorflow as tf
-from typing import Dict, Optional, Union, Any, ClassVar
+from typing import Dict, Optional, Union, Any
 
 # ---------------------------------------------------------------------
 # local imports

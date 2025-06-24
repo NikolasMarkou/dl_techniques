@@ -12,7 +12,7 @@ by minimizing the spectral norm of W^T W - I.
 
 import keras
 from keras import ops
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
