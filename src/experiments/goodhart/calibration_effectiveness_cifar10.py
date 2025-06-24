@@ -204,7 +204,6 @@ generalization bounds.
 probabilities reflect true confidence, crucial for reliable decision-making
 in real-world applications.
 """
-
 # ------------------------------------------------------------------------------
 # 1. Imports and Dependencies
 # ------------------------------------------------------------------------------
@@ -221,6 +220,7 @@ import numpy as np
 # Local imports
 # ------------------------------------------------------------------------------
 
+# --- Core project utilities (preserved from original) ---
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.goodhart_loss import GoodhartAwareLoss
 from dl_techniques.utils.train import TrainingConfig, train_model
@@ -260,7 +260,7 @@ class ExperimentConfig:
     use_residual: bool = True
 
     # Training Parameters
-    epochs: int = 1
+    epochs: int = 0
     batch_size: int = 64
     learning_rate: float = 0.001
     early_stopping_patience: int = 15
@@ -520,7 +520,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
 def print_experiment_summary(results: Dict[str, Any]) -> None:
     """Print a comprehensive summary of experiment results."""
-    logger.info("=" * 80)
+    logger.info("\n" + "=" * 80)
     logger.info("📋 EXPERIMENT SUMMARY")
     logger.info("=" * 80)
 
@@ -536,7 +536,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
     model_analysis = results.get('model_analysis')
     if model_analysis and model_analysis.calibration_metrics:
-        logger.info("🎯 CALIBRATION METRICS (from Model Analyzer):")
+        logger.info("\n🎯 CALIBRATION METRICS (from Model Analyzer):")
         logger.info(f"{'Model':<20} {'ECE':<12} {'Brier Score':<15} {'Mean Entropy':<12}")
         logger.info("-" * 65)
         for model_name, cal_metrics in model_analysis.calibration_metrics.items():
@@ -546,7 +546,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             )
 
     if 'histories' in results and results['histories']:
-        logger.info("🏁 FINAL TRAINING METRICS (on Validation Set):")
+        logger.info("\n🏁 FINAL TRAINING METRICS (on Validation Set):")
         logger.info(f"{'Model':<20} {'Val Accuracy':<15} {'Val Loss':<12}")
         logger.info("-" * 50)
         for model_name, history_dict in results['histories'].items():

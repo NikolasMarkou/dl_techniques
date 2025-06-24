@@ -1095,7 +1095,15 @@ class ModelAnalyzer:
         """Create calibration analysis visualizations."""
         # FIXED: Use subplots_adjust instead of constrained_layout
         fig, axes = plt.subplots(2, 2, figsize=self.config.get_figure_size())
-        fig.subplots_adjust(hspace=0.3, wspace=0.3)
+        fig.subplots_adjust(hspace=0.4, wspace=0.4)  # Changed from 0.3 to 0.4
+
+        # Temporarily reduce font sizes for this multi-subplot figure
+        original_titlesize = plt.rcParams['axes.titlesize']
+        original_labelsize = plt.rcParams['axes.labelsize']
+        plt.rcParams.update({
+            'axes.titlesize': original_titlesize * 0.85,
+            'axes.labelsize': original_labelsize * 0.9
+        })
 
         # 1. Reliability diagrams
         ax1 = axes[0, 0]
@@ -1118,6 +1126,12 @@ class ModelAnalyzer:
         if self.config.save_plots:
             self._save_figure(fig, 'calibration_analysis')
         plt.close(fig)
+
+        # Restore original font sizes
+        plt.rcParams.update({
+            'axes.titlesize': original_titlesize,
+            'axes.labelsize': original_labelsize
+        })
 
     def _plot_reliability_diagrams(self, ax) -> None:
         """Plot reliability diagrams."""
@@ -1178,7 +1192,7 @@ class ModelAnalyzer:
             # Use seaborn for cleaner visualization
             for model in df['Model'].unique():
                 model_data = df[df['Model'] == model]['Confidence']
-                ax.hist(model_data, bins=30, alpha=0.5, density=True,
+                ax.hist(model_data, bins=20, alpha=0.5, density=True,
                        label=model, edgecolor='black', linewidth=0.5)
 
             ax.set_xlabel('Confidence (Max Probability)')
