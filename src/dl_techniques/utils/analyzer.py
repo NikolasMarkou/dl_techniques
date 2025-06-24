@@ -95,6 +95,7 @@ class AnalysisConfig:
     analyze_activations: bool = True  # Now part of information flow
     analyze_weights: bool = True
     analyze_calibration: bool = True  # Now includes probability distributions
+    analyze_probability_distributions: bool = True  # Merged with calibration
     analyze_information_flow: bool = True  # Now includes activations
 
     # Sampling parameters
@@ -480,10 +481,6 @@ class ModelAnalyzer:
         # Create visualizations
         self._plot_enhanced_weight_analysis()
 
-        # Create separate correlation clustermap if we have correlations
-        if self.results.weight_correlations is not None:
-            self._plot_weight_correlation_clustermap()
-
     def _compute_weight_statistics(self, weights: np.ndarray) -> Dict[str, Any]:
         """Compute comprehensive statistics for a weight tensor."""
         flat_weights = weights.flatten()
@@ -628,182 +625,157 @@ class ModelAnalyzer:
                 logger.warning(f"Could not perform PCA on final layer weights: {e}")
 
     def _plot_enhanced_weight_analysis(self) -> None:
-        """Create enhanced weight analysis visualizations."""
-        fig = plt.figure(figsize=(14, 8))
-        gs = plt.GridSpec(2, 2, figure=fig, hspace=0.4, wspace=0.3)
+        """Create unified Weight Learning Journey visualization."""
+        fig = plt.figure(figsize=(14, 10))
+        gs = plt.GridSpec(2, 1, figure=fig, hspace=0.4, height_ratios=[1, 1])
 
-        # 1. Weight Norm Raincloud Plot (takes full top row)
-        ax1 = fig.add_subplot(gs[0, :])
-        self._plot_weight_norm_raincloud(ax1)
+        # Top: Weight magnitude evolution through layers
+        ax1 = fig.add_subplot(gs[0, 0])
+        self._plot_weight_learning_evolution(ax1)
 
-        # 2. Overall Sparsity Comparison
+        # Bottom: Weight health heatmap
         ax2 = fig.add_subplot(gs[1, 0])
-        self._plot_weight_sparsity_comparison(ax2)
+        self._plot_weight_health_heatmap(ax2)
 
-        # 3. PCA of Final Layer Weights
-        ax3 = fig.add_subplot(gs[1, 1])
-        self._plot_final_layer_pca(ax3)
-
-        plt.suptitle('Weight Distribution Analysis', fontsize=16, fontweight='bold')
+        plt.suptitle('Weight Learning Journey', fontsize=16, fontweight='bold')
         fig.subplots_adjust(top=0.93, bottom=0.1, left=0.1, right=0.95)
 
         if self.config.save_plots:
-            self._save_figure(fig, 'weight_analysis')
+            self._save_figure(fig, 'weight_learning_journey')
         plt.close(fig)
 
-    def _plot_weight_norm_raincloud(self, ax) -> None:
-        """Plot weight norm distributions using violin plots (raincloud-style)."""
-        norm_data = []
+    def _plot_weight_learning_evolution(self, ax) -> None:
+        """Plot how weight magnitudes evolve through network layers."""
+        evolution_data = {}
+
         for model_name, weight_stats in self.results.weight_stats.items():
-            for layer_name, stats in weight_stats.items():
-                norm_data.append({
-                    'Model': model_name,
-                    'Layer': layer_name.split('_')[0],
-                    'L2 Norm': stats['norms']['l2'],
-                })
+            layer_indices = []
+            l2_norms = []
+            mean_abs_weights = []
 
-        if norm_data:
-            df = pd.DataFrame(norm_data)
+            # Sort layers by name to get consistent ordering
+            sorted_layers = sorted(weight_stats.items(), key=lambda x: x[0])
 
-            # Sort models for consistency
-            model_order = sorted(df['Model'].unique())
+            for idx, (layer_name, stats) in enumerate(sorted_layers):
+                layer_indices.append(idx)
+                l2_norms.append(stats['norms']['l2'])
+                mean_abs_weights.append(abs(stats['basic']['mean']))
 
-            # Create violin plot with quartiles using matplotlib
-            parts = ax.violinplot([df[df['Model'] == m]['L2 Norm'].values
-                                  for m in model_order],
-                                 positions=range(len(model_order)),
-                                 vert=False, showmeans=False, showmedians=True,
-                                 showextrema=True)
+            evolution_data[model_name] = {
+                'indices': layer_indices,
+                'l2_norms': l2_norms,
+                'mean_abs_weights': mean_abs_weights
+            }
 
-            # Color the violin plots
-            for i, model in enumerate(model_order):
-                color = self.model_colors.get(model, '#333333')
-                parts['bodies'][i].set_facecolor(color)
-                parts['bodies'][i].set_alpha(0.7)
+        if evolution_data:
+            # Plot L2 norm evolution
+            for model_name, data in evolution_data.items():
+                color = self.model_colors.get(model_name, '#333333')
+                ax.plot(data['indices'], data['l2_norms'], 'o-',
+                       label=f'{model_name}', color=color, linewidth=2, markersize=6)
 
-            # Color other violin parts
-            for partname in ['cmeans', 'cmaxes', 'cmins', 'cbars', 'cmedians', 'cquantiles']:
-                if partname in parts:
-                    parts[partname].set_color('black')
-                    parts[partname].set_alpha(0.8)
+            ax.set_xlabel('Layer Index')
+            ax.set_ylabel('L2 Norm')
+            ax.set_title('Weight Magnitude Evolution Through Network Depth', fontsize=12, fontweight='bold')
+            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            ax.grid(True, alpha=0.3)
 
-            # Add strip plot on top for individual points
-            for i, model in enumerate(model_order):
-                model_data = df[df['Model'] == model]['L2 Norm'].values
-                y_positions = np.random.normal(i, 0.04, size=len(model_data))
-                ax.scatter(model_data, y_positions, s=20, alpha=0.4, color='black')
-
-            # Set labels
-            ax.set_yticks(range(len(model_order)))
-            ax.set_yticklabels(model_order)
-            ax.set_xlabel('L2 Norm of Layer Weights')
-            ax.set_title('Weight Norm Distributions by Model')
-            ax.grid(True, alpha=0.3, axis='x')
-
-    def _plot_weight_sparsity_comparison(self, ax) -> None:
-        """Plot overall sparsity comparison."""
-        sparsity_data = []
-        for model_name, weight_stats in self.results.weight_stats.items():
-            all_zeros = [s['distribution']['zero_fraction'] for s in weight_stats.values()]
-            if all_zeros:
-                sparsity_data.append({
-                    'Model': model_name,
-                    'Mean Sparsity': np.mean(all_zeros),
-                    'Std Sparsity': np.std(all_zeros)
-                })
-
-        if sparsity_data:
-            df = pd.DataFrame(sparsity_data)
-
-            # Sort models for consistency
-            df = df.sort_values('Model')
-
-            # Clean bar chart with consistent colors
-            x = np.arange(len(df))
-            bars = ax.bar(x, df['Mean Sparsity'], yerr=df['Std Sparsity'],
-                          capsize=5, alpha=0.8)
-
-            # Apply consistent colors
-            for i, (idx, row) in enumerate(df.iterrows()):
-                color = self.model_colors.get(row['Model'], '#333333')
-                bars[i].set_facecolor(color)
-
-            ax.set_xlabel('Model')
-            ax.set_ylabel('Average Sparsity')
-            ax.set_title('Weight Sparsity Comparison')
-            ax.set_xticks(x)
-            ax.set_xticklabels(df['Model'], rotation=45 if len(df) > 3 else 0)
-            ax.grid(True, alpha=0.3, axis='y')
-
-    def _plot_final_layer_pca(self, ax) -> None:
-        """Plot PCA of final layer weights."""
-        if not self.results.weight_pca:
-            ax.text(0.5, 0.5, 'Insufficient data for PCA analysis',
+            # Add insight text
+            ax.text(0.02, 0.98, 'Higher values indicate larger weight magnitudes\nSteep changes suggest learning transitions',
+                   transform=ax.transAxes, ha='left', va='top', fontsize=9,
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='lightblue', alpha=0.3))
+        else:
+            ax.text(0.5, 0.5, 'No weight evolution data available',
                    ha='center', va='center', transform=ax.transAxes)
-            ax.set_title('PCA of Final Layer Weights')
+            ax.set_title('Weight Magnitude Evolution')
+            ax.axis('off')
+
+    def _plot_weight_health_heatmap(self, ax) -> None:
+        """Create a comprehensive weight health heatmap."""
+        if not self.results.weight_stats:
+            ax.text(0.5, 0.5, 'No weight statistics available',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Weight Health Heatmap')
             ax.axis('off')
             return
 
-        components = self.results.weight_pca['components']
-        labels = self.results.weight_pca['labels']
-        explained_var = self.results.weight_pca['explained_variance']
+        # Prepare health metrics
+        health_metrics = []
+        models = sorted(self.results.weight_stats.keys())
 
-        # Create scatter plot with consistent colors
-        for i, (label, comp) in enumerate(zip(labels, components)):
-            color = self.model_colors.get(label, '#333333')
-            ax.scatter(comp[0], comp[1], c=[color], label=label,
-                      s=100, alpha=0.8, edgecolors='black', linewidth=1)
+        # Get consistent layer ordering across models
+        all_layers = set()
+        for weight_stats in self.results.weight_stats.values():
+            all_layers.update(weight_stats.keys())
 
-        ax.set_xlabel(f'PC1 ({explained_var[0]:.1%})')
-        ax.set_ylabel(f'PC2 ({explained_var[1]:.1%})')
-        ax.set_title('PCA of Final Layer Weights')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+        # Sort layers and take first 12 for readability
+        sorted_layers = sorted(list(all_layers))[:12]
 
-    def _plot_weight_correlation_clustermap(self) -> None:
-        """Create a separate clustered heatmap for weight correlations."""
-        if self.results.weight_correlations is None or len(self.results.weight_correlations) < 2:
-            return
+        for model_name in models:
+            weight_stats = self.results.weight_stats[model_name]
+            model_health = []
 
-        # Check for non-finite values
-        corr_matrix = self.results.weight_correlations
-        if not np.all(np.isfinite(corr_matrix.values)):
-            logger.warning("Correlation matrix contains non-finite values, skipping clustermap")
-            return
+            for layer_name in sorted_layers:
+                if layer_name in weight_stats:
+                    stats = weight_stats[layer_name]
 
-        # Check if correlation matrix is large enough for clustering
-        if corr_matrix.shape[0] < 2 or corr_matrix.shape[1] < 2:
-            logger.warning("Correlation matrix too small for clustering")
-            return
+                    # Calculate health score (0-1, higher is better)
+                    # Normalize L2 norm (smaller is often better, but not too small)
+                    l2_norm = stats['norms']['l2']
+                    norm_health = 1.0 / (1.0 + l2_norm / 10.0)  # Normalize around 10
 
-        try:
-            # Dynamically decide on annotations and figure size to improve readability
-            num_features = corr_matrix.shape[0]
-            show_annot = num_features <= 25  # Annotate only for smaller matrices
+                    # Sparsity (moderate sparsity is ok, too much is bad)
+                    sparsity = stats['distribution']['zero_fraction']
+                    sparsity_health = 1.0 - min(sparsity, 0.8)  # Penalize high sparsity
 
-            # Adjust figure size for better readability
-            figsize = (12, 12)
+                    # Weight distribution (closer to normal is better)
+                    weight_std = stats['basic']['std']
+                    weight_mean = abs(stats['basic']['mean'])
+                    dist_health = min(weight_std / (weight_mean + 1e-6), 1.0)  # Ratio of std to mean
 
-            # Set font size for annotations if shown
-            annot_kws = {"size": 8} if show_annot else None
+                    # Combined health score
+                    health_score = (norm_health + sparsity_health + dist_health) / 3.0
+                    model_health.append(health_score)
+                else:
+                    model_health.append(0.0)  # Missing layer
 
-            # Create clustermap
-            g = sns.clustermap(corr_matrix,
-                               annot=show_annot,
-                               fmt='.2f',
-                               annot_kws=annot_kws,
-                               cmap='coolwarm', center=0,
-                               figsize=figsize,
-                               cbar_kws={'label': 'Correlation'})
+            health_metrics.append(model_health)
 
-            # Adjust title position to prevent overlap
-            g.fig.suptitle('Clustered Model Weight Pattern Correlations', y=1.02, fontsize=14)
+        if health_metrics:
+            # Create heatmap
+            health_array = np.array(health_metrics)
 
-            if self.config.save_plots:
-                self._save_figure(g.fig, 'weight_correlation_clustermap')
-            plt.close(g.fig)
-        except Exception as e:
-            logger.warning(f"Could not create correlation clustermap: {e}")
+            im = ax.imshow(health_array, cmap='RdYlGn', aspect='auto',
+                          vmin=0, vmax=1, interpolation='nearest')
+
+            # Set labels
+            ax.set_title('Weight Health Across Layers', fontsize=12, fontweight='bold')
+            ax.set_xlabel('Layer Index')
+            ax.set_ylabel('Model')
+
+            # Set ticks
+            ax.set_xticks(range(len(sorted_layers)))
+            ax.set_xticklabels([f'L{i}' for i in range(len(sorted_layers))], fontsize=9)
+            ax.set_yticks(range(len(models)))
+            ax.set_yticklabels(models, fontsize=9)
+
+            # Add colorbar
+            cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+            cbar.set_label('Health Score', rotation=270, labelpad=20)
+            cbar.ax.tick_params(labelsize=9)
+
+            # Add value annotations for better readability
+            for i in range(len(models)):
+                for j in range(len(sorted_layers)):
+                    value = health_array[i, j]
+                    text_color = 'white' if value < 0.5 else 'black'
+                    ax.text(j, i, f'{value:.2f}', ha='center', va='center',
+                           color=text_color, fontsize=8, fontweight='bold')
+        else:
+            ax.text(0.5, 0.5, 'Insufficient data for health heatmap',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Weight Health Heatmap')
+            ax.axis('off')
 
     # ------------------------------------------------------------------------------
     # Merged Confidence and Calibration Analysis
