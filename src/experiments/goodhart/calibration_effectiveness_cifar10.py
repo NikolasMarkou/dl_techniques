@@ -432,8 +432,8 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             analyze_weights=True,
             analyze_calibration=True,
             analyze_probability_distributions=True,
-            analyze_activations=False,
-            analyze_information_flow=False,
+            analyze_activations=True,
+            analyze_information_flow=True,
             calibration_bins=config.calibration_bins,
             save_plots=True,
             plot_style='publication',
@@ -520,7 +520,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
 def print_experiment_summary(results: Dict[str, Any]) -> None:
     """Print a comprehensive summary of experiment results."""
-    logger.info("\n" + "=" * 80)
+    logger.info("=" * 80)
     logger.info("📋 EXPERIMENT SUMMARY")
     logger.info("=" * 80)
 
@@ -536,7 +536,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
     model_analysis = results.get('model_analysis')
     if model_analysis and model_analysis.calibration_metrics:
-        logger.info("\n🎯 CALIBRATION METRICS (from Model Analyzer):")
+        logger.info("🎯 CALIBRATION METRICS (from Model Analyzer):")
         logger.info(f"{'Model':<20} {'ECE':<12} {'Brier Score':<15} {'Mean Entropy':<12}")
         logger.info("-" * 65)
         for model_name, cal_metrics in model_analysis.calibration_metrics.items():
@@ -546,7 +546,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             )
 
     if 'histories' in results and results['histories']:
-        logger.info("\n🏁 FINAL TRAINING METRICS (on Validation Set):")
+        logger.info("🏁 FINAL TRAINING METRICS (on Validation Set):")
         logger.info(f"{'Model':<20} {'Val Accuracy':<15} {'Val Loss':<12}")
         logger.info("-" * 50)
         for model_name, history_dict in results['histories'].items():

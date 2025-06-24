@@ -42,6 +42,7 @@ Example Usage:
 import json
 import keras
 import scipy
+import warnings
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -53,7 +54,7 @@ from sklearn.decomposition import PCA
 from dataclasses import dataclass, field
 from sklearn.preprocessing import StandardScaler
 from typing import Dict, List, Optional, Union, Any, Tuple, Set, NamedTuple
-import warnings
+
 
 # ------------------------------------------------------------------------------
 # Local imports
@@ -293,7 +294,7 @@ class ModelAnalyzer:
         output_dir: Optional[Union[str, Path]] = None
     ):
         """
-        Initialize the unified analyzer.
+        Initialize the analyzer.
 
         Args:
             models: Dictionary mapping model names to Keras models
@@ -305,7 +306,7 @@ class ModelAnalyzer:
 
         self.models = models
         self.config = config or AnalysisConfig()
-        self.output_dir = Path(output_dir or f"unified_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        self.output_dir = Path(output_dir or f"analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Set up plotting style
@@ -320,7 +321,7 @@ class ModelAnalyzer:
         # Set up activation extraction models
         self._setup_activation_models()
 
-        logger.info(f"UnifiedModelAnalyzer initialized with {len(models)} models")
+        logger.info(f"ModelAnalyzer initialized with {len(models)} models")
 
     def _setup_activation_models(self) -> None:
         """Set up models for extracting intermediate activations."""
