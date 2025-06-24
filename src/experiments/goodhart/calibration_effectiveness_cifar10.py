@@ -242,7 +242,7 @@ class ExperimentConfig:
     use_residual: bool = True  # Enable residual connections
 
     # --- Training Parameters ---
-    epochs: int = 100  # Number of training epochs
+    epochs: int = 50  # Number of training epochs
     batch_size: int = 64  # Training batch size
     learning_rate: float = 0.001  # Adam optimizer learning rate
     early_stopping_patience: int = 15  # Patience for early stopping
@@ -250,7 +250,8 @@ class ExperimentConfig:
 
     # --- Loss Functions to Evaluate ---
     loss_functions: Dict[str, Callable] = field(default_factory=lambda: {
-        'CrossEntropy': lambda: keras.losses.CategoricalCrossentropy(from_logits=True),
+        'CrossEntropy': lambda: keras.losses.CategoricalCrossentropy(
+            from_logits=True),
         'LabelSmoothing': lambda: keras.losses.CategoricalCrossentropy(
             label_smoothing=0.1, from_logits=True
         ),
@@ -274,7 +275,6 @@ class ExperimentConfig:
     analyzer_config: AnalysisConfig = field(default_factory=lambda: AnalysisConfig(
         analyze_weights=True,  # Analyze weight distributions
         analyze_calibration=True,  # Analyze model calibration
-        analyze_probability_distributions=True,  # Analyze prediction distributions
         analyze_activations=True,  # Analyze activation patterns
         analyze_information_flow=True,  # Analyze information flow
         calibration_bins=15,  # Number of bins for calibration analysis
@@ -339,7 +339,9 @@ def build_residual_block(
     # Adjust skip connection if dimensions don't match
     if shortcut.shape[-1] != filters:
         shortcut = keras.layers.Conv2D(
-            filters, (1, 1), padding='same',
+            filters=filters,
+            kernel_size=(1, 1),
+            padding='same',
             kernel_initializer=config.kernel_initializer,
             kernel_regularizer=keras.regularizers.L2(config.weight_decay)
         )(shortcut)
@@ -382,7 +384,9 @@ def build_conv_block(
     else:
         # Standard convolutional block
         x = keras.layers.Conv2D(
-            filters, config.kernel_size, padding='same',
+            filters=filters,
+            kernel_size=config.kernel_size,
+            padding='same',
             kernel_initializer=config.kernel_initializer,
             kernel_regularizer=keras.regularizers.L2(config.weight_decay),
             name=f'conv{block_index}'
@@ -427,7 +431,9 @@ def build_model(config: ExperimentConfig, loss_fn: Callable, name: str) -> keras
 
     # Initial convolutional layer
     x = keras.layers.Conv2D(
-        config.conv_filters[0], config.kernel_size, padding='same',
+        config.conv_filters[0],
+        config.kernel_size,
+        padding='same',
         kernel_initializer=config.kernel_initializer,
         kernel_regularizer=keras.regularizers.L2(config.weight_decay),
         name='initial_conv'
@@ -447,7 +453,8 @@ def build_model(config: ExperimentConfig, loss_fn: Callable, name: str) -> keras
     # Dense classification layers
     for j, units in enumerate(config.dense_units):
         x = keras.layers.Dense(
-            units, kernel_initializer=config.kernel_initializer,
+            units=units,
+            kernel_initializer=config.kernel_initializer,
             kernel_regularizer=keras.regularizers.L2(config.weight_decay),
             name=f'dense_{j}'
         )(x)
@@ -465,14 +472,15 @@ def build_model(config: ExperimentConfig, loss_fn: Callable, name: str) -> keras
 
     # Final classification layer (logits output)
     logits = keras.layers.Dense(
-        config.num_classes, kernel_initializer=config.kernel_initializer,
+        units=config.num_classes,
+        kernel_initializer=config.kernel_initializer,
         kernel_regularizer=keras.regularizers.L2(config.weight_decay),
         name='logits'
     )(x)
 
     # Create and compile the model
     model = keras.Model(inputs=inputs, outputs=logits, name=f'{name}_model')
-    optimizer = keras.optimizers.Adam(learning_rate=config.learning_rate)
+    optimizer = keras.optimizers.AdamW(learning_rate=config.learning_rate)
     model.compile(optimizer=optimizer, loss=loss_fn, metrics=['accuracy'])
 
     return model

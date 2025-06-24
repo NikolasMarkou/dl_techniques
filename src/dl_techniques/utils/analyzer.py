@@ -1,16 +1,18 @@
 """
-Model Analyzer for Neural Networks - Enhanced Version
-=====================================================
+Model Analyzer for Neural Networks - Enhanced Version with Improved Dashboard
+============================================================================
 
 A comprehensive, modular analyzer with improved visualizations that reduce
 redundancy and provide clearer insights through better plot organization.
 
 Key Improvements:
 - Merged calibration and probability analysis
-- Merged activation and information flow analysis  
+- Merged activation and information flow analysis
 - Redesigned summary dashboard with comparative visualizations
 - Enhanced weight analysis with modern plot types
 - Cleaner, more focused visualization pages
+- Performance table instead of cluttered radar chart
+- Calibration landscape instead of empty training dynamics
 
 Example Usage:
     ```python
@@ -54,8 +56,8 @@ from typing import Dict, List, Optional, Union, Any, Tuple, Set, NamedTuple
 # Local imports
 # ------------------------------------------------------------------------------
 
-from .logger import logger
-from .calibration_metrics import (
+from dl_techniques.utils.logger import logger
+from dl_techniques.utils.calibration_metrics import (
     compute_ece,
     compute_brier_score,
     compute_reliability_data,
@@ -93,7 +95,6 @@ class AnalysisConfig:
     analyze_activations: bool = True  # Now part of information flow
     analyze_weights: bool = True
     analyze_calibration: bool = True  # Now includes probability distributions
-    analyze_probability_distributions: bool = True  # Merged with calibration
     analyze_information_flow: bool = True  # Now includes activations
 
     # Sampling parameters
@@ -1210,12 +1211,12 @@ class ModelAnalyzer:
         ax2 = fig.add_subplot(gs[0, 1])
         self._plot_effective_rank_evolution(ax2)
 
-        # Bottom row: Deep dive into key layer
+        # Bottom row: Actionable insights
         ax3 = fig.add_subplot(gs[1, 0])
-        self._plot_key_layer_comparison(ax3)
+        self._plot_activation_health_dashboard(ax3)
 
         ax4 = fig.add_subplot(gs[1, 1])
-        self._plot_sample_feature_maps_comparison(ax4)
+        self._plot_layer_specialization_analysis(ax4)
 
         plt.suptitle('Information Flow and Activation Analysis', fontsize=16, fontweight='bold')
         fig.subplots_adjust(top=0.93, bottom=0.1, left=0.1, right=0.95)
@@ -1276,88 +1277,213 @@ class ModelAnalyzer:
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-    def _plot_key_layer_comparison(self, ax) -> None:
-        """Compare activation distributions at a key layer across models."""
-        # Find a common layer type across models
-        activation_data = []
+    def _plot_activation_health_dashboard(self, ax) -> None:
+        """Create an activation health dashboard showing model health metrics."""
+        if not self.results.information_flow:
+            ax.text(0.5, 0.5, 'No activation data available',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Activation Health Dashboard')
+            ax.axis('off')
+            return
 
-        for model_name, layer_stats in self.results.activation_stats.items():
-            for layer_name, stats in layer_stats.items():
-                activation_data.append({
+        # Prepare health metrics data
+        health_data = []
+
+        for model_name in sorted(self.results.information_flow.keys()):
+            layer_analysis = self.results.information_flow[model_name]
+
+            for layer_name, analysis in layer_analysis.items():
+                # Calculate health metrics
+                sparsity = analysis.get('sparsity', 0.0)
+                positive_ratio = analysis.get('positive_ratio', 0.5)
+                mean_activation = abs(analysis.get('mean_activation', 0.0))
+
+                # Health indicators
+                dead_neurons = sparsity  # High sparsity indicates dead neurons
+                saturation = 1.0 - positive_ratio if positive_ratio > 0.9 else 0.0  # Very high positive ratio suggests saturation
+                activation_magnitude = min(mean_activation, 5.0) / 5.0  # Normalize activation magnitude
+
+                health_data.append({
                     'Model': model_name,
-                    'Layer': layer_name.split('_')[0],
-                    'Mean': stats['mean'],
-                    'Std': stats['std'],
-                    'Sparsity': stats['sparsity']
+                    'Layer': layer_name.split('_')[0] if '_' in layer_name else layer_name[:8],
+                    'Dead Neurons': dead_neurons,
+                    'Saturation': saturation,
+                    'Activation Level': activation_magnitude
                 })
 
-        if activation_data:
-            df = pd.DataFrame(activation_data)
+        if health_data:
+            df = pd.DataFrame(health_data)
 
-            # Create violin plot for activation statistics
-            metric_df = df.melt(id_vars=['Model', 'Layer'],
-                               value_vars=['Mean', 'Std', 'Sparsity'],
-                               var_name='Metric', value_name='Value')
+            # Create heatmap data
+            models = sorted(df['Model'].unique())
+            layers = df['Layer'].unique()[:8]  # Limit to first 8 layers for readability
 
-            # Sort models for consistent ordering
-            model_order = sorted(metric_df['Model'].unique())
+            # Create separate heatmaps for each metric
+            metrics = ['Dead Neurons', 'Saturation', 'Activation Level']
 
-            # Create custom palette based on model colors
-            palette = {model: self.model_colors.get(model, '#333333') for model in model_order}
-
-            sns.boxplot(data=metric_df, x='Metric', y='Value', hue='Model',
-                        ax=ax, palette=palette, hue_order=model_order, showfliers=False)
-
-            ax.set_title('Key Layer Activation Statistics Comparison')
-            ax.grid(True, alpha=0.3, axis='y')
-
-    def _plot_sample_feature_maps_comparison(self, ax) -> None:
-        """Compare sample feature maps across models."""
-        # Find models with conv activations
-        conv_samples = {}
-        model_order = sorted(self.results.activation_stats.keys())
-
-        for model_name in model_order:
-            layer_stats = self.results.activation_stats[model_name]
-            for layer_name, stats in layer_stats.items():
-                if stats.get('sample_activations') is not None:
-                    # Get the first sample's activation
-                    conv_samples[model_name] = stats['sample_activations'][0]
-                    break
-
-        if len(conv_samples) >= 2:
-            n_models = len(conv_samples)
-            # Find the minimum number of features across all models to compare
-            n_features = min(4, min(act.shape[-1] for act in conv_samples.values()))
-
-            # Create grid
+            # Create subplots within the main axis
             from matplotlib.gridspec import GridSpecFromSubplotSpec
-            gs_sub = GridSpecFromSubplotSpec(n_models, n_features, subplot_spec=ax.get_subplotspec(),
-                                           wspace=0.1, hspace=0.1)
+            gs_sub = GridSpecFromSubplotSpec(1, 3, subplot_spec=ax.get_subplotspec(),
+                                           wspace=0.4, hspace=0.1)
 
-            # Use the sorted list of model names for consistent row ordering
-            for i, model_name in enumerate(model_order):
-                if model_name not in conv_samples: continue
-                activations = conv_samples[model_name]
-                for j in range(n_features):
-                    ax_sub = plt.subplot(gs_sub[i, j])
-                    ax_sub.imshow(activations[:, :, j], cmap='viridis', aspect='auto')
-                    ax_sub.axis('off')
+            for idx, metric in enumerate(metrics):
+                ax_sub = plt.subplot(gs_sub[0, idx])
 
-                    # Add model name as a row label on the left
-                    if j == 0:
-                        ax_sub.set_ylabel(model_name, rotation=0, labelpad=20,
-                                          ha='right', va='center', fontsize=10, fontweight='bold')
-                    # Add feature index as a column title on the top
-                    if i == 0:
-                        ax_sub.set_title(f'F{j}', fontsize=9)
+                # Create pivot table for heatmap
+                df_filtered = df[df['Layer'].isin(layers)]
+                heatmap_data = df_filtered.pivot_table(values=metric, index='Model', columns='Layer', fill_value=0)
 
-            ax.axis('off')  # Hide the parent axis frame
-            ax.set_title('Sample Feature Map Comparison', pad=20)
+                # Ensure we have the right models in the right order
+                heatmap_data = heatmap_data.reindex(models, fill_value=0)
+
+                # Choose colormap based on metric
+                if metric == 'Dead Neurons':
+                    cmap = 'Reds'  # Red = bad (more dead neurons)
+                    vmax = 1.0
+                elif metric == 'Saturation':
+                    cmap = 'Oranges'  # Orange = bad (more saturation)
+                    vmax = 1.0
+                else:  # Activation Level
+                    cmap = 'Greens'  # Green = good (healthy activation)
+                    vmax = 1.0
+
+                # Create heatmap
+                im = ax_sub.imshow(heatmap_data.values, cmap=cmap, aspect='auto',
+                                  vmin=0, vmax=vmax, interpolation='nearest')
+
+                # Set labels
+                ax_sub.set_title(metric, fontsize=10, fontweight='bold')
+                ax_sub.set_xticks(range(len(heatmap_data.columns)))
+                ax_sub.set_xticklabels(heatmap_data.columns, rotation=45, ha='right', fontsize=8)
+                ax_sub.set_yticks(range(len(heatmap_data.index)))
+
+                # Only show model names on the leftmost heatmap
+                if idx == 0:
+                    ax_sub.set_yticklabels(heatmap_data.index, fontsize=8)
+                else:
+                    ax_sub.set_yticklabels([])
+
+                # Add colorbar
+                from matplotlib import cm
+                cbar = plt.colorbar(im, ax=ax_sub, shrink=0.6)
+                cbar.ax.tick_params(labelsize=7)
+
+            ax.axis('off')  # Hide the parent axis
+            ax.set_title('Activation Health Dashboard', fontsize=12, fontweight='bold', pad=20)
         else:
-            ax.text(0.5, 0.5, 'Insufficient convolutional activations\nfor comparison',
+            ax.text(0.5, 0.5, 'Insufficient data for health analysis',
                    ha='center', va='center', transform=ax.transAxes)
-            ax.set_title('Feature Map Comparison')
+            ax.set_title('Activation Health Dashboard')
+            ax.axis('off')
+
+    def _plot_layer_specialization_analysis(self, ax) -> None:
+        """Analyze how specialized each model's layers have become."""
+        if not self.results.information_flow:
+            ax.text(0.5, 0.5, 'No activation data available',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Layer Specialization Analysis')
+            ax.axis('off')
+            return
+
+        # Calculate specialization metrics for each model
+        specialization_data = []
+
+        for model_name in sorted(self.results.information_flow.keys()):
+            layer_analysis = self.results.information_flow[model_name]
+
+            total_specialization = 0
+            layer_count = 0
+            layer_specializations = []
+
+            for layer_name, analysis in layer_analysis.items():
+                # Specialization indicators:
+                # 1. Low sparsity (neurons are active)
+                # 2. Balanced positive ratio (not all saturated)
+                # 3. Good effective rank (diverse representations)
+
+                sparsity = analysis.get('sparsity', 1.0)
+                positive_ratio = analysis.get('positive_ratio', 0.5)
+                effective_rank = analysis.get('effective_rank', 1.0)
+
+                # Calculate specialization score (0-1, higher is better)
+                # Low sparsity is good (1 - sparsity)
+                activation_health = 1.0 - sparsity
+
+                # Balanced activation is good (closer to 0.5 is better)
+                balance_score = 1.0 - abs(positive_ratio - 0.5) * 2
+
+                # Higher effective rank is good (normalize by a reasonable max)
+                rank_score = min(effective_rank / 10.0, 1.0) if effective_rank > 0 else 0.0
+
+                # Combined specialization score
+                layer_spec = (activation_health + balance_score + rank_score) / 3.0
+                layer_specializations.append(layer_spec)
+
+                total_specialization += layer_spec
+                layer_count += 1
+
+            if layer_count > 0:
+                avg_specialization = total_specialization / layer_count
+                specialization_data.append({
+                    'Model': model_name,
+                    'Average Specialization': avg_specialization,
+                    'Layer Specializations': layer_specializations[:10]  # Limit to first 10 layers
+                })
+
+        if specialization_data:
+            # Create two sub-visualizations
+            from matplotlib.gridspec import GridSpecFromSubplotSpec
+            gs_sub = GridSpecFromSubplotSpec(2, 1, subplot_spec=ax.get_subplotspec(),
+                                           hspace=0.4, height_ratios=[1, 1.5])
+
+            # Top: Overall specialization comparison
+            ax_top = plt.subplot(gs_sub[0, 0])
+            models = [d['Model'] for d in specialization_data]
+            avg_specs = [d['Average Specialization'] for d in specialization_data]
+
+            bars = ax_top.bar(range(len(models)), avg_specs, alpha=0.8)
+
+            # Color bars with model colors
+            for i, model in enumerate(models):
+                color = self.model_colors.get(model, '#333333')
+                bars[i].set_facecolor(color)
+
+            ax_top.set_title('Overall Model Specialization', fontsize=10, fontweight='bold')
+            ax_top.set_ylabel('Specialization Score')
+            ax_top.set_xticks(range(len(models)))
+            ax_top.set_xticklabels([])  # Remove model names from x-axis
+            ax_top.grid(True, alpha=0.3, axis='y')
+            ax_top.set_ylim(0, 1)
+
+            # Add value labels on bars
+            for i, v in enumerate(avg_specs):
+                ax_top.text(i, v + 0.02, f'{v:.2f}', ha='center', va='bottom', fontsize=8)
+
+            # Bottom: Layer-by-layer specialization evolution
+            ax_bottom = plt.subplot(gs_sub[1, 0])
+
+            for data in specialization_data:
+                model_name = data['Model']
+                layer_specs = data['Layer Specializations']
+                color = self.model_colors.get(model_name, '#333333')
+
+                x_positions = range(len(layer_specs))
+                ax_bottom.plot(x_positions, layer_specs, 'o-',
+                             label=model_name, color=color, linewidth=2, markersize=6)
+
+            ax_bottom.set_title('Layer-wise Specialization Evolution', fontsize=10, fontweight='bold')
+            ax_bottom.set_xlabel('Layer Index')
+            ax_bottom.set_ylabel('Specialization Score')
+            ax_bottom.legend(fontsize=8)
+            ax_bottom.grid(True, alpha=0.3)
+            ax_bottom.set_ylim(0, 1)
+
+            ax.axis('off')  # Hide parent axis
+            ax.set_title('Layer Specialization Analysis', fontsize=12, fontweight='bold', pad=20)
+        else:
+            ax.text(0.5, 0.5, 'Insufficient data for specialization analysis',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Layer Specialization Analysis')
             ax.axis('off')
 
     # ------------------------------------------------------------------------------
@@ -1365,87 +1491,167 @@ class ModelAnalyzer:
     # ------------------------------------------------------------------------------
 
     def create_summary_dashboard(self) -> None:
-        """Create a focused, visual summary dashboard."""
-        fig = plt.figure(figsize=(14, 10))
-        gs = plt.GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.3)
+        """Create an enhanced, focused summary dashboard with improved visualizations."""
+        fig = plt.figure(figsize=(16, 10))
+        gs = plt.GridSpec(2, 2, figure=fig, hspace=0.35, wspace=0.25,
+                         height_ratios=[1, 1], width_ratios=[1.2, 1])
 
-        # 1. Overall Performance Radar Chart
-        ax1 = fig.add_subplot(gs[0, 0], projection='polar')
-        self._plot_performance_radar(ax1)
+        # 1. Performance Metrics Table (top left, wider)
+        ax1 = fig.add_subplot(gs[0, 0])
+        self._plot_performance_table(ax1)
 
-        # 2. Model Similarity (Weight PCA)
+        # 2. Model Similarity (top right)
         ax2 = fig.add_subplot(gs[0, 1])
         self._plot_model_similarity(ax2)
 
-        # 3. Confidence Profile
+        # 3. Confidence Distribution Profiles (bottom left, wider)
         ax3 = fig.add_subplot(gs[1, 0])
         self._plot_confidence_profile_summary(ax3)
 
-        # 4. Training Dynamics (if available)
+        # 4. Calibration Performance Comparison (bottom right)
         ax4 = fig.add_subplot(gs[1, 1])
-        self._plot_training_dynamics(ax4)
+        self._plot_calibration_performance_summary(ax4)
 
         plt.suptitle('Model Analysis Summary Dashboard', fontsize=18, fontweight='bold')
-        fig.subplots_adjust(top=0.93, bottom=0.07, left=0.1, right=0.95)
+        fig.subplots_adjust(top=0.93, bottom=0.07, left=0.08, right=0.96)
 
         if self.config.save_plots:
-            self._save_figure(fig, 'summary_dashboard')
+            self._save_figure(fig, 'enhanced_summary_dashboard')
         plt.close(fig)
 
-    def _plot_performance_radar(self, ax) -> None:
-        """Create radar chart for multi-metric comparison."""
-        categories = ['Accuracy', 'ECE\n(inverted)', 'Brier\n(inverted)',
-                     'Entropy\n(normalized)', 'Loss\n(inverted)']
+    def _plot_performance_table(self, ax) -> None:
+        """Create a clean performance metrics table instead of radar chart."""
+        # Prepare data for the table
+        table_data = []
+        metrics_order = ['Accuracy', 'Loss', 'ECE', 'Brier Score', 'Mean Entropy']
 
-        # Prepare data
-        radar_data = {}
-        for model_name in sorted(self.models.keys()):  # Sort for consistency
-            values = []
+        for model_name in sorted(self.models.keys()):
+            row_data = [model_name]
 
             # Accuracy
-            acc = self.results.model_metrics.get(model_name, {}).get('accuracy', 0.5)
-            values.append(acc)
+            acc = self.results.model_metrics.get(model_name, {}).get('accuracy', 0.0)
+            row_data.append(f'{acc:.3f}')
 
-            # ECE (inverted so higher is better)
-            ece = self.results.calibration_metrics.get(model_name, {}).get('ece', 0.1)
-            values.append(1 - min(ece, 1))
+            # Loss
+            loss = self.results.model_metrics.get(model_name, {}).get('loss', 0.0)
+            row_data.append(f'{loss:.3f}')
 
-            # Brier Score (inverted)
-            brier = self.results.calibration_metrics.get(model_name, {}).get('brier_score', 0.5)
-            values.append(1 - min(brier, 1))
+            # ECE
+            ece = self.results.calibration_metrics.get(model_name, {}).get('ece', 0.0)
+            row_data.append(f'{ece:.3f}')
 
-            # Entropy (normalized)
-            entropy = self.results.calibration_metrics.get(model_name, {}).get('mean_entropy', 1.0)
-            values.append(entropy / 2.5)  # Normalize to [0, 1]
+            # Brier Score
+            brier = self.results.calibration_metrics.get(model_name, {}).get('brier_score', 0.0)
+            row_data.append(f'{brier:.3f}')
 
-            # Loss (inverted)
-            loss = self.results.model_metrics.get(model_name, {}).get('loss', 1.0)
-            values.append(1 / (1 + loss))  # Transform to [0, 1]
+            # Mean Entropy
+            entropy = self.results.calibration_metrics.get(model_name, {}).get('mean_entropy', 0.0)
+            row_data.append(f'{entropy:.3f}')
 
-            radar_data[model_name] = values
+            table_data.append(row_data)
 
-        # Number of variables
-        num_vars = len(categories)
+        # Create table
+        headers = ['Model'] + metrics_order
 
-        # Compute angle for each axis
-        angles = np.linspace(0, 2 * np.pi, num_vars, endpoint=False).tolist()
+        # Create the table
+        table = ax.table(cellText=table_data,
+                        colLabels=headers,
+                        cellLoc='center',
+                        loc='center',
+                        bbox=[0, 0, 1, 1])
 
-        # Complete the circle
-        angles += angles[:1]
+        # Style the table
+        table.auto_set_font_size(False)
+        table.set_fontsize(10)
+        table.scale(1, 2)
 
-        # Plot data using consistent colors
-        for model_name, values in radar_data.items():
-            values += values[:1]  # Complete the circle
+        # Color the header row
+        for i in range(len(headers)):
+            table[(0, i)].set_facecolor('#E8E8E8')
+            table[(0, i)].set_text_props(weight='bold')
+
+        # Color the model name column and apply model colors
+        for i, row_data in enumerate(table_data, 1):
+            model_name = row_data[0]
+            color = self.model_colors.get(model_name, '#F5F5F5')
+
+            # Apply light version of model color to the entire row
+            light_color = self._lighten_color(color, 0.8)
+            for j in range(len(headers)):
+                table[(i, j)].set_facecolor(light_color)
+
+            # Make model name bold
+            table[(i, 0)].set_text_props(weight='bold')
+
+        # Remove axis
+        ax.axis('off')
+        ax.set_title('Performance Metrics Comparison', fontsize=14, fontweight='bold', pad=20)
+
+    def _plot_calibration_performance_summary(self, ax) -> None:
+        """Plot calibration performance comparison - more useful than training dynamics."""
+        if not self.results.calibration_metrics:
+            ax.text(0.5, 0.5, 'No calibration data available',
+                   ha='center', va='center', transform=ax.transAxes, fontsize=12)
+            ax.set_title('Calibration Performance')
+            ax.axis('off')
+            return
+
+        # Prepare data for plotting
+        models = sorted(self.results.calibration_metrics.keys())
+        ece_values = []
+        brier_values = []
+
+        for model_name in models:
+            metrics = self.results.calibration_metrics[model_name]
+            ece_values.append(metrics.get('ece', 0.0))
+            brier_values.append(metrics.get('brier_score', 0.0))
+
+        # Create a scatter plot showing ECE vs Brier Score
+        for i, model_name in enumerate(models):
             color = self.model_colors.get(model_name, '#333333')
-            ax.plot(angles, values, 'o-', linewidth=2, label=model_name, color=color)
-            ax.fill(angles, values, alpha=0.15, color=color)
+            ax.scatter(ece_values[i], brier_values[i],
+                      s=200, color=color, alpha=0.8,
+                      edgecolors='black', linewidth=2,
+                      label=model_name)
 
-        ax.set_xticks(angles[:-1])
-        ax.set_xticklabels(categories)
-        ax.set_ylim(0, 1)
-        ax.set_title('Performance Radar Chart', pad=20)
-        ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
-        ax.grid(True)
+            # Add model name as annotation
+            ax.annotate(model_name, (ece_values[i], brier_values[i]),
+                       xytext=(5, 5), textcoords='offset points',
+                       fontsize=9, ha='left', va='bottom')
+
+        # Add reference lines
+        if ece_values and brier_values:
+            # Perfect calibration line (diagonal)
+            max_val = max(max(ece_values), max(brier_values))
+            ax.plot([0, max_val], [0, max_val], 'k--', alpha=0.5,
+                   label='Perfect Correlation')
+
+            # Add quadrants for interpretation
+            mean_ece = np.mean(ece_values)
+            mean_brier = np.mean(brier_values)
+
+            ax.axvline(mean_ece, color='gray', linestyle=':', alpha=0.5)
+            ax.axhline(mean_brier, color='gray', linestyle=':', alpha=0.5)
+
+            # Add quadrant labels
+            ax.text(0.02, 0.98, 'Well Calibrated\nLow Uncertainty',
+                   transform=ax.transAxes, ha='left', va='top',
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='lightgreen', alpha=0.7),
+                   fontsize=8)
+
+            ax.text(0.98, 0.02, 'Poorly Calibrated\nHigh Uncertainty',
+                   transform=ax.transAxes, ha='right', va='bottom',
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='lightcoral', alpha=0.7),
+                   fontsize=8)
+
+        ax.set_xlabel('Expected Calibration Error (ECE)')
+        ax.set_ylabel('Brier Score')
+        ax.set_title('Calibration Performance Landscape')
+        ax.grid(True, alpha=0.3)
+
+        # Set axis limits to start from 0
+        ax.set_xlim(left=0)
+        ax.set_ylim(bottom=0)
 
     def _plot_model_similarity(self, ax) -> None:
         """Plot model similarity based on weight PCA."""
@@ -1477,8 +1683,6 @@ class ModelAnalyzer:
         ax.set_title('Model Similarity (Weight Space)')
         ax.legend()
         ax.grid(True, alpha=0.3)
-
-        # Equal aspect ratio
         ax.set_aspect('equal', adjustable='box')
 
     def _plot_confidence_profile_summary(self, ax) -> None:
@@ -1494,8 +1698,6 @@ class ModelAnalyzer:
 
         if confidence_data:
             df = pd.DataFrame(confidence_data)
-
-            # Sort models for consistency
             model_order = sorted(df['Model'].unique())
 
             # Create enhanced violin plot
@@ -1516,33 +1718,21 @@ class ModelAnalyzer:
             ax.set_title('Confidence Distribution Profiles')
             ax.grid(True, alpha=0.3, axis='y')
 
-    def _plot_training_dynamics(self, ax) -> None:
-        """Plot training dynamics if history is available."""
-        if not self.results.training_history:
-            ax.text(0.5, 0.5, 'No training history available',
-                   ha='center', va='center', transform=ax.transAxes)
-            ax.set_title('Training Dynamics')
-            ax.axis('off')
-            return
-
-        # Plot validation accuracy curves with consistent colors
-        for model_name in sorted(self.results.training_history.keys()):
-            history = self.results.training_history[model_name]
-            if 'val_accuracy' in history:
-                epochs = range(1, len(history['val_accuracy']) + 1)
-                color = self.model_colors.get(model_name, '#333333')
-                ax.plot(epochs, history['val_accuracy'], '-', label=model_name,
-                       linewidth=2, marker='o', markersize=3, color=color)
-
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Validation Accuracy')
-        ax.set_title('Training Dynamics')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
     # ------------------------------------------------------------------------------
     # Utility Methods
     # ------------------------------------------------------------------------------
+
+    def _lighten_color(self, color: str, factor: float) -> str:
+        """Lighten a color by interpolating towards white."""
+        import matplotlib.colors as mcolors
+
+        # Convert color to RGB
+        rgb = mcolors.to_rgb(color)
+
+        # Interpolate towards white
+        lightened = tuple(rgb[i] + (1 - rgb[i]) * factor for i in range(3))
+
+        return lightened
 
     def _save_figure(self, fig: plt.Figure, name: str) -> None:
         """Save figure with configured settings."""
