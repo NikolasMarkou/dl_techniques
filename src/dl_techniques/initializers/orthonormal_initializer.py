@@ -66,8 +66,8 @@ Examples
 """
 
 import keras
-from keras import ops
 import numpy as np
+from keras import ops
 from typing import Optional, Any, Tuple, Dict, Union
 
 # ---------------------------------------------------------------------
