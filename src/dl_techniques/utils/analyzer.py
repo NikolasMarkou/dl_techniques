@@ -1303,13 +1303,10 @@ class ModelAnalyzer:
             model_order = sorted(metric_df['Model'].unique())
 
             # Create custom palette based on model colors
-            palette = []
-            for model in model_order:
-                color = self.model_colors.get(model, '#333333')
-                palette.append(color)
+            palette = {model: self.model_colors.get(model, '#333333') for model in model_order}
 
-            sns.violinplot(data=metric_df, x='Metric', y='Value', hue='Model',
-                          ax=ax, palette=palette, hue_order=model_order)
+            sns.boxplot(data=metric_df, x='Metric', y='Value', hue='Model',
+                        ax=ax, palette=palette, hue_order=model_order, showfliers=False)
 
             ax.set_title('Key Layer Activation Statistics Comparison')
             ax.grid(True, alpha=0.3, axis='y')
@@ -1318,38 +1315,45 @@ class ModelAnalyzer:
         """Compare sample feature maps across models."""
         # Find models with conv activations
         conv_samples = {}
+        model_order = sorted(self.results.activation_stats.keys())
 
-        for model_name, layer_stats in self.results.activation_stats.items():
+        for model_name in model_order:
+            layer_stats = self.results.activation_stats[model_name]
             for layer_name, stats in layer_stats.items():
                 if stats.get('sample_activations') is not None:
+                    # Get the first sample's activation
                     conv_samples[model_name] = stats['sample_activations'][0]
                     break
 
         if len(conv_samples) >= 2:
             n_models = len(conv_samples)
-            n_features = min(4, conv_samples[list(conv_samples.keys())[0]].shape[-1])
+            # Find the minimum number of features across all models to compare
+            n_features = min(4, min(act.shape[-1] for act in conv_samples.values()))
 
             # Create grid
             from matplotlib.gridspec import GridSpecFromSubplotSpec
-            gs_sub = GridSpecFromSubplotSpec(n_models, n_features,
-                                           subplot_spec=ax.get_gridspec()[1, 1],
-                                           wspace=0.05, hspace=0.1)
+            gs_sub = GridSpecFromSubplotSpec(n_models, n_features, subplot_spec=ax.get_subplotspec(),
+                                           wspace=0.1, hspace=0.1)
 
-            for i, (model_name, activations) in enumerate(conv_samples.items()):
+            # Use the sorted list of model names for consistent row ordering
+            for i, model_name in enumerate(model_order):
+                if model_name not in conv_samples: continue
+                activations = conv_samples[model_name]
                 for j in range(n_features):
                     ax_sub = plt.subplot(gs_sub[i, j])
                     ax_sub.imshow(activations[:, :, j], cmap='viridis', aspect='auto')
                     ax_sub.axis('off')
 
+                    # Add model name as a row label on the left
                     if j == 0:
-                        ax_sub.set_ylabel(model_name[:10], rotation=0,
-                                         ha='right', va='center', fontsize=8)
+                        ax_sub.set_ylabel(model_name, rotation=0, labelpad=20,
+                                          ha='right', va='center', fontsize=10, fontweight='bold')
+                    # Add feature index as a column title on the top
                     if i == 0:
-                        ax_sub.set_title(f'F{j}', fontsize=8)
+                        ax_sub.set_title(f'F{j}', fontsize=9)
 
-            ax.set_visible(False)
-            ax.text(0.5, 1.05, 'Sample Feature Map Comparison',
-                   transform=ax.transAxes, ha='center', fontsize=12, fontweight='bold')
+            ax.axis('off')  # Hide the parent axis frame
+            ax.set_title('Sample Feature Map Comparison', pad=20)
         else:
             ax.text(0.5, 0.5, 'Insufficient convolutional activations\nfor comparison',
                    ha='center', va='center', transform=ax.transAxes)
