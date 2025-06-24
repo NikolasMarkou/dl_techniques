@@ -242,7 +242,7 @@ class ExperimentConfig:
     use_residual: bool = True  # Enable residual connections
 
     # --- Training Parameters ---
-    epochs: int = 20  # Number of training epochs
+    epochs: int = 100  # Number of training epochs
     batch_size: int = 64  # Training batch size
     learning_rate: float = 0.001  # Adam optimizer learning rate
     early_stopping_patience: int = 15  # Patience for early stopping
@@ -259,6 +259,9 @@ class ExperimentConfig:
         ),
         'GoodhartAware': lambda: GoodhartAwareLoss(
             entropy_weight=0.1, mi_weight=0.01, from_logits=True
+        ),
+        'GoodhartAware_ls': lambda: GoodhartAwareLoss(
+            entropy_weight=0.1, mi_weight=0.01, from_logits=True, label_smoothing=0.1
         ),
     })
 

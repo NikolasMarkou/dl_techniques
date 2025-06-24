@@ -4,7 +4,7 @@ pytest-cov
 matplotlib~=3.10.0
 scikit-learn~=1.6.1
 keras~=3.8.0
-tensorflow==2.18.0
+tensorflow[and-cuda]
 tqdm
 seaborn~=0.13.2
 scipy~=1.15.1
