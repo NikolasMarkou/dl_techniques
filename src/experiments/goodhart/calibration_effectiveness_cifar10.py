@@ -140,7 +140,7 @@ class ExperimentConfig:
     use_residual: bool = True
 
     # Training Parameters
-    epochs: int = 0
+    epochs: int = 10
     batch_size: int = 64
     learning_rate: float = 0.001
     early_stopping_patience: int = 15
