@@ -1,18 +1,16 @@
 """
-Model Analyzer for Neural Networks
-==============================================
+Model Analyzer for Neural Networks - Enhanced Version
+=====================================================
 
-A comprehensive, modular analyzer that combines activation, weight, calibration,
-and probability distribution analysis into a single, easy-to-use interface.
+A comprehensive, modular analyzer with improved visualizations that reduce
+redundancy and provide clearer insights through better plot organization.
 
-Key Features:
-- Unified configuration system
-- Modular analysis components
-- Consistent visualization style
-- Minimal code duplication
-- Clean, publication-ready plots
-- Flexible layer selection
-- Improved error handling
+Key Improvements:
+- Merged calibration and probability analysis
+- Merged activation and information flow analysis
+- Redesigned summary dashboard with comparative visualizations
+- Enhanced weight analysis with modern plot types
+- Cleaner, more focused visualization pages
 
 Example Usage:
     ```python
@@ -23,8 +21,7 @@ Example Usage:
         analyze_activations=True,
         analyze_weights=True,
         analyze_calibration=True,
-        plot_style='publication',
-        activation_layer_name='conv2d_1'  # Optional: specify layer
+        plot_style='publication'
     )
 
     # Create analyzer
@@ -32,10 +29,6 @@ Example Usage:
 
     # Run comprehensive analysis
     results = analyzer.analyze(test_data)
-
-    # Or run specific analyses
-    analyzer.analyze_weights()
-    analyzer.analyze_calibration(test_data)
     ```
 """
 
@@ -50,6 +43,7 @@ from tqdm import tqdm
 from pathlib import Path
 from datetime import datetime
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 from sklearn.decomposition import PCA
 from dataclasses import dataclass, field
 from sklearn.preprocessing import StandardScaler
@@ -93,14 +87,14 @@ class DataInput(NamedTuple):
 
 @dataclass
 class AnalysisConfig:
-    """configuration for all analysis types."""
+    """Configuration for all analysis types."""
 
     # Analysis toggles
-    analyze_activations: bool = True
+    analyze_activations: bool = True  # Now part of information flow
     analyze_weights: bool = True
-    analyze_calibration: bool = True
-    analyze_probability_distributions: bool = True
-    analyze_information_flow: bool = True
+    analyze_calibration: bool = True  # Now includes probability distributions
+    analyze_probability_distributions: bool = True  # Merged with calibration
+    analyze_information_flow: bool = True  # Now includes activations
 
     # Sampling parameters
     n_samples: int = 1000
@@ -108,8 +102,8 @@ class AnalysisConfig:
     sample_digits: Optional[List[int]] = None
 
     # Layer selection
-    activation_layer_name: Optional[str] = None  # Specify layer for activation analysis
-    activation_layer_index: Optional[int] = None  # Alternative: specify by index
+    activation_layer_name: Optional[str] = None
+    activation_layer_index: Optional[int] = None
 
     # Weight analysis options
     weight_layer_types: Optional[List[str]] = None
@@ -121,7 +115,7 @@ class AnalysisConfig:
     calibration_bins: int = 10
 
     # Visualization settings
-    plot_style: str = 'publication'  # 'publication', 'presentation', 'draft'
+    plot_style: str = 'publication'
     color_palette: str = 'deep'
     fig_width: int = 12
     fig_height: int = 8
@@ -140,7 +134,6 @@ class AnalysisConfig:
 
     def setup_plotting_style(self) -> None:
         """Set up matplotlib style based on configuration."""
-        # Reset to default first
         plt.style.use('default')
 
         # Apply style presets
@@ -186,11 +179,9 @@ class AnalysisConfig:
             }
         }
 
-        # Apply selected style
         if self.plot_style in style_settings:
             plt.rcParams.update(style_settings[self.plot_style])
 
-        # Common settings
         plt.rcParams.update({
             'figure.figsize': (self.fig_width, self.fig_height),
             'figure.dpi': 100,
@@ -199,14 +190,13 @@ class AnalysisConfig:
             'axes.spines.top': False,
             'axes.spines.right': False,
             'axes.axisbelow': True,
-            'figure.autolayout': False,  # Disabled to avoid conflicts with manual layout
+            'figure.autolayout': False,
         })
 
-        # Set seaborn theme
         sns.set_theme(style='whitegrid', palette=self.color_palette)
 
 # ------------------------------------------------------------------------------
-# Base Analysis Results
+# Analysis Results Container
 # ------------------------------------------------------------------------------
 
 @dataclass
@@ -216,7 +206,7 @@ class AnalysisResults:
     # Model performance
     model_metrics: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
-    # Activation analysis
+    # Activation analysis (now part of information flow)
     activation_stats: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     # Weight analysis
@@ -224,29 +214,29 @@ class AnalysisResults:
     weight_correlations: Optional[pd.DataFrame] = None
     weight_pca: Optional[Dict[str, Any]] = None
 
-    # Calibration analysis
+    # Calibration analysis (now includes probability metrics)
     calibration_metrics: Dict[str, Dict[str, float]] = field(default_factory=dict)
     reliability_data: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
-
-    # Probability analysis
     confidence_metrics: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
 
-    # Information flow
+    # Information flow (now includes activation analysis)
     information_flow: Dict[str, Any] = field(default_factory=dict)
+
+    # Training history (if available)
+    training_history: Dict[str, Dict[str, List[float]]] = field(default_factory=dict)
 
     # Metadata
     analysis_timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     config: Optional[AnalysisConfig] = None
 
 # ------------------------------------------------------------------------------
-# Utility Functions for Safe Plotting
+# Utility Functions
 # ------------------------------------------------------------------------------
 
 def safe_set_xticklabels(ax, labels, rotation=0, max_labels=10):
     """Safely set x-tick labels with proper handling."""
     try:
         if len(labels) > max_labels:
-            # Reduce number of labels if too many
             step = len(labels) // max_labels
             indices = range(0, len(labels), step)
             ax.set_xticks([i for i in indices])
@@ -263,43 +253,35 @@ def safe_tight_layout(fig, **kwargs):
         fig.tight_layout(**kwargs)
     except Exception as e:
         logger.warning(f"Could not apply tight_layout: {e}")
-        # Try alternative layout adjustment
         try:
             fig.subplots_adjust(hspace=0.3, wspace=0.3)
         except Exception:
             pass
 
 # ------------------------------------------------------------------------------
-# Model Analyzer
+# Enhanced Model Analyzer
 # ------------------------------------------------------------------------------
 
 class ModelAnalyzer:
     """
-    Model analyzer for comprehensive neural network model analysis.
-
-    This class combines activation, weight, calibration, and probability
-    distribution analysis into a single, configurable interface.
-
-    Attributes:
-        models: Dictionary of models to analyze
-        config: Analysis configuration
-        output_dir: Directory for saving outputs
-        results: Container for all analysis results
+    Enhanced model analyzer with improved visualizations and reduced redundancy.
     """
 
     def __init__(
         self,
         models: Dict[str, keras.Model],
         config: Optional[AnalysisConfig] = None,
-        output_dir: Optional[Union[str, Path]] = None
+        output_dir: Optional[Union[str, Path]] = None,
+        training_history: Optional[Dict[str, Dict[str, List[float]]]] = None
     ):
         """
         Initialize the analyzer.
 
         Args:
             models: Dictionary mapping model names to Keras models
-            config: Analysis configuration (uses defaults if None)
+            config: Analysis configuration
             output_dir: Output directory for plots and results
+            training_history: Optional training history for each model
         """
         if not models:
             raise ValueError("At least one model must be provided")
@@ -315,6 +297,10 @@ class ModelAnalyzer:
         # Initialize results container
         self.results = AnalysisResults(config=self.config)
 
+        # Store training history if provided
+        if training_history:
+            self.results.training_history = training_history
+
         # Cache for model outputs
         self._prediction_cache: Dict[str, Dict[str, np.ndarray]] = {}
 
@@ -329,18 +315,6 @@ class ModelAnalyzer:
         self.layer_extraction_models = {}
 
         for model_name, model in self.models.items():
-            # Find best layer for visualization
-            best_viz_layer = self._find_visualization_layer(model)
-
-            if best_viz_layer is not None:
-                try:
-                    self.activation_models[model_name] = keras.Model(
-                        inputs=model.input,
-                        outputs=[best_viz_layer.output, model.output]
-                    )
-                except Exception as e:
-                    logger.warning(f"Could not create activation model for {model_name}: {e}")
-
             # Set up multi-layer extraction for information flow
             extraction_layers = self._get_extraction_layers(model)
             if extraction_layers:
@@ -351,42 +325,6 @@ class ModelAnalyzer:
                     }
                 except Exception as e:
                     logger.warning(f"Could not create layer extraction model for {model_name}: {e}")
-
-    def _find_visualization_layer(self, model: keras.Model) -> Optional[keras.layers.Layer]:
-        """Find the layer for activation visualization based on config."""
-        # Check if specific layer is requested
-        if self.config.activation_layer_name:
-            try:
-                return model.get_layer(self.config.activation_layer_name)
-            except:
-                logger.warning(f"Layer '{self.config.activation_layer_name}' not found, using default selection")
-
-        if self.config.activation_layer_index is not None:
-            try:
-                return model.layers[self.config.activation_layer_index]
-            except IndexError:
-                logger.warning(f"Layer index {self.config.activation_layer_index} out of range, using default selection")
-
-        # Default heuristic
-        return self._find_best_visualization_layer(model)
-
-    def _find_best_visualization_layer(self, model: keras.Model) -> Optional[keras.layers.Layer]:
-        """Find the best layer for activation visualization using heuristics."""
-        # Priority: Conv2D > Dense > any layer with meaningful output
-        conv_layers = [l for l in model.layers if isinstance(l, keras.layers.Conv2D)]
-        if conv_layers:
-            return conv_layers[-1]
-
-        dense_layers = [l for l in model.layers if isinstance(l, keras.layers.Dense)]
-        if dense_layers:
-            return dense_layers[len(dense_layers) // 2]
-
-        # Fallback to any layer with output
-        for layer in reversed(model.layers):
-            if hasattr(layer, 'output') and layer.output is not None:
-                return layer
-
-        return None
 
     def _get_extraction_layers(self, model: keras.Model) -> List[Dict[str, Any]]:
         """Get layers suitable for information flow analysis."""
@@ -417,25 +355,22 @@ class ModelAnalyzer:
         Run comprehensive or selected analyses on models.
 
         Args:
-            data: Input data - can be DataInput, tuple (x, y), or object with x_test/y_test
-            analysis_types: Set of analysis types to run. If None, runs all enabled analyses.
-                          Options: {'activations', 'weights', 'calibration', 'probability', 'information_flow'}
+            data: Input data
+            analysis_types: Set of analysis types to run
 
         Returns:
             AnalysisResults object containing all results
         """
         if analysis_types is None:
             analysis_types = {
-                'activations' if self.config.analyze_activations else None,
                 'weights' if self.config.analyze_weights else None,
                 'calibration' if self.config.analyze_calibration else None,
-                'probability' if self.config.analyze_probability_distributions else None,
                 'information_flow' if self.config.analyze_information_flow else None,
             }
             analysis_types.discard(None)
 
         # Validate data requirement
-        data_required = {'activations', 'calibration', 'probability', 'information_flow'}
+        data_required = {'calibration', 'information_flow'}
         if analysis_types & data_required and data is None:
             raise ValueError(f"Data is required for: {analysis_types & data_required}")
 
@@ -456,14 +391,8 @@ class ModelAnalyzer:
         if 'weights' in analysis_types:
             self.analyze_weights()
 
-        if 'activations' in analysis_types and data is not None:
-            self.analyze_activations(data)
-
         if 'calibration' in analysis_types and data is not None:
-            self.analyze_calibration(data)
-
-        if 'probability' in analysis_types and data is not None:
-            self.analyze_probability_distributions(data)
+            self.analyze_confidence_and_calibration(data)
 
         if 'information_flow' in analysis_types and data is not None:
             self.analyze_information_flow(data)
@@ -501,18 +430,17 @@ class ModelAnalyzer:
             self.results.model_metrics[model_name] = dict(zip(model.metrics_names, metrics))
 
     # ------------------------------------------------------------------------------
-    # Weight Analysis
+    # Enhanced Weight Analysis
     # ------------------------------------------------------------------------------
 
     def analyze_weights(self) -> None:
-        """Analyze weight distributions across all models."""
+        """Analyze weight distributions with improved visualizations."""
         logger.info("Analyzing weight distributions...")
 
         for model_name, model in self.models.items():
             self.results.weight_stats[model_name] = {}
 
             for layer in model.layers:
-                # Filter by layer type if specified
                 if (self.config.weight_layer_types and
                     layer.__class__.__name__ not in self.config.weight_layer_types):
                     continue
@@ -522,7 +450,6 @@ class ModelAnalyzer:
                     continue
 
                 for idx, w in enumerate(weights):
-                    # Skip biases if not analyzing them
                     if len(w.shape) < 2 and not self.config.analyze_biases:
                         continue
 
@@ -539,7 +466,11 @@ class ModelAnalyzer:
             self._compute_weight_pca()
 
         # Create visualizations
-        self._plot_weight_analysis()
+        self._plot_enhanced_weight_analysis()
+
+        # Create separate correlation clustermap if we have correlations
+        if self.results.weight_correlations is not None:
+            self._plot_weight_correlation_clustermap()
 
     def _compute_weight_statistics(self, weights: np.ndarray) -> Dict[str, Any]:
         """Compute comprehensive statistics for a weight tensor."""
@@ -569,7 +500,6 @@ class ModelAnalyzer:
             }
         }
 
-        # Add spectral norm for 2D weights
         if len(weights.shape) == 2:
             try:
                 stats['norms']['spectral'] = float(np.linalg.norm(weights, 2))
@@ -580,93 +510,127 @@ class ModelAnalyzer:
 
     def _compute_weight_correlations(self) -> None:
         """Compute correlations between model weight patterns."""
-        # Aggregate features for each model
         model_features = {}
 
         for model_name, weight_stats in self.results.weight_stats.items():
             features = []
             for layer_stats in weight_stats.values():
-                # Extract key metrics
-                features.extend([
+                # Extract features, checking for validity
+                feat_values = [
                     layer_stats['basic']['mean'],
                     layer_stats['basic']['std'],
                     layer_stats['norms']['l2'],
                     layer_stats['distribution']['zero_fraction']
-                ])
+                ]
+
+                # Check if all features are finite
+                if all(np.isfinite(v) for v in feat_values):
+                    features.extend(feat_values)
+                else:
+                    logger.warning(f"Skipping layer with non-finite values in {model_name}")
 
             if features:
                 model_features[model_name] = features
 
-        # Create correlation matrix
         if len(model_features) >= 2:
             # Ensure all feature vectors have same length
             min_len = min(len(f) for f in model_features.values())
+            if min_len == 0:
+                logger.warning("No valid features found for correlation computation")
+                return
+
             aligned_features = {k: v[:min_len] for k, v in model_features.items()}
 
+            # Create DataFrame and compute correlations
             feature_df = pd.DataFrame(aligned_features).T
-            self.results.weight_correlations = feature_df.corr()
+
+            # Check for constant columns which would produce NaN correlations
+            constant_cols = feature_df.columns[feature_df.nunique() == 1]
+            if len(constant_cols) > 0:
+                logger.warning(f"Removing {len(constant_cols)} constant columns before correlation")
+                feature_df = feature_df.drop(columns=constant_cols)
+
+            # Only compute correlation if we have valid data
+            if not feature_df.empty and feature_df.shape[1] > 0:
+                try:
+                    corr_matrix = feature_df.corr()
+
+                    # Replace any remaining NaN values with 0
+                    if corr_matrix.isnull().any().any():
+                        logger.warning("Correlation matrix contains NaN values, filling with 0")
+                        corr_matrix = corr_matrix.fillna(0)
+
+                    self.results.weight_correlations = corr_matrix
+                except Exception as e:
+                    logger.error(f"Failed to compute correlations: {e}")
+            else:
+                logger.warning("Insufficient valid features for correlation computation")
 
     def _compute_weight_pca(self) -> None:
-        """Perform PCA analysis on weight patterns."""
-        all_features = []
+        """Perform PCA analysis specifically on final layer weights."""
+        final_layer_features = []
         labels = []
 
-        for model_name, weight_stats in self.results.weight_stats.items():
-            for layer_name, stats in weight_stats.items():
-                features = [
-                    stats['basic']['mean'],
-                    stats['basic']['std'],
-                    stats['basic']['skewness'],
-                    stats['norms']['l2'],
-                    stats['distribution']['zero_fraction']
-                ]
-                all_features.append(features)
-                labels.append(f"{model_name}_{layer_name.split('_')[0]}")
+        for model_name, model in self.models.items():
+            # Find the final dense layer
+            final_dense = None
+            for layer in reversed(model.layers):
+                if isinstance(layer, keras.layers.Dense):
+                    final_dense = layer
+                    break
 
-        if len(all_features) >= 3:
-            # Standardize features
-            scaler = StandardScaler()
-            features_scaled = scaler.fit_transform(all_features)
+            if final_dense and final_dense.get_weights():
+                weights = final_dense.get_weights()[0]  # Get kernel weights
+                # Flatten and take a subset if too large
+                flat_weights = weights.flatten()
+                if len(flat_weights) > 1000:
+                    flat_weights = flat_weights[::len(flat_weights)//1000]
 
-            # Perform PCA
-            pca = PCA(n_components=min(3, len(features_scaled[0])))
-            pca_result = pca.fit_transform(features_scaled)
+                # Check for finite values
+                if np.all(np.isfinite(flat_weights)):
+                    final_layer_features.append(flat_weights)
+                    labels.append(model_name)
+                else:
+                    logger.warning(f"Skipping {model_name} in PCA due to non-finite weights")
 
-            self.results.weight_pca = {
-                'components': pca_result,
-                'explained_variance': pca.explained_variance_ratio_,
-                'labels': labels
-            }
+        if len(final_layer_features) >= 2:
+            # Ensure all features have same length
+            min_len = min(len(f) for f in final_layer_features)
+            aligned_features = [f[:min_len] for f in final_layer_features]
 
-    def _plot_weight_analysis(self) -> None:
-        """Create weight analysis visualizations."""
-        # FIXED: Use subplots_adjust instead of constrained_layout
-        fig = plt.figure(figsize=self.config.get_figure_size(1.5))
-        gs = plt.GridSpec(3, 2, figure=fig, hspace=0.4, wspace=0.4)
+            try:
+                # Standardize features
+                scaler = StandardScaler()
+                features_scaled = scaler.fit_transform(aligned_features)
 
-        # 1. Norm distributions
+                # Perform PCA
+                pca = PCA(n_components=min(3, len(features_scaled)))
+                pca_result = pca.fit_transform(features_scaled)
+
+                self.results.weight_pca = {
+                    'components': pca_result,
+                    'explained_variance': pca.explained_variance_ratio_,
+                    'labels': labels
+                }
+            except Exception as e:
+                logger.warning(f"Could not perform PCA on final layer weights: {e}")
+
+    def _plot_enhanced_weight_analysis(self) -> None:
+        """Create enhanced weight analysis visualizations."""
+        fig = plt.figure(figsize=(14, 8))
+        gs = plt.GridSpec(2, 2, figure=fig, hspace=0.4, wspace=0.3)
+
+        # 1. Weight Norm Raincloud Plot (takes full top row)
         ax1 = fig.add_subplot(gs[0, :])
-        self._plot_weight_norm_distributions(ax1)
+        self._plot_weight_norm_raincloud(ax1)
 
-        # 2. Statistical comparison
+        # 2. Overall Sparsity Comparison
         ax2 = fig.add_subplot(gs[1, 0])
-        self._plot_weight_statistics_comparison(ax2)
+        self._plot_weight_sparsity_comparison(ax2)
 
-        # 3. Zero fraction analysis
+        # 3. PCA of Final Layer Weights
         ax3 = fig.add_subplot(gs[1, 1])
-        self._plot_weight_sparsity(ax3)
-
-        # 4. Correlation matrix (if available)
-        if self.results.weight_correlations is not None and not self.results.weight_correlations.empty:
-            ax4 = fig.add_subplot(gs[2, 0])
-            sns.heatmap(self.results.weight_correlations, annot=True, cmap='coolwarm',
-                       center=0, ax=ax4, cbar_kws={'label': 'Correlation'})
-            ax4.set_title('Model Weight Pattern Correlations')
-
-        # 5. PCA plot (if available)
-        if self.results.weight_pca:
-            ax5 = fig.add_subplot(gs[2, 1])
-            self._plot_weight_pca(ax5)
+        self._plot_final_layer_pca(ax3)
 
         plt.suptitle('Weight Distribution Analysis', fontsize=16, fontweight='bold')
         fig.subplots_adjust(top=0.93, bottom=0.1, left=0.1, right=0.95)
@@ -675,8 +639,8 @@ class ModelAnalyzer:
             self._save_figure(fig, 'weight_analysis')
         plt.close(fig)
 
-    def _plot_weight_norm_distributions(self, ax) -> None:
-        """Plot weight norm distributions using seaborn."""
+    def _plot_weight_norm_raincloud(self, ax) -> None:
+        """Plot weight norm distributions using violin plots (raincloud-style)."""
         norm_data = []
         for model_name, weight_stats in self.results.weight_stats.items():
             for layer_name, stats in weight_stats.items():
@@ -684,382 +648,118 @@ class ModelAnalyzer:
                     'Model': model_name,
                     'Layer': layer_name.split('_')[0],
                     'L2 Norm': stats['norms']['l2'],
-                    'RMS Norm': stats['norms']['rms']
                 })
 
         if norm_data:
             df = pd.DataFrame(norm_data)
 
-            # FIXED: Use seaborn violin plot with proper handling
-            try:
-                sns.violinplot(data=df, x='Model', y='L2 Norm', ax=ax,
-                               inner='quartile', hue='Model', palette=self.config.color_palette, legend=False)
+            # Create violin plot with inner quartiles
+            # Updated API: use hue instead of palette, density_norm instead of scale
+            sns.violinplot(data=df, x='L2 Norm', y='Model', ax=ax,
+                          inner='quartile', hue='Model', palette=self.config.color_palette,
+                          orient='h', cut=0, density_norm='width', legend=False)
 
-                # FIXED: Safe x-tick label rotation
-                labels = [t.get_text() for t in ax.get_xticklabels()]
-                if len(labels) > 3:
-                    safe_set_xticklabels(ax, labels, rotation=45)
+            # Add strip plot on top for individual points
+            sns.stripplot(data=df, x='L2 Norm', y='Model', ax=ax,
+                         size=3, alpha=0.5, color='black', orient='h')
 
-            except Exception as e:
-                logger.warning(f"Could not create violin plot: {e}")
-                # Fallback to simple bar plot
-                model_means = df.groupby('Model')['L2 Norm'].mean()
-                ax.bar(range(len(model_means)), model_means.values)
-                safe_set_xticklabels(ax, model_means.index.tolist())
-
-            ax.set_ylabel('L2 Norm')
+            ax.set_xlabel('L2 Norm of Layer Weights')
             ax.set_title('Weight Norm Distributions by Model')
-            ax.grid(True, alpha=0.3)
+            ax.grid(True, alpha=0.3, axis='x')
 
-    def _plot_weight_statistics_comparison(self, ax) -> None:
-        """Plot comparison of weight statistics."""
-        stats_data = []
-        for model_name, weight_stats in self.results.weight_stats.items():
-            mean_vals = [s['basic']['mean'] for s in weight_stats.values()]
-            std_vals = [s['basic']['std'] for s in weight_stats.values()]
-
-            if mean_vals:
-                stats_data.append({
-                    'Model': model_name,
-                    'Avg Mean': np.mean(mean_vals),
-                    'Avg Std': np.mean(std_vals),
-                    'Mean Std': np.std(mean_vals),
-                    'Std Std': np.std(std_vals)
-                })
-
-        if stats_data:
-            df = pd.DataFrame(stats_data)
-
-            # Create grouped bar plot
-            x = np.arange(len(df))
-            width = 0.35
-
-            ax.bar(x - width/2, df['Avg Mean'], width, label='Mean',
-                  yerr=df['Mean Std'], capsize=5, alpha=0.8)
-            ax.bar(x + width/2, df['Avg Std'], width, label='Std Dev',
-                  yerr=df['Std Std'], capsize=5, alpha=0.8)
-
-            ax.set_xlabel('Model')
-            ax.set_ylabel('Value')
-            ax.set_title('Weight Statistics Comparison')
-            # FIXED: Safe x-tick handling
-            safe_set_xticklabels(ax, df['Model'].tolist(), rotation=45 if len(df) > 3 else 0)
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-
-    def _plot_weight_sparsity(self, ax) -> None:
-        """Plot weight sparsity analysis using seaborn."""
+    def _plot_weight_sparsity_comparison(self, ax) -> None:
+        """Plot overall sparsity comparison."""
         sparsity_data = []
         for model_name, weight_stats in self.results.weight_stats.items():
-            for layer_name, stats in weight_stats.items():
+            all_zeros = [s['distribution']['zero_fraction'] for s in weight_stats.values()]
+            if all_zeros:
                 sparsity_data.append({
                     'Model': model_name,
-                    'Layer': layer_name.split('_')[0],
-                    'Zero Fraction': stats['distribution']['zero_fraction']
+                    'Mean Sparsity': np.mean(all_zeros),
+                    'Std Sparsity': np.std(all_zeros)
                 })
 
         if sparsity_data:
             df = pd.DataFrame(sparsity_data)
 
-            # FIXED: Use seaborn box plot with proper handling
-            try:
-                sns.boxplot(data=df, x='Model', y='Zero Fraction', ax=ax,
-                            hue='Model', palette=self.config.color_palette, legend=False)
+            # Clean bar chart
+            x = np.arange(len(df))
+            ax.bar(x, df['Mean Sparsity'], yerr=df['Std Sparsity'],
+                   capsize=5, alpha=0.8, color=sns.color_palette(self.config.color_palette))
 
-                # FIXED: Safe x-tick label rotation
-                labels = [t.get_text() for t in ax.get_xticklabels()]
-                if len(labels) > 3:
-                    safe_set_xticklabels(ax, labels, rotation=45)
+            ax.set_xlabel('Model')
+            ax.set_ylabel('Average Sparsity')
+            ax.set_title('Weight Sparsity Comparison')
+            ax.set_xticks(x)
+            ax.set_xticklabels(df['Model'], rotation=45 if len(df) > 3 else 0)
+            ax.grid(True, alpha=0.3, axis='y')
 
-            except Exception as e:
-                logger.warning(f"Could not create box plot: {e}")
-                # Fallback to simple bar plot
-                model_means = df.groupby('Model')['Zero Fraction'].mean()
-                ax.bar(range(len(model_means)), model_means.values)
-                safe_set_xticklabels(ax, model_means.index.tolist())
-
-            ax.set_ylabel('Zero Fraction')
-            ax.set_title('Weight Sparsity by Model')
-            ax.grid(True, alpha=0.3)
-
-    def _plot_weight_pca(self, ax) -> None:
-        """Plot PCA results for weights."""
+    def _plot_final_layer_pca(self, ax) -> None:
+        """Plot PCA of final layer weights."""
         if not self.results.weight_pca:
+            ax.text(0.5, 0.5, 'Insufficient data for PCA analysis',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('PCA of Final Layer Weights')
+            ax.axis('off')
             return
 
         components = self.results.weight_pca['components']
         labels = self.results.weight_pca['labels']
         explained_var = self.results.weight_pca['explained_variance']
 
-        # Extract model names from labels
-        model_names = [label.split('_')[0] for label in labels]
-        unique_models = list(set(model_names))
-        colors = plt.cm.Set3(np.arange(len(unique_models)))
-
         # Create scatter plot
-        for i, model in enumerate(unique_models):
-            mask = np.array([m == model for m in model_names])
-            ax.scatter(components[mask, 0], components[mask, 1],
-                      c=[colors[i]], label=model, alpha=0.7, s=60)
+        colors = plt.cm.Set3(np.arange(len(labels)))
+
+        for i, (label, comp) in enumerate(zip(labels, components)):
+            ax.scatter(comp[0], comp[1], c=[colors[i]], label=label,
+                      s=100, alpha=0.8, edgecolors='black', linewidth=1)
 
         ax.set_xlabel(f'PC1 ({explained_var[0]:.1%})')
         ax.set_ylabel(f'PC2 ({explained_var[1]:.1%})')
-        ax.set_title('PCA of Weight Patterns')
+        ax.set_title('PCA of Final Layer Weights')
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-    # ------------------------------------------------------------------------------
-    # Activation Analysis
-    # ------------------------------------------------------------------------------
-
-    def analyze_activations(self, data: DataInput) -> None:
-        """Analyze activation distributions."""
-        logger.info("Analyzing activation distributions...")
-
-        for model_name in self.activation_models:
-            self.results.activation_stats[model_name] = {}
-
-            # Get activations for different layers
-            activations = self._get_layer_activations(model_name, data.x_data)
-
-            for layer_name, acts in activations.items():
-                stats = self._compute_activation_statistics(acts)
-                self.results.activation_stats[model_name][layer_name] = stats
-
-        # Create visualizations
-        self._plot_activation_analysis()
-
-    def _get_layer_activations(self, model_name: str, x_data: np.ndarray) -> Dict[str, np.ndarray]:
-        """Get activations from multiple layers."""
-        activations = {}
-
-        # Use cached data if available
-        if model_name in self._prediction_cache:
-            x_data = self._prediction_cache[model_name]['x_data']
-        else:
-            # Sample if needed
-            if len(x_data) > self.config.n_samples:
-                indices = np.random.choice(len(x_data), self.config.n_samples, replace=False)
-                x_data = x_data[indices]
-
-        if model_name in self.activation_models:
-            try:
-                # Get activations (limit samples for memory efficiency)
-                outputs = self.activation_models[model_name].predict(x_data[:100], verbose=0)
-
-                if isinstance(outputs, list) and len(outputs) >= 2:
-                    # First output is the visualization layer
-                    activations['viz_layer'] = outputs[0]
-                    # Store sample inputs for visualization
-                    activations['sample_inputs'] = x_data[:10]  # Keep some samples
-            except Exception as e:
-                logger.warning(f"Could not get activations for {model_name}: {e}")
-
-        return activations
-
-    def _compute_activation_statistics(self, activations: np.ndarray) -> Dict[str, Any]:
-        """Compute statistics for activation tensor."""
-        flat_acts = activations.flatten()
-
-        return {
-            'shape': activations.shape,
-            'mean': float(np.mean(flat_acts)),
-            'std': float(np.std(flat_acts)),
-            'sparsity': float(np.mean(np.abs(flat_acts) < 1e-5)),
-            'positive_ratio': float(np.mean(flat_acts > 0)),
-            'percentiles': {
-                'p25': float(np.percentile(flat_acts, 25)),
-                'p50': float(np.percentile(flat_acts, 50)),
-                'p75': float(np.percentile(flat_acts, 75))
-            },
-            'raw_activations': activations  # Store for visualization
-        }
-
-    def _plot_activation_analysis(self) -> None:
-        """Create activation analysis visualizations."""
-        if not any(self.results.activation_stats.values()):
+    def _plot_weight_correlation_clustermap(self) -> None:
+        """Create a separate clustered heatmap for weight correlations."""
+        if self.results.weight_correlations is None or len(self.results.weight_correlations) < 2:
             return
 
-        # FIXED: Use subplots_adjust instead of constrained_layout
-        fig, axes = plt.subplots(2, 2, figsize=self.config.get_figure_size())
-        fig.subplots_adjust(hspace=0.3, wspace=0.3)
+        # Check for non-finite values
+        corr_matrix = self.results.weight_correlations
+        if not np.all(np.isfinite(corr_matrix.values)):
+            logger.warning("Correlation matrix contains non-finite values, skipping clustermap")
+            return
 
-        # 1. Activation distributions
-        ax1 = axes[0, 0]
-        self._plot_activation_distributions(ax1)
+        # Check if correlation matrix has enough variation
+        if corr_matrix.shape[0] < 2 or corr_matrix.shape[1] < 2:
+            logger.warning("Correlation matrix too small for clustering")
+            return
 
-        # 2. Sparsity comparison
-        ax2 = axes[0, 1]
-        self._plot_activation_sparsity(ax2)
+        try:
+            # Create clustermap
+            g = sns.clustermap(corr_matrix,
+                              annot=True, fmt='.2f',
+                              cmap='coolwarm', center=0,
+                              figsize=(8, 8),
+                              cbar_kws={'label': 'Correlation'})
 
-        # 3. Sample activations (now implemented!)
-        ax3 = axes[1, 0]
-        self._plot_sample_activations(ax3)
+            g.fig.suptitle('Clustered Model Weight Pattern Correlations', y=0.98)
 
-        # 4. Statistics summary
-        ax4 = axes[1, 1]
-        self._plot_activation_summary(ax4)
-
-        plt.suptitle('Activation Analysis', fontsize=16, fontweight='bold')
-
-        if self.config.save_plots:
-            self._save_figure(fig, 'activation_analysis')
-        plt.close(fig)
-
-    def _plot_activation_distributions(self, ax) -> None:
-        """Plot activation value distributions."""
-        for model_name, layer_stats in self.results.activation_stats.items():
-            for layer_name, stats in layer_stats.items():
-                if 'raw_activations' in stats:
-                    # Use actual activation values
-                    flat_acts = stats['raw_activations'].flatten()
-                    # Sample for efficiency
-                    if len(flat_acts) > 10000:
-                        flat_acts = np.random.choice(flat_acts, 10000, replace=False)
-
-                    ax.hist(flat_acts, bins=50, alpha=0.5, density=True,
-                           label=f"{model_name}_{layer_name}", edgecolor='black', linewidth=0.5)
-
-        ax.set_xlabel('Activation Value')
-        ax.set_ylabel('Density')
-        ax.set_title('Activation Distributions')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-    def _plot_activation_sparsity(self, ax) -> None:
-        """Plot activation sparsity comparison."""
-        sparsity_data = []
-        for model_name, layer_stats in self.results.activation_stats.items():
-            for layer_name, stats in layer_stats.items():
-                if layer_name != 'sample_inputs':  # Skip sample inputs
-                    sparsity_data.append({
-                        'Model': model_name,
-                        'Layer': layer_name,
-                        'Sparsity': stats['sparsity'],
-                        'Positive Ratio': stats['positive_ratio']
-                    })
-
-        if sparsity_data:
-            df = pd.DataFrame(sparsity_data)
-
-            # Bar plot
-            x = np.arange(len(df))
-            width = 0.35
-
-            ax.bar(x - width/2, df['Sparsity'], width, label='Sparsity', alpha=0.8)
-            ax.bar(x + width/2, df['Positive Ratio'], width, label='Positive Ratio', alpha=0.8)
-
-            ax.set_xlabel('Model/Layer')
-            ax.set_ylabel('Ratio')
-            ax.set_title('Activation Sparsity Analysis')
-            # FIXED: Safe x-tick handling
-            labels = [f"{row['Model'][:8]}\n{row['Layer'][:8]}" for _, row in df.iterrows()]
-            safe_set_xticklabels(ax, labels, rotation=45)
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-
-    def _plot_sample_activations(self, ax) -> None:
-        """Plot sample activation maps - now implemented!"""
-        # Find first model with Conv2D activations
-        conv_activations = None
-        model_name = None
-
-        for m_name, layer_stats in self.results.activation_stats.items():
-            for layer_name, stats in layer_stats.items():
-                if 'raw_activations' in stats and len(stats['shape']) == 4:  # Conv layer
-                    conv_activations = stats['raw_activations']
-                    model_name = m_name
-                    break
-            if conv_activations is not None:
-                break
-
-        if conv_activations is not None:
-            # Select first sample
-            sample_acts = conv_activations[0]  # Shape: (height, width, channels)
-
-            # Select up to 16 feature maps
-            n_features = min(16, sample_acts.shape[-1])
-            n_cols = 4
-            n_rows = (n_features + n_cols - 1) // n_cols
-
-            # Create subgrid - FIXED: Avoid complex subplot management
-            try:
-                from matplotlib.gridspec import GridSpecFromSubplotSpec
-                gs_sub = GridSpecFromSubplotSpec(n_rows, n_cols, subplot_spec=ax.get_gridspec()[1, 0],
-                                                wspace=0.1, hspace=0.1)
-
-                for i in range(n_features):
-                    row = i // n_cols
-                    col = i % n_cols
-                    ax_sub = plt.subplot(gs_sub[row, col])
-
-                    # Plot feature map
-                    im = ax_sub.imshow(sample_acts[:, :, i], cmap='viridis', aspect='auto')
-                    ax_sub.axis('off')
-                    ax_sub.set_title(f'F{i}', fontsize=8)
-
-                # Main axis adjustments
-                ax.set_visible(False)
-                ax.text(0.5, 1.05, f'Sample Activation Maps - {model_name}',
-                       transform=ax.transAxes, ha='center', fontsize=12, fontweight='bold')
-            except Exception as e:
-                logger.warning(f"Could not create activation subplots: {e}")
-                ax.text(0.5, 0.5, f'Activation visualization failed\n{str(e)[:50]}...',
-                       ha='center', va='center', transform=ax.transAxes)
-                ax.set_title('Sample Activations')
-                ax.axis('off')
-        else:
-            # Fallback for non-conv layers
-            ax.text(0.5, 0.5, 'No convolutional activations available\nfor visualization',
-                   ha='center', va='center', transform=ax.transAxes)
-            ax.set_title('Sample Activations')
-            ax.axis('off')
-
-    def _plot_activation_summary(self, ax) -> None:
-        """Plot activation statistics summary."""
-        ax.axis('tight')
-        ax.axis('off')
-
-        # Create summary table
-        summary_data = []
-        for model_name, layer_stats in self.results.activation_stats.items():
-            for layer_name, stats in layer_stats.items():
-                if layer_name != 'sample_inputs':  # Skip sample inputs
-                    summary_data.append([
-                        f"{model_name[:10]}",
-                        f"{layer_name[:10]}",
-                        f"{stats['mean']:.3f}",
-                        f"{stats['std']:.3f}",
-                        f"{stats['sparsity']:.2%}"
-                    ])
-
-        if summary_data:
-            table = ax.table(
-                cellText=summary_data,
-                colLabels=['Model', 'Layer', 'Mean', 'Std', 'Sparsity'],
-                loc='center',
-                cellLoc='center'
-            )
-            table.auto_set_font_size(False)
-            table.set_fontsize(9)
-            table.scale(1, 1.5)
-
-            # Style header
-            for i in range(5):
-                table[(0, i)].set_facecolor('#40466e')
-                table[(0, i)].set_text_props(weight='bold', color='white')
-
-        ax.set_title('Activation Statistics Summary', pad=20)
+            if self.config.save_plots:
+                self._save_figure(g.fig, 'weight_correlation_clustermap')
+            plt.close(g.fig)
+        except Exception as e:
+            logger.warning(f"Could not create correlation clustermap: {e}")
 
     # ------------------------------------------------------------------------------
-    # Calibration Analysis
+    # Merged Confidence and Calibration Analysis
     # ------------------------------------------------------------------------------
 
-    def analyze_calibration(self, data: DataInput) -> None:
-        """Analyze model calibration."""
-        logger.info("Analyzing calibration...")
+    def analyze_confidence_and_calibration(self, data: DataInput) -> None:
+        """Analyze model confidence and calibration in a unified way."""
+        logger.info("Analyzing confidence and calibration...")
 
-        # Get cached predictions
         for model_name in self.models:
             if model_name not in self._prediction_cache:
                 continue
@@ -1080,186 +780,40 @@ class ModelAnalyzer:
             brier_score = compute_brier_score(cache['y_data'], y_pred_proba)
             entropy_stats = compute_prediction_entropy_stats(y_pred_proba)
 
+            # Compute per-class ECE
+            n_classes = y_pred_proba.shape[1]
+            per_class_ece = []
+            for c in range(n_classes):
+                class_mask = y_true_idx == c
+                if np.any(class_mask):
+                    class_ece = compute_ece(y_true_idx[class_mask], y_pred_proba[class_mask],
+                                          self.config.calibration_bins // 2)
+                    per_class_ece.append(class_ece)
+                else:
+                    per_class_ece.append(0.0)
+
             self.results.calibration_metrics[model_name] = {
                 'ece': ece,
                 'brier_score': brier_score,
+                'per_class_ece': per_class_ece,
                 **entropy_stats
             }
 
             self.results.reliability_data[model_name] = reliability_data
 
-        # Create visualizations
-        self._plot_calibration_analysis()
+            # Compute confidence metrics
+            self.results.confidence_metrics[model_name] = self._compute_confidence_metrics(y_pred_proba)
 
-    def _plot_calibration_analysis(self) -> None:
-        """Create calibration analysis visualizations."""
-        # FIXED: Use subplots_adjust instead of constrained_layout
-        fig, axes = plt.subplots(2, 2, figsize=self.config.get_figure_size())
-        fig.subplots_adjust(hspace=0.4, wspace=0.4)  # Changed from 0.3 to 0.4
-
-        # Temporarily reduce font sizes for this multi-subplot figure
-        original_titlesize = plt.rcParams['axes.titlesize']
-        original_labelsize = plt.rcParams['axes.labelsize']
-        plt.rcParams.update({
-            'axes.titlesize': original_titlesize * 0.85,
-            'axes.labelsize': original_labelsize * 0.9
-        })
-
-        # 1. Reliability diagrams
-        ax1 = axes[0, 0]
-        self._plot_reliability_diagrams(ax1)
-
-        # 2. Calibration metrics comparison
-        ax2 = axes[0, 1]
-        self._plot_calibration_metrics(ax2)
-
-        # 3. Confidence distributions
-        ax3 = axes[1, 0]
-        self._plot_confidence_distributions(ax3)
-
-        # 4. Entropy analysis
-        ax4 = axes[1, 1]
-        self._plot_entropy_analysis(ax4)
-
-        plt.suptitle('Calibration Analysis', fontsize=16, fontweight='bold')
-
-        if self.config.save_plots:
-            self._save_figure(fig, 'calibration_analysis')
-        plt.close(fig)
-
-        # Restore original font sizes
-        plt.rcParams.update({
-            'axes.titlesize': original_titlesize,
-            'axes.labelsize': original_labelsize
-        })
-
-    def _plot_reliability_diagrams(self, ax) -> None:
-        """Plot reliability diagrams."""
-        # Perfect calibration line
-        ax.plot([0, 1], [0, 1], 'k--', alpha=0.6, label='Perfect Calibration')
-
-        colors = plt.cm.Set3(np.arange(len(self.models)))
-
-        for i, (model_name, rel_data) in enumerate(self.results.reliability_data.items()):
-            ax.plot(rel_data['bin_centers'], rel_data['bin_accuracies'],
-                   'o-', color=colors[i], label=model_name, linewidth=2, markersize=8)
-
-        ax.set_xlabel('Mean Predicted Probability')
-        ax.set_ylabel('Fraction of Positives')
-        ax.set_title('Reliability Diagrams')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim([0, 1])
-        ax.set_ylim([0, 1])
-
-    def _plot_calibration_metrics(self, ax) -> None:
-        """Plot calibration metrics comparison."""
-        metrics_df = pd.DataFrame(self.results.calibration_metrics).T
-
-        if not metrics_df.empty:
-            # Select key metrics
-            key_metrics = ['ece', 'brier_score', 'mean_entropy']
-            available_metrics = [m for m in key_metrics if m in metrics_df.columns]
-
-            if available_metrics:
-                metrics_df[available_metrics].plot(kind='bar', ax=ax, alpha=0.8)
-                ax.set_xlabel('Model')
-                ax.set_ylabel('Value')
-                ax.set_title('Calibration Metrics Comparison')
-                ax.legend(title='Metric')
-                ax.grid(True, alpha=0.3)
-
-                # FIXED: Safe x-tick label rotation
-                if len(metrics_df) > 3:
-                    safe_set_xticklabels(ax, metrics_df.index.tolist(), rotation=45)
-
-    def _plot_confidence_distributions(self, ax) -> None:
-        """Plot confidence score distributions."""
-        confidence_data = []
-
-        for model_name, cache in self._prediction_cache.items():
-            if model_name in self.results.calibration_metrics:
-                max_probs = np.max(cache['predictions'], axis=1)
-                for conf in max_probs:
-                    confidence_data.append({
-                        'Model': model_name,
-                        'Confidence': conf
-                    })
-
-        if confidence_data:
-            df = pd.DataFrame(confidence_data)
-
-            # Use seaborn for cleaner visualization
-            for model in df['Model'].unique():
-                model_data = df[df['Model'] == model]['Confidence']
-                ax.hist(model_data, bins=20, alpha=0.5, density=True,
-                       label=model, edgecolor='black', linewidth=0.5)
-
-            ax.set_xlabel('Confidence (Max Probability)')
-            ax.set_ylabel('Density')
-            ax.set_title('Confidence Score Distributions')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-
-    def _plot_entropy_analysis(self, ax) -> None:
-        """Plot prediction entropy analysis."""
-        entropy_data = []
-
-        for model_name, metrics in self.results.calibration_metrics.items():
-            if 'mean_entropy' in metrics:
-                entropy_data.append({
-                    'Model': model_name,
-                    'Mean': metrics['mean_entropy'],
-                    'Std': metrics.get('std_entropy', 0),
-                    'Median': metrics.get('median_entropy', metrics['mean_entropy'])
-                })
-
-        if entropy_data:
-            df = pd.DataFrame(entropy_data)
-
-            x = np.arange(len(df))
-            ax.bar(x, df['Mean'], yerr=df['Std'], capsize=5, alpha=0.8)
-
-            # Add median markers
-            ax.scatter(x, df['Median'], color='red', s=100, marker='_',
-                      linewidths=3, label='Median')
-
-            ax.set_xlabel('Model')
-            ax.set_ylabel('Entropy')
-            ax.set_title('Prediction Entropy Analysis')
-            # FIXED: Safe x-tick handling
-            safe_set_xticklabels(ax, df['Model'].tolist(), rotation=45 if len(df) > 3 else 0)
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-
-    # ------------------------------------------------------------------------------
-    # Probability Distribution Analysis
-    # ------------------------------------------------------------------------------
-
-    def analyze_probability_distributions(self, data: DataInput) -> None:
-        """Analyze probability distributions and confidence patterns."""
-        logger.info("Analyzing probability distributions...")
-
-        # Compute confidence metrics
-        for model_name, cache in self._prediction_cache.items():
-            predictions = cache['predictions']
-            self.results.confidence_metrics[model_name] = self._compute_confidence_metrics(predictions)
-
-        # Create visualizations
-        self._plot_probability_analysis()
+        # Create unified visualization
+        self._plot_confidence_calibration_analysis()
 
     def _compute_confidence_metrics(self, probabilities: np.ndarray) -> Dict[str, np.ndarray]:
         """Compute various confidence metrics."""
         max_prob = np.max(probabilities, axis=1)
-
-        # Entropy
         entropy = -np.sum(probabilities * np.log(probabilities + 1e-8), axis=1)
 
-        # Margin (difference between top 2)
         sorted_probs = np.sort(probabilities, axis=1)
         margin = sorted_probs[:, -1] - sorted_probs[:, -2]
-
-        # Gini coefficient
         gini = 1 - np.sum(sorted_probs**2, axis=1)
 
         return {
@@ -1269,170 +823,207 @@ class ModelAnalyzer:
             'gini_coefficient': gini
         }
 
-    def _plot_probability_analysis(self) -> None:
-        """Create probability distribution visualizations."""
-        # FIXED: Use subplots_adjust instead of constrained_layout
-        fig = plt.figure(figsize=self.config.get_figure_size(1.5))
-        gs = plt.GridSpec(3, 2, figure=fig, hspace=0.4, wspace=0.4)
+    def _plot_confidence_calibration_analysis(self) -> None:
+        """Create unified confidence and calibration visualizations."""
+        fig = plt.figure(figsize=(14, 10))
+        gs = plt.GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.3)
 
-        # 1. Confidence landscape
-        ax1 = fig.add_subplot(gs[0, :])
-        self._plot_confidence_landscape(ax1)
+        # 1. Reliability Diagram
+        ax1 = fig.add_subplot(gs[0, 0])
+        self._plot_enhanced_reliability_diagram(ax1)
 
-        # 2. Model agreement
-        ax2 = fig.add_subplot(gs[1, 0])
-        self._plot_model_agreement(ax2)
+        # 2. Confidence Distributions (Raincloud)
+        ax2 = fig.add_subplot(gs[0, 1])
+        self._plot_confidence_raincloud(ax2)
 
-        # 3. Uncertainty comparison
-        ax3 = fig.add_subplot(gs[1, 1])
-        self._plot_uncertainty_comparison(ax3)
+        # 3. Per-Class ECE
+        ax3 = fig.add_subplot(gs[1, 0])
+        self._plot_per_class_ece(ax3)
 
-        # 4. Per-class confidence
-        ax4 = fig.add_subplot(gs[2, :])
-        self._plot_class_confidence(ax4)
+        # 4. Uncertainty Landscape
+        ax4 = fig.add_subplot(gs[1, 1])
+        self._plot_uncertainty_landscape(ax4)
 
-        plt.suptitle('Probability Distribution Analysis', fontsize=16, fontweight='bold')
+        plt.suptitle('Confidence and Calibration Analysis', fontsize=16, fontweight='bold')
         fig.subplots_adjust(top=0.93, bottom=0.1, left=0.1, right=0.95)
 
         if self.config.save_plots:
-            self._save_figure(fig, 'probability_analysis')
+            self._save_figure(fig, 'confidence_calibration_analysis')
         plt.close(fig)
 
-    def _plot_confidence_landscape(self, ax) -> None:
-        """Plot confidence vs entropy landscape."""
+    def _plot_enhanced_reliability_diagram(self, ax) -> None:
+        """Plot enhanced reliability diagram with confidence intervals."""
+        ax.plot([0, 1], [0, 1], 'k--', alpha=0.6, label='Perfect Calibration')
+
         colors = plt.cm.Set3(np.arange(len(self.models)))
 
+        for i, (model_name, rel_data) in enumerate(self.results.reliability_data.items()):
+            # Plot main line
+            ax.plot(rel_data['bin_centers'], rel_data['bin_accuracies'],
+                   'o-', color=colors[i], label=model_name, linewidth=2, markersize=8)
+
+            # Add shaded confidence region if we have sample counts
+            if 'bin_counts' in rel_data:
+                # Simple confidence interval based on binomial proportion
+                counts = rel_data['bin_counts']
+                props = rel_data['bin_accuracies']
+                se = np.sqrt(props * (1 - props) / (counts + 1))
+
+                ax.fill_between(rel_data['bin_centers'],
+                               props - 1.96*se, props + 1.96*se,
+                               alpha=0.2, color=colors[i])
+
+        ax.set_xlabel('Mean Predicted Probability')
+        ax.set_ylabel('Fraction of Positives')
+        ax.set_title('Reliability Diagrams with 95% CI')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim([0, 1])
+        ax.set_ylim([0, 1])
+
+    def _plot_confidence_raincloud(self, ax) -> None:
+        """Plot confidence distributions as raincloud plot."""
+        confidence_data = []
+
+        for model_name, metrics in self.results.confidence_metrics.items():
+            for conf in metrics['max_probability']:
+                confidence_data.append({
+                    'Model': model_name,
+                    'Confidence': conf
+                })
+
+        if confidence_data:
+            df = pd.DataFrame(confidence_data)
+
+            # Create violin plot with quartiles using updated API
+            sns.violinplot(data=df, y='Model', x='Confidence', ax=ax,
+                          inner='quartile', hue='Model', palette=self.config.color_palette,
+                          orient='h', cut=0, density_norm='width', legend=False)
+
+            # Add summary statistics as text
+            for i, model in enumerate(df['Model'].unique()):
+                model_data = df[df['Model'] == model]['Confidence']
+                mean_conf = model_data.mean()
+                ax.text(mean_conf, i, f'{mean_conf:.3f}',
+                       ha='center', va='bottom', fontsize=9)
+
+            ax.set_xlabel('Confidence (Max Probability)')
+            ax.set_ylabel('')  # Remove the y-axis label
+            ax.set_title('Confidence Score Distributions')
+            ax.grid(True, alpha=0.3, axis='x')
+
+    def _plot_per_class_ece(self, ax) -> None:
+        """Plot per-class Expected Calibration Error."""
+        ece_data = []
+
+        for model_name, metrics in self.results.calibration_metrics.items():
+            if 'per_class_ece' in metrics:
+                for class_idx, ece in enumerate(metrics['per_class_ece']):
+                    ece_data.append({
+                        'Model': model_name,
+                        'Class': str(class_idx),
+                        'ECE': ece
+                    })
+
+        if ece_data:
+            df = pd.DataFrame(ece_data)
+
+            # Create grouped bar plot
+            n_models = len(df['Model'].unique())
+            n_classes = len(df['Class'].unique())
+
+            x = np.arange(n_classes)
+            width = 0.8 / n_models
+
+            for i, model in enumerate(df['Model'].unique()):
+                model_data = df[df['Model'] == model]
+                ax.bar(x + i * width, model_data['ECE'], width,
+                       label=model, alpha=0.8)
+
+            ax.set_xlabel('Class')
+            ax.set_ylabel('Expected Calibration Error')
+            ax.set_title('Per-Class Calibration Error')
+            ax.set_xticks(x + width * (n_models - 1) / 2)
+            ax.set_xticklabels([str(i) for i in range(n_classes)])
+            ax.legend()
+            ax.grid(True, alpha=0.3, axis='y')
+
+    def _plot_uncertainty_landscape(self, ax) -> None:
+        """Plot uncertainty landscape with density contours for each model."""
+        from scipy.stats import gaussian_kde
+
+        # Set up colors for each model
+        colors = plt.cm.Set3(np.arange(len(self.models)))
+
+        # Plot contours for each model
         for i, (model_name, metrics) in enumerate(self.results.confidence_metrics.items()):
-            scatter = ax.scatter(metrics['max_probability'], metrics['entropy'],
-                               c=metrics['margin'], cmap='viridis',
-                               alpha=0.6, s=20, label=model_name)
+            confidence = metrics['max_probability']
+            entropy = metrics['entropy']
+
+            if len(confidence) < 10:  # Skip if too few points
+                continue
+
+            try:
+                # Create 2D KDE
+                xy = np.vstack([confidence, entropy])
+                kde = gaussian_kde(xy)
+
+                # Create grid for contour plot
+                conf_min, conf_max = confidence.min(), confidence.max()
+                ent_min, ent_max = entropy.min(), entropy.max()
+
+                # Add some padding
+                conf_range = conf_max - conf_min
+                ent_range = ent_max - ent_min
+                conf_min -= 0.05 * conf_range
+                conf_max += 0.05 * conf_range
+                ent_min -= 0.05 * ent_range
+                ent_max += 0.05 * ent_range
+
+                # Create meshgrid
+                xx = np.linspace(conf_min, conf_max, 100)
+                yy = np.linspace(ent_min, ent_max, 100)
+                X, Y = np.meshgrid(xx, yy)
+
+                # Evaluate KDE on grid
+                positions = np.vstack([X.ravel(), Y.ravel()])
+                Z = kde(positions).reshape(X.shape)
+
+                # Plot contours
+                contours = ax.contour(X, Y, Z, levels=5, colors=[colors[i]],
+                                     alpha=0.8, linewidths=2)
+                ax.clabel(contours, inline=True, fontsize=8, fmt='%.2f')
+
+                # Plot filled contours with transparency
+                ax.contourf(X, Y, Z, levels=5, colors=[colors[i]], alpha=0.2)
+
+                # Add a dummy line for the legend
+                ax.plot([], [], color=colors[i], linewidth=3, label=model_name)
+
+            except Exception as e:
+                logger.warning(f"Could not create density contours for {model_name}: {e}")
+                # Fallback: plot a simple scatter with low alpha
+                ax.scatter(confidence, entropy, color=colors[i], alpha=0.3,
+                          s=20, label=model_name)
 
         ax.set_xlabel('Confidence (Max Probability)')
         ax.set_ylabel('Entropy')
-        ax.set_title('Confidence vs Uncertainty Landscape')
-
-        # Add colorbar
-        cbar = plt.colorbar(scatter, ax=ax)
-        cbar.set_label('Margin', rotation=270, labelpad=15)
-
-        ax.grid(True, alpha=0.3)
-
-    def _plot_model_agreement(self, ax) -> None:
-        """Plot model agreement analysis."""
-        if len(self.models) < 2:
-            ax.text(0.5, 0.5, 'Model agreement requires\nat least 2 models',
-                   ha='center', va='center', transform=ax.transAxes)
-            ax.set_title('Model Agreement')
-            ax.axis('off')
-            return
-
-        # Compute agreement matrix
-        model_names = list(self.models.keys())
-        n_models = len(model_names)
-        agreement_matrix = np.zeros((n_models, n_models))
-
-        for i, model1 in enumerate(model_names):
-            for j, model2 in enumerate(model_names):
-                if i == j:
-                    agreement_matrix[i, j] = 1.0
-                else:
-                    pred1 = np.argmax(self._prediction_cache[model1]['predictions'], axis=1)
-                    pred2 = np.argmax(self._prediction_cache[model2]['predictions'], axis=1)
-                    agreement_matrix[i, j] = np.mean(pred1 == pred2)
-
-        # Plot heatmap
-        sns.heatmap(agreement_matrix, annot=True, fmt='.3f', cmap='viridis',
-                   xticklabels=model_names, yticklabels=model_names,
-                   ax=ax, cbar_kws={'label': 'Agreement'})
-        ax.set_title('Model Agreement Matrix')
-
-    def _plot_uncertainty_comparison(self, ax) -> None:
-        """Compare uncertainty metrics across models."""
-        uncertainty_data = []
-
-        for model_name, metrics in self.results.confidence_metrics.items():
-            uncertainty_data.append({
-                'Model': model_name,
-                'Mean Entropy': np.mean(metrics['entropy']),
-                'Mean Margin': np.mean(metrics['margin']),
-                'Std Entropy': np.std(metrics['entropy']),
-                'Std Margin': np.std(metrics['margin'])
-            })
-
-        if uncertainty_data:
-            df = pd.DataFrame(uncertainty_data)
-
-            # Create grouped bar plot
-            x = np.arange(len(df))
-            width = 0.35
-
-            ax.bar(x - width/2, df['Mean Entropy'], width,
-                  yerr=df['Std Entropy'], label='Entropy',
-                  capsize=5, alpha=0.8)
-            ax.bar(x + width/2, df['Mean Margin'], width,
-                  yerr=df['Std Margin'], label='Margin',
-                  capsize=5, alpha=0.8)
-
-            ax.set_xlabel('Model')
-            ax.set_ylabel('Value')
-            ax.set_title('Uncertainty Metrics Comparison')
-            # FIXED: Safe x-tick handling
-            safe_set_xticklabels(ax, df['Model'].tolist(), rotation=45 if len(df) > 3 else 0)
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-
-    def _plot_class_confidence(self, ax) -> None:
-        """Plot per-class confidence analysis."""
-        # Get true labels
-        y_true = list(self._prediction_cache.values())[0]['y_data']
-        if len(y_true.shape) > 1:
-            y_true_idx = np.argmax(y_true, axis=1)
-        else:
-            y_true_idx = y_true
-
-        n_classes = len(np.unique(y_true_idx))
-
-        # Compute per-class confidence
-        class_confidence = {}
-        for model_name, cache in self._prediction_cache.items():
-            predictions = cache['predictions']
-            max_probs = np.max(predictions, axis=1)
-
-            class_conf = []
-            for c in range(n_classes):
-                mask = y_true_idx == c
-                if np.any(mask):
-                    class_conf.append(np.mean(max_probs[mask]))
-                else:
-                    class_conf.append(0)
-
-            class_confidence[model_name] = class_conf
-
-        # Plot
-        x = np.arange(n_classes)
-        width = 0.8 / len(self.models)
-
-        for i, (model_name, conf) in enumerate(class_confidence.items()):
-            ax.bar(x + i * width, conf, width, label=model_name, alpha=0.8)
-
-        ax.set_xlabel('Class')
-        ax.set_ylabel('Average Confidence')
-        ax.set_title('Per-Class Confidence Analysis')
-        ax.set_xticks(x + width * (len(self.models) - 1) / 2)
-        ax.set_xticklabels([str(i) for i in range(n_classes)])
+        ax.set_title('Uncertainty Landscape (Density Contours)')
         ax.legend()
         ax.grid(True, alpha=0.3)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, None)
 
     # ------------------------------------------------------------------------------
-    # Information Flow Analysis
+    # Enhanced Information Flow Analysis (includes Activations)
     # ------------------------------------------------------------------------------
 
     def analyze_information_flow(self, data: DataInput) -> None:
-        """Analyze information flow through network layers."""
-        logger.info("Analyzing information flow...")
+        """Analyze information flow through network, including activation patterns."""
+        logger.info("Analyzing information flow and activations...")
 
         # Get sample data
-        x_sample = data.x_data[:min(200, len(data.x_data))]  # Use smaller sample for efficiency
+        x_sample = data.x_data[:min(200, len(data.x_data))]
 
         for model_name, extraction_data in self.layer_extraction_models.items():
             if extraction_data is None:
@@ -1450,16 +1041,21 @@ class ModelAnalyzer:
 
             self.results.information_flow[model_name] = layer_analysis
 
+            # Store detailed activation stats for key layers
+            self._analyze_key_layer_activations(model_name, layer_outputs, layer_info)
+
         # Create visualizations
-        self._plot_information_flow()
+        self._plot_enhanced_information_flow()
 
     def _analyze_layer_information(self, output: np.ndarray, layer_info: Dict) -> Dict[str, Any]:
-        """Analyze information content of a layer's output."""
+        """Enhanced analysis of layer information content."""
         # Flatten spatial dimensions if needed
         if len(output.shape) == 4:  # Conv layer
-            output_flat = np.mean(output, axis=(1, 2))  # Global average pooling
+            output_flat = np.mean(output, axis=(1, 2))
+            spatial_output = output
         else:
             output_flat = output
+            spatial_output = None
 
         # Compute statistics
         analysis = {
@@ -1468,9 +1064,16 @@ class ModelAnalyzer:
             'mean_activation': float(np.mean(output_flat)),
             'std_activation': float(np.std(output_flat)),
             'sparsity': float(np.mean(np.abs(output_flat) < 1e-5)),
+            'positive_ratio': float(np.mean(output_flat > 0)),
         }
 
-        # Compute effective rank (measure of dimensionality)
+        # Add spatial statistics for conv layers
+        if spatial_output is not None:
+            analysis['spatial_mean'] = float(np.mean(spatial_output))
+            analysis['spatial_std'] = float(np.std(spatial_output))
+            analysis['channel_variance'] = float(np.var(np.mean(spatial_output, axis=(0, 1, 2))))
+
+        # Compute effective rank
         if output_flat.shape[1] > 1:
             try:
                 _, s, _ = np.linalg.svd(output_flat, full_matrices=False)
@@ -1482,362 +1085,314 @@ class ModelAnalyzer:
 
         return analysis
 
-    def _plot_information_flow(self) -> None:
-        """Create information flow visualizations."""
-        if not self.results.information_flow:
-            return
+    def _analyze_key_layer_activations(self, model_name: str, layer_outputs: List[np.ndarray],
+                                     layer_info: List[Dict]) -> None:
+        """Analyze activations for key layers in detail."""
+        # Find key layers (last conv and middle dense)
+        conv_indices = [i for i, info in enumerate(layer_info) if info['type'] == 'Conv2D']
+        dense_indices = [i for i, info in enumerate(layer_info) if info['type'] == 'Dense']
 
-        # FIXED: Use subplots_adjust instead of constrained_layout
-        fig, axes = plt.subplots(2, 2, figsize=self.config.get_figure_size())
-        fig.subplots_adjust(hspace=0.3, wspace=0.3)
+        key_indices = []
+        if conv_indices:
+            key_indices.append(conv_indices[-1])  # Last conv layer
+        if dense_indices and len(dense_indices) > 1:
+            key_indices.append(dense_indices[len(dense_indices)//2])  # Middle dense layer
 
-        # 1. Activation evolution
-        ax1 = axes[0, 0]
-        self._plot_activation_evolution(ax1)
+        self.results.activation_stats[model_name] = {}
 
-        # 2. Sparsity evolution
-        ax2 = axes[0, 1]
-        self._plot_sparsity_evolution(ax2)
+        for idx in key_indices:
+            if idx < len(layer_outputs):
+                layer_name = layer_info[idx]['name']
+                activations = layer_outputs[idx]
 
-        # 3. Effective rank evolution
-        ax3 = axes[1, 0]
-        self._plot_effective_rank_evolution(ax3)
+                flat_acts = activations.flatten()
 
-        # 4. Layer statistics summary
-        ax4 = axes[1, 1]
-        self._plot_layer_summary(ax4)
+                self.results.activation_stats[model_name][layer_name] = {
+                    'shape': activations.shape,
+                    'mean': float(np.mean(flat_acts)),
+                    'std': float(np.std(flat_acts)),
+                    'sparsity': float(np.mean(np.abs(flat_acts) < 1e-5)),
+                    'positive_ratio': float(np.mean(flat_acts > 0)),
+                    'percentiles': {
+                        'p25': float(np.percentile(flat_acts, 25)),
+                        'p50': float(np.percentile(flat_acts, 50)),
+                        'p75': float(np.percentile(flat_acts, 75))
+                    },
+                    'sample_activations': activations[:10] if len(activations.shape) == 4 else None
+                }
 
-        plt.suptitle('Information Flow Analysis', fontsize=16, fontweight='bold')
+    def _plot_enhanced_information_flow(self) -> None:
+        """Create enhanced information flow visualizations."""
+        fig = plt.figure(figsize=(14, 10))
+        gs = plt.GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.3)
+
+        # Top row: Flow overview
+        ax1 = fig.add_subplot(gs[0, 0])
+        self._plot_activation_flow_overview(ax1)
+
+        ax2 = fig.add_subplot(gs[0, 1])
+        self._plot_effective_rank_evolution(ax2)
+
+        # Bottom row: Deep dive into key layer
+        ax3 = fig.add_subplot(gs[1, 0])
+        self._plot_key_layer_comparison(ax3)
+
+        ax4 = fig.add_subplot(gs[1, 1])
+        self._plot_sample_feature_maps_comparison(ax4)
+
+        plt.suptitle('Information Flow and Activation Analysis', fontsize=16, fontweight='bold')
+        fig.subplots_adjust(top=0.93, bottom=0.1, left=0.1, right=0.95)
 
         if self.config.save_plots:
-            self._save_figure(fig, 'information_flow')
+            self._save_figure(fig, 'information_flow_analysis')
         plt.close(fig)
 
-    def _plot_activation_evolution(self, ax) -> None:
-        """Plot how activation statistics evolve through layers."""
+    def _plot_activation_flow_overview(self, ax) -> None:
+        """Plot activation statistics evolution through layers."""
         for model_name, layer_analysis in self.results.information_flow.items():
             means = []
             stds = []
-            layer_names = []
+            layer_positions = []
 
-            for layer_name, analysis in layer_analysis.items():
+            for i, (layer_name, analysis) in enumerate(layer_analysis.items()):
                 means.append(analysis['mean_activation'])
                 stds.append(analysis['std_activation'])
-                layer_names.append(layer_name.split('_')[0])
+                layer_positions.append(i)
 
-            x = np.arange(len(means))
-            ax.plot(x, means, 'o-', label=f'{model_name} (mean)', linewidth=2)
-            ax.fill_between(x, np.array(means) - np.array(stds),
-                           np.array(means) + np.array(stds), alpha=0.3)
+            # Plot mean with std as shaded region
+            means = np.array(means)
+            stds = np.array(stds)
 
-        ax.set_xlabel('Layer Index')
+            line = ax.plot(layer_positions, means, 'o-', label=f'{model_name}',
+                          linewidth=2, markersize=6)
+            ax.fill_between(layer_positions, means - stds, means + stds,
+                           alpha=0.2, color=line[0].get_color())
+
+        ax.set_xlabel('Layer Depth')
         ax.set_ylabel('Activation Statistics')
-        ax.set_title('Activation Evolution Through Network')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-    def _plot_sparsity_evolution(self, ax) -> None:
-        """Plot how sparsity evolves through layers."""
-        for model_name, layer_analysis in self.results.information_flow.items():
-            sparsities = []
-
-            for layer_name, analysis in layer_analysis.items():
-                sparsities.append(analysis['sparsity'])
-
-            ax.plot(range(len(sparsities)), sparsities, 'o-',
-                   label=model_name, linewidth=2, markersize=8)
-
-        ax.set_xlabel('Layer Index')
-        ax.set_ylabel('Sparsity')
-        ax.set_title('Sparsity Evolution Through Network')
+        ax.set_title('Activation Mean ± Std Evolution')
         ax.legend()
         ax.grid(True, alpha=0.3)
 
     def _plot_effective_rank_evolution(self, ax) -> None:
-        """Plot effective rank evolution."""
+        """Plot effective rank evolution through network."""
         for model_name, layer_analysis in self.results.information_flow.items():
             ranks = []
+            positions = []
 
-            for layer_name, analysis in layer_analysis.items():
-                if 'effective_rank' in analysis:
+            for i, (layer_name, analysis) in enumerate(layer_analysis.items()):
+                if 'effective_rank' in analysis and analysis['effective_rank'] > 0:
                     ranks.append(analysis['effective_rank'])
+                    positions.append(i)
 
             if ranks:
-                ax.plot(range(len(ranks)), ranks, 'o-',
-                       label=model_name, linewidth=2, markersize=8)
+                ax.plot(positions, ranks, 'o-', label=model_name,
+                       linewidth=2, markersize=8)
 
-        ax.set_xlabel('Layer Index')
+        ax.set_xlabel('Layer Depth')
         ax.set_ylabel('Effective Rank')
-        ax.set_title('Information Dimensionality Through Network')
+        ax.set_title('Information Dimensionality Evolution')
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-    def _plot_layer_summary(self, ax) -> None:
-        """Create summary table of layer statistics."""
-        ax.axis('tight')
-        ax.axis('off')
+    def _plot_key_layer_comparison(self, ax) -> None:
+        """Compare activation distributions at a key layer across models."""
+        # Find a common layer type across models
+        activation_data = []
 
-        # Collect summary data
-        summary_data = []
-        for model_name, layer_analysis in self.results.information_flow.items():
-            for i, (layer_name, analysis) in enumerate(layer_analysis.items()):
-                if i < 5:  # Limit to first 5 layers
-                    summary_data.append([
-                        model_name[:10],
-                        layer_name[:15],
-                        analysis['layer_type'][:10],
-                        f"{analysis['mean_activation']:.3f}",
-                        f"{analysis['sparsity']:.2%}"
-                    ])
+        for model_name, layer_stats in self.results.activation_stats.items():
+            for layer_name, stats in layer_stats.items():
+                activation_data.append({
+                    'Model': model_name,
+                    'Layer': layer_name.split('_')[0],
+                    'Mean': stats['mean'],
+                    'Std': stats['std'],
+                    'Sparsity': stats['sparsity']
+                })
 
-        if summary_data:
-            table = ax.table(
-                cellText=summary_data,
-                colLabels=['Model', 'Layer', 'Type', 'Mean Act', 'Sparsity'],
-                loc='center',
-                cellLoc='center'
-            )
-            table.auto_set_font_size(False)
-            table.set_fontsize(9)
-            table.scale(1, 1.5)
+        if activation_data:
+            df = pd.DataFrame(activation_data)
 
-            # Style header
-            for i in range(5):
-                table[(0, i)].set_facecolor('#40466e')
-                table[(0, i)].set_text_props(weight='bold', color='white')
+            # Create violin plot for activation statistics
+            metric_df = df.melt(id_vars=['Model', 'Layer'],
+                               value_vars=['Mean', 'Std', 'Sparsity'],
+                               var_name='Metric', value_name='Value')
 
-        ax.set_title('Layer Information Summary', pad=20)
+            sns.violinplot(data=metric_df, x='Metric', y='Value', hue='Model',
+                          ax=ax, palette=self.config.color_palette)
+
+            ax.set_title('Key Layer Activation Statistics Comparison')
+            ax.grid(True, alpha=0.3, axis='y')
+
+    def _plot_sample_feature_maps_comparison(self, ax) -> None:
+        """Compare sample feature maps across models."""
+        # Find models with conv activations
+        conv_samples = {}
+
+        for model_name, layer_stats in self.results.activation_stats.items():
+            for layer_name, stats in layer_stats.items():
+                if stats.get('sample_activations') is not None:
+                    conv_samples[model_name] = stats['sample_activations'][0]
+                    break
+
+        if len(conv_samples) >= 2:
+            n_models = len(conv_samples)
+            n_features = min(4, conv_samples[list(conv_samples.keys())[0]].shape[-1])
+
+            # Create grid
+            from matplotlib.gridspec import GridSpecFromSubplotSpec
+            gs_sub = GridSpecFromSubplotSpec(n_models, n_features,
+                                           subplot_spec=ax.get_gridspec()[1, 1],
+                                           wspace=0.05, hspace=0.1)
+
+            for i, (model_name, activations) in enumerate(conv_samples.items()):
+                for j in range(n_features):
+                    ax_sub = plt.subplot(gs_sub[i, j])
+                    ax_sub.imshow(activations[:, :, j], cmap='viridis', aspect='auto')
+                    ax_sub.axis('off')
+
+                    if j == 0:
+                        ax_sub.set_ylabel(model_name[:10], rotation=0,
+                                         ha='right', va='center', fontsize=8)
+                    if i == 0:
+                        ax_sub.set_title(f'F{j}', fontsize=8)
+
+            ax.set_visible(False)
+            ax.text(0.5, 1.05, 'Sample Feature Map Comparison',
+                   transform=ax.transAxes, ha='center', fontsize=12, fontweight='bold')
+        else:
+            ax.text(0.5, 0.5, 'Insufficient convolutional activations\nfor comparison',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Feature Map Comparison')
+            ax.axis('off')
 
     # ------------------------------------------------------------------------------
-    # Summary Dashboard
+    # Enhanced Summary Dashboard
     # ------------------------------------------------------------------------------
 
     def create_summary_dashboard(self) -> None:
-        """Create a comprehensive summary dashboard."""
-        # FIXED: Use subplots_adjust instead of constrained_layout for better control
+        """Create a focused, visual summary dashboard."""
         fig = plt.figure(figsize=(14, 10))
-        gs = plt.GridSpec(4, 4, figure=fig, hspace=0.4, wspace=0.4)
+        gs = plt.GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.3)
 
-        # 1. Model performance comparison
-        ax1 = fig.add_subplot(gs[0, :2])
-        self._plot_model_performance(ax1)
+        # 1. Overall Performance Radar Chart
+        ax1 = fig.add_subplot(gs[0, 0], projection='polar')
+        self._plot_performance_radar(ax1)
 
-        # 2. Key metrics summary
-        ax2 = fig.add_subplot(gs[0, 2:])
-        self._plot_key_metrics_summary(ax2)
+        # 2. Model Similarity (Weight PCA)
+        ax2 = fig.add_subplot(gs[0, 1])
+        self._plot_model_similarity(ax2)
 
-        # 3. Weight statistics
-        ax3 = fig.add_subplot(gs[1, :2])
-        self._plot_weight_summary(ax3)
+        # 3. Confidence Profile
+        ax3 = fig.add_subplot(gs[1, 0])
+        self._plot_confidence_profile_summary(ax3)
 
-        # 4. Calibration summary
-        ax4 = fig.add_subplot(gs[1, 2:])
-        self._plot_calibration_summary(ax4)
-
-        # 5. Confidence analysis (improved with seaborn)
-        ax5 = fig.add_subplot(gs[2, :])
-        self._plot_confidence_summary(ax5)
-
-        # 6. Analysis overview
-        ax6 = fig.add_subplot(gs[3, :])
-        self._plot_analysis_overview(ax6)
+        # 4. Training Dynamics (if available)
+        ax4 = fig.add_subplot(gs[1, 1])
+        self._plot_training_dynamics(ax4)
 
         plt.suptitle('Model Analysis Summary Dashboard', fontsize=18, fontweight='bold')
-
-        # FIXED: Use subplots_adjust instead of constrained_layout
         fig.subplots_adjust(top=0.93, bottom=0.07, left=0.1, right=0.95)
 
         if self.config.save_plots:
             self._save_figure(fig, 'summary_dashboard')
         plt.close(fig)
 
-    def _plot_model_performance(self, ax) -> None:
-        """Plot model performance metrics."""
-        if not self.results.model_metrics:
-            ax.text(0.5, 0.5, 'No performance metrics available',
-                   ha='center', va='center', transform=ax.transAxes)
-            ax.set_title('Model Performance')
-            ax.axis('off')
-            return
+    def _plot_performance_radar(self, ax) -> None:
+        """Create radar chart for multi-metric comparison."""
+        categories = ['Accuracy', 'ECE\n(inverted)', 'Brier\n(inverted)',
+                     'Entropy\n(normalized)', 'Loss\n(inverted)']
 
-        # Extract accuracy and loss
-        models = []
-        accuracies = []
-        losses = []
-
-        for model_name, metrics in self.results.model_metrics.items():
-            models.append(model_name)
-            accuracies.append(metrics.get('accuracy', 0))
-            losses.append(metrics.get('loss', 0))
-
-        x = np.arange(len(models))
-        width = 0.35
-
-        ax2 = ax.twinx()
-
-        bars1 = ax.bar(x - width/2, accuracies, width, label='Accuracy', alpha=0.8, color='green')
-        bars2 = ax2.bar(x + width/2, losses, width, label='Loss', alpha=0.8, color='red')
-
-        ax.set_xlabel('Model')
-        ax.set_ylabel('Accuracy', color='green')
-        ax2.set_ylabel('Loss', color='red')
-        ax.set_title('Model Performance Comparison')
-        # FIXED: Safe x-tick handling
-        safe_set_xticklabels(ax, models, rotation=45 if len(models) > 3 else 0)
-
-        # Add value labels
-        for bar, val in zip(bars1, accuracies):
-            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                   f'{val:.3f}', ha='center', va='bottom', fontsize=8)
-
-        for bar, val in zip(bars2, losses):
-            ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                    f'{val:.3f}', ha='center', va='bottom', fontsize=8)
-
-        ax.grid(True, alpha=0.3, axis='y')
-
-    def _plot_key_metrics_summary(self, ax) -> None:
-        """Plot summary of key metrics across analyses."""
-        ax.axis('tight')
-        ax.axis('off')
-
-        # Collect key metrics
-        summary_data = []
+        # Prepare data
+        radar_data = {}
         for model_name in self.models:
-            row = [model_name[:15]]
+            values = []
 
-            # Add accuracy
-            if model_name in self.results.model_metrics:
-                acc = self.results.model_metrics[model_name].get('accuracy', 0)
-                row.append(f"{acc:.3f}")
-            else:
-                row.append("-")
+            # Accuracy
+            acc = self.results.model_metrics.get(model_name, {}).get('accuracy', 0.5)
+            values.append(acc)
 
-            # Add ECE
-            if model_name in self.results.calibration_metrics:
-                ece = self.results.calibration_metrics[model_name].get('ece', 0)
-                row.append(f"{ece:.3f}")
-            else:
-                row.append("-")
+            # ECE (inverted so higher is better)
+            ece = self.results.calibration_metrics.get(model_name, {}).get('ece', 0.1)
+            values.append(1 - min(ece, 1))
 
-            # Add weight stats
-            if model_name in self.results.weight_stats:
-                n_params = sum(np.prod(s['shape']) for s in self.results.weight_stats[model_name].values())
-                row.append(f"{n_params:,}")
-            else:
-                row.append("-")
+            # Brier Score (inverted)
+            brier = self.results.calibration_metrics.get(model_name, {}).get('brier_score', 0.5)
+            values.append(1 - min(brier, 1))
 
-            # Add mean entropy
-            if model_name in self.results.calibration_metrics:
-                entropy = self.results.calibration_metrics[model_name].get('mean_entropy', 0)
-                row.append(f"{entropy:.3f}")
-            else:
-                row.append("-")
+            # Entropy (normalized)
+            entropy = self.results.calibration_metrics.get(model_name, {}).get('mean_entropy', 1.0)
+            values.append(entropy / 2.5)  # Normalize to [0, 1]
 
-            summary_data.append(row)
+            # Loss (inverted)
+            loss = self.results.model_metrics.get(model_name, {}).get('loss', 1.0)
+            values.append(1 / (1 + loss))  # Transform to [0, 1]
 
-        if summary_data:
-            table = ax.table(
-                cellText=summary_data,
-                colLabels=['Model', 'Accuracy', 'ECE', '# Params', 'Entropy'],
-                loc='center',
-                cellLoc='center'
-            )
-            table.auto_set_font_size(False)
-            table.set_fontsize(10)
-            table.scale(1, 2)
+            radar_data[model_name] = values
 
-            # Style header
-            for i in range(5):
-                table[(0, i)].set_facecolor('#40466e')
-                table[(0, i)].set_text_props(weight='bold', color='white')
+        # Number of variables
+        num_vars = len(categories)
 
-        ax.set_title('Key Metrics Summary', pad=20)
+        # Compute angle for each axis
+        angles = np.linspace(0, 2 * np.pi, num_vars, endpoint=False).tolist()
 
-    def _plot_weight_summary(self, ax) -> None:
-        """Plot weight distribution summary."""
-        if not any(self.results.weight_stats.values()):
-            ax.text(0.5, 0.5, 'No weight analysis available',
+        # Complete the circle
+        angles += angles[:1]
+
+        # Plot data
+        colors = plt.cm.Set3(np.arange(len(self.models)))
+
+        for i, (model_name, values) in enumerate(radar_data.items()):
+            values += values[:1]  # Complete the circle
+            ax.plot(angles, values, 'o-', linewidth=2, label=model_name, color=colors[i])
+            ax.fill(angles, values, alpha=0.15, color=colors[i])
+
+        ax.set_xticks(angles[:-1])
+        ax.set_xticklabels(categories)
+        ax.set_ylim(0, 1)
+        ax.set_title('Performance Radar Chart', pad=20)
+        ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
+        ax.grid(True)
+
+    def _plot_model_similarity(self, ax) -> None:
+        """Plot model similarity based on weight PCA."""
+        if not self.results.weight_pca:
+            ax.text(0.5, 0.5, 'No weight PCA data available',
                    ha='center', va='center', transform=ax.transAxes)
-            ax.set_title('Weight Distribution Summary')
+            ax.set_title('Model Similarity (Weight Space)')
             ax.axis('off')
             return
 
-        # Compute overall statistics
-        model_stats = []
-        for model_name, weight_stats in self.results.weight_stats.items():
-            all_means = [s['basic']['mean'] for s in weight_stats.values()]
-            all_stds = [s['basic']['std'] for s in weight_stats.values()]
-            all_zeros = [s['distribution']['zero_fraction'] for s in weight_stats.values()]
+        components = self.results.weight_pca['components']
+        labels = self.results.weight_pca['labels']
+        explained_var = self.results.weight_pca['explained_variance']
 
-            if all_means:
-                model_stats.append({
-                    'Model': model_name,
-                    'Mean±Std': f"{np.mean(all_means):.3f}±{np.mean(all_stds):.3f}",
-                    'Sparsity': np.mean(all_zeros)
-                })
+        # Create enhanced scatter plot
+        colors = plt.cm.Set3(np.arange(len(labels)))
 
-        if model_stats:
-            df = pd.DataFrame(model_stats)
+        for i, (label, comp) in enumerate(zip(labels, components)):
+            ax.scatter(comp[0], comp[1], c=[colors[i]], label=label,
+                      s=200, alpha=0.8, edgecolors='black', linewidth=2)
 
-            # Bar plot of sparsity
-            ax.bar(df['Model'], df['Sparsity'], alpha=0.8)
-            ax.set_ylabel('Average Sparsity')
-            ax.set_title('Weight Sparsity Summary')
-            # FIXED: Safe x-tick handling
-            safe_set_xticklabels(ax, df['Model'].tolist(), rotation=45 if len(df) > 3 else 0)
+            # Add connecting lines to origin
+            ax.plot([0, comp[0]], [0, comp[1]], '--', color=colors[i], alpha=0.3)
 
-            # Add text annotations
-            for i, row in df.iterrows():
-                ax.text(i, row['Sparsity'] + 0.01, row['Mean±Std'],
-                       ha='center', va='bottom', fontsize=9)
+        # Add origin
+        ax.scatter(0, 0, c='black', s=50, marker='x')
 
-            ax.grid(True, alpha=0.3, axis='y')
-
-    def _plot_calibration_summary(self, ax) -> None:
-        """Plot calibration summary."""
-        if not self.results.calibration_metrics:
-            ax.text(0.5, 0.5, 'No calibration analysis available',
-                   ha='center', va='center', transform=ax.transAxes)
-            ax.set_title('Calibration Summary')
-            ax.axis('off')
-            return
-
-        # Extract ECE and Brier scores
-        models = []
-        eces = []
-        briers = []
-
-        for model_name, metrics in self.results.calibration_metrics.items():
-            models.append(model_name)
-            eces.append(metrics.get('ece', 0))
-            briers.append(metrics.get('brier_score', 0))
-
-        x = np.arange(len(models))
-        width = 0.35
-
-        ax.bar(x - width/2, eces, width, label='ECE', alpha=0.8)
-        ax.bar(x + width/2, briers, width, label='Brier Score', alpha=0.8)
-
-        ax.set_xlabel('Model')
-        ax.set_ylabel('Score')
-        ax.set_title('Calibration Summary')
-        # FIXED: Safe x-tick handling
-        safe_set_xticklabels(ax, models, rotation=45 if len(models) > 3 else 0)
+        ax.set_xlabel(f'PC1 ({explained_var[0]:.1%})')
+        ax.set_ylabel(f'PC2 ({explained_var[1]:.1%})')
+        ax.set_title('Model Similarity (Weight Space)')
         ax.legend()
-        ax.grid(True, alpha=0.3, axis='y')
+        ax.grid(True, alpha=0.3)
 
-    def _plot_confidence_summary(self, ax) -> None:
-        """Plot confidence analysis summary using seaborn."""
-        if not self.results.confidence_metrics:
-            ax.text(0.5, 0.5, 'No confidence analysis available',
-                   ha='center', va='center', transform=ax.transAxes)
-            ax.set_title('Confidence Analysis Summary')
-            ax.axis('off')
-            return
+        # Equal aspect ratio
+        ax.set_aspect('equal', adjustable='box')
 
-        # Build dataframe for seaborn
+    def _plot_confidence_profile_summary(self, ax) -> None:
+        """Plot confidence distribution summary."""
         confidence_data = []
+
         for model_name, metrics in self.results.confidence_metrics.items():
             for conf in metrics['max_probability']:
                 confidence_data.append({
@@ -1848,113 +1403,81 @@ class ModelAnalyzer:
         if confidence_data:
             df = pd.DataFrame(confidence_data)
 
-            # FIXED: Use seaborn violin plot with safe handling
-            try:
-                sns.violinplot(data=df, x='Model', y='Confidence', ax=ax,
-                               inner='quartile', hue='Model', palette=self.config.color_palette, legend=False)
+            # Create enhanced violin plot
+            parts = ax.violinplot([df[df['Model'] == m]['Confidence'].values
+                                  for m in df['Model'].unique()],
+                                 positions=range(len(df['Model'].unique())),
+                                 showmeans=True, showmedians=True)
 
-                # FIXED: Safe x-tick label rotation
-                labels = [t.get_text() for t in ax.get_xticklabels()]
-                if len(labels) > 3:
-                    safe_set_xticklabels(ax, labels, rotation=45)
+            # Customize colors
+            colors = plt.cm.Set3(np.arange(len(df['Model'].unique())))
+            for i, pc in enumerate(parts['bodies']):
+                pc.set_facecolor(colors[i])
+                pc.set_alpha(0.6)
 
-            except Exception as e:
-                logger.warning(f"Could not create confidence violin plot: {e}")
-                # Fallback to simple histogram
-                for model in df['Model'].unique():
-                    model_data = df[df['Model'] == model]['Confidence']
-                    ax.hist(model_data, bins=20, alpha=0.5, label=model)
-                ax.legend()
-
+            ax.set_xticks(range(len(df['Model'].unique())))
+            ax.set_xticklabels(df['Model'].unique(), rotation=45 if len(df['Model'].unique()) > 3 else 0)
             ax.set_ylabel('Confidence (Max Probability)')
-            ax.set_title('Confidence Distribution Summary')
+            ax.set_title('Confidence Distribution Profiles')
             ax.grid(True, alpha=0.3, axis='y')
 
-    def _plot_analysis_overview(self, ax) -> None:
-        """Plot overview of analyses performed."""
-        ax.axis('off')
+    def _plot_training_dynamics(self, ax) -> None:
+        """Plot training dynamics if history is available."""
+        if not self.results.training_history:
+            ax.text(0.5, 0.5, 'No training history available',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Training Dynamics')
+            ax.axis('off')
+            return
 
-        # Create analysis summary text
-        summary_text = "Analysis Overview\n" + "="*50 + "\n\n"
+        # Plot validation accuracy curves
+        for model_name, history in self.results.training_history.items():
+            if 'val_accuracy' in history:
+                epochs = range(1, len(history['val_accuracy']) + 1)
+                ax.plot(epochs, history['val_accuracy'], '-', label=model_name,
+                       linewidth=2, marker='o', markersize=3)
 
-        # Models analyzed
-        summary_text += f"Models Analyzed: {len(self.models)}\n"
-        for model_name in self.models:
-            summary_text += f"  • {model_name}\n"
-
-        summary_text += f"\nAnalyses Performed:\n"
-
-        # Check which analyses were performed
-        if any(self.results.weight_stats.values()):
-            n_weights = sum(len(stats) for stats in self.results.weight_stats.values())
-            summary_text += f"  ✓ Weight Analysis ({n_weights} tensors)\n"
-
-        if any(self.results.activation_stats.values()):
-            n_acts = sum(len(stats) for stats in self.results.activation_stats.values())
-            summary_text += f"  ✓ Activation Analysis ({n_acts} layers)\n"
-
-        if self.results.calibration_metrics:
-            summary_text += f"  ✓ Calibration Analysis\n"
-
-        if self.results.confidence_metrics:
-            summary_text += f"  ✓ Probability Distribution Analysis\n"
-
-        if self.results.information_flow:
-            summary_text += f"  ✓ Information Flow Analysis\n"
-
-        # Add timestamp
-        summary_text += f"\nAnalysis Timestamp: {self.results.analysis_timestamp}\n"
-
-        # Add output directory
-        summary_text += f"Output Directory: {self.output_dir}\n"
-
-        ax.text(0.1, 0.9, summary_text, transform=ax.transAxes,
-               fontsize=11, verticalalignment='top', fontfamily='monospace')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Validation Accuracy')
+        ax.set_title('Training Dynamics')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
 
     # ------------------------------------------------------------------------------
     # Utility Methods
     # ------------------------------------------------------------------------------
 
     def _save_figure(self, fig: plt.Figure, name: str) -> None:
-        """Save figure with configured settings and error handling."""
+        """Save figure with configured settings."""
         try:
             filepath = self.output_dir / f"{name}.{self.config.save_format}"
-            # FIXED: Save with explicit bbox_inches and pad_inches to avoid layout issues
             fig.savefig(filepath, dpi=self.config.dpi, bbox_inches='tight',
                        facecolor='white', edgecolor='none', pad_inches=0.1)
             logger.info(f"Saved plot: {filepath}")
         except Exception as e:
             logger.error(f"Could not save figure {name}: {e}")
-            # Try saving without bbox_inches as fallback
-            try:
-                filepath = self.output_dir / f"{name}_fallback.{self.config.save_format}"
-                fig.savefig(filepath, dpi=self.config.dpi, facecolor='white', edgecolor='none')
-                logger.info(f"Saved plot (fallback): {filepath}")
-            except Exception as e2:
-                logger.error(f"Fallback save also failed for {name}: {e2}")
 
     def save_results(self, filename: str = "analysis_results.json") -> None:
-        """Save analysis results to JSON file with configurable filename."""
+        """Save analysis results to JSON file."""
         results_dict = {
             'timestamp': self.results.analysis_timestamp,
             'config': self.config.__dict__,
             'model_metrics': self.results.model_metrics,
             'weight_stats': self.results.weight_stats,
-            'activation_stats': self.results.activation_stats,
             'calibration_metrics': self.results.calibration_metrics,
         }
 
         # Convert numpy arrays to lists for JSON serialization
         def convert_numpy(obj):
-            # FIXED: Handle numpy scalars properly
             if isinstance(obj, np.generic):
-                return obj.item()  # Convert numpy scalar to python equivalent
+                return obj.item()
             elif isinstance(obj, np.ndarray):
                 return obj.tolist()
             elif isinstance(obj, pd.DataFrame):
                 return obj.to_dict()
             elif isinstance(obj, dict):
-                return {k: convert_numpy(v) for k, v in obj.items() if k != 'raw_activations'}
+                return {k: convert_numpy(v) for k, v in obj.items()
+                       if k not in ['raw_activations', 'sample_activations']}
             elif isinstance(obj, list):
                 return [convert_numpy(item) for item in obj]
             else:
@@ -1983,30 +1506,25 @@ class ModelAnalyzer:
         # Check which analyses were performed
         if any(self.results.weight_stats.values()):
             summary['analyses_performed'].append('weight_analysis')
-        if any(self.results.activation_stats.values()):
-            summary['analyses_performed'].append('activation_analysis')
         if self.results.calibration_metrics:
-            summary['analyses_performed'].append('calibration_analysis')
-        if self.results.confidence_metrics:
-            summary['analyses_performed'].append('probability_analysis')
+            summary['analyses_performed'].append('confidence_calibration_analysis')
         if self.results.information_flow:
-            summary['analyses_performed'].append('information_flow')
+            summary['analyses_performed'].append('information_flow_analysis')
 
-        # Add model performance
+        # Add summaries
         for model_name, metrics in self.results.model_metrics.items():
             summary['model_performance'][model_name] = {
                 'accuracy': metrics.get('accuracy', 0),
                 'loss': metrics.get('loss', 0)
             }
 
-        # Add calibration summary
         for model_name, metrics in self.results.calibration_metrics.items():
             summary['calibration_summary'][model_name] = {
                 'ece': metrics.get('ece', 0),
-                'brier_score': metrics.get('brier_score', 0)
+                'brier_score': metrics.get('brier_score', 0),
+                'mean_entropy': metrics.get('mean_entropy', 0)
             }
 
-        # Add weight summary
         for model_name, weight_stats in self.results.weight_stats.items():
             n_params = sum(np.prod(s['shape']) for s in weight_stats.values())
             summary['weight_summary'][model_name] = {
