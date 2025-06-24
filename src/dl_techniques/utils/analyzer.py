@@ -7,7 +7,7 @@ redundancy and provide clearer insights through better plot organization.
 
 Key Improvements:
 - Merged calibration and probability analysis
-- Merged activation and information flow analysis
+- Merged activation and information flow analysis  
 - Redesigned summary dashboard with comparative visualizations
 - Enhanced weight analysis with modern plot types
 - Cleaner, more focused visualization pages
@@ -304,10 +304,21 @@ class ModelAnalyzer:
         # Cache for model outputs
         self._prediction_cache: Dict[str, Dict[str, np.ndarray]] = {}
 
+        # Initialize model colors for consistent visualization
+        self.model_colors: Dict[str, str] = {}
+        self._setup_model_colors()
+
         # Set up activation extraction models
         self._setup_activation_models()
 
         logger.info(f"ModelAnalyzer initialized with {len(models)} models")
+
+    def _setup_model_colors(self) -> None:
+        """Set up consistent colors for models across all visualizations."""
+        # Define consistent colors for models (avoiding yellow)
+        model_names = sorted(self.models.keys())  # Sort for consistency
+        color_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b'][:len(model_names)]
+        self.model_colors = dict(zip(model_names, color_palette))
 
     def _setup_activation_models(self) -> None:
         """Set up models for extracting intermediate activations."""
@@ -653,16 +664,37 @@ class ModelAnalyzer:
         if norm_data:
             df = pd.DataFrame(norm_data)
 
-            # Create violin plot with inner quartiles
-            # Updated API: use hue instead of palette, density_norm instead of scale
-            sns.violinplot(data=df, x='L2 Norm', y='Model', ax=ax,
-                          inner='quartile', hue='Model', palette=self.config.color_palette,
-                          orient='h', cut=0, density_norm='width', legend=False)
+            # Sort models for consistency
+            model_order = sorted(df['Model'].unique())
+
+            # Create violin plot with quartiles using matplotlib
+            parts = ax.violinplot([df[df['Model'] == m]['L2 Norm'].values
+                                  for m in model_order],
+                                 positions=range(len(model_order)),
+                                 vert=False, showmeans=False, showmedians=True,
+                                 showextrema=True)
+
+            # Color the violin plots
+            for i, model in enumerate(model_order):
+                color = self.model_colors.get(model, '#333333')
+                parts['bodies'][i].set_facecolor(color)
+                parts['bodies'][i].set_alpha(0.7)
+
+            # Color other violin parts
+            for partname in ['cmeans', 'cmaxes', 'cmins', 'cbars', 'cmedians', 'cquantiles']:
+                if partname in parts:
+                    parts[partname].set_color('black')
+                    parts[partname].set_alpha(0.8)
 
             # Add strip plot on top for individual points
-            sns.stripplot(data=df, x='L2 Norm', y='Model', ax=ax,
-                         size=3, alpha=0.5, color='black', orient='h')
+            for i, model in enumerate(model_order):
+                model_data = df[df['Model'] == model]['L2 Norm'].values
+                y_positions = np.random.normal(i, 0.04, size=len(model_data))
+                ax.scatter(model_data, y_positions, s=20, alpha=0.4, color='black')
 
+            # Set labels
+            ax.set_yticks(range(len(model_order)))
+            ax.set_yticklabels(model_order)
             ax.set_xlabel('L2 Norm of Layer Weights')
             ax.set_title('Weight Norm Distributions by Model')
             ax.grid(True, alpha=0.3, axis='x')
@@ -682,10 +714,18 @@ class ModelAnalyzer:
         if sparsity_data:
             df = pd.DataFrame(sparsity_data)
 
-            # Clean bar chart
+            # Sort models for consistency
+            df = df.sort_values('Model')
+
+            # Clean bar chart with consistent colors
             x = np.arange(len(df))
-            ax.bar(x, df['Mean Sparsity'], yerr=df['Std Sparsity'],
-                   capsize=5, alpha=0.8, color=sns.color_palette(self.config.color_palette))
+            bars = ax.bar(x, df['Mean Sparsity'], yerr=df['Std Sparsity'],
+                          capsize=5, alpha=0.8)
+
+            # Apply consistent colors
+            for i, (idx, row) in enumerate(df.iterrows()):
+                color = self.model_colors.get(row['Model'], '#333333')
+                bars[i].set_facecolor(color)
 
             ax.set_xlabel('Model')
             ax.set_ylabel('Average Sparsity')
@@ -707,11 +747,10 @@ class ModelAnalyzer:
         labels = self.results.weight_pca['labels']
         explained_var = self.results.weight_pca['explained_variance']
 
-        # Create scatter plot
-        colors = plt.cm.Set3(np.arange(len(labels)))
-
+        # Create scatter plot with consistent colors
         for i, (label, comp) in enumerate(zip(labels, components)):
-            ax.scatter(comp[0], comp[1], c=[colors[i]], label=label,
+            color = self.model_colors.get(label, '#333333')
+            ax.scatter(comp[0], comp[1], c=[color], label=label,
                       s=100, alpha=0.8, edgecolors='black', linewidth=1)
 
         ax.set_xlabel(f'PC1 ({explained_var[0]:.1%})')
@@ -855,12 +894,12 @@ class ModelAnalyzer:
         """Plot enhanced reliability diagram with confidence intervals."""
         ax.plot([0, 1], [0, 1], 'k--', alpha=0.6, label='Perfect Calibration')
 
-        colors = plt.cm.Set3(np.arange(len(self.models)))
+        for model_name, rel_data in self.results.reliability_data.items():
+            color = self.model_colors.get(model_name, '#333333')
 
-        for i, (model_name, rel_data) in enumerate(self.results.reliability_data.items()):
             # Plot main line
             ax.plot(rel_data['bin_centers'], rel_data['bin_accuracies'],
-                   'o-', color=colors[i], label=model_name, linewidth=2, markersize=8)
+                   'o-', color=color, label=model_name, linewidth=2, markersize=8)
 
             # Add shaded confidence region if we have sample counts
             if 'bin_counts' in rel_data:
@@ -871,7 +910,7 @@ class ModelAnalyzer:
 
                 ax.fill_between(rel_data['bin_centers'],
                                props - 1.96*se, props + 1.96*se,
-                               alpha=0.2, color=colors[i])
+                               alpha=0.2, color=color)
 
         ax.set_xlabel('Mean Predicted Probability')
         ax.set_ylabel('Fraction of Positives')
@@ -895,13 +934,34 @@ class ModelAnalyzer:
         if confidence_data:
             df = pd.DataFrame(confidence_data)
 
-            # Create violin plot with quartiles using updated API
-            sns.violinplot(data=df, y='Model', x='Confidence', ax=ax,
-                          inner='quartile', hue='Model', palette=self.config.color_palette,
-                          orient='h', cut=0, density_norm='width', legend=False)
+            # Sort models to match color order
+            model_order = sorted(df['Model'].unique())
+
+            # Create violin plot with quartiles using matplotlib
+            parts = ax.violinplot([df[df['Model'] == m]['Confidence'].values
+                                  for m in model_order],
+                                 positions=range(len(model_order)),
+                                 vert=False, showmeans=False, showmedians=True,
+                                 showextrema=True)
+
+            # Color the violin plots
+            for i, model in enumerate(model_order):
+                color = self.model_colors.get(model, '#333333')
+                parts['bodies'][i].set_facecolor(color)
+                parts['bodies'][i].set_alpha(0.7)
+
+            # Color other violin parts
+            for partname in ['cmeans', 'cmaxes', 'cmins', 'cbars', 'cmedians', 'cquantiles']:
+                if partname in parts:
+                    parts[partname].set_color('black')
+                    parts[partname].set_alpha(0.8)
+
+            # Add model labels
+            ax.set_yticks(range(len(model_order)))
+            ax.set_yticklabels(model_order)
 
             # Add summary statistics as text
-            for i, model in enumerate(df['Model'].unique()):
+            for i, model in enumerate(model_order):
                 model_data = df[df['Model'] == model]['Confidence']
                 mean_conf = model_data.mean()
                 ax.text(mean_conf, i, f'{mean_conf:.3f}',
@@ -928,17 +988,19 @@ class ModelAnalyzer:
         if ece_data:
             df = pd.DataFrame(ece_data)
 
-            # Create grouped bar plot
-            n_models = len(df['Model'].unique())
+            # Sort models to match color order
+            model_order = sorted(df['Model'].unique())
+            n_models = len(model_order)
             n_classes = len(df['Class'].unique())
 
             x = np.arange(n_classes)
             width = 0.8 / n_models
 
-            for i, model in enumerate(df['Model'].unique()):
+            for i, model in enumerate(model_order):
                 model_data = df[df['Model'] == model]
+                color = self.model_colors.get(model, '#333333')
                 ax.bar(x + i * width, model_data['ECE'], width,
-                       label=model, alpha=0.8)
+                       label=model, alpha=0.8, color=color)
 
             ax.set_xlabel('Class')
             ax.set_ylabel('Expected Calibration Error')
@@ -952,13 +1014,15 @@ class ModelAnalyzer:
         """Plot uncertainty landscape with density contours for each model."""
         from scipy.stats import gaussian_kde
 
-        # Set up colors for each model
-        colors = plt.cm.Set3(np.arange(len(self.models)))
+        # Sort models for consistent ordering
+        model_order = sorted(self.results.confidence_metrics.keys())
 
         # Plot contours for each model
-        for i, (model_name, metrics) in enumerate(self.results.confidence_metrics.items()):
+        for model_name in model_order:
+            metrics = self.results.confidence_metrics[model_name]
             confidence = metrics['max_probability']
             entropy = metrics['entropy']
+            color = self.model_colors.get(model_name, '#333333')
 
             if len(confidence) < 10:  # Skip if too few points
                 continue
@@ -990,20 +1054,20 @@ class ModelAnalyzer:
                 Z = kde(positions).reshape(X.shape)
 
                 # Plot contours
-                contours = ax.contour(X, Y, Z, levels=5, colors=[colors[i]],
+                contours = ax.contour(X, Y, Z, levels=5, colors=[color],
                                      alpha=0.8, linewidths=2)
                 ax.clabel(contours, inline=True, fontsize=8, fmt='%.2f')
 
                 # Plot filled contours with transparency
-                ax.contourf(X, Y, Z, levels=5, colors=[colors[i]], alpha=0.2)
+                ax.contourf(X, Y, Z, levels=5, colors=[color], alpha=0.2)
 
                 # Add a dummy line for the legend
-                ax.plot([], [], color=colors[i], linewidth=3, label=model_name)
+                ax.plot([], [], color=color, linewidth=3, label=model_name)
 
             except Exception as e:
                 logger.warning(f"Could not create density contours for {model_name}: {e}")
                 # Fallback: plot a simple scatter with low alpha
-                ax.scatter(confidence, entropy, color=colors[i], alpha=0.3,
+                ax.scatter(confidence, entropy, color=color, alpha=0.3,
                           s=20, label=model_name)
 
         ax.set_xlabel('Confidence (Max Probability)')
@@ -1149,7 +1213,8 @@ class ModelAnalyzer:
 
     def _plot_activation_flow_overview(self, ax) -> None:
         """Plot activation statistics evolution through layers."""
-        for model_name, layer_analysis in self.results.information_flow.items():
+        for model_name in sorted(self.results.information_flow.keys()):
+            layer_analysis = self.results.information_flow[model_name]
             means = []
             stds = []
             layer_positions = []
@@ -1163,10 +1228,11 @@ class ModelAnalyzer:
             means = np.array(means)
             stds = np.array(stds)
 
+            color = self.model_colors.get(model_name, '#333333')
             line = ax.plot(layer_positions, means, 'o-', label=f'{model_name}',
-                          linewidth=2, markersize=6)
+                          linewidth=2, markersize=6, color=color)
             ax.fill_between(layer_positions, means - stds, means + stds,
-                           alpha=0.2, color=line[0].get_color())
+                           alpha=0.2, color=color)
 
         ax.set_xlabel('Layer Depth')
         ax.set_ylabel('Activation Statistics')
@@ -1176,7 +1242,8 @@ class ModelAnalyzer:
 
     def _plot_effective_rank_evolution(self, ax) -> None:
         """Plot effective rank evolution through network."""
-        for model_name, layer_analysis in self.results.information_flow.items():
+        for model_name in sorted(self.results.information_flow.keys()):
+            layer_analysis = self.results.information_flow[model_name]
             ranks = []
             positions = []
 
@@ -1186,8 +1253,9 @@ class ModelAnalyzer:
                     positions.append(i)
 
             if ranks:
+                color = self.model_colors.get(model_name, '#333333')
                 ax.plot(positions, ranks, 'o-', label=model_name,
-                       linewidth=2, markersize=8)
+                       linewidth=2, markersize=8, color=color)
 
         ax.set_xlabel('Layer Depth')
         ax.set_ylabel('Effective Rank')
@@ -1218,8 +1286,17 @@ class ModelAnalyzer:
                                value_vars=['Mean', 'Std', 'Sparsity'],
                                var_name='Metric', value_name='Value')
 
+            # Sort models for consistent ordering
+            model_order = sorted(metric_df['Model'].unique())
+
+            # Create custom palette based on model colors
+            palette = []
+            for model in model_order:
+                color = self.model_colors.get(model, '#333333')
+                palette.append(color)
+
             sns.violinplot(data=metric_df, x='Metric', y='Value', hue='Model',
-                          ax=ax, palette=self.config.color_palette)
+                          ax=ax, palette=palette, hue_order=model_order)
 
             ax.set_title('Key Layer Activation Statistics Comparison')
             ax.grid(True, alpha=0.3, axis='y')
@@ -1305,7 +1382,7 @@ class ModelAnalyzer:
 
         # Prepare data
         radar_data = {}
-        for model_name in self.models:
+        for model_name in sorted(self.models.keys()):  # Sort for consistency
             values = []
 
             # Accuracy
@@ -1339,13 +1416,12 @@ class ModelAnalyzer:
         # Complete the circle
         angles += angles[:1]
 
-        # Plot data
-        colors = plt.cm.Set3(np.arange(len(self.models)))
-
-        for i, (model_name, values) in enumerate(radar_data.items()):
+        # Plot data using consistent colors
+        for model_name, values in radar_data.items():
             values += values[:1]  # Complete the circle
-            ax.plot(angles, values, 'o-', linewidth=2, label=model_name, color=colors[i])
-            ax.fill(angles, values, alpha=0.15, color=colors[i])
+            color = self.model_colors.get(model_name, '#333333')
+            ax.plot(angles, values, 'o-', linewidth=2, label=model_name, color=color)
+            ax.fill(angles, values, alpha=0.15, color=color)
 
         ax.set_xticks(angles[:-1])
         ax.set_xticklabels(categories)
@@ -1367,15 +1443,14 @@ class ModelAnalyzer:
         labels = self.results.weight_pca['labels']
         explained_var = self.results.weight_pca['explained_variance']
 
-        # Create enhanced scatter plot
-        colors = plt.cm.Set3(np.arange(len(labels)))
-
+        # Create enhanced scatter plot using consistent colors
         for i, (label, comp) in enumerate(zip(labels, components)):
-            ax.scatter(comp[0], comp[1], c=[colors[i]], label=label,
+            color = self.model_colors.get(label, '#333333')
+            ax.scatter(comp[0], comp[1], c=[color], label=label,
                       s=200, alpha=0.8, edgecolors='black', linewidth=2)
 
             # Add connecting lines to origin
-            ax.plot([0, comp[0]], [0, comp[1]], '--', color=colors[i], alpha=0.3)
+            ax.plot([0, comp[0]], [0, comp[1]], '--', color=color, alpha=0.3)
 
         # Add origin
         ax.scatter(0, 0, c='black', s=50, marker='x')
@@ -1403,20 +1478,23 @@ class ModelAnalyzer:
         if confidence_data:
             df = pd.DataFrame(confidence_data)
 
+            # Sort models for consistency
+            model_order = sorted(df['Model'].unique())
+
             # Create enhanced violin plot
             parts = ax.violinplot([df[df['Model'] == m]['Confidence'].values
-                                  for m in df['Model'].unique()],
-                                 positions=range(len(df['Model'].unique())),
+                                  for m in model_order],
+                                 positions=range(len(model_order)),
                                  showmeans=True, showmedians=True)
 
-            # Customize colors
-            colors = plt.cm.Set3(np.arange(len(df['Model'].unique())))
-            for i, pc in enumerate(parts['bodies']):
-                pc.set_facecolor(colors[i])
-                pc.set_alpha(0.6)
+            # Customize colors using consistent palette
+            for i, model in enumerate(model_order):
+                color = self.model_colors.get(model, '#333333')
+                parts['bodies'][i].set_facecolor(color)
+                parts['bodies'][i].set_alpha(0.6)
 
-            ax.set_xticks(range(len(df['Model'].unique())))
-            ax.set_xticklabels(df['Model'].unique(), rotation=45 if len(df['Model'].unique()) > 3 else 0)
+            ax.set_xticks(range(len(model_order)))
+            ax.set_xticklabels(model_order, rotation=45 if len(model_order) > 3 else 0)
             ax.set_ylabel('Confidence (Max Probability)')
             ax.set_title('Confidence Distribution Profiles')
             ax.grid(True, alpha=0.3, axis='y')
@@ -1430,12 +1508,14 @@ class ModelAnalyzer:
             ax.axis('off')
             return
 
-        # Plot validation accuracy curves
-        for model_name, history in self.results.training_history.items():
+        # Plot validation accuracy curves with consistent colors
+        for model_name in sorted(self.results.training_history.keys()):
+            history = self.results.training_history[model_name]
             if 'val_accuracy' in history:
                 epochs = range(1, len(history['val_accuracy']) + 1)
+                color = self.model_colors.get(model_name, '#333333')
                 ax.plot(epochs, history['val_accuracy'], '-', label=model_name,
-                       linewidth=2, marker='o', markersize=3)
+                       linewidth=2, marker='o', markersize=3, color=color)
 
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Validation Accuracy')

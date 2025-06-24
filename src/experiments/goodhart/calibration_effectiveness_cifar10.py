@@ -162,29 +162,6 @@ Advanced usage with custom configuration:
     results = run_experiment(config)
     ```
 
-Output Structure
-----------------
-
-The experiment generates comprehensive outputs in the specified directory:
-
-    ```
-    results/
-    ├── cifar10_loss_comparison_analyzer_YYYYMMDD_HHMMSS/
-    │   ├── model_analysis/              # ModelAnalyzer outputs
-    │   │   ├── calibration_analysis/    # ECE, Brier scores, reliability diagrams
-    │   │   ├── weight_analysis/         # Weight distribution analysis
-    │   │   ├── activation_analysis/     # Layer activation patterns
-    │   │   └── probability_analysis/    # Output distribution analysis
-    │   ├── training_plots/              # Individual model training curves
-    │   │   ├── CrossEntropy/
-    │   │   ├── LabelSmoothing/
-    │   │   ├── FocalLoss/
-    │   │   └── GoodhartAware/
-    │   └── visualizations/              # Comparative analysis plots
-    │       ├── training_comparison.png  # Side-by-side training curves
-    │       └── loss_function_confusion_matrices.png
-    ```
-
 Theoretical Foundation
 ----------------------
 
@@ -265,7 +242,7 @@ class ExperimentConfig:
     use_residual: bool = True  # Enable residual connections
 
     # --- Training Parameters ---
-    epochs: int = 0  # Number of training epochs (0 for testing)
+    epochs: int = 0  # Number of training epochs
     batch_size: int = 64  # Training batch size
     learning_rate: float = 0.001  # Adam optimizer learning rate
     early_stopping_patience: int = 15  # Patience for early stopping
