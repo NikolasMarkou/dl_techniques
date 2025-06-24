@@ -195,14 +195,12 @@ import gc
 import keras
 import numpy as np
 
-# --- Core project utilities ---
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.goodhart_loss import GoodhartAwareLoss
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.utils.datasets import load_and_preprocess_cifar10
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 
-# --- ModelAnalyzer for comprehensive analysis ---
 from dl_techniques.utils.analyzer import (
     ModelAnalyzer,
     AnalysisConfig,
@@ -431,12 +429,13 @@ def build_model(config: ExperimentConfig, loss_fn: Callable, name: str) -> keras
 
     # Initial convolutional layer
     x = keras.layers.Conv2D(
-        config.conv_filters[0],
-        config.kernel_size,
+        filters=config.conv_filters[0],
+        kernel_size=(4, 4),
+        strides=(2, 2),
         padding='same',
         kernel_initializer=config.kernel_initializer,
         kernel_regularizer=keras.regularizers.L2(config.weight_decay),
-        name='initial_conv'
+        name='stem'
     )(x)
 
     if config.use_batch_norm:
