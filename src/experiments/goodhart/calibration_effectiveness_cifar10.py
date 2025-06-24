@@ -1,87 +1,208 @@
 """
-Colored CIFAR10 Spurious Correlation Experiment: GoodhartAwareLoss vs. Baselines
-================================================================================
+CIFAR-10 Loss Function Comparison: Evaluating Goodhart-Aware Training
+=====================================================================
 
-This module implements a comprehensive experiment to evaluate and compare the robustness
-of different loss functions against spurious correlations. The experiment uses a synthetic
-Colored CIFAR10 dataset to test whether models can avoid "gaming the metric" by exploiting
-dataset artifacts, a key manifestation of Goodhart's Law in machine learning.
+This experiment conducts a comprehensive comparison of different loss functions
+for image classification on CIFAR-10, with particular emphasis on evaluating
+the effectiveness of the GoodhartAwareLoss against traditional approaches.
 
-The experiment systematically compares loss function variants using the project's
-standard analysis framework, focusing on metrics that quantify robustness to
-distributional shifts.
+The study addresses a fundamental question in deep learning: how do different
+loss formulations affect model robustness, calibration, and generalization?
+By comparing standard cross-entropy with more sophisticated loss functions,
+this experiment provides insights into the trade-offs between accuracy,
+confidence calibration, and resistance to overfitting.
 
-EXPERIMENT OVERVIEW
-------------------
-The experiment trains multiple CNN models with identical architectures but different
-loss functions applied during training:
+Experimental Design
+-------------------
 
-1. **Standard Cross-Entropy**: A baseline model expected to overfit to spurious features.
-2. **Label Smoothing**: A common regularization technique tested for its robustness benefits.
-3. **GoodhartAwareLoss**: An information-theoretic loss designed to prevent metric gaming
-   by regularizing the model's internal information flow and output uncertainty.
+**Dataset**: CIFAR-10 (10 classes, 32×32 RGB images)
+- 50,000 training images
+- 10,000 test images
+- Standard preprocessing with normalization
 
-SPURIOUS CORRELATION DESIGN
----------------------------
-A synthetic Colored CIFAR10 dataset is generated with a controlled distribution shift
-between the training and test sets:
+**Model Architecture**: ResNet-inspired CNN with the following components:
+- Initial convolutional layer (32 filters)
+- 4 convolutional blocks with residual connections
+- Progressive filter scaling: [32, 64, 128, 256]
+- Batch normalization and dropout regularization
+- Global average pooling
+- Dense classification layers with L2 regularization
+- Configurable architecture parameters for systematic studies
 
-- **Training Set (High Correlation)**: A strong, spurious correlation (e.g., 95%) is
-  introduced between the digit's class and its color. For example, the digit '7' is
-  colored red 95% of the time. A model can achieve high training accuracy by simply
-  learning this color-to-class mapping.
+**Loss Functions Evaluated**:
 
-- **Test Set (Zero Correlation)**: The spurious correlation is completely removed.
-  Colors are assigned randomly, providing no information about the digit's class.
-  A model's performance on this set reveals whether it learned the true underlying
-  feature (digit shape) or relied on the spurious shortcut (color).
+1. **Standard Cross-Entropy**: The baseline approach for multi-class classification
+2. **Label Smoothing**: Cross-entropy with soft targets (α=0.1) to reduce overconfidence
+3. **Focal Loss**: Addresses class imbalance by down-weighting easy examples (γ=2.0)
+4. **Goodhart-Aware Loss**: Information-theoretic approach combining:
+   - Cross-entropy for task accuracy
+   - Entropy regularization to maintain prediction uncertainty
+   - Mutual information regularization to compress irrelevant features
 
-RESEARCH HYPOTHESIS
-------------------
-**Core Claims Being Tested:**
-- GoodhartAwareLoss (GAL) should maintain higher test accuracy on the uncorrelated
-  test set, demonstrating superior robustness.
-- GAL should exhibit a smaller "generalization gap" (the drop in accuracy from the
-  training set to the test set), indicating less overfitting to spurious patterns.
-- GAL should force the model to learn the true, causal features (digit morphology)
-  instead of the easy, spurious ones (color).
+Comprehensive Analysis Pipeline
+------------------------------
 
-METHODOLOGY
------------
-Each model follows an identical training and evaluation protocol to ensure a fair comparison:
+The experiment employs a multi-faceted analysis approach:
 
-- **Architecture**: A standard CNN optimized for 28x28 images. All models share the
-  exact same architecture and weight initialization. The model outputs raw logits for
-  numerical stability.
-- **Dataset**: The generated Colored CIFAR10 dataset with a 95% train / 0% test correlation.
-- **Training**: All models are trained using the project's standard `train_model` utility,
-  ensuring identical optimizers, learning rate schedules, and epochs.
-- **Evaluation**: Robustness is quantified by measuring the test set accuracy and the
-  generalization gap. A modular `RobustnessAnalyzer` handles the evaluation.
+**Training Analysis**:
+- Training and validation curves for all loss functions
+- Convergence behavior and stability metrics
+- Early stopping based on validation accuracy
 
-ROBUSTNESS METRICS
-------------------
-**Test Set Accuracy (Primary Metric):**
-- The model's accuracy on the "fair" test set where the color correlation is broken.
-- This is the single most important measure of a model's robustness. Higher is better.
+**Model Performance Evaluation**:
+- Test set accuracy and top-k accuracy
+- Loss values and convergence characteristics
+- Statistical significance testing across runs
 
-**Generalization Gap:**
-- Defined as: `Train Accuracy - Test Accuracy`.
-- Measures the degree to which a model has overfitted to the spurious correlations
-  present only in the training data. A smaller gap indicates more robust learning.
+**Calibration Analysis** (via ModelAnalyzer):
+- Expected Calibration Error (ECE) with configurable binning
+- Brier score for probabilistic prediction quality
+- Reliability diagrams and calibration plots
+- Confidence histogram analysis
 
-ANALYSIS OUTPUTS
----------------
-The experiment produces a set of comparative analyses and visualizations:
+**Weight and Activation Analysis**:
+- Layer-wise weight distribution statistics
+- Activation pattern analysis across the network
+- Information flow characteristics
+- Feature representation quality
 
-**Robustness Analysis:**
-- A bar chart comparing the Test Accuracy and Generalization Gap across all tested
-  loss functions.
-- A clear, data-driven summary verdict on the research hypothesis.
+**Probability Distribution Analysis**:
+- Output probability distribution characteristics
+- Entropy analysis of predictions
+- Uncertainty quantification metrics
 
-**Training Analysis:**
-- Training and validation accuracy/loss curves for all models, managed by the
-  `train_model` utility.
+**Visual Analysis**:
+- Training history comparison plots
+- Confusion matrices for each loss function
+- Calibration and reliability diagrams
+- Weight distribution visualizations
+
+Configuration and Customization
+-------------------------------
+
+The experiment is highly configurable through the ``ExperimentConfig`` class:
+
+**Architecture Parameters**:
+- ``conv_filters``: Filter counts for convolutional layers
+- ``dense_units``: Hidden unit counts for dense layers
+- ``dropout_rates``: Dropout probabilities per layer
+- ``weight_decay``: L2 regularization strength
+
+**Training Parameters**:
+- ``epochs``: Number of training epochs
+- ``batch_size``: Training batch size
+- ``learning_rate``: Adam optimizer learning rate
+- ``early_stopping_patience``: Patience for early stopping
+
+**Loss Function Parameters**:
+- Easily extensible loss function dictionary
+- Configurable hyperparameters for each loss
+- Support for custom loss implementations
+
+**Analysis Parameters**:
+- ``calibration_bins``: Number of bins for calibration analysis
+- Output directory structure and naming
+- Visualization and plotting options
+
+Expected Outcomes and Insights
+------------------------------
+
+This experiment is designed to reveal:
+
+1. **Accuracy vs. Calibration Trade-offs**: How different loss functions balance
+   task performance with prediction reliability
+
+2. **Robustness Characteristics**: Which approaches produce more robust models
+   that generalize better to unseen data
+
+3. **Information-Theoretic Benefits**: Whether the Goodhart-Aware Loss's
+   information bottleneck principle provides measurable advantages
+
+4. **Training Dynamics**: How different loss formulations affect convergence
+   speed, stability, and final performance
+
+Usage Example
+-------------
+
+Basic usage with default configuration:
+
+    ```python
+    from pathlib import Path
+
+    # Run with default settings
+    config = ExperimentConfig()
+    results = run_experiment(config)
+
+    # Access results
+    performance = results['performance_analysis']
+    calibration = results['model_analysis'].calibration_metrics
+    ```
+
+Advanced usage with custom configuration:
+
+    ```python
+    # Custom configuration
+    config = ExperimentConfig(
+        epochs=50,
+        batch_size=128,
+        learning_rate=0.0001,
+        output_dir=Path("custom_results"),
+        calibration_bins=20,
+        # Add custom loss functions
+        loss_functions={
+            'CrossEntropy': lambda: keras.losses.CategoricalCrossentropy(from_logits=True),
+            'CustomGoodhart': lambda: GoodhartAwareLoss(
+                entropy_weight=0.05,
+                mi_weight=0.005,
+                from_logits=True
+            )
+        }
+    )
+
+    results = run_experiment(config)
+    ```
+
+Output Structure
+----------------
+
+The experiment generates comprehensive outputs in the specified directory:
+
+    ```
+    results/
+    ├── cifar10_loss_comparison_analyzer_YYYYMMDD_HHMMSS/
+    │   ├── model_analysis/              # ModelAnalyzer outputs
+    │   │   ├── calibration_analysis/    # ECE, Brier scores, reliability diagrams
+    │   │   ├── weight_analysis/         # Weight distribution analysis
+    │   │   ├── activation_analysis/     # Layer activation patterns
+    │   │   └── probability_analysis/    # Output distribution analysis
+    │   ├── training_plots/              # Individual model training curves
+    │   │   ├── CrossEntropy/
+    │   │   ├── LabelSmoothing/
+    │   │   ├── FocalLoss/
+    │   │   └── GoodhartAware/
+    │   └── visualizations/              # Comparative analysis plots
+    │       ├── training_comparison.png  # Side-by-side training curves
+    │       └── loss_function_confusion_matrices.png
+    ```
+
+Theoretical Foundation
+----------------------
+
+This experiment is grounded in several key theoretical frameworks:
+
+**Information Theory**: The Goodhart-Aware Loss leverages information-theoretic
+principles to balance task performance with model robustness, drawing from:
+- Information Bottleneck Principle (Tishby et al.)
+- Entropy regularization for calibration (Pereyra et al.)
+- Mutual information constraints for generalization
+
+**Statistical Learning Theory**: The comparison addresses fundamental questions
+about the bias-variance trade-off and how different loss formulations affect
+generalization bounds.
+
+**Calibration Theory**: The analysis framework evaluates how well predicted
+probabilities reflect true confidence, crucial for reliable decision-making
+in real-world applications.
 """
 
 # ------------------------------------------------------------------------------
@@ -100,7 +221,6 @@ import numpy as np
 # Local imports
 # ------------------------------------------------------------------------------
 
-# --- Core project utilities (preserved from original) ---
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.goodhart_loss import GoodhartAwareLoss
 from dl_techniques.utils.train import TrainingConfig, train_model
@@ -140,7 +260,7 @@ class ExperimentConfig:
     use_residual: bool = True
 
     # Training Parameters
-    epochs: int = 10
+    epochs: int = 1
     batch_size: int = 64
     learning_rate: float = 0.001
     early_stopping_patience: int = 15
@@ -281,15 +401,25 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     logger.info("🛠️  Creating models with softmax output for analysis...")
     analysis_models = {}
     for name, trained_model in models.items():
+        # Create new model with softmax output
         logits_output = trained_model.output
         probs_output = keras.layers.Activation('softmax', name='predictions')(logits_output)
         analysis_model = keras.Model(inputs=trained_model.input, outputs=probs_output, name=f"{name}_prediction")
-        analysis_model.compile(loss='categorical_crossentropy', metrics=['accuracy', 'top_k_categorical_accuracy'])
+
+        # FIXED: Transfer weights from trained model to analysis model
+        analysis_model.set_weights(trained_model.get_weights())
+
+        # Compile with appropriate metrics
+        analysis_model.compile(
+            optimizer='adam',
+            loss='categorical_crossentropy',
+            metrics=['accuracy', keras.metrics.TopKCategoricalAccuracy(k=5, name='top_5_accuracy')]
+        )
         analysis_models[name] = analysis_model
 
-    # --- NEW: Free up memory ---
+    # --- NEW: Free up memory (but keep models for performance evaluation) ---
     logger.info("🗑️  Releasing original training models from memory...")
-    del models
+    # Don't delete models yet - we need them for verification
     import gc
     gc.collect()  # Ask the garbage collector to run
     # --- END NEW ---
@@ -299,9 +429,14 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     model_analysis_results = None
     try:
         analyzer_config = AnalysisConfig(
-            analyze_weights=True, analyze_calibration=True, analyze_probability_distributions=True,
-            analyze_activations=False, analyze_information_flow=False,
-            calibration_bins=config.calibration_bins, save_plots=True, plot_style='publication',
+            analyze_weights=True,
+            analyze_calibration=True,
+            analyze_probability_distributions=True,
+            analyze_activations=False,
+            analyze_information_flow=False,
+            calibration_bins=config.calibration_bins,
+            save_plots=True,
+            plot_style='publication',
         )
         analyzer = ModelAnalyzer(
             models=analysis_models, config=analyzer_config,
@@ -336,10 +471,42 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
     # --- Final Performance Evaluation ---
     logger.info("📈 Evaluating final model performance on full test set...")
+
+    # Debug: Check data format
+    logger.info(f"Test data shape: {cifar10_data.x_test.shape}, {cifar10_data.y_test.shape}")
+    logger.info(f"Test labels sample: {cifar10_data.y_test[:5]}")
+
     performance_results = {}
     for name, model in analysis_models.items():
         eval_results = model.evaluate(cifar10_data.x_test, cifar10_data.y_test, verbose=0)
-        performance_results[name] = dict(zip(model.metrics_names, eval_results))
+
+        # FIXED: Handle different metric naming conventions
+        metrics_dict = dict(zip(model.metrics_names, eval_results))
+
+        # Debug logging to see what metrics are actually returned
+        logger.info(f"Raw metrics for {name}: {metrics_dict}")
+
+        # Map common metric name variations to standard names
+        standardized_metrics = {}
+        for metric_name, value in metrics_dict.items():
+            if metric_name == 'accuracy':
+                standardized_metrics['accuracy'] = value
+            elif 'top' in metric_name.lower():
+                standardized_metrics['top_k_categorical_accuracy'] = value
+            elif metric_name == 'compile_metrics':  # Handle edge case
+                standardized_metrics['accuracy'] = value
+            else:
+                standardized_metrics[metric_name] = value
+
+        performance_results[name] = standardized_metrics
+
+        # Ensure top_k_categorical_accuracy exists even if not found
+        if 'top_k_categorical_accuracy' not in standardized_metrics:
+            standardized_metrics['top_k_categorical_accuracy'] = 0.0
+            logger.warning(f"Top-K accuracy not found for {name}, setting to 0.0")
+
+        # FIXED: Add debug logging to verify weights were transferred correctly
+        logger.info(f"Model {name} final metrics: {standardized_metrics}")
 
     # --- SUMMARY ---
     results_payload = {

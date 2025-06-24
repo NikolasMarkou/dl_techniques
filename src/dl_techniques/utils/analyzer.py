@@ -53,6 +53,7 @@ from sklearn.decomposition import PCA
 from dataclasses import dataclass, field
 from sklearn.preprocessing import StandardScaler
 from typing import Dict, List, Optional, Union, Any, Tuple, Set, NamedTuple
+import warnings
 
 # ------------------------------------------------------------------------------
 # Local imports
@@ -197,7 +198,7 @@ class AnalysisConfig:
             'axes.spines.top': False,
             'axes.spines.right': False,
             'axes.axisbelow': True,
-            'figure.autolayout': True,
+            'figure.autolayout': False,  # Disabled to avoid conflicts with manual layout
         })
 
         # Set seaborn theme
@@ -235,6 +236,37 @@ class AnalysisResults:
     # Metadata
     analysis_timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     config: Optional[AnalysisConfig] = None
+
+# ------------------------------------------------------------------------------
+# Utility Functions for Safe Plotting
+# ------------------------------------------------------------------------------
+
+def safe_set_xticklabels(ax, labels, rotation=0, max_labels=10):
+    """Safely set x-tick labels with proper handling."""
+    try:
+        if len(labels) > max_labels:
+            # Reduce number of labels if too many
+            step = len(labels) // max_labels
+            indices = range(0, len(labels), step)
+            ax.set_xticks([i for i in indices])
+            ax.set_xticklabels([labels[i] for i in indices], rotation=rotation, ha='right' if rotation > 0 else 'center')
+        else:
+            ax.set_xticks(range(len(labels)))
+            ax.set_xticklabels(labels, rotation=rotation, ha='right' if rotation > 0 else 'center')
+    except Exception as e:
+        logger.warning(f"Could not set x-tick labels: {e}")
+
+def safe_tight_layout(fig, **kwargs):
+    """Safely apply tight_layout with error handling."""
+    try:
+        fig.tight_layout(**kwargs)
+    except Exception as e:
+        logger.warning(f"Could not apply tight_layout: {e}")
+        # Try alternative layout adjustment
+        try:
+            fig.subplots_adjust(hspace=0.3, wspace=0.3)
+        except Exception:
+            pass
 
 # ------------------------------------------------------------------------------
 # Model Analyzer
@@ -607,9 +639,9 @@ class ModelAnalyzer:
 
     def _plot_weight_analysis(self) -> None:
         """Create weight analysis visualizations."""
-        # Create figure with subplots
+        # FIXED: Use subplots_adjust instead of constrained_layout
         fig = plt.figure(figsize=self.config.get_figure_size(1.5))
-        gs = plt.GridSpec(3, 2, hspace=0.3, wspace=0.3)
+        gs = plt.GridSpec(3, 2, figure=fig, hspace=0.4, wspace=0.4)
 
         # 1. Norm distributions
         ax1 = fig.add_subplot(gs[0, :])
@@ -636,6 +668,7 @@ class ModelAnalyzer:
             self._plot_weight_pca(ax5)
 
         plt.suptitle('Weight Distribution Analysis', fontsize=16, fontweight='bold')
+        fig.subplots_adjust(top=0.93, bottom=0.1, left=0.1, right=0.95)
 
         if self.config.save_plots:
             self._save_figure(fig, 'weight_analysis')
@@ -656,12 +689,23 @@ class ModelAnalyzer:
         if norm_data:
             df = pd.DataFrame(norm_data)
 
-            # Use seaborn violin plot
-            sns.violinplot(data=df, x='Model', y='L2 Norm', ax=ax,
-                           inner='quartile', hue='Model', palette=self.config.color_palette, legend=False)
+            # FIXED: Use seaborn violin plot with proper handling
+            try:
+                sns.violinplot(data=df, x='Model', y='L2 Norm', ax=ax,
+                               inner='quartile', hue='Model', palette=self.config.color_palette, legend=False)
 
-            ax.set_xticklabels(ax.get_xticklabels(),
-                              rotation=45 if len(df['Model'].unique()) > 3 else 0)
+                # FIXED: Safe x-tick label rotation
+                labels = [t.get_text() for t in ax.get_xticklabels()]
+                if len(labels) > 3:
+                    safe_set_xticklabels(ax, labels, rotation=45)
+
+            except Exception as e:
+                logger.warning(f"Could not create violin plot: {e}")
+                # Fallback to simple bar plot
+                model_means = df.groupby('Model')['L2 Norm'].mean()
+                ax.bar(range(len(model_means)), model_means.values)
+                safe_set_xticklabels(ax, model_means.index.tolist())
+
             ax.set_ylabel('L2 Norm')
             ax.set_title('Weight Norm Distributions by Model')
             ax.grid(True, alpha=0.3)
@@ -697,8 +741,8 @@ class ModelAnalyzer:
             ax.set_xlabel('Model')
             ax.set_ylabel('Value')
             ax.set_title('Weight Statistics Comparison')
-            ax.set_xticks(x)
-            ax.set_xticklabels(df['Model'], rotation=45 if len(df) > 3 else 0)
+            # FIXED: Safe x-tick handling
+            safe_set_xticklabels(ax, df['Model'].tolist(), rotation=45 if len(df) > 3 else 0)
             ax.legend()
             ax.grid(True, alpha=0.3)
 
@@ -716,14 +760,25 @@ class ModelAnalyzer:
         if sparsity_data:
             df = pd.DataFrame(sparsity_data)
 
-            # Use seaborn box plot
-            sns.boxplot(data=df, x='Model', y='Zero Fraction', ax=ax,
-                        hue='Model', palette=self.config.color_palette, legend=False)
+            # FIXED: Use seaborn box plot with proper handling
+            try:
+                sns.boxplot(data=df, x='Model', y='Zero Fraction', ax=ax,
+                            hue='Model', palette=self.config.color_palette, legend=False)
+
+                # FIXED: Safe x-tick label rotation
+                labels = [t.get_text() for t in ax.get_xticklabels()]
+                if len(labels) > 3:
+                    safe_set_xticklabels(ax, labels, rotation=45)
+
+            except Exception as e:
+                logger.warning(f"Could not create box plot: {e}")
+                # Fallback to simple bar plot
+                model_means = df.groupby('Model')['Zero Fraction'].mean()
+                ax.bar(range(len(model_means)), model_means.values)
+                safe_set_xticklabels(ax, model_means.index.tolist())
 
             ax.set_ylabel('Zero Fraction')
             ax.set_title('Weight Sparsity by Model')
-            ax.set_xticklabels(ax.get_xticklabels(),
-                              rotation=45 if len(df['Model'].unique()) > 3 else 0)
             ax.grid(True, alpha=0.3)
 
     def _plot_weight_pca(self, ax) -> None:
@@ -824,7 +879,9 @@ class ModelAnalyzer:
         if not any(self.results.activation_stats.values()):
             return
 
+        # FIXED: Use subplots_adjust instead of constrained_layout
         fig, axes = plt.subplots(2, 2, figsize=self.config.get_figure_size())
+        fig.subplots_adjust(hspace=0.3, wspace=0.3)
 
         # 1. Activation distributions
         ax1 = axes[0, 0]
@@ -843,7 +900,6 @@ class ModelAnalyzer:
         self._plot_activation_summary(ax4)
 
         plt.suptitle('Activation Analysis', fontsize=16, fontweight='bold')
-        plt.tight_layout()
 
         if self.config.save_plots:
             self._save_figure(fig, 'activation_analysis')
@@ -895,9 +951,9 @@ class ModelAnalyzer:
             ax.set_xlabel('Model/Layer')
             ax.set_ylabel('Ratio')
             ax.set_title('Activation Sparsity Analysis')
-            ax.set_xticks(x)
-            ax.set_xticklabels([f"{row['Model'][:8]}\n{row['Layer'][:8]}"
-                               for _, row in df.iterrows()], rotation=45)
+            # FIXED: Safe x-tick handling
+            labels = [f"{row['Model'][:8]}\n{row['Layer'][:8]}" for _, row in df.iterrows()]
+            safe_set_xticklabels(ax, labels, rotation=45)
             ax.legend()
             ax.grid(True, alpha=0.3)
 
@@ -925,25 +981,32 @@ class ModelAnalyzer:
             n_cols = 4
             n_rows = (n_features + n_cols - 1) // n_cols
 
-            # Create subgrid
-            from matplotlib.gridspec import GridSpecFromSubplotSpec
-            gs_sub = GridSpecFromSubplotSpec(n_rows, n_cols, subplot_spec=ax.get_gridspec()[1, 0],
-                                            wspace=0.1, hspace=0.1)
+            # Create subgrid - FIXED: Avoid complex subplot management
+            try:
+                from matplotlib.gridspec import GridSpecFromSubplotSpec
+                gs_sub = GridSpecFromSubplotSpec(n_rows, n_cols, subplot_spec=ax.get_gridspec()[1, 0],
+                                                wspace=0.1, hspace=0.1)
 
-            for i in range(n_features):
-                row = i // n_cols
-                col = i % n_cols
-                ax_sub = plt.subplot(gs_sub[row, col])
+                for i in range(n_features):
+                    row = i // n_cols
+                    col = i % n_cols
+                    ax_sub = plt.subplot(gs_sub[row, col])
 
-                # Plot feature map
-                im = ax_sub.imshow(sample_acts[:, :, i], cmap='viridis', aspect='auto')
-                ax_sub.axis('off')
-                ax_sub.set_title(f'F{i}', fontsize=8)
+                    # Plot feature map
+                    im = ax_sub.imshow(sample_acts[:, :, i], cmap='viridis', aspect='auto')
+                    ax_sub.axis('off')
+                    ax_sub.set_title(f'F{i}', fontsize=8)
 
-            # Main axis adjustments
-            ax.set_visible(False)
-            ax.text(0.5, 1.05, f'Sample Activation Maps - {model_name}',
-                   transform=ax.transAxes, ha='center', fontsize=12, fontweight='bold')
+                # Main axis adjustments
+                ax.set_visible(False)
+                ax.text(0.5, 1.05, f'Sample Activation Maps - {model_name}',
+                       transform=ax.transAxes, ha='center', fontsize=12, fontweight='bold')
+            except Exception as e:
+                logger.warning(f"Could not create activation subplots: {e}")
+                ax.text(0.5, 0.5, f'Activation visualization failed\n{str(e)[:50]}...',
+                       ha='center', va='center', transform=ax.transAxes)
+                ax.set_title('Sample Activations')
+                ax.axis('off')
         else:
             # Fallback for non-conv layers
             ax.text(0.5, 0.5, 'No convolutional activations available\nfor visualization',
@@ -1029,7 +1092,9 @@ class ModelAnalyzer:
 
     def _plot_calibration_analysis(self) -> None:
         """Create calibration analysis visualizations."""
+        # FIXED: Use subplots_adjust instead of constrained_layout
         fig, axes = plt.subplots(2, 2, figsize=self.config.get_figure_size())
+        fig.subplots_adjust(hspace=0.3, wspace=0.3)
 
         # 1. Reliability diagrams
         ax1 = axes[0, 0]
@@ -1048,7 +1113,6 @@ class ModelAnalyzer:
         self._plot_entropy_analysis(ax4)
 
         plt.suptitle('Calibration Analysis', fontsize=16, fontweight='bold')
-        plt.tight_layout()
 
         if self.config.save_plots:
             self._save_figure(fig, 'calibration_analysis')
@@ -1090,9 +1154,9 @@ class ModelAnalyzer:
                 ax.legend(title='Metric')
                 ax.grid(True, alpha=0.3)
 
-                # Rotate x labels if many models
+                # FIXED: Safe x-tick label rotation
                 if len(metrics_df) > 3:
-                    ax.set_xticklabels(ax.get_xticklabels(), rotation=45)
+                    safe_set_xticklabels(ax, metrics_df.index.tolist(), rotation=45)
 
     def _plot_confidence_distributions(self, ax) -> None:
         """Plot confidence score distributions."""
@@ -1148,8 +1212,8 @@ class ModelAnalyzer:
             ax.set_xlabel('Model')
             ax.set_ylabel('Entropy')
             ax.set_title('Prediction Entropy Analysis')
-            ax.set_xticks(x)
-            ax.set_xticklabels(df['Model'], rotation=45 if len(df) > 3 else 0)
+            # FIXED: Safe x-tick handling
+            safe_set_xticklabels(ax, df['Model'].tolist(), rotation=45 if len(df) > 3 else 0)
             ax.legend()
             ax.grid(True, alpha=0.3)
 
@@ -1192,8 +1256,9 @@ class ModelAnalyzer:
 
     def _plot_probability_analysis(self) -> None:
         """Create probability distribution visualizations."""
+        # FIXED: Use subplots_adjust instead of constrained_layout
         fig = plt.figure(figsize=self.config.get_figure_size(1.5))
-        gs = plt.GridSpec(3, 2, hspace=0.3, wspace=0.3)
+        gs = plt.GridSpec(3, 2, figure=fig, hspace=0.4, wspace=0.4)
 
         # 1. Confidence landscape
         ax1 = fig.add_subplot(gs[0, :])
@@ -1212,6 +1277,7 @@ class ModelAnalyzer:
         self._plot_class_confidence(ax4)
 
         plt.suptitle('Probability Distribution Analysis', fontsize=16, fontweight='bold')
+        fig.subplots_adjust(top=0.93, bottom=0.1, left=0.1, right=0.95)
 
         if self.config.save_plots:
             self._save_figure(fig, 'probability_analysis')
@@ -1295,8 +1361,8 @@ class ModelAnalyzer:
             ax.set_xlabel('Model')
             ax.set_ylabel('Value')
             ax.set_title('Uncertainty Metrics Comparison')
-            ax.set_xticks(x)
-            ax.set_xticklabels(df['Model'], rotation=45 if len(df) > 3 else 0)
+            # FIXED: Safe x-tick handling
+            safe_set_xticklabels(ax, df['Model'].tolist(), rotation=45 if len(df) > 3 else 0)
             ax.legend()
             ax.grid(True, alpha=0.3)
 
@@ -1406,7 +1472,9 @@ class ModelAnalyzer:
         if not self.results.information_flow:
             return
 
+        # FIXED: Use subplots_adjust instead of constrained_layout
         fig, axes = plt.subplots(2, 2, figsize=self.config.get_figure_size())
+        fig.subplots_adjust(hspace=0.3, wspace=0.3)
 
         # 1. Activation evolution
         ax1 = axes[0, 0]
@@ -1425,7 +1493,6 @@ class ModelAnalyzer:
         self._plot_layer_summary(ax4)
 
         plt.suptitle('Information Flow Analysis', fontsize=16, fontweight='bold')
-        plt.tight_layout()
 
         if self.config.save_plots:
             self._save_figure(fig, 'information_flow')
@@ -1532,8 +1599,9 @@ class ModelAnalyzer:
 
     def create_summary_dashboard(self) -> None:
         """Create a comprehensive summary dashboard."""
-        fig = plt.figure(figsize=(14, 10)) # A smaller, more memory-friendly size
-        gs = plt.GridSpec(4, 4, hspace=0.4, wspace=0.3)
+        # FIXED: Use subplots_adjust instead of constrained_layout for better control
+        fig = plt.figure(figsize=(14, 10))
+        gs = plt.GridSpec(4, 4, figure=fig, hspace=0.4, wspace=0.4)
 
         # 1. Model performance comparison
         ax1 = fig.add_subplot(gs[0, :2])
@@ -1560,6 +1628,9 @@ class ModelAnalyzer:
         self._plot_analysis_overview(ax6)
 
         plt.suptitle('Model Analysis Summary Dashboard', fontsize=18, fontweight='bold')
+
+        # FIXED: Use subplots_adjust instead of constrained_layout
+        fig.subplots_adjust(top=0.93, bottom=0.07, left=0.1, right=0.95)
 
         if self.config.save_plots:
             self._save_figure(fig, 'summary_dashboard')
@@ -1596,17 +1667,17 @@ class ModelAnalyzer:
         ax.set_ylabel('Accuracy', color='green')
         ax2.set_ylabel('Loss', color='red')
         ax.set_title('Model Performance Comparison')
-        ax.set_xticks(x)
-        ax.set_xticklabels(models, rotation=45 if len(models) > 3 else 0)
+        # FIXED: Safe x-tick handling
+        safe_set_xticklabels(ax, models, rotation=45 if len(models) > 3 else 0)
 
         # Add value labels
         for bar, val in zip(bars1, accuracies):
             ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                   f'{val:.3f}', ha='center', va='bottom')
+                   f'{val:.3f}', ha='center', va='bottom', fontsize=8)
 
         for bar, val in zip(bars2, losses):
             ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                    f'{val:.3f}', ha='center', va='bottom')
+                    f'{val:.3f}', ha='center', va='bottom', fontsize=8)
 
         ax.grid(True, alpha=0.3, axis='y')
 
@@ -1698,7 +1769,8 @@ class ModelAnalyzer:
             ax.bar(df['Model'], df['Sparsity'], alpha=0.8)
             ax.set_ylabel('Average Sparsity')
             ax.set_title('Weight Sparsity Summary')
-            ax.set_xticklabels(df['Model'], rotation=45 if len(df) > 3 else 0)
+            # FIXED: Safe x-tick handling
+            safe_set_xticklabels(ax, df['Model'].tolist(), rotation=45 if len(df) > 3 else 0)
 
             # Add text annotations
             for i, row in df.iterrows():
@@ -1735,8 +1807,8 @@ class ModelAnalyzer:
         ax.set_xlabel('Model')
         ax.set_ylabel('Score')
         ax.set_title('Calibration Summary')
-        ax.set_xticks(x)
-        ax.set_xticklabels(models, rotation=45 if len(models) > 3 else 0)
+        # FIXED: Safe x-tick handling
+        safe_set_xticklabels(ax, models, rotation=45 if len(models) > 3 else 0)
         ax.legend()
         ax.grid(True, alpha=0.3, axis='y')
 
@@ -1761,12 +1833,24 @@ class ModelAnalyzer:
         if confidence_data:
             df = pd.DataFrame(confidence_data)
 
-            # Use seaborn violin plot
-            sns.violinplot(data=df, x='Model', y='Confidence', ax=ax,
-                           inner='quartile', hue='Model', palette=self.config.color_palette, legend=False)
+            # FIXED: Use seaborn violin plot with safe handling
+            try:
+                sns.violinplot(data=df, x='Model', y='Confidence', ax=ax,
+                               inner='quartile', hue='Model', palette=self.config.color_palette, legend=False)
 
-            ax.set_xticklabels(ax.get_xticklabels(),
-                              rotation=45 if len(df['Model'].unique()) > 3 else 0)
+                # FIXED: Safe x-tick label rotation
+                labels = [t.get_text() for t in ax.get_xticklabels()]
+                if len(labels) > 3:
+                    safe_set_xticklabels(ax, labels, rotation=45)
+
+            except Exception as e:
+                logger.warning(f"Could not create confidence violin plot: {e}")
+                # Fallback to simple histogram
+                for model in df['Model'].unique():
+                    model_data = df[df['Model'] == model]['Confidence']
+                    ax.hist(model_data, bins=20, alpha=0.5, label=model)
+                ax.legend()
+
             ax.set_ylabel('Confidence (Max Probability)')
             ax.set_title('Confidence Distribution Summary')
             ax.grid(True, alpha=0.3, axis='y')
@@ -1817,10 +1901,22 @@ class ModelAnalyzer:
     # ------------------------------------------------------------------------------
 
     def _save_figure(self, fig: plt.Figure, name: str) -> None:
-        """Save figure with configured settings."""
-        filepath = self.output_dir / f"{name}.{self.config.save_format}"
-        fig.savefig(filepath, dpi=self.config.dpi, bbox_inches='tight')
-        logger.info(f"Saved plot: {filepath}")
+        """Save figure with configured settings and error handling."""
+        try:
+            filepath = self.output_dir / f"{name}.{self.config.save_format}"
+            # FIXED: Save with explicit bbox_inches and pad_inches to avoid layout issues
+            fig.savefig(filepath, dpi=self.config.dpi, bbox_inches='tight',
+                       facecolor='white', edgecolor='none', pad_inches=0.1)
+            logger.info(f"Saved plot: {filepath}")
+        except Exception as e:
+            logger.error(f"Could not save figure {name}: {e}")
+            # Try saving without bbox_inches as fallback
+            try:
+                filepath = self.output_dir / f"{name}_fallback.{self.config.save_format}"
+                fig.savefig(filepath, dpi=self.config.dpi, facecolor='white', edgecolor='none')
+                logger.info(f"Saved plot (fallback): {filepath}")
+            except Exception as e2:
+                logger.error(f"Fallback save also failed for {name}: {e2}")
 
     def save_results(self, filename: str = "analysis_results.json") -> None:
         """Save analysis results to JSON file with configurable filename."""
@@ -1835,11 +1931,10 @@ class ModelAnalyzer:
 
         # Convert numpy arrays to lists for JSON serialization
         def convert_numpy(obj):
-            # --- FIX STARTS HERE ---
+            # FIXED: Handle numpy scalars properly
             if isinstance(obj, np.generic):
                 return obj.item()  # Convert numpy scalar to python equivalent
-            # --- FIX ENDS HERE ---
-            if isinstance(obj, np.ndarray):
+            elif isinstance(obj, np.ndarray):
                 return obj.tolist()
             elif isinstance(obj, pd.DataFrame):
                 return obj.to_dict()
@@ -1852,11 +1947,13 @@ class ModelAnalyzer:
 
         results_dict = convert_numpy(results_dict)
 
-        filepath = self.output_dir / filename
-        with open(filepath, 'w') as f:
-            json.dump(results_dict, f, indent=2)
-
-        logger.info(f"Saved results to: {filepath}")
+        try:
+            filepath = self.output_dir / filename
+            with open(filepath, 'w') as f:
+                json.dump(results_dict, f, indent=2)
+            logger.info(f"Saved results to: {filepath}")
+        except Exception as e:
+            logger.error(f"Could not save results: {e}")
 
     def get_summary_statistics(self) -> Dict[str, Any]:
         """Get summary statistics of the analysis."""
