@@ -84,6 +84,7 @@ class SwinMLP(keras.layers.Layer):
 
     Args:
         hidden_dim: Dimension of the hidden layer.
+        use_bias: Whether to use bias or not
         out_dim: Dimension of the output layer. If None, uses input dimension.
         act_layer: Activation function name or callable. Defaults to "gelu".
         drop: Dropout rate. Defaults to 0.0.
@@ -98,6 +99,7 @@ class SwinMLP(keras.layers.Layer):
     def __init__(
             self,
             hidden_dim: int,
+            use_bias: bool = True,
             out_dim: Optional[int] = None,
             act_layer: Union[str, callable] = "gelu",
             drop: float = 0.0,
@@ -118,6 +120,7 @@ class SwinMLP(keras.layers.Layer):
 
         # Store configuration parameters
         self.hidden_dim = hidden_dim
+        self.use_bias = use_bias
         self.out_dim = out_dim
         self.act_layer = act_layer
         self.drop_rate = drop
@@ -153,6 +156,7 @@ class SwinMLP(keras.layers.Layer):
         # Create first dense layer
         self.fc1 = keras.layers.Dense(
             self.hidden_dim,
+            use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -172,6 +176,7 @@ class SwinMLP(keras.layers.Layer):
         # Create second dense layer
         self.fc2 = keras.layers.Dense(
             out_dim,
+            use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -252,6 +257,7 @@ class SwinMLP(keras.layers.Layer):
             "out_dim": self.out_dim,
             "act_layer": self.act_layer,
             "drop": self.drop_rate,
+            "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
