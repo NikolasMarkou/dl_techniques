@@ -27,6 +27,7 @@ Experimental Design
 - Batch normalization and dropout regularization
 - Global average pooling
 - Dense classification layers with L2 regularization
+- Softmax output layer for probability predictions
 - Configurable architecture parameters for systematic studies
 
 **Loss Functions Evaluated**:
@@ -150,11 +151,11 @@ Advanced usage with custom configuration:
         calibration_bins=20,
         # Add custom loss functions
         loss_functions={
-            'CrossEntropy': lambda: keras.losses.CategoricalCrossentropy(from_logits=True),
+            'CrossEntropy': lambda: keras.losses.CategoricalCrossentropy(from_logits=False),
             'CustomGoodhart': lambda: GoodhartAwareLoss(
                 entropy_weight=0.05,
                 mi_weight=0.005,
-                from_logits=True
+                from_logits=False
             )
         }
     )
@@ -246,27 +247,27 @@ class ExperimentConfig:
     early_stopping_patience: int = 15  # Patience for early stopping
     monitor_metric: str = 'val_accuracy'  # Metric to monitor for early stopping
 
-    # --- Loss Functions to Evaluate ---
+    # --- Loss Functions to Evaluate (Updated for softmax outputs) ---
     loss_functions: Dict[str, Callable] = field(default_factory=lambda: {
         'CrossEntropy': lambda: keras.losses.CategoricalCrossentropy(
-            from_logits=True),
+            from_logits=False),
         'LabelSmoothing': lambda: keras.losses.CategoricalCrossentropy(
-            label_smoothing=0.1, from_logits=True
+            label_smoothing=0.1, from_logits=False
         ),
         'FocalLoss': lambda: keras.losses.CategoricalFocalCrossentropy(
-            gamma=2.0, from_logits=True
+            gamma=2.0, from_logits=False
         ),
         'GoodhartAware': lambda: GoodhartAwareLoss(
-            entropy_weight=0.1, mi_weight=0.01, from_logits=True
+            entropy_weight=0.1, mi_weight=0.01, from_logits=False
         ),
         'GoodhartAware_ls': lambda: GoodhartAwareLoss(
-            entropy_weight=0.1, mi_weight=0.01, from_logits=True, label_smoothing=0.1
+            entropy_weight=0.1, mi_weight=0.01, from_logits=False, label_smoothing=0.1
         ),
     })
 
     # --- Experiment Configuration ---
     output_dir: Path = Path("results")  # Output directory for results
-    experiment_name: str = "cifar10_loss_comparison_analyzer"  # Experiment name
+    experiment_name: str = "cifar10_loss_comparison_softmax"  # Experiment name
     random_seed: int = 42  # Random seed for reproducibility
 
     # --- Analysis Configuration ---
@@ -409,11 +410,11 @@ def build_conv_block(
 
 def build_model(config: ExperimentConfig, loss_fn: Callable, name: str) -> keras.Model:
     """
-    Build a complete CNN model for CIFAR-10 classification.
+    Build a complete CNN model for CIFAR-10 classification with softmax output.
 
     This function constructs a ResNet-inspired CNN with configurable architecture
     parameters. The model includes convolutional blocks, global average pooling,
-    and dense classification layers.
+    dense classification layers, and a final softmax layer for probability output.
 
     Args:
         config: Experiment configuration containing model architecture parameters
@@ -421,7 +422,7 @@ def build_model(config: ExperimentConfig, loss_fn: Callable, name: str) -> keras
         name: Name prefix for the model and its layers
 
     Returns:
-        Compiled Keras model ready for training
+        Compiled Keras model ready for training with softmax probability outputs
     """
     # Define input layer
     inputs = keras.layers.Input(shape=config.input_shape, name=f'{name}_input')
@@ -469,7 +470,7 @@ def build_model(config: ExperimentConfig, loss_fn: Callable, name: str) -> keras
             if dropout_rate > 0:
                 x = keras.layers.Dropout(dropout_rate)(x)
 
-    # Final classification layer (logits output)
+    # Pre-softmax logits layer
     logits = keras.layers.Dense(
         units=config.num_classes,
         kernel_initializer=config.kernel_initializer,
@@ -477,10 +478,22 @@ def build_model(config: ExperimentConfig, loss_fn: Callable, name: str) -> keras
         name='logits'
     )(x)
 
+    # Final softmax layer for probability output
+    predictions = keras.layers.Activation('softmax', name='predictions')(logits)
+
     # Create and compile the model
-    model = keras.Model(inputs=inputs, outputs=logits, name=f'{name}_model')
+    model = keras.Model(inputs=inputs, outputs=predictions, name=f'{name}_model')
+
+    # Compile with comprehensive metrics
     optimizer = keras.optimizers.AdamW(learning_rate=config.learning_rate)
-    model.compile(optimizer=optimizer, loss=loss_fn, metrics=['accuracy'])
+    model.compile(
+        optimizer=optimizer,
+        loss=loss_fn,
+        metrics=[
+            keras.metrics.CategoricalAccuracy(name='accuracy'),
+            keras.metrics.TopKCategoricalAccuracy(k=5, name='top_5_accuracy')
+        ]
+    )
 
     return model
 
@@ -522,7 +535,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     )
 
     # Log experiment start
-    logger.info("🚀 Starting CIFAR-10 Loss Comparison Experiment")
+    logger.info("🚀 Starting CIFAR-10 Loss Comparison Experiment (Softmax Output)")
     logger.info(f"📁 Results will be saved to: {experiment_dir}")
     logger.info("=" * 80)
 
@@ -533,14 +546,18 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
     # ===== MODEL TRAINING PHASE =====
     logger.info("🏋️ Starting model training phase...")
-    models = {}  # Store trained models
+    trained_models = {}  # Store trained models (already with softmax output)
     all_histories = {}  # Store training histories
 
     for loss_name, loss_fn_factory in config.loss_functions.items():
         logger.info(f"--- Training model with {loss_name} loss ---")
 
-        # Build model for this loss function
+        # Build model for this loss function (with softmax output)
         model = build_model(config, loss_fn_factory(), loss_name)
+
+        # Log model architecture info
+        logger.info(f"Model {loss_name} output layer: {model.output.name}")
+        logger.info(f"Model {loss_name} metrics: {model.metrics_names}")
 
         # Configure training parameters
         training_config = TrainingConfig(
@@ -559,72 +576,12 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         )
 
         # Store results
-        models[loss_name] = model
+        trained_models[loss_name] = model
         all_histories[loss_name] = history.history
         logger.info(f"✅ {loss_name} training completed!")
 
-    # ===== MODEL ANALYSIS PREPARATION =====
-    logger.info("🛠️ Creating analysis models with softmax outputs...")
-    analysis_models = {}
-
-    for name, trained_model in models.items():
-        logger.info(f"Preparing analysis model for {name}...")
-        logger.info(f"Original model metrics: {trained_model.metrics_names}")
-
-        # Create new model with softmax output for probability analysis
-        logits_output = trained_model.output
-        probs_output = keras.layers.Activation('softmax', name='predictions')(logits_output)
-        analysis_model = keras.Model(
-            inputs=trained_model.input,
-            outputs=probs_output,
-            name=f"{name}_prediction"
-        )
-
-        # Transfer weights from trained model to analysis model
-        logger.info(f"Transferring weights for {name}...")
-        analysis_model.set_weights(trained_model.get_weights())
-        logger.info(f"Weight transfer completed for {name}")
-
-        # Test model before compilation to verify weights are correct
-        logger.info(f"Testing model {name} before compilation...")
-        test_sample = cifar10_data.x_test[:1]  # Single sample for testing
-        test_pred_before = analysis_model.predict(test_sample, verbose=0)
-        logger.info(f"Model {name} prediction shape: {test_pred_before.shape}")
-        logger.info(f"Model {name} prediction sample: {test_pred_before[0][:3]}")
-
-        # Compile the analysis model with appropriate metrics
-        try:
-            analysis_model.compile(
-                optimizer='adam',
-                loss='categorical_crossentropy',
-                metrics=[
-                    keras.metrics.CategoricalAccuracy(name='accuracy'),
-                    keras.metrics.TopKCategoricalAccuracy(k=5, name='top_5_accuracy')
-                ]
-            )
-            logger.info(f"Model {name} compiled successfully with explicit metrics")
-        except Exception as e:
-            logger.warning(f"Explicit metric compilation failed for {name}: {e}")
-            # Fallback to simple compilation
-            analysis_model.compile(
-                optimizer='adam',
-                loss='categorical_crossentropy',
-                metrics=['accuracy']
-            )
-            logger.info(f"Model {name} compiled with fallback metrics")
-
-        # Verify compilation worked correctly
-        logger.info(f"Model {name} metric names after compilation: {analysis_model.metrics_names}")
-
-        # Test after compilation to ensure consistency
-        test_pred_after = analysis_model.predict(test_sample, verbose=0)
-        logger.info(f"Model {name} prediction after compilation: {test_pred_after[0][:3]}")
-
-        analysis_models[name] = analysis_model
-
     # ===== MEMORY MANAGEMENT =====
-    logger.info("🗑️ Releasing original training models from memory...")
-    # Keep models for now but trigger garbage collection
+    logger.info("🗑️ Triggering garbage collection...")
     gc.collect()
 
     # ===== COMPREHENSIVE MODEL ANALYSIS =====
@@ -632,9 +589,9 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     model_analysis_results = None
 
     try:
-        # Initialize the model analyzer
+        # Initialize the model analyzer with trained models (already have softmax outputs)
         analyzer = ModelAnalyzer(
-            models=analysis_models,
+            models=trained_models,
             config=config.analyzer_config,
             output_dir=experiment_dir / "model_analysis"
         )
@@ -661,7 +618,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     # Generate confusion matrices for model comparison
     raw_predictions = {
         name: model.predict(cifar10_data.x_test, verbose=0)
-        for name, model in analysis_models.items()
+        for name, model in trained_models.items()
     }
     class_predictions = {
         name: np.argmax(preds, axis=1)
@@ -686,68 +643,55 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
     performance_results = {}
 
-    for name, model in analysis_models.items():
+    for name, model in trained_models.items():
         logger.info(f"Evaluating model {name}...")
+        logger.info(f"Model {name} metrics: {model.metrics_names}")
 
         # Get model evaluation metrics
         eval_results = model.evaluate(cifar10_data.x_test, cifar10_data.y_test, verbose=0)
         metrics_dict = dict(zip(model.metrics_names, eval_results))
 
         # Debug logging for metric inspection
-        logger.info(f"Raw metrics for {name}: {metrics_dict}")
+        logger.info(f"Raw evaluation metrics for {name}: {metrics_dict}")
 
-        # Calculate manual top-5 accuracy as backup
-        logger.info(f"Computing manual top-5 accuracy for {name}...")
+        # Calculate manual accuracy verification
         predictions = model.predict(cifar10_data.x_test, verbose=0)
         y_true_indices = np.argmax(cifar10_data.y_test, axis=1)
 
+        # Manual top-1 accuracy verification
+        manual_top1_acc = np.mean(np.argmax(predictions, axis=1) == y_true_indices)
+        logger.info(f"Manual top-1 accuracy for {name}: {manual_top1_acc:.4f}")
+
         # Manual top-5 accuracy calculation
-        top_5_predictions = np.argsort(predictions, axis=1)[:, -5:]  # Get top 5 predictions
+        top_5_predictions = np.argsort(predictions, axis=1)[:, -5:]
         manual_top5_acc = np.mean([
             y_true in top5_pred
             for y_true, top5_pred in zip(y_true_indices, top_5_predictions)
         ])
         logger.info(f"Manual top-5 accuracy for {name}: {manual_top5_acc:.4f}")
 
-        # Manual top-1 accuracy for verification
-        manual_top1_acc = np.mean(np.argmax(predictions, axis=1) == y_true_indices)
-        logger.info(f"Manual top-1 accuracy for {name}: {manual_top1_acc:.4f}")
-
-        # Standardize metric names for consistent reporting
-        standardized_metrics = {}
-        for metric_name, value in metrics_dict.items():
-            if metric_name in ['accuracy', 'compile_metrics']:
-                standardized_metrics['accuracy'] = value
-            elif 'top' in metric_name.lower() and '5' in metric_name:
-                standardized_metrics['top_k_categorical_accuracy'] = value
-            elif metric_name == 'loss':
-                standardized_metrics['loss'] = value
-            else:
-                # Keep any other metrics as-is
-                standardized_metrics[metric_name] = value
-
-        performance_results[name] = standardized_metrics
-
-        # Use manual calculation if built-in top-5 accuracy is not available
-        if ('top_k_categorical_accuracy' not in standardized_metrics or
-            standardized_metrics['top_k_categorical_accuracy'] == 0.0):
-            standardized_metrics['top_k_categorical_accuracy'] = manual_top5_acc
-            logger.info(f"Using manual top-5 accuracy for {name}: {manual_top5_acc:.4f}")
+        # Store standardized metrics
+        performance_results[name] = {
+            'accuracy': metrics_dict.get('accuracy', manual_top1_acc),
+            'top_5_accuracy': metrics_dict.get('top_5_accuracy', manual_top5_acc),
+            'loss': metrics_dict.get('loss', 0.0)
+        }
 
         # Warn about potentially problematic accuracy values
-        if standardized_metrics['accuracy'] < 0.2:
-            logger.warning(f"Low accuracy detected for {name}: {standardized_metrics['accuracy']:.4f}")
-            logger.warning(f"Manual accuracy: {manual_top1_acc:.4f}")
-            logger.warning("This may indicate weight transfer issues or untrained models")
+        final_accuracy = performance_results[name]['accuracy']
+        if final_accuracy < 0.2:
+            logger.warning(f"Low accuracy detected for {name}: {final_accuracy:.4f}")
+            logger.warning("This may indicate training issues or model problems")
 
         # Log final metrics for this model
-        logger.info(f"Model {name} final metrics: {standardized_metrics}")
+        logger.info(f"Model {name} final metrics: {performance_results[name]}")
 
     # ===== RESULTS COMPILATION =====
     results_payload = {
         'performance_analysis': performance_results,
         'model_analysis': model_analysis_results,
-        'histories': all_histories
+        'histories': all_histories,
+        'trained_models': trained_models  # Include trained models in results
     }
 
     # Print comprehensive summary
@@ -783,7 +727,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
         for model_name, metrics in results['performance_analysis'].items():
             accuracy = metrics.get('accuracy', 0.0)
-            top5_acc = metrics.get('top_k_categorical_accuracy', 0.0)
+            top5_acc = metrics.get('top_5_accuracy', 0.0)
             loss = metrics.get('loss', 0.0)
             logger.info(f"{model_name:<20} {accuracy:<12.4f} {top5_acc:<12.4f} {loss:<12.4f}")
 
@@ -842,7 +786,7 @@ def main() -> None:
     This function serves as the entry point for the experiment, handling
     configuration setup, experiment execution, and error handling.
     """
-    logger.info("🚀 CIFAR-10 Loss Function Comparison")
+    logger.info("🚀 CIFAR-10 Loss Function Comparison (Softmax Output)")
     logger.info("=" * 80)
 
     # Initialize experiment configuration
@@ -854,6 +798,7 @@ def main() -> None:
     logger.info(f"   Epochs: {config.epochs}, Batch Size: {config.batch_size}")
     logger.info(f"   Model Architecture: {len(config.conv_filters)} conv blocks, "
                 f"{len(config.dense_units)} dense layers")
+    logger.info(f"   Output: Softmax probabilities (from_logits=False)")
     logger.info("")
 
     try:
