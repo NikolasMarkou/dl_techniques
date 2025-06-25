@@ -45,21 +45,6 @@ This implementation offers two sparsification strategies:
 3. **Better Representations**: By focusing on key relationships, sparse attention can produce cleaner feature representations.
 4. **Automatic Statistical Threshold**: Using 1/N as threshold has a sound interpretation - values below
    uniform distribution are "no better than random".
-
-## Implementation Details
-
-This layer is designed for full compatibility with Keras and TensorFlow's XLA compilation:
-
-* **Graph-Mode Compatible**: All operations are designed for `@tf.function` and XLA compilation.
-* **Hardware Accelerator Optimized**: Tensor operations leverage efficient XLA fusion patterns.
-* **Numerically Stable**: All division operations include epsilon terms to prevent divide-by-zero.
-* **Memory Efficient**: Conditional computation for one-hot fallbacks only when needed.
-* **Backend Agnostic**: Uses `keras.ops` for compatibility across TensorFlow/JAX/PyTorch.
-* **Serialization Support**: Complete get_config() and build_from_config() implementations.
-* **Per-Sample Early Stopping**: Allows different samples to reach convergence independently.
-
-The layer can be used as a drop-in replacement for `keras.layers.MultiHeadAttention` with the
-added benefit of sparsification.
 """
 
 import keras
