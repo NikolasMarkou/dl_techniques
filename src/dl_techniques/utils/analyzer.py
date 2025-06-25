@@ -1500,12 +1500,15 @@ class ModelAnalyzer:
         for model_name in sorted(self.models.keys()):
             row_data = [model_name]
 
-            # Accuracy
-            acc = self.results.model_metrics.get(model_name, {}).get('accuracy', 0.0)
+            # Accuracy - try multiple possible keys
+            model_metrics = self.results.model_metrics.get(model_name, {})
+            acc = (model_metrics.get('accuracy', 0.0) or
+                   model_metrics.get('compile_metrics', 0.0) or
+                   model_metrics.get('val_accuracy', 0.0) or 0.0)
             row_data.append(f'{acc:.3f}')
 
             # Loss
-            loss = self.results.model_metrics.get(model_name, {}).get('loss', 0.0)
+            loss = model_metrics.get('loss', 0.0)
             row_data.append(f'{loss:.3f}')
 
             # ECE
@@ -1525,24 +1528,25 @@ class ModelAnalyzer:
         # Create table
         headers = ['Model'] + metrics_order
 
-        # Create the table
+        # Create the table with better formatting
         table = ax.table(cellText=table_data,
                         colLabels=headers,
                         cellLoc='center',
                         loc='center',
                         bbox=[0, 0, 1, 1])
 
-        # Style the table
+        # Style the table for better text containment
         table.auto_set_font_size(False)
-        table.set_fontsize(10)
-        table.scale(1, 2)
+        table.set_fontsize(9)  # Slightly smaller font
+        table.scale(1, 1.8)    # More height for better text spacing
 
         # Color the header row
         for i in range(len(headers)):
             table[(0, i)].set_facecolor('#E8E8E8')
             table[(0, i)].set_text_props(weight='bold')
+            table[(0, i)].set_height(0.08)  # Consistent header height
 
-        # Color the model name column and apply model colors
+        # Color the model rows and ensure text fits
         for i, row_data in enumerate(table_data, 1):
             model_name = row_data[0]
             color = self.model_colors.get(model_name, '#F5F5F5')
@@ -1550,14 +1554,18 @@ class ModelAnalyzer:
             # Apply light version of model color to the entire row
             light_color = self._lighten_color(color, 0.8)
             for j in range(len(headers)):
-                table[(i, j)].set_facecolor(light_color)
+                cell = table[(i, j)]
+                cell.set_facecolor(light_color)
+                cell.set_height(0.08)  # Consistent row height
 
-            # Make model name bold
-            table[(i, 0)].set_text_props(weight='bold')
+                # Ensure text fits properly
+                if j == 0:  # Model name column
+                    cell.set_text_props(weight='bold', fontsize=9)
+                else:  # Metric columns
+                    cell.set_text_props(fontsize=9)
 
-        # Remove axis
+        # Remove axis and don't add title
         ax.axis('off')
-        ax.set_title('Performance Metrics Comparison', fontsize=14, fontweight='bold', pad=20)
 
     def _plot_calibration_performance_summary(self, ax) -> None:
         """Plot calibration performance comparison - more useful than training dynamics."""
