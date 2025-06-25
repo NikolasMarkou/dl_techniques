@@ -76,6 +76,7 @@ class WindowAttention(keras.layers.Layer):
         qk_scale: Override default qk scale of head_dim ** -0.5 if set. Defaults to None.
         attn_drop: Attention dropout rate. Defaults to 0.0.
         proj_drop: Output projection dropout rate. Defaults to 0.0.
+        proj_bias: projection bias, Defaults to True.
         kernel_initializer: Initializer for dense layer kernels. Defaults to "glorot_uniform".
         bias_initializer: Initializer for dense layer biases. Defaults to "zeros".
         kernel_regularizer: Regularizer for dense layer kernels. Defaults to None.
@@ -118,6 +119,7 @@ class WindowAttention(keras.layers.Layer):
             qk_scale: Optional[float] = None,
             attn_drop: float = 0.0,
             proj_drop: float = 0.0,
+            proj_bias: bool = True,
             kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
             bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
             kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
@@ -149,6 +151,7 @@ class WindowAttention(keras.layers.Layer):
         self.qkv_bias = qkv_bias
         self.attn_drop_rate = attn_drop
         self.proj_drop_rate = proj_drop
+        self.proj_bias = proj_bias
 
         # Store initializers and regularizers
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -216,6 +219,7 @@ class WindowAttention(keras.layers.Layer):
         # Create output projection and dropout
         self.proj = keras.layers.Dense(
             self.dim,
+            use_bias=self.proj_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -329,6 +333,7 @@ class WindowAttention(keras.layers.Layer):
             "qk_scale": self.qk_scale,  # Store original parameter, not computed scale
             "attn_drop": self.attn_drop_rate,
             "proj_drop": self.proj_drop_rate,
+            "proj_bias": self.proj_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
