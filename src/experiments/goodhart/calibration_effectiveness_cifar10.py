@@ -260,8 +260,17 @@ class ExperimentConfig:
         'GoodhartAware': lambda: GoodhartAwareLoss(
             entropy_weight=0.1, mi_weight=0.01, from_logits=False
         ),
-        'GoodhartAware_ls': lambda: GoodhartAwareLoss(
-            entropy_weight=0.1, mi_weight=0.01, from_logits=False, label_smoothing=0.1
+        'GoodhartAware_0': lambda: GoodhartAwareLoss(
+            entropy_weight=0.0, mi_weight=0.01, from_logits=False
+        ),
+        'GoodhartAware_01': lambda: GoodhartAwareLoss(
+            entropy_weight=0.01, mi_weight=0.01, from_logits=False
+        ),
+        'GoodhartAware_05': lambda: GoodhartAwareLoss(
+            entropy_weight=0.05, mi_weight=0.01, from_logits=False
+        ),
+        'GoodhartAware_001': lambda: GoodhartAwareLoss(
+            entropy_weight=0.001, mi_weight=0.01, from_logits=False
         ),
     })
 
