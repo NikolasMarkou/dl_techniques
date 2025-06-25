@@ -328,30 +328,51 @@ class ModelAnalyzer:
         self.layer_extraction_models = {}
 
         for model_name, model in self.models.items():
-            # Set up multi-layer extraction for information flow
-            extraction_layers = self._get_extraction_layers(model)
-            if extraction_layers:
-                try:
-                    self.layer_extraction_models[model_name] = {
-                        'model': keras.Model(inputs=model.input, outputs=[l['output'] for l in extraction_layers]),
-                        'layer_info': extraction_layers
-                    }
-                except Exception as e:
-                    logger.warning(f"Could not create layer extraction model for {model_name}: {e}")
+            try:
+                # Set up multi-layer extraction for information flow
+                extraction_layers = self._get_extraction_layers(model)
+                if extraction_layers:
+                    try:
+                        self.layer_extraction_models[model_name] = {
+                            'model': keras.Model(inputs=model.input, outputs=[l['output'] for l in extraction_layers]),
+                            'layer_info': extraction_layers
+                        }
+                    except Exception as e:
+                        logger.warning(f"Could not create layer extraction model for {model_name}: {e}")
+                        self.layer_extraction_models[model_name] = None
+                else:
+                    logger.warning(f"No suitable layers found for extraction in {model_name}")
+                    self.layer_extraction_models[model_name] = None
+            except Exception as e:
+                logger.error(f"Failed to setup activation models for {model_name}: {e}")
+                self.layer_extraction_models[model_name] = None
 
     def _get_extraction_layers(self, model: keras.Model) -> List[Dict[str, Any]]:
         """Get layers suitable for information flow analysis."""
         extraction_layers = []
 
-        for layer in model.layers:
-            if isinstance(layer, (keras.layers.Conv2D, keras.layers.Dense,
-                                keras.layers.BatchNormalization, keras.layers.LayerNormalization)):
-                if hasattr(layer, 'output') and layer.output is not None:
-                    extraction_layers.append({
-                        'name': layer.name,
-                        'type': layer.__class__.__name__,
-                        'output': layer.output
-                    })
+        try:
+            # Check if model has layers attribute
+            if not hasattr(model, 'layers'):
+                logger.warning(f"Model does not have 'layers' attribute")
+                return extraction_layers
+
+            for layer in model.layers:
+                try:
+                    # Check for common layer types that are suitable for analysis
+                    if isinstance(layer, (keras.layers.Conv2D, keras.layers.Dense,
+                                        keras.layers.BatchNormalization, keras.layers.LayerNormalization)):
+                        if hasattr(layer, 'output') and layer.output is not None:
+                            extraction_layers.append({
+                                'name': layer.name,
+                                'type': layer.__class__.__name__,
+                                'output': layer.output
+                            })
+                except Exception as e:
+                    logger.warning(f"Could not process layer {getattr(layer, 'name', 'unknown')}: {e}")
+                    continue
+        except Exception as e:
+            logger.error(f"Failed to extract layers from model: {e}")
 
         return extraction_layers
 
@@ -437,10 +458,27 @@ class ModelAnalyzer:
                 'y_data': y_data
             }
 
-        # Also evaluate models
+        # Also evaluate models with better metric handling
         for model_name, model in self.models.items():
-            metrics = model.evaluate(x_data, y_data, verbose=0)
-            self.results.model_metrics[model_name] = dict(zip(model.metrics_names, metrics))
+            try:
+                metrics = model.evaluate(x_data, y_data, verbose=0)
+                metric_names = getattr(model, 'metrics_names', ['loss'])
+
+                # Handle different metric name patterns
+                metric_dict = {}
+                for i, name in enumerate(metric_names):
+                    if i < len(metrics):
+                        value = metrics[i] if isinstance(metrics, (list, tuple)) else metrics
+                        metric_dict[name] = value
+
+                        # Add common aliases for accuracy
+                        if name in ['compile_metrics', 'categorical_accuracy', 'sparse_categorical_accuracy']:
+                            metric_dict['accuracy'] = value
+
+                self.results.model_metrics[model_name] = metric_dict
+            except Exception as e:
+                logger.warning(f"Could not evaluate model {model_name}: {e}")
+                self.results.model_metrics[model_name] = {'loss': 0.0, 'accuracy': 0.0}
 
     # ------------------------------------------------------------------------------
     # Enhanced Weight Analysis
@@ -699,24 +737,21 @@ class ModelAnalyzer:
             ax.axis('off')
             return
 
-        # Prepare health metrics
+        # Prepare health metrics - each model uses its own layer sequence
         health_metrics = []
         models = sorted(self.results.weight_stats.keys())
-
-        # Get consistent layer ordering across models
-        all_layers = set()
-        for weight_stats in self.results.weight_stats.values():
-            all_layers.update(weight_stats.keys())
-
-        # Sort layers and take first 12 for readability
-        sorted_layers = sorted(list(all_layers))[:12]
+        max_layers = 12  # Show first 12 layers for each model
 
         for model_name in models:
             weight_stats = self.results.weight_stats[model_name]
             model_health = []
 
-            for layer_name in sorted_layers:
-                if layer_name in weight_stats:
+            # Get this model's layers in order (first 12)
+            model_layers = sorted(list(weight_stats.keys()))[:max_layers]
+
+            for layer_idx in range(max_layers):
+                if layer_idx < len(model_layers):
+                    layer_name = model_layers[layer_idx]
                     stats = weight_stats[layer_name]
 
                     # Calculate health score (0-1, higher is better)
@@ -737,7 +772,8 @@ class ModelAnalyzer:
                     health_score = (norm_health + sparsity_health + dist_health) / 3.0
                     model_health.append(health_score)
                 else:
-                    model_health.append(0.0)  # Missing layer
+                    # Model has fewer layers than max_layers
+                    model_health.append(0.0)
 
             health_metrics.append(model_health)
 
@@ -750,12 +786,12 @@ class ModelAnalyzer:
 
             # Set labels
             ax.set_title('Weight Health Across Layers', fontsize=12, fontweight='bold')
-            ax.set_xlabel('Layer Index')
+            ax.set_xlabel('Layer Position')
             ax.set_ylabel('Model')
 
             # Set ticks
-            ax.set_xticks(range(len(sorted_layers)))
-            ax.set_xticklabels([f'L{i}' for i in range(len(sorted_layers))], fontsize=9)
+            ax.set_xticks(range(max_layers))
+            ax.set_xticklabels([f'L{i}' for i in range(max_layers)], fontsize=9)
             ax.set_yticks(range(len(models)))
             ax.set_yticklabels(models, fontsize=9)
 
@@ -766,7 +802,7 @@ class ModelAnalyzer:
 
             # Add value annotations for better readability
             for i in range(len(models)):
-                for j in range(len(sorted_layers)):
+                for j in range(max_layers):
                     value = health_array[i, j]
                     text_color = 'white' if value < 0.5 else 'black'
                     ax.text(j, i, f'{value:.2f}', ha='center', va='center',
@@ -793,11 +829,12 @@ class ModelAnalyzer:
             y_pred_proba = cache['predictions']
             y_true = cache['y_data']
 
-            # Convert to class indices if needed
-            if len(y_true.shape) > 1:
+            # Convert to class indices if needed - handle different data types
+            y_true = np.asarray(y_true)  # Ensure numpy array
+            if len(y_true.shape) > 1 and y_true.shape[1] > 1:
                 y_true_idx = np.argmax(y_true, axis=1)
             else:
-                y_true_idx = y_true
+                y_true_idx = y_true.flatten().astype(int)
 
             # Compute calibration metrics
             ece = compute_ece(y_true_idx, y_pred_proba, self.config.calibration_bins)
@@ -805,14 +842,16 @@ class ModelAnalyzer:
             brier_score = compute_brier_score(cache['y_data'], y_pred_proba)
             entropy_stats = compute_prediction_entropy_stats(y_pred_proba)
 
-            # Compute per-class ECE
+            # Compute per-class ECE with validated bins
             n_classes = y_pred_proba.shape[1]
             per_class_ece = []
+            per_class_bins = max(2, self.config.calibration_bins // 2)  # Ensure minimum 2 bins
+
             for c in range(n_classes):
                 class_mask = y_true_idx == c
                 if np.any(class_mask):
                     class_ece = compute_ece(y_true_idx[class_mask], y_pred_proba[class_mask],
-                                          self.config.calibration_bins // 2)
+                                          per_class_bins)
                     per_class_ece.append(class_ece)
                 else:
                     per_class_ece.append(0.0)
@@ -911,6 +950,11 @@ class ModelAnalyzer:
         confidence_data = []
 
         for model_name, metrics in self.results.confidence_metrics.items():
+            # Safety check for required keys
+            if 'max_probability' not in metrics:
+                logger.warning(f"Missing 'max_probability' key for model {model_name}")
+                continue
+
             for conf in metrics['max_probability']:
                 confidence_data.append({
                     'Model': model_name,
@@ -1006,6 +1050,12 @@ class ModelAnalyzer:
         # Plot contours for each model
         for model_name in model_order:
             metrics = self.results.confidence_metrics[model_name]
+
+            # Safety checks for required keys
+            if 'max_probability' not in metrics or 'entropy' not in metrics:
+                logger.warning(f"Missing confidence metrics keys for model {model_name}")
+                continue
+
             confidence = metrics['max_probability']
             entropy = metrics['entropy']
             color = self.model_colors.get(model_name, '#333333')
@@ -1077,22 +1127,27 @@ class ModelAnalyzer:
 
         for model_name, extraction_data in self.layer_extraction_models.items():
             if extraction_data is None:
+                logger.warning(f"No extraction data available for model {model_name}")
                 continue
 
-            # Get multi-layer outputs
-            layer_outputs = extraction_data['model'].predict(x_sample, verbose=0)
-            layer_info = extraction_data['layer_info']
+            try:
+                # Get multi-layer outputs
+                layer_outputs = extraction_data['model'].predict(x_sample, verbose=0)
+                layer_info = extraction_data['layer_info']
 
-            # Analyze each layer
-            layer_analysis = {}
-            for i, (output, info) in enumerate(zip(layer_outputs, layer_info)):
-                analysis = self._analyze_layer_information(output, info)
-                layer_analysis[info['name']] = analysis
+                # Analyze each layer
+                layer_analysis = {}
+                for i, (output, info) in enumerate(zip(layer_outputs, layer_info)):
+                    analysis = self._analyze_layer_information(output, info)
+                    layer_analysis[info['name']] = analysis
 
-            self.results.information_flow[model_name] = layer_analysis
+                self.results.information_flow[model_name] = layer_analysis
 
-            # Store detailed activation stats for key layers
-            self._analyze_key_layer_activations(model_name, layer_outputs, layer_info)
+                # Store detailed activation stats for key layers
+                self._analyze_key_layer_activations(model_name, layer_outputs, layer_info)
+            except Exception as e:
+                logger.error(f"Failed to analyze information flow for {model_name}: {e}")
+                continue
 
         # Create visualizations
         self._plot_enhanced_information_flow()
@@ -1594,11 +1649,6 @@ class ModelAnalyzer:
                       edgecolors='black', linewidth=2,
                       label=model_name)
 
-            # Add model name as annotation
-            ax.annotate(model_name, (ece_values[i], brier_values[i]),
-                       xytext=(5, 5), textcoords='offset points',
-                       fontsize=9, ha='left', va='bottom')
-
         # Add reference lines
         if ece_values and brier_values:
             # Perfect calibration line (diagonal)
@@ -1646,6 +1696,14 @@ class ModelAnalyzer:
         labels = self.results.weight_pca['labels']
         explained_var = self.results.weight_pca['explained_variance']
 
+        # Validate PCA components
+        if len(components) == 0 or len(components[0]) < 2:
+            ax.text(0.5, 0.5, 'Insufficient PCA components for visualization',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Model Similarity (Weight Space)')
+            ax.axis('off')
+            return
+
         # Create enhanced scatter plot using consistent colors
         for i, (label, comp) in enumerate(zip(labels, components)):
             color = self.model_colors.get(label, '#333333')
@@ -1659,7 +1717,7 @@ class ModelAnalyzer:
         ax.scatter(0, 0, c='black', s=50, marker='x')
 
         ax.set_xlabel(f'PC1 ({explained_var[0]:.1%})')
-        ax.set_ylabel(f'PC2 ({explained_var[1]:.1%})')
+        ax.set_ylabel(f'PC2 ({explained_var[1]:.1%})' if len(explained_var) > 1 else 'PC2')
         ax.set_title('Model Similarity (Weight Space)')
         ax.legend()
         ax.grid(True, alpha=0.3)
@@ -1670,6 +1728,11 @@ class ModelAnalyzer:
         confidence_data = []
 
         for model_name, metrics in self.results.confidence_metrics.items():
+            # Safety check for required keys
+            if 'max_probability' not in metrics:
+                logger.warning(f"Missing 'max_probability' key for model {model_name}")
+                continue
+
             for conf in metrics['max_probability']:
                 confidence_data.append({
                     'Model': model_name,
@@ -1693,7 +1756,7 @@ class ModelAnalyzer:
                 parts['bodies'][i].set_alpha(0.6)
 
             ax.set_xticks(range(len(model_order)))
-            ax.set_xticklabels(model_order, rotation=45 if len(model_order) > 3 else 0)
+            ax.set_xticklabels([])  # Remove model names from x-axis
             ax.set_ylabel('Confidence (Max Probability)')
             ax.set_title('Confidence Distribution Profiles')
             ax.grid(True, alpha=0.3, axis='y')
