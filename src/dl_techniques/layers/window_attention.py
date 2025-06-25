@@ -1,3 +1,60 @@
+"""
+# WindowAttention Layer
+
+A Keras layer implementing windowed multi-head self-attention as described in the Swin Transformer
+paper. This layer partitions input tokens into non-overlapping windows and computes self-attention
+within each window, reducing computational complexity while maintaining effective modeling capacity.
+
+## Conceptual Overview
+
+Standard transformer attention computes relationships between all pairs of tokens in a sequence,
+leading to quadratic complexity O(N²) where N is the sequence length. For vision tasks with
+high-resolution images, this becomes computationally prohibitive as the number of patches grows.
+
+WindowAttention addresses this by:
+
+1. **Spatial Partitioning**: Dividing the input feature map into non-overlapping windows
+2. **Local Attention**: Computing self-attention only within each window
+3. **Relative Position Encoding**: Using learnable relative position biases to capture spatial relationships
+
+This reduces complexity from O(N²) to O(W² × N) where W is the window size, making it linear
+with respect to image size while quadratic only within small, fixed-size windows.
+
+### Mathematical Description:
+
+For an input tensor of shape (B, H×W, C) representing B images with H×W patches of C channels:
+
+1. **Window Partitioning**: Reshape input into (B×num_windows, window_size², C)
+2. **Standard Multi-Head Attention** within each window:
+   * Query, Key, Value projections: `Q = XW_q`, `K = XW_k`, `V = XW_v`
+   * Attention scores: `A = (QK^T) / √d_head`
+   * **Relative Position Bias**: `A = A + B_rel`
+   * Attention weights: `P = softmax(A)`
+   * Output: `O = PV`
+
+3. **Relative Position Bias Computation**:
+   * For each window position pair (i,j), compute relative coordinates: `(Δi, Δj)`
+   * Map to bias table index: `idx = (Δi + W-1) × (2W-1) + (Δj + W-1)`
+   * Retrieve bias: `B_rel[i,j] = bias_table[idx]`
+
+### Key Benefits:
+
+1. **Linear Complexity**: O(W² × N) complexity scales linearly with image size
+2. **Local Modeling**: Effectively captures local spatial relationships within windows
+3. **Relative Position Awareness**: Learnable biases encode spatial structure without absolute positions
+4. **Hardware Efficient**: Regular window structure enables efficient GPU/TPU computation
+5. **Hierarchical Compatibility**: Works with shifted window schemes for cross-window connections
+
+### Usage Example:
+```python
+# For a 7×7 window with 96 channels and 3 attention heads
+window_attn = WindowAttention(dim=96, window_size=7, num_heads=3)
+
+# Input: (batch_size, 49, 96) where 49 = 7×7 window
+x = keras.random.normal((4, 49, 96))
+output = window_attn(x)  # Shape: (4, 49, 96)
+"""
+
 import keras
 from keras import ops
 from typing import Tuple, Optional, Dict, Any, Union
