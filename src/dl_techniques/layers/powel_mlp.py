@@ -39,7 +39,7 @@ from typing import List, Optional, Union, Dict, Any, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-
+from .activations.relu_k import ReLUK
 # ---------------------------------------------------------------------
 
 
@@ -65,88 +65,6 @@ class PowerMLPConfig:
     bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None
     use_bias: bool = True
     output_activation: Optional[Union[str, callable]] = None
-
-# ---------------------------------------------------------------------
-
-
-@keras.saving.register_keras_serializable()
-class ReLUK(keras.layers.Layer):
-    """ReLU-k activation layer implementing f(x) = max(0,x)^k.
-
-    This layer applies a powered ReLU activation function which is more expressive
-    than standard ReLU while maintaining computational efficiency.
-
-    Args:
-        k: Power for ReLU function. Must be positive integer.
-        **kwargs: Additional keyword arguments for the Layer parent class.
-    """
-
-    def __init__(self, k: int = 3, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        if k <= 0:
-            raise ValueError(f"k must be positive, got {k}")
-        self.k = k
-        self._build_input_shape = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer.
-
-        Args:
-            input_shape: Shape of the input tensor.
-        """
-        self._build_input_shape = input_shape
-        super().build(input_shape)
-
-    def call(self, inputs: Union[keras.KerasTensor, Any], training: Optional[bool] = None) -> keras.KerasTensor:
-        """Forward pass of the layer.
-
-        Args:
-            inputs: Input tensor.
-            training: Boolean indicating whether the layer should behave in training mode.
-
-        Returns:
-            Output tensor after ReLU-k activation.
-        """
-        relu_output = ops.maximum(0.0, inputs)
-        return ops.power(relu_output, self.k)
-
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
-
-        Args:
-            input_shape: Shape of the input.
-
-        Returns:
-            Output shape (same as input shape).
-        """
-        return input_shape
-
-    def get_config(self) -> Dict[str, Any]:
-        """Returns the config of the layer.
-
-        Returns:
-            Dictionary containing the layer configuration.
-        """
-        config = super().get_config()
-        config.update({"k": self.k})
-        return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the config needed to build the layer from a config.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------
 
