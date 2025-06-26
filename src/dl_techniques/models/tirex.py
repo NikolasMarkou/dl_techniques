@@ -16,13 +16,11 @@ from typing import Optional, Union, List, Any, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import RMSNorm
+from dl_techniques.layers.quantile_head import QuantileHead
 from dl_techniques.layers.standard_scaler import StandardScaler
 from dl_techniques.layers.patch_embedding import PatchEmbedding1d
 from dl_techniques.layers.ffn.residual_block import ResidualBlock
-from dl_techniques.layers.tirex import (
-    QuantileHead,
-    MixedSequentialBlock
-)
+from dl_techniques.layers.mixed_sequential_block import MixedSequentialBlock
 
 # ---------------------------------------------------------------------
 
