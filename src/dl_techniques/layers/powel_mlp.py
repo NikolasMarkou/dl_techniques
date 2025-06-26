@@ -40,6 +40,8 @@ from typing import List, Optional, Union, Dict, Any, Tuple
 
 from dl_techniques.utils.logger import logger
 from .activations.relu_k import ReLUK
+from .activations.basis_function import BasisFunction
+
 # ---------------------------------------------------------------------
 
 
@@ -66,77 +68,7 @@ class PowerMLPConfig:
     use_bias: bool = True
     output_activation: Optional[Union[str, callable]] = None
 
-# ---------------------------------------------------------------------
 
-
-@keras.saving.register_keras_serializable()
-class BasisFunction(keras.layers.Layer):
-    """Basis function layer implementing b(x) = x/(1 + e^(-x)).
-
-    This layer implements the basis function branch of PowerMLP, which enhances
-    the expressiveness of the network by capturing complex relationships.
-    """
-
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._build_input_shape = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer.
-
-        Args:
-            input_shape: Shape of the input tensor.
-        """
-        self._build_input_shape = input_shape
-        super().build(input_shape)
-
-    def call(self, inputs: Union[keras.KerasTensor, Any], training: Optional[bool] = None) -> keras.KerasTensor:
-        """Forward pass of the layer.
-
-        Args:
-            inputs: Input tensor.
-            training: Boolean indicating whether the layer should behave in training mode.
-
-        Returns:
-            Output tensor after basis function transformation.
-        """
-        return inputs / (1.0 + ops.exp(-inputs))
-
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
-
-        Args:
-            input_shape: Shape of the input.
-
-        Returns:
-            Output shape (same as input shape).
-        """
-        return input_shape
-
-    def get_config(self) -> Dict[str, Any]:
-        """Returns the config of the layer.
-
-        Returns:
-            Dictionary containing the layer configuration.
-        """
-        return super().get_config()
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the config needed to build the layer from a config.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------
 
