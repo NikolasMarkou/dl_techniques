@@ -16,8 +16,8 @@ from typing import Optional, Union, List, Any, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import RMSNorm
+from dl_techniques.layers.standard_scaler import StandardScaler
 from dl_techniques.layers.tirex import (
-    StandardScaler,
     PatchEmbedding,
     ResidualBlock,
     QuantileHead,
