@@ -75,7 +75,7 @@ from typing import Optional, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from .rope_layer import RotaryPositionEmbedding
+from .rope import RotaryPositionEmbedding
 
 # ---------------------------------------------------------------------
 

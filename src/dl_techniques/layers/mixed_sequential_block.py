@@ -6,7 +6,6 @@ adapted to work with Keras and our project's available components.
 """
 
 import keras
-from keras import ops
 from typing import Optional, Union, Any
 
 # ---------------------------------------------------------------------
