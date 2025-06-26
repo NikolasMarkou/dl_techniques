@@ -14,7 +14,14 @@ PowerMLP is an efficient alternative to Kolmogorov-Arnold Networks (KAN) offerin
 - Simpler implementation
 
 Usage:
-    python train_powermlp.py [--dataset mnist] [--epochs 100] [--batch-size 128]
+    # Basic stable training:
+    python train_powermlp.py --dataset mnist --epochs 50 --architecture small --k 2
+
+    # Advanced training with regularization:
+    python train_powermlp.py --dataset mnist --k 2 --dropout-rate 0.2 --batch-normalization
+
+    # Conservative training for stability:
+    python train_powermlp.py --dataset mnist --learning-rate 0.0001 --k 1 --architecture small
 """
 
 import argparse
@@ -40,6 +47,15 @@ from dl_techniques.utils.logger import logger
 plt.style.use('seaborn-v0_8')
 sns.set_palette("husl")
 
+class LearningRateLogger(keras.callbacks.Callback):
+    """Custom callback to log learning rate to history."""
+
+    def on_epoch_end(self, epoch, logs=None):
+        if logs is None:
+            logs = {}
+        # Get learning rate from optimizer
+        lr = float(self.model.optimizer.learning_rate)
+        logs['lr'] = lr
 
 def setup_gpu():
     """Configure GPU settings for optimal training."""
@@ -169,7 +185,7 @@ def load_cifar10_data(
 def create_model_config(
         dataset: str,
         architecture: str = "default",
-        k: int = 3,
+        k: int = 2,  # Lower default k to prevent exploding gradients
         dropout_rate: float = 0.0,
         batch_normalization: bool = False
 ) -> Dict[str, Any]:
@@ -190,27 +206,29 @@ def create_model_config(
         'dropout_rate': dropout_rate,
         'batch_normalization': batch_normalization,
         'output_activation': 'softmax',
-        'kernel_initializer': 'he_normal',
+        'kernel_initializer': 'glorot_normal',  # Better initialization for stability
         'bias_initializer': 'zeros',
+        'kernel_regularizer': keras.regularizers.L2(1e-5) if dropout_rate == 0.0 else None,
+        # Light regularization if no dropout
     }
 
-    # Architecture configurations
+    # Architecture configurations - more conservative sizes
     architectures = {
         'small': {
-            'mnist': [256, 128, 10],
-            'cifar10': [512, 256, 10]
+            'mnist': [128, 64, 10],
+            'cifar10': [256, 128, 10]
         },
         'default': {
-            'mnist': [512, 256, 128, 10],
-            'cifar10': [1024, 512, 256, 10]
+            'mnist': [256, 128, 64, 10],
+            'cifar10': [512, 256, 128, 10]
         },
         'large': {
-            'mnist': [1024, 512, 256, 128, 10],
-            'cifar10': [2048, 1024, 512, 256, 10]
+            'mnist': [512, 256, 128, 64, 10],
+            'cifar10': [1024, 512, 256, 128, 10]
         },
         'deep': {
-            'mnist': [512, 256, 256, 128, 128, 64, 10],
-            'cifar10': [1024, 512, 512, 256, 256, 128, 10]
+            'mnist': [256, 128, 128, 64, 64, 32, 10],
+            'cifar10': [512, 256, 256, 128, 128, 64, 10]
         }
     }
 
@@ -498,7 +516,43 @@ def plot_confusion_matrix(
     plt.close()
 
 
-class LearningRateLogger(keras.callbacks.Callback):
+def create_stable_optimizer(optimizer_name: str, learning_rate: float) -> keras.optimizers.Optimizer:
+    """Create an optimizer with gradient clipping for stable training.
+
+    Args:
+        optimizer_name: Name of the optimizer.
+        learning_rate: Learning rate.
+
+    Returns:
+        Configured optimizer with gradient clipping.
+    """
+    if optimizer_name.lower() == 'adam':
+        optimizer = keras.optimizers.Adam(
+            learning_rate=learning_rate,
+            clipnorm=1.0,  # Gradient clipping
+            epsilon=1e-7  # Smaller epsilon for numerical stability
+        )
+    elif optimizer_name.lower() == 'adamw':
+        optimizer = keras.optimizers.AdamW(
+            learning_rate=learning_rate,
+            clipnorm=1.0,
+            weight_decay=0.01,
+            epsilon=1e-7
+        )
+    elif optimizer_name.lower() == 'sgd':
+        optimizer = keras.optimizers.SGD(
+            learning_rate=learning_rate,
+            momentum=0.9,
+            clipnorm=1.0
+        )
+    else:
+        # Fallback to basic optimizer
+        optimizer = keras.optimizers.get(optimizer_name)
+        optimizer.learning_rate = learning_rate
+        if hasattr(optimizer, 'clipnorm'):
+            optimizer.clipnorm = 1.0
+
+    return optimizer
     """Custom callback to log learning rate to history."""
 
     def on_epoch_end(self, epoch, logs=None):
@@ -507,6 +561,21 @@ class LearningRateLogger(keras.callbacks.Callback):
         # Get learning rate from optimizer
         lr = float(self.model.optimizer.learning_rate)
         logs['lr'] = lr
+
+
+class NaNStoppingCallback(keras.callbacks.Callback):
+    """Custom callback to stop training when NaN values are detected."""
+
+    def on_epoch_end(self, epoch, logs=None):
+        if logs is None:
+            logs = {}
+
+        # Check for NaN in any metric
+        for key, value in logs.items():
+            if np.isnan(value) or np.isinf(value):
+                logger.error(f"NaN or Inf detected in {key}: {value}. Stopping training.")
+                self.model.stop_training = True
+                return
 
 
 def create_callbacks(
@@ -534,6 +603,9 @@ def create_callbacks(
     os.makedirs(results_dir, exist_ok=True)
 
     callbacks = [
+        # NaN detection callback (should be first)
+        NaNStoppingCallback(),
+
         # Early stopping
         keras.callbacks.EarlyStopping(
             monitor=monitor,
@@ -613,13 +685,31 @@ def generate_final_visualizations(
     # Evaluate model and get test results
     test_results = model.evaluate(x_test, y_test, verbose=0)
     if isinstance(test_results, (list, tuple)):
-        test_results_dict = dict(zip(model.metrics_names, test_results))
+        # Handle case where metrics_names might not be available or might be different
+        if hasattr(model, 'metrics_names') and model.metrics_names and len(model.metrics_names) == len(test_results):
+            test_results_dict = dict(zip(model.metrics_names, test_results))
+        else:
+            # Fallback naming scheme
+            test_results_dict = {"loss": test_results[0]}
+            if len(test_results) > 1:
+                test_results_dict["accuracy"] = test_results[1]
+            for i, value in enumerate(test_results[2:], 2):
+                test_results_dict[f"metric_{i}"] = value
     else:
         test_results_dict = {"test_loss": test_results}
 
     # Add model parameter information
     test_results_dict['total_params'] = model.count_params()
-    test_results_dict['trainable_params'] = np.sum([keras.backend.count_params(w) for w in model.trainable_weights])
+    # Calculate trainable parameters correctly for Keras 3
+    trainable_params = 0
+    for weight in model.trainable_weights:
+        if hasattr(weight, 'numpy'):
+            # For Keras 3 - weight is a tensor
+            trainable_params += np.prod(weight.shape)
+        else:
+            # Fallback for other cases
+            trainable_params += np.prod(weight.get_shape().as_list())
+    test_results_dict['trainable_params'] = trainable_params
 
     # Plot training history
     plot_training_history(history, final_viz_dir)
@@ -628,27 +718,37 @@ def generate_final_visualizations(
     plot_metrics_summary(history, test_results_dict, final_viz_dir, model_params)
 
     # Generate predictions for confusion matrix
-    predictions = model.predict(x_test, verbose=0)
+    try:
+        predictions = model.predict(x_test, verbose=0)
 
-    # Create class names
-    if dataset.lower() == 'mnist':
-        class_names = [str(i) for i in range(10)]
-    elif dataset.lower() == 'cifar10':
-        class_names = ['airplane', 'automobile', 'bird', 'cat', 'deer',
-                       'dog', 'frog', 'horse', 'ship', 'truck']
-    else:
-        class_names = None
+        # Create class names
+        if dataset.lower() == 'mnist':
+            class_names = [str(i) for i in range(10)]
+        elif dataset.lower() == 'cifar10':
+            class_names = ['airplane', 'automobile', 'bird', 'cat', 'deer',
+                           'dog', 'frog', 'horse', 'ship', 'truck']
+        else:
+            class_names = None
 
-    # Plot confusion matrix
-    plot_confusion_matrix(y_test, predictions, final_viz_dir, class_names)
+        # Plot confusion matrix
+        plot_confusion_matrix(y_test, predictions, final_viz_dir, class_names)
 
-    # Generate classification report
-    y_true_classes = np.argmax(y_test, axis=1) if len(y_test.shape) > 1 else y_test
-    y_pred_classes = np.argmax(predictions, axis=1) if len(predictions.shape) > 1 else predictions
+        # Generate classification report
+        y_true_classes = np.argmax(y_test, axis=1) if len(y_test.shape) > 1 else y_test
+        y_pred_classes = np.argmax(predictions, axis=1) if len(predictions.shape) > 1 else predictions
 
-    # Save detailed classification report
-    report = classification_report(y_true_classes, y_pred_classes,
-                                   target_names=class_names, output_dict=True)
+        # Save detailed classification report
+        report = classification_report(y_true_classes, y_pred_classes,
+                                       target_names=class_names, output_dict=True)
+
+        # Save detailed classification report as JSON
+        import json
+        with open(os.path.join(final_viz_dir, 'classification_report.json'), 'w') as f:
+            json.dump(report, f, indent=2)
+
+    except Exception as e:
+        logger.warning(f"Failed to generate confusion matrix and classification report: {e}")
+        report = {}
 
     # Save training summary
     with open(os.path.join(results_dir, 'training_summary.txt'), 'w') as f:
@@ -673,18 +773,19 @@ def generate_final_visualizations(
 
         f.write(f"\nTest Results:\n")
         for metric_name, value in test_results_dict.items():
-            f.write(f"{metric_name}: {value:.6f}\n")
+            if isinstance(value, (int, float, np.number)):
+                f.write(f"{metric_name}: {value:.6f}\n")
+            else:
+                f.write(f"{metric_name}: {value}\n")
 
         f.write(f"\nPer-class Performance:\n")
-        for class_name, metrics in report.items():
-            if isinstance(metrics, dict) and class_name not in ['accuracy', 'macro avg', 'weighted avg']:
-                f.write(f"{class_name}: precision={metrics['precision']:.3f}, "
-                        f"recall={metrics['recall']:.3f}, f1-score={metrics['f1-score']:.3f}\n")
-
-    # Save detailed classification report as JSON
-    import json
-    with open(os.path.join(final_viz_dir, 'classification_report.json'), 'w') as f:
-        json.dump(report, f, indent=2)
+        if report and isinstance(report, dict):
+            for class_name, metrics in report.items():
+                if isinstance(metrics, dict) and class_name not in ['accuracy', 'macro avg', 'weighted avg']:
+                    f.write(f"{class_name}: precision={metrics.get('precision', 0):.3f}, "
+                            f"recall={metrics.get('recall', 0):.3f}, f1-score={metrics.get('f1-score', 0):.3f}\n")
+        else:
+            f.write("Per-class performance not available due to errors in report generation.\n")
 
     logger.info(f"Final visualizations saved to: {final_viz_dir}")
 
@@ -724,15 +825,18 @@ def train_model(args: argparse.Namespace) -> None:
 
     logger.info(f"Model configuration: {model_config}")
 
-    # Create model
+    # Create model with stable optimizer
     logger.info("Creating PowerMLP model...")
-    model = create_power_mlp(
-        optimizer=args.optimizer,
-        learning_rate=args.learning_rate,
+    stable_optimizer = create_stable_optimizer(args.optimizer, args.learning_rate)
+
+    model = PowerMLP(**model_config)
+    model.compile(
+        optimizer=stable_optimizer,
         loss='categorical_crossentropy',
-        metrics=['accuracy'],
-        **model_config
+        metrics=['accuracy']
     )
+
+    logger.info(f"Using optimizer: {type(stable_optimizer).__name__} with clipnorm=1.0")
 
     # Build model by calling it once
     sample_input = tf.zeros((1, x_train.shape[1]))
@@ -741,6 +845,30 @@ def train_model(args: argparse.Namespace) -> None:
     # Print model summary
     logger.info("Model architecture:")
     model.summary()
+
+    # Quick sanity check
+    logger.info("Performing quick sanity check...")
+    try:
+        sample_batch = x_train[:32]
+        sample_labels = y_train[:32]
+        test_loss = model.evaluate(sample_batch, sample_labels, verbose=0)
+        logger.info(f"Initial model sanity check - loss: {test_loss[0]:.4f}, accuracy: {test_loss[1]:.4f}")
+
+        if np.isnan(test_loss[0]) or np.isinf(test_loss[0]):
+            logger.error("Model produces NaN/Inf values before training! Check model configuration.")
+            logger.error("Try reducing learning rate, k value, or enabling batch normalization.")
+            return
+
+    except Exception as e:
+        logger.warning(f"Sanity check failed: {e}. Proceeding with training...")
+
+    logger.info(f"Model configuration summary:")
+    logger.info(f"  - Architecture: {model_config['hidden_units']}")
+    logger.info(f"  - ReLU-k power: {model_config['k']}")
+    logger.info(f"  - Dropout rate: {model_config['dropout_rate']}")
+    logger.info(f"  - Batch normalization: {model_config['batch_normalization']}")
+    logger.info(f"  - Learning rate: {args.learning_rate}")
+    logger.info(f"  - Total parameters: {model.count_params():,}")
 
     # Create callbacks
     callbacks, results_dir = create_callbacks(
@@ -770,8 +898,17 @@ def train_model(args: argparse.Namespace) -> None:
     logger.info("Final test results:")
 
     if isinstance(test_results, (list, tuple)):
-        for metric_name, value in zip(model.metrics_names, test_results):
-            logger.info(f"  {metric_name}: {value:.4f}")
+        # Handle case where metrics_names might not be available
+        if hasattr(model, 'metrics_names') and model.metrics_names:
+            for metric_name, value in zip(model.metrics_names, test_results):
+                logger.info(f"  {metric_name}: {value:.4f}")
+        else:
+            # Fallback naming
+            logger.info(f"  loss: {test_results[0]:.4f}")
+            if len(test_results) > 1:
+                logger.info(f"  accuracy: {test_results[1]:.4f}")
+            for i, value in enumerate(test_results[2:], 2):
+                logger.info(f"  metric_{i}: {value:.4f}")
     else:
         logger.info(f"  test_loss: {test_results:.4f}")
 
@@ -828,19 +965,19 @@ def main():
                         help='Training batch size (default: 128)')
     parser.add_argument('--optimizer', type=str, default='adam',
                         help='Optimizer to use (default: adam)')
-    parser.add_argument('--learning-rate', type=float, default=0.001,
-                        help='Learning rate (default: 0.001)')
-    parser.add_argument('--patience', type=int, default=20,
-                        help='Early stopping patience (default: 20)')
+    parser.add_argument('--learning-rate', type=float, default=0.0003,
+                        help='Learning rate (default: 0.0003)')
+    parser.add_argument('--patience', type=int, default=15,
+                        help='Early stopping patience (default: 15)')
 
     # Model arguments
-    parser.add_argument('--architecture', type=str, default='small',
+    parser.add_argument('--architecture', type=str, default='default',
                         choices=['small', 'default', 'large', 'deep'],
                         help='Model architecture size (default: default)')
-    parser.add_argument('--k', type=int, default=3,
-                        help='Power for ReLU-k activation (default: 3)')
-    parser.add_argument('--dropout-rate', type=float, default=0.0,
-                        help='Dropout rate for regularization (default: 0.0)')
+    parser.add_argument('--k', type=int, default=2,
+                        help='Power for ReLU-k activation (default: 2)')
+    parser.add_argument('--dropout-rate', type=float, default=0.1,
+                        help='Dropout rate for regularization (default: 0.1)')
     parser.add_argument('--batch-normalization', action='store_true',
                         help='Enable batch normalization')
 

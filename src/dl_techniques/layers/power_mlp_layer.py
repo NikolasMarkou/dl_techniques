@@ -67,8 +67,6 @@ class PowerMLPLayer(keras.layers.Layer):
         the output would have shape `(batch_size, units)`.
 
     Example:
-        >>> import keras
-        >>> from dl_techniques.layers import PowerMLPLayer
         >>>
         >>> # Create a PowerMLP layer
         >>> power_mlp = PowerMLPLayer(units=64, k=3)
