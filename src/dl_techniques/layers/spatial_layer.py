@@ -1,7 +1,7 @@
 import keras
 from keras import ops
 import tensorflow as tf
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple
 
 # ---------------------------------------------------------------------
 

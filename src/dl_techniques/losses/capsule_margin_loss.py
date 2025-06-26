@@ -51,6 +51,36 @@ from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
+def capsule_margin_loss(y_pred, y_true, downweight, positive_margin, negative_margin):
+    # Ensure compatible dtypes
+    y_true = ops.cast(y_true, dtype=y_pred.dtype)
+
+    # Validate shapes
+    if len(ops.shape(y_true)) != len(ops.shape(y_pred)):
+        raise ValueError(
+            f"y_true and y_pred must have the same number of dimensions. "
+            f"Got {len(ops.shape(y_true))} and {len(ops.shape(y_pred))}."
+        )
+
+    # Calculate positive class loss: T_k * max(0, m^+ - ||v_k||)^2
+    positive_loss = y_true * ops.square(
+        ops.maximum(0.0, positive_margin - y_pred)
+    )
+
+    # Calculate negative class loss: λ * (1 - T_k) * max(0, ||v_k|| - m^-)^2
+    negative_loss = downweight * (1.0 - y_true) * ops.square(
+        ops.maximum(0.0, y_pred - negative_margin)
+    )
+
+    # Combine losses
+    total_loss = positive_loss + negative_loss
+
+    # Sum over classes for each sample, then reduce according to reduction strategy
+    return ops.sum(total_loss, axis=-1)
+
+# ---------------------------------------------------------------------
+
+
 @keras.saving.register_keras_serializable()
 class CapsuleMarginLoss(keras.losses.Loss):
     """
@@ -160,31 +190,12 @@ class CapsuleMarginLoss(keras.losses.Loss):
         :rtype: keras.KerasTensor
         :raises ValueError: If tensor shapes are incompatible.
         """
-        # Ensure compatible dtypes
-        y_true = ops.cast(y_true, dtype=y_pred.dtype)
-
-        # Validate shapes
-        if len(ops.shape(y_true)) != len(ops.shape(y_pred)):
-            raise ValueError(
-                f"y_true and y_pred must have the same number of dimensions. "
-                f"Got {len(ops.shape(y_true))} and {len(ops.shape(y_pred))}."
-            )
-
-        # Calculate positive class loss: T_k * max(0, m^+ - ||v_k||)^2
-        positive_loss = y_true * ops.square(
-            ops.maximum(0.0, self.positive_margin - y_pred)
-        )
-
-        # Calculate negative class loss: λ * (1 - T_k) * max(0, ||v_k|| - m^-)^2
-        negative_loss = self.downweight * (1.0 - y_true) * ops.square(
-            ops.maximum(0.0, y_pred - self.negative_margin)
-        )
-
-        # Combine losses
-        total_loss = positive_loss + negative_loss
-
-        # Sum over classes for each sample, then reduce according to reduction strategy
-        return ops.sum(total_loss, axis=-1)
+        return capsule_margin_loss(
+            y_pred=y_pred,
+            y_true=y_true,
+            positive_margin=self.positive_margin,
+            negative_margin=self.negative_margin,
+            downweight=self.downweight)
 
     def get_config(self) -> Dict[str, Any]:
         """

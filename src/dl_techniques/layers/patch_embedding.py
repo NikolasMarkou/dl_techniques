@@ -261,7 +261,7 @@ class PatchEmbedding2D(keras.layers.Layer):
 
 
 @keras.saving.register_keras_serializable()
-class PatchEmbedding(keras.layers.Layer):
+class PatchEmbedding1d(keras.layers.Layer):
     """
     Patch embedding layer for time series data.
 

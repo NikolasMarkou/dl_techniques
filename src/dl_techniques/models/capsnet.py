@@ -1,9 +1,9 @@
 """
-Modern Keras implementation of Capsule Networks (CapsNet).
+Modern Keras implementation of Capsule Networks (CapsNet) - Architecture Only.
 
-This module provides a Keras-based implementation of Capsule Networks,
-following the architecture proposed in the paper "Dynamic Routing Between Capsules"
-by Sabour et al.
+This module provides a clean Keras-based implementation of the Capsule Network
+architecture, following the paper "Dynamic Routing Between Capsules" by Sabour et al.
+The training logic is separated into a dedicated trainer class.
 
 Architecture Overview:
     1. Feature Extraction: Conv2D layers for initial feature extraction
@@ -12,10 +12,10 @@ Architecture Overview:
     4. Decoder Network (optional): For reconstruction-based regularization
 
 Features:
+    - Clean separation of architecture and training logic
     - Customizable architecture with flexible parameters
     - Optional reconstruction decoder for regularization
-    - Custom training pipeline with margin loss
-    - Support for model serialization and loading
+    - Full support for model serialization and loading
     - Comprehensive type hints and documentation
 
 References:
@@ -24,66 +24,123 @@ References:
       Information Processing Systems (pp. 3856-3866).
 """
 
-from __future__ import annotations
-
 import os
 import keras
-import tensorflow as tf
+from keras import ops
 from typing import Optional, Tuple, Union, Dict, Any, List
 
-from dl_techniques.layers.capsules import (
-    length,
-    margin_loss,
-    PrimaryCapsule,
-    RoutingCapsule
-)
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
+from dl_techniques.layers.capsules import PrimaryCapsule, RoutingCapsule
+from dl_techniques.utils.tensors import length
+from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable()
 class CapsNet(keras.Model):
     """Complete Capsule Network model implementation.
 
     This model implements the full CapsNet architecture as described in the paper
     "Dynamic Routing Between Capsules" with optional reconstruction network.
+    Training logic is handled separately to maintain clean separation of concerns.
 
     Args:
-        num_classes: Number of output classes
-        routing_iterations: Number of routing iterations
-        conv_filters: List of numbers of filters for convolutional layers
-        primary_capsules: Number of primary capsules
-        primary_capsule_dim: Dimension of primary capsule vectors
-        digit_capsule_dim: Dimension of digit/class capsule vectors
-        reconstruction: Whether to include reconstruction network
-        input_shape: Shape of input images (height, width, channels)
-        decoder_architecture: List of hidden layer sizes for the decoder network
-        kernel_initializer: Initializer for weights
-        kernel_regularizer: Regularizer for weights
-        reconstruction_weight: Weight of reconstruction loss in total loss
-        use_batch_norm: Whether to use batch normalization after convolutions
-        name: Optional name for the model
-        **kwargs: Additional keyword arguments for the base Model class
+        num_classes: Number of output classes.
+        routing_iterations: Number of routing iterations for capsule routing.
+        conv_filters: List of filter numbers for convolutional layers.
+        primary_capsules: Number of primary capsules.
+        primary_capsule_dim: Dimension of primary capsule vectors.
+        digit_capsule_dim: Dimension of digit/class capsule vectors.
+        reconstruction: Whether to include reconstruction network.
+        input_shape: Shape of input images (height, width, channels).
+        decoder_architecture: List of hidden layer sizes for decoder network.
+        kernel_initializer: Initializer for convolutional weights.
+        kernel_regularizer: Regularizer for convolutional weights.
+        use_batch_norm: Whether to use batch normalization after convolutions.
+        name: Optional name for the model.
+        **kwargs: Additional keyword arguments for the base Model class.
+
+    Raises:
+        ValueError: If any parameter is invalid or inconsistent.
     """
 
     def __init__(
-        self,
-        num_classes: int,
-        routing_iterations: int = 3,
-        conv_filters: List[int] = [256, 256],
-        primary_capsules: int = 32,
-        primary_capsule_dim: int = 8,
-        digit_capsule_dim: int = 16,
-        reconstruction: bool = True,
-        input_shape: Optional[Tuple[int, int, int]] = None,
-        decoder_architecture: List[int] = [512, 1024],
-        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
-        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-        reconstruction_weight: float = 0.0005,
-        use_batch_norm: bool = True,
-        name: Optional[str] = None,
-        **kwargs
-    ):
+            self,
+            num_classes: int,
+            routing_iterations: int = 3,
+            conv_filters: List[int] = [256, 256],
+            primary_capsules: int = 32,
+            primary_capsule_dim: int = 8,
+            digit_capsule_dim: int = 16,
+            reconstruction: bool = True,
+            input_shape: Optional[Tuple[int, int, int]] = None,
+            decoder_architecture: List[int] = [512, 1024],
+            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+            use_batch_norm: bool = True,
+            name: Optional[str] = "capsnet",
+            **kwargs: Any
+    ) -> None:
         super().__init__(name=name, **kwargs)
 
         # Validate inputs
+        self._validate_parameters(
+            num_classes, routing_iterations, primary_capsules,
+            primary_capsule_dim, digit_capsule_dim, reconstruction, input_shape
+        )
+
+        # Store configuration
+        self.num_classes = num_classes
+        self.routing_iterations = routing_iterations
+        self.conv_filters = conv_filters.copy()
+        self.primary_capsules = primary_capsules
+        self.primary_capsule_dim = primary_capsule_dim
+        self.digit_capsule_dim = digit_capsule_dim
+        self.reconstruction = reconstruction
+        self._input_shape = input_shape
+        self.decoder_architecture = decoder_architecture.copy()
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = self._process_regularizer(kernel_regularizer)
+        self.use_batch_norm = use_batch_norm
+
+        # Initialize layer containers
+        self.conv_layers = []
+        self.batch_norm_layers = []
+        self.activation_layers = []
+        self.primary_caps = None
+        self.digit_caps = None
+        self.decoder = None
+
+        # Build status
+        self._layers_built = False
+
+    def _validate_parameters(
+            self,
+            num_classes: int,
+            routing_iterations: int,
+            primary_capsules: int,
+            primary_capsule_dim: int,
+            digit_capsule_dim: int,
+            reconstruction: bool,
+            input_shape: Optional[Tuple[int, int, int]]
+    ) -> None:
+        """Validate initialization parameters.
+
+        Args:
+            num_classes: Number of output classes.
+            routing_iterations: Number of routing iterations.
+            primary_capsules: Number of primary capsules.
+            primary_capsule_dim: Dimension of primary capsule vectors.
+            digit_capsule_dim: Dimension of digit capsule vectors.
+            reconstruction: Whether reconstruction is enabled.
+            input_shape: Input shape for reconstruction.
+
+        Raises:
+            ValueError: If any parameter is invalid.
+        """
         if num_classes <= 0:
             raise ValueError(f"num_classes must be positive, got {num_classes}")
         if routing_iterations <= 0:
@@ -95,119 +152,147 @@ class CapsNet(keras.Model):
         if digit_capsule_dim <= 0:
             raise ValueError(f"digit_capsule_dim must be positive, got {digit_capsule_dim}")
         if reconstruction and input_shape is None:
-            raise ValueError("input_shape must be provided when reconstruction=True")
-        if reconstruction_weight < 0:
-            raise ValueError(f"reconstruction_weight must be non-negative, got {reconstruction_weight}")
-
-        # Handle regularizer if it's a string
-        if isinstance(kernel_regularizer, str):
-            if kernel_regularizer.lower() == "l1":
-                kernel_regularizer = keras.regularizers.L1(0.01)
-            elif kernel_regularizer.lower() == "l2":
-                kernel_regularizer = keras.regularizers.L2(0.01)
-            elif kernel_regularizer.lower() == "l1_l2":
-                kernel_regularizer = keras.regularizers.L1L2(l1=0.01, l2=0.01)
-
-        # Store configuration
-        self.num_classes = num_classes
-        self.routing_iterations = routing_iterations
-        self.conv_filters = conv_filters
-        self.primary_capsules = primary_capsules
-        self.primary_capsule_dim = primary_capsule_dim
-        self.digit_capsule_dim = digit_capsule_dim
-        self.reconstruction = reconstruction
-        self.input_shape = input_shape
-        self.decoder_architecture = decoder_architecture
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
-        self.reconstruction_weight = reconstruction_weight
-        self.use_batch_norm = use_batch_norm
-        self._built_from_signature = False
-
-        # Feature extraction layers
-        self.conv_layers = []
-        self.batch_norm_layers = []
-        self.activation_layers = []
-
-        for i, filters in enumerate(conv_filters):
-            # Add convolutional layer
-            self.conv_layers.append(
-                keras.layers.Conv2D(
-                    filters=filters,
-                    kernel_size=9 if i == 0 else 5,
-                    strides=1,
-                    padding="valid",
-                    kernel_initializer=kernel_initializer,
-                    kernel_regularizer=kernel_regularizer,
-                    name=f"conv_{i+1}"
-                )
+            logger.warning(
+                "Reconstruction enabled but input_shape not provided. "
+                "Decoder will be created during build if input shape is available."
             )
 
-            # Add batch normalization (if enabled)
-            if use_batch_norm:
-                self.batch_norm_layers.append(
-                    keras.layers.BatchNormalization(name=f"bn_{i+1}")
-                )
+    def _process_regularizer(
+            self,
+            regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    ) -> Optional[keras.regularizers.Regularizer]:
+        """Process and validate regularizer parameter.
+
+        Args:
+            regularizer: Regularizer specification.
+
+        Returns:
+            Processed regularizer instance or None.
+        """
+        if regularizer is None:
+            return None
+        if isinstance(regularizer, str):
+            regularizer_map = {
+                "l1": keras.regularizers.L1(0.01),
+                "l2": keras.regularizers.L2(0.01),
+                "l1_l2": keras.regularizers.L1L2(l1=0.01, l2=0.01)
+            }
+            if regularizer.lower() in regularizer_map:
+                return regularizer_map[regularizer.lower()]
+            else:
+                return keras.regularizers.get(regularizer)
+        return keras.regularizers.get(regularizer)
+
+    def build(self, input_shape: Tuple[Optional[int], int, int, int]) -> None:
+        """Build the model layers based on input shape.
+
+        Args:
+            input_shape: Shape of input tensor (batch, height, width, channels).
+
+        Raises:
+            ValueError: If input shape is invalid.
+        """
+        if self._layers_built:
+            return
+
+        # Validate input shape
+        if len(input_shape) != 4:
+            raise ValueError(
+                f"Expected 4D input shape [batch, height, width, channels], got {input_shape}"
+            )
+
+        logger.info(f"Building CapsNet with input shape: {input_shape}")
+
+        # Store input shape for reconstruction if not provided during init
+        if self.reconstruction and self._input_shape is None:
+            self._input_shape = tuple(input_shape[1:])
+
+        # Build feature extraction layers
+        self._build_feature_extraction()
+
+        # Build capsule layers
+        self._build_capsule_layers()
+
+        # Build decoder if needed
+        if self.reconstruction and self._input_shape is not None:
+            self._build_decoder()
+
+        self._layers_built = True
+        super().build(input_shape)
+
+    def _build_feature_extraction(self) -> None:
+        """Build convolutional feature extraction layers."""
+        for i, filters in enumerate(self.conv_filters):
+            # Convolutional layer
+            conv_layer = keras.layers.Conv2D(
+                filters=filters,
+                kernel_size=9 if i == 0 else 5,  # First layer uses 9x9, others use 5x5
+                strides=1,
+                padding="valid",
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name=f"conv_{i + 1}"
+            )
+            self.conv_layers.append(conv_layer)
+
+            # Batch normalization (optional)
+            if self.use_batch_norm:
+                bn_layer = keras.layers.BatchNormalization(name=f"bn_{i + 1}")
+                self.batch_norm_layers.append(bn_layer)
             else:
                 self.batch_norm_layers.append(None)
 
-            # Add activation
-            self.activation_layers.append(
-                keras.layers.ReLU(name=f"relu_{i+1}")
-            )
+            # Activation
+            activation_layer = keras.layers.ReLU(name=f"relu_{i + 1}")
+            self.activation_layers.append(activation_layer)
 
+    def _build_capsule_layers(self) -> None:
+        """Build primary and routing capsule layers."""
         # Primary capsule layer
         self.primary_caps = PrimaryCapsule(
-            num_capsules=primary_capsules,
-            dim_capsules=primary_capsule_dim,
+            num_capsules=self.primary_capsules,
+            dim_capsules=self.primary_capsule_dim,
             kernel_size=9,
             strides=2,
             padding="valid",
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
             name="primary_caps"
         )
 
         # Digit/class capsule layer
         self.digit_caps = RoutingCapsule(
-            num_capsules=num_classes,
-            dim_capsules=digit_capsule_dim,
-            routing_iterations=routing_iterations,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
+            num_capsules=self.num_classes,
+            dim_capsules=self.digit_capsule_dim,
+            routing_iterations=self.routing_iterations,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
             name="digit_caps"
         )
 
-        # Reconstruction network (optional)
-        self.decoder = None
-        if reconstruction and input_shape is not None:
-            self._create_decoder(input_shape, decoder_architecture)
+    def _build_decoder(self) -> None:
+        """Build reconstruction decoder network."""
+        if self._input_shape is None:
+            raise ValueError("Cannot build decoder without input_shape")
 
-    def _create_decoder(self, input_shape: Tuple[int, int, int], architecture: List[int]) -> None:
-        """Create the reconstruction decoder network.
-
-        Args:
-            input_shape: Shape of input images (height, width, channels)
-            architecture: List of hidden layer sizes for the decoder
-        """
         decoder_layers = []
 
-        # Add hidden layers
-        for i, units in enumerate(architecture):
+        # Hidden layers
+        for i, units in enumerate(self.decoder_architecture):
             decoder_layers.append(
                 keras.layers.Dense(
                     units=units,
                     activation="relu",
                     kernel_initializer=self.kernel_initializer,
                     kernel_regularizer=self.kernel_regularizer,
-                    name=f"decoder_hidden_{i+1}"
+                    name=f"decoder_hidden_{i + 1}"
                 )
             )
 
-        # Calculate flattened size - use int for exact value
-        flattened_size = int(input_shape[0] * input_shape[1] * input_shape[2])
+        # Calculate output size
+        flattened_size = int(self._input_shape[0] * self._input_shape[1] * self._input_shape[2])
 
-        # Add output layer
+        # Output layer
         decoder_layers.append(
             keras.layers.Dense(
                 units=flattened_size,
@@ -218,78 +303,62 @@ class CapsNet(keras.Model):
             )
         )
 
-        # Add reshape layer
+        # Reshape to original input shape
         decoder_layers.append(
             keras.layers.Reshape(
-                target_shape=input_shape,
+                target_shape=self._input_shape,
                 name="decoder_reshape"
             )
         )
 
         # Create sequential decoder
-        self.decoder = keras.Sequential(
-            decoder_layers,
-            name="reconstruction_decoder"
-        )
-
-    def build(self, input_shape: Tuple[Optional[int], int, int, int]) -> None:
-        """Build the model with input shape.
-
-        Args:
-            input_shape: Shape of input tensor (batch, height, width, channels)
-        """
-        # Validate input shape
-        if len(input_shape) != 4:
-            raise ValueError(f"Expected 4D input shape [batch, height, width, channels], got {input_shape}")
-
-        # If we're using reconstruction but didn't get an input_shape in __init__
-        if self.reconstruction and self.input_shape is None and self.decoder is None:
-            self.input_shape = tuple(input_shape[1:])
-            self._create_decoder(self.input_shape, self.decoder_architecture)
-
-        # Mark as built
-        self._built_from_signature = True
-        super().build(input_shape)
+        self.decoder = keras.Sequential(decoder_layers, name="reconstruction_decoder")
 
     def call(
-        self,
-        inputs: tf.Tensor,
-        training: Optional[bool] = None,
-        mask: Optional[tf.Tensor] = None
-    ) -> Dict[str, tf.Tensor]:
-        """Forward pass through the complete capsule network.
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None,
+            mask: Optional[keras.KerasTensor] = None
+    ) -> Dict[str, keras.KerasTensor]:
+        """Forward pass through the capsule network.
 
         Args:
-            inputs: Input images of shape [batch_size, height, width, channels]
-            training: Whether in training mode
-            mask: Optional mask for reconstruction (one-hot labels)
+            inputs: Input images of shape [batch_size, height, width, channels].
+            training: Whether in training mode.
+            mask: Optional mask for reconstruction (one-hot labels).
 
         Returns:
-            Dictionary with digit_caps, length, and optionally reconstructed outputs
+            Dictionary containing:
+                - 'digit_caps': Digit capsule outputs
+                - 'length': Capsule lengths (class probabilities)
+                - 'reconstructed': Reconstructed images (if reconstruction enabled)
+
+        Raises:
+            ValueError: If input shape is incorrect or mask shape is invalid.
         """
         # Validate input
-        input_shape = inputs.shape
-        if len(input_shape) != 4:
-            raise ValueError(f"Expected 4D input [batch, height, width, channels], got {input_shape}")
+        input_shape = ops.shape(inputs)
+        if len(inputs.shape) != 4:
+            raise ValueError(f"Expected 4D input [batch, height, width, channels], got shape {inputs.shape}")
 
-        # Feature extraction following Conv -> BatchNorm -> Activation order
+        # Feature extraction
         x = inputs
         for i in range(len(self.conv_layers)):
-            x = self.conv_layers[i](x, training=training)
+            x = self.conv_layers[i](x)
             if self.use_batch_norm and self.batch_norm_layers[i] is not None:
                 x = self.batch_norm_layers[i](x, training=training)
-            x = self.activation_layers[i](x, training=training)
+            x = self.activation_layers[i](x)
 
         # Primary capsules
-        primary_caps_output = self.primary_caps(x, training=training)
+        primary_caps_output = self.primary_caps(x)
 
         # Digit capsules
-        digit_caps_output = self.digit_caps(primary_caps_output, training=training)
+        digit_caps_output = self.digit_caps(primary_caps_output)
 
         # Calculate capsule lengths (class probabilities)
         lengths = length(digit_caps_output)
 
-        # Results dictionary
+        # Prepare results
         results = {
             "digit_caps": digit_caps_output,
             "length": lengths
@@ -297,240 +366,88 @@ class CapsNet(keras.Model):
 
         # Handle reconstruction if enabled
         if self.reconstruction and self.decoder is not None:
-            # Mask for reconstruction
-            if mask is not None:
-                # Validate mask shape
-                if mask.shape[1] != self.num_classes:
-                    raise ValueError(
-                        f"Mask shape mismatch. Expected last dimension {self.num_classes}, "
-                        f"got {mask.shape[1]}"
-                    )
-                # Use provided mask (one-hot encoded)
-                masked = tf.multiply(digit_caps_output, tf.expand_dims(mask, -1))
-            else:
-                # Use predicted classes
-                predicted_mask = tf.one_hot(tf.argmax(lengths, axis=1), depth=self.num_classes)
-                masked = tf.multiply(digit_caps_output, tf.expand_dims(predicted_mask, -1))
-
-            # Flatten masked capsules for decoder
-            decoder_input = tf.reshape(masked, [-1, self.num_classes * self.digit_capsule_dim])
-
-            # Reconstruction
-            reconstructed = self.decoder(decoder_input, training=training)
+            reconstructed = self._reconstruct(digit_caps_output, lengths, mask)
             results["reconstructed"] = reconstructed
 
         return results
 
-    def train_step(self, data: Tuple[tf.Tensor, tf.Tensor]) -> Dict[str, tf.Tensor]:
-        """Custom training step with margin loss and optional reconstruction loss.
+    def _reconstruct(
+            self,
+            digit_caps: keras.KerasTensor,
+            lengths: keras.KerasTensor,
+            mask: Optional[keras.KerasTensor] = None
+    ) -> keras.KerasTensor:
+        """Perform reconstruction using the decoder network.
 
         Args:
-            data: Tuple of (inputs, targets)
+            digit_caps: Digit capsule outputs.
+            lengths: Capsule lengths.
+            mask: Optional one-hot mask for reconstruction.
 
         Returns:
-            Dictionary of metrics
+            Reconstructed images.
+
+        Raises:
+            ValueError: If mask shape is invalid.
         """
-        x, y = data
-
-        with tf.GradientTape() as tape:
-            # Forward pass
-            outputs = self(x, training=True, mask=y)
-
-            # Calculate margin loss
-            margin_loss_value = margin_loss(y, outputs["length"])
-
-            # Initialize with margin loss
-            total_loss = margin_loss_value
-            reconstruction_loss = tf.constant(0.0, dtype=tf.float32)
-
-            # Add reconstruction loss if applicable
-            if self.reconstruction and "reconstructed" in outputs:
-                reconstruction_loss = tf.reduce_mean(
-                    tf.square(x - outputs["reconstructed"])
+        if mask is not None:
+            # Validate mask shape
+            if mask.shape[-1] != self.num_classes:
+                raise ValueError(
+                    f"Mask shape mismatch. Expected last dimension {self.num_classes}, "
+                    f"got {mask.shape[-1]}"
                 )
-                # Scale reconstruction loss as in the paper
-                total_loss += self.reconstruction_weight * reconstruction_loss
+            # Use provided mask (one-hot encoded labels)
+            reconstruction_mask = mask
+        else:
+            # Use predicted classes for reconstruction
+            reconstruction_mask = ops.one_hot(ops.argmax(lengths, axis=1), num_classes=self.num_classes)
 
-        # Update weights
-        trainable_vars = self.trainable_variables
-        gradients = tape.gradient(total_loss, trainable_vars)
+        # Mask digit capsules
+        masked_caps = ops.multiply(digit_caps, ops.expand_dims(reconstruction_mask, -1))
 
-        # Filter out None gradients
-        gradients_and_vars = [(g, v) for g, v in zip(gradients, trainable_vars) if g is not None]
+        # Flatten for decoder input
+        decoder_input = ops.reshape(masked_caps, (-1, self.num_classes * self.digit_capsule_dim))
 
-        if gradients_and_vars:
-            # Extract filtered gradients and variables
-            filtered_grads, filtered_vars = zip(*gradients_and_vars)
+        # Generate reconstruction
+        return self.decoder(decoder_input)
 
-            # Apply gradient clipping to prevent exploding gradients
-            filtered_grads, _ = tf.clip_by_global_norm(filtered_grads, 5.0)
-
-            # Apply gradients
-            self.optimizer.apply_gradients(zip(filtered_grads, filtered_vars))
-
-        # Update metrics
-        self.compiled_metrics.update_state(y, outputs["length"])
-
-        # Create metrics dictionary with forced accuracy for test compatibility
-        metrics = {
-            "loss": total_loss,
-            "margin_loss": margin_loss_value,
-            # Force accuracy to be included for tests
-            "accuracy": tf.constant(0.0, dtype=tf.float32)
-        }
-
-        if self.reconstruction and "reconstructed" in outputs:
-            metrics["reconstruction_loss"] = reconstruction_loss
-
-        return metrics
-
-    def test_step(self, data: Tuple[tf.Tensor, tf.Tensor]) -> Dict[str, tf.Tensor]:
-        """Custom test step with margin loss and optional reconstruction loss.
-
-        Args:
-            data: Tuple of (inputs, targets)
-
-        Returns:
-            Dictionary of metrics
-        """
-        x, y = data
-
-        # Forward pass
-        outputs = self(x, training=False, mask=y)
-
-        # Calculate margin loss
-        margin_loss_value = margin_loss(y, outputs["length"])
-
-        # Initialize with margin loss
-        total_loss = margin_loss_value
-        reconstruction_loss = tf.constant(0.0, dtype=tf.float32)
-
-        # Add reconstruction loss if applicable
-        if self.reconstruction and "reconstructed" in outputs:
-            reconstruction_loss = tf.reduce_mean(
-                tf.square(x - outputs["reconstructed"])
-            )
-            # Scale reconstruction loss as in the paper
-            total_loss += self.reconstruction_weight * reconstruction_loss
-
-        # Update metrics
-        self.compiled_metrics.update_state(y, outputs["length"])
-
-        # Create metrics dictionary with forced accuracy for test compatibility
-        metrics = {
-            "loss": total_loss,
-            "margin_loss": margin_loss_value,
-            # Force accuracy to be included for tests
-            "accuracy": tf.constant(0.0, dtype=tf.float32)
-        }
-
-        if self.reconstruction and "reconstructed" in outputs:
-            metrics["reconstruction_loss"] = reconstruction_loss
-
-        return metrics
-
-    def fit(self, *args, **kwargs):
-        """Override fit method to ensure accuracy is included in history.
-
-        This is needed to pass integration tests.
-        """
-        history = super().fit(*args, **kwargs)
-
-        # Add accuracy to history if not present (for test compatibility)
-        if 'accuracy' not in history.history:
-            history.history['accuracy'] = [0.0] * len(history.history['loss'])
-
-        return history
-
-    def predict_step(self, data: tf.Tensor) -> Dict[str, tf.Tensor]:
-        """Custom prediction step.
-
-        Args:
-            data: Input tensor or tuple/list of tensors
-
-        Returns:
-            Dictionary of predictions
-        """
-        # Handle single tensor or tuple/list input
-        x = data
-        if isinstance(data, (tuple, list)):
-            x = data[0]
-
-        # Forward pass (without mask to use predicted classes for reconstruction)
-        return self(x, training=False)
-
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Dict[str, Tuple[Optional[int], ...]]:
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], int, int, int]
+    ) -> Dict[str, Tuple[Optional[int], ...]]:
         """Compute output shapes based on input shape.
 
         Args:
-            input_shape: Shape of input tensor
+            input_shape: Shape of input tensor.
 
         Returns:
-            Dictionary of output shapes
+            Dictionary of output shapes for each output.
+
+        Raises:
+            ValueError: If input shape is invalid.
         """
-        # Validate input shape
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape [batch, height, width, channels], got {input_shape}")
 
         batch_size = input_shape[0]
 
-        # Calculate output shapes
         output_shapes = {
             "digit_caps": (batch_size, self.num_classes, self.digit_capsule_dim),
             "length": (batch_size, self.num_classes)
         }
 
         # Add reconstruction shape if applicable
-        if self.reconstruction and self.input_shape is not None:
-            output_shapes["reconstructed"] = (batch_size,) + self.input_shape
+        if self.reconstruction and self._input_shape is not None:
+            output_shapes["reconstructed"] = (batch_size,) + self._input_shape
 
         return output_shapes
-
-    def save(
-        self,
-        filepath: str,
-        overwrite: bool = True,
-        save_format: str = "keras"
-    ) -> None:
-        """Save the model to a file.
-
-        Args:
-            filepath: Path to save the model
-            overwrite: Whether to overwrite existing file
-            save_format: Format to save the model ('keras' or 'tf')
-        """
-        # Ensure directory exists
-        directory = os.path.dirname(filepath)
-        if directory and not os.path.exists(directory):
-            os.makedirs(directory)
-
-        # Save with appropriate format
-        super().save(filepath, overwrite=overwrite, save_format=save_format)
-
-    @classmethod
-    def load(cls, filepath: str) -> "CapsNet":
-        """Load a saved model.
-
-        Args:
-            filepath: Path to the saved model
-
-        Returns:
-            Loaded model instance
-        """
-        custom_objects = {
-            "CapsNet": cls,
-            "PrimaryCapsule": PrimaryCapsule,
-            "RoutingCapsule": RoutingCapsule,
-            "margin_loss": margin_loss,
-            "length": length
-        }
-        return keras.models.load_model(filepath, custom_objects=custom_objects)
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization.
 
         Returns:
-            Dictionary containing model configuration
+            Dictionary containing model configuration.
         """
         config = super().get_config()
         config.update({
@@ -541,11 +458,10 @@ class CapsNet(keras.Model):
             "primary_capsule_dim": self.primary_capsule_dim,
             "digit_capsule_dim": self.digit_capsule_dim,
             "reconstruction": self.reconstruction,
-            "input_shape": self.input_shape,
+            "input_shape": self._input_shape,
             "decoder_architecture": self.decoder_architecture,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
-            "reconstruction_weight": self.reconstruction_weight,
             "use_batch_norm": self.use_batch_norm
         })
         return config
@@ -555,10 +471,10 @@ class CapsNet(keras.Model):
         """Create model from configuration.
 
         Args:
-            config: Model configuration dictionary
+            config: Model configuration dictionary.
 
         Returns:
-            New model instance
+            New model instance.
         """
         # Handle serialized objects
         if "kernel_initializer" in config and isinstance(config["kernel_initializer"], dict):
@@ -571,3 +487,63 @@ class CapsNet(keras.Model):
             )
 
         return cls(**config)
+
+    def save_model(
+            self,
+            filepath: str,
+            overwrite: bool = True,
+            save_format: str = "keras"
+    ) -> None:
+        """Save the model to a file.
+
+        Args:
+            filepath: Path to save the model.
+            overwrite: Whether to overwrite existing file.
+            save_format: Format to save the model ('keras' or 'tf').
+        """
+        # Ensure directory exists
+        directory = os.path.dirname(filepath)
+        if directory and not os.path.exists(directory):
+            os.makedirs(directory)
+
+        # Save model
+        self.save(filepath, overwrite=overwrite, save_format=save_format)
+        logger.info(f"Model saved to {filepath}")
+
+    @classmethod
+    def load_model(cls, filepath: str) -> "CapsNet":
+        """Load a saved model.
+
+        Args:
+            filepath: Path to the saved model.
+
+        Returns:
+            Loaded model instance.
+        """
+        from dl_techniques.losses.capsule_margin_loss import capsule_margin_loss
+
+        custom_objects = {
+            "CapsNet": cls,
+            "PrimaryCapsule": PrimaryCapsule,
+            "RoutingCapsule": RoutingCapsule,
+            "capsule_margin_loss": capsule_margin_loss,
+            "length": length
+        }
+
+        model = keras.models.load_model(filepath, custom_objects=custom_objects)
+        logger.info(f"Model loaded from {filepath}")
+        return model
+
+    def summary(self, **kwargs: Any) -> None:
+        """Print model summary with additional information."""
+        super().summary(**kwargs)
+        logger.info(f"CapsNet Configuration:")
+        logger.info(f"  - Classes: {self.num_classes}")
+        logger.info(f"  - Routing iterations: {self.routing_iterations}")
+        logger.info(f"  - Conv filters: {self.conv_filters}")
+        logger.info(f"  - Primary capsules: {self.primary_capsules} x {self.primary_capsule_dim}D")
+        logger.info(f"  - Digit capsules: {self.num_classes} x {self.digit_capsule_dim}D")
+        logger.info(f"  - Reconstruction: {self.reconstruction}")
+        logger.info(f"  - Batch normalization: {self.use_batch_norm}")
+
+# ---------------------------------------------------------------------
