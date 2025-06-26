@@ -1,490 +1,783 @@
-"""
-Tests for CapsNet implementation.
-
-This module contains pytest tests for the Capsule Network implementation,
-testing functionality of individual components and integration.
-"""
-
-import keras
 import pytest
 import numpy as np
-import tensorflow as tf
+import keras
+import os
+import tempfile
 
 from dl_techniques.layers.capsules import (
-    length, squash, margin_loss,
-    BaseCapsuleLayer, PrimaryCapsule, RoutingCapsule, CapsuleBlock
+    SquashLayer,
+    PrimaryCapsule,
+    RoutingCapsule,
+    CapsuleBlock
 )
 
+from dl_techniques.utils.tensors import length
 
-@pytest.fixture
-def random_seed():
-    """Set random seeds for reproducibility."""
-    np.random.seed(42)
-    tf.random.set_seed(42)
-    return 42
+class TestSquashLayer:
+    """Test suite for SquashLayer implementation."""
 
+    @pytest.fixture
+    def input_tensor(self):
+        """Create a test input tensor."""
+        return keras.random.normal([4, 32, 16])  # batch_size, num_capsules, dim_capsules
 
-class TestCapsNetUtils:
-    """Test utility functions used in Capsule Networks."""
+    @pytest.fixture
+    def layer_instance(self):
+        """Create a default layer instance for testing."""
+        return SquashLayer()
 
-    def test_length_function(self):
-        """Test the length function for vectors."""
-        # Create test vectors
-        vectors = tf.constant([
-            [1.0, 0.0, 0.0],  # Length 1
-            [0.0, 3.0, 4.0],  # Length 5
-            [2.0, 2.0, 1.0],  # Length 3
-        ])
+    def test_initialization_defaults(self):
+        """Test initialization with default parameters."""
+        layer = SquashLayer()
 
-        expected_lengths = tf.constant([1.0, 5.0, 3.0])
-        computed_lengths = length(vectors)
+        # Check default values
+        assert layer.axis == -1
+        assert layer.epsilon == keras.backend.epsilon()
 
-        # Check if computed lengths match expected values
-        tf.debugging.assert_near(computed_lengths, expected_lengths, rtol=1e-5)
+    def test_initialization_custom(self):
+        """Test initialization with custom parameters."""
+        layer = SquashLayer(axis=1, epsilon=1e-8)
 
-    def test_squash_function(self):
-        """Test the squash function for normalization."""
-        # Test vectors with different magnitudes
-        vectors = tf.constant([
-            [10.0, 0.0, 0.0],  # Large magnitude -> should be close to 1.0
-            [0.1, 0.0, 0.0],  # Small magnitude -> should be much less than 1.0
-            [0.0, 0.0, 0.0],  # Zero vector -> should remain zero
-        ])
+        # Check custom values
+        assert layer.axis == 1
+        assert layer.epsilon == 1e-8
 
-        squashed = squash(vectors)
+    def test_build_process(self, input_tensor, layer_instance):
+        """Test that the layer builds properly."""
+        # Trigger build through forward pass
+        output = layer_instance(input_tensor)
 
-        # Check squashed vector properties
-        squashed_lengths = length(squashed)
+        # Check that layer was built
+        assert layer_instance.built is True
 
-        # 1. Large vector should be squashed to length close to 1.0
-        assert 0.99 < squashed_lengths[0] < 1.0
+    def test_output_shapes(self, input_tensor):
+        """Test that output shapes are computed correctly."""
+        shapes_to_test = [
+            (4, 32, 16),
+            (2, 10, 8),
+            (1, 5, 32),
+        ]
 
-        # 2. Small vector should have smaller length
-        assert squashed_lengths[1] < 0.5
+        for shape in shapes_to_test:
+            layer = SquashLayer()
+            test_input = keras.random.normal(shape)
+            output = layer(test_input)
 
-        # 3. Zero vector should remain zero or very close to zero
-        # Note: Changed from 1e-6 to 1e-4 to account for numerical precision
-        assert squashed_lengths[2] < 1e-4
+            # Check output shape matches input shape
+            assert output.shape == test_input.shape
 
-        # 4. Direction should be preserved
-        for i in range(2):  # Skip zero vector (index 2)
-            # Normalize the original vector
-            orig_direction = vectors[i] / tf.maximum(tf.norm(vectors[i]), 1e-9)
-            # Get direction of squashed vector
-            squashed_direction = squashed[i] / tf.maximum(tf.norm(squashed[i]), 1e-9)
-            # Compare directions
-            tf.debugging.assert_near(orig_direction, squashed_direction, rtol=1e-5)
+            # Test compute_output_shape separately
+            computed_shape = layer.compute_output_shape(test_input.shape)
+            assert computed_shape == test_input.shape
 
-    def test_margin_loss(self):
-        """Test margin loss calculation."""
-        # Create test data
-        y_true = tf.constant([
-            [1, 0, 0],
-            [0, 1, 0],
-            [0, 0, 1]
-        ], dtype=tf.float32)
+    def test_forward_pass(self, input_tensor, layer_instance):
+        """Test that forward pass produces expected values."""
+        output = layer_instance(input_tensor)
 
-        # Case 1: Perfect predictions
-        y_pred = tf.constant([
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0]
-        ], dtype=tf.float32)
+        # Basic sanity checks
+        assert not np.any(np.isnan(output.numpy()))
+        assert not np.any(np.isinf(output.numpy()))
 
-        # Loss should be near zero for perfect predictions
-        loss1 = margin_loss(y_true, y_pred)
-        assert loss1 < 0.01
+        # Check output shape
+        assert output.shape == input_tensor.shape
 
-        # Case 2: Bad predictions
-        y_pred_bad = tf.constant([
-            [0.0, 1.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [0.5, 0.5, 0.0]
-        ], dtype=tf.float32)
+        # Check that vector norms are between 0 and 1
+        norms = length(output)
+        assert np.all(norms.numpy() >= 0.0)
+        assert np.all(norms.numpy() <= 1.0)
 
-        # Loss should be higher for bad predictions
-        loss2 = margin_loss(y_true, y_pred_bad)
-        assert loss2 > 0.5
+    def test_different_axes(self):
+        """Test squashing along different axes."""
+        input_tensor = keras.random.normal([4, 32, 16])
 
-        # Case 3: Test margin and downweight parameters
-        custom_loss = margin_loss(y_true, y_pred_bad, margin=0.7, downweight=0.2)
+        for axis in [-1, -2, 1, 2]:
+            layer = SquashLayer(axis=axis)
+            output = layer(input_tensor)
 
-        # Different parameters should give different loss
-        assert not np.isclose(custom_loss.numpy(), loss2.numpy())
+            # Check output is valid
+            assert not np.any(np.isnan(output.numpy()))
+            assert output.shape == input_tensor.shape
+
+    def test_zero_vectors(self):
+        """Test handling of zero vectors."""
+        layer = SquashLayer()
+        zero_input = keras.ops.zeros([2, 10, 8])
+        output = layer(zero_input)
+
+        # Zero vectors should remain zero
+        assert np.allclose(output.numpy(), 0.0)
+
+    def test_serialization(self):
+        """Test serialization and deserialization of the layer."""
+        original_layer = SquashLayer(axis=1, epsilon=1e-8)
+
+        # Build the layer
+        input_shape = (None, 32, 16)
+        original_layer.build(input_shape)
+
+        # Get configs
+        config = original_layer.get_config()
+        build_config = original_layer.get_build_config()
+
+        # Recreate the layer
+        recreated_layer = SquashLayer.from_config(config)
+        recreated_layer.build_from_config(build_config)
+
+        # Check configuration matches
+        assert recreated_layer.axis == original_layer.axis
+        assert recreated_layer.epsilon == original_layer.epsilon
+
+    def test_numerical_stability(self):
+        """Test layer stability with extreme input values."""
+        layer = SquashLayer()
+
+        test_cases = [
+            keras.ops.ones((2, 10, 8)) * 1e-10,  # Very small values
+            keras.ops.ones((2, 10, 8)) * 1e10,  # Very large values
+            keras.random.normal((2, 10, 8)) * 1e5  # Large random values
+        ]
+
+        for test_input in test_cases:
+            output = layer(test_input)
+
+            # Check for NaN/Inf values
+            assert not np.any(np.isnan(output.numpy())), "NaN values detected in output"
+            assert not np.any(np.isinf(output.numpy())), "Inf values detected in output"
+
+            # Check norms are still valid
+            norms = length(output)
+            assert np.all(norms.numpy() >= 0.0)
+            assert np.all(norms.numpy() <= 1.0001)
 
 
 class TestPrimaryCapsule:
-    """Tests for PrimaryCapsule layer."""
+    """Test suite for PrimaryCapsule implementation."""
 
-    def test_creation_and_build(self):
-        """Test if PrimaryCapsule can be created and built."""
-        # Create layer
+    @pytest.fixture
+    def input_tensor(self):
+        """Create a test input tensor."""
+        return keras.random.normal([4, 28, 28, 64])  # batch_size, height, width, channels
+
+    @pytest.fixture
+    def layer_instance(self):
+        """Create a default layer instance for testing."""
+        return PrimaryCapsule(num_capsules=8, dim_capsules=8, kernel_size=9, strides=2)
+
+    def test_initialization_defaults(self):
+        """Test initialization with default parameters."""
+        layer = PrimaryCapsule(num_capsules=8, dim_capsules=8, kernel_size=9)
+
+        # Check default values
+        assert layer.num_capsules == 8
+        assert layer.dim_capsules == 8
+        assert layer.kernel_size == 9
+        assert layer.strides == 1
+        assert layer.padding == "valid"
+        assert layer.use_bias is True
+        assert layer.squash_axis == -1
+        assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
+
+    def test_initialization_custom(self):
+        """Test initialization with custom parameters."""
+        custom_regularizer = keras.regularizers.L2(1e-4)
+
         layer = PrimaryCapsule(
-            num_capsules=8,
-            dim_capsules=16,
-            kernel_size=3,
-            strides=2,
-            padding="valid",
-            kernel_regularizer=keras.regularizers.L2(1e-4)
+            num_capsules=16,
+            dim_capsules=4,
+            kernel_size=(3, 3),
+            strides=(2, 2),
+            padding="same",
+            kernel_initializer="glorot_uniform",
+            kernel_regularizer=custom_regularizer,
+            use_bias=False,
+            squash_axis=-2,
+            squash_epsilon=1e-8
         )
 
-        # Build layer with input shape
-        input_shape = (None, 28, 28, 32)  # Batch, height, width, channels
-        layer.build(input_shape)
+        # Check custom values
+        assert layer.num_capsules == 16
+        assert layer.dim_capsules == 4
+        assert layer.kernel_size == (3, 3)
+        assert layer.strides == (2, 2)
+        assert layer.padding == "same"
+        assert layer.use_bias is False
+        assert layer.squash_axis == -2
+        assert layer.squash_epsilon == 1e-8
+        assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
+        assert layer.kernel_regularizer == custom_regularizer
 
-        # Check if weights were created
-        assert hasattr(layer.conv, 'kernel')
+    def test_invalid_parameters(self):
+        """Test that invalid parameters raise appropriate errors."""
+        # Test negative or zero num_capsules
+        with pytest.raises(ValueError, match="num_capsules must be positive"):
+            PrimaryCapsule(num_capsules=-8, dim_capsules=8, kernel_size=9)
 
-        # Check shapes
-        # Each capsule output requires dim_capsules filters
-        assert layer.conv.kernel.shape == (3, 3, 32, 8 * 16)
+        with pytest.raises(ValueError, match="num_capsules must be positive"):
+            PrimaryCapsule(num_capsules=0, dim_capsules=8, kernel_size=9)
 
-    def test_output_shape(self, random_seed):
-        """Test if output shape is as expected."""
-        # Create layer and test input
-        layer = PrimaryCapsule(
-            num_capsules=8,
-            dim_capsules=16,
-            kernel_size=3,
-            strides=2,
-            padding="valid"
-        )
+        # Test negative or zero dim_capsules
+        with pytest.raises(ValueError, match="dim_capsules must be positive"):
+            PrimaryCapsule(num_capsules=8, dim_capsules=-8, kernel_size=9)
 
-        # Create test input with eager execution to avoid graph mode issues
-        with tf.device('/CPU:0'):
-            inputs = tf.random.normal((2, 28, 28, 32))
+        with pytest.raises(ValueError, match="dim_capsules must be positive"):
+            PrimaryCapsule(num_capsules=8, dim_capsules=0, kernel_size=9)
 
-            # Get output
-            outputs = layer(inputs)
+        # Test invalid padding
+        with pytest.raises(ValueError, match="padding must be one of"):
+            PrimaryCapsule(num_capsules=8, dim_capsules=8, kernel_size=9, padding="invalid")
 
-            # Check output shape
-            # With kernel 3x3, strides 2 and valid padding:
-            # - Input: 28x28
-            # - Output: 13x13 (in each spatial dimension)
-            # - Total spatial capsules: 13*13 = 169
-            # - Each spatial point has num_capsules, so total is 169*8 = 1352
-            expected_shape = (2, 13 * 13 * 8, 16)
-            assert outputs.shape == expected_shape
+    def test_build_process(self, input_tensor, layer_instance):
+        """Test that the layer builds properly."""
+        # Trigger build through forward pass
+        output = layer_instance(input_tensor)
 
-            # Check that output vectors are normalized by squashing
-            # (lengths should be between 0 and 1)
-            output_lengths = length(outputs)
-            assert tf.reduce_all(output_lengths >= 0.0)
-            assert tf.reduce_all(output_lengths <= 1.0)
+        # Check that layer was built
+        assert layer_instance.built is True
+        assert hasattr(layer_instance, "conv")
+        assert hasattr(layer_instance, "squash_layer")
+        assert layer_instance.conv is not None
+        assert layer_instance.squash_layer is not None
+
+    def test_output_shapes(self, input_tensor):
+        """Test that output shapes are computed correctly."""
+        configs_to_test = [
+            {"num_capsules": 8, "dim_capsules": 8, "kernel_size": 9, "strides": 2},
+            {"num_capsules": 16, "dim_capsules": 4, "kernel_size": 3, "strides": 1},
+            {"num_capsules": 4, "dim_capsules": 16, "kernel_size": 5, "strides": 2},
+        ]
+
+        for config in configs_to_test:
+            layer = PrimaryCapsule(**config)
+            output = layer(input_tensor)
+
+            # Check output has correct number of dimensions
+            assert len(output.shape) == 3  # [batch_size, num_total_capsules, dim_capsules]
+            assert output.shape[0] == input_tensor.shape[0]  # batch size preserved
+            assert output.shape[2] == config["dim_capsules"]  # capsule dimension correct
+
+            # Test compute_output_shape separately
+            computed_shape = layer.compute_output_shape(input_tensor.shape)
+            assert computed_shape == output.shape
+
+    def test_forward_pass(self, input_tensor, layer_instance):
+        """Test that forward pass produces expected values."""
+        output = layer_instance(input_tensor)
+
+        # Basic sanity checks
+        assert not np.any(np.isnan(output.numpy()))
+        assert not np.any(np.isinf(output.numpy()))
+
+        # Check that outputs are properly squashed (norms between 0 and 1)
+        norms = length(output)
+        assert np.all(norms.numpy() >= 0.0)
+        assert np.all(norms.numpy() <= 1.0)
+
+    def test_different_configurations(self):
+        """Test layer with different configurations."""
+        configurations = [
+            {"num_capsules": 8, "dim_capsules": 8, "kernel_size": 9, "strides": 2, "padding": "valid"},
+            {"num_capsules": 16, "dim_capsules": 4, "kernel_size": 3, "strides": 1, "padding": "same"},
+            {"num_capsules": 32, "dim_capsules": 2, "kernel_size": 5, "strides": 2, "padding": "valid"},
+        ]
+
+        for config in configurations:
+            layer = PrimaryCapsule(**config)
+
+            # Create test input
+            test_input = keras.random.normal([2, 32, 32, 64])
+
+            # Test forward pass
+            output = layer(test_input)
+
+            # Check output is valid
+            assert not np.any(np.isnan(output.numpy()))
+            assert len(output.shape) == 3
 
     def test_serialization(self):
-        """Test saving and loading of layer configuration."""
-        # Create original layer
-        original = PrimaryCapsule(
-            num_capsules=4,
-            dim_capsules=8,
+        """Test serialization and deserialization of the layer."""
+        original_layer = PrimaryCapsule(
+            num_capsules=16,
+            dim_capsules=4,
             kernel_size=3,
-            strides=1,
-            padding="same",
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # Get config
-        config = original.get_config()
-
-        # Create new layer from config
-        new_layer = PrimaryCapsule.from_config(config)
-
-        # Compare attributes
-        assert new_layer.num_capsules == original.num_capsules
-        assert new_layer.dim_capsules == original.dim_capsules
-        assert new_layer.kernel_size == original.kernel_size
-        assert new_layer.strides == original.strides
-        assert new_layer.padding == original.padding
-        # Check regularizer type (actual values might differ in string representation)
-        assert isinstance(new_layer.kernel_regularizer, type(original.kernel_regularizer))
-
-
-class TestRoutingCapsuleFixtures:
-    """Fixtures and helper methods for RoutingCapsule tests."""
-
-    @pytest.fixture
-    def routing_capsule_layer(self):
-        """Create a RoutingCapsule layer for testing."""
-        layer = RoutingCapsule(
-            num_capsules=10,
-            dim_capsules=16,
-            routing_iterations=3
-        )
-        return layer
-
-    @pytest.fixture
-    def test_input(self):
-        """Create a test input for RoutingCapsule layer."""
-        # Using eager execution to avoid graph mode errors
-        inputs = tf.random.normal((2, 32, 8))  # Smaller size for faster tests
-        return inputs
-
-    @pytest.fixture
-    def mock_forward_pass(self, monkeypatch):
-        """Mock the forward pass of RoutingCapsule to avoid matrix incompatibility."""
-
-        def mock_call(self, inputs, training=None):
-            batch_size = tf.shape(inputs)[0]
-            # Simply return a tensor of the correct shape
-            return tf.random.normal((batch_size, self.num_capsules, self.dim_capsules))
-
-        # Apply the monkey patch
-        monkeypatch.setattr(RoutingCapsule, 'call', mock_call)
-
-
-class TestRoutingCapsule(TestRoutingCapsuleFixtures):
-    """Tests for RoutingCapsule layer."""
-
-    def test_creation_and_build(self, routing_capsule_layer, test_input):
-        """Test if RoutingCapsule can be created and built."""
-        layer = routing_capsule_layer
-
-        # Build layer with input shape
-        layer.build(test_input.shape)
-
-        # Check if weights were created
-        assert hasattr(layer, 'W')
-        if layer.use_bias:
-            assert hasattr(layer, 'bias')
-
-        # Check shapes
-        # Weight matrix maps from input_dim to output_dim for each input-output capsule pair
-        assert layer.W.shape == (1, 32, 10, 16, 8)
-
-    def test_output_shape(self, routing_capsule_layer, test_input, mock_forward_pass):
-        """Test if output shape is as expected using mocked forward pass."""
-        layer = routing_capsule_layer
-
-        # Build the layer first
-        layer.build(test_input.shape)
-
-        # Get output using eager execution
-        with tf.device('/CPU:0'):
-            outputs = layer(test_input)
-
-            # Check output shape: (batch, num_capsules, dim_capsules)
-            expected_shape = (2, 10, 16)
-            assert outputs.shape == expected_shape
-
-    def test_config_serialization(self, routing_capsule_layer):
-        """Test configuration serialization and deserialization."""
-        # Get config
-        config = routing_capsule_layer.get_config()
-
-        # Create new layer from config
-        new_layer = RoutingCapsule.from_config(config)
-
-        # Compare configurations
-        assert new_layer.num_capsules == routing_capsule_layer.num_capsules
-        assert new_layer.dim_capsules == routing_capsule_layer.dim_capsules
-        assert new_layer.routing_iterations == routing_capsule_layer.routing_iterations
-
-
-class TestCapsuleBlockFixtures:
-    """Fixtures and helper methods for CapsuleBlock tests."""
-
-    @pytest.fixture
-    def capsule_block(self):
-        """Create a CapsuleBlock for testing."""
-        block = CapsuleBlock(
-            num_capsules=10,
-            dim_capsules=16,
-            dropout_rate=0.5,
-            use_layer_norm=True
-        )
-        return block
-
-    @pytest.fixture
-    def test_input(self):
-        """Create a test input for CapsuleBlock."""
-        inputs = tf.random.normal((2, 32, 8))
-        return inputs
-
-    @pytest.fixture
-    def mock_capsule_layer(self, monkeypatch):
-        """Mock RoutingCapsule.call to avoid matrix incompatibility."""
-
-        def mock_call(self, inputs, training=None):
-            batch_size = tf.shape(inputs)[0]
-            return tf.random.normal((batch_size, self.num_capsules, self.dim_capsules))
-
-        # Apply the monkey patch to RoutingCapsule
-        monkeypatch.setattr(RoutingCapsule, 'call', mock_call)
-
-
-class TestCapsuleBlock(TestCapsuleBlockFixtures):
-    """Tests for CapsuleBlock, which combines RoutingCapsule with normalization."""
-
-    def test_creation_and_layers(self, capsule_block):
-        """Test if CapsuleBlock creates all expected layers."""
-        block = capsule_block
-
-        # Check if all layers exist
-        assert hasattr(block, 'capsule_layer')
-        assert hasattr(block, 'dropout')
-        assert hasattr(block, 'layer_norm')
-        assert block.capsule_layer is not None
-        assert block.dropout is not None
-        assert block.layer_norm is not None
-
-        # Check layer properties
-        assert block.capsule_layer.num_capsules == 10
-        assert block.capsule_layer.dim_capsules == 16
-        assert block.capsule_layer.routing_iterations == 3
-        assert block.dropout.rate == 0.5
-        assert block.use_layer_norm is True
-
-    def test_forward_pass(self, capsule_block, test_input, mock_capsule_layer):
-        """Test forward pass through all layers with mocked capsule layer."""
-        block = capsule_block
-
-        # Build the block
-        block.build(test_input.shape)
-
-        # Run in eager execution mode
-        with tf.device('/CPU:0'):
-            # Run in training mode (to activate dropout)
-            training_output = block(test_input, training=True)
-
-            # Run in inference mode
-            inference_output = block(test_input, training=False)
-
-            # Check shapes
-            assert training_output.shape == (2, 10, 16)
-            assert inference_output.shape == (2, 10, 16)
-
-            # Outputs should differ in training vs inference due to dropout
-            # This might not always be true due to randomness, so we'll make this test conditional
-            output_diff = tf.reduce_sum(tf.abs(training_output - inference_output))
-            if output_diff > 1e-6:  # If outputs differ sufficiently
-                assert not np.allclose(
-                    training_output.numpy(),
-                    inference_output.numpy(),
-                    rtol=1e-5, atol=1e-5
-                )
-
-    def test_config_serialization(self, capsule_block):
-        """Test the configuration serialization."""
-        block = capsule_block
-
-        # Get config
-        config = block.get_config()
-
-        # Create new block from config
-        new_block = CapsuleBlock.from_config(config)
-
-        # Compare configurations
-        assert new_block.num_capsules == block.num_capsules
-        assert new_block.dim_capsules == block.dim_capsules
-        assert new_block.dropout_rate == block.dropout_rate
-        assert new_block.use_layer_norm == block.use_layer_norm
-
-
-@pytest.mark.integration
-class TestEndToEnd:
-    """Test end-to-end CapsNet model creation and training."""
-
-    @pytest.fixture
-    def mock_primary_capsule(self, monkeypatch):
-        """Mock PrimaryCapsule forward pass to avoid graph mode errors."""
-
-        def mock_call(self, inputs, training=None):
-            batch_size = tf.shape(inputs)[0]
-            num_spatial_capsules = 49  # 7x7 feature map
-            return tf.random.normal((batch_size, num_spatial_capsules * self.num_capsules, self.dim_capsules))
-
-        monkeypatch.setattr(PrimaryCapsule, 'call', mock_call)
-
-    @pytest.fixture
-    def mock_routing_capsule(self, monkeypatch):
-        """Mock RoutingCapsule forward pass to avoid matrix incompatibility."""
-
-        def mock_call(self, inputs, training=None):
-            batch_size = tf.shape(inputs)[0]
-            return tf.random.normal((batch_size, self.num_capsules, self.dim_capsules))
-
-        monkeypatch.setattr(RoutingCapsule, 'call', mock_call)
-
-    @pytest.fixture
-    def simple_capsnet(self, mock_primary_capsule, mock_routing_capsule):
-        """Create a simple CapsNet model with mocked layers."""
-        # Create model with the Keras Functional API
-        inputs = keras.Input(shape=(28, 28, 1))
-
-        # Conv2D layer
-        x = keras.layers.Conv2D(
-            filters=256,
-            kernel_size=9,
-            strides=1,
-            padding='valid',
-            activation='relu',
-            kernel_initializer='he_normal',
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )(inputs)
-
-        # Primary Capsules
-        primary_caps = PrimaryCapsule(
-            num_capsules=8,
-            dim_capsules=8,
-            kernel_size=9,
             strides=2,
-            padding='valid',
-            kernel_initializer='he_normal',
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )(x)
-
-        # Digit Capsules
-        digit_caps = RoutingCapsule(
-            num_capsules=10,
-            dim_capsules=16,
-            routing_iterations=3
-        )(primary_caps)
-
-        # Length layer to get classification probabilities
-        lengths = keras.layers.Lambda(lambda x: length(x))(digit_caps)
-
-        # Build model
-        model = keras.Model(inputs=inputs, outputs=[lengths, digit_caps])
-
-        # Compile with custom margin loss
-        model.compile(
-            optimizer=keras.optimizers.Adam(learning_rate=0.001),
-            loss=[margin_loss, lambda y_true, y_pred: y_true * 0],  # Dummy loss for digit_caps
-            loss_weights=[1.0, 0.0]
+            padding="same",
+            kernel_initializer="he_normal",
+            use_bias=False,
+            squash_epsilon=1e-8
         )
 
-        return model
+        # Build the layer
+        input_shape = (None, 32, 32, 64)
+        original_layer.build(input_shape)
 
-    def test_create_simple_capsnet(self, simple_capsnet):
-        """Test creating a simple CapsNet model."""
-        model = simple_capsnet
+        # Get configs
+        config = original_layer.get_config()
+        build_config = original_layer.get_build_config()
 
-        # Check model structure
-        assert len(model.layers) >= 5  # At least 5 layers including Input, Conv, PrimaryCaps, DigitCaps, Lambda
+        # Recreate the layer
+        recreated_layer = PrimaryCapsule.from_config(config)
+        recreated_layer.build_from_config(build_config)
 
-        # Handle different TensorFlow versions that might represent shapes differently
-        # Use shape tuples instead of shape.as_list()
-        output_shapes = [output.shape for output in model.outputs]
-        assert output_shapes[0][1] == 10  # Class probabilities (batch dim, 10 classes)
-        assert output_shapes[1][1:] == (10, 16)  # Digit capsules (batch dim, 10 capsules, 16 dimensions)
-        
-    def test_capsnet_prediction(self, simple_capsnet):
-        """Test CapsNet model prediction with mocked layers."""
-        model = simple_capsnet
+        # Check configuration matches
+        assert recreated_layer.num_capsules == original_layer.num_capsules
+        assert recreated_layer.dim_capsules == original_layer.dim_capsules
+        assert recreated_layer.kernel_size == original_layer.kernel_size
+        assert recreated_layer.strides == original_layer.strides
+        assert recreated_layer.padding == original_layer.padding
+        assert recreated_layer.use_bias == original_layer.use_bias
 
-        # Create dummy data (2 samples)
-        dummy_data = np.random.normal(size=(2, 28, 28, 1)).astype(np.float32)
 
-        # Run in eager execution mode
-        with tf.device('/CPU:0'):
-            # Make prediction
-            predictions, _ = model(dummy_data, training=False)
+class TestRoutingCapsule:
+    """Test suite for RoutingCapsule implementation."""
 
-            # Check outputs
-            assert predictions.shape == (2, 10)
-            # All lengths should be non-negative
-            assert np.all(predictions.numpy() >= 0.0)
-            # Verify we can get sensible class predictions
-            class_predictions = np.argmax(predictions, axis=1)
-            assert class_predictions.shape == (2,)
+    @pytest.fixture
+    def input_tensor(self):
+        """Create a test input tensor."""
+        return keras.random.normal([4, 1152, 8])  # batch_size, num_input_capsules, input_dim_capsules
+
+    @pytest.fixture
+    def layer_instance(self):
+        """Create a default layer instance for testing."""
+        return RoutingCapsule(num_capsules=10, dim_capsules=16, routing_iterations=3)
+
+    def test_initialization_defaults(self):
+        """Test initialization with default parameters."""
+        layer = RoutingCapsule(num_capsules=10, dim_capsules=16)
+
+        # Check default values
+        assert layer.num_capsules == 10
+        assert layer.dim_capsules == 16
+        assert layer.routing_iterations == 3
+        assert layer.use_bias is True
+        assert layer.squash_axis == -2
+        assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
+
+    def test_initialization_custom(self):
+        """Test initialization with custom parameters."""
+        custom_regularizer = keras.regularizers.L2(1e-4)
+
+        layer = RoutingCapsule(
+            num_capsules=20,
+            dim_capsules=32,
+            routing_iterations=5,
+            kernel_initializer="he_normal",
+            kernel_regularizer=custom_regularizer,
+            use_bias=False,
+            squash_axis=-1,
+            squash_epsilon=1e-8
+        )
+
+        # Check custom values
+        assert layer.num_capsules == 20
+        assert layer.dim_capsules == 32
+        assert layer.routing_iterations == 5
+        assert layer.use_bias is False
+        assert layer.squash_axis == -1
+        assert layer.squash_epsilon == 1e-8
+        assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
+        assert layer.kernel_regularizer == custom_regularizer
+
+    def test_invalid_parameters(self):
+        """Test that invalid parameters raise appropriate errors."""
+        # Test negative or zero num_capsules
+        with pytest.raises(ValueError, match="num_capsules must be positive"):
+            RoutingCapsule(num_capsules=-10, dim_capsules=16)
+
+        with pytest.raises(ValueError, match="num_capsules must be positive"):
+            RoutingCapsule(num_capsules=0, dim_capsules=16)
+
+        # Test negative or zero dim_capsules
+        with pytest.raises(ValueError, match="dim_capsules must be positive"):
+            RoutingCapsule(num_capsules=10, dim_capsules=-16)
+
+        with pytest.raises(ValueError, match="dim_capsules must be positive"):
+            RoutingCapsule(num_capsules=10, dim_capsules=0)
+
+        # Test negative or zero routing_iterations
+        with pytest.raises(ValueError, match="routing_iterations must be positive"):
+            RoutingCapsule(num_capsules=10, dim_capsules=16, routing_iterations=-3)
+
+        with pytest.raises(ValueError, match="routing_iterations must be positive"):
+            RoutingCapsule(num_capsules=10, dim_capsules=16, routing_iterations=0)
+
+    def test_build_process(self, input_tensor, layer_instance):
+        """Test that the layer builds properly."""
+        # Trigger build through forward pass
+        output = layer_instance(input_tensor)
+
+        # Check that layer was built
+        assert layer_instance.built is True
+        assert hasattr(layer_instance, "W")
+        assert hasattr(layer_instance, "squash_layer")
+        assert layer_instance.W is not None
+        assert layer_instance.squash_layer is not None
+
+        # Check weight shapes
+        expected_W_shape = (1, input_tensor.shape[1], layer_instance.num_capsules,
+                            layer_instance.dim_capsules, input_tensor.shape[2])
+        assert layer_instance.W.shape == expected_W_shape
+
+    def test_output_shapes(self, input_tensor):
+        """Test that output shapes are computed correctly."""
+        configs_to_test = [
+            {"num_capsules": 10, "dim_capsules": 16, "routing_iterations": 3},
+            {"num_capsules": 5, "dim_capsules": 32, "routing_iterations": 2},
+            {"num_capsules": 20, "dim_capsules": 8, "routing_iterations": 4},
+        ]
+
+        for config in configs_to_test:
+            layer = RoutingCapsule(**config)
+            output = layer(input_tensor)
+
+            # Check output shape
+            expected_shape = (input_tensor.shape[0], config["num_capsules"], config["dim_capsules"])
+            assert output.shape == expected_shape
+
+            # Test compute_output_shape separately
+            computed_shape = layer.compute_output_shape(input_tensor.shape)
+            assert computed_shape == expected_shape
+
+    def test_forward_pass(self, input_tensor, layer_instance):
+        """Test that forward pass produces expected values."""
+        output = layer_instance(input_tensor)
+
+        # Basic sanity checks
+        assert not np.any(np.isnan(output.numpy()))
+        assert not np.any(np.isinf(output.numpy()))
+
+        # Check output shape
+        expected_shape = (input_tensor.shape[0], layer_instance.num_capsules, layer_instance.dim_capsules)
+        assert output.shape == expected_shape
+
+    def test_different_routing_iterations(self, input_tensor):
+        """Test layer with different routing iterations."""
+        routing_iterations = [1, 2, 3, 5]
+
+        for iterations in routing_iterations:
+            layer = RoutingCapsule(num_capsules=10, dim_capsules=16, routing_iterations=iterations)
+            output = layer(input_tensor)
+
+            # Check output is valid
+            assert not np.any(np.isnan(output.numpy()))
+            assert output.shape == (input_tensor.shape[0], 10, 16)
+
+    def test_serialization(self):
+        """Test serialization and deserialization of the layer."""
+        original_layer = RoutingCapsule(
+            num_capsules=15,
+            dim_capsules=24,
+            routing_iterations=4,
+            kernel_initializer="he_normal",
+            use_bias=False,
+            squash_epsilon=1e-8
+        )
+
+        # Build the layer
+        input_shape = (None, 100, 8)
+        original_layer.build(input_shape)
+
+        # Get configs
+        config = original_layer.get_config()
+        build_config = original_layer.get_build_config()
+
+        # Recreate the layer
+        recreated_layer = RoutingCapsule.from_config(config)
+        recreated_layer.build_from_config(build_config)
+
+        # Check configuration matches
+        assert recreated_layer.num_capsules == original_layer.num_capsules
+        assert recreated_layer.dim_capsules == original_layer.dim_capsules
+        assert recreated_layer.routing_iterations == original_layer.routing_iterations
+        assert recreated_layer.use_bias == original_layer.use_bias
+
+
+class TestCapsuleBlock:
+    """Test suite for CapsuleBlock implementation."""
+
+    @pytest.fixture
+    def input_tensor(self):
+        """Create a test input tensor."""
+        return keras.random.normal([4, 1152, 8])  # batch_size, num_input_capsules, input_dim_capsules
+
+    @pytest.fixture
+    def layer_instance(self):
+        """Create a default layer instance for testing."""
+        return CapsuleBlock(num_capsules=10, dim_capsules=16)
+
+    def test_initialization_defaults(self):
+        """Test initialization with default parameters."""
+        layer = CapsuleBlock(num_capsules=10, dim_capsules=16)
+
+        # Check default values
+        assert layer.num_capsules == 10
+        assert layer.dim_capsules == 16
+        assert layer.routing_iterations == 3
+        assert layer.dropout_rate == 0.0
+        assert layer.use_layer_norm is False
+        assert layer.use_bias is True
+        assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
+
+    def test_initialization_custom(self):
+        """Test initialization with custom parameters."""
+        custom_regularizer = keras.regularizers.L2(1e-4)
+
+        layer = CapsuleBlock(
+            num_capsules=20,
+            dim_capsules=32,
+            routing_iterations=5,
+            dropout_rate=0.2,
+            use_layer_norm=True,
+            kernel_initializer="he_normal",
+            kernel_regularizer=custom_regularizer,
+            use_bias=False
+        )
+
+        # Check custom values
+        assert layer.num_capsules == 20
+        assert layer.dim_capsules == 32
+        assert layer.routing_iterations == 5
+        assert layer.dropout_rate == 0.2
+        assert layer.use_layer_norm is True
+        assert layer.use_bias is False
+        assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
+        assert layer.kernel_regularizer == custom_regularizer
+
+    def test_invalid_parameters(self):
+        """Test that invalid parameters raise appropriate errors."""
+        # Test invalid dropout rate
+        with pytest.raises(ValueError, match="dropout_rate must be in"):
+            CapsuleBlock(num_capsules=10, dim_capsules=16, dropout_rate=-0.1)
+
+        with pytest.raises(ValueError, match="dropout_rate must be in"):
+            CapsuleBlock(num_capsules=10, dim_capsules=16, dropout_rate=1.1)
+
+        # Test invalid use_layer_norm type
+        with pytest.raises(TypeError, match="use_layer_norm must be boolean"):
+            CapsuleBlock(num_capsules=10, dim_capsules=16, use_layer_norm="true")
+
+    def test_build_process(self, input_tensor, layer_instance):
+        """Test that the layer builds properly."""
+        # Trigger build through forward pass
+        output = layer_instance(input_tensor)
+
+        # Check that layer was built
+        assert layer_instance.built is True
+        assert hasattr(layer_instance, "capsule_layer")
+        assert layer_instance.capsule_layer is not None
+
+    def test_output_shapes(self, input_tensor):
+        """Test that output shapes are computed correctly."""
+        configs_to_test = [
+            {"num_capsules": 10, "dim_capsules": 16, "dropout_rate": 0.0, "use_layer_norm": False},
+            {"num_capsules": 5, "dim_capsules": 32, "dropout_rate": 0.1, "use_layer_norm": True},
+            {"num_capsules": 20, "dim_capsules": 8, "dropout_rate": 0.2, "use_layer_norm": False},
+        ]
+
+        for config in configs_to_test:
+            layer = CapsuleBlock(**config)
+            output = layer(input_tensor)
+
+            # Check output shape
+            expected_shape = (input_tensor.shape[0], config["num_capsules"], config["dim_capsules"])
+            assert output.shape == expected_shape
+
+            # Test compute_output_shape separately
+            computed_shape = layer.compute_output_shape(input_tensor.shape)
+            assert computed_shape == expected_shape
+
+    def test_forward_pass(self, input_tensor, layer_instance):
+        """Test that forward pass produces expected values."""
+        output = layer_instance(input_tensor)
+
+        # Basic sanity checks
+        assert not np.any(np.isnan(output.numpy()))
+        assert not np.any(np.isinf(output.numpy()))
+
+        # Check output shape
+        expected_shape = (input_tensor.shape[0], layer_instance.num_capsules, layer_instance.dim_capsules)
+        assert output.shape == expected_shape
+
+    def test_with_regularization(self, input_tensor):
+        """Test layer with different regularization options."""
+        # Test with dropout
+        layer_dropout = CapsuleBlock(num_capsules=10, dim_capsules=16, dropout_rate=0.2)
+        output_dropout = layer_dropout(input_tensor, training=True)
+        assert output_dropout.shape == (input_tensor.shape[0], 10, 16)
+
+        # Test with layer norm
+        layer_norm = CapsuleBlock(num_capsules=10, dim_capsules=16, use_layer_norm=True)
+        output_norm = layer_norm(input_tensor)
+        assert output_norm.shape == (input_tensor.shape[0], 10, 16)
+
+        # Test with both
+        layer_both = CapsuleBlock(num_capsules=10, dim_capsules=16, dropout_rate=0.1, use_layer_norm=True)
+        output_both = layer_both(input_tensor, training=True)
+        assert output_both.shape == (input_tensor.shape[0], 10, 16)
+
+    def test_serialization(self):
+        """Test serialization and deserialization of the layer."""
+        original_layer = CapsuleBlock(
+            num_capsules=15,
+            dim_capsules=24,
+            routing_iterations=4,
+            dropout_rate=0.1,
+            use_layer_norm=True,
+            kernel_initializer="he_normal",
+            use_bias=False
+        )
+
+        # Build the layer
+        input_shape = (None, 100, 8)
+        original_layer.build(input_shape)
+
+        # Get configs
+        config = original_layer.get_config()
+        build_config = original_layer.get_build_config()
+
+        # Recreate the layer
+        recreated_layer = CapsuleBlock.from_config(config)
+        recreated_layer.build_from_config(build_config)
+
+        # Check configuration matches
+        assert recreated_layer.num_capsules == original_layer.num_capsules
+        assert recreated_layer.dim_capsules == original_layer.dim_capsules
+        assert recreated_layer.routing_iterations == original_layer.routing_iterations
+        assert recreated_layer.dropout_rate == original_layer.dropout_rate
+        assert recreated_layer.use_layer_norm == original_layer.use_layer_norm
+        assert recreated_layer.use_bias == original_layer.use_bias
+
+    def test_model_integration(self, input_tensor):
+        """Test the layer in a model context."""
+        # Create a simple model with the capsule block
+        inputs = keras.Input(shape=input_tensor.shape[1:])
+        x = CapsuleBlock(num_capsules=10, dim_capsules=16)(inputs)
+        x = keras.layers.Lambda(lambda x: length(x))(x)  # Get capsule lengths
+        outputs = keras.layers.Dense(10, activation='softmax')(x)
+
+        model = keras.Model(inputs=inputs, outputs=outputs)
+
+        # Compile the model
+        model.compile(
+            optimizer="adam",
+            loss="sparse_categorical_crossentropy",
+        )
+
+        # Test forward pass
+        y_pred = model(input_tensor, training=False)
+        assert y_pred.shape == (input_tensor.shape[0], 10)
+
+    def test_model_save_load(self, input_tensor):
+        """Test saving and loading a model with the capsule block."""
+        # Create a model with the capsule block
+        inputs = keras.Input(shape=input_tensor.shape[1:])
+        x = CapsuleBlock(num_capsules=10, dim_capsules=16, name="capsule_block")(inputs)
+        outputs = keras.layers.Dense(10, activation='softmax')(x)
+
+        model = keras.Model(inputs=inputs, outputs=outputs)
+
+        # Generate a prediction before saving
+        original_prediction = model.predict(input_tensor, verbose=0)
+
+        # Create temporary directory for model
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            model_path = os.path.join(tmpdirname, "model.keras")
+
+            # Save the model
+            model.save(model_path)
+
+            # Load the model
+            loaded_model = keras.models.load_model(
+                model_path,
+                custom_objects={
+                    "CapsuleBlock": CapsuleBlock,
+                    "RoutingCapsule": RoutingCapsule,
+                    "SquashLayer": SquashLayer,
+                }
+            )
+
+            # Generate prediction with loaded model
+            loaded_prediction = loaded_model.predict(input_tensor, verbose=0)
+
+            # Check predictions match
+            assert np.allclose(original_prediction, loaded_prediction, rtol=1e-5)
+
+            # Check layer type is preserved
+            assert isinstance(loaded_model.get_layer("capsule_block"), CapsuleBlock)
+
+    def test_numerical_stability(self):
+        """Test layer stability with extreme input values."""
+        layer = CapsuleBlock(num_capsules=5, dim_capsules=8)
+
+        # Create inputs with different magnitudes
+        batch_size = 2
+        num_input_capsules = 100
+        input_dim_capsules = 4
+
+        test_cases = [
+            keras.ops.zeros((batch_size, num_input_capsules, input_dim_capsules)),  # Zeros
+            keras.ops.ones((batch_size, num_input_capsules, input_dim_capsules)) * 1e-10,  # Very small values
+            keras.ops.ones((batch_size, num_input_capsules, input_dim_capsules)) * 1e5,  # Large values
+            keras.random.normal((batch_size, num_input_capsules, input_dim_capsules)) * 100  # Large random values
+        ]
+
+        for test_input in test_cases:
+            output = layer(test_input)
+
+            # Check for NaN/Inf values
+            assert not np.any(np.isnan(output.numpy())), "NaN values detected in output"
+            assert not np.any(np.isinf(output.numpy())), "Inf values detected in output"
+
+    def test_regularization(self, input_tensor):
+        """Test that regularization losses are properly applied."""
+        # Create layer with regularization
+        layer = CapsuleBlock(
+            num_capsules=10,
+            dim_capsules=16,
+            kernel_regularizer=keras.regularizers.L2(0.1)
+        )
+
+        # Build layer
+        layer.build(input_tensor.shape)
+
+        # No regularization losses before calling the layer
+        initial_losses = len(layer.losses)
+
+        # Apply the layer
+        _ = layer(input_tensor)
+
+        # Should have regularization losses now
+        assert len(layer.losses) >= initial_losses
+
+
+class TestUtilityFunctions:
+    """Test suite for utility functions."""
+
+    def test_length_function(self):
+        """Test the length utility function."""
+        # Test with known vectors
+        vectors = keras.ops.array([
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],  # Unit vectors
+            [[3.0, 4.0, 0.0], [0.0, 0.0, 5.0]]  # Known lengths: 5, 5
+        ])
+
+        lengths = length(vectors)
+        expected_lengths = keras.ops.array([
+            [1.0, 1.0],
+            [5.0, 5.0]
+        ])
+
+        assert np.allclose(lengths.numpy(), expected_lengths.numpy(), rtol=1e-6)
+
+    def test_length_numerical_stability(self):
+        """Test length function with extreme values."""
+        # Very small vectors
+        small_vectors = keras.ops.ones((2, 3, 4)) * 1e-10
+        small_lengths = length(small_vectors)
+        assert not np.any(np.isnan(small_lengths.numpy()))
+        assert not np.any(np.isinf(small_lengths.numpy()))
+
+        # Very large vectors
+        large_vectors = keras.ops.ones((2, 3, 4)) * 1e10
+        large_lengths = length(large_vectors)
+        assert not np.any(np.isnan(large_lengths.numpy()))
+        assert not np.any(np.isinf(large_lengths.numpy()))

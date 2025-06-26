@@ -459,3 +459,16 @@ def gaussian_probability(y: keras.KerasTensor, mu: keras.KerasTensor, sigma: ker
     return ops.exp(exp_term) / norm
 
 # ---------------------------------------------------------------------
+
+def length(vectors) -> Any:
+    """Compute length of capsule vectors.
+
+    Args:
+        vectors: Capsule vectors of shape [..., dim_capsule]
+
+    Returns:
+        Length of vectors with shape [...]
+    """
+    return ops.sqrt(ops.sum(ops.square(vectors), axis=-1) + keras.backend.epsilon())
+
+# ---------------------------------------------------------------------
