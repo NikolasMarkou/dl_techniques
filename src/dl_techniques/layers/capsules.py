@@ -685,7 +685,7 @@ class RoutingCapsule(keras.layers.Layer):
                 b += agreement
 
         # Final output: shape [batch_size, num_capsules, dim_capsules]
-        return ops.squeeze(v, axis=[1, -1])
+        return ops.reshape(v, (batch_size, self.num_capsules, self.dim_capsules))
 
     def compute_output_shape(self, input_shape) -> Tuple[Optional[int], ...]:
         """Compute output shape based on input shape.
