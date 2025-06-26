@@ -124,7 +124,7 @@ class CapsNet(keras.Model):
         positive_margin: float = 0.9,
         negative_margin: float = 0.1,
         downweight: float = 0.5,
-        reconstruction_weight: float = 0.0005,
+        reconstruction_weight: float = 0.01,
         name: Optional[str] = "capsnet",
         **kwargs: Any
     ) -> None:

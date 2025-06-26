@@ -500,23 +500,109 @@ class PrimaryCapsule(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class RoutingCapsule(keras.layers.Layer):
-    """Capsule layer with dynamic routing.
+    """Capsule layer with dynamic routing between capsules.
 
-    Implements the dynamic routing mechanism between capsules as described in the paper.
-    This unified implementation replaces both DigitCaps and CapsuleLayer from the
-    original code.
+    Implements the iterative dynamic routing mechanism that determines how lower-level
+    capsules should contribute to higher-level capsules. This is the key innovation
+    of Capsule Networks that replaces max-pooling with a more sophisticated routing
+    mechanism based on agreement between predictions and outputs.
+
+    ## Dynamic Routing Algorithm
+
+    The routing process iteratively refines the connection strengths between input
+    and output capsules through an agreement mechanism:
+
+    1. **Initialize**: All routing coefficients start equal (uniform routing)
+    2. **For each iteration**:
+       - Convert routing logits to coefficients via softmax
+       - Compute weighted sum of input predictions
+       - Apply squashing non-linearity to get output
+       - Measure agreement between predictions and outputs
+       - Update routing logits based on agreement
+    3. **Converge**: Strong agreements strengthen connections, weak ones weaken
+
+    ## Mathematical Formulation
+
+    For each routing iteration:
+
+    .. math::
+        c_{ij} = \\text{softmax}(b_{ij}) \\quad \\text{(routing coefficients)}
+
+    .. math::
+        s_j = \\sum_i c_{ij} \\hat{u}_{j|i} \\quad \\text{(weighted sum)}
+
+    .. math::
+        v_j = \\text{squash}(s_j) \\quad \\text{(output capsule)}
+
+    .. math::
+        b_{ij} \\leftarrow b_{ij} + \\hat{u}_{j|i} \\cdot v_j \\quad \\text{(update logits)}
+
+    Where:
+    - :math:`c_{ij}`: routing coefficient from input capsule i to output capsule j
+    - :math:`b_{ij}`: routing logit (accumulated agreement)
+    - :math:`\\hat{u}_{j|i}`: prediction from input capsule i for output capsule j
+    - :math:`v_j`: final output of capsule j
+    - :math:`s_j`: weighted input to capsule j
+
+    ## Intuitive Understanding
+
+    Consider face recognition:
+    - **Lower capsules**: Detect eyes, nose, mouth features
+    - **Higher capsules**: Detect complete faces
+    - **Without routing**: All features contribute equally to face detection
+    - **With routing**:
+        - Iteration 1: Eyes strongly predict "face present", mouth prediction is weaker
+        - Iteration 2: Eye→face connections strengthened, mouth→face connections weakened
+        - Iteration 3: Stable routing where relevant features dominate face detection
+
+    ## Why Multiple Iterations?
+
+    - **Iteration 1**: Uniform routing, initial outputs computed
+    - **Iteration 2**: Routing refined based on agreement, better connections strengthened
+    - **Iteration 3**: Further refinement, typically reaches stable routing pattern
+    - **3+ iterations**: Diminishing returns, computational cost increases linearly
+
+    The iterative process creates a competitive mechanism where input capsules compete
+    to contribute to output capsules based on prediction quality, leading to more
+    interpretable and hierarchical representations.
 
     Args:
-        num_capsules: Number of output capsules
-        dim_capsules: Dimension of each output capsule's vector
-        routing_iterations: Number of routing iterations
-        kernel_initializer: Initializer for the transformation matrices
-        kernel_regularizer: Regularizer function for the transformation matrices
-        use_bias: Whether to use biases in routing
-        squash_axis: Axis along which to apply squashing operation
-        squash_epsilon: Epsilon for numerical stability in squashing
-        name: Optional name for the layer
-        **kwargs: Additional keyword arguments for the base class
+        num_capsules: Number of output capsules to produce.
+        dim_capsules: Dimension of each output capsule's vector.
+        routing_iterations: Number of dynamic routing iterations. The paper recommends 3
+            iterations as a good balance between performance and computational cost.
+            More iterations provide diminishing returns.
+        kernel_initializer: Initializer for the transformation matrices W that transform
+            input capsule predictions to output capsule space.
+        kernel_regularizer: Regularizer function applied to the transformation matrices.
+        use_bias: Whether to include bias terms in the routing computation.
+        squash_axis: Axis along which to apply the squashing non-linearity. Default is -2
+            to squash along the capsule dimension.
+        squash_epsilon: Small constant for numerical stability in the squashing function.
+        name: Optional name for the layer.
+        **kwargs: Additional keyword arguments passed to the Layer base class.
+
+    Input shape:
+        3D tensor with shape: ``(batch_size, num_input_capsules, input_dim_capsules)``
+
+    Output shape:
+        3D tensor with shape: ``(batch_size, num_capsules, dim_capsules)``
+
+    Example:
+        >>> # Route from 1152 primary capsules (8D) to 10 digit capsules (16D)
+        >>> routing_layer = RoutingCapsule(
+        ...     num_capsules=10,
+        ...     dim_capsules=16,
+        ...     routing_iterations=3
+        ... )
+        >>> primary_caps = keras.random.normal((32, 1152, 8))
+        >>> digit_caps = routing_layer(primary_caps)
+        >>> print(digit_caps.shape)
+        (32, 10, 16)
+
+    References:
+        Sabour, S., Frosst, N., & Hinton, G. E. (2017). Dynamic routing between capsules.
+        In Advances in Neural Information Processing Systems (pp. 3856-3866).
     """
 
     def __init__(

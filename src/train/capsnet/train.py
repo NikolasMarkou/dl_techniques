@@ -158,6 +158,22 @@ def create_model_config(dataset: str) -> Dict[str, Any]:
             'num_classes': 10,
             'input_shape': (28, 28, 1),
             'conv_filters': [256, 256],
+            'primary_capsules': 16,
+            'primary_capsule_dim': 4,
+            'digit_capsule_dim': 8,
+            'reconstruction': True,
+            'decoder_architecture': [256, 512],
+            'positive_margin': 0.9,
+            'negative_margin': 0.1,
+            'downweight': 0.5,
+            'reconstruction_weight': 0.1,
+            'use_batch_norm': True
+        }
+    elif dataset.lower() == 'cifar10':
+        return {
+            'num_classes': 10,
+            'input_shape': (32, 32, 3),
+            'conv_filters': [128, 256, 256],  # More layers for complex images
             'primary_capsules': 32,
             'primary_capsule_dim': 8,
             'digit_capsule_dim': 16,
@@ -166,23 +182,7 @@ def create_model_config(dataset: str) -> Dict[str, Any]:
             'positive_margin': 0.9,
             'negative_margin': 0.1,
             'downweight': 0.5,
-            'reconstruction_weight': 0.0005,
-            'use_batch_norm': True
-        }
-    elif dataset.lower() == 'cifar10':
-        return {
-            'num_classes': 10,
-            'input_shape': (32, 32, 3),
-            'conv_filters': [128, 256, 256],  # More layers for complex images
-            'primary_capsules': 64,  # More capsules for complex features
-            'primary_capsule_dim': 16,
-            'digit_capsule_dim': 32,
-            'reconstruction': True,
-            'decoder_architecture': [1024, 2048, 1024],  # Larger decoder
-            'positive_margin': 0.9,
-            'negative_margin': 0.1,
-            'downweight': 0.5,
-            'reconstruction_weight': 0.0005,
+            'reconstruction_weight': 0.1,
             'use_batch_norm': True
         }
     else:
@@ -1052,16 +1052,16 @@ def main():
                         help='Fraction of training data to use for validation (default: 0.1)')
 
     # Training arguments
-    parser.add_argument('--epochs', type=int, default=5,
-                        help='Number of training epochs (default: 5)')
+    parser.add_argument('--epochs', type=int, default=100,
+                        help='Number of training epochs (default: 100)')
     parser.add_argument('--batch-size', type=int, default=32,
                         help='Training batch size (default: 32)')
     parser.add_argument('--optimizer', type=str, default='adam',
                         help='Optimizer to use (default: adam)')
     parser.add_argument('--learning-rate', type=float, default=0.001,
                         help='Learning rate (default: 0.001)')
-    parser.add_argument('--patience', type=int, default=10,
-                        help='Early stopping patience (default: 10)')
+    parser.add_argument('--patience', type=int, default=30,
+                        help='Early stopping patience (default: 30)')
 
     # Model arguments
     parser.add_argument('--no-reconstruction', action='store_true',
