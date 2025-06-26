@@ -41,10 +41,13 @@ This layer is particularly useful in models requiring:
 """
 
 import keras
-from keras import ops
 from keras.api.regularizers import Regularizer
 from keras.api.initializers import Initializer
-from typing import Callable, Optional, Union, Tuple, Dict, Any, List
+from typing import Callable, Optional, Union, Tuple, Dict, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 

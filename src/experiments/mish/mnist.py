@@ -157,7 +157,7 @@ from keras.api.activations import gelu, relu, tanh
 # ------------------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.mish import mish, saturated_mish
+from dl_techniques.layers.activations.mish import mish, saturated_mish
 from dl_techniques.utils.model_analyzer import ModelAnalyzer
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.utils.weight_analyzer import WeightAnalyzerConfig, WeightAnalyzer

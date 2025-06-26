@@ -20,7 +20,7 @@ import keras
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.decomposition import PCA
-from typing import Tuple, List, Dict, Any, Optional, Union, Callable
+from typing import Tuple, List, Dict, Any
 import os
 import json
 import datetime
@@ -31,7 +31,7 @@ np.random.seed(42)
 tf.random.set_seed(42)
 
 # Import the custom DifferentialFFN layer (adjust the import path as needed)
-from dl_techniques.layers.diff_ffn import DifferentialFFN
+from dl_techniques.layers.ffn.diff_ffn import DifferentialFFN
 
 
 def create_experiment_directory() -> str:

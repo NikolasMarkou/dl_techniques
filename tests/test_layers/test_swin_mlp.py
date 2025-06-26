@@ -9,7 +9,7 @@ import keras
 import tempfile
 import os
 
-from dl_techniques.layers.swin_mlp import SwinMLP
+from dl_techniques.layers.ffn.swin_mlp import SwinMLP
 
 
 class TestSwinMLP:

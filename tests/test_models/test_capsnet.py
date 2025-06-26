@@ -440,9 +440,7 @@ class TestCapsNetIntegration:
         y = tf.one_hot(np.random.randint(0, config["num_classes"], size=batch_size),
                        depth=config["num_classes"])
 
-        # Fit for just 2 epochs
-        with tf.device('/CPU:0'):  # Force CPU to avoid potential GPU issues in CI
-            history = model.fit(x, y, epochs=2, batch_size=2, verbose=0)
+        history = model.fit(x, y, epochs=2, batch_size=2, verbose=0)
 
         # Check that history contains expected metrics
         assert isinstance(history.history, dict)

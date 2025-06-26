@@ -1,12 +1,14 @@
 import keras
 from keras import ops
-from typing import Optional, Union, Any, Tuple
+from typing import Optional, Any, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class StandardScaler(keras.layers.Layer):
@@ -264,3 +266,5 @@ class StandardScaler(keras.layers.Layer):
             return None
 
         return self.stored_mean, self.stored_std
+
+# ---------------------------------------------------------------------

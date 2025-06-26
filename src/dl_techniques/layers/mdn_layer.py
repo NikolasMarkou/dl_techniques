@@ -42,7 +42,15 @@ import keras
 from keras import ops
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Union, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.tensors import gaussian_probability
+
+# ---------------------------------------------------------------------
 
 
 def elu_plus_one_plus_epsilon(x: keras.KerasTensor) -> keras.KerasTensor:
@@ -64,37 +72,7 @@ def elu_plus_one_plus_epsilon(x: keras.KerasTensor) -> keras.KerasTensor:
     """
     return keras.activations.elu(x) + 1.0 + keras.backend.epsilon()
 
-
-def gaussian_probability(y: keras.KerasTensor, mu: keras.KerasTensor, sigma: keras.KerasTensor) -> keras.KerasTensor:
-    """Compute Gaussian probability density using Keras operations.
-
-    Parameters
-    ----------
-    y : keras.KerasTensor
-        Target values tensor of shape [batch_size, 1, output_dim] or [batch_size, output_dim]
-    mu : keras.KerasTensor
-        Mean values tensor of shape [batch_size, num_mixtures, output_dim]
-    sigma : keras.KerasTensor
-        Standard deviation tensor of shape [batch_size, num_mixtures, output_dim]
-
-    Returns
-    -------
-    keras.KerasTensor
-        Probability densities tensor of shape [batch_size, num_mixtures, output_dim]
-    """
-    # Ensure numerical stability with a minimum standard deviation
-    sigma = ops.maximum(1e-6, sigma)
-    sigma = ops.cast(sigma, "float32")
-
-    # Compute normalized squared difference
-    norm = ops.sqrt(2.0 * np.pi) * sigma
-    y = ops.cast(y, "float32")
-    mu = ops.cast(mu, "float32")
-    norm = ops.cast(norm, "float32")
-    exp_term = -0.5 * ops.square((y - mu) / sigma)
-
-    return ops.exp(exp_term) / norm
-
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class MDNLayer(keras.layers.Layer):

@@ -29,12 +29,9 @@ import seaborn as sns
 from sklearn.metrics import confusion_matrix, roc_curve, auc, precision_recall_curve
 
 import dl_techniques.layers.rms_norm_spherical_bound
-from dl_techniques.layers.layer_scale import LearnableMultiplier
-from dl_techniques.layers.mish import SaturatedMish
+from dl_techniques.layers.activations.mish import SaturatedMish
 from dl_techniques.layers.rms_norm_spherical_bound import SphericalBoundRMS
-from dl_techniques.regularizers.binary_preference import BinaryPreferenceRegularizer
-from dl_techniques.regularizers.soft_orthogonal import SoftOrthogonalConstraintRegularizer, \
-    SoftOrthonormalConstraintRegularizer
+from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 
 #------------------------------------------------------------------------------
 # GLOBAL CONSTANTS

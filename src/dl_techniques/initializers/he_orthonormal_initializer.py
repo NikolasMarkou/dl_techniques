@@ -9,7 +9,7 @@ The implementation follows these key steps:
 1. Generate a random matrix using He normal initialization
 2. Apply QR decomposition to obtain orthogonal vectors (Q matrix)
 3. Ensure numerical stability by fixing the signs based on the diagonal of R
-4. Extract the first n_clusters rows to get the desired number of orthogonal vectors
+4. Extract the orthonormal vectors as rows of the transposed Q matrix
 
 Mathematical Background
 -----------------------
@@ -181,10 +181,9 @@ class HeOrthonormalInitializer(keras.initializers.Initializer):
         Notes
         -----
         The algorithm works as follows:
-        1. Generate a He normal matrix of shape (feature_dims, feature_dims)
-        2. Apply QR decomposition: A = QR
-        3. Ensure deterministic results by using a simple sign convention
-        4. Extract the first n_clusters rows from Q
+        1. Generate a He normal matrix and apply QR decomposition
+        2. Extract orthonormal vectors from the Q matrix
+        3. Apply sign convention for deterministic results
 
         This guarantees orthonormality up to numerical precision.
         """
@@ -203,44 +202,63 @@ class HeOrthonormalInitializer(keras.initializers.Initializer):
         )
 
         try:
-            # Step 1: Generate He normal matrix of shape (feature_dims, feature_dims)
-            he_matrix_shape = (feature_dims, feature_dims)
-            he_matrix = self._he_normal(he_matrix_shape, dtype=dtype)
+            # Generate He normal matrix of the desired shape directly
+            he_matrix = self._he_normal(shape, dtype=dtype)
 
-            # Step 2: Compute QR decomposition using keras.ops
-            q, r = ops.linalg.qr(he_matrix, mode="reduced")
+            # Apply QR decomposition to the transposed matrix
+            # This gives us orthonormal columns that become orthonormal rows after transpose
+            he_matrix_t = ops.transpose(he_matrix)  # Shape: (feature_dims, n_clusters)
+            q, r = ops.linalg.qr(he_matrix_t)  # Q: (feature_dims, n_clusters)
 
-            # Step 3: Ensure deterministic results by applying a simple sign convention
-            # We'll make the first element of each column have a consistent sign
-            # This is simpler and avoids complex indexing operations
-
-            # Get the first row of Q matrix
-            first_row = q[0, :]  # Shape: (feature_dims,)
-
-            # Create sign corrections based on the first row
+            # Apply sign convention: make diagonal elements of R positive
+            r_diag = ops.diagonal(r)  # Shape: (n_clusters,)
             signs = ops.where(
-                ops.numpy.greater_equal(first_row, ops.cast(0.0, dtype)),
-                ops.ones_like(first_row),
-                ops.cast(-1.0, dtype) * ops.ones_like(first_row)
+                ops.greater_equal(r_diag, ops.cast(0.0, dtype)),
+                ops.cast(1.0, dtype),
+                ops.cast(-1.0, dtype)
             )
 
-            # Apply sign corrections to each column
-            q_corrected = q * ops.expand_dims(signs, axis=0)
+            # Apply signs to Q
+            q_signed = q * ops.expand_dims(signs, axis=0)  # Shape: (feature_dims, n_clusters)
 
-            # Step 4: Extract the first n_clusters rows to get desired number of vectors
-            orthonormal_vectors = q_corrected[:n_clusters, :]
+            # Transpose to get orthonormal rows
+            orthonormal_vectors = ops.transpose(q_signed)  # Shape: (n_clusters, feature_dims)
 
-            # Ensure the result has the correct dtype
-            result = ops.cast(orthonormal_vectors, dtype)
+            # Ensure correct dtype
+            orthonormal_vectors = ops.cast(orthonormal_vectors, dtype)
 
-            logger.debug(f"Successfully generated He orthonormal vectors with shape {ops.shape(result)}")
-            return result
+            logger.debug(f"Successfully generated He orthonormal vectors with shape {ops.shape(orthonormal_vectors)}")
+            return orthonormal_vectors
 
         except Exception as e:
             logger.error(f"Failed to generate He orthonormal vectors: {str(e)}")
             raise RuntimeError(
                 f"Failed to generate He orthonormal vectors for shape {shape}: {str(e)}"
             ) from e
+
+    def _gram_schmidt_orthogonalize(self, vectors: Any, dtype: str) -> Any:
+        """Apply Gram-Schmidt orthogonalization to the rows of a matrix.
+
+        This method is kept for reference but not currently used due to
+        dynamic loop limitations in Keras ops.
+
+        Parameters
+        ----------
+        vectors : tensor
+            Input vectors of shape (n_vectors, feature_dims).
+        dtype : str
+            Desired dtype for computations.
+
+        Returns
+        -------
+        tensor
+            Orthonormalized vectors of the same shape.
+        """
+        # This implementation would require dynamic loops which are
+        # not efficiently supported in Keras ops
+        raise NotImplementedError(
+            "Gram-Schmidt implementation requires dynamic loops not supported in Keras ops"
+        )
 
     def get_config(self) -> Dict[str, Any]:
         """Get the configuration of the initializer.

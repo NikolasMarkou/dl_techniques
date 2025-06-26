@@ -17,9 +17,9 @@ from typing import Optional, Union, List, Any, Tuple
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import RMSNorm
 from dl_techniques.layers.standard_scaler import StandardScaler
+from dl_techniques.layers.patch_embedding import PatchEmbedding1d
+from dl_techniques.layers.ffn.residual_block import ResidualBlock
 from dl_techniques.layers.tirex import (
-    PatchEmbedding,
-    ResidualBlock,
     QuantileHead,
     MixedSequentialBlock
 )
@@ -91,7 +91,7 @@ class TiRexCore(keras.Model):
         self.scaler = StandardScaler(name="scaler")
 
         # Patch embedding
-        self.patch_embedding = PatchEmbedding(
+        self.patch_embedding = PatchEmbedding1d(
             patch_size=self.patch_size,
             embed_dim=self.embed_dim * 2,  # Include mask information
             name="patch_embedding"

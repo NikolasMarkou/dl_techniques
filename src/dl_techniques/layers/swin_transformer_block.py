@@ -9,7 +9,7 @@ from typing import Tuple, Optional, Dict, Any, Union
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import window_reverse, window_partition
 
-from .swin_mlp import SwinMLP
+from dl_techniques.layers.ffn.swin_mlp import SwinMLP
 from .stochastic_depth import StochasticDepth
 from .window_attention import WindowAttention
 

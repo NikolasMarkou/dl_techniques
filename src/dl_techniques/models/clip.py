@@ -49,7 +49,7 @@ from typing import Optional, Any, Dict, Union, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.swiglu_ffn import SwiGLUFFN
+from dl_techniques.layers.ffn.swiglu_ffn import SwiGLUFFN
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.group_query_attention_layer import GroupedQueryAttention

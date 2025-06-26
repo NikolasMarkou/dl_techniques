@@ -12,7 +12,7 @@ import pytest
 import tensorflow as tf
 import numpy as np
 import keras
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any
 
 from dl_techniques.layers.adaptive_softmax import AdaptiveTemperatureSoftmax
 

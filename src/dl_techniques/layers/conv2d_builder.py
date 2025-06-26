@@ -59,7 +59,7 @@ from typing import List, Tuple, Union, Dict, Optional, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from .mish import Mish, SaturatedMish
+from dl_techniques.layers.activations.mish import Mish, SaturatedMish
 
 
 # ---------------------------------------------------------------------

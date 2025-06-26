@@ -257,19 +257,19 @@ class ExperimentConfig:
         'FocalLoss': lambda: keras.losses.CategoricalFocalCrossentropy(
             gamma=2.0, from_logits=False
         ),
-        'GoodhartAware': lambda: GoodhartAwareLoss(
-            entropy_weight=0.1, mi_weight=0.01, from_logits=False
-        ),
-        'GoodhartAware_0': lambda: GoodhartAwareLoss(
+        'GAL_0': lambda: GoodhartAwareLoss(
             entropy_weight=0.0, mi_weight=0.01, from_logits=False
         ),
-        'GoodhartAware_01': lambda: GoodhartAwareLoss(
+        'GAL_01': lambda: GoodhartAwareLoss(
+            entropy_weight=0.1, mi_weight=0.01, from_logits=False
+        ),
+        'GAL_001': lambda: GoodhartAwareLoss(
             entropy_weight=0.01, mi_weight=0.01, from_logits=False
         ),
-        'GoodhartAware_05': lambda: GoodhartAwareLoss(
+        'GAL_005': lambda: GoodhartAwareLoss(
             entropy_weight=0.05, mi_weight=0.01, from_logits=False
         ),
-        'GoodhartAware_001': lambda: GoodhartAwareLoss(
+        'GAL_0001': lambda: GoodhartAwareLoss(
             entropy_weight=0.001, mi_weight=0.01, from_logits=False
         ),
     })

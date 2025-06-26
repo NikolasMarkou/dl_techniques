@@ -116,7 +116,7 @@ import keras
 import tensorflow as tf
 from keras.api.regularizers import Regularizer
 from keras.api.initializers import Initializer
-from typing import Callable, Optional, Union, Tuple
+from typing import Callable, Optional, Union
 
 
 # ---------------------------------------------------------------------

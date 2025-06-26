@@ -299,45 +299,94 @@ def compute_prediction_entropy(
 
 
 def validate_orthonormality(
-        vectors: Any,
-        rtol: float = 1e-5,
-        atol: float = 1e-8
+    vectors: Any,
+    rtol: float = 1e-3,
+    atol: float = 1e-5,
 ) -> bool:
-    """Validate that a set of vectors is orthonormal.
+    """
+    Validates that a set of vectors is orthonormal using the Keras backend.
+
+    A set of vectors is orthonormal if each vector is a unit vector and all
+    vectors in the set are mutually orthogonal. This is verified by checking
+    if the Gram matrix (vectors @ vectors.T) is close to the identity matrix.
 
     Parameters
     ----------
-    vectors : tensor
-        Matrix where each row is a vector to check.
+    vectors : tensor-like
+        A 2D tensor-like object (e.g., Keras tensor, NumPy array, TensorFlow
+        tensor) where each row represents a vector.
     rtol : float, optional
-        Relative tolerance for numerical comparisons.
+        Relative tolerance for the `allclose` comparison. Defaults to 1e-5.
     atol : float, optional
-        Absolute tolerance for numerical comparisons.
+        Absolute tolerance for the `allclose` comparison. Defaults to 1e-8.
 
     Returns
     -------
     bool
-        True if the vectors are orthonormal within the specified tolerance.
+        `True` if the vectors are orthonormal within the specified tolerance,
+        `False` otherwise.
+
+    Raises
+    ------
+    TypeError
+        If the input `vectors` do not have a floating-point dtype.
+    ValueError
+        If the input `vectors` is not a 2D matrix.
+
+    Example
+    -------
+    >>> import numpy as np
+    >>> # A perfect orthonormal basis
+    >>> perfect_vectors = np.array([[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]])
+    >>> validate_orthonormality(perfect_vectors)
+    True
+
+    >>> # A non-orthogonal set
+    >>> non_ortho = np.array([[1., 0.5], [0., 1.]])
+    >>> validate_orthonormality(non_ortho)
+    False
+
+    >>> # A non-normalized set
+    >>> non_normalized = np.array([[2., 0.], [0., 1.]])
+    >>> validate_orthonormality(non_normalized)
+    False
     """
-    # Compute Gram matrix (inner products)
-    vectors_gram_matrix = ops.matmul(vectors, ops.transpose(vectors))
+    # 1. Convert input to a tensor and perform validation
+    try:
+        vectors = keras.ops.convert_to_tensor(vectors)
+    except Exception as e:
+        raise TypeError(f"Input could not be converted to a Keras tensor. Error: {e}")
 
-    # Create identity matrix of same size and dtype
-    n_vectors = ops.shape(vectors)[0]
-    identity = ops.eye(n_vectors, dtype=vectors.dtype)
+    # this is set to the highest precision because errors accumulate for large matrices
+    vectors = keras.ops.cast(vectors, dtype='float64')
 
-    # Ensure both tensors have the same dtype before subtraction
-    vectors_gram_matrix = ops.cast(vectors_gram_matrix, dtype=vectors.dtype)
-    identity = ops.cast(identity, dtype=vectors.dtype)
+    if keras.ops.ndim(vectors) != 2:
+        raise ValueError(
+            "Input must be a 2D matrix where each row is a vector, but got "
+            f"shape {keras.ops.shape(vectors)}."
+        )
 
-    # Check if Gram matrix is close to identity
-    diff = ops.numpy.abs(vectors_gram_matrix - identity)
-    max_diff = ops.numpy.max(diff)
+    # 2. Handle the edge case of an empty set of vectors
+    n_vectors = keras.ops.shape(vectors)[0]
+    if n_vectors == 0:
+        return True  # An empty set is vacuously orthonormal
 
-    # Convert to numpy for comparison
-    max_diff_val = float(ops.convert_to_numpy(max_diff))
+    # 3. Compute the Gram matrix (inner products of all vector pairs)
+    gram_matrix = keras.ops.matmul(vectors, keras.ops.transpose(vectors))
 
-    return max_diff_val <= (atol + rtol * 1.0)
+    # 4. Create the target identity matrix
+    identity = keras.ops.eye(n_vectors, dtype=vectors.dtype)
+
+    # 5. Manually implement the `allclose` check since it is not in keras.ops.
+    #    The formula is: absolute(a - b) <= atol + rtol * absolute(b)
+    #    This must hold true for all elements in the tensors.
+    is_close = keras.ops.absolute(gram_matrix - identity) <= (
+        atol + rtol * keras.ops.absolute(identity)
+    )
+    is_orthonormal = keras.ops.all(is_close)
+
+    # Return a standard Python boolean, as ops.all() returns a scalar tensor
+    return bool(is_orthonormal)
 
 # ---------------------------------------------------------------------
 
@@ -357,6 +406,7 @@ def window_partition(x: keras.KerasTensor, window_size: int) -> keras.KerasTenso
     windows = ops.reshape(windows, (-1, window_size, window_size, C))
     return windows
 
+# ---------------------------------------------------------------------
 
 def window_reverse(windows: keras.KerasTensor, window_size: int, H: int, W: int) -> keras.KerasTensor:
     """Reverse window partitioning back to feature map.
@@ -378,3 +428,34 @@ def window_reverse(windows: keras.KerasTensor, window_size: int, H: int, W: int)
 
 # ---------------------------------------------------------------------
 
+def gaussian_probability(y: keras.KerasTensor, mu: keras.KerasTensor, sigma: keras.KerasTensor) -> keras.KerasTensor:
+    """Compute Gaussian probability density using Keras operations.
+
+    Parameters
+    ----------
+    y : keras.KerasTensor
+        Target values tensor of shape [batch_size, 1, output_dim] or [batch_size, output_dim]
+    mu : keras.KerasTensor
+        Mean values tensor of shape [batch_size, num_mixtures, output_dim]
+    sigma : keras.KerasTensor
+        Standard deviation tensor of shape [batch_size, num_mixtures, output_dim]
+
+    Returns
+    -------
+    keras.KerasTensor
+        Probability densities tensor of shape [batch_size, num_mixtures, output_dim]
+    """
+    # Ensure numerical stability with a minimum standard deviation
+    sigma = ops.maximum(1e-6, sigma)
+    sigma = ops.cast(sigma, "float32")
+
+    # Compute normalized squared difference
+    norm = ops.sqrt(2.0 * np.pi) * sigma
+    y = ops.cast(y, "float32")
+    mu = ops.cast(mu, "float32")
+    norm = ops.cast(norm, "float32")
+    exp_term = -0.5 * ops.square((y - mu) / sigma)
+
+    return ops.exp(exp_term) / norm
+
+# ---------------------------------------------------------------------

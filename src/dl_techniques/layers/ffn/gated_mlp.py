@@ -5,28 +5,9 @@ Implementation of the Gated MLP (gMLP) architecture from the paper:
 This module implements a Gated Multi-Layer Perceptron (MLP) layer for use in
 neural networks. The layer combines gating mechanisms with 1x1 convolutions
 to create a powerful feature transformation block without self-attention.
-"""
 
-import keras
-from typing import Optional, Union, Literal, Any
+Architecture:
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.layers.conv2d_builder import activation_wrapper
-
-
-@keras.saving.register_keras_serializable()
-class GatedMLP(keras.layers.Layer):
-    """A Gated MLP layer implementation using 1x1 convolutions.
-
-    This layer implements a gated MLP architecture where the input is processed through
-    three separate 1x1 convolution paths: gate, up, and down projections. The gating
-    mechanism allows the network to selectively focus on relevant features.
-
-    Architecture:
-    ------------
                        +------------------+
                        |      Input       |
                        +--------+---------+
@@ -63,6 +44,26 @@ class GatedMLP(keras.layers.Layer):
                      +----------v---------+
                      |      Output        |
                      +--------------------+
+"""
+
+import keras
+from typing import Optional, Union, Literal, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from ..conv2d_builder import activation_wrapper
+
+# ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable()
+class GatedMLP(keras.layers.Layer):
+    """A Gated MLP layer implementation using 1x1 convolutions.
+
+    This layer implements a gated MLP architecture where the input is processed through
+    three separate 1x1 convolution paths: gate, up, and down projections. The gating
+    mechanism allows the network to selectively focus on relevant features.
 
     Args:
         filters: Number of filters for the output convolution.

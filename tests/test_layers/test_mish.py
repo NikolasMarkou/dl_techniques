@@ -4,9 +4,8 @@ import tensorflow as tf
 import keras
 import os
 import tempfile
-from typing import Any, Dict, Optional, Union
 
-from dl_techniques.layers.mish import Mish, SaturatedMish
+from dl_techniques.layers.activations.mish import Mish, SaturatedMish
 
 
 class TestMish:

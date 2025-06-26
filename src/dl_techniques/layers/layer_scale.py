@@ -18,8 +18,7 @@ from typing import Dict, Any, Optional, Union, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-# Note: If ValueRangeConstraint is not available, use keras.constraints.NonNeg() instead
-# from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
+from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
 
 # ---------------------------------------------------------------------
 
