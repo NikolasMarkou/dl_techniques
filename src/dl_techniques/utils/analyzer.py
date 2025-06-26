@@ -1,9 +1,8 @@
 """
-Model Analyzer for Neural Networks - Enhanced Version with Improved Dashboard
+Model Analyzer for Neural Networks
 ============================================================================
 
-A comprehensive, modular analyzer with improved visualizations that reduce
-redundancy and provide clearer insights through better plot organization.
+A comprehensive, modular analyzer with visualizations
 
 Key Improvements:
 - Merged calibration and probability analysis
@@ -11,8 +10,8 @@ Key Improvements:
 - Redesigned summary dashboard with comparative visualizations
 - Enhanced weight analysis with modern plot types
 - Cleaner, more focused visualization pages
-- Performance table instead of cluttered radar chart
-- Calibration landscape instead of empty training dynamics
+- Performance table
+- Calibration landscape i
 
 Example Usage:
     ```python

@@ -30,11 +30,10 @@ from keras import ops
 import tensorflow as tf
 from typing import Optional, Tuple, Union, Dict, Any, List
 
-from dl_techniques.layers.capsules import PrimaryCapsule, RoutingCapsule
+from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import length
 from dl_techniques.losses.capsule_margin_loss import capsule_margin_loss
-from dl_techniques.utils.logger import logger
-
+from dl_techniques.layers.capsules import PrimaryCapsule, RoutingCapsule
 
 class CapsuleAccuracy(keras.metrics.Metric):
     """Custom accuracy metric for capsule networks based on capsule lengths."""
