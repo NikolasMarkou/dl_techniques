@@ -288,7 +288,9 @@ class TestWindowAttention:
             # Load the model
             loaded_model = keras.models.load_model(
                 model_path,
-                custom_objects={"WindowAttention": WindowAttention}
+                custom_objects={
+                    "WindowAttention": WindowAttention
+                }
             )
 
             # Generate prediction with loaded model
