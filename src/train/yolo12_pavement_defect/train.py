@@ -13,20 +13,23 @@ Features:
     - Progress tracking and logging
 
 Usage:
-    python train_multitask.py --data-dir /path/to/SUT-Crack \
+    python train.py --data-dir /path/to/SUT-Crack \
                              --tasks detection segmentation classification \
                              --scale n --epochs 100 --batch-size 16
 
-File: src/train/yolo12_multitask/train_multitask.py
+File: src/train/yolo12_pavement_defect/train.py
 """
 
-import argparse
+
 import os
 import sys
-import numpy as np
 import keras
-import tensorflow as tf
+import json
+import argparse
 import matplotlib
+import numpy as np
+import tensorflow as tf
+
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -34,20 +37,25 @@ import pandas as pd
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
-import json
+
 
 # Add project root to path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+from dl_techniques.utils.datasets.sut import SUTDataset
 from dl_techniques.models.yolo12_multitask import create_yolov12_multitask
 from dl_techniques.losses.yolo12_multitask_loss import create_multitask_loss
-from dl_techniques.utils.datasets.sut import SUTDataset
-from dl_techniques.utils.logger import logger
 
 # Set style for better plots
 plt.style.use('seaborn-v0_8')
 sns.set_palette("husl")
 
+# ---------------------------------------------------------------------
 
 def setup_gpu():
     """Configure GPU settings for optimal training."""
@@ -63,6 +71,8 @@ def setup_gpu():
     else:
         logger.info("No GPUs found, using CPU")
 
+# ---------------------------------------------------------------------
+
 
 class MultiTaskMetrics:
     """Custom metrics tracking for multi-task training."""
@@ -70,6 +80,9 @@ class MultiTaskMetrics:
     def __init__(self, tasks: List[str]):
         self.tasks = tasks
         self.reset_states()
+        self.metrics = {}
+        self.total_loss = 0.0
+        self.total_count = 0
 
     def reset_states(self):
         """Reset all metric states."""
@@ -100,6 +113,8 @@ class MultiTaskMetrics:
             results['total_loss'] = self.total_loss / self.total_count
 
         return results
+
+# ---------------------------------------------------------------------
 
 
 class MultiTaskTrainingCallback(keras.callbacks.Callback):
@@ -139,6 +154,7 @@ class MultiTaskTrainingCallback(keras.callbacks.Callback):
 
         logger.info(f"Epoch {epoch + 1} - Loss: {logs.get('loss', 0):.4f}")
 
+# ---------------------------------------------------------------------
 
 def create_dataset_splits(
     data_dir: str,
@@ -216,6 +232,8 @@ def create_dataset_splits(
 
     return train_dataset, val_dataset, test_dataset
 
+# ---------------------------------------------------------------------
+
 
 def create_model_and_loss(
     tasks: List[str],
@@ -225,7 +243,7 @@ def create_model_and_loss(
     use_uncertainty_weighting: bool = False
 ) -> Tuple[keras.Model, keras.losses.Loss]:
     """
-    Create multi-task model and loss function.
+    Create multitask model and loss function.
 
     Args:
         tasks: List of tasks to enable.
@@ -237,7 +255,7 @@ def create_model_and_loss(
     Returns:
         Tuple of (model, loss_function).
     """
-    # Create multi-task model
+    # Create multitask model
     model = create_yolov12_multitask(
         num_classes=num_classes,
         input_shape=(patch_size, patch_size, 3),
@@ -245,7 +263,7 @@ def create_model_and_loss(
         tasks=tasks
     )
 
-    # Create multi-task loss
+    # Create multitask loss
     loss_fn = create_multitask_loss(
         tasks=tasks,
         patch_size=patch_size,
@@ -253,6 +271,8 @@ def create_model_and_loss(
     )
 
     return model, loss_fn
+
+# ---------------------------------------------------------------------
 
 
 def train_model(args: argparse.Namespace) -> None:
@@ -673,6 +693,8 @@ def plot_training_history(history: keras.callbacks.History, save_dir: str):
     plt.savefig(os.path.join(save_dir, 'training_history.png'), dpi=150, bbox_inches='tight')
     plt.close()
 
+# ---------------------------------------------------------------------
+
 
 def main():
     """Main function with argument parsing."""
@@ -744,6 +766,8 @@ def main():
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise
+
+# ---------------------------------------------------------------------
 
 
 if __name__ == '__main__':

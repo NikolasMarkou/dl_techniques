@@ -19,11 +19,16 @@ import keras
 from keras import layers, ops
 from typing import Optional, Tuple, Dict, Any, List, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.yolo12 import YOLOv12
 from dl_techniques.layers.yolo12 import YOLOv12DetectionHead
 from dl_techniques.layers.squeeze_excitation import SqueezeExcitation
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class YOLOv12SegmentationHead(layers.Layer):
@@ -132,8 +137,6 @@ class YOLOv12SegmentationHead(layers.Layer):
                         name=f"{self.name}_attention_{i}"
                     )
                     self.attention_blocks.append(attention_block)
-                else:
-                    self.attention_blocks.append(None)
 
         # Final segmentation output
         self.final_conv = keras.Sequential([
@@ -183,7 +186,7 @@ class YOLOv12SegmentationHead(layers.Layer):
             x = ops.concatenate([x, p4_processed], axis=-1)
 
             # Apply attention if enabled
-            if self.attention_blocks[0] is not None:
+            if self.use_attention:
                 x = self.attention_blocks[0](x, training=training)
 
         # Second upsampling: P4 -> P3 scale
@@ -196,7 +199,7 @@ class YOLOv12SegmentationHead(layers.Layer):
                 x = ops.concatenate([x, p3_processed], axis=-1)
 
                 # Apply attention if enabled
-                if self.attention_blocks[1] is not None:
+                if self.use_attention:
                     x = self.attention_blocks[1](x, training=training)
 
         # Final upsampling: P3 -> original scale (if we have 3 upsampling blocks)
@@ -659,8 +662,8 @@ def create_yolov12_multitask(
     logger.info(f"YOLOv12MultiTask-{scale} model created successfully with tasks: {tasks}")
     return model
 
+# ---------------------------------------------------------------------
 
-# Example usage and testing
 if __name__ == "__main__":
     # Test multi-task model creation
     model = create_yolov12_multitask(
@@ -673,9 +676,9 @@ if __name__ == "__main__":
     sample_input = keras.ops.zeros((1, 256, 256, 3))
     outputs = model(sample_input, training=False)
 
-    print("Multi-task model outputs:")
+    logger.info("Multi-task model outputs:")
     for task, output in outputs.items():
-        print(f"  {task}: {output.shape}")
+        logger.info(f"  {task}: {output.shape}")
 
     # Test single task model
     seg_model = create_yolov12_multitask(
@@ -685,4 +688,6 @@ if __name__ == "__main__":
     )
 
     seg_output = seg_model(sample_input, training=False)
-    print(f"Segmentation-only model output: {seg_output.shape}")
+    logger.info(f"Segmentation-only model output: {seg_output.shape}")
+
+# ---------------------------------------------------------------------
