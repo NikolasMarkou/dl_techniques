@@ -25,11 +25,12 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
+from dl_techniques.utils.logger import logger
+from dl_techniques.utils.datasets.sut import SUTDataset
 from dl_techniques.models.yolo12_multitask import create_yolov12_multitask
 from dl_techniques.losses.yolo12_multitask_loss import create_multitask_loss
-from dl_techniques.utils.datasets.sut_crack_patch_loader import SUTCrackPatchDataset
-from dl_techniques.utils.datasets.inference_utils import create_inference_engine, InferenceConfig
-from dl_techniques.utils.logger import logger
+from dl_techniques.utils.inference import create_inference_engine, InferenceConfig
+
 
 
 def explore_dataset(data_dir: str):
@@ -37,7 +38,7 @@ def explore_dataset(data_dir: str):
     logger.info("=== Dataset Exploration ===")
 
     # Create dataset instance
-    dataset = SUTCrackPatchDataset(
+    dataset = SUTDataset(
         data_dir=data_dir,
         patch_size=256,
         patches_per_image=4,  # Small number for exploration
@@ -66,10 +67,10 @@ def explore_dataset(data_dir: str):
 
 
 def train_multitask_model(
-        dataset: SUTCrackPatchDataset,
-        tasks: list = ["detection", "segmentation", "classification"],
-        epochs: int = 5,  # Small number for demo
-        scale: str = "n"
+    dataset: SUTDataset,
+    tasks: list = ["detection", "segmentation", "classification"],
+    epochs: int = 5,  # Small number for demo
+    scale: str = "n"
 ):
     """Train YOLOv12 multi-task model."""
     logger.info("=== Model Training ===")
@@ -84,10 +85,10 @@ def train_multitask_model(
     test_annotations = dataset.annotations[train_size + val_size:]
 
     logger.info(f"Data splits - Train: {len(train_annotations)}, "
-                f"Val: {len(val_annotations)}, Test: {len(test_annotations)}")
+               f"Val: {len(val_annotations)}, Test: {len(test_annotations)}")
 
     # Create training dataset
-    train_dataset = SUTCrackPatchDataset(
+    train_dataset = SUTDataset(
         data_dir=dataset.data_dir,
         patch_size=256,
         patches_per_image=8,
@@ -96,7 +97,7 @@ def train_multitask_model(
     train_dataset.annotations = train_annotations
 
     # Create validation dataset
-    val_dataset = SUTCrackPatchDataset(
+    val_dataset = SUTDataset(
         data_dir=dataset.data_dir,
         patch_size=256,
         patches_per_image=4,
@@ -180,7 +181,7 @@ def train_multitask_model(
     return model, history, model_path
 
 
-def evaluate_model(model_path: str, dataset: SUTCrackPatchDataset):
+def evaluate_model(model_path: str, dataset: SUTDataset):
     """Evaluate the trained model."""
     logger.info("=== Model Evaluation ===")
 
@@ -189,7 +190,7 @@ def evaluate_model(model_path: str, dataset: SUTCrackPatchDataset):
 
     # Create test dataset (use last annotations)
     test_annotations = dataset.annotations[-10:]  # Last 10 images for demo
-    test_dataset = SUTCrackPatchDataset(
+    test_dataset = SUTDataset(
         data_dir=dataset.data_dir,
         patch_size=256,
         patches_per_image=4,
@@ -230,7 +231,7 @@ def evaluate_model(model_path: str, dataset: SUTCrackPatchDataset):
     return sample_predictions
 
 
-def demonstrate_full_image_inference(model_path: str, dataset: SUTCrackPatchDataset):
+def demonstrate_full_image_inference(model_path: str, dataset: SUTDataset):
     """Demonstrate inference on full-resolution images."""
     logger.info("=== Full Image Inference Demo ===")
 
@@ -250,7 +251,7 @@ def demonstrate_full_image_inference(model_path: str, dataset: SUTCrackPatchData
 
     # Get a few test images
     test_images = [ann.image_path for ann in dataset.annotations[:3]
-                   if os.path.exists(ann.image_path)]
+                  if os.path.exists(ann.image_path)]
 
     if not test_images:
         logger.warning("No valid test images found for inference demo")
@@ -272,7 +273,7 @@ def demonstrate_full_image_inference(model_path: str, dataset: SUTCrackPatchData
 
             logger.info(f"  Detections: {num_detections}")
             logger.info(f"  Classification: {'Crack' if cls_pred else 'No Crack'} "
-                        f"(Score: {cls_score:.3f})")
+                       f"(Score: {cls_score:.3f})")
 
             if 'segmentation' in result and result['segmentation'] is not None:
                 seg_coverage = np.mean(result['segmentation'] > 0.5)
@@ -303,7 +304,7 @@ def visualize_results(sample_predictions, inference_results):
         for i in range(min(3, len(images))):
             # Original patch
             axes[0, i].imshow(images[i])
-            axes[0, i].set_title(f"Patch {i + 1}")
+            axes[0, i].set_title(f"Patch {i+1}")
             axes[0, i].axis('off')
 
             # Segmentation prediction vs ground truth
@@ -314,7 +315,7 @@ def visualize_results(sample_predictions, inference_results):
                 # Combine prediction and ground truth for comparison
                 comparison = np.zeros((seg_pred.shape[0], seg_pred.shape[1], 3))
                 comparison[:, :, 0] = seg_pred  # Red channel for predictions
-                comparison[:, :, 1] = seg_gt  # Green channel for ground truth
+                comparison[:, :, 1] = seg_gt    # Green channel for ground truth
 
                 axes[1, i].imshow(comparison)
                 axes[1, i].set_title(f"Seg: Red=Pred, Green=GT")
@@ -334,13 +335,13 @@ def visualize_results(sample_predictions, inference_results):
     if inference_results:
         logger.info("Full image inference summary:")
         for i, result in enumerate(inference_results):
-            logger.info(f"  Image {i + 1}:")
+            logger.info(f"  Image {i+1}:")
             logger.info(f"    Detections: {len(result.get('detections', []))}")
 
             if 'classification' in result:
                 cls = result['classification']
                 logger.info(f"    Classification: {cls.get('prediction', 0)} "
-                            f"(Score: {cls.get('score', 0.0):.3f})")
+                           f"(Score: {cls.get('score', 0.0):.3f})")
 
 
 def main():

@@ -33,7 +33,7 @@ import seaborn as sns
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional
 import json
 
 # Add project root to path
@@ -41,8 +41,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from dl_techniques.models.yolo12_multitask import create_yolov12_multitask
 from dl_techniques.losses.yolo12_multitask_loss import create_multitask_loss
-from dl_techniques.utils.datasets.sut_crack_patch_loader import SUTCrackPatchDataset
-from dl_techniques.utils.datasets.inference_utils import create_inference_engine, InferenceConfig
+from dl_techniques.utils.datasets.sut import SUTDataset
 from dl_techniques.utils.logger import logger
 
 # Set style for better plots
@@ -148,7 +147,7 @@ def create_dataset_splits(
     val_ratio: float = 0.2,
     test_ratio: float = 0.1,
     random_seed: int = 42
-) -> Tuple[SUTCrackPatchDataset, SUTCrackPatchDataset, SUTCrackPatchDataset]:
+) -> Tuple[SUTDataset, SUTDataset, SUTDataset]:
     """
     Create train/validation/test dataset splits.
 
@@ -164,7 +163,7 @@ def create_dataset_splits(
         Tuple of (train_dataset, val_dataset, test_dataset).
     """
     # Create full dataset to get annotations
-    full_dataset = SUTCrackPatchDataset(
+    full_dataset = SUTDataset(
         data_dir=data_dir,
         patch_size=patch_size,
         patches_per_image=1,  # Just for getting annotations
@@ -188,7 +187,7 @@ def create_dataset_splits(
                f"Val: {len(val_annotations)}, Test: {len(test_annotations)}")
 
     # Create dataset objects with split annotations
-    train_dataset = SUTCrackPatchDataset(
+    train_dataset = SUTDataset(
         data_dir=data_dir,
         patch_size=patch_size,
         patches_per_image=16,  # More patches for training
@@ -197,7 +196,7 @@ def create_dataset_splits(
     )
     train_dataset.annotations = train_annotations
 
-    val_dataset = SUTCrackPatchDataset(
+    val_dataset = SUTDataset(
         data_dir=data_dir,
         patch_size=patch_size,
         patches_per_image=8,  # Fewer patches for validation
@@ -206,7 +205,7 @@ def create_dataset_splits(
     )
     val_dataset.annotations = val_annotations
 
-    test_dataset = SUTCrackPatchDataset(
+    test_dataset = SUTDataset(
         data_dir=data_dir,
         patch_size=patch_size,
         patches_per_image=8,

@@ -25,16 +25,17 @@ Key Improvements:
 - Better memory management
 - Comprehensive logging and debugging
 
-File: src/dl_techniques/utils/datasets/sut_crack_patch_loader.py
+File: src/dl_techniques/utils/datasets/sut.py
 """
 
+import warnings
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
 from dataclasses import dataclass
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Tuple, Optional, Any, Union
-import warnings
+
 
 # Assuming logger is configured elsewhere, creating a placeholder if not
 try:
@@ -756,7 +757,7 @@ class SUTCrackPatchSampler:
         return patch
 
 
-class SUTCrackPatchDataset:
+class SUTDataset:
     """Enhanced TensorFlow-compatible dataset for SUT-Crack patch-based multi-task learning."""
 
     def __init__(
@@ -1179,7 +1180,7 @@ class SUTCrackPatchDataset:
 
 def create_sut_crack_dataset(data_dir: str, **kwargs) -> tf.data.Dataset:
     """Convenience function to create SUT-Crack dataset."""
-    dataset = SUTCrackPatchDataset(data_dir=data_dir, **kwargs)
+    dataset = SUTDataset(data_dir=data_dir, **kwargs)
     info = dataset.get_dataset_info()
     logger.info(f"Dataset statistics: {info}")
     return dataset.create_tf_dataset(batch_size=kwargs.get('batch_size', 32))
@@ -1228,7 +1229,7 @@ if __name__ == "__main__":
         start_time = time.time()
 
         # Initialize dataset
-        dataset_loader = SUTCrackPatchDataset(
+        dataset_loader = SUTDataset(
             data_dir=args.data_dir,
             patch_size=args.patch_size,
             patches_per_image=args.patches_per_image,
