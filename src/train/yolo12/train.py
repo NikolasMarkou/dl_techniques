@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Enhanced training script for YOLOv12 object detection model.
 
@@ -447,22 +446,14 @@ def generate_final_visualizations(
                 f.write(f"{metric_name}: {value:.6f}\n")
 
         # Model parameters
-        total_params = model.count_params()
-        trainable_params = sum([keras.backend.count_params(w) for w in model.trainable_weights])
         f.write(f"\nModel Statistics:\n")
-        f.write(f"Total Parameters: {total_params:,}\n")
-        f.write(f"Trainable Parameters: {trainable_params:,}\n")
-        f.write(f"Non-trainable Parameters: {total_params - trainable_params:,}\n")
+        f.write(f"Total Parameters: {model.count_params():,}\n")
 
     logger.info(f"Final visualizations saved to: {final_viz_dir}")
 
 
 def train_model(args: argparse.Namespace) -> None:
-    """Main training function.
-
-    Args:
-        args: Command line arguments.
-    """
+    """Main training function."""
     logger.info("Starting YOLOv12 training")
     logger.info(f"Arguments: {vars(args)}")
 
@@ -498,10 +489,17 @@ def train_model(args: argparse.Namespace) -> None:
         max_boxes=args.max_boxes
     )
 
-    # Prepare datasets
-    train_dataset = train_dataset.batch(args.batch_size).prefetch(tf.data.AUTOTUNE)
-    val_dataset = val_dataset.batch(args.batch_size).prefetch(tf.data.AUTOTUNE)
-    test_dataset = test_dataset.batch(args.batch_size).prefetch(tf.data.AUTOTUNE)
+    # Calculate steps for training
+    steps_per_epoch = args.train_samples // args.batch_size
+    validation_steps = args.val_samples // args.batch_size
+
+    logger.info(f"Training steps per epoch: {steps_per_epoch}")
+    logger.info(f"Validation steps: {validation_steps}")
+
+    # Prepare datasets - ADD .repeat() for infinite data generation
+    train_dataset = train_dataset.repeat().batch(args.batch_size).prefetch(tf.data.AUTOTUNE)
+    val_dataset = val_dataset.repeat().batch(args.batch_size).prefetch(tf.data.AUTOTUNE)
+    test_dataset = test_dataset.batch(args.batch_size).prefetch(tf.data.AUTOTUNE)  # Test doesn't need repeat
 
     logger.info(f"Train dataset: {train_dataset.element_spec}")
     logger.info(f"Validation dataset: {val_dataset.element_spec}")
@@ -570,14 +568,17 @@ def train_model(args: argparse.Namespace) -> None:
         save_best_only=True
     )
 
-    # Train model
+    # Train model - ADD steps_per_epoch and validation_steps
     logger.info("Starting training...")
     validation_data = val_dataset if args.validation else None
+    val_steps = validation_steps if args.validation else None
 
     history = model.fit(
         train_dataset,
         validation_data=validation_data,
         epochs=args.epochs,
+        steps_per_epoch=steps_per_epoch,
+        validation_steps=val_steps,
         callbacks=callbacks,
         verbose=1
     )
@@ -586,7 +587,8 @@ def train_model(args: argparse.Namespace) -> None:
     test_results = None
     if args.evaluate:
         logger.info("Evaluating on test set...")
-        test_loss = model.evaluate(test_dataset, verbose=1)
+        test_steps = args.test_samples // args.batch_size
+        test_loss = model.evaluate(test_dataset, steps=test_steps, verbose=1)
         test_results = {'test_loss': float(test_loss)}
 
         logger.info("Test Results:")
@@ -622,8 +624,8 @@ def main():
                         help='Input image size (default: 320)')
 
     # Training arguments
-    parser.add_argument('--epochs', type=int, default=300,
-                        help='Number of training epochs (default: 300)')
+    parser.add_argument('--epochs', type=int, default=2,
+                        help='Number of training epochs (default: 2)')
     parser.add_argument('--batch-size', type=int, default=4,
                         help='Training batch size (default: 4)')
     parser.add_argument('--learning-rate', type=float, default=0.01,
