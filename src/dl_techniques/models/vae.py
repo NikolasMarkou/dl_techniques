@@ -3,18 +3,13 @@
 """
 Keras-compliant implementation of a Variational Autoencoder (VAE) for images.
 
-This module provides a fully Keras-compliant VAE that works with the standard
-Keras compile/fit workflow. The custom training logic, which combines
-reconstruction loss and KL divergence loss, is integrated into the model's
-train_step and test_step methods.
+This version uses a simplified and more robust architecture where the VAE class
+owns all layers directly, avoiding complex sub-model dependencies and build-cycle errors.
 
-Architecture Overview:
-    1. Encoder: A convolutional network that outputs the parameters (mean and
-       log-variance) of the latent distribution.
-    2. Sampling Layer: Uses the reparameterization trick to sample from the
-       latent distribution in a way that allows backpropagation.
-    3. Decoder: A deconvolutional network that reconstructs the input image
-       from a latent space sample.
+Features:
+    - Full Keras 3 compliance with compile/fit workflow.
+    - Custom train_step and test_step for VAE-specific loss.
+    - Simplified and robust layer management.
 """
 
 import os
@@ -49,8 +44,8 @@ class VAE(keras.Model):
     def __init__(
             self,
             latent_dim: int,
-            encoder_filters: List[int] = [32, 64, 128],
-            decoder_filters: List[int] = [128, 64, 32],
+            encoder_filters: List[int] = [32, 64],
+            decoder_filters: List[int] = [64, 32],
             kl_loss_weight: float = 1.0,
             input_shape: Optional[Tuple[int, int, int]] = None,
             kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
@@ -60,114 +55,106 @@ class VAE(keras.Model):
             **kwargs: Any
     ) -> None:
         super().__init__(name=name, **kwargs)
+        # Store configuration
         self.latent_dim = latent_dim
-        self.encoder_filters = encoder_filters.copy()
-        self.decoder_filters = decoder_filters.copy()
+        self.encoder_filters = encoder_filters
+        self.decoder_filters = decoder_filters
         self.kl_loss_weight = kl_loss_weight
         self._input_shape_arg = input_shape
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.use_batch_norm = use_batch_norm
 
-        self.encoder = None
-        self.decoder = None
+        # Layer containers
+        self.encoder_layers = []
+        self.decoder_layers = []
+
+        # This will be built properly in the build method
         self.sampling = Sampling(name="sampling")
+        self.flatten = keras.layers.Flatten()
+        self.encoder_output_dense = keras.layers.Dense(self.latent_dim * 2)
+
+        # Metrics
         self.total_loss_tracker = keras.metrics.Mean(name="total_loss")
         self.reconstruction_loss_tracker = keras.metrics.Mean(name="reconstruction_loss")
         self.kl_loss_tracker = keras.metrics.Mean(name="kl_loss")
 
+        # If input_shape is provided at init, build the model
         if self._input_shape_arg is not None:
             self.build((None,) + self._input_shape_arg)
 
-    def _build_encoder(self, input_shape):
-        """Builds the encoder as a standalone Keras model."""
-        encoder_input = keras.layers.Input(shape=input_shape)
-        x = encoder_input
-        for filters in self.encoder_filters:
-            x = keras.layers.Conv2D(
-                filters, 3, strides=2, padding="same",
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-            )(x)
-            if self.use_batch_norm:
-                x = keras.layers.BatchNormalization()(x)
-            x = keras.layers.LeakyReLU()(x)
-
-        # The shape before flattening is the output shape of the last conv block
-        shape_before_flatten = ops.shape(x)[1:]
-        x = keras.layers.Flatten()(x)
-        encoder_output = keras.layers.Dense(self.latent_dim * 2, name="encoder_dense_output")(x)
-
-        encoder = keras.Model(encoder_input, [encoder_output, shape_before_flatten], name="encoder")
-        logger.info("Encoder built successfully.")
-        encoder.summary(print_fn=logger.info)
-        return encoder
-
-    def _build_decoder(self, shape_before_flatten):
-        """Builds the decoder as a standalone Keras model."""
-        latent_inputs = keras.layers.Input(shape=(self.latent_dim,))
-        dense_units = int(ops.reduce_prod(shape_before_flatten))
-
-        x = keras.layers.Dense(units=dense_units, activation="relu")(latent_inputs)
-        x = keras.layers.Reshape(target_shape=shape_before_flatten)(x)
-
-        for filters in self.decoder_filters:
-            x = keras.layers.Conv2DTranspose(
-                filters, 3, strides=2, padding="same",
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-            )(x)
-            if self.use_batch_norm:
-                x = keras.layers.BatchNormalization()(x)
-            x = keras.layers.LeakyReLU()(x)
-
-        decoder_outputs = keras.layers.Conv2DTranspose(
-            filters=self._input_shape_arg[-1],
-            kernel_size=3, padding="same", activation="sigmoid", name="decoder_output"
-        )(x)
-
-        decoder = keras.Model(latent_inputs, decoder_outputs, name="decoder")
-        logger.info("Decoder built successfully.")
-        decoder.summary(print_fn=logger.info)
-        return decoder
-
     def build(self, input_shape):
-        """Build the encoder and decoder models."""
         if self.built:
             return
 
         super().build(input_shape)
         self._input_shape_arg = tuple(input_shape[1:])
 
-        # Build encoder and get the shape_before_flatten
-        # To get the shape, we must do a dummy pass through the conv layers
-        temp_input = keras.layers.Input(shape=self._input_shape_arg)
-        x = temp_input
+        # --- Encoder Layers ---
         for filters in self.encoder_filters:
-            x = keras.layers.Conv2D(filters, 3, strides=2, padding="same")(x)
+            self.encoder_layers.append(keras.layers.Conv2D(
+                filters, 3, strides=2, padding="same",
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer
+            ))
             if self.use_batch_norm:
-                x = keras.layers.BatchNormalization()(x)
-            x = keras.layers.LeakyReLU()(x)
+                self.encoder_layers.append(keras.layers.BatchNormalization())
+            self.encoder_layers.append(keras.layers.LeakyReLU())
+
+        # --- Determine shape for Decoder ---
+        # To do this, we create a symbolic input and pass it through the encoder conv layers
+        dummy_input = keras.Input(shape=self._input_shape_arg)
+        x = dummy_input
+        for layer in self.encoder_layers:
+            x = layer(x)
         shape_before_flatten = ops.shape(x)[1:]
 
-        # Now build the real models
-        self.encoder = self._build_encoder(self._input_shape_arg)
-        self.decoder = self._build_decoder(shape_before_flatten)
+        # --- Decoder Layers ---
+        self.decoder_layers.append(keras.layers.Dense(
+            units=int(ops.prod(shape_before_flatten)), activation="relu"
+        ))
+        self.decoder_layers.append(keras.layers.Reshape(target_shape=shape_before_flatten))
+        for filters in self.decoder_filters:
+            self.decoder_layers.append(keras.layers.Conv2DTranspose(
+                filters, 3, strides=2, padding="same",
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer
+            ))
+            if self.use_batch_norm:
+                self.decoder_layers.append(keras.layers.BatchNormalization())
+            self.decoder_layers.append(keras.layers.LeakyReLU())
+
+        # Final decoder output layer
+        self.decoder_layers.append(keras.layers.Conv2DTranspose(
+            filters=self._input_shape_arg[-1], kernel_size=3, padding="same", activation="sigmoid"
+        ))
+        logger.info("VAE layers built successfully.")
 
     @property
     def metrics(self):
-        return [
-            self.total_loss_tracker,
-            self.reconstruction_loss_tracker,
-            self.kl_loss_tracker,
-        ]
+        return [self.total_loss_tracker, self.reconstruction_loss_tracker, self.kl_loss_tracker]
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> Dict[str, keras.KerasTensor]:
-        encoder_output, _ = self.encoder(inputs, training=training)
+        # --- Encoder Pass ---
+        x = inputs
+        for layer in self.encoder_layers:
+            x = layer(x, training=training)
+
+        x = self.flatten(x)
+        encoder_output = self.encoder_output_dense(x)
+
         z_mean = encoder_output[:, :self.latent_dim]
         z_log_var = encoder_output[:, self.latent_dim:]
+
+        # --- Sampling ---
         z = self.sampling((z_mean, z_log_var))
-        reconstruction = self.decoder(z, training=training)
+
+        # --- Decoder Pass ---
+        x = z
+        for layer in self.decoder_layers:
+            x = layer(x, training=training)
+        reconstruction = x
+
         return {
             "reconstruction": reconstruction,
             "z_mean": z_mean,
@@ -186,18 +173,20 @@ class VAE(keras.Model):
                 ops.sum(keras.losses.mean_squared_error(x, outputs["reconstruction"]), axis=(1, 2))
             )
             kl_loss = -0.5 * ops.mean(
-                ops.sum(
-                    1 + outputs["z_log_var"] - ops.square(outputs["z_mean"]) - ops.exp(outputs["z_log_var"]),
-                    axis=1,
-                )
+                ops.sum(1 + outputs["z_log_var"] - ops.square(outputs["z_mean"]) - ops.exp(outputs["z_log_var"]),
+                        axis=1)
             )
             total_loss = reconstruction_loss + self.kl_loss_weight * kl_loss
+            # Add regularization losses if any
+            total_loss += sum(self.losses)
 
         grads = tape.gradient(total_loss, self.trainable_weights)
         self.optimizer.apply_gradients(zip(grads, self.trainable_weights))
+
         self.total_loss_tracker.update_state(total_loss)
         self.reconstruction_loss_tracker.update_state(reconstruction_loss)
         self.kl_loss_tracker.update_state(kl_loss)
+
         return {m.name: m.result() for m in self.metrics}
 
     def test_step(self, data: Tuple[tf.Tensor, Any]) -> Dict[str, tf.Tensor]:
@@ -211,16 +200,15 @@ class VAE(keras.Model):
             ops.sum(keras.losses.mean_squared_error(x, outputs["reconstruction"]), axis=(1, 2))
         )
         kl_loss = -0.5 * ops.mean(
-            ops.sum(
-                1 + outputs["z_log_var"] - ops.square(outputs["z_mean"]) - ops.exp(outputs["z_log_var"]),
-                axis=1,
-            )
+            ops.sum(1 + outputs["z_log_var"] - ops.square(outputs["z_mean"]) - ops.exp(outputs["z_log_var"]), axis=1)
         )
         total_loss = reconstruction_loss + self.kl_loss_weight * kl_loss
+        total_loss += sum(self.losses)
 
         self.total_loss_tracker.update_state(total_loss)
         self.reconstruction_loss_tracker.update_state(reconstruction_loss)
         self.kl_loss_tracker.update_state(kl_loss)
+
         return {m.name: m.result() for m in self.metrics}
 
     def get_config(self) -> Dict[str, Any]:
