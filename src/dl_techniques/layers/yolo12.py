@@ -21,14 +21,20 @@ File: src/dl_techniques/models/yolo12.py
 """
 
 import keras
-from keras import layers, ops
-from typing import Optional, Tuple, Union, Dict, Any, List, Callable
+from keras import ops
+from typing import Optional, Tuple, Union, Dict, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
-class ConvBlock(layers.Layer):
+class ConvBlock(keras.layers.Layer):
     """Standard Convolution Block with BatchNorm and SiLU activation.
 
     This block implements the standard pattern used throughout YOLOv12:
@@ -45,6 +51,7 @@ class ConvBlock(layers.Layer):
         kernel_initializer: Weight initializer.
         kernel_regularizer: Weight regularizer.
         name: Layer name.
+        **kwargs: Additional keyword arguments.
     """
 
     def __init__(
@@ -56,11 +63,11 @@ class ConvBlock(layers.Layer):
             groups: int = 1,
             activation: bool = True,
             use_bias: bool = False,
-            kernel_initializer: str = "he_normal",
+            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
             kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
             name: Optional[str] = None,
             **kwargs
-    ):
+    ) -> None:
         super().__init__(name=name, **kwargs)
 
         self.filters = filters
@@ -70,19 +77,27 @@ class ConvBlock(layers.Layer):
         self.groups = groups
         self.activation = activation
         self.use_bias = use_bias
-        self.kernel_initializer = kernel_initializer
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # Layers will be created in build()
         self.conv = None
         self.bn = None
         self.act = None
+        self._build_input_shape = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer components."""
+        """Build the layer components.
+
+        Args:
+            input_shape: Shape tuple of the input tensor.
+        """
         super().build(input_shape)
 
-        self.conv = layers.Conv2D(
+        # Store for serialization
+        self._build_input_shape = input_shape
+
+        self.conv = keras.layers.Conv2D(
             filters=self.filters,
             kernel_size=self.kernel_size,
             strides=self.strides,
@@ -94,20 +109,28 @@ class ConvBlock(layers.Layer):
             name=f"{self.name}_conv" if self.name else None
         )
 
-        self.bn = layers.BatchNormalization(
+        self.bn = keras.layers.BatchNormalization(
             epsilon=1e-3,
             momentum=0.97,
             name=f"{self.name}_bn" if self.name else None
         )
 
         if self.activation:
-            self.act = layers.Activation(
+            self.act = keras.layers.Activation(
                 "silu",
                 name=f"{self.name}_silu" if self.name else None
             )
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        """Forward pass through the convolution block."""
+        """Forward pass through the convolution block.
+
+        Args:
+            inputs: Input tensor.
+            training: Whether the layer should behave in training mode.
+
+        Returns:
+            Output tensor after convolution, batch normalization, and optional activation.
+        """
         x = self.conv(inputs)
         x = self.bn(x, training=training)
         if self.activation:
@@ -115,7 +138,11 @@ class ConvBlock(layers.Layer):
         return x
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
+        """Get layer configuration for serialization.
+
+        Returns:
+            Dictionary containing the layer configuration.
+        """
         config = super().get_config()
         config.update({
             "filters": self.filters,
@@ -125,14 +152,36 @@ class ConvBlock(layers.Layer):
             "groups": self.groups,
             "activation": self.activation,
             "use_bias": self.use_bias,
-            "kernel_initializer": self.kernel_initializer,
-            "kernel_regularizer": self.kernel_regularizer,
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
 
+    def get_build_config(self) -> Dict[str, Any]:
+        """Get build configuration for serialization.
+
+        Returns:
+            Dictionary containing the build configuration.
+        """
+        return {
+            "input_shape": self._build_input_shape,
+        }
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Build layer from configuration.
+
+        Args:
+            config: Dictionary containing build configuration.
+        """
+        if config.get("input_shape") is not None:
+            self.build(config["input_shape"])
+
+
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
-class AreaAttention(layers.Layer):
+class AreaAttention(keras.layers.Layer):
     """Area Attention mechanism for YOLOv12.
 
     This implements the area-attention mechanism that allows the model
@@ -305,9 +354,10 @@ class AreaAttention(layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class AttentionBlock(layers.Layer):
+class AttentionBlock(keras.layers.Layer):
     """Attention Block with Area Attention and MLP.
 
     This block combines area attention with a feed-forward network
@@ -401,9 +451,10 @@ class AttentionBlock(layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class Bottleneck(layers.Layer):
+class Bottleneck(keras.layers.Layer):
     """Standard Bottleneck block with optional residual connection.
 
     Args:
@@ -470,9 +521,11 @@ class Bottleneck(layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
-class C3k2Block(layers.Layer):
+class C3k2Block(keras.layers.Layer):
     """CSP-like block with 2 convolutions and Bottleneck layers.
 
     Args:
@@ -567,9 +620,11 @@ class C3k2Block(layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
-class A2C2fBlock(layers.Layer):
+class A2C2fBlock(keras.layers.Layer):
     """Attention-enhanced R-ELAN block with progressive feature extraction.
 
     Args:
@@ -669,149 +724,4 @@ class A2C2fBlock(layers.Layer):
         })
         return config
 
-
-@keras.saving.register_keras_serializable()
-class YOLOv12DetectionHead(layers.Layer):
-    """YOLOv12 Detection Head with separate classification and regression branches.
-
-    Args:
-        num_classes: Number of object classes.
-        reg_max: Maximum value for DFL regression.
-        kernel_initializer: Weight initializer.
-        name: Layer name.
-    """
-
-    def __init__(
-            self,
-            num_classes: int = 80,
-            reg_max: int = 16,
-            kernel_initializer: str = "he_normal",
-            name: Optional[str] = None,
-            **kwargs
-    ):
-        super().__init__(name=name, **kwargs)
-
-        self.num_classes = num_classes
-        self.reg_max = reg_max
-        self.kernel_initializer = kernel_initializer
-
-        # Will store branch layers for each scale
-        self.bbox_branches = []
-        self.cls_branches = []
-
-    def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
-        """Build detection head branches for each input scale."""
-        super().build(input_shape)
-
-        if not isinstance(input_shape, list):
-            raise ValueError("DetectionHead expects a list of input shapes")
-
-        # Create branches for each scale
-        for i, shape in enumerate(input_shape):
-            in_channels = shape[-1]
-            c2 = max(16, in_channels // 4, self.reg_max * 4)
-            c3 = max(in_channels, min(self.num_classes, 100))
-
-            # Bounding box regression branch
-            bbox_branch = keras.Sequential([
-                ConvBlock(
-                    filters=c2,
-                    kernel_size=3,
-                    kernel_initializer=self.kernel_initializer,
-                    name=f"{self.name}_bbox_{i}_1"
-                ),
-                ConvBlock(
-                    filters=c2,
-                    kernel_size=3,
-                    kernel_initializer=self.kernel_initializer,
-                    name=f"{self.name}_bbox_{i}_2"
-                ),
-                layers.Conv2D(
-                    filters=4 * self.reg_max,
-                    kernel_size=1,
-                    kernel_initializer=self.kernel_initializer,
-                    name=f"{self.name}_bbox_{i}_pred"
-                )
-            ], name=f"{self.name}_bbox_{i}")
-
-            # Classification branch with depthwise separable convolutions
-            cls_branch = keras.Sequential([
-                ConvBlock(
-                    filters=in_channels,
-                    kernel_size=3,
-                    groups=in_channels,  # Depthwise
-                    kernel_initializer=self.kernel_initializer,
-                    name=f"{self.name}_cls_{i}_dw1"
-                ),
-                ConvBlock(
-                    filters=c3,
-                    kernel_size=1,  # Pointwise
-                    kernel_initializer=self.kernel_initializer,
-                    name=f"{self.name}_cls_{i}_pw1"
-                ),
-                ConvBlock(
-                    filters=c3,
-                    kernel_size=3,
-                    groups=c3,  # Depthwise
-                    kernel_initializer=self.kernel_initializer,
-                    name=f"{self.name}_cls_{i}_dw2"
-                ),
-                ConvBlock(
-                    filters=c3,
-                    kernel_size=1,  # Pointwise
-                    kernel_initializer=self.kernel_initializer,
-                    name=f"{self.name}_cls_{i}_pw2"
-                ),
-                layers.Conv2D(
-                    filters=self.num_classes,
-                    kernel_size=1,
-                    kernel_initializer=self.kernel_initializer,
-                    name=f"{self.name}_cls_{i}_pred"
-                )
-            ], name=f"{self.name}_cls_{i}")
-
-            self.bbox_branches.append(bbox_branch)
-            self.cls_branches.append(cls_branch)
-
-    def call(
-            self,
-            inputs: List[keras.KerasTensor],
-            training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """Forward pass through detection head."""
-        if not isinstance(inputs, list) or len(inputs) != 3:
-            raise ValueError("DetectionHead expects exactly 3 input feature maps")
-
-        outputs = []
-
-        for i, x in enumerate(inputs):
-            # Get bbox predictions
-            bbox_pred = self.bbox_branches[i](x, training=training)
-
-            # Get classification predictions
-            cls_pred = self.cls_branches[i](x, training=training)
-
-            # Reshape predictions
-            batch_size = ops.shape(x)[0]
-            h = ops.shape(x)[1]
-            w = ops.shape(x)[2]
-
-            bbox_pred = ops.reshape(bbox_pred, (batch_size, h * w, 4 * self.reg_max))
-            cls_pred = ops.reshape(cls_pred, (batch_size, h * w, self.num_classes))
-
-            # Concatenate bbox and class predictions
-            output = ops.concatenate([bbox_pred, cls_pred], axis=-1)
-            outputs.append(output)
-
-        # Concatenate all scales
-        return ops.concatenate(outputs, axis=1)
-
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
-        config = super().get_config()
-        config.update({
-            "num_classes": self.num_classes,
-            "reg_max": self.reg_max,
-            "kernel_initializer": self.kernel_initializer,
-        })
-        return config
+# ---------------------------------------------------------------------

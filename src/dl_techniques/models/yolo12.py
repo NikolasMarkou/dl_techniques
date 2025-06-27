@@ -24,7 +24,11 @@ from typing import Optional, Tuple, Dict, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.yolo12 import (
-    ConvBlock, A2C2fBlock, C3k2Block, YOLOv12DetectionHead)
+    ConvBlock,
+    A2C2fBlock,
+    C3k2Block,
+)
+from dl_techniques.layers.yolo12_heads import YOLOv12DetectionHead
 
 @keras.saving.register_keras_serializable()
 class YOLOv12(keras.Model):
