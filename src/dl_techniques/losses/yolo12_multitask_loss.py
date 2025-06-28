@@ -81,7 +81,6 @@ Usage Example:
     #     callbacks=[loss_callback]
     # )
 """
-
 import keras
 from keras import ops
 from typing import Dict, Any, List, Union, Tuple, Optional
@@ -94,6 +93,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.bounding_box import bbox_iou
 from dl_techniques.utils.vision_task_types import (
     TaskType, TaskConfiguration, parse_task_list)
+
 
 # ---------------------------------------------------------------------
 
@@ -122,18 +122,18 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
     """
 
     def __init__(
-        self,
-        num_classes: int = 80,
-        input_shape: Tuple[int, int] = (640, 640),
-        reg_max: int = 16,
-        box_weight: float = 7.5,
-        cls_weight: float = 0.5,
-        dfl_weight: float = 1.5,
-        assigner_topk: int = 10,
-        assigner_alpha: float = 0.5,
-        assigner_beta: float = 6.0,
-        name: str = "yolov12_loss",
-        **kwargs
+            self,
+            num_classes: int = 80,
+            input_shape: Tuple[int, int] = (640, 640),
+            reg_max: int = 16,
+            box_weight: float = 7.5,
+            cls_weight: float = 0.5,
+            dfl_weight: float = 1.5,
+            assigner_topk: int = 10,
+            assigner_alpha: float = 0.5,
+            assigner_beta: float = 6.0,
+            name: str = "yolov12_loss",
+            **kwargs
     ):
         super().__init__(name=name, **kwargs)
 
@@ -197,13 +197,13 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         return anchors, strides
 
     def _task_aligned_assigner(
-        self,
-        pred_scores: keras.KerasTensor,
-        pred_bboxes: keras.KerasTensor,
-        anchors: keras.KerasTensor,
-        gt_labels: keras.KerasTensor,
-        gt_bboxes: keras.KerasTensor,
-        mask_gt: keras.KerasTensor
+            self,
+            pred_scores: keras.KerasTensor,
+            pred_bboxes: keras.KerasTensor,
+            anchors: keras.KerasTensor,
+            gt_labels: keras.KerasTensor,
+            gt_bboxes: keras.KerasTensor,
+            mask_gt: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Simplified task-aligned assignment of ground truth boxes to anchors.
 
@@ -280,11 +280,11 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         return target_gt_idx, fg_mask
 
     def _get_targets(
-        self,
-        gt_labels: keras.KerasTensor,
-        gt_bboxes: keras.KerasTensor,
-        target_gt_idx: keras.KerasTensor,
-        fg_mask: keras.KerasTensor
+            self,
+            gt_labels: keras.KerasTensor,
+            gt_bboxes: keras.KerasTensor,
+            target_gt_idx: keras.KerasTensor,
+            fg_mask: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
         """Get target labels, boxes, and scores for loss calculation.
 
@@ -332,9 +332,9 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         return target_labels_int, target_bboxes, target_scores
 
     def _bbox_to_dist(
-        self,
-        bboxes: keras.KerasTensor,
-        anchors: keras.KerasTensor
+            self,
+            bboxes: keras.KerasTensor,
+            anchors: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Convert bounding boxes to distance format (ltrb).
 
@@ -354,9 +354,9 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         return ops.concatenate([lt, rb], axis=-1)
 
     def _dist_to_bbox(
-        self,
-        distance: keras.KerasTensor,
-        anchors: keras.KerasTensor
+            self,
+            distance: keras.KerasTensor,
+            anchors: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Convert distance predictions to bounding boxes.
 
@@ -373,9 +373,9 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         return ops.concatenate([x1y1, x2y2], axis=-1)
 
     def call(
-        self,
-        y_true: keras.KerasTensor,
-        y_pred: keras.KerasTensor
+            self,
+            y_true: keras.KerasTensor,
+            y_pred: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Calculate YOLOv12 loss.
 
@@ -525,9 +525,9 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
 
         # Calculate total loss
         total_loss = (
-            self.box_weight * loss_box +
-            self.cls_weight * loss_cls +
-            self.dfl_weight * loss_dfl
+                self.box_weight * loss_box +
+                self.cls_weight * loss_cls +
+                self.dfl_weight * loss_dfl
         )
 
         return total_loss
@@ -548,6 +548,7 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         })
         return config
 
+
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -560,21 +561,21 @@ class DiceFocalSegmentationLoss(keras.losses.Loss):
     """
 
     def __init__(
-        self,
-        # Dice loss parameters
-        dice_smooth: float = 1e-6,
-        dice_axis: Union[int, List[int]] = [1, 2],
-        # Focal loss parameters
-        focal_alpha: float = 0.25,
-        focal_gamma: float = 2.0,
-        focal_from_logits: bool = False,
-        # Loss weighting
-        dice_weight: float = 0.5,
-        focal_weight: float = 0.5,
-        # Base parameters
-        reduction: str = "sum_over_batch_size",
-        name: str = "dice_focal_segmentation_loss",
-        **kwargs
+            self,
+            # Dice loss parameters
+            dice_smooth: float = 1e-6,
+            dice_axis: Union[int, List[int]] = [1, 2],
+            # Focal loss parameters
+            focal_alpha: float = 0.25,
+            focal_gamma: float = 2.0,
+            focal_from_logits: bool = False,
+            # Loss weighting
+            dice_weight: float = 0.5,
+            focal_weight: float = 0.5,
+            # Base parameters
+            reduction: str = "sum_over_batch_size",
+            name: str = "dice_focal_segmentation_loss",
+            **kwargs
     ):
         """
         Initialize combined Dice-Focal segmentation loss.
@@ -619,7 +620,7 @@ class DiceFocalSegmentationLoss(keras.losses.Loss):
 
     def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
         """
-        Calculate combined Dice and Focal loss.
+        Calculate combined Dice and Focal loss with robust shape handling.
 
         Args:
             y_true: Ground truth masks (batch_size, height, width, 1).
@@ -629,13 +630,22 @@ class DiceFocalSegmentationLoss(keras.losses.Loss):
             Combined loss value.
         """
         # Calculate individual loss components
-        dice_loss_val = self.dice_loss(y_true, y_pred)
-        focal_loss_val = self.focal_loss(y_true, y_pred)
+        dice_loss_val = self.dice_loss(y_true, y_pred)  # Shape: (batch_size,)
+        focal_loss_val = self.focal_loss(y_true, y_pred)  # Shape: varies
 
-        # Combine losses with weights
+        # Ensure both losses have compatible shapes
+        # Dice loss should be (batch_size,), if not, reduce appropriately
+        if len(dice_loss_val.shape) > 1:
+            dice_loss_val = ops.mean(dice_loss_val, axis=list(range(1, len(dice_loss_val.shape))))
+
+        # Focal loss might be (batch_size,) or (batch_size, H, W, 1), reduce to (batch_size,)
+        if len(focal_loss_val.shape) > 1:
+            focal_loss_val = ops.mean(focal_loss_val, axis=list(range(1, len(focal_loss_val.shape))))
+
+        # Now both should have shape (batch_size,)
         combined_loss = (
-            self.dice_weight * dice_loss_val +
-            self.focal_weight * focal_loss_val
+                self.dice_weight * dice_loss_val +
+                self.focal_weight * focal_loss_val
         )
 
         return combined_loss
@@ -672,48 +682,48 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
     """
 
     def __init__(
-        self,
-        # Task configuration
-        task_config: Union[
-            TaskConfiguration,
-            List[TaskType],
-            List[str],
-            TaskType,
-            str
-        ] = TaskType.DETECTION,
+            self,
+            # Task configuration
+            task_config: Union[
+                TaskConfiguration,
+                List[TaskType],
+                List[str],
+                TaskType,
+                str
+            ] = TaskType.DETECTION,
 
-        # Task loss weights
-        detection_weight: float = 1.0,
-        segmentation_weight: float = 1.0,
-        classification_weight: float = 1.0,
+            # Task loss weights
+            detection_weight: float = 1.0,
+            segmentation_weight: float = 1.0,
+            classification_weight: float = 1.0,
 
-        # Detection loss parameters (YOLOv12Loss)
-        num_classes: int = 1,
-        input_shape: tuple = (640, 640),
-        reg_max: int = 16,
-        detection_box_weight: float = 7.5,
-        detection_cls_weight: float = 0.5,
-        detection_dfl_weight: float = 1.5,
+            # Detection loss parameters (YOLOv12Loss)
+            num_classes: int = 1,
+            input_shape: tuple = (640, 640),
+            reg_max: int = 16,
+            detection_box_weight: float = 7.5,
+            detection_cls_weight: float = 0.5,
+            detection_dfl_weight: float = 1.5,
 
-        # Segmentation loss parameters (DiceFocalSegmentationLoss)
-        seg_dice_weight: float = 0.5,
-        seg_focal_weight: float = 0.5,
-        seg_focal_alpha: float = 0.25,
-        seg_focal_gamma: float = 2.0,
-        seg_from_logits: bool = False,
+            # Segmentation loss parameters (DiceFocalSegmentationLoss)
+            seg_dice_weight: float = 0.5,
+            seg_focal_weight: float = 0.5,
+            seg_focal_alpha: float = 0.25,
+            seg_focal_gamma: float = 2.0,
+            seg_from_logits: bool = False,
 
-        # Classification loss parameters (BinaryCrossentropy)
-        cls_from_logits: bool = False,
-        cls_label_smoothing: float = 0.0,
+            # Classification loss parameters (BinaryCrossentropy)
+            cls_from_logits: bool = False,
+            cls_label_smoothing: float = 0.0,
 
-        # Uncertainty weighting (learnable task balancing)
-        use_uncertainty_weighting: bool = False,
-        uncertainty_regularization: float = 1.0,
+            # Uncertainty weighting (learnable task balancing)
+            use_uncertainty_weighting: bool = False,
+            uncertainty_regularization: float = 1.0,
 
-        # Base parameters
-        reduction: str = "sum_over_batch_size",
-        name: str = "yolov12_multitask_loss",
-        **kwargs
+            # Base parameters
+            reduction: str = "sum_over_batch_size",
+            name: str = "yolov12_multitask_loss",
+            **kwargs
     ):
         """
         Initialize YOLOv12 multitask loss function.
@@ -848,9 +858,9 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
             )
 
     def _infer_task_from_shapes(
-        self,
-        y_true: keras.KerasTensor,
-        y_pred: keras.KerasTensor
+            self,
+            y_true: keras.KerasTensor,
+            y_pred: keras.KerasTensor
     ) -> Optional[str]:
         """
         Infer which task is being computed based on tensor shapes.
@@ -891,9 +901,9 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         return None
 
     def call(
-        self,
-        y_true: Union[Dict[str, keras.KerasTensor], keras.KerasTensor],
-        y_pred: Union[Dict[str, keras.KerasTensor], keras.KerasTensor]
+            self,
+            y_true: Union[Dict[str, keras.KerasTensor], keras.KerasTensor],
+            y_pred: Union[Dict[str, keras.KerasTensor], keras.KerasTensor]
     ) -> keras.KerasTensor:
         """
         Calculate multi-task loss with enhanced handling for Named Outputs.
@@ -929,9 +939,9 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
             return self._compute_individual_task_loss(y_true, y_pred)
 
     def _compute_individual_task_loss(
-        self,
-        y_true: keras.KerasTensor,
-        y_pred: keras.KerasTensor
+            self,
+            y_true: keras.KerasTensor,
+            y_pred: keras.KerasTensor
     ) -> keras.KerasTensor:
         """
         Compute loss for individual task when called by Keras per output.
@@ -996,9 +1006,9 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
             return ops.convert_to_tensor(0.01, dtype=y_pred.dtype)
 
     def _compute_multi_task_loss(
-        self,
-        y_true: Dict[str, keras.KerasTensor],
-        y_pred: Dict[str, keras.KerasTensor]
+            self,
+            y_true: Dict[str, keras.KerasTensor],
+            y_pred: Dict[str, keras.KerasTensor]
     ) -> keras.KerasTensor:
         """Compute loss for multi-task model with dictionary inputs."""
         total_loss = ops.convert_to_tensor(0.0, dtype=self.dtype)
@@ -1006,8 +1016,8 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
 
         # Detection loss
         if (self.task_config.has_detection() and
-            TaskType.DETECTION.value in y_true and
-            TaskType.DETECTION.value in y_pred):
+                TaskType.DETECTION.value in y_true and
+                TaskType.DETECTION.value in y_pred):
 
             det_loss = self.detection_loss(
                 y_true[TaskType.DETECTION.value],
@@ -1025,8 +1035,8 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
 
         # Segmentation loss
         if (self.task_config.has_segmentation() and
-            TaskType.SEGMENTATION.value in y_true and
-            TaskType.SEGMENTATION.value in y_pred):
+                TaskType.SEGMENTATION.value in y_true and
+                TaskType.SEGMENTATION.value in y_pred):
 
             seg_loss = self.segmentation_loss(
                 y_true[TaskType.SEGMENTATION.value],
@@ -1044,8 +1054,8 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
 
         # Classification loss
         if (self.task_config.has_classification() and
-            TaskType.CLASSIFICATION.value in y_true and
-            TaskType.CLASSIFICATION.value in y_pred):
+                TaskType.CLASSIFICATION.value in y_true and
+                TaskType.CLASSIFICATION.value in y_pred):
 
             cls_loss = self.classification_loss(
                 y_true[TaskType.CLASSIFICATION.value],
@@ -1157,21 +1167,22 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         })
         return config
 
+
 # ---------------------------------------------------------------------
 # Factory functions for common use cases - UNCHANGED
 # ---------------------------------------------------------------------
 
 def create_yolov12_multitask_loss(
-    tasks: Union[
-        List[TaskType],
-        List[str],
-        TaskConfiguration,
-        TaskType,
-        str
-    ] = TaskType.DETECTION,
-    num_classes: int = 1,
-    input_shape: tuple = (640, 640),
-    **kwargs
+        tasks: Union[
+            List[TaskType],
+            List[str],
+            TaskConfiguration,
+            TaskType,
+            str
+        ] = TaskType.DETECTION,
+        num_classes: int = 1,
+        input_shape: tuple = (640, 640),
+        **kwargs
 ) -> YOLOv12MultiTaskLoss:
     """
     Create YOLOv12 multi-task loss function with specified configuration.
@@ -1206,9 +1217,9 @@ def create_yolov12_multitask_loss(
 
 
 def create_detection_only_loss(
-    num_classes: int = 1,
-    input_shape: tuple = (640, 640),
-    **kwargs
+        num_classes: int = 1,
+        input_shape: tuple = (640, 640),
+        **kwargs
 ) -> YOLOv12MultiTaskLoss:
     """Create loss function for detection-only models."""
     return create_yolov12_multitask_loss(
@@ -1220,8 +1231,8 @@ def create_detection_only_loss(
 
 
 def create_segmentation_only_loss(
-    input_shape: tuple = (640, 640),
-    **kwargs
+        input_shape: tuple = (640, 640),
+        **kwargs
 ) -> YOLOv12MultiTaskLoss:
     """Create loss function for segmentation-only models."""
     return create_yolov12_multitask_loss(
@@ -1233,9 +1244,9 @@ def create_segmentation_only_loss(
 
 
 def create_detection_segmentation_loss(
-    num_classes: int = 1,
-    input_shape: tuple = (640, 640),
-    **kwargs
+        num_classes: int = 1,
+        input_shape: tuple = (640, 640),
+        **kwargs
 ) -> YOLOv12MultiTaskLoss:
     """Create loss function for detection + segmentation models."""
     return create_yolov12_multitask_loss(
@@ -1244,6 +1255,7 @@ def create_detection_segmentation_loss(
         input_shape=input_shape,
         **kwargs
     )
+
 
 # ---------------------------------------------------------------------
 # Utility functions for loss monitoring and callbacks - UNCHANGED
