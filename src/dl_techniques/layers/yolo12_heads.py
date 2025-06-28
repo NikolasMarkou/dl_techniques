@@ -422,7 +422,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
                 # Attention block for feature fusion
                 if self.use_attention:
                     attention_block = SqueezeExcitation(
-                        reduction_ratio=16,
+                        reduction_ratio=0.25,
                         name=f"{self.name}_attention_{i}"
                     )
                     self.attention_blocks.append(attention_block)

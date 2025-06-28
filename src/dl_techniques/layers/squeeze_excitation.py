@@ -6,15 +6,6 @@ Implementation of the Squeeze-and-Excitation (SE) block as described in:
 "Squeeze-and-Excitation Networks" (Hu et al., 2019)
 https://arxiv.org/abs/1709.01507
 
-Key Features:
-------------
-- Channel-wise attention mechanism
-- Configurable reduction ratio
-- Configurable activation function
-- Learnable channel scaling
-- Support for various kernel initializations
-- Optional bias terms
-
 Architecture:
 ------------
 The SE block consists of:
@@ -28,11 +19,6 @@ The SE block consists of:
 
 The computation flow is:
 input -> global_pool -> conv_reduce -> activation -> conv_restore -> sigmoid -> scale -> output
-
-References:
-----------
-Based on implementation from:
-https://github.com/lvpeiqing/SAR-U-Net-liver-segmentation/blob/master/models/core/modules.py
 
 Usage Example:
 ------------
