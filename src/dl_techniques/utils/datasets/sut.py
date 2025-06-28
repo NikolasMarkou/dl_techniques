@@ -340,7 +340,7 @@ class SUTCrackPatchSampler:
                 # FIX: Handle potential orientation mismatch where mask dimensions are swapped.
                 # This checks if the image and mask shapes are different, but would match if one was transposed.
                 if image.shape[:2] != mask.shape[:2] and image.shape[:2] == mask.shape[:2][::-1]:
-                    logger.info(
+                    logger.debug(
                         f"Correcting orientation for mask of {annotation.image_path}. "
                         f"Original mask shape: {mask.shape}, image shape: {image.shape[:2]}. Transposing mask."
                     )

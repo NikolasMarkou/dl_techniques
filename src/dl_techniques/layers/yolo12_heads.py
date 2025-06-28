@@ -535,39 +535,14 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
         if len(self.upconv_blocks) > 4:
             x = self.upconv_blocks[4](x, training=training)
 
-        # If we still haven't reached target resolution, add final upsampling
-        current_height = ops.shape(x)[1]
-        current_width = ops.shape(x)[2]
-        target_height, target_width = self._computed_target_size
-
-        # Check if we need additional upsampling to reach target size
-        if self._computed_target_size[0] // current_height > 1:
-            # Calculate required upsampling factor
-            height_factor = self._computed_target_size[0] // current_height
-            width_factor = self._computed_target_size[1] // current_width
-
-            if height_factor == width_factor and height_factor in [2, 4, 8]:
-                # Use strided transpose convolution for exact factors
-                logger.info(f"Adding final upsampling with factor {height_factor}")
-
-                final_upsample = keras.layers.Conv2DTranspose(
-                    filters=self.intermediate_filters[-1] if self.intermediate_filters else 32,
-                    kernel_size=3,
-                    strides=height_factor,
-                    padding="same",
-                    kernel_initializer=self.kernel_initializer,
-                    kernel_regularizer=self.kernel_regularizer,
-                    name=f"{self.name}_final_upsample"
-                )
-                x = final_upsample(x)
-            else:
-                # Use resize for non-standard factors
-                logger.info(f"Using resize for upsampling to {self._computed_target_size}")
-                x = ops.image.resize(
-                    x,
-                    size=self._computed_target_size,
-                    interpolation="bilinear"
-                )
+        # Ensure exact target size with resize (no-op if already correct size)
+        # This avoids complex tensor comparisons and dynamic layer creation
+        if self._computed_target_size != (None, None):
+            x = ops.image.resize(
+                x,
+                size=self._computed_target_size,
+                interpolation="bilinear"
+            )
 
         # Apply dropout
         if self.dropout is not None:
@@ -575,19 +550,6 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
 
         # Final segmentation output
         segmentation_output = self.final_conv(x, training=training)
-
-        # Ensure exact target size (safety check)
-        output_height = ops.shape(segmentation_output)[1]
-        output_width = ops.shape(segmentation_output)[2]
-
-        # If there's still a size mismatch, use resize as final fallback
-        if (output_height != target_height or output_width != target_width):
-            logger.warning(f"Final resize needed: {(output_height, output_width)} -> {self._computed_target_size}")
-            segmentation_output = ops.image.resize(
-                segmentation_output,
-                size=self._computed_target_size,
-                interpolation="bilinear"
-            )
 
         return segmentation_output
 
