@@ -1,5 +1,46 @@
 """
-This module provides all custom blocks and layers for yolo12.
+YOLOv12 Core Building Blocks.
+
+This module provides a collection of custom Keras layers and blocks that form the
+fundamental components of the YOLOv12 object detection architecture. These blocks
+are designed to be modular, efficient, and fully serializable.
+
+The key components include:
+
+- **ConvBlock**: The standard base unit for all convolutions in the network,
+  consisting of a Conv2D layer, followed by Batch Normalization and a SiLU
+  (Sigmoid-weighted Linear Unit) activation function. This pattern promotes
+  stable training and effective feature learning.
+
+- **AreaAttention**: A specialized multi-head self-attention mechanism designed for
+  2D feature maps. It can operate globally or on localized "areas" of the
+  feature map, allowing the model to focus on relevant spatial regions with
+  varying levels of granularity. This is crucial for capturing both local and
+  global context.
+
+- **AttentionBlock**: A transformer-style block that integrates the `AreaAttention`
+  layer with a small feed-forward MLP (Multi-Layer Perceptron), both wrapped in
+  residual connections. This allows the model to refine features by attending
+  to different parts of the image and then processing them through a non-linear
+  transformation.
+
+- **Bottleneck**: A classic residual block used in many modern CNNs. It consists
+  of two sequential `ConvBlock` layers with a shortcut (residual) connection
+  that adds the input to the output. This helps to mitigate the vanishing
+  gradient problem and allows for the construction of very deep networks.
+
+- **C3k2Block**: A CSP (Cross-Stage Partial) inspired block that splits the input
+  features into two paths. One path is processed through a series of `Bottleneck`
+  layers, while the other remains unchanged. The two paths are then concatenated,
+  fusing the processed and original features to enhance the gradient flow and
+- learning capacity without a significant increase in computational cost.
+
+- **A2C2fBlock**: An attention-enhanced feature fusion block inspired by ELAN
+  (Efficient Layer Aggregation Network) principles. It processes an input through
+  a series of `AttentionBlock` pairs, progressively concatenating the output of
+  each stage. This creates a rich feature hierarchy, allowing the network to
+  learn complex representations by combining features from different levels of
+  abstraction.
 """
 
 import keras
