@@ -278,11 +278,22 @@ class TensorFlowNativePatchSampler:
         image_width_f = tf.cast(image_width, tf.float32)
         image_height_f = tf.cast(image_height, tf.float32)
 
+        # Ensure patch centers are always within valid bounds
+        min_center_x = self.half_patch
+        max_center_x = image_width_f - self.half_patch
+        min_center_y = self.half_patch
+        max_center_y = image_height_f - self.half_patch
+
+        # Skip if image is too small for patches
+        if tf.logical_or(tf.less_equal(max_center_x, min_center_x),
+                        tf.less_equal(max_center_y, min_center_y)):
+            return tf.zeros([0, 2], dtype=tf.float32)
+
         # Vectorized calculation of grid bounds for all bboxes
-        x_start = tf.maximum(self.half_patch, bboxes[:, 0] - self.half_patch)
-        x_end = tf.minimum(image_width_f - self.half_patch, bboxes[:, 2] + self.half_patch)
-        y_start = tf.maximum(self.half_patch, bboxes[:, 1] - self.half_patch)
-        y_end = tf.minimum(image_height_f - self.half_patch, bboxes[:, 3] + self.half_patch)
+        x_start = tf.maximum(min_center_x, tf.maximum(min_center_x, bboxes[:, 0] - self.half_patch))
+        x_end = tf.minimum(max_center_x, tf.minimum(max_center_x, bboxes[:, 2] + self.half_patch))
+        y_start = tf.maximum(min_center_y, tf.maximum(min_center_y, bboxes[:, 1] - self.half_patch))
+        y_end = tf.minimum(max_center_y, tf.minimum(max_center_y, bboxes[:, 3] + self.half_patch))
 
         # Create a fixed grid that we'll filter
         # Determine the overall bounds
@@ -290,6 +301,17 @@ class TensorFlowNativePatchSampler:
         global_x_end = tf.reduce_max(x_end)
         global_y_start = tf.reduce_min(y_start)
         global_y_end = tf.reduce_max(y_end)
+
+        # Ensure bounds are valid
+        global_x_start = tf.maximum(global_x_start, min_center_x)
+        global_x_end = tf.minimum(global_x_end, max_center_x)
+        global_y_start = tf.maximum(global_y_start, min_center_y)
+        global_y_end = tf.minimum(global_y_end, max_center_y)
+
+        # Skip if no valid region
+        if tf.logical_or(tf.greater_equal(global_x_start, global_x_end),
+                        tf.greater_equal(global_y_start, global_y_end)):
+            return tf.zeros([0, 2], dtype=tf.float32)
 
         # Generate global grid
         x_coords = tf.range(global_x_start, global_x_end, grid_spacing)
@@ -337,6 +359,17 @@ class TensorFlowNativePatchSampler:
 
         # Generate positive patch centers
         def sample_positive():
+            # Ensure we have valid sampling region
+            min_center_x = self.half_patch
+            max_center_x = image_width_f - self.half_patch
+            min_center_y = self.half_patch
+            max_center_y = image_height_f - self.half_patch
+
+            # Skip if image is too small
+            if tf.logical_or(tf.less_equal(max_center_x, min_center_x),
+                            tf.less_equal(max_center_y, min_center_y)):
+                return tf.zeros([0, 2], dtype=tf.float32)
+
             # Generate grid centers around bboxes
             grid_centers = self._generate_grid_centers(bboxes, image_width, image_height)
 
@@ -364,11 +397,11 @@ class TensorFlowNativePatchSampler:
             # Combine grid and random centers
             all_positive_candidates = tf.concat([grid_centers, random_centers], axis=0)
 
-            # Clip to valid region
+            # Clip to valid region with proper bounds
             all_positive_candidates = tf.clip_by_value(
                 all_positive_candidates,
-                [self.half_patch, self.half_patch],
-                [image_width_f - self.half_patch, image_height_f - self.half_patch]
+                [min_center_x, min_center_y],
+                [max_center_x, max_center_y]
             )
 
             # Sample required number
@@ -390,6 +423,17 @@ class TensorFlowNativePatchSampler:
 
         # Generate negative patch centers (avoid bbox regions)
         def sample_negative():
+            # Ensure we have valid sampling region
+            min_center_x = self.half_patch
+            max_center_x = image_width_f - self.half_patch
+            min_center_y = self.half_patch
+            max_center_y = image_height_f - self.half_patch
+
+            # Skip if image is too small
+            if tf.logical_or(tf.less_equal(max_center_x, min_center_x),
+                            tf.less_equal(max_center_y, min_center_y)):
+                return tf.zeros([0, 2], dtype=tf.float32)
+
             # Create avoidance zones around bboxes
             def create_avoidance_zones():
                 buffer = self.half_patch
@@ -414,8 +458,8 @@ class TensorFlowNativePatchSampler:
             max_attempts = num_negative * 5
             candidate_centers = tf.random.uniform(
                 [max_attempts, 2],
-                [self.half_patch, self.half_patch],
-                [image_width_f - self.half_patch, image_height_f - self.half_patch]
+                [min_center_x, min_center_y],  # Use proper bounds
+                [max_center_x, max_center_y]   # Use proper bounds
             )
 
             # Check if candidates are in avoidance zones
@@ -491,17 +535,46 @@ class TensorFlowNativePatchSampler:
             def extract_single_patch(i):
                 center = centers_int[i]
 
-                # Calculate patch bounds
-                y1 = center[1] - half_patch
-                y2 = center[1] + half_patch
-                x1 = center[0] - half_patch
-                x2 = center[0] + half_patch
+                # Calculate desired patch bounds
+                y1_desired = center[1] - half_patch
+                y2_desired = center[1] + half_patch
+                x1_desired = center[0] - half_patch
+                x2_desired = center[0] + half_patch
 
-                # Extract image patch
-                img_patch = image[y1:y2, x1:x2, :]
+                # Get image dimensions
+                image_height = tf.shape(image)[0]
+                image_width = tf.shape(image)[1]
+
+                # Calculate what we can actually extract from the image
+                y1_actual = tf.maximum(0, y1_desired)
+                y2_actual = tf.minimum(image_height, y2_desired)
+                x1_actual = tf.maximum(0, x1_desired)
+                x2_actual = tf.minimum(image_width, x2_desired)
+
+                # Calculate padding needed
+                pad_top = tf.maximum(0, -y1_desired)
+                pad_bottom = tf.maximum(0, y2_desired - image_height)
+                pad_left = tf.maximum(0, -x1_desired)
+                pad_right = tf.maximum(0, x2_desired - image_width)
+
+                # Extract the available region from the image
+                img_patch_raw = tf.slice(
+                    image,
+                    [y1_actual, x1_actual, 0],
+                    [y2_actual - y1_actual, x2_actual - x1_actual, 3]
+                )
+
+                # Now pad to get exactly the right size
+                img_patch = tf.pad(
+                    img_patch_raw,
+                    [[pad_top, pad_bottom], [pad_left, pad_right], [0, 0]],
+                    mode='REFLECT'
+                )
+
+                # This should now be exactly the right shape, but ensure it
                 img_patch = tf.ensure_shape(img_patch, [self.patch_size, self.patch_size, 3])
 
-                # Extract mask patch
+                # Extract mask patch with same logic
                 def extract_mask():
                     mask_resized = mask
                     # Resize mask to image size if needed
@@ -521,7 +594,22 @@ class TensorFlowNativePatchSampler:
                         lambda: mask
                     )
 
-                    return mask_resized[y1:y2, x1:x2]
+                    # Extract mask patch with same logic as image
+                    mask_patch_raw = tf.slice(
+                        mask_resized,
+                        [y1_actual, x1_actual],
+                        [y2_actual - y1_actual, x2_actual - x1_actual]
+                    )
+
+                    # Pad mask patch
+                    mask_patch_padded = tf.pad(
+                        mask_patch_raw,
+                        [[pad_top, pad_bottom], [pad_left, pad_right]],
+                        mode='CONSTANT',
+                        constant_values=0
+                    )
+
+                    return mask_patch_padded
 
                 def empty_mask():
                     return tf.zeros([self.patch_size, self.patch_size], dtype=tf.float32)
@@ -533,8 +621,8 @@ class TensorFlowNativePatchSampler:
                 )
                 mask_patch = tf.ensure_shape(mask_patch, [self.patch_size, self.patch_size])
 
-                # Process bboxes for this patch
-                patch_bbox = tf.cast([x1, y1, x2, y2], tf.float32)
+                # Process bboxes for this patch (use desired coordinates for proper scaling)
+                patch_bbox = tf.cast([x1_desired, y1_desired, x2_desired, y2_desired], tf.float32)
 
                 # Find overlapping bboxes using vectorized operations
                 def process_bboxes():
@@ -549,12 +637,30 @@ class TensorFlowNativePatchSampler:
 
                     # Adjust coordinates to patch space and normalize
                     def adjust_bboxes():
+                        # Adjust bbox coordinates to patch space (accounting for the desired patch bounds)
+                        adjusted_x_min = tf.clip_by_value(
+                            (overlapping_bboxes[:, 0] - patch_bbox[0]) / self.patch_size_f,
+                            0.0, 1.0
+                        )
+                        adjusted_y_min = tf.clip_by_value(
+                            (overlapping_bboxes[:, 1] - patch_bbox[1]) / self.patch_size_f,
+                            0.0, 1.0
+                        )
+                        adjusted_x_max = tf.clip_by_value(
+                            (overlapping_bboxes[:, 2] - patch_bbox[0]) / self.patch_size_f,
+                            0.0, 1.0
+                        )
+                        adjusted_y_max = tf.clip_by_value(
+                            (overlapping_bboxes[:, 3] - patch_bbox[1]) / self.patch_size_f,
+                            0.0, 1.0
+                        )
+
                         adjusted = tf.stack([
                             tf.zeros(tf.shape(overlapping_bboxes)[0]),  # class_id
-                            tf.clip_by_value((overlapping_bboxes[:, 0] - patch_bbox[0]) / self.patch_size_f, 0.0, 1.0),
-                            tf.clip_by_value((overlapping_bboxes[:, 1] - patch_bbox[1]) / self.patch_size_f, 0.0, 1.0),
-                            tf.clip_by_value((overlapping_bboxes[:, 2] - patch_bbox[0]) / self.patch_size_f, 0.0, 1.0),
-                            tf.clip_by_value((overlapping_bboxes[:, 3] - patch_bbox[1]) / self.patch_size_f, 0.0, 1.0)
+                            adjusted_x_min,
+                            adjusted_y_min,
+                            adjusted_x_max,
+                            adjusted_y_max
                         ], axis=1)
 
                         # Pad or truncate to max_boxes (10)
