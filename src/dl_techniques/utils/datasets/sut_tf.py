@@ -479,136 +479,147 @@ class TensorFlowNativePatchSampler:
         """Extract patches and their corresponding data vectorized."""
         num_patches = tf.shape(centers)[0]
 
-        if tf.equal(num_patches, 0):
+        # Initialize variables in all branches
+        half_patch = tf.cast(self.patch_size // 2, tf.int32)
+        centers_int = tf.cast(centers, tf.int32)
+
+        def extract_patches():
+            """Extract patches when centers are available."""
+        def extract_patches():
+            """Extract patches when centers are available."""
+            # Use tf.map_fn to process patches in parallel instead of Python loops
+            def extract_single_patch(i):
+                center = centers_int[i]
+
+                # Calculate patch bounds
+                y1 = center[1] - half_patch
+                y2 = center[1] + half_patch
+                x1 = center[0] - half_patch
+                x2 = center[0] + half_patch
+
+                # Extract image patch
+                img_patch = image[y1:y2, x1:x2, :]
+                img_patch = tf.ensure_shape(img_patch, [self.patch_size, self.patch_size, 3])
+
+                # Extract mask patch
+                def extract_mask():
+                    mask_resized = mask
+                    # Resize mask to image size if needed
+                    mask_shape = tf.shape(mask)
+                    image_shape = tf.shape(image)
+
+                    mask_resized = tf.cond(
+                        tf.logical_or(
+                            tf.not_equal(mask_shape[0], image_shape[0]),
+                            tf.not_equal(mask_shape[1], image_shape[1])
+                        ),
+                        lambda: tf.squeeze(tf.image.resize(
+                            tf.expand_dims(mask, -1),
+                            [image_shape[0], image_shape[1]],
+                            method='nearest'
+                        ), -1),
+                        lambda: mask
+                    )
+
+                    return mask_resized[y1:y2, x1:x2]
+
+                def empty_mask():
+                    return tf.zeros([self.patch_size, self.patch_size], dtype=tf.float32)
+
+                mask_patch = tf.cond(
+                    tf.greater(tf.reduce_prod(tf.shape(mask)), 1),
+                    extract_mask,
+                    empty_mask
+                )
+                mask_patch = tf.ensure_shape(mask_patch, [self.patch_size, self.patch_size])
+
+                # Process bboxes for this patch
+                patch_bbox = tf.cast([x1, y1, x2, y2], tf.float32)
+
+                # Find overlapping bboxes using vectorized operations
+                def process_bboxes():
+                    # Check intersection with all bboxes at once
+                    intersects = tf.logical_and(
+                        tf.logical_and(bboxes[:, 2] > patch_bbox[0], bboxes[:, 0] < patch_bbox[2]),
+                        tf.logical_and(bboxes[:, 3] > patch_bbox[1], bboxes[:, 1] < patch_bbox[3])
+                    )
+
+                    # Get intersecting bboxes
+                    overlapping_bboxes = tf.boolean_mask(bboxes, intersects)
+
+                    # Adjust coordinates to patch space and normalize
+                    def adjust_bboxes():
+                        adjusted = tf.stack([
+                            tf.zeros(tf.shape(overlapping_bboxes)[0]),  # class_id
+                            tf.clip_by_value((overlapping_bboxes[:, 0] - patch_bbox[0]) / self.patch_size_f, 0.0, 1.0),
+                            tf.clip_by_value((overlapping_bboxes[:, 1] - patch_bbox[1]) / self.patch_size_f, 0.0, 1.0),
+                            tf.clip_by_value((overlapping_bboxes[:, 2] - patch_bbox[0]) / self.patch_size_f, 0.0, 1.0),
+                            tf.clip_by_value((overlapping_bboxes[:, 3] - patch_bbox[1]) / self.patch_size_f, 0.0, 1.0)
+                        ], axis=1)
+
+                        # Pad or truncate to max_boxes (10)
+                        max_boxes = 10
+                        num_boxes = tf.shape(adjusted)[0]
+
+                        adjusted = tf.cond(
+                            tf.greater(num_boxes, max_boxes),
+                            lambda: adjusted[:max_boxes],
+                            lambda: tf.pad(adjusted, [[0, max_boxes - num_boxes], [0, 0]])
+                        )
+
+                        return adjusted, 1  # label = 1 (has crack)
+
+                    def no_bboxes():
+                        return tf.zeros([10, 5], dtype=tf.float32), 0  # label = 0 (no crack)
+
+                    return tf.cond(
+                        tf.greater(tf.shape(overlapping_bboxes)[0], 0),
+                        adjust_bboxes,
+                        no_bboxes
+                    )
+
+                def no_bboxes_available():
+                    return tf.zeros([10, 5], dtype=tf.float32), 0
+
+                bbox_tensor, label = tf.cond(
+                    tf.greater(tf.shape(bboxes)[0], 0),
+                    process_bboxes,
+                    no_bboxes_available
+                )
+
+                return img_patch, mask_patch, label, bbox_tensor
+
+            # Process all patches using tf.map_fn
+            patches_data = tf.map_fn(
+                extract_single_patch,
+                tf.range(num_patches),
+                fn_output_signature=(
+                    tf.TensorSpec([self.patch_size, self.patch_size, 3], tf.float32),
+                    tf.TensorSpec([self.patch_size, self.patch_size], tf.float32),
+                    tf.TensorSpec([], tf.int32),
+                    tf.TensorSpec([10, 5], tf.float32)
+                ),
+                parallel_iterations=10
+            )
+
+            image_patches, mask_patches, labels, bbox_patches = patches_data
+            return image_patches, mask_patches, labels, bbox_patches
+
+        def return_empty():
+            """Return empty tensors when no centers."""
             return (
                 tf.zeros([0, self.patch_size, self.patch_size, 3], dtype=tf.float32),
                 tf.zeros([0, self.patch_size, self.patch_size], dtype=tf.float32),
                 tf.zeros([0], dtype=tf.int32),
-                tf.zeros([0, 10, 5], dtype=tf.float32)  # max 10 boxes per patch
+                tf.zeros([0, 10, 5], dtype=tf.float32)
             )
 
-        # Calculate patch coordinates
-        half_patch = tf.cast(self.patch_size // 2, tf.int32)
-        centers_int = tf.cast(centers, tf.int32)
-
-        # Use tf.map_fn to process patches in parallel instead of Python loops
-        def extract_single_patch(i):
-            center = centers_int[i]
-
-            # Calculate patch bounds
-            y1 = center[1] - half_patch
-            y2 = center[1] + half_patch
-            x1 = center[0] - half_patch
-            x2 = center[0] + half_patch
-
-            # Extract image patch
-            img_patch = image[y1:y2, x1:x2, :]
-            img_patch = tf.ensure_shape(img_patch, [self.patch_size, self.patch_size, 3])
-
-            # Extract mask patch
-            def extract_mask():
-                mask_resized = mask
-                # Resize mask to image size if needed
-                mask_shape = tf.shape(mask)
-                image_shape = tf.shape(image)
-
-                mask_resized = tf.cond(
-                    tf.logical_or(
-                        tf.not_equal(mask_shape[0], image_shape[0]),
-                        tf.not_equal(mask_shape[1], image_shape[1])
-                    ),
-                    lambda: tf.squeeze(tf.image.resize(
-                        tf.expand_dims(mask, -1),
-                        [image_shape[0], image_shape[1]],
-                        method='nearest'
-                    ), -1),
-                    lambda: mask
-                )
-
-                return mask_resized[y1:y2, x1:x2]
-
-            def empty_mask():
-                return tf.zeros([self.patch_size, self.patch_size], dtype=tf.float32)
-
-            mask_patch = tf.cond(
-                tf.greater(tf.reduce_prod(tf.shape(mask)), 1),
-                extract_mask,
-                empty_mask
-            )
-            mask_patch = tf.ensure_shape(mask_patch, [self.patch_size, self.patch_size])
-
-            # Process bboxes for this patch
-            patch_bbox = tf.cast([x1, y1, x2, y2], tf.float32)
-
-            # Find overlapping bboxes using vectorized operations
-            def process_bboxes():
-                # Check intersection with all bboxes at once
-                intersects = tf.logical_and(
-                    tf.logical_and(bboxes[:, 2] > patch_bbox[0], bboxes[:, 0] < patch_bbox[2]),
-                    tf.logical_and(bboxes[:, 3] > patch_bbox[1], bboxes[:, 1] < patch_bbox[3])
-                )
-
-                # Get intersecting bboxes
-                overlapping_bboxes = tf.boolean_mask(bboxes, intersects)
-
-                # Adjust coordinates to patch space and normalize
-                def adjust_bboxes():
-                    adjusted = tf.stack([
-                        tf.zeros(tf.shape(overlapping_bboxes)[0]),  # class_id
-                        tf.clip_by_value((overlapping_bboxes[:, 0] - patch_bbox[0]) / self.patch_size_f, 0.0, 1.0),
-                        tf.clip_by_value((overlapping_bboxes[:, 1] - patch_bbox[1]) / self.patch_size_f, 0.0, 1.0),
-                        tf.clip_by_value((overlapping_bboxes[:, 2] - patch_bbox[0]) / self.patch_size_f, 0.0, 1.0),
-                        tf.clip_by_value((overlapping_bboxes[:, 3] - patch_bbox[1]) / self.patch_size_f, 0.0, 1.0)
-                    ], axis=1)
-
-                    # Pad or truncate to max_boxes (10)
-                    max_boxes = 10
-                    num_boxes = tf.shape(adjusted)[0]
-
-                    adjusted = tf.cond(
-                        tf.greater(num_boxes, max_boxes),
-                        lambda: adjusted[:max_boxes],
-                        lambda: tf.pad(adjusted, [[0, max_boxes - num_boxes], [0, 0]])
-                    )
-
-                    return adjusted, 1  # label = 1 (has crack)
-
-                def no_bboxes():
-                    return tf.zeros([10, 5], dtype=tf.float32), 0  # label = 0 (no crack)
-
-                return tf.cond(
-                    tf.greater(tf.shape(overlapping_bboxes)[0], 0),
-                    adjust_bboxes,
-                    no_bboxes
-                )
-
-            def no_bboxes_available():
-                return tf.zeros([10, 5], dtype=tf.float32), 0
-
-            bbox_tensor, label = tf.cond(
-                tf.greater(tf.shape(bboxes)[0], 0),
-                process_bboxes,
-                no_bboxes_available
-            )
-
-            return img_patch, mask_patch, label, bbox_tensor
-
-        # Process all patches using tf.map_fn
-        patches_data = tf.map_fn(
-            extract_single_patch,
-            tf.range(num_patches),
-            fn_output_signature=(
-                tf.TensorSpec([self.patch_size, self.patch_size, 3], tf.float32),
-                tf.TensorSpec([self.patch_size, self.patch_size], tf.float32),
-                tf.TensorSpec([], tf.int32),
-                tf.TensorSpec([10, 5], tf.float32)
-            ),
-            parallel_iterations=10
+        # Use tf.cond to handle the branching properly
+        return tf.cond(
+            tf.greater(num_patches, 0),
+            extract_patches,
+            return_empty
         )
-
-        image_patches, mask_patches, labels, bbox_patches = patches_data
-
-        return image_patches, mask_patches, labels, bbox_patches
 
     @tf.function
     def _apply_augmentation_tf(self, image_patches: tf.Tensor) -> tf.Tensor:
