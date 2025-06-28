@@ -1,8 +1,41 @@
 """
-Sampling layer implementing the reparameterization trick for Variational Autoencoders.
+Sampling Layer for Variational Autoencoders (VAEs).
 
-This module provides the Sampling layer which is commonly used in VAE architectures
-to sample from the latent distribution using the reparameterization trick.
+This module defines the `Sampling` layer, a custom Keras layer that implements
+the reparameterization trick. This technique is a cornerstone of Variational
+Autoencoders, enabling the model to be trained via backpropagation despite
+involving a random sampling step.
+
+The layer takes the mean (mu) and the log-variance (log_var) of a latent
+Gaussian distribution (as predicted by a VAE's encoder) and generates a
+sample `z` from this distribution. The reparameterization trick expresses
+the sample `z` as a deterministic function of `mu`, `log_var`, and an
+auxiliary random noise variable `epsilon` (sampled from a standard normal
+distribution), according to the formula:
+
+    z = mu + exp(0.5 * log_var) * epsilon
+
+By reformulating the sampling process this way, the gradients can flow
+backwards from the decoder's loss, through the sample `z`, and to the
+encoder's parameters (`mu` and `log_var`), allowing for end-to-end training.
+
+Typical Usage:
+  >>> # Define the latent dimension
+  >>> latent_dim = 2
+  >>>
+  >>> # Assume `encoder_output` is the output of the main encoder network
+  >>> # e.g., encoder_output = keras.layers.Dense(16, activation="relu")(input_tensor)
+  >>>
+  >>> # Project the encoder output into mean and log variance vectors
+  >>> z_mean = keras.layers.Dense(latent_dim, name="z_mean")(encoder_output)
+  >>> z_log_var = keras.layers.Dense(latent_dim, name="z_log_var")(encoder_output)
+  >>>
+  >>> # Use the Sampling layer to get a sample from the latent space
+  >>> z = Sampling()([z_mean, z_log_var])
+  >>>
+  >>> # The sampled `z` tensor can then be passed to the decoder
+  >>> # e.g., decoded_output = decoder(z)
+  >>> # vae_model = keras.Model(inputs=input_tensor, outputs=decoded_output)
 """
 
 import keras
