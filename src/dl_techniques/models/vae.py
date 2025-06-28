@@ -1,41 +1,18 @@
-# vae.py
 
-"""
-Keras-compliant implementation of a Variational Autoencoder (VAE) for images.
-
-This version uses a simplified and more robust architecture where the VAE class
-owns all layers directly, avoiding complex sub-model dependencies and build-cycle errors.
-
-Features:
-    - Full Keras 3 compliance with compile/fit workflow.
-    - Custom train_step and test_step for VAE-specific loss.
-    - Simplified and robust layer management.
-"""
-
-import os
 import keras
 from keras import ops
 import tensorflow as tf
 from typing import Optional, Tuple, Union, Dict, Any, List
 
-# Make sure this import path is correct for your project structure
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.sampling import Sampling
 
-
-@keras.saving.register_keras_serializable()
-class Sampling(keras.layers.Layer):
-    """Uses reparameterization trick to sample from a Normal distribution."""
-
-    def call(self, inputs: Tuple[keras.KerasTensor, keras.KerasTensor]) -> keras.KerasTensor:
-        z_mean, z_log_var = inputs
-        batch = ops.shape(z_mean)[0]
-        dim = ops.shape(z_mean)[1]
-        epsilon = keras.random.normal(shape=(batch, dim))
-        return z_mean + ops.exp(0.5 * z_log_var) * epsilon
-
-    def compute_output_shape(self, input_shape: Tuple[Tuple, Tuple]) -> Tuple:
-        return input_shape[0]
-
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class VAE(keras.Model):
