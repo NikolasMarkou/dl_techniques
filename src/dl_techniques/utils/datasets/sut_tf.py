@@ -269,37 +269,58 @@ class TensorFlowNativePatchSampler:
         image_height: tf.Tensor
     ) -> tf.Tensor:
         """Generate grid of potential patch centers around bounding boxes."""
+        # Handle empty bboxes case
+        if tf.equal(tf.shape(bboxes)[0], 0):
+            return tf.zeros([0, 2], dtype=tf.float32)
+
         # Grid spacing
         grid_spacing = tf.cast(self.patch_size_tensor // 4, tf.float32)
+        image_width_f = tf.cast(image_width, tf.float32)
+        image_height_f = tf.cast(image_height, tf.float32)
 
-        centers_list = []
+        # Vectorized calculation of grid bounds for all bboxes
+        x_start = tf.maximum(self.half_patch, bboxes[:, 0] - self.half_patch)
+        x_end = tf.minimum(image_width_f - self.half_patch, bboxes[:, 2] + self.half_patch)
+        y_start = tf.maximum(self.half_patch, bboxes[:, 1] - self.half_patch)
+        y_end = tf.minimum(image_height_f - self.half_patch, bboxes[:, 3] + self.half_patch)
 
-        # Process each bbox
+        # Create a fixed grid that we'll filter
+        # Determine the overall bounds
+        global_x_start = tf.reduce_min(x_start)
+        global_x_end = tf.reduce_max(x_end)
+        global_y_start = tf.reduce_min(y_start)
+        global_y_end = tf.reduce_max(y_end)
+
+        # Generate global grid
+        x_coords = tf.range(global_x_start, global_x_end, grid_spacing)
+        y_coords = tf.range(global_y_start, global_y_end, grid_spacing)
+
+        # Create meshgrid
+        x_grid, y_grid = tf.meshgrid(x_coords, y_coords)
+        all_grid_points = tf.stack([tf.reshape(x_grid, [-1]), tf.reshape(y_grid, [-1])], axis=1)
+
+        # Filter points that are within any bbox region
+        valid_mask = tf.zeros([tf.shape(all_grid_points)[0]], dtype=tf.bool)
+
+        # Check each bbox
         for i in tf.range(tf.shape(bboxes)[0]):
-            bbox = bboxes[i]  # [xmin, ymin, xmax, ymax]
+            # Check if points are within this bbox's expanded region
+            in_bbox = tf.logical_and(
+                tf.logical_and(
+                    all_grid_points[:, 0] >= x_start[i],
+                    all_grid_points[:, 0] <= x_end[i]
+                ),
+                tf.logical_and(
+                    all_grid_points[:, 1] >= y_start[i],
+                    all_grid_points[:, 1] <= y_end[i]
+                )
+            )
+            valid_mask = tf.logical_or(valid_mask, in_bbox)
 
-            # Calculate grid bounds
-            x_start = tf.maximum(self.half_patch, bbox[0] - self.half_patch)
-            x_end = tf.minimum(tf.cast(image_width, tf.float32) - self.half_patch, bbox[2] + self.half_patch)
-            y_start = tf.maximum(self.half_patch, bbox[1] - self.half_patch)
-            y_end = tf.minimum(tf.cast(image_height, tf.float32) - self.half_patch, bbox[3] + self.half_patch)
+        # Filter valid points
+        valid_centers = tf.boolean_mask(all_grid_points, valid_mask)
 
-            # Generate grid points
-            x_coords = tf.range(x_start, x_end, grid_spacing)
-            y_coords = tf.range(y_start, y_end, grid_spacing)
-
-            # Create meshgrid
-            x_grid, y_grid = tf.meshgrid(x_coords, y_coords)
-            centers = tf.stack([tf.reshape(x_grid, [-1]), tf.reshape(y_grid, [-1])], axis=1)
-            centers_list.append(centers)
-
-        # Concatenate all centers
-        if centers_list:
-            all_centers = tf.concat(centers_list, axis=0)
-        else:
-            all_centers = tf.zeros([0, 2], dtype=tf.float32)
-
-        return all_centers
+        return valid_centers
 
     @tf.function
     def _sample_patch_centers(
@@ -315,9 +336,7 @@ class TensorFlowNativePatchSampler:
         image_height_f = tf.cast(image_height, tf.float32)
 
         # Generate positive patch centers
-        positive_centers = tf.zeros([0, 2], dtype=tf.float32)
-
-        if tf.greater(num_positive, 0) and tf.greater(tf.shape(bboxes)[0], 0):
+        def sample_positive():
             # Generate grid centers around bboxes
             grid_centers = self._generate_grid_centers(bboxes, image_width, image_height)
 
@@ -325,20 +344,22 @@ class TensorFlowNativePatchSampler:
             bbox_centers = (bboxes[:, :2] + bboxes[:, 2:]) / 2.0  # [cx, cy]
 
             # Expand sampling region
-            expansion = tf.maximum(
-                tf.reduce_max(bboxes[:, 2:] - bboxes[:, :2], axis=1, keepdims=True),
-                self.half_patch
-            )
+            bbox_sizes = tf.reduce_max(bboxes[:, 2:] - bboxes[:, :2], axis=1, keepdims=True)
+            expansion = tf.maximum(bbox_sizes, self.half_patch)
 
             # Sample random centers near bboxes
-            num_bbox_samples = tf.minimum(num_positive, tf.shape(bbox_centers)[0] * 4)
-            random_indices = tf.random.uniform([num_bbox_samples], 0, tf.shape(bbox_centers)[0], dtype=tf.int32)
-            selected_bbox_centers = tf.gather(bbox_centers, random_indices)
-            selected_expansions = tf.gather(expansion, random_indices)
+            num_bbox_samples = tf.minimum(num_positive * 2, tf.shape(bbox_centers)[0] * 4)
+
+            # Repeat bbox centers and expansions to match num_bbox_samples
+            num_bboxes = tf.shape(bbox_centers)[0]
+            repeat_factor = tf.cast(tf.math.ceil(tf.cast(num_bbox_samples, tf.float32) / tf.cast(num_bboxes, tf.float32)), tf.int32)
+
+            repeated_centers = tf.tile(bbox_centers, [repeat_factor, 1])[:num_bbox_samples]
+            repeated_expansions = tf.tile(expansion, [repeat_factor, 1])[:num_bbox_samples]
 
             # Add random jitter
-            jitter = tf.random.uniform([num_bbox_samples, 2], -1.0, 1.0) * selected_expansions
-            random_centers = selected_bbox_centers + jitter
+            jitter = tf.random.uniform([num_bbox_samples, 2], -1.0, 1.0) * repeated_expansions
+            random_centers = repeated_centers + jitter
 
             # Combine grid and random centers
             all_positive_candidates = tf.concat([grid_centers, random_centers], axis=0)
@@ -351,19 +372,26 @@ class TensorFlowNativePatchSampler:
             )
 
             # Sample required number
-            if tf.greater(tf.shape(all_positive_candidates)[0], num_positive):
-                indices = tf.random.shuffle(tf.range(tf.shape(all_positive_candidates)[0]))[:num_positive]
-                positive_centers = tf.gather(all_positive_candidates, indices)
-            else:
-                positive_centers = all_positive_candidates
+            num_candidates = tf.shape(all_positive_candidates)[0]
+            return tf.cond(
+                tf.greater(num_candidates, num_positive),
+                lambda: tf.gather(all_positive_candidates, tf.random.shuffle(tf.range(num_candidates))[:num_positive]),
+                lambda: all_positive_candidates
+            )
+
+        def no_positive():
+            return tf.zeros([0, 2], dtype=tf.float32)
+
+        positive_centers = tf.cond(
+            tf.logical_and(tf.greater(num_positive, 0), tf.greater(tf.shape(bboxes)[0], 0)),
+            sample_positive,
+            no_positive
+        )
 
         # Generate negative patch centers (avoid bbox regions)
-        negative_centers = tf.zeros([0, 2], dtype=tf.float32)
-
-        if tf.greater(num_negative, 0):
+        def sample_negative():
             # Create avoidance zones around bboxes
-            avoidance_zones = tf.zeros([0, 4], dtype=tf.float32)
-            if tf.greater(tf.shape(bboxes)[0], 0):
+            def create_avoidance_zones():
                 buffer = self.half_patch
                 avoidance_zones = tf.stack([
                     tf.maximum(0.0, bboxes[:, 0] - buffer),
@@ -371,6 +399,16 @@ class TensorFlowNativePatchSampler:
                     tf.minimum(image_width_f, bboxes[:, 2] + buffer),
                     tf.minimum(image_height_f, bboxes[:, 3] + buffer)
                 ], axis=1)
+                return avoidance_zones
+
+            def no_avoidance_zones():
+                return tf.zeros([0, 4], dtype=tf.float32)
+
+            avoidance_zones = tf.cond(
+                tf.greater(tf.shape(bboxes)[0], 0),
+                create_avoidance_zones,
+                no_avoidance_zones
+            )
 
             # Sample random centers and filter out those in avoidance zones
             max_attempts = num_negative * 5
@@ -381,27 +419,52 @@ class TensorFlowNativePatchSampler:
             )
 
             # Check if candidates are in avoidance zones
-            valid_mask = tf.ones([max_attempts], dtype=tf.bool)
+            def check_avoidance():
+                # Vectorized intersection check
+                # candidate_centers: [N, 2], avoidance_zones: [M, 4]
+                # Expand dimensions for broadcasting
+                candidates_expanded = tf.expand_dims(candidate_centers, 1)  # [N, 1, 2]
+                zones_expanded = tf.expand_dims(avoidance_zones, 0)  # [1, M, 4]
 
-            if tf.greater(tf.shape(avoidance_zones)[0], 0):
-                # Check intersection with avoidance zones
-                for i in tf.range(tf.shape(avoidance_zones)[0]):
-                    zone = avoidance_zones[i]
-                    in_zone = tf.logical_and(
-                        tf.logical_and(
-                            candidate_centers[:, 0] >= zone[0],
-                            candidate_centers[:, 0] <= zone[2]
-                        ),
-                        tf.logical_and(
-                            candidate_centers[:, 1] >= zone[1],
-                            candidate_centers[:, 1] <= zone[3]
-                        )
+                # Check if candidates are inside any zone
+                in_zone = tf.logical_and(
+                    tf.logical_and(
+                        candidates_expanded[:, :, 0] >= zones_expanded[:, :, 0],
+                        candidates_expanded[:, :, 0] <= zones_expanded[:, :, 2]
+                    ),
+                    tf.logical_and(
+                        candidates_expanded[:, :, 1] >= zones_expanded[:, :, 1],
+                        candidates_expanded[:, :, 1] <= zones_expanded[:, :, 3]
                     )
-                    valid_mask = tf.logical_and(valid_mask, tf.logical_not(in_zone))
+                )
+
+                # A candidate is invalid if it's in ANY zone
+                invalid_mask = tf.reduce_any(in_zone, axis=1)
+                valid_mask = tf.logical_not(invalid_mask)
+
+                return valid_mask
+
+            def all_valid():
+                return tf.ones([max_attempts], dtype=tf.bool)
+
+            valid_mask = tf.cond(
+                tf.greater(tf.shape(avoidance_zones)[0], 0),
+                check_avoidance,
+                all_valid
+            )
 
             # Select valid candidates
             valid_centers = tf.boolean_mask(candidate_centers, valid_mask)
-            negative_centers = valid_centers[:num_negative]
+            return valid_centers[:num_negative]
+
+        def no_negative():
+            return tf.zeros([0, 2], dtype=tf.float32)
+
+        negative_centers = tf.cond(
+            tf.greater(num_negative, 0),
+            sample_negative,
+            no_negative
+        )
 
         return positive_centers, negative_centers
 
@@ -414,7 +477,9 @@ class TensorFlowNativePatchSampler:
         bboxes: tf.Tensor
     ) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
         """Extract patches and their corresponding data vectorized."""
-        if tf.equal(tf.shape(centers)[0], 0):
+        num_patches = tf.shape(centers)[0]
+
+        if tf.equal(num_patches, 0):
             return (
                 tf.zeros([0, self.patch_size, self.patch_size, 3], dtype=tf.float32),
                 tf.zeros([0, self.patch_size, self.patch_size], dtype=tf.float32),
@@ -426,13 +491,8 @@ class TensorFlowNativePatchSampler:
         half_patch = tf.cast(self.patch_size // 2, tf.int32)
         centers_int = tf.cast(centers, tf.int32)
 
-        # Extract image patches
-        image_patches = []
-        mask_patches = []
-        labels = []
-        bbox_patches = []
-
-        for i in tf.range(tf.shape(centers)[0]):
+        # Use tf.map_fn to process patches in parallel instead of Python loops
+        def extract_single_patch(i):
             center = centers_int[i]
 
             # Calculate patch bounds
@@ -444,78 +504,109 @@ class TensorFlowNativePatchSampler:
             # Extract image patch
             img_patch = image[y1:y2, x1:x2, :]
             img_patch = tf.ensure_shape(img_patch, [self.patch_size, self.patch_size, 3])
-            image_patches.append(img_patch)
 
             # Extract mask patch
-            if tf.greater(tf.reduce_prod(tf.shape(mask)), 1):
-                # Resize mask to image size if needed
+            def extract_mask():
                 mask_resized = mask
-                if tf.not_equal(tf.shape(mask)[0], tf.shape(image)[0]) or tf.not_equal(tf.shape(mask)[1], tf.shape(image)[1]):
-                    mask_resized = tf.image.resize(
-                        tf.expand_dims(mask, -1),
-                        [tf.shape(image)[0], tf.shape(image)[1]],
-                        method='nearest'
-                    )
-                    mask_resized = tf.squeeze(mask_resized, -1)
+                # Resize mask to image size if needed
+                mask_shape = tf.shape(mask)
+                image_shape = tf.shape(image)
 
-                mask_patch = mask_resized[y1:y2, x1:x2]
-                mask_patch = tf.ensure_shape(mask_patch, [self.patch_size, self.patch_size])
-            else:
-                mask_patch = tf.zeros([self.patch_size, self.patch_size], dtype=tf.float32)
-            mask_patches.append(mask_patch)
+                mask_resized = tf.cond(
+                    tf.logical_or(
+                        tf.not_equal(mask_shape[0], image_shape[0]),
+                        tf.not_equal(mask_shape[1], image_shape[1])
+                    ),
+                    lambda: tf.squeeze(tf.image.resize(
+                        tf.expand_dims(mask, -1),
+                        [image_shape[0], image_shape[1]],
+                        method='nearest'
+                    ), -1),
+                    lambda: mask
+                )
+
+                return mask_resized[y1:y2, x1:x2]
+
+            def empty_mask():
+                return tf.zeros([self.patch_size, self.patch_size], dtype=tf.float32)
+
+            mask_patch = tf.cond(
+                tf.greater(tf.reduce_prod(tf.shape(mask)), 1),
+                extract_mask,
+                empty_mask
+            )
+            mask_patch = tf.ensure_shape(mask_patch, [self.patch_size, self.patch_size])
 
             # Process bboxes for this patch
             patch_bbox = tf.cast([x1, y1, x2, y2], tf.float32)
 
-            # Find overlapping bboxes and adjust coordinates
-            overlapping_bboxes = []
-            if tf.greater(tf.shape(bboxes)[0], 0):
-                # Check intersection with each bbox
-                for j in tf.range(tf.shape(bboxes)[0]):
-                    bbox = bboxes[j]
+            # Find overlapping bboxes using vectorized operations
+            def process_bboxes():
+                # Check intersection with all bboxes at once
+                intersects = tf.logical_and(
+                    tf.logical_and(bboxes[:, 2] > patch_bbox[0], bboxes[:, 0] < patch_bbox[2]),
+                    tf.logical_and(bboxes[:, 3] > patch_bbox[1], bboxes[:, 1] < patch_bbox[3])
+                )
 
-                    # Check if bbox intersects with patch
-                    intersects = tf.logical_and(
-                        tf.logical_and(bbox[2] > patch_bbox[0], bbox[0] < patch_bbox[2]),
-                        tf.logical_and(bbox[3] > patch_bbox[1], bbox[1] < patch_bbox[3])
+                # Get intersecting bboxes
+                overlapping_bboxes = tf.boolean_mask(bboxes, intersects)
+
+                # Adjust coordinates to patch space and normalize
+                def adjust_bboxes():
+                    adjusted = tf.stack([
+                        tf.zeros(tf.shape(overlapping_bboxes)[0]),  # class_id
+                        tf.clip_by_value((overlapping_bboxes[:, 0] - patch_bbox[0]) / self.patch_size_f, 0.0, 1.0),
+                        tf.clip_by_value((overlapping_bboxes[:, 1] - patch_bbox[1]) / self.patch_size_f, 0.0, 1.0),
+                        tf.clip_by_value((overlapping_bboxes[:, 2] - patch_bbox[0]) / self.patch_size_f, 0.0, 1.0),
+                        tf.clip_by_value((overlapping_bboxes[:, 3] - patch_bbox[1]) / self.patch_size_f, 0.0, 1.0)
+                    ], axis=1)
+
+                    # Pad or truncate to max_boxes (10)
+                    max_boxes = 10
+                    num_boxes = tf.shape(adjusted)[0]
+
+                    adjusted = tf.cond(
+                        tf.greater(num_boxes, max_boxes),
+                        lambda: adjusted[:max_boxes],
+                        lambda: tf.pad(adjusted, [[0, max_boxes - num_boxes], [0, 0]])
                     )
 
-                    if intersects:
-                        # Adjust bbox coordinates to patch space
-                        adjusted_bbox = tf.stack([
-                            tf.constant(0.0),  # class_id
-                            tf.clip_by_value((bbox[0] - patch_bbox[0]) / self.patch_size_f, 0.0, 1.0),  # normalized xmin
-                            tf.clip_by_value((bbox[1] - patch_bbox[1]) / self.patch_size_f, 0.0, 1.0),  # normalized ymin
-                            tf.clip_by_value((bbox[2] - patch_bbox[0]) / self.patch_size_f, 0.0, 1.0),  # normalized xmax
-                            tf.clip_by_value((bbox[3] - patch_bbox[1]) / self.patch_size_f, 0.0, 1.0)   # normalized ymax
-                        ])
-                        overlapping_bboxes.append(adjusted_bbox)
+                    return adjusted, 1  # label = 1 (has crack)
 
-            # Pad or truncate to max_boxes (10)
-            max_boxes = 10
-            if overlapping_bboxes:
-                bbox_tensor = tf.stack(overlapping_bboxes)
-                num_boxes = tf.shape(bbox_tensor)[0]
+                def no_bboxes():
+                    return tf.zeros([10, 5], dtype=tf.float32), 0  # label = 0 (no crack)
 
-                if tf.greater(num_boxes, max_boxes):
-                    bbox_tensor = bbox_tensor[:max_boxes]
-                else:
-                    padding = [[0, max_boxes - num_boxes], [0, 0]]
-                    bbox_tensor = tf.pad(bbox_tensor, padding)
+                return tf.cond(
+                    tf.greater(tf.shape(overlapping_bboxes)[0], 0),
+                    adjust_bboxes,
+                    no_bboxes
+                )
 
-                label = 1  # Has crack
-            else:
-                bbox_tensor = tf.zeros([max_boxes, 5], dtype=tf.float32)
-                label = 0  # No crack
+            def no_bboxes_available():
+                return tf.zeros([10, 5], dtype=tf.float32), 0
 
-            bbox_patches.append(bbox_tensor)
-            labels.append(label)
+            bbox_tensor, label = tf.cond(
+                tf.greater(tf.shape(bboxes)[0], 0),
+                process_bboxes,
+                no_bboxes_available
+            )
 
-        # Stack all patches
-        image_patches = tf.stack(image_patches)
-        mask_patches = tf.stack(mask_patches)
-        labels = tf.stack(labels)
-        bbox_patches = tf.stack(bbox_patches)
+            return img_patch, mask_patch, label, bbox_tensor
+
+        # Process all patches using tf.map_fn
+        patches_data = tf.map_fn(
+            extract_single_patch,
+            tf.range(num_patches),
+            fn_output_signature=(
+                tf.TensorSpec([self.patch_size, self.patch_size, 3], tf.float32),
+                tf.TensorSpec([self.patch_size, self.patch_size], tf.float32),
+                tf.TensorSpec([], tf.int32),
+                tf.TensorSpec([10, 5], tf.float32)
+            ),
+            parallel_iterations=10
+        )
+
+        image_patches, mask_patches, labels, bbox_patches = patches_data
 
         return image_patches, mask_patches, labels, bbox_patches
 
