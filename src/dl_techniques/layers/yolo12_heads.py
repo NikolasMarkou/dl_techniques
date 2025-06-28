@@ -296,9 +296,12 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
     to generate pixel-level segmentation masks. Designed for dense prediction
     tasks like crack segmentation.
 
+    FIXED VERSION: Now properly upsamples to original input resolution.
+
     Args:
         num_classes: Number of segmentation classes (1 for binary segmentation).
         intermediate_filters: Filter sizes for each upsampling stage.
+        target_size: Target output size (height, width). If None, auto-computed from input.
         use_attention: Whether to use attention mechanisms for feature fusion.
         dropout_rate: Dropout rate for regularization.
         kernel_initializer: Initializer for kernel weights.
@@ -310,7 +313,8 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
     def __init__(
             self,
             num_classes: int = 1,
-            intermediate_filters: List[int] = [128, 64, 32],
+            intermediate_filters: List[int] = [128, 64, 32, 16],  # Added more stages
+            target_size: Optional[Tuple[int, int]] = None,  # NEW: explicit target size
             use_attention: bool = True,
             dropout_rate: float = 0.1,
             kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
@@ -323,6 +327,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
         Args:
             num_classes: Number of segmentation classes (1 for binary crack detection).
             intermediate_filters: Number of filters for each upsampling stage.
+            target_size: Target output size (height, width). If None, inferred from P3 features.
             use_attention: Whether to use attention mechanisms.
             dropout_rate: Dropout rate for regularization.
             kernel_initializer: Weight initializer.
@@ -334,6 +339,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
 
         self.num_classes = num_classes
         self.intermediate_filters = intermediate_filters
+        self.target_size = target_size
         self.use_attention = use_attention
         self.dropout_rate = dropout_rate
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -343,15 +349,18 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
         self.upconv_blocks = []
         self.skip_convs = []
         self.attention_blocks = []
+        self.final_upsampling = None  # NEW: For final upsampling to target size
         self.final_conv = None
         self.dropout = None
         self._build_input_shape = None
+        self._computed_target_size = None
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
-        """Build segmentation head with progressive upsampling.
+        """Build segmentation head with progressive upsampling to full resolution.
 
         Args:
             input_shape: List of shape tuples for input feature maps.
+                Expected: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
 
         Raises:
             ValueError: If input_shape is not a list of 3 shapes.
@@ -364,14 +373,31 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
         if not isinstance(input_shape, list) or len(input_shape) != 3:
             raise ValueError("SegmentationHead expects 3 input feature maps")
 
-        logger.info(f"Building YOLOv12SegmentationHead with {len(self.intermediate_filters)} upsampling stages")
+        # Compute target size if not provided
+        if self.target_size is None:
+            # P3 has shape (B, H/8, W/8, C), so original size is (H, W) = (H/8 * 8, W/8 * 8)
+            p3_shape = input_shape[0]  # (B, H/8, W/8, C1)
+            if p3_shape[1] is not None and p3_shape[2] is not None:
+                self._computed_target_size = (p3_shape[1] * 8, p3_shape[2] * 8)
+            else:
+                # Fallback for dynamic shapes - assume 256x256 patches
+                self._computed_target_size = (256, 256)
+                logger.warning("Could not infer target size from input shape, using (256, 256)")
+        else:
+            self._computed_target_size = self.target_size
+
+        logger.info(f"Building YOLOv12SegmentationHead:")
+        logger.info(f"  Input shapes: {input_shape}")
+        logger.info(f"  Target output size: {self._computed_target_size}")
+        logger.info(f"  Upsampling stages: {len(self.intermediate_filters)}")
 
         # input_shape: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
-        # We'll upsample from the largest feature map (smallest spatial size) progressively
+        # We'll upsample from P5 (H/32) progressively to full resolution
 
-        # Build upsampling blocks (from P5 -> P4 -> P3 -> output)
+        # Build upsampling blocks
+        # Stage progression: P5(H/32) -> P4(H/16) -> P3(H/8) -> H/4 -> H/2 -> H
         for i, filters in enumerate(self.intermediate_filters):
-            logger.info(f"Upsampling stage {i}: filters={filters}")
+            logger.info(f"  Upsampling stage {i}: filters={filters}")
 
             # Upsampling block
             upconv_block = keras.Sequential([
@@ -403,8 +429,9 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
 
             self.upconv_blocks.append(upconv_block)
 
-            # Skip connection processing (if not the last layer)
-            if i < len(self.intermediate_filters) - 1:
+            # Skip connection processing for P4 and P3 fusion
+            # Only create skip connections for the first 2 stages (P5->P4, P4->P3)
+            if i < 2:  # Only for P4 and P3 fusion
                 skip_conv = keras.Sequential([
                     keras.layers.Conv2D(
                         filters=filters,
@@ -453,10 +480,11 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
 
         Args:
             inputs: List of feature maps [P3, P4, P5] from backbone.
+                   Expected shapes: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
             training: Whether in training mode.
 
         Returns:
-            Segmentation mask tensor with shape (batch_size, height, width, num_classes).
+            Segmentation mask tensor with shape (batch_size, target_height, target_width, num_classes).
 
         Raises:
             ValueError: If inputs is not a list of exactly 3 tensors.
@@ -469,7 +497,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
         # Start from the deepest features (P5) and progressively upsample
         x = p5
 
-        # First upsampling: P5 -> P4 scale
+        # Stage 0: P5 (H/32) -> P4 scale (H/16)
         x = self.upconv_blocks[0](x, training=training)
 
         # Fuse with P4 features
@@ -481,7 +509,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
             if self.use_attention and len(self.attention_blocks) > 0:
                 x = self.attention_blocks[0](x, training=training)
 
-        # Second upsampling: P4 -> P3 scale
+        # Stage 1: P4 scale (H/16) -> P3 scale (H/8)
         if len(self.upconv_blocks) > 1:
             x = self.upconv_blocks[1](x, training=training)
 
@@ -494,9 +522,52 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
                 if self.use_attention and len(self.attention_blocks) > 1:
                     x = self.attention_blocks[1](x, training=training)
 
-        # Final upsampling: P3 -> original scale (if we have 3 upsampling blocks)
+        # Additional upsampling stages to reach full resolution
+        # Stage 2: P3 scale (H/8) -> H/4
         if len(self.upconv_blocks) > 2:
             x = self.upconv_blocks[2](x, training=training)
+
+        # Stage 3: H/4 -> H/2
+        if len(self.upconv_blocks) > 3:
+            x = self.upconv_blocks[3](x, training=training)
+
+        # Stage 4: H/2 -> H (full resolution) - if we have 5 stages
+        if len(self.upconv_blocks) > 4:
+            x = self.upconv_blocks[4](x, training=training)
+
+        # If we still haven't reached target resolution, add final upsampling
+        current_height = ops.shape(x)[1]
+        current_width = ops.shape(x)[2]
+        target_height, target_width = self._computed_target_size
+
+        # Check if we need additional upsampling to reach target size
+        if self._computed_target_size[0] // current_height > 1:
+            # Calculate required upsampling factor
+            height_factor = self._computed_target_size[0] // current_height
+            width_factor = self._computed_target_size[1] // current_width
+
+            if height_factor == width_factor and height_factor in [2, 4, 8]:
+                # Use strided transpose convolution for exact factors
+                logger.info(f"Adding final upsampling with factor {height_factor}")
+
+                final_upsample = keras.layers.Conv2DTranspose(
+                    filters=self.intermediate_filters[-1] if self.intermediate_filters else 32,
+                    kernel_size=3,
+                    strides=height_factor,
+                    padding="same",
+                    kernel_initializer=self.kernel_initializer,
+                    kernel_regularizer=self.kernel_regularizer,
+                    name=f"{self.name}_final_upsample"
+                )
+                x = final_upsample(x)
+            else:
+                # Use resize for non-standard factors
+                logger.info(f"Using resize for upsampling to {self._computed_target_size}")
+                x = ops.image.resize(
+                    x,
+                    size=self._computed_target_size,
+                    interpolation="bilinear"
+                )
 
         # Apply dropout
         if self.dropout is not None:
@@ -504,6 +575,19 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
 
         # Final segmentation output
         segmentation_output = self.final_conv(x, training=training)
+
+        # Ensure exact target size (safety check)
+        output_height = ops.shape(segmentation_output)[1]
+        output_width = ops.shape(segmentation_output)[2]
+
+        # If there's still a size mismatch, use resize as final fallback
+        if (output_height != target_height or output_width != target_width):
+            logger.warning(f"Final resize needed: {(output_height, output_width)} -> {self._computed_target_size}")
+            segmentation_output = ops.image.resize(
+                segmentation_output,
+                size=self._computed_target_size,
+                interpolation="bilinear"
+            )
 
         return segmentation_output
 
@@ -517,6 +601,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
         config.update({
             "num_classes": self.num_classes,
             "intermediate_filters": self.intermediate_filters,
+            "target_size": self.target_size,  # NEW
             "use_attention": self.use_attention,
             "dropout_rate": self.dropout_rate,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
@@ -542,7 +627,6 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
         """
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
-
 
 # ---------------------------------------------------------------------
 
