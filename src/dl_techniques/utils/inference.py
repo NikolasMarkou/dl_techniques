@@ -20,7 +20,7 @@ import numpy as np
 import tensorflow as tf
 import keras
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Union, Any, Callable
+from typing import Dict, List, Optional, Union, Any, Callable
 from dataclasses import dataclass
 import matplotlib.pyplot as plt
 from tqdm import tqdm

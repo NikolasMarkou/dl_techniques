@@ -1,249 +1,287 @@
 """
-YOLOv12 Multi-Task Model for Object Detection, Segmentation, and Classification.
+YOLOv12 Multi-Task Learning Model Implementation
 
-This module extends the YOLOv12 architecture to support simultaneous object detection,
-semantic segmentation, and image classification tasks. The model uses a shared backbone
-and neck while providing task-specific heads for each task.
+This module implements a YOLOv12-based multi-task learning model that can simultaneously
+perform object detection, instance segmentation, and image classification using a shared
+feature extraction backbone. The implementation uses Keras Functional API with named
+outputs for clean, dictionary-based results in multi-task scenarios.
 
-Architecture:
-    - Shared Backbone: Feature extraction with ConvNeXt-style blocks
-    - Shared Neck: PAN (Path Aggregation Network) with attention mechanisms
-    - Detection Head: Multi-scale object detection (existing YOLOv12)
-    - Segmentation Head: Progressive upsampling decoder with skip connections
-    - Classification Head: Global pooling with attention mechanism
+Architecture Overview
+--------------------
+The model follows a multitask learning architecture with three main components:
 
-File: src/dl_techniques/models/yolo12_multitask.py
+1. **Shared Feature Extractor**: A YOLOv12 backbone and neck that extracts multi-scale
+   features (P3, P4, P5) from input images. This shared component enables efficient
+   computation and knowledge transfer between tasks.
+
+2. **Task-Specific Heads**: Specialized heads for each computer vision task:
+   - Detection Head: Performs object detection with bounding box regression and
+     classification using DFL (Distribution Focal Loss) regression
+   - Segmentation Head: Generates pixel-level segmentation masks using a decoder
+     architecture with configurable filter sizes and dropout
+   - Classification Head: Performs global image classification using an MLP with
+     configurable hidden dimensions and dropout
+
+3. **Flexible Task Configuration**: Tasks can be enabled/disabled individually using
+   TaskType enums, allowing for various combinations from single-task to full multi-task
+   learning scenarios.
+
+Key Features
+-----------
+- **Multi-Scale Feature Extraction**: Leverages YOLOv12's FPN-style neck for rich
+  multi-scale feature representations
+- **Named Outputs**: Returns clean dictionary-based outputs for multi-task scenarios
+  (e.g., {"detection": tensor, "segmentation": tensor}) or single tensor for single tasks
+- **Configurable Architecture**: Supports multiple YOLOv12 scales ('n', 's', 'm', 'l', 'x')
+  and flexible head configurations
+- **Serialization Support**: Full Keras serialization compatibility with get_config()
+  and from_config() methods
+- **Task-Aware Compilation**: Convenient compile_for_multitask() method that handles
+  task-specific losses, metrics, and loss weighting automatically
+- **Factory Functions**: Pre-configured convenience functions for common task combinations
+
+Usage Examples
+--------------
+Single Task (Detection Only):
+    >>> model = YOLOv12MultiTask(
+    ...     num_classes=80,
+    ...     task_config=TaskType.DETECTION,
+    ...     scale='s'
+    ... )
+    >>> output = model(images)  # Returns detection tensor directly
+
+Multi-Task (Detection + Segmentation):
+    >>> model = YOLOv12MultiTask(
+    ...     num_classes=20,
+    ...     task_config=[TaskType.DETECTION, TaskType.SEGMENTATION],
+    ...     scale='m'
+    ... )
+    >>> outputs = model(images)  # Returns {"detection": tensor, "segmentation": tensor}
+
+Using Factory Functions:
+    >>> model = create_yolov12_all_tasks(num_classes=20, scale='l')
+    >>> model = create_yolov12_detection_segmentation(num_classes=10, scale='n')
+
+Task Configuration
+-----------------
+Tasks can be specified in multiple flexible ways:
+- Single TaskType enum: TaskType.DETECTION
+- List of TaskType enums: [TaskType.DETECTION, TaskType.SEGMENTATION]
+- String representations: "detection" or ["detection", "segmentation"]
+- TaskConfiguration objects for advanced configuration
+- Predefined CommonTaskConfigurations for common combinations
+
+Model Compilation
+----------------
+For multi-task models, use the convenience compilation method:
+    >>> model.compile_for_multitask(
+    ...     optimizer='adam',
+    ...     task_losses={'detection': 'yolo_loss', 'segmentation': 'focal_loss'},
+    ...     task_loss_weights={'detection': 1.0, 'segmentation': 0.5},
+    ...     task_metrics={'detection': ['map'], 'segmentation': ['iou']}
+    ... )
+
 """
 
 import keras
-from keras import ops
 from typing import Optional, Tuple, Dict, Any, List, Union
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.yolo12 import YOLOv12
+from dl_techniques.utils.vision_task_types import (
+    TaskType,
+    TaskConfiguration,
+    CommonTaskConfigurations,
+    parse_task_list
+)
+from dl_techniques.models.yolo12_feature_extractor import YOLOv12FeatureExtractor
 from dl_techniques.layers.yolo12_heads import (
     YOLOv12DetectionHead,
     YOLOv12SegmentationHead,
     YOLOv12ClassificationHead
 )
 
-# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class YOLOv12MultiTask(keras.Model):
     """
-    YOLOv12 Multi-Task Model for simultaneous object detection, segmentation, and classification.
+    YOLOv12 Multi-Task Learning Model using Named Outputs (Functional API).
 
-    This model extends the standard YOLOv12 architecture with additional heads for segmentation
-    and classification tasks while sharing the backbone and neck features.
+    This model combines a shared YOLOv12FeatureExtractor with multiple task-specific
+    heads to perform simultaneous object detection, segmentation, and classification.
+    Uses Keras Functional API with named outputs for clean dictionary-based results.
+
+    Args:
+        num_classes: Number of classes for detection and classification tasks.
+        input_shape: Input image shape (height, width, channels).
+        scale: Model scale configuration ('n', 's', 'm', 'l', 'x').
+        reg_max: Maximum value for DFL regression in detection.
+        task_config: TaskConfiguration instance or list of TaskType enums.
+        segmentation_filters: Filter sizes for segmentation decoder.
+        segmentation_dropout: Dropout rate for segmentation head.
+        classification_hidden_dims: Hidden dimensions for classification head.
+        classification_dropout: Dropout rate for classification head.
+        kernel_initializer: Weight initializer for all layers.
+        name: Model name.
+
+    Example:
+        >>> model = YOLOv12MultiTask(
+        ...     num_classes=20,
+        ...     task_config=[TaskType.DETECTION, TaskType.SEGMENTATION]
+        ... )
+        >>> outputs = model(images)  # Returns {"detection": tensor, "segmentation": tensor}
     """
 
     def __init__(
-            self,
-            num_classes: int = 1,  # For crack detection (binary)
-            input_shape: Tuple[int, int, int] = (256, 256, 3),  # Patch size
-            scale: str = "n",
-            reg_max: int = 16,
-
-            # Task-specific configurations
-            enable_detection: bool = True,
-            enable_segmentation: bool = True,
-            enable_classification: bool = True,
-
-            # Segmentation head config
-            segmentation_filters: List[int] = [128, 64, 32],
-            segmentation_dropout: float = 0.1,
-
-            # Classification head config
-            classification_hidden_dims: List[int] = [512, 256],
-            classification_dropout: float = 0.3,
-
-            kernel_initializer: str = "he_normal",
-            name: Optional[str] = None,
-            **kwargs
+        self,
+        num_classes: int = 80,
+        input_shape: Tuple[int, int, int] = (640, 640, 3),
+        scale: str = "n",
+        reg_max: int = 16,
+        # Task configuration using enums
+        task_config: Union[
+            TaskConfiguration,
+            List[TaskType],
+            List[str],
+            TaskType,
+            str
+        ] = TaskType.DETECTION,
+        # Segmentation head configuration
+        segmentation_filters: List[int] = [128, 64, 32],
+        segmentation_dropout: float = 0.1,
+        # Classification head configuration
+        classification_hidden_dims: List[int] = [512, 256],
+        classification_dropout: float = 0.3,
+        # Common configuration
+        kernel_initializer: str = "he_normal",
+        name: Optional[str] = None,
+        **kwargs
     ):
         """
-        Initialize YOLOv12 multi-task model.
+        Initialize YOLOv12 multi-task model using Functional API.
 
         Args:
-            num_classes: Number of classes (1 for binary crack detection).
-            input_shape: Input patch shape.
+            num_classes: Number of classes for classification tasks.
+            input_shape: Input image shape (height, width, channels).
             scale: Model scale ('n', 's', 'm', 'l', 'x').
             reg_max: Maximum value for DFL regression.
-            enable_detection: Whether to enable object detection head.
-            enable_segmentation: Whether to enable segmentation head.
-            enable_classification: Whether to enable classification head.
-            segmentation_filters: Filter sizes for segmentation head.
-            segmentation_dropout: Dropout rate for segmentation head.
-            classification_hidden_dims: Hidden dimensions for classification head.
-            classification_dropout: Dropout rate for classification head.
+            task_config: Task configuration - can be TaskConfiguration, list of TaskType enums,
+                        list of strings, single TaskType, or single string.
+            segmentation_filters: Filter sizes for segmentation decoder.
+            segmentation_dropout: Dropout rate for segmentation.
+            classification_hidden_dims: Hidden dims for classification MLP.
+            classification_dropout: Dropout rate for classification.
             kernel_initializer: Weight initializer.
             name: Model name.
+            **kwargs: Additional keyword arguments.
         """
-        if name is None:
-            name = f"yolov12_multitask_{scale}"
-        super().__init__(name=name, **kwargs)
+        # Parse task configuration
+        self.task_config = parse_task_list(task_config)
 
+        # Store configuration for serialization
         self.num_classes = num_classes
         self.input_shape_config = input_shape
         self.scale = scale
         self.reg_max = reg_max
-        self.enable_detection = enable_detection
-        self.enable_segmentation = enable_segmentation
-        self.enable_classification = enable_classification
-        self.kernel_initializer = kernel_initializer
-
-        # Store configuration for serialization
         self.segmentation_filters = segmentation_filters
         self.segmentation_dropout = segmentation_dropout
         self.classification_hidden_dims = classification_hidden_dims
         self.classification_dropout = classification_dropout
+        self.kernel_initializer = kernel_initializer
 
-        # Initialize backbone model (YOLOv12 without detection head)
-        self.backbone = self._create_backbone()
+        if name is None:
+            task_names = self.task_config.get_task_names()
+            task_str = "_".join([name[:3] for name in task_names])  # Short names
+            name = f"yolov12_multitask_{scale}_{task_str}"
 
-        # Initialize task-specific heads
-        self.detection_head = None
-        self.segmentation_head = None
-        self.classification_head = None
+        # Build the model using Functional API
+        inputs, outputs = self._build_functional_model()
 
-        if self.enable_detection:
-            # Import here to avoid circular imports
-            self.detection_head = YOLOv12DetectionHead(
-                num_classes=1,  # Only crack class
+        # Initialize the Model with named outputs
+        super().__init__(inputs=inputs, outputs=outputs, name=name, **kwargs)
+
+        enabled_tasks = self.task_config.get_task_names()
+        logger.info(
+            f"Created YOLOv12MultiTask-{scale} with {num_classes} classes. "
+            f"Enabled tasks: {enabled_tasks}"
+        )
+
+    def _build_functional_model(self) -> Tuple[keras.KerasTensor, Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]]:
+        """
+        Build the multi-task model using Functional API.
+
+        Returns:
+            Tuple of (inputs, outputs) where outputs is either a single tensor
+            for single-task models or a dictionary for multi-task models.
+        """
+        # Define inputs
+        inputs = keras.Input(shape=self.input_shape_config, name="input_images")
+
+        # Shared feature extractor (backbone + neck)
+        feature_extractor = YOLOv12FeatureExtractor(
+            input_shape=self.input_shape_config,
+            scale=self.scale,
+            kernel_initializer=self.kernel_initializer,
+            name="shared_feature_extractor"
+        )
+
+        # Extract multi-scale features
+        feature_maps = feature_extractor(inputs)
+
+        # Build task-specific heads and collect outputs
+        task_outputs = {}
+
+        if self.task_config.has_detection():
+            detection_head = YOLOv12DetectionHead(
+                num_classes=self.num_classes,
                 reg_max=self.reg_max,
                 kernel_initializer=self.kernel_initializer,
                 name="detection_head"
             )
+            detection_output = detection_head(feature_maps)
+            task_outputs[TaskType.DETECTION.value] = detection_output
 
-        if self.enable_segmentation:
-            self.segmentation_head = YOLOv12SegmentationHead(
-                num_classes=1,  # Binary segmentation
+        if self.task_config.has_segmentation():
+            segmentation_head = YOLOv12SegmentationHead(
+                num_classes=self.num_classes,
                 intermediate_filters=self.segmentation_filters,
                 dropout_rate=self.segmentation_dropout,
                 kernel_initializer=self.kernel_initializer,
                 name="segmentation_head"
             )
+            segmentation_output = segmentation_head(feature_maps)
+            task_outputs[TaskType.SEGMENTATION.value] = segmentation_output
 
-        if self.enable_classification:
-            self.classification_head = YOLOv12ClassificationHead(
-                num_classes=1,  # Binary classification
+        if self.task_config.has_classification():
+            classification_head = YOLOv12ClassificationHead(
+                num_classes=self.num_classes,
                 hidden_dims=self.classification_hidden_dims,
                 dropout_rate=self.classification_dropout,
                 kernel_initializer=self.kernel_initializer,
                 name="classification_head"
             )
+            classification_output = classification_head(feature_maps)
+            task_outputs[TaskType.CLASSIFICATION.value] = classification_output
 
-        logger.info(f"Created YOLOv12MultiTask-{scale} with tasks: "
-                    f"detection={enable_detection}, segmentation={enable_segmentation}, "
-                    f"classification={enable_classification}")
+        # Return single output for single task, dictionary for multiple tasks
+        if len(task_outputs) == 1:
+            # Single task - return the tensor directly
+            outputs = list(task_outputs.values())[0]
+        else:
+            # Multiple tasks - return named dictionary
+            outputs = task_outputs
 
-    def _create_backbone(self) -> keras.Model:
-        """Create YOLOv12 backbone (without detection head)."""
-        # Create full YOLOv12 model
-        full_yolo = YOLOv12(
-            num_classes=1,  # Dummy, we'll replace the head
-            input_shape=self.input_shape_config,
-            scale=self.scale,
-            reg_max=self.reg_max,
-            kernel_initializer=self.kernel_initializer
-        )
-
-        # Extract backbone and neck (everything except detection head)
-        inputs = keras.Input(shape=self.input_shape_config)
-
-        # Forward through backbone
-        x = full_yolo.stem1(inputs)
-        x = full_yolo.stem2(x)
-        x = full_yolo.b1(x)
-
-        p3 = full_yolo.down1(x)
-        p3 = full_yolo.b2(p3)
-
-        p4 = full_yolo.down2(p3)
-        p4 = full_yolo.b3(p4)
-
-        p5 = full_yolo.down3(p4)
-        p5 = full_yolo.b4(p5)
-
-        # Forward through neck
-        x = full_yolo.up1(p5)
-        x = ops.concatenate([x, p4], axis=-1)
-        h1 = full_yolo.h1(x)
-
-        x = full_yolo.up2(h1)
-        x = ops.concatenate([x, p3], axis=-1)
-        h2 = full_yolo.h2(x)
-
-        x = full_yolo.neck_down1(h2)
-        x = ops.concatenate([x, h1], axis=-1)
-        h3 = full_yolo.h3(x)
-
-        x = full_yolo.neck_down2(h3)
-        x = ops.concatenate([x, p5], axis=-1)
-        h4 = full_yolo.h4(x)
-
-        # Return the three feature maps [P3, P4, P5]
-        outputs = [h2, h3, h4]  # Different scales for multi-task heads
-
-        backbone_model = keras.Model(inputs=inputs, outputs=outputs, name="yolov12_backbone")
-        return backbone_model
-
-    def call(
-            self,
-            inputs: keras.KerasTensor,
-            training: Optional[bool] = None
-    ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
-        """
-        Forward pass through multi-task model.
-
-        Args:
-            inputs: Input tensor (batch_size, height, width, channels).
-            training: Whether in training mode.
-
-        Returns:
-            If single task enabled: task output tensor.
-            If multiple tasks enabled: dict with task outputs.
-        """
-        # Forward through shared backbone and neck
-        feature_maps = self.backbone(inputs, training=training)  # [P3, P4, P5]
-
-        outputs = {}
-
-        # Forward through task-specific heads
-        if self.enable_detection and self.detection_head is not None:
-            detection_output = self.detection_head(feature_maps, training=training)
-            outputs['detection'] = detection_output
-
-        if self.enable_segmentation and self.segmentation_head is not None:
-            segmentation_output = self.segmentation_head(feature_maps, training=training)
-            outputs['segmentation'] = segmentation_output
-
-        if self.enable_classification and self.classification_head is not None:
-            classification_output = self.classification_head(feature_maps, training=training)
-            outputs['classification'] = classification_output
-
-        # Return single output if only one task is enabled
-        if len(outputs) == 1:
-            return list(outputs.values())[0]
-
-        return outputs
+        return inputs, outputs
 
     def get_config(self) -> Dict[str, Any]:
-        """Get model configuration."""
+        """Get model configuration for serialization."""
         config = super().get_config()
         config.update({
             "num_classes": self.num_classes,
             "input_shape": self.input_shape_config,
             "scale": self.scale,
             "reg_max": self.reg_max,
-            "enable_detection": self.enable_detection,
-            "enable_segmentation": self.enable_segmentation,
-            "enable_classification": self.enable_classification,
+            # Serialize task config as task names list for simplicity
+            "task_config": self.task_config.get_task_names(),
             "segmentation_filters": self.segmentation_filters,
             "segmentation_dropout": self.segmentation_dropout,
             "classification_hidden_dims": self.classification_hidden_dims,
@@ -257,71 +295,281 @@ class YOLOv12MultiTask(keras.Model):
         """Create model from configuration."""
         return cls(**config)
 
+    def get_feature_extractor(self) -> YOLOv12FeatureExtractor:
+        """
+        Get the shared feature extractor.
+
+        Returns:
+            The YOLOv12FeatureExtractor instance.
+
+        Note:
+            Since this is a Functional API model, the feature extractor
+            is embedded within the model graph. This method helps access
+            it for analysis or transfer learning.
+        """
+        # Find the feature extractor layer in the model
+        for layer in self.layers:
+            if isinstance(layer, YOLOv12FeatureExtractor):
+                return layer
+
+        # If not found as a layer, create a new one with same config
+        logger.warning("Feature extractor not found as layer, creating new instance")
+        return YOLOv12FeatureExtractor(
+            input_shape=self.input_shape_config,
+            scale=self.scale,
+            kernel_initializer=self.kernel_initializer
+        )
+
+    def get_enabled_tasks(self) -> List[TaskType]:
+        """
+        Get list of enabled tasks.
+
+        Returns:
+            List of enabled TaskType enums.
+        """
+        return self.task_config.get_enabled_tasks()
+
+    def get_enabled_task_names(self) -> List[str]:
+        """
+        Get list of enabled task names as strings.
+
+        Returns:
+            List of enabled task names.
+        """
+        return self.task_config.get_task_names()
+
+    def has_task(self, task: TaskType) -> bool:
+        """
+        Check if a specific task is enabled.
+
+        Args:
+            task: TaskType enum to check.
+
+        Returns:
+            True if the task is enabled, False otherwise.
+        """
+        return task in self.task_config.tasks
+
+    def extract_features(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> List[keras.KerasTensor]:
+        """
+        Extract shared features without applying task heads.
+
+        Args:
+            inputs: Input tensor.
+            training: Whether in training mode.
+
+        Returns:
+            List of feature maps [P3, P4, P5].
+
+        Note:
+            This creates a separate feature extraction call since the
+            feature extractor is embedded in the functional model.
+        """
+        feature_extractor = self.get_feature_extractor()
+        return feature_extractor(inputs, training=training)
+
+    def compile_for_multitask(
+        self,
+        optimizer: str = "adam",
+        task_losses: Optional[Dict[str, str]] = None,
+        task_loss_weights: Optional[Dict[str, float]] = None,
+        task_metrics: Optional[Dict[str, List[str]]] = None,
+        **kwargs
+    ) -> None:
+        """
+        Convenience method for compiling multi-task model with task-specific configurations.
+
+        Args:
+            optimizer: Optimizer to use.
+            task_losses: Dictionary mapping task names to loss functions.
+            task_loss_weights: Dictionary mapping task names to loss weights.
+            task_metrics: Dictionary mapping task names to list of metrics.
+            **kwargs: Additional arguments for model.compile().
+
+        Example:
+            >>> model.compile_for_multitask(
+            ...     optimizer="adam",
+            ...     task_losses={
+            ...         "detection": "yolo_loss",
+            ...         "segmentation": "focal_loss"
+            ...     },
+            ...     task_loss_weights={
+            ...         "detection": 1.0,
+            ...         "segmentation": 0.5
+            ...     }
+            ... )
+        """
+        enabled_tasks = self.get_enabled_task_names()
+
+        # Set default losses if not provided
+        if task_losses is None:
+            task_losses = {}
+            for task in enabled_tasks:
+                if task == "detection":
+                    task_losses[task] = "sparse_categorical_crossentropy"
+                elif task == "segmentation":
+                    task_losses[task] = "sparse_categorical_crossentropy"
+                elif task == "classification":
+                    task_losses[task] = "sparse_categorical_crossentropy"
+
+        # Set default loss weights if not provided
+        if task_loss_weights is None:
+            task_loss_weights = {task: 1.0 for task in enabled_tasks}
+
+        # Set default metrics if not provided
+        if task_metrics is None:
+            task_metrics = {}
+            for task in enabled_tasks:
+                if task == "classification":
+                    task_metrics[task] = ["accuracy"]
+                else:
+                    task_metrics[task] = ["mae"]
+
+        # Handle single task case
+        if len(enabled_tasks) == 1:
+            task_name = enabled_tasks[0]
+            self.compile(
+                optimizer=optimizer,
+                loss=task_losses.get(task_name, "sparse_categorical_crossentropy"),
+                metrics=task_metrics.get(task_name, ["accuracy"]),
+                **kwargs
+            )
+        else:
+            # Multi-task case with named outputs
+            self.compile(
+                optimizer=optimizer,
+                loss=task_losses,
+                loss_weights=task_loss_weights,
+                metrics=task_metrics,
+                **kwargs
+            )
+
 
 def create_yolov12_multitask(
-        num_classes: int = 1,
-        input_shape: Tuple[int, int, int] = (256, 256, 3),
-        scale: str = "n",
-        tasks: List[str] = ["detection", "segmentation", "classification"],
-        **kwargs
+    num_classes: int = 80,
+    input_shape: Tuple[int, int, int] = (640, 640, 3),
+    scale: str = "n",
+    tasks: Union[
+        List[TaskType],
+        List[str],
+        TaskConfiguration,
+        TaskType,
+        str
+    ] = TaskType.DETECTION,
+    **kwargs
 ) -> YOLOv12MultiTask:
     """
-    Create YOLOv12 multi-task model with specified configuration.
+    Create YOLOv12 multi-task model with specified tasks.
 
     Args:
         num_classes: Number of classes.
-        input_shape: Input shape for patches.
+        input_shape: Input image shape.
         scale: Model scale.
-        tasks: List of tasks to enable.
+        tasks: Tasks to enable - can be TaskConfiguration, list of TaskType enums,
+               list of strings, single TaskType, or single string.
         **kwargs: Additional arguments.
 
     Returns:
         YOLOv12MultiTask model instance.
-    """
-    # Parse task configuration
-    enable_detection = "detection" in tasks
-    enable_segmentation = "segmentation" in tasks
-    enable_classification = "classification" in tasks
 
+    Example:
+        >>> model = create_yolov12_multitask(
+        ...     num_classes=20,
+        ...     tasks=[TaskType.DETECTION, TaskType.SEGMENTATION],
+        ...     scale="s"
+        ... )
+        >>>
+        >>> # Also works with strings
+        >>> model = create_yolov12_multitask(
+        ...     num_classes=20,
+        ...     tasks=["detection", "segmentation"],
+        ...     scale="s"
+        ... )
+    """
     model = YOLOv12MultiTask(
         num_classes=num_classes,
         input_shape=input_shape,
         scale=scale,
-        enable_detection=enable_detection,
-        enable_segmentation=enable_segmentation,
-        enable_classification=enable_classification,
+        task_config=tasks,
         **kwargs
     )
 
-    logger.info(f"YOLOv12MultiTask-{scale} model created successfully with tasks: {tasks}")
+    task_config = parse_task_list(tasks)
+    task_names = task_config.get_task_names()
+    logger.info(f"YOLOv12MultiTask-{scale} created with tasks: {task_names}")
     return model
 
-# ---------------------------------------------------------------------
 
-if __name__ == "__main__":
-    # Test multi-task model creation
-    model = create_yolov12_multitask(
-        scale="n",
-        input_shape=(256, 256, 3),
-        tasks=["detection", "segmentation", "classification"]
+# Convenience functions for specific task combinations using predefined configurations
+def create_yolov12_detection_segmentation(
+    num_classes: int = 80,
+    scale: str = "n",
+    **kwargs
+) -> YOLOv12MultiTask:
+    """Create YOLOv12 model for detection + segmentation."""
+    return create_yolov12_multitask(
+        num_classes=num_classes,
+        scale=scale,
+        tasks=CommonTaskConfigurations.DETECTION_SEGMENTATION,
+        **kwargs
     )
 
-    # Build model
-    sample_input = keras.ops.zeros((1, 256, 256, 3))
-    outputs = model(sample_input, training=False)
 
-    logger.info("Multi-task model outputs:")
-    for task, output in outputs.items():
-        logger.info(f"  {task}: {output.shape}")
-
-    # Test single task model
-    seg_model = create_yolov12_multitask(
-        scale="n",
-        input_shape=(256, 256, 3),
-        tasks=["segmentation"]
+def create_yolov12_all_tasks(
+    num_classes: int = 80,
+    scale: str = "n",
+    **kwargs
+) -> YOLOv12MultiTask:
+    """Create YOLOv12 model with all tasks enabled."""
+    return create_yolov12_multitask(
+        num_classes=num_classes,
+        scale=scale,
+        tasks=CommonTaskConfigurations.ALL_TASKS,
+        **kwargs
     )
 
-    seg_output = seg_model(sample_input, training=False)
-    logger.info(f"Segmentation-only model output: {seg_output.shape}")
 
-# ---------------------------------------------------------------------
+def create_yolov12_segmentation_only(
+    num_classes: int = 80,
+    scale: str = "n",
+    **kwargs
+) -> YOLOv12MultiTask:
+    """Create YOLOv12 model for segmentation only."""
+    return create_yolov12_multitask(
+        num_classes=num_classes,
+        scale=scale,
+        tasks=CommonTaskConfigurations.SEGMENTATION_ONLY,
+        **kwargs
+    )
+
+
+def create_yolov12_detection_only(
+    num_classes: int = 80,
+    scale: str = "n",
+    **kwargs
+) -> YOLOv12MultiTask:
+    """Create YOLOv12 model for detection only."""
+    return create_yolov12_multitask(
+        num_classes=num_classes,
+        scale=scale,
+        tasks=CommonTaskConfigurations.DETECTION_ONLY,
+        **kwargs
+    )
+
+
+def create_yolov12_classification_only(
+    num_classes: int = 80,
+    scale: str = "n",
+    **kwargs
+) -> YOLOv12MultiTask:
+    """Create YOLOv12 model for classification only."""
+    return create_yolov12_multitask(
+        num_classes=num_classes,
+        scale=scale,
+        tasks=CommonTaskConfigurations.CLASSIFICATION_ONLY,
+        **kwargs
+    )

@@ -1,26 +1,23 @@
 """
-YOLOv12 Model Implementation for Keras 3.
+YOLOv12 Feature Extractor Implementation
 
-This module provides a complete implementation of the YOLOv12 architecture
-including all custom blocks and layers. The model supports different scale
-configurations (nano, small, medium, large, extra-large) and includes
-area-attention mechanisms for improved feature extraction.
+This module provides the backbone and neck components of the YOLOv12 architecture
+as a standalone feature extractor. This base model can be used by different task-specific
+models for object detection, segmentation, classification, etc.
 
-The implementation follows Keras 3 best practices with proper serialization,
-type hints, and comprehensive documentation.
+The feature extractor outputs multiscale feature maps that can be consumed by
+various task-specific heads.
 
-Architecture Overview:
-    1. Backbone: Feature extraction with ConvNeXt-style blocks
-    2. Neck: PAN (Path Aggregation Network) with attention mechanisms
-    3. Head: Multi-scale detection head with classification and bbox regression
-
-References:
-    - YOLOv12: Real-Time Object Detection with Enhanced Architecture
+File: src/dl_techniques/models/yolo12_feature_extractor.py
 """
 
 import keras
-from keras import layers, ops
-from typing import Optional, Tuple, Dict, Any
+from keras import ops
+from typing import Optional, Tuple, Dict, Any, List
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.yolo12 import (
@@ -28,22 +25,26 @@ from dl_techniques.layers.yolo12 import (
     A2C2fBlock,
     C3k2Block,
 )
-from dl_techniques.layers.yolo12_heads import YOLOv12DetectionHead
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class YOLOv12(keras.Model):
-    """YOLOv12 Object Detection Model.
+class YOLOv12FeatureExtractor(keras.Model):
+    """
+    YOLOv12 Feature Extractor (Backbone + Neck).
 
-    Complete implementation of YOLOv12 with backbone, neck, and detection head.
-    Supports different model scales and includes area-attention mechanisms.
+    This model contains the backbone and neck components of YOLOv12 that extract
+    multi-scale features from input images. The output feature maps can be used
+    by various task-specific heads.
 
     Args:
-        num_classes: Number of object classes.
         input_shape: Input image shape (height, width, channels).
-        scale: Model scale ('n', 's', 'm', 'l', 'x').
-        reg_max: Maximum value for DFL regression.
-        kernel_initializer: Weight initializer.
+        scale: Model scale configuration ('n', 's', 'm', 'l', 'x').
+        kernel_initializer: Weight initializer for all layers.
         name: Model name.
+
+    Returns:
+        List of three feature maps at different scales [P3, P4, P5].
     """
 
     # Scale configurations: [depth_multiple, width_multiple]
@@ -57,31 +58,42 @@ class YOLOv12(keras.Model):
 
     def __init__(
             self,
-            num_classes: int = 80,
             input_shape: Tuple[int, int, int] = (640, 640, 3),
             scale: str = "n",
-            reg_max: int = 16,
             kernel_initializer: str = "he_normal",
             name: Optional[str] = None,
             **kwargs
     ):
+        """
+        Initialize YOLOv12 feature extractor.
+
+        Args:
+            input_shape: Input image shape (height, width, channels).
+            scale: Model scale ('n', 's', 'm', 'l', 'x').
+            kernel_initializer: Weight initializer.
+            name: Model name.
+            **kwargs: Additional keyword arguments.
+        """
         if name is None:
-            name = f"yolov12_{scale}"
+            name = f"yolov12_feature_extractor_{scale}"
         super().__init__(name=name, **kwargs)
 
-        self.num_classes = num_classes
         self.input_shape_config = input_shape
         self.scale = scale
-        self.reg_max = reg_max
         self.kernel_initializer = kernel_initializer
 
         if scale not in self.SCALE_CONFIGS:
-            raise ValueError(f"Unsupported scale: {scale}. Choose from {list(self.SCALE_CONFIGS.keys())}")
+            raise ValueError(
+                f"Unsupported scale: {scale}. Choose from {list(self.SCALE_CONFIGS.keys())}"
+            )
 
         self.depth_multiple, self.width_multiple = self.SCALE_CONFIGS[scale]
 
         # Calculate filter numbers based on scale
-        base_filters = {'c1': 64, 'c2': 128, 'c3': 256, 'c4': 512, 'c5': 512, 'c6': 1024}
+        base_filters = {
+            'c1': 64, 'c2': 128, 'c3': 256,
+            'c4': 512, 'c5': 512, 'c6': 1024
+        }
         self.filters = {k: int(v * self.width_multiple) for k, v in base_filters.items()}
 
         # Calculate layer repetitions based on depth
@@ -92,13 +104,26 @@ class YOLOv12(keras.Model):
         self.n_a2c2f_head = max(round(2 * self.depth_multiple), 1)
         self.n_c3k2_head = max(round(2 * self.depth_multiple), 1)
 
-        # Initialize layers
-        self._build_layers()
+        # Store build state for serialization
+        self._build_input_shape = None
 
-        logger.info(f"Created YOLOv12-{scale} with {num_classes} classes")
+        # Initialize layers (will be built in build())
+        self._layers_built = False
+
+        logger.info(f"Created YOLOv12FeatureExtractor-{scale}")
+
+    def build(self, input_shape):
+        """Build the feature extractor layers."""
+        if self._layers_built:
+            return
+
+        self._build_input_shape = input_shape
+        self._build_layers()
+        self._layers_built = True
+        super().build(input_shape)
 
     def _build_layers(self) -> None:
-        """Initialize all model layers."""
+        """Initialize all backbone and neck layers."""
         # Backbone stem
         self.stem1 = ConvBlock(
             filters=self.filters['c1'],
@@ -175,8 +200,13 @@ class YOLOv12(keras.Model):
             name="backbone_b4"
         )
 
-        # Neck (PAN)
-        self.up1 = layers.UpSampling2D(size=2, interpolation="nearest", name="neck_up1")
+        # Neck (PAN) layers
+        self.up1 = keras.layers.UpSampling2D(
+            size=2,
+            interpolation="nearest",
+            name="neck_up1"
+        )
+
         self.h1 = A2C2fBlock(
             filters=self.filters['c5'],
             n=self.n_a2c2f_head,
@@ -185,7 +215,12 @@ class YOLOv12(keras.Model):
             name="neck_h1"
         )
 
-        self.up2 = layers.UpSampling2D(size=2, interpolation="nearest", name="neck_up2")
+        self.up2 = keras.layers.UpSampling2D(
+            size=2,
+            interpolation="nearest",
+            name="neck_up2"
+        )
+
         self.h2 = A2C2fBlock(
             filters=self.filters['c3'],
             n=self.n_a2c2f_head,
@@ -226,98 +261,140 @@ class YOLOv12(keras.Model):
             name="neck_h4"
         )
 
-        # Detection head
-        self.detect_head = YOLOv12DetectionHead(
-            num_classes=self.num_classes,
-            reg_max=self.reg_max,
-            kernel_initializer=self.kernel_initializer,
-            name="detect_head"
-        )
-
     def call(
             self,
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """Forward pass through YOLOv12."""
-        # Backbone
+    ) -> List[keras.KerasTensor]:
+        """
+        Forward pass through feature extractor.
+
+        Args:
+            inputs: Input tensor (batch_size, height, width, channels).
+            training: Whether in training mode.
+
+        Returns:
+            List of three feature maps [P3, P4, P5] at different scales.
+        """
+        # Backbone forward pass
         x = self.stem1(inputs, training=training)
         x = self.stem2(x, training=training)
         x = self.b1(x, training=training)
 
+        # Extract P3 features
         p3 = self.down1(x, training=training)
         p3 = self.b2(p3, training=training)
 
+        # Extract P4 features
         p4 = self.down2(p3, training=training)
         p4 = self.b3(p4, training=training)
 
+        # Extract P5 features
         p5 = self.down3(p4, training=training)
         p5 = self.b4(p5, training=training)
 
-        # Neck - Top-down path
+        # Neck forward pass - Top-down path
         x = self.up1(p5)
         x = ops.concatenate([x, p4], axis=-1)
         h1 = self.h1(x, training=training)
 
         x = self.up2(h1)
         x = ops.concatenate([x, p3], axis=-1)
-        h2 = self.h2(x, training=training)
+        h2 = self.h2(x, training=training)  # P3 output
 
-        # Neck - Bottom-up path
+        # Neck forward pass - Bottom-up path
         x = self.neck_down1(h2, training=training)
         x = ops.concatenate([x, h1], axis=-1)
-        h3 = self.h3(x, training=training)
+        h3 = self.h3(x, training=training)  # P4 output
 
         x = self.neck_down2(h3, training=training)
         x = ops.concatenate([x, p5], axis=-1)
-        h4 = self.h4(x, training=training)
+        h4 = self.h4(x, training=training)  # P5 output
 
-        # Detection head
-        outputs = self.detect_head([h2, h3, h4], training=training)
+        # Return multi-scale feature maps
+        return [h2, h3, h4]  # [P3, P4, P5]
 
-        return outputs
+    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> List[Tuple[int, ...]]:
+        """
+        Compute output shapes for the three feature maps.
+
+        Args:
+            input_shape: Input tensor shape.
+
+        Returns:
+            List of output shapes for [P3, P4, P5].
+        """
+        batch_size = input_shape[0]
+        height, width = input_shape[1], input_shape[2]
+
+        # Calculate output dimensions based on downsampling
+        p3_h, p3_w = height // 8, width // 8
+        p4_h, p4_w = height // 16, width // 16
+        p5_h, p5_w = height // 32, width // 32
+
+        return [
+            (batch_size, p3_h, p3_w, self.filters['c3']),  # P3
+            (batch_size, p4_h, p4_w, self.filters['c5']),  # P4
+            (batch_size, p5_h, p5_w, self.filters['c6']),  # P5
+        ]
 
     def get_config(self) -> Dict[str, Any]:
-        """Get model configuration."""
+        """Get model configuration for serialization."""
         config = super().get_config()
         config.update({
-            "num_classes": self.num_classes,
             "input_shape": self.input_shape_config,
             "scale": self.scale,
-            "reg_max": self.reg_max,
             "kernel_initializer": self.kernel_initializer,
         })
         return config
 
+    def get_build_config(self) -> Dict[str, Any]:
+        """Get build configuration for serialization."""
+        return {
+            "input_shape": self._build_input_shape,
+        }
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Build model from configuration."""
+        if config.get("input_shape") is not None:
+            self.build(config["input_shape"])
+
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "YOLOv12":
+    def from_config(cls, config: Dict[str, Any]) -> "YOLOv12FeatureExtractor":
         """Create model from configuration."""
         return cls(**config)
 
 
-def create_yolov12(
-        num_classes: int = 80,
+def create_yolov12_feature_extractor(
         input_shape: Tuple[int, int, int] = (640, 640, 3),
         scale: str = "n",
         **kwargs
-) -> YOLOv12:
-    """Create a YOLOv12 model with specified configuration.
+) -> YOLOv12FeatureExtractor:
+    """
+    Create a YOLOv12 feature extractor with specified configuration.
 
     Args:
-        num_classes: Number of object classes.
         input_shape: Input image shape.
         scale: Model scale.
-        **kwargs: Additional arguments for YOLOv12.
+        **kwargs: Additional arguments for YOLOv12FeatureExtractor.
 
     Returns:
-        YOLOv12 model instance.
+        YOLOv12FeatureExtractor model instance.
+
+    Example:
+        >>> extractor = create_yolov12_feature_extractor(
+        ...     input_shape=(256, 256, 3),
+        ...     scale="s"
+        ... )
+        >>> features = extractor(images)  # Returns [P3, P4, P5]
     """
-    model = YOLOv12(
-        num_classes=num_classes,
+    extractor = YOLOv12FeatureExtractor(
         input_shape=input_shape,
         scale=scale,
         **kwargs
     )
 
-    logger.info(f"YOLOv12-{scale} model created successfully")
-    return model
+    logger.info(f"YOLOv12FeatureExtractor-{scale} created successfully")
+    return extractor
+
+# ---------------------------------------------------------------------

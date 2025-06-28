@@ -8,6 +8,7 @@ from typing import List, Tuple, Optional, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.mobilenet_v4 import ModelConfig, MobileNetV4
+
 # ---------------------------------------------------------------------
 
 def configure_model(model: keras.Model, config: ModelConfig) -> None:

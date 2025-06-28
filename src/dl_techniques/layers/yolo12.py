@@ -1,34 +1,10 @@
 """
-YOLOv12 Model Implementation for Keras 3.
-
-This module provides a complete implementation of the YOLOv12 architecture
-including all custom blocks and layers. The model supports different scale
-configurations (nano, small, medium, large, extra-large) and includes
-area-attention mechanisms for improved feature extraction.
-
-The implementation follows Keras 3 best practices with proper serialization,
-type hints, and comprehensive documentation.
-
-Architecture Overview:
-    1. Backbone: Feature extraction with ConvNeXt-style blocks
-    2. Neck: PAN (Path Aggregation Network) with attention mechanisms
-    3. Head: Multi-scale detection head with classification and bbox regression
-
-References:
-    - YOLOv12: Real-Time Object Detection with Enhanced Architecture
-
-File: src/dl_techniques/models/yolo12.py
+This module provides all custom blocks and layers for yolo12.
 """
 
 import keras
 from keras import ops
 from typing import Optional, Tuple, Union, Dict, Any
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
