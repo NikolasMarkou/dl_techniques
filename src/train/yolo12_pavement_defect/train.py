@@ -1,5 +1,5 @@
 """
-Comprehensive Training Script for YOLOv12 Multi-Task Model - Refined Version.
+Comprehensive Training Script for YOLOv12 Multi-Task Model
 
 This script provides complete training pipeline for simultaneous object detection,
 segmentation, and classification on crack detection datasets using patch-based learning.

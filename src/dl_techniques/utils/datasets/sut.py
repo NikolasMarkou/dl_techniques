@@ -28,23 +28,20 @@ Key Improvements:
 File: src/dl_techniques/utils/datasets/sut.py
 """
 
-import warnings
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
 from dataclasses import dataclass
 import xml.etree.ElementTree as ET
-from typing import Dict, List, Tuple, Optional, Any, Union
+from typing import Dict, List, Tuple, Optional, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
-# Assuming logger is configured elsewhere, creating a placeholder if not
-try:
-    from dl_techniques.utils.logger import logger
-except ImportError:
-    import logging
-    logger = logging.getLogger(__name__)
-    logging.basicConfig(level=logging.INFO)
+from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @dataclass
 class BoundingBox:
@@ -339,9 +336,22 @@ class SUTCrackPatchSampler:
         mask = None
         if annotation.mask_path:
             mask = self._load_mask_tf(annotation.mask_path)
-            if mask is not None and mask.shape != image.shape[:2]:
-                logger.warning(f"Mask shape {mask.shape} doesn't match image {image.shape[:2]}")
-                mask = None
+            if mask is not None:
+                # FIX: Handle potential orientation mismatch where mask dimensions are swapped.
+                # This checks if the image and mask shapes are different, but would match if one was transposed.
+                if image.shape[:2] != mask.shape[:2] and image.shape[:2] == mask.shape[:2][::-1]:
+                    logger.info(
+                        f"Correcting orientation for mask of {annotation.image_path}. "
+                        f"Original mask shape: {mask.shape}, image shape: {image.shape[:2]}. Transposing mask."
+                    )
+                    # Transpose height and width
+                    mask = np.transpose(mask, (1, 0))
+
+                # Final check after potential correction
+                if mask.shape != image.shape[:2]:
+                    logger.warning(f"Mask shape {mask.shape} doesn't match image {image.shape[:2]} "
+                                   f"even after orientation check. Discarding mask.")
+                    mask = None
 
         # Adjust sampling strategy based on image content
         if strategy == "aggressive" and annotation.has_crack:
@@ -410,7 +420,10 @@ class SUTCrackPatchSampler:
 
             # Choose sampling strategy: bbox-based or grid-based
             if len(grid_centers) > 0 and np.random.random() < 0.7:
-                center_x, center_y = np.random.choice(grid_centers)
+                # FIX: np.random.choice cannot sample from a list of tuples.
+                # Choose a random index and select the center tuple from the list.
+                random_index = np.random.randint(0, len(grid_centers))
+                center_x, center_y = grid_centers[random_index]
                 # Add spatial jittering
                 jitter_x = np.random.uniform(-self.spatial_jitter, self.spatial_jitter) * self.patch_size
                 jitter_y = np.random.uniform(-self.spatial_jitter, self.spatial_jitter) * self.patch_size
@@ -1061,7 +1074,7 @@ class SUTDataset:
 
         # Create dataset
         dataset = tf.data.Dataset.from_generator(
-            patch_generator,
+            generator=patch_generator,
             output_signature=self._get_output_signature()
         )
 
@@ -1185,11 +1198,12 @@ def create_sut_crack_dataset(data_dir: str, **kwargs) -> tf.data.Dataset:
     logger.info(f"Dataset statistics: {info}")
     return dataset.create_tf_dataset(batch_size=kwargs.get('batch_size', 32))
 
+# ---------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main():
+    import time
     import argparse
     import traceback
-    import time
 
     parser = argparse.ArgumentParser(
         description="Enhanced SUT-Crack Dataset Loader Test Script",
@@ -1214,16 +1228,13 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-
-    print("=" * 80)
-    print("Enhanced SUT-Crack Dataset Loader Test")
-    print(f"  Dataset Directory: {args.data_dir}")
-    print(f"  Patch Size: {args.patch_size}x{args.patch_size}")
-    print(f"  Patches per Crack Image: {args.patches_per_image}")
-    print(f"  Validation Split: {args.validation_split}")
-    print("=" * 80)
+    logger.info("=" * 80)
+    logger.info("Enhanced SUT-Crack Dataset Loader Test")
+    logger.info(f"  Dataset Directory: {args.data_dir}")
+    logger.info(f"  Patch Size: {args.patch_size}x{args.patch_size}")
+    logger.info(f"  Patches per Crack Image: {args.patches_per_image}")
+    logger.info(f"  Validation Split: {args.validation_split}")
+    logger.info("=" * 80)
 
     try:
         start_time = time.time()
@@ -1240,16 +1251,16 @@ if __name__ == "__main__":
         )
 
         load_time = time.time() - start_time
-        print(f"\n✅ Dataset loaded successfully in {load_time:.2f} seconds")
+        logger.info(f"\n✅ Dataset loaded successfully in {load_time:.2f} seconds")
 
         # Print statistics
         info = dataset_loader.get_dataset_info()
-        print("\n📊 Dataset Statistics:")
+        logger.info("\n📊 Dataset Statistics:")
         for key, value in info.items():
-            print(f"  • {key.replace('_', ' ').title()}: {value}")
+            logger.info(f"  • {key.replace('_', ' ').title()}: {value}")
 
         # Test train dataset
-        print(f"\n🚂 Testing training dataset...")
+        logger.info(f"\n🚂 Testing training dataset...")
         train_dataset = dataset_loader.create_tf_dataset(
             batch_size=args.batch_size,
             shuffle=True,
@@ -1257,7 +1268,7 @@ if __name__ == "__main__":
             subset="train"
         )
 
-        print(f"  Processing {args.test_batches} training batches...")
+        logger.info(f"  Processing {args.test_batches} training batches...")
         train_batch_count = 0
         train_start = time.time()
 
@@ -1265,29 +1276,29 @@ if __name__ == "__main__":
             train_batch_count += 1
 
             if train_batch_count == 1:  # Detailed info for first batch
-                print(f"\n  📦 Batch {train_batch_count} Details:")
-                print(f"    Image shape: {batch_images.shape}, dtype: {batch_images.dtype}")
-                print(f"    Image value range: [{tf.reduce_min(batch_images):.3f}, {tf.reduce_max(batch_images):.3f}]")
+                logger.info(f"\n  📦 Batch {train_batch_count} Details:")
+                logger.info(f"    Image shape: {batch_images.shape}, dtype: {batch_images.dtype}")
+                logger.info(f"    Image value range: [{tf.reduce_min(batch_images):.3f}, {tf.reduce_max(batch_images):.3f}]")
 
                 det_labels = batch_labels['detection']
                 seg_labels = batch_labels['segmentation']
                 cls_labels = batch_labels['classification']
 
-                print(f"    Detection labels: {det_labels.shape}")
-                print(f"    Segmentation labels: {seg_labels.shape}")
-                print(f"    Classification labels: {cls_labels.shape}")
-                print(f"    Classification distribution: {np.bincount(cls_labels.numpy())}")
+                logger.info(f"    Detection labels: {det_labels.shape}")
+                logger.info(f"    Segmentation labels: {seg_labels.shape}")
+                logger.info(f"    Classification labels: {cls_labels.shape}")
+                logger.info(f"    Classification distribution: {np.bincount(cls_labels.numpy())}")
 
                 # Check for valid detections
                 valid_detections = tf.reduce_sum(tf.cast(det_labels[..., 0] > 0, tf.int32))
-                print(f"    Valid detections in batch: {valid_detections}")
+                logger.info(f"    Valid detections in batch: {valid_detections}")
 
         train_time = time.time() - train_start
-        print(f"  ✅ Processed {train_batch_count} training batches in {train_time:.2f} seconds")
+        logger.info(f"  ✅ Processed {train_batch_count} training batches in {train_time:.2f} seconds")
 
         # Test validation dataset if split was created
         if hasattr(dataset_loader, 'val_annotations'):
-            print(f"\n🧪 Testing validation dataset...")
+            logger.info(f"\n🧪 Testing validation dataset...")
             val_dataset = dataset_loader.create_tf_dataset(
                 batch_size=args.batch_size,
                 shuffle=False,
@@ -1299,32 +1310,37 @@ if __name__ == "__main__":
             for batch_images, batch_labels in val_dataset.take(2):
                 val_batch_count += 1
 
-            print(f"  ✅ Processed {val_batch_count} validation batches")
+            logger.info(f"  ✅ Processed {val_batch_count} validation batches")
 
         # Performance summary
         total_time = time.time() - start_time
-        print(f"\n⚡ Performance Summary:")
-        print(f"  • Total test time: {total_time:.2f} seconds")
-        print(f"  • Dataset loading: {load_time:.2f} seconds")
-        print(f"  • Batch processing: {total_time - load_time:.2f} seconds")
+        logger.info(f"\n⚡ Performance Summary:")
+        logger.info(f"  • Total test time: {total_time:.2f} seconds")
+        logger.info(f"  • Dataset loading: {load_time:.2f} seconds")
+        logger.info(f"  • Batch processing: {total_time - load_time:.2f} seconds")
 
         if train_batch_count > 0:
             patches_processed = train_batch_count * args.batch_size
             patches_per_second = patches_processed / train_time
-            print(f"  • Processing speed: {patches_per_second:.1f} patches/second")
+            logger.info(f"  • Processing speed: {patches_per_second:.1f} patches/second")
 
-        print(f"\n🎉 All tests completed successfully!")
+        logger.info(f"\n🎉 All tests completed successfully!")
 
     except (FileNotFoundError, ValueError) as e:
-        print(f"\n❌ Configuration Error: {e}")
-        print("  💡 Please ensure:")
-        print("    • The data_dir path is correct")
-        print("    • The dataset has the expected directory structure")
-        print("    • Image and annotation files are present")
+        logger.info(f"\n❌ Configuration Error: {e}")
+        logger.info("  💡 Please ensure:")
+        logger.info("    • The data_dir path is correct")
+        logger.info("    • The dataset has the expected directory structure")
+        logger.info("    • Image and annotation files are present")
 
     except Exception as e:
-        print(f"\n❌ Unexpected error: {e}")
+        logger.info(f"\n❌ Unexpected error: {e}")
         if args.verbose:
             traceback.print_exc()
         else:
-            print("  💡 Run with --verbose for detailed error information")
+            logger.info("  💡 Run with --verbose for detailed error information")
+
+# ---------------------------------------------------------------------
+
+if __name__ == "__main__":
+    main()
