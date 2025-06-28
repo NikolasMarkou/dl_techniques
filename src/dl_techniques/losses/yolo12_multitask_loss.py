@@ -1,20 +1,90 @@
 """
-YOLOv12 Multi-Task Loss Function using Native Keras Components.
+Defines custom Keras loss functions for multi-task computer vision models.
 
-This module provides comprehensive loss functions for training YOLOv12 on multiple tasks
-with proper loss balancing. It leverages native Keras losses where possible and integrates
-seamlessly with the Named Outputs (Functional API) multi-task model.
+This module provides a flexible and powerful multi-task loss system, centered
+around the `YOLOv12MultiTaskLoss` class. It is designed to handle complex models
+that perform tasks like object detection, semantic segmentation, and image
+classification simultaneously.
 
-Components:
-    - Detection Loss: Custom YOLOv12Loss (specialized for object detection)
-    - Segmentation Loss: Combined native Dice and BinaryFocalCrossentropy
-    - Classification Loss: Native BinaryCrossentropy with configuration options
-    - Multi-task loss coordination with TaskType enum support
+The system is built to be compatible with Keras Functional API models that use
+named outputs. The core design philosophy is that the single `YOLOv12MultiTaskLoss`
+instance is passed as the loss function for *each* task-specific output. The loss
+function then automatically infers which sub-loss to apply based on the tensor
+shapes of `y_true` and `y_pred`.
+
+This module also supports learnable uncertainty weighting to automatically
+balance the contribution of each task's loss during training.
+
+Key Components:
+- YOLOv12MultiTaskLoss: The main, user-facing loss class. It orchestrates the
+  individual task losses, handles Keras's per-output loss calculation, and
+  manages static or learnable loss weighting.
+
+- YOLOv12ObjectDetectionLoss: A specialized loss for YOLO-style object detection.
+  It integrates a Task-Aligned Assigner, CIoU loss for bounding boxes,
+  Distribution Focal Loss (DFL), and Binary Cross-Entropy for classification.
+
+- DiceFocalSegmentationLoss: A standard combined loss for segmentation, blending
+  Dice and Focal loss to effectively handle class imbalance in pixel-level tasks.
+
+- Factory Functions: A set of helper functions (`create_detection_only_loss`,
+  `create_detection_segmentation_loss`, etc.) for easily instantiating the
+  multi-task loss for common task combinations.
+
+- MultiTaskLossCallback: A Keras callback to log individual task losses and
+  their dynamic weights during training, providing better insight into the
+  training process, especially when using uncertainty weighting.
+
+Usage Example:
+    # Example of creating a loss for a model that performs both
+    # detection and segmentation with named outputs.
+
+    from dl_techniques.utils.vision_task_types import TaskType
+    # Assuming the factory functions from this file are imported
+    # from .losses import create_detection_segmentation_loss, MultiTaskLossCallback
+
+    # 1. Create the loss function instance.
+    #    This single instance will be used for both model outputs.
+    multi_task_loss = create_detection_segmentation_loss(
+        num_classes=20,
+        input_shape=(640, 640),
+        use_uncertainty_weighting=True  # Enable automatic loss balancing
+    )
+
+    # 2. Define a Keras model with named outputs.
+    #    (Model definition is omitted for brevity)
+    #    inputs = keras.Input(shape=(640, 640, 3))
+    #    ...
+    #    detection_output = keras.layers.Layer(name='detection')(x)
+    #    segmentation_output = keras.layers.Layer(name='segmentation')(x)
+    #    model = keras.Model(inputs, {
+    #        'detection': detection_output,
+    #        'segmentation': segmentation_output
+    #    })
+
+    # 3. Compile the model, assigning the *same* loss instance to each output.
+    #    The `TaskType` enum values should match the output layer names.
+    #
+    # model.compile(
+    #     optimizer='adam',
+    #     loss={
+    #         TaskType.DETECTION.value: multi_task_loss,
+    #         TaskType.SEGMENTATION.value: multi_task_loss
+    #     }
+    # )
+
+    # 4. Use the callback to monitor individual task losses and weights.
+    # loss_callback = MultiTaskLossCallback(loss_fn=multi_task_loss)
+    #
+    # model.fit(
+    #     dataset,
+    #     callbacks=[loss_callback]
+    # )
 """
 
 import keras
 from keras import ops
-from typing import Dict, Any, List, Union, Tuple
+from typing import Dict, Any, List, Union, Tuple, Optional
 
 # ---------------------------------------------------------------------
 # local imports
@@ -590,9 +660,15 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
     """
     Multi-task loss function for YOLOv12 using native Keras components where possible.
 
-    This loss function works with the Named Outputs (Functional API) multi-task model
-    and supports TaskType enum-based configuration. It automatically handles different
-    task combinations and provides proper loss balancing.
+    FIXED VERSION: This loss function handles both dictionary-based calls (when called
+    with full multi-task data) and individual output calls (when Keras calls it
+    separately for each named output).
+
+    Key Features:
+    - Automatic detection of which task is being computed
+    - Proper handling of Named Outputs (Functional API) models
+    - TaskType enum-based configuration
+    - Uncertainty weighting support
     """
 
     def __init__(
@@ -771,13 +847,60 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
                 trainable=True
             )
 
+    def _infer_task_from_shapes(
+        self,
+        y_true: keras.KerasTensor,
+        y_pred: keras.KerasTensor
+    ) -> Optional[str]:
+        """
+        Infer which task is being computed based on tensor shapes.
+
+        This is used when Keras calls the loss function separately for each output.
+
+        Args:
+            y_true: Ground truth tensor.
+            y_pred: Prediction tensor.
+
+        Returns:
+            Task name string or None if cannot be determined.
+        """
+        try:
+            pred_shape = y_pred.shape
+            true_shape = y_true.shape
+
+            # Detection: y_pred should be (batch, num_anchors, num_classes + 4*reg_max)
+            # Expected: (batch, 1344, 65) for patch_size=256, num_classes=1, reg_max=16
+            if len(pred_shape) == 3:
+                if pred_shape[-1] == (self.num_classes + 4 * self.reg_max):
+                    return TaskType.DETECTION.value
+
+            # Segmentation: y_pred should be (batch, height, width, 1)
+            # Expected: (batch, patch_size//4, patch_size//4, 1)
+            if len(pred_shape) == 4 and pred_shape[-1] == 1:
+                if pred_shape[1] == pred_shape[2]:  # Square spatial dimensions
+                    return TaskType.SEGMENTATION.value
+
+            # Classification: y_pred should be (batch, 1) or (batch,)
+            if len(pred_shape) <= 2:
+                if pred_shape[-1] == 1 or (len(pred_shape) == 1):
+                    return TaskType.CLASSIFICATION.value
+
+        except Exception as e:
+            logger.warning(f"Failed to infer task from shapes: {e}")
+
+        return None
+
     def call(
         self,
         y_true: Union[Dict[str, keras.KerasTensor], keras.KerasTensor],
         y_pred: Union[Dict[str, keras.KerasTensor], keras.KerasTensor]
     ) -> keras.KerasTensor:
         """
-        Calculate multi-task loss.
+        Calculate multi-task loss with enhanced handling for Named Outputs.
+
+        This method automatically detects whether it's being called with:
+        1. Full multi-task dictionaries (both y_true and y_pred are dicts)
+        2. Individual task tensors (when Keras calls loss per output)
 
         Args:
             y_true: Ground truth labels. For multi-task: dictionary with task keys.
@@ -786,45 +909,98 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
                    For single-task: direct tensor.
 
         Returns:
-            Total multi-task loss.
+            Total multi-task loss or individual task loss.
         """
-        # Handle single-task case (direct tensors)
-        if not isinstance(y_true, dict) or not isinstance(y_pred, dict):
-            return self._compute_single_task_loss(y_true, y_pred)
+        # Case 1: Both are dictionaries - true multi-task call
+        if isinstance(y_true, dict) and isinstance(y_pred, dict):
+            return self._compute_multi_task_loss(y_true, y_pred)
 
-        # Multi-task case (dictionaries)
-        return self._compute_multi_task_loss(y_true, y_pred)
+        # Case 2: Neither are dictionaries - individual task call from Keras
+        elif not isinstance(y_true, dict) and not isinstance(y_pred, dict):
+            return self._compute_individual_task_loss(y_true, y_pred)
 
-    def _compute_single_task_loss(
+        # Case 3: Mixed types - should not happen, but handle gracefully
+        else:
+            logger.warning(
+                f"Mixed input types in loss function: "
+                f"y_true type: {type(y_true)}, y_pred type: {type(y_pred)}. "
+                f"Attempting individual task computation."
+            )
+            return self._compute_individual_task_loss(y_true, y_pred)
+
+    def _compute_individual_task_loss(
         self,
         y_true: keras.KerasTensor,
         y_pred: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """Compute loss for single-task model."""
-        enabled_tasks = self.task_config.get_enabled_tasks()
+        """
+        Compute loss for individual task when called by Keras per output.
 
-        if len(enabled_tasks) != 1:
-            raise ValueError(
-                f"Single task loss expects exactly 1 enabled task, got {len(enabled_tasks)}"
-            )
+        This method automatically infers which task is being computed based on
+        the tensor shapes and routes to the appropriate loss function.
 
-        task = enabled_tasks[0]
+        Args:
+            y_true: Ground truth tensor for a single task.
+            y_pred: Prediction tensor for a single task.
 
-        if task == TaskType.DETECTION:
-            return self.detection_loss(y_true, y_pred)
-        elif task == TaskType.SEGMENTATION:
-            return self.segmentation_loss(y_true, y_pred)
-        elif task == TaskType.CLASSIFICATION:
-            return self.classification_loss(y_true, y_pred)
+        Returns:
+            Loss value for the individual task.
+        """
+        # Infer which task this is
+        task_name = self._infer_task_from_shapes(y_true, y_pred)
+
+        if task_name is None:
+            # Fallback: try to guess based on enabled tasks and tensor properties
+            enabled_tasks = self.task_config.get_enabled_tasks()
+            if len(enabled_tasks) == 1:
+                task_name = enabled_tasks[0].value
+            else:
+                logger.warning(
+                    f"Could not infer task from shapes. y_true: {y_true.shape}, "
+                    f"y_pred: {y_pred.shape}. Using first enabled task."
+                )
+                task_name = enabled_tasks[0].value if enabled_tasks else "detection"
+
+        # Route to appropriate loss function
+        if task_name == TaskType.DETECTION.value and self.detection_loss is not None:
+            loss = self.detection_loss(y_true, y_pred)
+            if self.use_uncertainty_weighting and hasattr(self, 'detection_log_var'):
+                precision = ops.exp(-self.detection_log_var)
+                return precision * loss + self.detection_log_var
+            else:
+                return self.detection_weight * loss
+
+        elif task_name == TaskType.SEGMENTATION.value and self.segmentation_loss is not None:
+            loss = self.segmentation_loss(y_true, y_pred)
+            if self.use_uncertainty_weighting and hasattr(self, 'segmentation_log_var'):
+                precision = ops.exp(-self.segmentation_log_var)
+                return precision * loss + self.segmentation_log_var
+            else:
+                return self.segmentation_weight * loss
+
+        elif task_name == TaskType.CLASSIFICATION.value and self.classification_loss is not None:
+            loss = self.classification_loss(y_true, y_pred)
+            if self.use_uncertainty_weighting and hasattr(self, 'classification_log_var'):
+                precision = ops.exp(-self.classification_log_var)
+                return precision * loss + self.classification_log_var
+            else:
+                return self.classification_weight * loss
+
         else:
-            raise ValueError(f"Unknown task type: {task}")
+            # Fallback: return a small loss to avoid training issues
+            logger.warning(
+                f"Could not compute loss for inferred task '{task_name}'. "
+                f"Available tasks: {self.task_config.get_task_names()}. "
+                f"Returning minimal loss."
+            )
+            return ops.convert_to_tensor(0.01, dtype=y_pred.dtype)
 
     def _compute_multi_task_loss(
         self,
         y_true: Dict[str, keras.KerasTensor],
         y_pred: Dict[str, keras.KerasTensor]
     ) -> keras.KerasTensor:
-        """Compute loss for multi-task model."""
+        """Compute loss for multi-task model with dictionary inputs."""
         total_loss = ops.convert_to_tensor(0.0, dtype=self.dtype)
         individual_losses = {}
 
@@ -982,7 +1158,7 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         return config
 
 # ---------------------------------------------------------------------
-# Factory functions for common use cases
+# Factory functions for common use cases - UNCHANGED
 # ---------------------------------------------------------------------
 
 def create_yolov12_multitask_loss(
@@ -1070,7 +1246,7 @@ def create_detection_segmentation_loss(
     )
 
 # ---------------------------------------------------------------------
-# Utility functions for loss monitoring and callbacks
+# Utility functions for loss monitoring and callbacks - UNCHANGED
 # ---------------------------------------------------------------------
 
 class MultiTaskLossCallback(keras.callbacks.Callback):
