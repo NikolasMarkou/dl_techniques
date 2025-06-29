@@ -23,33 +23,6 @@ Key Components:
 
     - Factory Function: A convenience function `create_yolov12_multitask_loss` to
       easily instantiate the main loss function with the correct configuration.
-
-Usage in `train.py`::
-
-    # 1. Create the model and a single loss instance using the factory.
-    model, loss_fn = create_model_and_loss(
-        task_config=task_config,
-        patch_size=args.patch_size,
-        scale=args.scale,
-        use_uncertainty_weighting=args.uncertainty_weighting
-    )
-
-    # 2. Compile the model, passing the single loss instance.
-    model.compile(
-        optimizer=optimizer,
-        loss=loss_fn,  # A single loss object, not a dictionary.
-        run_eagerly=args.run_eagerly
-    )
-
-    # 3. Create callbacks that can interact with the loss function.
-    callbacks = create_callbacks(
-        loss_fn=loss_fn,
-        # ...
-    )
-
-    # 4. Fit the model. Keras will call the loss_fn for each named output,
-    #    and the loss_fn will route to the correct sub-loss internally.
-    model.fit(...)
 """
 
 import keras
@@ -118,8 +91,10 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         self.assigner_alpha = assigner_alpha
         self.assigner_beta = assigner_beta
 
-        # Initialize binary cross-entropy loss for classification
-        self.bce = keras.losses.BinaryCrossentropy(
+        # Initialize binary focal cross-entropy loss for classification
+        # focal cross entropy handles class imbalance better
+        self.bce = keras.losses.BinaryFocalCrossentropy(
+            apply_class_balancing=True,
             from_logits=True,
             reduction="none"
         )
@@ -536,7 +511,8 @@ class DiceFocalSegmentationLoss(keras.losses.Loss):
             alpha=focal_alpha,
             gamma=focal_gamma,
             from_logits=from_logits,
-            reduction="none"
+            reduction="none",
+            apply_class_balancing=True
         )
 
     def call(
@@ -610,6 +586,7 @@ class ClassificationFocalLoss(keras.losses.Loss):
             alpha=alpha,
             gamma=gamma,
             from_logits=from_logits,
+            apply_class_balancing=True,
             reduction="none"
         )
 
