@@ -579,21 +579,32 @@ class TensorFlowNativePatchSampler:
             def extract_single_patch(i):
                 center = centers_int[i]
 
-                # Calculate desired patch bounds
-                y1_desired = center[1] - half_patch
-                y2_desired = center[1] + half_patch
-                x1_desired = center[0] - half_patch
-                x2_desired = center[0] + half_patch
-
-                # Get image dimensions
+                # Get image dimensions first
                 image_height = tf.shape(image)[0]
                 image_width = tf.shape(image)[1]
 
-                # Calculate what we can actually extract from the image
+                # Ensure center is within valid bounds for patch extraction
+                # Valid center range: [half_patch, image_size - half_patch]
+                center_x = tf.clip_by_value(center[0], half_patch, image_width - half_patch)
+                center_y = tf.clip_by_value(center[1], half_patch, image_height - half_patch)
+
+                # Calculate desired patch bounds
+                y1_desired = center_y - half_patch
+                y2_desired = center_y + half_patch
+                x1_desired = center_x - half_patch
+                x2_desired = center_x + half_patch
+
+                # Calculate what we can actually extract from the image (should be exact now)
                 y1_actual = tf.maximum(0, y1_desired)
                 y2_actual = tf.minimum(image_height, y2_desired)
                 x1_actual = tf.maximum(0, x1_desired)
                 x2_actual = tf.minimum(image_width, x2_desired)
+
+                # Additional safety check - ensure slice parameters are valid
+                y1_actual = tf.clip_by_value(y1_actual, 0, image_height - 1)
+                x1_actual = tf.clip_by_value(x1_actual, 0, image_width - 1)
+                slice_height = tf.clip_by_value(y2_actual - y1_actual, 1, image_height - y1_actual)
+                slice_width = tf.clip_by_value(x2_actual - x1_actual, 1, image_width - x1_actual)
 
                 # Calculate padding needed
                 pad_top = tf.maximum(0, -y1_desired)
@@ -601,11 +612,11 @@ class TensorFlowNativePatchSampler:
                 pad_left = tf.maximum(0, -x1_desired)
                 pad_right = tf.maximum(0, x2_desired - image_width)
 
-                # Extract the available region from the image
+                # Extract the available region from the image with safe parameters
                 img_patch_raw = tf.slice(
                     image,
                     [y1_actual, x1_actual, 0],
-                    [y2_actual - y1_actual, x2_actual - x1_actual, 3]
+                    [slice_height, slice_width, 3]
                 )
 
                 # Now pad to get exactly the right size
@@ -615,7 +626,7 @@ class TensorFlowNativePatchSampler:
                     mode='REFLECT'
                 )
 
-                # This should now be exactly the right shape, but ensure it
+                # This should now be exactly the right shape
                 img_patch = tf.ensure_shape(img_patch, [self.patch_size, self.patch_size, 3])
 
                 # Extract mask patch with same logic
@@ -638,11 +649,14 @@ class TensorFlowNativePatchSampler:
                         lambda: mask
                     )
 
-                    # Extract mask patch with same logic as image
+                    # Extract mask patch with same safe logic
+                    mask_slice_height = tf.clip_by_value(slice_height, 1, tf.shape(mask_resized)[0] - y1_actual)
+                    mask_slice_width = tf.clip_by_value(slice_width, 1, tf.shape(mask_resized)[1] - x1_actual)
+
                     mask_patch_raw = tf.slice(
                         mask_resized,
                         [y1_actual, x1_actual],
-                        [y2_actual - y1_actual, x2_actual - x1_actual]
+                        [mask_slice_height, mask_slice_width]
                     )
 
                     # Pad mask patch
