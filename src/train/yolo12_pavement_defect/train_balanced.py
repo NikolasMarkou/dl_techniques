@@ -32,11 +32,10 @@ import argparse
 import matplotlib
 import numpy as np
 import tensorflow as tf
-from collections import Counter
+from sklearn.model_selection import train_test_split
 
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
 import seaborn as sns
 import pandas as pd
 from datetime import datetime
@@ -125,6 +124,29 @@ class BalancedSUTDataset(OptimizedSUTDataset):
         logger.info(f"BalancedSUTDataset initialized with {balance_strategy} strategy, "
                    f"target positive ratio: {positive_ratio}")
 
+    def _has_cracks(self, annotation) -> bool:
+        """
+        Helper method to check if an annotation indicates the presence of cracks.
+
+        Args:
+            annotation: Annotation object or dictionary.
+
+        Returns:
+            True if the annotation indicates cracks are present.
+        """
+        # Handle both dict and object-style annotations
+        if hasattr(annotation, 'has_cracks'):
+            return annotation.has_cracks
+        elif hasattr(annotation, 'get'):
+            return annotation.get('has_cracks', False)
+        elif hasattr(annotation, 'detection_boxes'):
+            # Fallback: check if annotation has detection boxes
+            boxes = getattr(annotation, 'detection_boxes', [])
+            return len(boxes) > 0
+        else:
+            # Default to False if we can't determine
+            return False
+
     def analyze_class_distribution(self) -> Dict[str, Union[int, float]]:
         """
         Analyze the class distribution in the dataset.
@@ -140,17 +162,13 @@ class BalancedSUTDataset(OptimizedSUTDataset):
         total_pixels = 0
 
         for annotation in self.annotations:
-            # For image-level classification
-            has_cracks = annotation.get('has_cracks', False)
+            has_cracks = self._has_cracks(annotation)
 
             if has_cracks:
                 positive_count += 1
                 # Estimate crack pixels from segmentation if available
-                if 'segmentation_path' in annotation:
-                    # This would require loading the segmentation mask
-                    # For now, we'll use a placeholder
-                    estimated_crack_pixels = self.patch_size * self.patch_size * 0.1  # Estimate
-                    total_crack_pixels += estimated_crack_pixels
+                estimated_crack_pixels = self.patch_size * self.patch_size * 0.1  # Estimate
+                total_crack_pixels += estimated_crack_pixels
             else:
                 negative_count += 1
 
@@ -180,21 +198,27 @@ class BalancedSUTDataset(OptimizedSUTDataset):
 
         return distribution
 
-    def apply_balancing_strategy(self, annotations: List[Dict]) -> List[Dict]:
+    def apply_balancing_strategy(self, annotations: List) -> List:
         """
         Apply the selected balancing strategy to the annotations.
 
         Args:
-            annotations: List of annotation dictionaries.
+            annotations: List of annotation objects/dictionaries.
 
         Returns:
             Balanced list of annotations.
         """
         logger.info(f"Applying {self.balance_strategy} balancing strategy...")
 
-        # Separate positive and negative samples
-        positive_samples = [ann for ann in annotations if ann.get('has_cracks', False)]
-        negative_samples = [ann for ann in annotations if not ann.get('has_cracks', False)]
+        # Separate positive and negative samples using helper method
+        positive_samples = []
+        negative_samples = []
+
+        for ann in annotations:
+            if self._has_cracks(ann):
+                positive_samples.append(ann)
+            else:
+                negative_samples.append(ann)
 
         logger.info(f"Original distribution: {len(positive_samples)} positive, {len(negative_samples)} negative")
 
@@ -211,8 +235,8 @@ class BalancedSUTDataset(OptimizedSUTDataset):
         # Shuffle the balanced dataset
         np.random.shuffle(balanced_annotations)
 
-        # Log final distribution
-        final_positive = sum(1 for ann in balanced_annotations if ann.get('has_cracks', False))
+        # Log final distribution using helper method
+        final_positive = sum(1 for ann in balanced_annotations if self._has_cracks(ann))
         final_negative = len(balanced_annotations) - final_positive
         final_ratio = final_positive / len(balanced_annotations) if len(balanced_annotations) > 0 else 0
 
