@@ -650,8 +650,9 @@ class DataBalanceVisualizationCallback(keras.callbacks.Callback):
 
                 axes[i].imshow(img_display)
 
-                # Determine if positive or negative
-                is_positive = target[0] > 0.5 if len(target) > 0 else target > 0.5
+                # target is a scalar (e.g., 1 or 0), so we can compare it directly.
+                is_positive = target > 0.5
+
                 label = "Positive (Crack)" if is_positive else "Negative (No Crack)"
                 color = 'red' if is_positive else 'green'
 
