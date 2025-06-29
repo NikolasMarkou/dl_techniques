@@ -765,7 +765,7 @@ class TensorFlowNativePatchSampler:
                 tf.zeros([0, self.patch_size, self.patch_size, 3], dtype=tf.float32),
                 tf.zeros([0, self.patch_size, self.patch_size], dtype=tf.float32),
                 tf.zeros([0], dtype=tf.int32),
-                tf.zeros([0, 10, 5], dtype=tf.float32)
+                tf.zeros([0, max_boxes_per_patch, 5], dtype=tf.float32)  # CORRECT
             )
 
         # Use tf.cond to handle the branching properly
