@@ -51,7 +51,7 @@ from dl_techniques.utils.vision_task_types import (
     TaskConfiguration,
     parse_task_list
 )
-from dl_techniques.losses.yolo12_multitask_loss_v2 import (
+from dl_techniques.losses.yolo12_multitask_loss import (
     create_yolov12_multitask_loss,
 )
 

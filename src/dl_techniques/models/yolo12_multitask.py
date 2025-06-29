@@ -262,13 +262,7 @@ class YOLOv12MultiTask(keras.Model):
             classification_output = classification_head(feature_maps)
             task_outputs[TaskType.CLASSIFICATION.value] = classification_output
 
-        # Return single output for single task, dictionary for multiple tasks
-        if len(task_outputs) == 1:
-            # Single task - return the tensor directly
-            outputs = list(task_outputs.values())[0]
-        else:
-            # Multiple tasks - return named dictionary
-            outputs = task_outputs
+        outputs = task_outputs
 
         return inputs, outputs
 
