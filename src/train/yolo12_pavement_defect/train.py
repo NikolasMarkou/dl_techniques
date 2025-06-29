@@ -194,6 +194,8 @@ class PerEpochVisualizationCallback(keras.callbacks.Callback):
         # Cache the result to avoid recomputation
         self._anchor_grid_cache = np.concatenate(anchor_points, 0)
         return self._anchor_grid_cache
+
+    def _prepare_visualization_samples(self):
         """Prepare a fixed set of samples for consistent visualization across epochs."""
         try:
             # Take a batch from validation dataset
@@ -627,7 +629,7 @@ class PerEpochVisualizationCallback(keras.callbacks.Callback):
             if gt_labels is not None:
                 legend_elements.extend([
                     patches.Patch(color='lime', label='Correct Prediction'),
-                    patches.Patch(color='red', label='Incorrect Prediction', linestyle='--')
+                    patches.Patch(color='red', label='Incorrect Prediction')  # POLISH: Removed inconsistent linestyle
                 ])
 
             fig.legend(handles=legend_elements, loc='upper right', fontsize=10)
@@ -1047,10 +1049,9 @@ def train_model(args: argparse.Namespace) -> None:
 
     # Calculate steps
     steps_per_epoch = max(train_info['total_patches_per_epoch'] // args.batch_size, 1)
-    validation_steps = max(val_info['total_patches_per_epoch'] // args.batch_size, 1)
+    # POLISH: Removed unused validation_steps calculation since we use validation_steps=None
 
     logger.info(f"Steps per epoch: {steps_per_epoch}")
-    logger.info(f"Validation steps: {validation_steps}")
 
     # Create model and loss with enhanced configuration
     logger.info("Creating model and loss function...")
