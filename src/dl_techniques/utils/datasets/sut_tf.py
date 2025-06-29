@@ -724,7 +724,7 @@ class TensorFlowNativePatchSampler:
                         return adjusted, 1  # label = 1 (has crack)
 
                     def no_bboxes():
-                        return tf.zeros([10, 5], dtype=tf.float32), 0  # label = 0 (no crack)
+                        return tf.zeros([max_boxes_per_patch, 5], dtype=tf.float32), 0 # CORRECT
 
                     return tf.cond(
                         tf.greater(tf.shape(overlapping_bboxes)[0], 0),
@@ -733,7 +733,7 @@ class TensorFlowNativePatchSampler:
                     )
 
                 def no_bboxes_available():
-                    return tf.zeros([10, 5], dtype=tf.float32), 0
+                    return tf.zeros([max_boxes_per_patch, 5], dtype=tf.float32), 0 # CORRECT
 
                 bbox_tensor, label = tf.cond(
                     tf.greater(tf.shape(bboxes)[0], 0),
