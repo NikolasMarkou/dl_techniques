@@ -1,5 +1,5 @@
 """
-Comprehensive Training Script for YOLOv12 Multi-Task Model - FIXED VERSION
+Comprehensive Training Script for YOLOv12 Multi-Task Model - ENHANCED WITH VISUALIZATIONS
 
 This script provides complete training pipeline for simultaneous object detection,
 segmentation, and classification on crack detection datasets using patch-based learning.
@@ -9,6 +9,7 @@ Features:
     - TaskType enum-based configuration for type safety
     - Native Keras loss components with uncertainty weighting
     - Patch-based data loading for large images
+    - Per-epoch visualization generation for all tasks
     - Comprehensive evaluation and visualization
     - Model checkpointing and saving with proper serialization
     - Progress tracking and logging
@@ -30,6 +31,7 @@ import tensorflow as tf
 
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 import seaborn as sns
 import pandas as pd
 from datetime import datetime
@@ -96,6 +98,314 @@ def parse_tasks(task_strings: List[str]) -> TaskConfiguration:
         logger.error(f"Invalid task configuration: {e}")
         logger.info(f"Valid tasks are: {[t.value for t in TaskType.all_tasks()]}")
         raise
+
+# ---------------------------------------------------------------------
+
+class PerEpochVisualizationCallback(keras.callbacks.Callback):
+    """
+    Callback for generating per-epoch visualizations for all tasks.
+
+    This callback creates visualization images showing model predictions
+    vs ground truth for detection, segmentation, and classification tasks.
+    """
+
+    def __init__(
+        self,
+        validation_dataset,
+        task_config: TaskConfiguration,
+        results_dir: str,
+        num_samples: int = 8,
+        visualization_freq: int = 1,
+        patch_size: int = 256
+    ):
+        """
+        Initialize the visualization callback.
+
+        Args:
+            validation_dataset: TensorFlow dataset for validation.
+            task_config: Configuration of enabled tasks.
+            results_dir: Directory to save visualizations.
+            num_samples: Number of samples to visualize per epoch.
+            visualization_freq: Frequency of visualization (every N epochs).
+            patch_size: Size of input patches.
+        """
+        super().__init__()
+        self.validation_dataset = validation_dataset
+        self.task_config = task_config
+        self.results_dir = results_dir
+        self.num_samples = num_samples
+        self.visualization_freq = visualization_freq
+        self.patch_size = patch_size
+
+        # Create visualization directory
+        self.viz_dir = os.path.join(results_dir, 'epoch_visualizations')
+        os.makedirs(self.viz_dir, exist_ok=True)
+
+        # Pre-sample validation data for consistent visualization
+        self._prepare_visualization_samples()
+
+        logger.info(f"PerEpochVisualizationCallback initialized for tasks: {task_config.get_task_names()}")
+
+    def _prepare_visualization_samples(self):
+        """Prepare a fixed set of samples for consistent visualization across epochs."""
+        try:
+            # Take a batch from validation dataset
+            sample_batch = next(iter(self.validation_dataset.take(1)))
+
+            if isinstance(sample_batch, tuple) and len(sample_batch) == 2:
+                self.sample_images, self.sample_targets = sample_batch
+
+                # Limit to num_samples
+                if tf.shape(self.sample_images)[0] > self.num_samples:
+                    self.sample_images = self.sample_images[:self.num_samples]
+                    if isinstance(self.sample_targets, dict):
+                        self.sample_targets = {
+                            k: v[:self.num_samples] for k, v in self.sample_targets.items()
+                        }
+                    else:
+                        self.sample_targets = self.sample_targets[:self.num_samples]
+
+                logger.info(f"Prepared {tf.shape(self.sample_images)[0]} samples for visualization")
+            else:
+                logger.error("Unexpected sample batch format for visualization")
+                self.sample_images = None
+                self.sample_targets = None
+
+        except Exception as e:
+            logger.error(f"Failed to prepare visualization samples: {e}")
+            self.sample_images = None
+            self.sample_targets = None
+
+    def on_epoch_end(self, epoch, logs=None):
+        """Generate visualizations at the end of each epoch."""
+        if (epoch + 1) % self.visualization_freq != 0:
+            return
+
+        if self.sample_images is None:
+            logger.warning("No samples available for visualization")
+            return
+
+        try:
+            # Get predictions for the sample batch
+            predictions = self.model(self.sample_images, training=False)
+
+            # Create epoch-specific directory
+            epoch_dir = os.path.join(self.viz_dir, f'epoch_{epoch+1:03d}')
+            os.makedirs(epoch_dir, exist_ok=True)
+
+            # Generate visualizations for each enabled task
+            if self.task_config.has_detection():
+                self._visualize_detection(predictions, epoch_dir, epoch + 1)
+
+            if self.task_config.has_segmentation():
+                self._visualize_segmentation(predictions, epoch_dir, epoch + 1)
+
+            if self.task_config.has_classification():
+                self._visualize_classification(predictions, epoch_dir, epoch + 1)
+
+            logger.info(f"Generated visualizations for epoch {epoch + 1}")
+
+        except Exception as e:
+            logger.error(f"Failed to generate visualizations for epoch {epoch + 1}: {e}")
+
+    def _visualize_detection(self, predictions, save_dir: str, epoch: int):
+        """
+        Generate detection visualization with bounding boxes.
+
+        Args:
+            predictions: Model predictions (dict or tensor).
+            save_dir: Directory to save visualizations.
+            epoch: Current epoch number.
+        """
+        try:
+            # Extract detection predictions
+            if isinstance(predictions, dict):
+                detection_pred = predictions.get('detection_output')
+            else:
+                # Assume single output is detection
+                detection_pred = predictions
+
+            if detection_pred is None:
+                return
+
+            # Convert to numpy for processing
+            images_np = self.sample_images.numpy()
+            pred_np = detection_pred.numpy()
+
+            # Create figure
+            fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+            axes = axes.flatten()
+
+            for i, (img, pred) in enumerate(zip(images_np[:8], pred_np[:8])):
+                if i >= len(axes):
+                    break
+
+                # Normalize image for display
+                img_display = ((img - img.min()) / (img.max() - img.min() + 1e-8) * 255).astype(np.uint8)
+
+                axes[i].imshow(img_display)
+                axes[i].set_title(f'Sample {i+1}', fontsize=10)
+                axes[i].axis('off')
+
+                # Process detection predictions (simplified for visualization)
+                # This assumes pred contains detection scores/boxes
+                if pred.shape[-1] > 4:  # Has classification scores
+                    # Extract confidence scores (last dimension typically contains class scores)
+                    scores = pred[..., -1] if len(pred.shape) > 1 else pred[-1]
+                    max_score = np.max(scores) if hasattr(scores, 'max') else float(scores)
+
+                    # Add confidence as text
+                    axes[i].text(10, 30, f'Max Conf: {max_score:.3f}',
+                               bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7),
+                               fontsize=8)
+
+            plt.suptitle(f'Detection Results - Epoch {epoch}', fontsize=14, fontweight='bold')
+            plt.tight_layout()
+            plt.savefig(os.path.join(save_dir, 'detection_results.png'),
+                       dpi=150, bbox_inches='tight')
+            plt.close()
+
+        except Exception as e:
+            logger.error(f"Failed to visualize detection: {e}")
+
+    def _visualize_segmentation(self, predictions, save_dir: str, epoch: int):
+        """
+        Generate segmentation visualization with masks.
+
+        Args:
+            predictions: Model predictions (dict or tensor).
+            save_dir: Directory to save visualizations.
+            epoch: Current epoch number.
+        """
+        try:
+            # Extract segmentation predictions
+            if isinstance(predictions, dict):
+                seg_pred = predictions.get('segmentation_output')
+            else:
+                return  # Can't determine segmentation output
+
+            if seg_pred is None:
+                return
+
+            # Get ground truth segmentation if available
+            seg_gt = None
+            if isinstance(self.sample_targets, dict):
+                seg_gt = self.sample_targets.get('segmentation_output')
+
+            # Convert to numpy
+            images_np = self.sample_images.numpy()
+            pred_np = tf.nn.sigmoid(seg_pred).numpy()  # Apply sigmoid for visualization
+            gt_np = seg_gt.numpy() if seg_gt is not None else None
+
+            # Create figure
+            n_cols = 3 if gt_np is not None else 2
+            fig, axes = plt.subplots(4, n_cols * 2, figsize=(20, 16))
+
+            for i in range(min(4, len(images_np))):
+                row_start = i * n_cols
+
+                # Original image
+                img_display = ((images_np[i] - images_np[i].min()) /
+                              (images_np[i].max() - images_np[i].min() + 1e-8) * 255).astype(np.uint8)
+
+                axes[i, 0].imshow(img_display)
+                axes[i, 0].set_title(f'Input {i+1}', fontsize=10)
+                axes[i, 0].axis('off')
+
+                # Predicted mask
+                pred_mask = pred_np[i, ..., 0] if len(pred_np.shape) == 4 else pred_np[i]
+                axes[i, 1].imshow(pred_mask, cmap='hot', vmin=0, vmax=1)
+                axes[i, 1].set_title(f'Predicted Mask {i+1}', fontsize=10)
+                axes[i, 1].axis('off')
+
+                # Ground truth mask (if available)
+                if gt_np is not None and i < len(gt_np):
+                    gt_mask = gt_np[i, ..., 0] if len(gt_np.shape) == 4 else gt_np[i]
+                    axes[i, 2].imshow(gt_mask, cmap='hot', vmin=0, vmax=1)
+                    axes[i, 2].set_title(f'Ground Truth {i+1}', fontsize=10)
+                    axes[i, 2].axis('off')
+
+            plt.suptitle(f'Segmentation Results - Epoch {epoch}', fontsize=14, fontweight='bold')
+            plt.tight_layout()
+            plt.savefig(os.path.join(save_dir, 'segmentation_results.png'),
+                       dpi=150, bbox_inches='tight')
+            plt.close()
+
+        except Exception as e:
+            logger.error(f"Failed to visualize segmentation: {e}")
+
+    def _visualize_classification(self, predictions, save_dir: str, epoch: int):
+        """
+        Generate classification visualization with confidence scores.
+
+        Args:
+            predictions: Model predictions (dict or tensor).
+            save_dir: Directory to save visualizations.
+            epoch: Current epoch number.
+        """
+        try:
+            # Extract classification predictions
+            if isinstance(predictions, dict):
+                cls_pred = predictions.get('classification_output')
+            else:
+                return  # Can't determine classification output
+
+            if cls_pred is None:
+                return
+
+            # Get ground truth labels if available
+            cls_gt = None
+            if isinstance(self.sample_targets, dict):
+                cls_gt = self.sample_targets.get('classification_output')
+
+            # Convert to numpy
+            images_np = self.sample_images.numpy()
+            pred_probs = tf.nn.sigmoid(cls_pred).numpy()  # Apply sigmoid for binary classification
+            gt_labels = cls_gt.numpy() if cls_gt is not None else None
+
+            # Create figure
+            fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+            axes = axes.flatten()
+
+            for i, (img, pred_prob) in enumerate(zip(images_np[:8], pred_probs[:8])):
+                if i >= len(axes):
+                    break
+
+                # Normalize image for display
+                img_display = ((img - img.min()) / (img.max() - img.min() + 1e-8) * 255).astype(np.uint8)
+
+                axes[i].imshow(img_display)
+
+                # Extract probability (assuming binary classification)
+                prob = pred_prob[0] if len(pred_prob.shape) > 0 else pred_prob
+                pred_class = "Crack" if prob > 0.5 else "No Crack"
+                confidence = prob if prob > 0.5 else 1 - prob
+
+                # Color based on prediction
+                color = 'red' if pred_class == "Crack" else 'green'
+
+                # Add ground truth if available
+                title = f'Sample {i+1}\nPred: {pred_class} ({confidence:.3f})'
+                if gt_labels is not None and i < len(gt_labels):
+                    gt_class = "Crack" if gt_labels[i] > 0.5 else "No Crack"
+                    title += f'\nGT: {gt_class}'
+
+                axes[i].set_title(title, fontsize=9, color=color)
+                axes[i].axis('off')
+
+                # Add confidence bar
+                axes[i].add_patch(patches.Rectangle((10, img.shape[0] - 30),
+                                                  confidence * 100, 10,
+                                                  facecolor=color, alpha=0.7))
+
+            plt.suptitle(f'Classification Results - Epoch {epoch}', fontsize=14, fontweight='bold')
+            plt.tight_layout()
+            plt.savefig(os.path.join(save_dir, 'classification_results.png'),
+                       dpi=150, bbox_inches='tight')
+            plt.close()
+
+        except Exception as e:
+            logger.error(f"Failed to visualize classification: {e}")
 
 # ---------------------------------------------------------------------
 
@@ -362,12 +672,15 @@ def create_callbacks(
     results_dir: str,
     loss_fn: keras.losses.Loss,
     task_config: TaskConfiguration,
+    val_dataset,
+    validation_steps: int,
+    patch_size: int = 256,
     monitor: str = 'val_loss',
     patience: int = 20,
-    val_dataset=None,
-    validation_steps=None
+    enable_visualizations: bool = True,
+    visualization_freq: int = 1
 ) -> List[keras.callbacks.Callback]:
-    """Create enhanced training callbacks with multi-task support."""
+    """Create enhanced training callbacks with multi-task support and visualizations."""
 
     callbacks = [
         # Enhanced multi-task callback
@@ -427,6 +740,19 @@ def create_callbacks(
         ),
     ]
 
+    # Add per-epoch visualization callback
+    if enable_visualizations:
+        viz_callback = PerEpochVisualizationCallback(
+            validation_dataset=val_dataset,
+            task_config=task_config,
+            results_dir=results_dir,
+            num_samples=8,
+            visualization_freq=visualization_freq,
+            patch_size=patch_size
+        )
+        callbacks.append(viz_callback)
+        logger.info(f"Added per-epoch visualization callback (freq: {visualization_freq})")
+
     # Add task-specific callbacks if using uncertainty weighting
     if hasattr(loss_fn, 'use_uncertainty_weighting') and loss_fn.use_uncertainty_weighting:
         logger.info("Added uncertainty weighting monitoring")
@@ -436,8 +762,8 @@ def create_callbacks(
 # ---------------------------------------------------------------------
 
 def train_model(args: argparse.Namespace) -> None:
-    """Enhanced main training function - FIXED VERSION."""
-    logger.info("Starting YOLOv12 Multi-Task training with Named Outputs")
+    """Enhanced main training function - FIXED VERSION with visualizations."""
+    logger.info("Starting YOLOv12 Multi-Task training with Named Outputs and Per-Epoch Visualizations")
     logger.info(f"Arguments: {vars(args)}")
 
     # Setup GPU
@@ -560,19 +886,22 @@ def train_model(args: argparse.Namespace) -> None:
             run_eagerly=True
         )
 
-    # Create enhanced callbacks
+    # Create enhanced callbacks with visualizations
     callbacks = create_callbacks(
         results_dir=results_dir,
         loss_fn=loss_fn,
         task_config=task_config,
+        val_dataset=val_tf_dataset,
+        validation_steps=validation_steps,
+        patch_size=args.patch_size,
         monitor='val_loss',
         patience=args.patience,
-        val_dataset=val_tf_dataset,
-        validation_steps=validation_steps
+        enable_visualizations=args.enable_visualizations,
+        visualization_freq=args.visualization_freq
     )
 
     # Train model with enhanced error handling
-    logger.info("Starting training...")
+    logger.info("Starting training with per-epoch visualizations...")
     try:
         history = model.fit(
             train_tf_dataset,
@@ -637,7 +966,7 @@ def train_model(args: argparse.Namespace) -> None:
         callbacks=callbacks
     )
 
-    logger.info("Training completed successfully!")
+    logger.info("Training completed successfully! 🎉")
 
 # ---------------------------------------------------------------------
 
@@ -712,6 +1041,11 @@ def save_training_results(
                 'segmentation': args.segmentation_weight,
                 'classification': args.classification_weight
             }
+        },
+        'visualization_config': {
+            'enabled': args.enable_visualizations,
+            'frequency': args.visualization_freq,
+            'per_epoch_visualizations_path': 'epoch_visualizations/'
         }
     }
 
@@ -917,6 +1251,13 @@ def create_training_summary(
         f.write(f"  Optimizer: {config['training_args']['optimizer']}\n")
         f.write(f"  Uncertainty Weighting: {config['loss_configuration']['uses_uncertainty_weighting']}\n\n")
 
+        # Visualization configuration
+        if 'visualization_config' in config:
+            f.write("Visualization Configuration:\n")
+            f.write(f"  Per-Epoch Visualizations: {config['visualization_config']['enabled']}\n")
+            f.write(f"  Visualization Frequency: Every {config['visualization_config']['frequency']} epoch(s)\n")
+            f.write(f"  Visualizations Path: {config['visualization_config']['per_epoch_visualizations_path']}\n\n")
+
         # Training results
         f.write("Training Results:\n")
         f.write(f"  Epochs Completed: {config['training_results']['epochs_completed']}\n")
@@ -942,9 +1283,9 @@ def create_training_summary(
 # ---------------------------------------------------------------------
 
 def main():
-    """Enhanced main function with TaskType enum support."""
+    """Enhanced main function with TaskType enum support and visualizations."""
     parser = argparse.ArgumentParser(
-        description='Train YOLOv12 Multi-Task Model with Named Outputs',
+        description='Train YOLOv12 Multi-Task Model with Named Outputs and Per-Epoch Visualizations',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
@@ -988,6 +1329,14 @@ def main():
     parser.add_argument('--classification-weight', type=float, default=1.0,
                        help='Weight for classification loss')
 
+    # Visualization arguments
+    parser.add_argument('--enable-visualizations', action='store_true', default=True,
+                       help='Enable per-epoch visualizations')
+    parser.add_argument('--disable-visualizations', action='store_true',
+                       help='Disable per-epoch visualizations')
+    parser.add_argument('--visualization-freq', type=int, default=1,
+                       help='Frequency of visualization generation (every N epochs)')
+
     # Control arguments
     parser.add_argument('--no-evaluate', action='store_true',
                        help='Skip evaluation on test set')
@@ -999,6 +1348,10 @@ def main():
     # Parse arguments
     args = parser.parse_args()
     args.evaluate = not args.no_evaluate
+
+    # Handle visualization flag logic
+    if args.disable_visualizations:
+        args.enable_visualizations = False
 
     # Validate arguments
     if not os.path.exists(args.data_dir):
@@ -1014,6 +1367,9 @@ def main():
     logger.info(f"  Batch Size: {args.batch_size}")
     logger.info(f"  Learning Rate: {args.learning_rate}")
     logger.info(f"  Uncertainty Weighting: {args.uncertainty_weighting}")
+    logger.info(f"  Per-Epoch Visualizations: {args.enable_visualizations}")
+    if args.enable_visualizations:
+        logger.info(f"  Visualization Frequency: Every {args.visualization_freq} epoch(s)")
 
     # Set random seeds for reproducibility
     np.random.seed(args.random_seed)

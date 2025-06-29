@@ -22,13 +22,13 @@ Performance Improvements:
 File: src/dl_techniques/utils/datasets/sut_optimized.py
 """
 
+import os
 import tensorflow as tf
-import numpy as np
 from pathlib import Path
 from dataclasses import dataclass
 import xml.etree.ElementTree as ET
-from typing import Dict, List, Tuple, Optional, Any, Union
-import os
+from typing import Dict, List, Tuple, Optional, Any
+
 
 # ---------------------------------------------------------------------
 # Local imports
