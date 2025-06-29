@@ -404,7 +404,7 @@ def create_stratified_dataset_splits(
 
     # Get all annotations and their labels
     annotations = base_dataset.annotations.copy()
-    labels = [ann.get('has_cracks', False) for ann in annotations]
+    labels = [base_dataset._has_cracks(ann) for ann in annotations]
 
     # Stratified splitting to maintain class distribution across splits
     np.random.seed(random_seed)
