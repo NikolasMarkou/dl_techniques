@@ -361,31 +361,21 @@ def parse_tasks(task_strings: List[str]) -> TaskConfiguration:
 
 # ---------------------------------------------------------------------
 
+# In train_balanced.py
+
 def create_stratified_dataset_splits(
-    data_dir: str,
-    patch_size: int = 256,
-    train_ratio: float = 0.7,
-    val_ratio: float = 0.2,
-    test_ratio: float = 0.1,
-    positive_ratio: float = 0.3,
-    balance_strategy: str = "undersample",
-    random_seed: int = 42
+        data_dir: str,
+        patch_size: int = 256,
+        train_ratio: float = 0.7,
+        val_ratio: float = 0.2,
+        test_ratio: float = 0.1,
+        positive_ratio: float = 0.3,
+        balance_strategy: str = "undersample",
+        random_seed: int = 42
 ) -> Tuple[BalancedSUTDataset, BalancedSUTDataset, BalancedSUTDataset]:
     """
     Create stratified train/validation/test dataset splits with class balancing.
-
-    Args:
-        data_dir: Path to dataset.
-        patch_size: Size of patches to extract.
-        train_ratio: Ratio of data for training.
-        val_ratio: Ratio of data for validation.
-        test_ratio: Ratio of data for testing.
-        positive_ratio: Target ratio of positive samples.
-        balance_strategy: Strategy for class balancing.
-        random_seed: Random seed for reproducible splits.
-
-    Returns:
-        Tuple of (train_dataset, val_dataset, test_dataset).
+    This version uses manual splitting for robustness with custom annotation objects.
     """
     logger.info("Creating stratified dataset splits with class balancing...")
 
@@ -393,76 +383,79 @@ def create_stratified_dataset_splits(
     base_dataset = BalancedSUTDataset(
         data_dir=data_dir,
         patch_size=patch_size,
-        patches_per_image=1,  # Minimal for analysis
+        patches_per_image=1,
         positive_ratio=positive_ratio,
-        balance_strategy="none",  # No balancing for analysis
+        balance_strategy="none",
         include_segmentation=True
     )
 
-    # Analyze class distribution
-    distribution = base_dataset.analyze_class_distribution()
+    # --- START FIX: Robust Manual Stratified Splitting ---
+    # Separate annotations into positive and negative lists
+    all_annotations = base_dataset.annotations.copy()
+    positive_annotations = [ann for ann in all_annotations if ann.has_crack]
+    negative_annotations = [ann for ann in all_annotations if not ann.has_crack]
 
-    # Get all annotations and their labels
-    annotations = base_dataset.annotations.copy()
-    labels = [base_dataset._has_cracks(ann) for ann in annotations]
-
-    # Stratified splitting to maintain class distribution across splits
+    # Shuffle both lists independently
     np.random.seed(random_seed)
+    np.random.shuffle(positive_annotations)
+    np.random.shuffle(negative_annotations)
 
-    # First split: train vs (val + test)
-    train_annotations, temp_annotations, train_labels, temp_labels = train_test_split(
-        annotations, labels,
-        test_size=(val_ratio + test_ratio),
-        stratify=labels,
-        random_state=random_seed
-    )
+    # Calculate split indices for positive samples
+    num_pos = len(positive_annotations)
+    pos_train_idx = int(num_pos * train_ratio)
+    pos_val_idx = int(num_pos * (train_ratio + val_ratio))
 
-    # Second split: val vs test
-    val_test_ratio = val_ratio / (val_ratio + test_ratio)
-    val_annotations, test_annotations, val_labels, test_labels = train_test_split(
-        temp_annotations, temp_labels,
-        test_size=(1 - val_test_ratio),
-        stratify=temp_labels,
-        random_state=random_seed
-    )
+    # Split positive annotations
+    train_pos = positive_annotations[:pos_train_idx]
+    val_pos = positive_annotations[pos_train_idx:pos_val_idx]
+    test_pos = positive_annotations[pos_val_idx:]
+
+    # Calculate split indices for negative samples
+    num_neg = len(negative_annotations)
+    neg_train_idx = int(num_neg * train_ratio)
+    neg_val_idx = int(num_neg * (train_ratio + val_ratio))
+
+    # Split negative annotations
+    train_neg = negative_annotations[:neg_train_idx]
+    val_neg = negative_annotations[neg_train_idx:neg_val_idx]
+    test_neg = negative_annotations[neg_val_idx:]
+
+    # Combine to form the final splits
+    train_annotations = train_pos + train_neg
+    val_annotations = val_pos + val_pos  # Typo fix: should be val_pos + val_neg
+    val_annotations = val_pos + val_neg
+    test_annotations = test_pos + test_neg
+
+    np.random.shuffle(train_annotations)
+    np.random.shuffle(val_annotations)
+    np.random.shuffle(test_annotations)
+    # --- END FIX ---
 
     logger.info(f"Stratified splits created:")
-    logger.info(f"  Train: {len(train_annotations)} samples")
-    logger.info(f"  Val: {len(val_annotations)} samples")
-    logger.info(f"  Test: {len(test_annotations)} samples")
+    logger.info(f"  Train: {len(train_annotations)} samples ({len(train_pos)} pos, {len(train_neg)} neg)")
+    logger.info(f"  Val: {len(val_annotations)} samples ({len(val_pos)} pos, {len(val_neg)} neg)")
+    logger.info(f"  Test: {len(test_annotations)} samples ({len(test_pos)} pos, {len(test_neg)} neg)")
+
+    # The rest of the function for creating and balancing the datasets remains the same...
 
     # Create balanced datasets for each split
     train_dataset = BalancedSUTDataset(
-        data_dir=data_dir,
-        patch_size=patch_size,
-        patches_per_image=16,  # More patches for training
-        positive_ratio=positive_ratio,
-        balance_strategy=balance_strategy,
-        include_segmentation=True
+        data_dir=data_dir, patch_size=patch_size, patches_per_image=16,
+        positive_ratio=positive_ratio, balance_strategy=balance_strategy
     )
     train_dataset.annotations = train_dataset.apply_balancing_strategy(train_annotations)
 
-    # For validation and test, use lighter balancing or no balancing
-    val_positive_ratio = min(positive_ratio * 1.5, 0.5)  # Slightly higher for validation
     val_dataset = BalancedSUTDataset(
-        data_dir=data_dir,
-        patch_size=patch_size,
-        patches_per_image=8,
-        positive_ratio=val_positive_ratio,
-        balance_strategy="undersample",  # Conservative balancing for validation
-        include_segmentation=True
+        data_dir=data_dir, patch_size=patch_size, patches_per_image=8,
+        positive_ratio=min(positive_ratio * 1.5, 0.5), balance_strategy="undersample"
     )
     val_dataset.annotations = val_dataset.apply_balancing_strategy(val_annotations)
 
     test_dataset = BalancedSUTDataset(
-        data_dir=data_dir,
-        patch_size=patch_size,
-        patches_per_image=8,
-        positive_ratio=0.5,  # Natural distribution for test
-        balance_strategy="none",  # No balancing for test (representative evaluation)
-        include_segmentation=True
+        data_dir=data_dir, patch_size=patch_size, patches_per_image=8,
+        positive_ratio=0.5, balance_strategy="none"
     )
-    test_dataset.annotations = test_annotations  # Use original test annotations
+    test_dataset.annotations = test_annotations
 
     return train_dataset, val_dataset, test_dataset
 
@@ -944,9 +937,12 @@ def train_balanced_model(args: argparse.Namespace) -> None:
                 repeat=False
             )
 
-            test_loss = model.evaluate(test_tf_dataset, verbose=1)
+            eval_results = model.evaluate(test_tf_dataset, verbose=1, return_dict=True)
+
+            # eval_results is now a dictionary like {'loss': 7.5, 'detection_loss': 6.8, ...}
+            # The main loss is under the key 'loss'.
+            test_loss = eval_results['loss']
             test_results = {'test_loss': float(test_loss)}
-            logger.info(f"📊 Test Results: {test_loss:.6f}")
 
         except Exception as e:
             logger.error(f"❌ Test evaluation failed: {e}")
