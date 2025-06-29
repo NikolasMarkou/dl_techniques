@@ -691,7 +691,6 @@ def save_training_results(
             'scale': args.scale,
             'patch_size': args.patch_size,
             'total_parameters': model.count_params(),
-            'trainable_parameters': sum([keras.backend.count_params(w) for w in model.trainable_weights]),
             'model_type': 'Named Outputs (Functional API)'
         },
         'dataset_info': {
@@ -910,7 +909,6 @@ def create_training_summary(
         f.write(f"  Scale: {config['model_config']['scale']}\n")
         f.write(f"  Patch Size: {config['model_config']['patch_size']}x{config['model_config']['patch_size']}\n")
         f.write(f"  Total Parameters: {config['model_config']['total_parameters']:,}\n")
-        f.write(f"  Trainable Parameters: {config['model_config']['trainable_parameters']:,}\n\n")
 
         # Training configuration
         f.write("Training Configuration:\n")
