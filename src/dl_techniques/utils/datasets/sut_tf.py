@@ -269,11 +269,7 @@ class TensorFlowNativePatchSampler:
         image_height: tf.Tensor
     ) -> tf.Tensor:
         """Generate grid of potential patch centers around bounding boxes."""
-        # Handle empty bboxes case
-        if tf.equal(tf.shape(bboxes)[0], 0):
-            return tf.zeros([0, 2], dtype=tf.float32)
-
-        # Grid spacing
+        # Initialize variables
         grid_spacing = tf.cast(self.patch_size_tensor // 4, tf.float32)
         image_width_f = tf.cast(image_width, tf.float32)
         image_height_f = tf.cast(image_height, tf.float32)
@@ -284,65 +280,84 @@ class TensorFlowNativePatchSampler:
         min_center_y = self.half_patch
         max_center_y = image_height_f - self.half_patch
 
-        # Skip if image is too small for patches
-        if tf.logical_or(tf.less_equal(max_center_x, min_center_x),
-                        tf.less_equal(max_center_y, min_center_y)):
+        # Define empty result
+        def return_empty():
             return tf.zeros([0, 2], dtype=tf.float32)
 
-        # Vectorized calculation of grid bounds for all bboxes
-        x_start = tf.maximum(min_center_x, tf.maximum(min_center_x, bboxes[:, 0] - self.half_patch))
-        x_end = tf.minimum(max_center_x, tf.minimum(max_center_x, bboxes[:, 2] + self.half_patch))
-        y_start = tf.maximum(min_center_y, tf.maximum(min_center_y, bboxes[:, 1] - self.half_patch))
-        y_end = tf.minimum(max_center_y, tf.minimum(max_center_y, bboxes[:, 3] + self.half_patch))
+        def generate_centers():
+            # Vectorized calculation of grid bounds for all bboxes
+            x_start = tf.maximum(min_center_x, tf.maximum(min_center_x, bboxes[:, 0] - self.half_patch))
+            x_end = tf.minimum(max_center_x, tf.minimum(max_center_x, bboxes[:, 2] + self.half_patch))
+            y_start = tf.maximum(min_center_y, tf.maximum(min_center_y, bboxes[:, 1] - self.half_patch))
+            y_end = tf.minimum(max_center_y, tf.minimum(max_center_y, bboxes[:, 3] + self.half_patch))
 
-        # Create a fixed grid that we'll filter
-        # Determine the overall bounds
-        global_x_start = tf.reduce_min(x_start)
-        global_x_end = tf.reduce_max(x_end)
-        global_y_start = tf.reduce_min(y_start)
-        global_y_end = tf.reduce_max(y_end)
+            # Create a fixed grid that we'll filter
+            # Determine the overall bounds
+            global_x_start = tf.reduce_min(x_start)
+            global_x_end = tf.reduce_max(x_end)
+            global_y_start = tf.reduce_min(y_start)
+            global_y_end = tf.reduce_max(y_end)
 
-        # Ensure bounds are valid
-        global_x_start = tf.maximum(global_x_start, min_center_x)
-        global_x_end = tf.minimum(global_x_end, max_center_x)
-        global_y_start = tf.maximum(global_y_start, min_center_y)
-        global_y_end = tf.minimum(global_y_end, max_center_y)
+            # Ensure bounds are valid
+            global_x_start = tf.maximum(global_x_start, min_center_x)
+            global_x_end = tf.minimum(global_x_end, max_center_x)
+            global_y_start = tf.maximum(global_y_start, min_center_y)
+            global_y_end = tf.minimum(global_y_end, max_center_y)
 
-        # Skip if no valid region
-        if tf.logical_or(tf.greater_equal(global_x_start, global_x_end),
-                        tf.greater_equal(global_y_start, global_y_end)):
-            return tf.zeros([0, 2], dtype=tf.float32)
+            def create_grid():
+                # Generate global grid
+                x_coords = tf.range(global_x_start, global_x_end, grid_spacing)
+                y_coords = tf.range(global_y_start, global_y_end, grid_spacing)
 
-        # Generate global grid
-        x_coords = tf.range(global_x_start, global_x_end, grid_spacing)
-        y_coords = tf.range(global_y_start, global_y_end, grid_spacing)
+                # Create meshgrid
+                x_grid, y_grid = tf.meshgrid(x_coords, y_coords)
+                all_grid_points = tf.stack([tf.reshape(x_grid, [-1]), tf.reshape(y_grid, [-1])], axis=1)
 
-        # Create meshgrid
-        x_grid, y_grid = tf.meshgrid(x_coords, y_coords)
-        all_grid_points = tf.stack([tf.reshape(x_grid, [-1]), tf.reshape(y_grid, [-1])], axis=1)
+                # Filter points that are within any bbox region
+                valid_mask = tf.zeros([tf.shape(all_grid_points)[0]], dtype=tf.bool)
 
-        # Filter points that are within any bbox region
-        valid_mask = tf.zeros([tf.shape(all_grid_points)[0]], dtype=tf.bool)
+                # Check each bbox
+                for i in tf.range(tf.shape(bboxes)[0]):
+                    # Check if points are within this bbox's expanded region
+                    in_bbox = tf.logical_and(
+                        tf.logical_and(
+                            all_grid_points[:, 0] >= x_start[i],
+                            all_grid_points[:, 0] <= x_end[i]
+                        ),
+                        tf.logical_and(
+                            all_grid_points[:, 1] >= y_start[i],
+                            all_grid_points[:, 1] <= y_end[i]
+                        )
+                    )
+                    valid_mask = tf.logical_or(valid_mask, in_bbox)
 
-        # Check each bbox
-        for i in tf.range(tf.shape(bboxes)[0]):
-            # Check if points are within this bbox's expanded region
-            in_bbox = tf.logical_and(
-                tf.logical_and(
-                    all_grid_points[:, 0] >= x_start[i],
-                    all_grid_points[:, 0] <= x_end[i]
+                # Filter valid points
+                valid_centers = tf.boolean_mask(all_grid_points, valid_mask)
+                return valid_centers
+
+            # Check if valid region exists
+            return tf.cond(
+                tf.logical_or(
+                    tf.greater_equal(global_x_start, global_x_end),
+                    tf.greater_equal(global_y_start, global_y_end)
                 ),
-                tf.logical_and(
-                    all_grid_points[:, 1] >= y_start[i],
-                    all_grid_points[:, 1] <= y_end[i]
-                )
+                return_empty,
+                create_grid
             )
-            valid_mask = tf.logical_or(valid_mask, in_bbox)
 
-        # Filter valid points
-        valid_centers = tf.boolean_mask(all_grid_points, valid_mask)
-
-        return valid_centers
+        # Handle all the edge cases with tf.cond
+        return tf.cond(
+            tf.equal(tf.shape(bboxes)[0], 0),  # No bboxes
+            return_empty,
+            lambda: tf.cond(
+                tf.logical_or(  # Image too small
+                    tf.less_equal(max_center_x, min_center_x),
+                    tf.less_equal(max_center_y, min_center_y)
+                ),
+                return_empty,
+                generate_centers
+            )
+        )
 
     @tf.function
     def _sample_patch_centers(
@@ -359,57 +374,73 @@ class TensorFlowNativePatchSampler:
 
         # Generate positive patch centers
         def sample_positive():
-            # Ensure we have valid sampling region
+            # Initialize all variables at the beginning
             min_center_x = self.half_patch
             max_center_x = image_width_f - self.half_patch
             min_center_y = self.half_patch
             max_center_y = image_height_f - self.half_patch
 
-            # Skip if image is too small
-            if tf.logical_or(tf.less_equal(max_center_x, min_center_x),
-                            tf.less_equal(max_center_y, min_center_y)):
+            # Initialize default values
+            grid_centers = tf.zeros([0, 2], dtype=tf.float32)
+            bbox_centers = tf.zeros([0, 2], dtype=tf.float32)
+            random_centers = tf.zeros([0, 2], dtype=tf.float32)
+            all_positive_candidates = tf.zeros([0, 2], dtype=tf.float32)
+
+            # Check if image is too small - return early if so
+            def return_empty_positive():
                 return tf.zeros([0, 2], dtype=tf.float32)
 
-            # Generate grid centers around bboxes
-            grid_centers = self._generate_grid_centers(bboxes, image_width, image_height)
+            def process_positive_sampling():
+                # Generate grid centers around bboxes
+                grid_pts = self._generate_grid_centers(bboxes, image_width, image_height)
 
-            # Add some random centers near bboxes
-            bbox_centers = (bboxes[:, :2] + bboxes[:, 2:]) / 2.0  # [cx, cy]
+                # Add some random centers near bboxes
+                bbox_ctrs = (bboxes[:, :2] + bboxes[:, 2:]) / 2.0  # [cx, cy]
 
-            # Expand sampling region
-            bbox_sizes = tf.reduce_max(bboxes[:, 2:] - bboxes[:, :2], axis=1, keepdims=True)
-            expansion = tf.maximum(bbox_sizes, self.half_patch)
+                # Expand sampling region
+                bbox_sizes = tf.reduce_max(bboxes[:, 2:] - bboxes[:, :2], axis=1, keepdims=True)
+                expansion = tf.maximum(bbox_sizes, self.half_patch)
 
-            # Sample random centers near bboxes
-            num_bbox_samples = tf.minimum(num_positive * 2, tf.shape(bbox_centers)[0] * 4)
+                # Sample random centers near bboxes
+                num_bbox_samples = tf.minimum(num_positive * 2, tf.shape(bbox_ctrs)[0] * 4)
 
-            # Repeat bbox centers and expansions to match num_bbox_samples
-            num_bboxes = tf.shape(bbox_centers)[0]
-            repeat_factor = tf.cast(tf.math.ceil(tf.cast(num_bbox_samples, tf.float32) / tf.cast(num_bboxes, tf.float32)), tf.int32)
+                # Repeat bbox centers and expansions to match num_bbox_samples
+                num_bboxes = tf.shape(bbox_ctrs)[0]
+                repeat_factor = tf.cast(tf.math.ceil(tf.cast(num_bbox_samples, tf.float32) / tf.cast(num_bboxes, tf.float32)), tf.int32)
 
-            repeated_centers = tf.tile(bbox_centers, [repeat_factor, 1])[:num_bbox_samples]
-            repeated_expansions = tf.tile(expansion, [repeat_factor, 1])[:num_bbox_samples]
+                repeated_centers = tf.tile(bbox_ctrs, [repeat_factor, 1])[:num_bbox_samples]
+                repeated_expansions = tf.tile(expansion, [repeat_factor, 1])[:num_bbox_samples]
 
-            # Add random jitter
-            jitter = tf.random.uniform([num_bbox_samples, 2], -1.0, 1.0) * repeated_expansions
-            random_centers = repeated_centers + jitter
+                # Add random jitter
+                jitter = tf.random.uniform([num_bbox_samples, 2], -1.0, 1.0) * repeated_expansions
+                rand_ctrs = repeated_centers + jitter
 
-            # Combine grid and random centers
-            all_positive_candidates = tf.concat([grid_centers, random_centers], axis=0)
+                # Combine grid and random centers
+                candidates = tf.concat([grid_pts, rand_ctrs], axis=0)
 
-            # Clip to valid region with proper bounds
-            all_positive_candidates = tf.clip_by_value(
-                all_positive_candidates,
-                [min_center_x, min_center_y],
-                [max_center_x, max_center_y]
-            )
+                # Clip to valid region with proper bounds
+                candidates_clipped = tf.clip_by_value(
+                    candidates,
+                    [min_center_x, min_center_y],
+                    [max_center_x, max_center_y]
+                )
 
-            # Sample required number
-            num_candidates = tf.shape(all_positive_candidates)[0]
+                # Sample required number
+                num_candidates = tf.shape(candidates_clipped)[0]
+                return tf.cond(
+                    tf.greater(num_candidates, num_positive),
+                    lambda: tf.gather(candidates_clipped, tf.random.shuffle(tf.range(num_candidates))[:num_positive]),
+                    lambda: candidates_clipped
+                )
+
+            # Use tf.cond to handle the branching properly
             return tf.cond(
-                tf.greater(num_candidates, num_positive),
-                lambda: tf.gather(all_positive_candidates, tf.random.shuffle(tf.range(num_candidates))[:num_positive]),
-                lambda: all_positive_candidates
+                tf.logical_or(
+                    tf.less_equal(max_center_x, min_center_x),
+                    tf.less_equal(max_center_y, min_center_y)
+                ),
+                return_empty_positive,
+                process_positive_sampling
             )
 
         def no_positive():
@@ -423,83 +454,96 @@ class TensorFlowNativePatchSampler:
 
         # Generate negative patch centers (avoid bbox regions)
         def sample_negative():
-            # Ensure we have valid sampling region
+            # Initialize all variables at the beginning
             min_center_x = self.half_patch
             max_center_x = image_width_f - self.half_patch
             min_center_y = self.half_patch
             max_center_y = image_height_f - self.half_patch
 
-            # Skip if image is too small
-            if tf.logical_or(tf.less_equal(max_center_x, min_center_x),
-                            tf.less_equal(max_center_y, min_center_y)):
+            # Initialize default values
+            avoidance_zones = tf.zeros([0, 4], dtype=tf.float32)
+            max_attempts = num_negative * 5
+            candidate_centers = tf.zeros([0, 2], dtype=tf.float32)
+            valid_mask = tf.zeros([0], dtype=tf.bool)
+
+            # Check if image is too small - return early if so
+            def return_empty_negative():
                 return tf.zeros([0, 2], dtype=tf.float32)
 
-            # Create avoidance zones around bboxes
-            def create_avoidance_zones():
-                buffer = self.half_patch
-                avoidance_zones = tf.stack([
-                    tf.maximum(0.0, bboxes[:, 0] - buffer),
-                    tf.maximum(0.0, bboxes[:, 1] - buffer),
-                    tf.minimum(image_width_f, bboxes[:, 2] + buffer),
-                    tf.minimum(image_height_f, bboxes[:, 3] + buffer)
-                ], axis=1)
-                return avoidance_zones
+            def process_negative_sampling():
+                # Create avoidance zones around bboxes
+                def create_avoidance_zones():
+                    buffer = self.half_patch
+                    zones = tf.stack([
+                        tf.maximum(0.0, bboxes[:, 0] - buffer),
+                        tf.maximum(0.0, bboxes[:, 1] - buffer),
+                        tf.minimum(image_width_f, bboxes[:, 2] + buffer),
+                        tf.minimum(image_height_f, bboxes[:, 3] + buffer)
+                    ], axis=1)
+                    return zones
 
-            def no_avoidance_zones():
-                return tf.zeros([0, 4], dtype=tf.float32)
+                def no_avoidance_zones():
+                    return tf.zeros([0, 4], dtype=tf.float32)
 
-            avoidance_zones = tf.cond(
-                tf.greater(tf.shape(bboxes)[0], 0),
-                create_avoidance_zones,
-                no_avoidance_zones
-            )
-
-            # Sample random centers and filter out those in avoidance zones
-            max_attempts = num_negative * 5
-            candidate_centers = tf.random.uniform(
-                [max_attempts, 2],
-                [min_center_x, min_center_y],  # Use proper bounds
-                [max_center_x, max_center_y]   # Use proper bounds
-            )
-
-            # Check if candidates are in avoidance zones
-            def check_avoidance():
-                # Vectorized intersection check
-                # candidate_centers: [N, 2], avoidance_zones: [M, 4]
-                # Expand dimensions for broadcasting
-                candidates_expanded = tf.expand_dims(candidate_centers, 1)  # [N, 1, 2]
-                zones_expanded = tf.expand_dims(avoidance_zones, 0)  # [1, M, 4]
-
-                # Check if candidates are inside any zone
-                in_zone = tf.logical_and(
-                    tf.logical_and(
-                        candidates_expanded[:, :, 0] >= zones_expanded[:, :, 0],
-                        candidates_expanded[:, :, 0] <= zones_expanded[:, :, 2]
-                    ),
-                    tf.logical_and(
-                        candidates_expanded[:, :, 1] >= zones_expanded[:, :, 1],
-                        candidates_expanded[:, :, 1] <= zones_expanded[:, :, 3]
-                    )
+                zones = tf.cond(
+                    tf.greater(tf.shape(bboxes)[0], 0),
+                    create_avoidance_zones,
+                    no_avoidance_zones
                 )
 
-                # A candidate is invalid if it's in ANY zone
-                invalid_mask = tf.reduce_any(in_zone, axis=1)
-                valid_mask = tf.logical_not(invalid_mask)
+                # Sample random centers and filter out those in avoidance zones
+                attempts = num_negative * 5
+                candidates = tf.random.uniform(
+                    [attempts, 2],
+                    [min_center_x, min_center_y],
+                    [max_center_x, max_center_y]
+                )
 
-                return valid_mask
+                # Check if candidates are in avoidance zones
+                def check_avoidance():
+                    # Vectorized intersection check
+                    candidates_expanded = tf.expand_dims(candidates, 1)  # [N, 1, 2]
+                    zones_expanded = tf.expand_dims(zones, 0)  # [1, M, 4]
 
-            def all_valid():
-                return tf.ones([max_attempts], dtype=tf.bool)
+                    # Check if candidates are inside any zone
+                    in_zone = tf.logical_and(
+                        tf.logical_and(
+                            candidates_expanded[:, :, 0] >= zones_expanded[:, :, 0],
+                            candidates_expanded[:, :, 0] <= zones_expanded[:, :, 2]
+                        ),
+                        tf.logical_and(
+                            candidates_expanded[:, :, 1] >= zones_expanded[:, :, 1],
+                            candidates_expanded[:, :, 1] <= zones_expanded[:, :, 3]
+                        )
+                    )
 
-            valid_mask = tf.cond(
-                tf.greater(tf.shape(avoidance_zones)[0], 0),
-                check_avoidance,
-                all_valid
+                    # A candidate is invalid if it's in ANY zone
+                    invalid_mask = tf.reduce_any(in_zone, axis=1)
+                    valid_mask_result = tf.logical_not(invalid_mask)
+                    return valid_mask_result
+
+                def all_valid():
+                    return tf.ones([attempts], dtype=tf.bool)
+
+                mask = tf.cond(
+                    tf.greater(tf.shape(zones)[0], 0),
+                    check_avoidance,
+                    all_valid
+                )
+
+                # Select valid candidates
+                valid_centers = tf.boolean_mask(candidates, mask)
+                return valid_centers[:num_negative]
+
+            # Use tf.cond to handle the branching properly
+            return tf.cond(
+                tf.logical_or(
+                    tf.less_equal(max_center_x, min_center_x),
+                    tf.less_equal(max_center_y, min_center_y)
+                ),
+                return_empty_negative,
+                process_negative_sampling
             )
-
-            # Select valid candidates
-            valid_centers = tf.boolean_mask(candidate_centers, valid_mask)
-            return valid_centers[:num_negative]
 
         def no_negative():
             return tf.zeros([0, 2], dtype=tf.float32)
