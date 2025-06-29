@@ -127,25 +127,17 @@ class BalancedSUTDataset(OptimizedSUTDataset):
     def _has_cracks(self, annotation) -> bool:
         """
         Helper method to check if an annotation indicates the presence of cracks.
-
-        Args:
-            annotation: Annotation object or dictionary.
-
-        Returns:
-            True if the annotation indicates cracks are present.
         """
-        # Handle both dict and object-style annotations
-        if hasattr(annotation, 'has_cracks'):
-            return annotation.has_cracks
-        elif hasattr(annotation, 'get'):
-            return annotation.get('has_cracks', False)
-        elif hasattr(annotation, 'detection_boxes'):
-            # Fallback: check if annotation has detection boxes
-            boxes = getattr(annotation, 'detection_boxes', [])
-            return len(boxes) > 0
-        else:
-            # Default to False if we can't determine
-            return False
+        # This is the primary and correct check for the ImageAnnotation object.
+        if hasattr(annotation, 'has_crack'):  # Correct: singular
+            return annotation.has_crack
+
+        # This is a good fallback for when the data might be a dictionary.
+        elif isinstance(annotation, dict):
+            return annotation.get('has_crack', False)  # Correct: singular
+
+        # Fallback to False if we can't determine
+        return False
 
     def analyze_class_distribution(self) -> Dict[str, Union[int, float]]:
         """
