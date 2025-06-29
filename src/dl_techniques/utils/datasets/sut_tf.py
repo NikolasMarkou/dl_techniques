@@ -576,8 +576,6 @@ class TensorFlowNativePatchSampler:
 
         def extract_patches():
             """Extract patches when centers are available."""
-        def extract_patches():
-            """Extract patches when centers are available."""
             # Use tf.map_fn to process patches in parallel instead of Python loops
             def extract_single_patch(i):
                 center = centers_int[i]
@@ -1188,7 +1186,7 @@ class OptimizedSUTDataset:
 
             # Create output tensors
             outputs = tf.data.Dataset.from_tensor_slices({
-                'image': image_patches,
+                'input_images': image_patches,
                 'labels': {
                     'detection': bbox_patches,
                     'segmentation': tf.expand_dims(mask_patches, -1),
@@ -1198,7 +1196,7 @@ class OptimizedSUTDataset:
         else:
             # Empty dataset if no valid patches
             outputs = tf.data.Dataset.from_tensor_slices({
-                'image': tf.zeros([0, self.patch_size, self.patch_size, 3], dtype=tf.float32),
+                'input_images': tf.zeros([0, self.patch_size, self.patch_size, 3], dtype=tf.float32),
                 'labels': {
                     'detection': tf.zeros([0, self.max_boxes_per_patch, 5], dtype=tf.float32),
                     'segmentation': tf.zeros([0, self.patch_size, self.patch_size, 1], dtype=tf.float32),
@@ -1261,140 +1259,3 @@ def create_sut_crack_dataset(data_dir: str, **kwargs) -> tf.data.Dataset:
     return dataset.create_tf_dataset(batch_size=kwargs.get('batch_size', 32))
 
 # ---------------------------------------------------------------------
-
-def main():
-    """Test the optimized dataset loader."""
-    import time
-    import argparse
-    import traceback
-
-    parser = argparse.ArgumentParser(
-        description="Optimized TensorFlow-Native SUT-Crack Dataset Loader Test",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument("data_dir", type=str,
-                       help="Path to the root SUT-Crack dataset directory.")
-    parser.add_argument("--patch-size", type=int, default=256,
-                       help="Size of the square patches to extract.")
-    parser.add_argument("--batch-size", type=int, default=8,
-                       help="Batch size for testing the dataset iterator.")
-    parser.add_argument("--patches-per-image", type=int, default=16,
-                       help="Number of patches to sample per image WITH cracks.")
-    parser.add_argument("--validation-split", type=float, default=0.2,
-                       help="Fraction of data to use for validation.")
-    parser.add_argument("--test-batches", type=int, default=5,
-                       help="Number of batches to test.")
-    parser.add_argument("--cache-dir", type=str, default=None,
-                       help="Directory for caching preprocessed data.")
-
-    args = parser.parse_args()
-
-    logger.info("=" * 80)
-    logger.info("Optimized TensorFlow-Native SUT-Crack Dataset Loader Test")
-    logger.info(f"  Dataset Directory: {args.data_dir}")
-    logger.info(f"  Patch Size: {args.patch_size}x{args.patch_size}")
-    logger.info(f"  Patches per Crack Image: {args.patches_per_image}")
-    logger.info(f"  Validation Split: {args.validation_split}")
-    logger.info("=" * 80)
-
-    try:
-        start_time = time.time()
-
-        # Initialize optimized dataset
-        dataset_loader = OptimizedSUTDataset(
-            data_dir=args.data_dir,
-            patch_size=args.patch_size,
-            patches_per_image=args.patches_per_image,
-            validation_split=args.validation_split,
-            cache_dir=args.cache_dir,
-            enable_augmentation=True
-        )
-
-        load_time = time.time() - start_time
-        logger.info(f"\n✅ Dataset loaded successfully in {load_time:.2f} seconds")
-
-        # Print statistics
-        info = dataset_loader.get_dataset_info()
-        logger.info("\n📊 Dataset Statistics:")
-        for key, value in info.items():
-            logger.info(f"  • {key.replace('_', ' ').title()}: {value}")
-
-        # Test train dataset
-        logger.info(f"\n🚂 Testing optimized training dataset...")
-        train_dataset = dataset_loader.create_tf_dataset(
-            batch_size=args.batch_size,
-            shuffle=True,
-            repeat=False,
-            subset="train",
-            cache=True,
-            num_parallel_calls=tf.data.AUTOTUNE
-        )
-
-        logger.info(f"  Processing {args.test_batches} training batches...")
-        train_batch_count = 0
-        train_start = time.time()
-
-        for batch_data in train_dataset.take(args.test_batches):
-            train_batch_count += 1
-
-            # The pipeline always returns a dict, so no need for tuple check
-            batch_images = batch_data['image']
-            batch_labels = batch_data['labels']
-
-            if train_batch_count == 1:  # Detailed info for first batch
-                logger.info(f"\n  📦 Batch {train_batch_count} Details:")
-                logger.info(f"    Image shape: {batch_images.shape}, dtype: {batch_images.dtype}")
-                logger.info(f"    Image value range: [{tf.reduce_min(batch_images):.3f}, {tf.reduce_max(batch_images):.3f}]")
-
-                for task, labels in batch_labels.items():
-                    logger.info(f"    {task.title()} labels: {labels.shape}")
-                    if task == 'classification':
-                        logger.info(f"    Classification distribution: {tf.math.bincount(labels).numpy()}")
-
-        train_time = time.time() - train_start
-        logger.info(f"  ✅ Processed {train_batch_count} training batches in {train_time:.2f} seconds")
-
-        # Performance metrics
-        if train_batch_count > 0:
-            patches_processed = train_batch_count * args.batch_size
-            patches_per_second = patches_processed / train_time
-            logger.info(f"  ⚡ Processing speed: {patches_per_second:.1f} patches/second")
-
-        # Test validation dataset if available
-        if hasattr(dataset_loader, 'val_annotations'):
-            logger.info(f"\n🧪 Testing validation dataset...")
-            val_dataset = dataset_loader.create_tf_dataset(
-                batch_size=args.batch_size,
-                shuffle=False,
-                repeat=False,
-                subset="validation",
-                cache=True
-            )
-
-            val_batch_count = 0
-            for batch_data in val_dataset.take(2):
-                val_batch_count += 1
-
-            logger.info(f"  ✅ Processed {val_batch_count} validation batches")
-
-        # Performance summary
-        total_time = time.time() - start_time
-        logger.info(f"\n⚡ Performance Summary:")
-        logger.info(f"  • Total test time: {total_time:.2f} seconds")
-        logger.info(f"  • Dataset loading: {load_time:.2f} seconds")
-        logger.info(f"  • Batch processing: {total_time - load_time:.2f} seconds")
-
-        if train_batch_count > 0:
-            speedup_estimate = f"~{patches_per_second/10:.0f}x faster than original" if patches_per_second > 100 else "Significantly faster"
-            logger.info(f"  • Estimated speedup: {speedup_estimate}")
-
-        logger.info(f"\n🎉 All tests completed successfully!")
-        logger.info("🚀 The optimized dataset loader is ready for training!")
-
-    except Exception as e:
-        logger.error(f"\n❌ Test failed: {e}")
-        traceback.print_exc()
-
-
-if __name__ == "__main__":
-    main()

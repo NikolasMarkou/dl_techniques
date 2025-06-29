@@ -300,27 +300,24 @@ def create_model_and_loss(
 # ---------------------------------------------------------------------
 
 def test_model_compilation(model: keras.Model,
-                          train_dataset,
-                          task_config: TaskConfiguration,
-                          run_eagerly: bool = False) -> bool:
-    """
-    Test model compilation with sample data to ensure compatibility.
-
-    Args:
-        model: Compiled Keras model.
-        train_dataset: Training dataset.
-        task_config: Task configuration.
-        run_eagerly: Whether to run in eager mode.
-
-    Returns:
-        True if compilation test succeeds, False otherwise.
-    """
+                           train_dataset,
+                           task_config: TaskConfiguration,
+                           run_eagerly: bool = False) -> bool:
+    """Test model compilation with sample data to ensure compatibility."""
     logger.info("Testing model compilation...")
 
     try:
         # Get a sample batch
         sample_batch = next(iter(train_dataset))
-        sample_x, sample_y = sample_batch
+
+        # Handle the data structure correctly
+        if isinstance(sample_batch, dict):
+            # Data comes as {'input_images': tensor, 'labels': {...}}
+            sample_x = sample_batch['input_images']
+            sample_y = sample_batch['labels']
+        else:
+            # Data comes as tuple (x, y)
+            sample_x, sample_y = sample_batch
 
         # Test forward pass
         predictions = model(sample_x, training=False)
@@ -340,10 +337,8 @@ def test_model_compilation(model: keras.Model,
 
     except Exception as e:
         logger.error(f"✗ Model compilation test failed: {e}")
-
         if not run_eagerly:
             logger.info("Suggestion: Try running with --run-eagerly flag")
-
         return False
 
 # ---------------------------------------------------------------------
