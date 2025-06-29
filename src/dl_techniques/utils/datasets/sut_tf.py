@@ -1106,11 +1106,21 @@ class OptimizedSUTDataset:
 
         # Shuffle if requested
         if shuffle:
-            dataset = dataset.shuffle(
-                buffer_size=min(1000, len(annotations) * self.patches_per_image),
-                seed=self.seed,
-                reshuffle_each_iteration=True
-            )
+            # --- START FIX ---
+            num_annotations = len(annotations)
+            if num_annotations > 0:
+                # Calculate buffer size, ensuring it's at least 1.
+                # This prevents a buffer_size of 0 for small annotation lists.
+                buffer_size = max(1, min(1000, num_annotations * self.patches_per_image))
+                logger.info(f"Shuffling dataset with buffer size: {buffer_size}")
+                dataset = dataset.shuffle(
+                    buffer_size=buffer_size,
+                    seed=self.seed,
+                    reshuffle_each_iteration=True
+                )
+            else:
+                logger.warning("Skipping shuffle for dataset with 0 annotations.")
+            # --- END FIX ---
 
         # Repeat if requested
         if repeat:
