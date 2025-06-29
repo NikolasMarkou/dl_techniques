@@ -1,23 +1,42 @@
 """
-Comprehensive Training Script for YOLOv12 Multi-Task Model - ENHANCED WITH VISUALIZATIONS
+Comprehensive Training Script for YOLOv12 Multi-Task Model - PRODUCTION VERSION WITH ENHANCED VISUALIZATIONS
 
 This script provides complete training pipeline for simultaneous object detection,
 segmentation, and classification on crack detection datasets using patch-based learning.
+
+CRITICAL FIXES APPLIED:
+    - Fixed dictionary key access in visualization callback ('detection' not 'detection_output')
+    - Corrected YOLOv12 detection output decoding with proper distance/classification handling
+    - Fixed validation dataset to use repeat=False for safety
+    - Enhanced error handling and logging throughout visualization pipeline
+    - Added proper IoU calculation for segmentation and accuracy for classification
+
+ENHANCED FEATURES:
+    - Predicted bounding box visualization using reconstructed anchor grid
+    - Robust ground truth label handling for all data types
+    - Simplified and cleaner argument parsing
+    - Comprehensive per-sample metrics (IoU, accuracy, confidence)
 
 Features:
     - Multi-task model training with shared backbone using Named Outputs (Functional API)
     - TaskType enum-based configuration for type safety
     - Native Keras loss components with uncertainty weighting
     - Patch-based data loading for large images
-    - Per-epoch visualization generation for all tasks
-    - Comprehensive evaluation and visualization
+    - Per-epoch visualization generation for all tasks with proper decoding
+    - Comprehensive evaluation and visualization with predicted box drawing
     - Model checkpointing and saving with proper serialization
     - Progress tracking and logging
 
 Usage:
     python train.py --data-dir /path/to/dataset \
                     --tasks detection segmentation classification \
-                    --scale n --epochs 100 --batch-size 16
+                    --scale n --epochs 100 --batch-size 16 \
+                    --visualization-freq 5  # Recommended for long training runs
+
+    # Disable visualizations for fastest training
+    python train.py --data-dir /path/to/dataset \
+                    --tasks detection segmentation \
+                    --no-visualizations
 """
 
 import os
@@ -146,7 +165,35 @@ class PerEpochVisualizationCallback(keras.callbacks.Callback):
 
         logger.info(f"PerEpochVisualizationCallback initialized for tasks: {task_config.get_task_names()}")
 
-    def _prepare_visualization_samples(self):
+    def _get_anchor_grid(self):
+        """
+        Generates a simplified anchor grid for visualization.
+
+        This reconstructs the anchor grid used by YOLOv12 to enable proper
+        bounding box visualization by converting distance predictions to coordinates.
+
+        Returns:
+            numpy.ndarray: Anchor points with shape (num_anchors, 2) containing (x, y) centers.
+        """
+        if hasattr(self, '_anchor_grid_cache'):
+            return self._anchor_grid_cache
+
+        H, W = self.patch_size, self.patch_size
+        strides_config = [8, 16, 32]  # Match YOLOv12 architecture
+        anchor_points = []
+
+        for stride in strides_config:
+            h, w = H // stride, W // stride
+            # Generate anchor centers (offset by 0.5 to center in grid cell)
+            x_coords = (np.arange(w) + 0.5) * stride
+            y_coords = (np.arange(h) + 0.5) * stride
+            y_grid, x_grid = np.meshgrid(y_coords, x_coords, indexing='ij')
+            xy_grid = np.stack([x_grid, y_grid], axis=-1).reshape(-1, 2)
+            anchor_points.append(xy_grid)
+
+        # Cache the result to avoid recomputation
+        self._anchor_grid_cache = np.concatenate(anchor_points, 0)
+        return self._anchor_grid_cache
         """Prepare a fixed set of samples for consistent visualization across epochs."""
         try:
             # Take a batch from validation dataset
@@ -210,7 +257,7 @@ class PerEpochVisualizationCallback(keras.callbacks.Callback):
 
     def _visualize_detection(self, predictions, save_dir: str, epoch: int):
         """
-        Generate detection visualization with bounding boxes.
+        Generate detection visualization with bounding boxes (CORRECTED VERSION).
 
         Args:
             predictions: Model predictions (dict or tensor).
@@ -218,9 +265,9 @@ class PerEpochVisualizationCallback(keras.callbacks.Callback):
             epoch: Current epoch number.
         """
         try:
-            # Extract detection predictions
+            # CRITICAL FIX 1: Use correct dictionary key
             if isinstance(predictions, dict):
-                detection_pred = predictions.get('detection_output')
+                detection_pred = predictions.get('detection')
             else:
                 # Assume single output is detection
                 detection_pred = predictions
@@ -228,15 +275,42 @@ class PerEpochVisualizationCallback(keras.callbacks.Callback):
             if detection_pred is None:
                 return
 
+            # Get ground truth detection targets
+            gt_boxes_normalized = None
+            if isinstance(self.sample_targets, dict):
+                gt_boxes_normalized = self.sample_targets.get('detection')
+
             # Convert to numpy for processing
             images_np = self.sample_images.numpy()
             pred_np = detection_pred.numpy()
+            gt_np = gt_boxes_normalized.numpy() if gt_boxes_normalized is not None else None
+
+            # CRITICAL FIX 2: Proper decoding of YOLOv12 predictions
+            # YOLOv12 output format: (batch, num_anchors, 4 * reg_max + num_classes)
+            reg_max = 16  # Should match the loss function's reg_max
+            num_classes = 1  # Binary classification for crack detection
+
+            # Split the predictions into distance and classification components
+            pred_dist, pred_scores = np.split(pred_np, [4 * reg_max], axis=-1)
+
+            # Reshape distance predictions for processing
+            pred_dist = pred_dist.reshape((pred_np.shape[0], -1, 4, reg_max))
+
+            # Apply softmax to get probabilities and compute weighted distances
+            softmax_dist = np.exp(pred_dist) / (np.sum(np.exp(pred_dist), axis=-1, keepdims=True) + 1e-8)
+            decoded_dist = np.sum(softmax_dist * np.arange(reg_max), axis=-1)
+
+            # Apply sigmoid to classification scores
+            pred_scores_sigmoid = 1 / (1 + np.exp(-pred_scores))
+
+            # Find the anchor with highest confidence for each image
+            best_pred_indices = np.argmax(pred_scores_sigmoid.reshape(pred_np.shape[0], -1), axis=1)
 
             # Create figure
             fig, axes = plt.subplots(2, 4, figsize=(20, 10))
             axes = axes.flatten()
 
-            for i, (img, pred) in enumerate(zip(images_np[:8], pred_np[:8])):
+            for i, img in enumerate(images_np[:8]):
                 if i >= len(axes):
                     break
 
@@ -247,26 +321,109 @@ class PerEpochVisualizationCallback(keras.callbacks.Callback):
                 axes[i].set_title(f'Sample {i+1}', fontsize=10)
                 axes[i].axis('off')
 
-                # Process detection predictions (simplified for visualization)
-                # This assumes pred contains detection scores/boxes
-                if pred.shape[-1] > 4:  # Has classification scores
-                    # Extract confidence scores (last dimension typically contains class scores)
-                    scores = pred[..., -1] if len(pred.shape) > 1 else pred[-1]
-                    max_score = np.max(scores) if hasattr(scores, 'max') else float(scores)
+                # Draw Ground Truth Boxes (if available)
+                if gt_np is not None and i < len(gt_np):
+                    for gt_box in gt_np[i]:
+                        if gt_box.sum() == 0:  # Skip padding/empty boxes
+                            continue
+                        # Ground truth format: [class, x1, y1, x2, y2] (normalized)
+                        if len(gt_box) >= 5:
+                            _, x1, y1, x2, y2 = gt_box[:5]
+                        else:
+                            continue
 
-                    # Add confidence as text
-                    axes[i].text(10, 30, f'Max Conf: {max_score:.3f}',
-                               bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7),
-                               fontsize=8)
+                        # Convert from normalized to pixel coordinates
+                        x1_px, y1_px = x1 * self.patch_size, y1 * self.patch_size
+                        x2_px, y2_px = x2 * self.patch_size, y2 * self.patch_size
+
+                        # Draw ground truth rectangle
+                        rect = patches.Rectangle(
+                            (x1_px, y1_px), x2_px - x1_px, y2_px - y1_px,
+                            linewidth=2, edgecolor='green', facecolor='none',
+                            linestyle='-', alpha=0.8
+                        )
+                        axes[i].add_patch(rect)
+
+                # Show model confidence (max confidence across all anchors)
+                max_confidence = np.max(pred_scores_sigmoid[i])
+                confidence_text = f'Max Conf: {max_confidence:.3f}'
+
+                # Add confidence indicator color
+                color = 'red' if max_confidence > 0.5 else 'orange'
+
+                # ENHANCEMENT: Draw predicted bounding box using anchor grid
+                try:
+                    # Get the anchor grid for converting distance predictions to boxes
+                    anchor_grid = self._get_anchor_grid()
+
+                    # Find the index of the best anchor
+                    best_anchor_flat_index = best_pred_indices[i]
+
+                    # Get the decoded distance for the best anchor (if within bounds)
+                    if best_anchor_flat_index < len(decoded_dist[i]) and best_anchor_flat_index < len(anchor_grid):
+                        best_dist = decoded_dist[i, best_anchor_flat_index, :]
+                        anchor_center = anchor_grid[best_anchor_flat_index]
+
+                        # Decode the bounding box coordinates in pixel space
+                        px, py = anchor_center
+                        l, t, r, b = best_dist
+                        pred_x1 = max(0, px - l)
+                        pred_y1 = max(0, py - t)
+                        pred_x2 = min(self.patch_size, px + r)
+                        pred_y2 = min(self.patch_size, py + b)
+
+                        # Only draw box if it's reasonable sized
+                        if pred_x2 > pred_x1 and pred_y2 > pred_y1 and (pred_x2 - pred_x1) * (pred_y2 - pred_y1) > 100:
+                            # Draw the predicted bounding box
+                            pred_rect = patches.Rectangle(
+                                (pred_x1, pred_y1), pred_x2 - pred_x1, pred_y2 - pred_y1,
+                                linewidth=2, edgecolor='red', facecolor='none',
+                                linestyle='--', alpha=0.9
+                            )
+                            axes[i].add_patch(pred_rect)
+
+                            # Place confidence text near the predicted box
+                            axes[i].text(pred_x1, max(0, pred_y1 - 5), f'Pred: {max_confidence:.3f}',
+                                       bbox=dict(boxstyle="round,pad=0.2", facecolor=color, alpha=0.8),
+                                       color='white', fontsize=8, fontweight='bold')
+                        else:
+                            # Fallback to corner text if box is invalid
+                            axes[i].text(5, 20, confidence_text,
+                                       bbox=dict(boxstyle="round,pad=0.3", facecolor=color, alpha=0.7),
+                                       color='white', fontsize=9, fontweight='bold')
+                    else:
+                        # Fallback if indices out of bounds
+                        axes[i].text(5, 20, confidence_text,
+                                   bbox=dict(boxstyle="round,pad=0.3", facecolor=color, alpha=0.7),
+                                   color='white', fontsize=9, fontweight='bold')
+                except Exception:
+                    # Fallback to simple confidence display if box drawing fails
+                    axes[i].text(5, 20, confidence_text,
+                               bbox=dict(boxstyle="round,pad=0.3", facecolor=color, alpha=0.7),
+                               color='white', fontsize=9, fontweight='bold')
+
+            # Add legend
+            legend_elements = []
+            if gt_np is not None:
+                legend_elements.append(patches.Patch(color='green', label='Ground Truth', linestyle='-'))
+            legend_elements.extend([
+                patches.Patch(color='red', label='Predicted Box', linestyle='--'),
+                patches.Patch(color='red', label='High Confidence (>0.5)', alpha=0.7),
+                patches.Patch(color='orange', label='Low Confidence (≤0.5)', alpha=0.7)
+            ])
+
+            if legend_elements:
+                fig.legend(handles=legend_elements, loc='upper right', fontsize=10)
 
             plt.suptitle(f'Detection Results - Epoch {epoch}', fontsize=14, fontweight='bold')
-            plt.tight_layout()
+            plt.tight_layout(rect=[0, 0, 1, 0.96])
             plt.savefig(os.path.join(save_dir, 'detection_results.png'),
                        dpi=150, bbox_inches='tight')
             plt.close()
 
         except Exception as e:
-            logger.error(f"Failed to visualize detection: {e}")
+            import traceback
+            logger.error(f"Failed to visualize detection: {e}\n{traceback.format_exc()}")
 
     def _visualize_segmentation(self, predictions, save_dir: str, epoch: int):
         """
@@ -278,9 +435,9 @@ class PerEpochVisualizationCallback(keras.callbacks.Callback):
             epoch: Current epoch number.
         """
         try:
-            # Extract segmentation predictions
+            # CRITICAL FIX: Use correct dictionary key
             if isinstance(predictions, dict):
-                seg_pred = predictions.get('segmentation_output')
+                seg_pred = predictions.get('segmentation')
             else:
                 return  # Can't determine segmentation output
 
@@ -290,7 +447,7 @@ class PerEpochVisualizationCallback(keras.callbacks.Callback):
             # Get ground truth segmentation if available
             seg_gt = None
             if isinstance(self.sample_targets, dict):
-                seg_gt = self.sample_targets.get('segmentation_output')
+                seg_gt = self.sample_targets.get('segmentation')
 
             # Convert to numpy
             images_np = self.sample_images.numpy()
@@ -299,40 +456,56 @@ class PerEpochVisualizationCallback(keras.callbacks.Callback):
 
             # Create figure
             n_cols = 3 if gt_np is not None else 2
-            fig, axes = plt.subplots(4, n_cols * 2, figsize=(20, 16))
+            fig, axes = plt.subplots(4, n_cols, figsize=(15, 16))
 
             for i in range(min(4, len(images_np))):
-                row_start = i * n_cols
-
                 # Original image
                 img_display = ((images_np[i] - images_np[i].min()) /
                               (images_np[i].max() - images_np[i].min() + 1e-8) * 255).astype(np.uint8)
 
                 axes[i, 0].imshow(img_display)
-                axes[i, 0].set_title(f'Input {i+1}', fontsize=10)
+                axes[i, 0].set_title(f'Input {i+1}', fontsize=12)
                 axes[i, 0].axis('off')
 
                 # Predicted mask
                 pred_mask = pred_np[i, ..., 0] if len(pred_np.shape) == 4 else pred_np[i]
-                axes[i, 1].imshow(pred_mask, cmap='hot', vmin=0, vmax=1)
-                axes[i, 1].set_title(f'Predicted Mask {i+1}', fontsize=10)
+                im_pred = axes[i, 1].imshow(pred_mask, cmap='hot', vmin=0, vmax=1)
+                axes[i, 1].set_title(f'Predicted Mask {i+1}', fontsize=12)
                 axes[i, 1].axis('off')
+
+                # Add colorbar for predicted mask
+                plt.colorbar(im_pred, ax=axes[i, 1], shrink=0.8)
 
                 # Ground truth mask (if available)
                 if gt_np is not None and i < len(gt_np):
                     gt_mask = gt_np[i, ..., 0] if len(gt_np.shape) == 4 else gt_np[i]
-                    axes[i, 2].imshow(gt_mask, cmap='hot', vmin=0, vmax=1)
-                    axes[i, 2].set_title(f'Ground Truth {i+1}', fontsize=10)
+                    im_gt = axes[i, 2].imshow(gt_mask, cmap='hot', vmin=0, vmax=1)
+                    axes[i, 2].set_title(f'Ground Truth {i+1}', fontsize=12)
                     axes[i, 2].axis('off')
 
+                    # Add colorbar for ground truth mask
+                    plt.colorbar(im_gt, ax=axes[i, 2], shrink=0.8)
+
+                    # Calculate and display IoU if both masks exist
+                    pred_binary = (pred_mask > 0.5).astype(float)
+                    gt_binary = (gt_mask > 0.5).astype(float)
+                    intersection = np.sum(pred_binary * gt_binary)
+                    union = np.sum(pred_binary) + np.sum(gt_binary) - intersection
+                    iou = intersection / (union + 1e-8)
+
+                    axes[i, 1].text(5, pred_mask.shape[0] - 20, f'IoU: {iou:.3f}',
+                                   bbox=dict(boxstyle="round,pad=0.3", facecolor="cyan", alpha=0.8),
+                                   fontsize=10, fontweight='bold')
+
             plt.suptitle(f'Segmentation Results - Epoch {epoch}', fontsize=14, fontweight='bold')
-            plt.tight_layout()
+            plt.tight_layout(rect=[0, 0, 1, 0.96])
             plt.savefig(os.path.join(save_dir, 'segmentation_results.png'),
                        dpi=150, bbox_inches='tight')
             plt.close()
 
         except Exception as e:
-            logger.error(f"Failed to visualize segmentation: {e}")
+            import traceback
+            logger.error(f"Failed to visualize segmentation: {e}\n{traceback.format_exc()}")
 
     def _visualize_classification(self, predictions, save_dir: str, epoch: int):
         """
@@ -344,9 +517,9 @@ class PerEpochVisualizationCallback(keras.callbacks.Callback):
             epoch: Current epoch number.
         """
         try:
-            # Extract classification predictions
+            # CRITICAL FIX: Use correct dictionary key
             if isinstance(predictions, dict):
-                cls_pred = predictions.get('classification_output')
+                cls_pred = predictions.get('classification')
             else:
                 return  # Can't determine classification output
 
@@ -356,7 +529,7 @@ class PerEpochVisualizationCallback(keras.callbacks.Callback):
             # Get ground truth labels if available
             cls_gt = None
             if isinstance(self.sample_targets, dict):
-                cls_gt = self.sample_targets.get('classification_output')
+                cls_gt = self.sample_targets.get('classification')
 
             # Convert to numpy
             images_np = self.sample_images.numpy()
@@ -366,6 +539,9 @@ class PerEpochVisualizationCallback(keras.callbacks.Callback):
             # Create figure
             fig, axes = plt.subplots(2, 4, figsize=(20, 10))
             axes = axes.flatten()
+
+            correct_predictions = 0
+            total_predictions = 0
 
             for i, (img, pred_prob) in enumerate(zip(images_np[:8], pred_probs[:8])):
                 if i >= len(axes):
@@ -377,35 +553,94 @@ class PerEpochVisualizationCallback(keras.callbacks.Callback):
                 axes[i].imshow(img_display)
 
                 # Extract probability (assuming binary classification)
-                prob = pred_prob[0] if len(pred_prob.shape) > 0 else pred_prob
+                prob = pred_prob[0] if len(pred_prob.shape) > 0 and pred_prob.shape[0] > 0 else float(pred_prob)
                 pred_class = "Crack" if prob > 0.5 else "No Crack"
                 confidence = prob if prob > 0.5 else 1 - prob
 
-                # Color based on prediction
-                color = 'red' if pred_class == "Crack" else 'green'
+                # Determine colors based on prediction and ground truth
+                pred_color = 'red' if pred_class == "Crack" else 'green'
 
-                # Add ground truth if available
+                # Build title with prediction info
                 title = f'Sample {i+1}\nPred: {pred_class} ({confidence:.3f})'
+
+                # Add ground truth if available and calculate accuracy
                 if gt_labels is not None and i < len(gt_labels):
-                    gt_class = "Crack" if gt_labels[i] > 0.5 else "No Crack"
+                    # ROBUSTNESS FIX: Handle both scalar and array ground truth labels
+                    gt_label_i = gt_labels[i]
+                    try:
+                        # Handle shape (1,) arrays, (,) scalars, or higher dimensional arrays
+                        if hasattr(gt_label_i, 'shape') and gt_label_i.shape:
+                            gt_prob = float(gt_label_i.flat[0])  # Get first element safely
+                        else:
+                            gt_prob = float(gt_label_i)  # Handle scalar case
+                    except (IndexError, TypeError):
+                        # Fallback for unexpected formats
+                        gt_prob = float(gt_label_i) if np.isscalar(gt_label_i) else float(gt_label_i[0])
+
+                    gt_class = "Crack" if gt_prob > 0.5 else "No Crack"
                     title += f'\nGT: {gt_class}'
 
-                axes[i].set_title(title, fontsize=9, color=color)
+                    # Check if prediction is correct
+                    pred_correct = (prob > 0.5) == (gt_prob > 0.5)
+                    if pred_correct:
+                        correct_predictions += 1
+                        border_color = 'lime'  # Bright green for correct
+                    else:
+                        border_color = 'red'   # Red for incorrect
+
+                    # Add colored border to indicate correctness
+                    for spine in axes[i].spines.values():
+                        spine.set_edgecolor(border_color)
+                        spine.set_linewidth(3)
+
+                    total_predictions += 1
+
+                axes[i].set_title(title, fontsize=9, color=pred_color, fontweight='bold')
                 axes[i].axis('off')
 
-                # Add confidence bar
-                axes[i].add_patch(patches.Rectangle((10, img.shape[0] - 30),
-                                                  confidence * 100, 10,
-                                                  facecolor=color, alpha=0.7))
+                # Add confidence bar at bottom of image
+                bar_width = confidence * (img.shape[1] - 20)
+                bar_x = 10
+                bar_y = img.shape[0] - 25
+
+                axes[i].add_patch(patches.Rectangle(
+                    (bar_x, bar_y), bar_width, 15,
+                    facecolor=pred_color, alpha=0.7, edgecolor='black'
+                ))
+
+                # Add confidence text
+                axes[i].text(bar_x + bar_width/2, bar_y + 7.5, f'{confidence:.2f}',
+                           ha='center', va='center', fontsize=8, fontweight='bold', color='white')
+
+            # Calculate and display overall accuracy if ground truth is available
+            if total_predictions > 0:
+                accuracy = correct_predictions / total_predictions
+                accuracy_text = f'Batch Accuracy: {accuracy:.2f} ({correct_predictions}/{total_predictions})'
+                plt.figtext(0.5, 0.02, accuracy_text, ha='center', fontsize=12,
+                           bbox=dict(boxstyle="round,pad=0.5", facecolor="lightblue", alpha=0.8))
+
+            # Add legend
+            legend_elements = [
+                patches.Patch(color='red', label='Crack Prediction'),
+                patches.Patch(color='green', label='No Crack Prediction'),
+            ]
+            if gt_labels is not None:
+                legend_elements.extend([
+                    patches.Patch(color='lime', label='Correct Prediction'),
+                    patches.Patch(color='red', label='Incorrect Prediction', linestyle='--')
+                ])
+
+            fig.legend(handles=legend_elements, loc='upper right', fontsize=10)
 
             plt.suptitle(f'Classification Results - Epoch {epoch}', fontsize=14, fontweight='bold')
-            plt.tight_layout()
+            plt.tight_layout(rect=[0, 0, 1, 0.95])
             plt.savefig(os.path.join(save_dir, 'classification_results.png'),
                        dpi=150, bbox_inches='tight')
             plt.close()
 
         except Exception as e:
-            logger.error(f"Failed to visualize classification: {e}")
+            import traceback
+            logger.error(f"Failed to visualize classification: {e}\n{traceback.format_exc()}")
 
 # ---------------------------------------------------------------------
 
@@ -673,7 +908,7 @@ def create_callbacks(
     loss_fn: keras.losses.Loss,
     task_config: TaskConfiguration,
     val_dataset,
-    validation_steps: int,
+    validation_steps: Optional[int],
     patch_size: int = 256,
     monitor: str = 'val_loss',
     patience: int = 20,
@@ -803,10 +1038,11 @@ def train_model(args: argparse.Namespace) -> None:
         repeat=True
     )
 
+    # PERFORMANCE FIX: Remove repeat=True from validation dataset for safety
     val_tf_dataset = val_dataset.create_tf_dataset(
         batch_size=args.batch_size,
         shuffle=False,
-        repeat=True
+        repeat=False  # Changed to False for safety
     )
 
     # Calculate steps
@@ -892,7 +1128,7 @@ def train_model(args: argparse.Namespace) -> None:
         loss_fn=loss_fn,
         task_config=task_config,
         val_dataset=val_tf_dataset,
-        validation_steps=validation_steps,
+        validation_steps=None,  # Let Keras infer from dataset
         patch_size=args.patch_size,
         monitor='val_loss',
         patience=args.patience,
@@ -908,7 +1144,8 @@ def train_model(args: argparse.Namespace) -> None:
             validation_data=val_tf_dataset,
             epochs=args.epochs,
             steps_per_epoch=steps_per_epoch,
-            validation_steps=validation_steps,
+            # PERFORMANCE FIX: Let Keras infer validation_steps from dataset size
+            validation_steps=None,  # Keras will iterate through entire validation set
             callbacks=callbacks,
             verbose=1
         )
@@ -1330,10 +1567,8 @@ def main():
                        help='Weight for classification loss')
 
     # Visualization arguments
-    parser.add_argument('--enable-visualizations', action='store_true', default=True,
-                       help='Enable per-epoch visualizations')
-    parser.add_argument('--disable-visualizations', action='store_true',
-                       help='Disable per-epoch visualizations')
+    parser.add_argument('--no-visualizations', action='store_true',
+                       help='Disable per-epoch visualizations (enabled by default)')
     parser.add_argument('--visualization-freq', type=int, default=1,
                        help='Frequency of visualization generation (every N epochs)')
 
@@ -1349,9 +1584,8 @@ def main():
     args = parser.parse_args()
     args.evaluate = not args.no_evaluate
 
-    # Handle visualization flag logic
-    if args.disable_visualizations:
-        args.enable_visualizations = False
+    # CLEANER FLAG LOGIC: Set visualization flag based on single argument
+    args.enable_visualizations = not args.no_visualizations
 
     # Validate arguments
     if not os.path.exists(args.data_dir):
