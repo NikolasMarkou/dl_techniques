@@ -195,7 +195,11 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
             return loss_cls, loss_box, loss_dfl
 
         loss_cls, loss_box, loss_dfl = ops.cond(ops.sum(ops.cast(mask_gt, "float32")) > 0, compute_losses, lambda: (0., 0., 0.))
-        return self.box_weight * loss_box + self.cls_weight * loss_cls + self.dfl_weight * loss_dfl
+        # Normalize the total loss by the number of ground truths to balance its scale
+        # We add a small epsilon to avoid division by zero in batches with no GTs.
+        num_gts = ops.sum(ops.cast(mask_gt, "float32"))
+        total_loss = self.box_weight * loss_box + self.cls_weight * loss_cls + self.dfl_weight * loss_dfl
+        return total_loss / (num_gts + 1e-8)
 
     def get_config(self) -> Dict[str, Any]:
         """Returns the serializable config of the loss."""
