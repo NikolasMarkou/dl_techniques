@@ -305,7 +305,8 @@ class TensorFlowNativePatchSampler:
             global_y_end = tf.minimum(global_y_end, max_center_y)
 
             def create_grid():
-                # Generate global grid
+                # Generate global grid - this approach balances vectorization with memory usage
+                # Alternative: per-bbox grids with tf.map_fn, but current approach is more readable
                 x_coords = tf.range(global_x_start, global_x_end, grid_spacing)
                 y_coords = tf.range(global_y_start, global_y_end, grid_spacing)
 
@@ -316,7 +317,7 @@ class TensorFlowNativePatchSampler:
                 # Filter points that are within any bbox region
                 valid_mask = tf.zeros([tf.shape(all_grid_points)[0]], dtype=tf.bool)
 
-                # Check each bbox
+                # Check each bbox - this loop is necessary for complex region filtering
                 for i in tf.range(tf.shape(bboxes)[0]):
                     # Check if points are within this bbox's expanded region
                     in_bbox = tf.logical_and(
@@ -335,7 +336,7 @@ class TensorFlowNativePatchSampler:
                 valid_centers = tf.boolean_mask(all_grid_points, valid_mask)
                 return valid_centers
 
-            # Check if valid region exists
+            # Check if valid region exists after bounds enforcement
             return tf.cond(
                 tf.logical_or(
                     tf.greater_equal(global_x_start, global_x_end),
@@ -345,12 +346,14 @@ class TensorFlowNativePatchSampler:
                 create_grid
             )
 
-        # Handle all the edge cases with tf.cond
+        # Handle all edge cases with tf.cond for proper graph execution
+        # Note: We use tf.cond instead of Python if statements because this function
+        # is decorated with @tf.function, requiring TensorFlow control flow operations
         return tf.cond(
-            tf.equal(tf.shape(bboxes)[0], 0),  # No bboxes
+            tf.equal(tf.shape(bboxes)[0], 0),  # No bboxes case
             return_empty,
             lambda: tf.cond(
-                tf.logical_or(  # Image too small
+                tf.logical_or(  # Handle images too small for patches
                     tf.less_equal(max_center_x, min_center_x),
                     tf.less_equal(max_center_y, min_center_y)
                 ),
@@ -1128,16 +1131,18 @@ class OptimizedSUTDataset:
         image = self.sampler._load_and_decode_image(annotation_dict['image_path'])
         mask = self.sampler._load_and_decode_mask(annotation_dict['mask_path'])
 
-        # Handle mask orientation mismatch
+        # Handle mask orientation mismatch - check for 90-degree rotation
         image_shape = tf.shape(image)
         mask_shape = tf.shape(mask)
 
-        # Check if mask needs to be transposed
+        # Check if mask is rotated 90 degrees (width and height swapped)
+        is_rotated = tf.logical_and(
+            tf.equal(image_shape[0], mask_shape[1]),
+            tf.equal(image_shape[1], mask_shape[0])
+        )
+
         mask = tf.cond(
-            tf.logical_and(
-                tf.not_equal(image_shape[0], mask_shape[0]),
-                tf.equal(image_shape[0], mask_shape[1])
-            ),
+            is_rotated,
             lambda: tf.transpose(mask),
             lambda: mask
         )
@@ -1332,22 +1337,19 @@ def main():
         for batch_data in train_dataset.take(args.test_batches):
             train_batch_count += 1
 
-            if isinstance(batch_data, tuple):
-                batch_images, batch_labels = batch_data
-            else:
-                batch_images = batch_data['image']
-                batch_labels = batch_data['labels']
+            # The pipeline always returns a dict, so no need for tuple check
+            batch_images = batch_data['image']
+            batch_labels = batch_data['labels']
 
             if train_batch_count == 1:  # Detailed info for first batch
                 logger.info(f"\n  📦 Batch {train_batch_count} Details:")
                 logger.info(f"    Image shape: {batch_images.shape}, dtype: {batch_images.dtype}")
                 logger.info(f"    Image value range: [{tf.reduce_min(batch_images):.3f}, {tf.reduce_max(batch_images):.3f}]")
 
-                if isinstance(batch_labels, dict):
-                    for task, labels in batch_labels.items():
-                        logger.info(f"    {task.title()} labels: {labels.shape}")
-                        if task == 'classification':
-                            logger.info(f"    Classification distribution: {tf.math.bincount(labels).numpy()}")
+                for task, labels in batch_labels.items():
+                    logger.info(f"    {task.title()} labels: {labels.shape}")
+                    if task == 'classification':
+                        logger.info(f"    Classification distribution: {tf.math.bincount(labels).numpy()}")
 
         train_time = time.time() - train_start
         logger.info(f"  ✅ Processed {train_batch_count} training batches in {train_time:.2f} seconds")
