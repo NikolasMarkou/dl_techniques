@@ -76,15 +76,6 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
     This class is not intended to be used directly but is called by
     `YOLOv12MultiTaskLoss`. It combines a Task-Aligned Assigner, CIoU loss,
     Distribution Focal Loss (DFL), and Binary Cross-Entropy.
-
-    Args:
-        num_classes: Number of object classes.
-        input_shape: Model input shape (height, width) for anchor generation.
-        reg_max: Maximum value for DFL regression.
-        box_weight: Weight for bounding box loss component.
-        cls_weight: Weight for classification loss component.
-        dfl_weight: Weight for DFL loss component.
-        name: Loss function name.
     """
 
     def __init__(
@@ -100,7 +91,6 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
             name: str = "yolov12_detection_loss_internal",
             **kwargs
     ):
-        # We always use 'none' reduction internally, as the outer loss handles it.
         super().__init__(name=name, reduction="none", **kwargs)
         self.num_classes = num_classes
         self.input_shape = input_shape
@@ -117,9 +107,8 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
     def _make_anchors(self, grid_cell_offset: float = 0.5) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Generates anchor points and strides for all feature map levels."""
         H, W = self.input_shape
-        strides_config = [8, 16, 32]  # Strides for P3, P4, P5
+        strides_config = [8, 16, 32]
         anchor_points, stride_tensor = [], []
-
         for stride in strides_config:
             h, w = H // stride, W // stride
             x_coords = ops.arange(w, dtype="float32") + grid_cell_offset
@@ -129,7 +118,6 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
             xy_grid = ops.reshape(xy_grid, (-1, 2))
             anchor_points.append(xy_grid)
             stride_tensor.append(ops.full((h * w, 1), stride, dtype="float32"))
-
         return ops.concatenate(anchor_points, 0), ops.concatenate(stride_tensor, 0)
 
     def _task_aligned_assigner(self, pred_scores, pred_bboxes, anchors, gt_labels, gt_bboxes, mask_gt):
@@ -138,19 +126,14 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         anchors_exp = ops.reshape(anchors, (1, 1, num_anchors, 2))
         gt_bboxes_exp = ops.expand_dims(gt_bboxes, 2)
         gt_x1y1, gt_x2y2 = ops.split(gt_bboxes_exp, 2, axis=-1)
-
-        # Check if anchor centers are inside GT boxes
-        is_in_gt = ops.all(anchors_exp >= gt_x1y1, axis=-1) & ops.all(anchors_exp <= gt_x2y2, axis=-1)
+        is_in_gt = ops.all(anchors_exp >= gt_x1y1, -1) & ops.all(anchors_exp <= gt_x2y2, -1)
         ious = bbox_iou(ops.expand_dims(pred_bboxes, 1), gt_bboxes_exp, xywh=False, CIoU=True)
-
         gt_labels_int = ops.cast(ops.squeeze(gt_labels, -1), "int32")
         gt_labels_one_hot = ops.one_hot(gt_labels_int, self.num_classes)
-        cls_scores = ops.sum(ops.expand_dims(gt_labels_one_hot, 2) * ops.nn.sigmoid(ops.expand_dims(pred_scores, 1)), axis=-1)
-
+        cls_scores = ops.sum(ops.expand_dims(gt_labels_one_hot, 2) * ops.nn.sigmoid(ops.expand_dims(pred_scores, 1)), -1)
         align_metric = ops.power(cls_scores, self.assigner_alpha) * ops.power(ious, self.assigner_beta)
         mask_gt_broadcast = ops.cast(ops.expand_dims(ops.squeeze(mask_gt, -1), -1), "bool")
         align_metric = ops.where(is_in_gt & mask_gt_broadcast, align_metric, 0.)
-
         target_gt_idx = ops.argmax(align_metric, axis=1)
         fg_mask = ops.max(align_metric, axis=1) > 0
         return target_gt_idx, fg_mask
@@ -160,10 +143,8 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         batch_size, num_anchors, max_gt = ops.shape(target_gt_idx)[0], ops.shape(target_gt_idx)[1], ops.shape(gt_labels)[1]
         batch_indices = ops.tile(ops.expand_dims(ops.arange(batch_size), 1), [1, num_anchors])
         flat_indices = ops.reshape(batch_indices * max_gt + target_gt_idx, [-1])
-
         target_labels = ops.reshape(ops.take(ops.reshape(gt_labels, [-1, 1]), flat_indices, 0), [batch_size, num_anchors, 1])
         target_bboxes = ops.reshape(ops.take(ops.reshape(gt_bboxes, [-1, 4]), flat_indices, 0), [batch_size, num_anchors, 4])
-
         target_labels_int = ops.cast(ops.squeeze(target_labels, -1), "int32")
         target_scores = ops.one_hot(target_labels_int, self.num_classes) * ops.expand_dims(ops.cast(fg_mask, "float32"), -1)
         return target_bboxes, target_scores
@@ -171,56 +152,50 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
     def _dist_to_bbox(self, distance, anchors):
         """Converts distance predictions to bounding boxes."""
         lt, rb = ops.split(distance, 2, axis=-1)
-        return ops.concatenate([anchors - lt, anchors + rb], axis=-1)
+        return ops.concatenate([anchors - lt, anchors + rb], -1)
 
     def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
-        # Decode predictions
-        pred_dist, pred_scores = ops.split(y_pred, [4 * self.reg_max], axis=-1)
+        pred_dist, pred_scores = ops.split(y_pred, [4 * self.reg_max], -1)
         pred_dist_reshaped = ops.reshape(pred_dist, [ops.shape(y_pred)[0], -1, 4, self.reg_max])
-        pred_dist_mean = ops.sum(ops.nn.softmax(pred_dist_reshaped, axis=-1) * ops.arange(self.reg_max, dtype="float32"), axis=-1)
+        pred_dist_mean = ops.sum(ops.nn.softmax(pred_dist_reshaped, -1) * ops.arange(self.reg_max, dtype="float32"), -1)
         pred_bboxes = self._dist_to_bbox(pred_dist_mean, self.anchors * self.strides)
-
-        # Prepare ground truth
         gt_labels, gt_bboxes = y_true[..., :1], y_true[..., 1:]
-        mask_gt = ops.sum(gt_bboxes, axis=-1, keepdims=True) > 0
+        mask_gt = ops.sum(gt_bboxes, -1, keepdims=True) > 0
 
         def compute_losses():
             target_gt_idx, fg_mask = self._task_aligned_assigner(pred_scores, pred_bboxes, self.anchors * self.strides, gt_labels, gt_bboxes, mask_gt)
             target_bboxes, target_scores = self._get_targets(gt_labels, gt_bboxes, target_gt_idx, fg_mask)
-
-            # Classification loss
             target_scores_sum = ops.maximum(ops.sum(target_scores), 1.0)
             loss_cls = ops.sum(self.bce(target_scores, pred_scores)) / target_scores_sum
 
-            # Bbox and DFL losses for foreground samples
             def compute_box_dfl_losses():
                 flat_fg_mask = ops.reshape(fg_mask, [-1])
                 pred_bboxes_pos = ops.reshape(pred_bboxes, [-1, 4])[flat_fg_mask]
                 target_bboxes_pos = ops.reshape(target_bboxes, [-1, 4])[flat_fg_mask]
                 target_scores_pos = ops.reshape(target_scores, [-1, self.num_classes])[flat_fg_mask]
-
-                # Bbox loss (CIoU)
                 iou = bbox_iou(pred_bboxes_pos, target_bboxes_pos, xywh=False, CIoU=True)
                 loss_box = ops.sum((1.0 - iou) * ops.sum(target_scores_pos, -1)) / target_scores_sum
 
-                # DFL loss
+                # *** FIX: Correctly shape inputs for DFL loss calculation ***
                 anchor_indices = ops.tile(ops.arange(ops.shape(pred_bboxes)[1]), [ops.shape(pred_bboxes)[0]])
                 anchors_pos = ops.take(self.anchors * self.strides, anchor_indices[flat_fg_mask], 0)
-                target_ltrb = ops.concatenate([anchors_pos - target_bboxes_pos[..., :2], target_bboxes_pos[..., 2:] - anchors_pos], axis=-1)
+                target_ltrb = ops.concatenate([anchors_pos - target_bboxes_pos[..., :2], target_bboxes_pos[..., 2:] - anchors_pos], -1)
                 target_ltrb = ops.clip(target_ltrb, 0, self.reg_max - 1.01)
+
+                # Reshape prediction and target tensors to be compatible with sparse_categorical_crossentropy
+                # target must be 1D, pred must be 2D
                 pred_dist_pos = ops.reshape(pred_dist_reshaped, [-1, 4, self.reg_max])[flat_fg_mask]
-                loss_dfl = ops.sum(keras.losses.sparse_categorical_crossentropy(ops.cast(target_ltrb, "int32"), ops.reshape(pred_dist_pos, [-1, self.reg_max]), from_logits=True)) / target_scores_sum
+                target_ltrb_flat = ops.reshape(target_ltrb, [-1]) # Shape: (num_pos_samples * 4,)
+                pred_dist_flat = ops.reshape(pred_dist_pos, [-1, self.reg_max]) # Shape: (num_pos_samples * 4, reg_max)
+
+                loss_dfl = ops.sum(keras.losses.sparse_categorical_crossentropy(ops.cast(target_ltrb_flat, "int32"), pred_dist_flat, from_logits=True)) / target_scores_sum
                 return loss_box, loss_dfl
 
             loss_box, loss_dfl = ops.cond(ops.sum(ops.cast(fg_mask, "float32")) > 0, compute_box_dfl_losses, lambda: (0., 0.))
             return loss_cls, loss_box, loss_dfl
 
-        # Return zero loss if no ground truths are present in the batch, avoids NaNs
         loss_cls, loss_box, loss_dfl = ops.cond(ops.sum(ops.cast(mask_gt, "float32")) > 0, compute_losses, lambda: (0., 0., 0.))
-
-        # Return the weighted sum of the loss components
-        total_loss = self.box_weight * loss_box + self.cls_weight * loss_cls + self.dfl_weight * loss_dfl
-        return total_loss
+        return self.box_weight * loss_box + self.cls_weight * loss_cls + self.dfl_weight * loss_dfl
 
     def get_config(self) -> Dict[str, Any]:
         """Returns the serializable config of the loss."""
@@ -258,6 +233,9 @@ class ClassificationFocalLoss(keras.losses.Loss):
         self.focal_loss = keras.losses.BinaryFocalCrossentropy(alpha=alpha, gamma=gamma, from_logits=from_logits, reduction="none")
 
     def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
+        # Ensure y_true has the same shape as y_pred if it's a scalar target
+        if len(y_true.shape) == 1:
+            y_true = ops.expand_dims(y_true, -1)
         return self.focal_loss(y_true, y_pred)
 
     def get_config(self) -> Dict[str, Any]:
@@ -281,25 +259,19 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
 
     def __init__(
         self,
-        # Task configuration
-        task_config: Union[TaskConfiguration, List[str], List[TaskType]],
+        tasks: Union[TaskConfiguration, List[str], List[TaskType]],
         num_classes: int,
         input_shape: Tuple[int, int],
-        # Loss weighting
         use_uncertainty_weighting: bool = False,
         detection_weight: float = 1.0,
         segmentation_weight: float = 1.0,
         classification_weight: float = 1.0,
-        # Sub-loss parameters
         reg_max: int = 16,
-        # Base parameters
         name: str = "yolov12_multitask_loss",
         **kwargs
     ):
         super().__init__(name=name, **kwargs)
-
-        # Store all configuration parameters for serialization
-        self.task_config = parse_task_list(task_config)
+        self.task_config = parse_task_list(tasks)
         self.num_classes = num_classes
         self.input_shape = input_shape
         self.use_uncertainty_weighting = use_uncertainty_weighting
@@ -308,25 +280,15 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         self.classification_weight = classification_weight
         self.reg_max = reg_max
         self._internal_losses = {}
-
-        # Build internal loss functions based on the task configuration
         self._build_loss_functions()
-
-        # Build learnable uncertainty weights if enabled
         if self.use_uncertainty_weighting:
             self._build_uncertainty_weights()
-
-        enabled_tasks = self.task_config.get_task_names()
-        logger.info(f"YOLOv12MultiTaskLoss initialized for tasks: {enabled_tasks}. Uncertainty weighting: {self.use_uncertainty_weighting}")
+        logger.info(f"YOLOv12MultiTaskLoss initialized for tasks: {self.task_config.get_task_names()}. Uncertainty weighting: {self.use_uncertainty_weighting}")
 
     def _build_loss_functions(self) -> None:
         """Instantiate internal, task-specific loss functions."""
         if self.task_config.has_detection():
-            self._internal_losses[TaskType.DETECTION.value] = YOLOv12ObjectDetectionLoss(
-                num_classes=self.num_classes,
-                input_shape=self.input_shape,
-                reg_max=self.reg_max
-            )
+            self._internal_losses[TaskType.DETECTION.value] = YOLOv12ObjectDetectionLoss(num_classes=self.num_classes, input_shape=self.input_shape, reg_max=self.reg_max)
         if self.task_config.has_segmentation():
             self._internal_losses[TaskType.SEGMENTATION.value] = DiceFocalSegmentationLoss(from_logits=True)
         if self.task_config.has_classification():
@@ -342,98 +304,58 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
             self.classification_log_var = self.add_weight(name="classification_log_var", shape=(), initializer="zeros", trainable=True)
 
     def _infer_task_from_shapes(self, y_pred: keras.KerasTensor) -> Optional[str]:
-        """
-        Infers the current task by inspecting the shape of the prediction tensor.
-
-        This is the core of the internal routing mechanism. It relies on the assumption
-        that each task head produces a uniquely shaped output tensor.
-        """
+        """Infers the current task by inspecting the shape of the prediction tensor."""
         pred_shape = y_pred.shape
-        # Detection: (batch, num_anchors, num_classes + 4 * reg_max) -> 3 dims
-        if len(pred_shape) == 3:
-            return TaskType.DETECTION.value
-        # Segmentation: (batch, height, width, 1) -> 4 dims
-        elif len(pred_shape) == 4:
-            return TaskType.SEGMENTATION.value
-        # Classification: (batch, num_classes) -> 2 dims
-        elif len(pred_shape) == 2:
-            return TaskType.CLASSIFICATION.value
+        if len(pred_shape) == 3: return TaskType.DETECTION.value
+        elif len(pred_shape) == 4: return TaskType.SEGMENTATION.value
+        elif len(pred_shape) == 2: return TaskType.CLASSIFICATION.value
         return None
 
     def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Calculates the loss for a single task output.
-
-        Keras calls this method separately for each named output of the model.
-        """
-        # 1. Infer which task this call is for
+        """Calculates the loss for a single task output."""
         task_name = self._infer_task_from_shapes(y_pred)
         if task_name is None or task_name not in self._internal_losses:
-            logger.warning(f"Could not infer task or find loss for pred_shape: {y_pred.shape}. Returning 0 loss.")
             return ops.convert_to_tensor(0.0, dtype=y_pred.dtype)
 
-        # 2. Compute the raw loss using the appropriate internal loss function
         raw_loss = self._internal_losses[task_name](y_true, y_pred)
 
-        # 3. Apply weighting (either learnable uncertainty or fixed static weight)
         if self.use_uncertainty_weighting:
             if task_name == TaskType.DETECTION.value:
-                precision = ops.exp(-self.detection_log_var)
-                weighted_loss = precision * raw_loss + self.detection_log_var
+                return ops.exp(-self.detection_log_var) * raw_loss + self.detection_log_var
             elif task_name == TaskType.SEGMENTATION.value:
-                precision = ops.exp(-self.segmentation_log_var)
-                weighted_loss = precision * raw_loss + self.segmentation_log_var
-            else:  # Classification
-                precision = ops.exp(-self.classification_log_var)
-                weighted_loss = precision * raw_loss + self.classification_log_var
+                return ops.exp(-self.segmentation_log_var) * raw_loss + self.segmentation_log_var
+            else: # Classification
+                return ops.exp(-self.classification_log_var) * raw_loss + self.classification_log_var
         else:
             if task_name == TaskType.DETECTION.value:
-                weighted_loss = self.detection_weight * raw_loss
+                return self.detection_weight * raw_loss
             elif task_name == TaskType.SEGMENTATION.value:
-                weighted_loss = self.segmentation_weight * raw_loss
+                return self.segmentation_weight * raw_loss
             else: # Classification
-                weighted_loss = self.classification_weight * raw_loss
-
-        return weighted_loss
+                return self.classification_weight * raw_loss
 
     def get_task_weights(self) -> Dict[str, float]:
-        """
-        Returns the current weights for each task.
-
-        Called by the callback to log weights during training.
-        """
+        """Returns the current weights for each task, for callback logging."""
         weights = {}
         if self.use_uncertainty_weighting:
-            if self.task_config.has_detection():
-                weights[TaskType.DETECTION.value] = float(ops.exp(-self.detection_log_var))
-            if self.task_config.has_segmentation():
-                weights[TaskType.SEGMENTATION.value] = float(ops.exp(-self.segmentation_log_var))
-            if self.task_config.has_classification():
-                weights[TaskType.CLASSIFICATION.value] = float(ops.exp(-self.classification_log_var))
+            if self.task_config.has_detection(): weights[TaskType.DETECTION.value] = float(ops.exp(-self.detection_log_var))
+            if self.task_config.has_segmentation(): weights[TaskType.SEGMENTATION.value] = float(ops.exp(-self.segmentation_log_var))
+            if self.task_config.has_classification(): weights[TaskType.CLASSIFICATION.value] = float(ops.exp(-self.classification_log_var))
         else:
-            if self.task_config.has_detection():
-                weights[TaskType.DETECTION.value] = self.detection_weight
-            if self.task_config.has_segmentation():
-                weights[TaskType.SEGMENTATION.value] = self.segmentation_weight
-            if self.task_config.has_classification():
-                weights[TaskType.CLASSIFICATION.value] = self.classification_weight
+            if self.task_config.has_detection(): weights[TaskType.DETECTION.value] = self.detection_weight
+            if self.task_config.has_segmentation(): weights[TaskType.SEGMENTATION.value] = self.segmentation_weight
+            if self.task_config.has_classification(): weights[TaskType.CLASSIFICATION.value] = self.classification_weight
         return weights
 
     def get_individual_losses(self) -> Dict[str, float]:
-        """
-        Provides API compatibility for the callback.
-
-        Note: In a named-output model, Keras logs individual losses automatically
-        (e.g., 'detection_loss'). This method is not strictly necessary for logging
-        but is kept for compatibility with the provided `EnhancedMultiTaskCallback`.
-        """
+        """Provides API compatibility for the callback."""
         return {}
 
     def get_config(self) -> Dict[str, Any]:
         """Returns the serializable config of the loss."""
         config = super().get_config()
         config.update({
-            "task_config": self.task_config.get_task_names(),
+            "tasks": self.task_config.get_task_names(),
             "num_classes": self.num_classes,
             "input_shape": self.input_shape,
             "use_uncertainty_weighting": self.use_uncertainty_weighting,
@@ -443,6 +365,12 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
             "reg_max": self.reg_max,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config):
+        # The 'tasks' key was saved, so we use it to initialize.
+        # This is the correct way to handle custom object arguments in get_config/from_config.
+        return cls(**config)
 
 # ---------------------------------------------------------------------
 # Public-Facing Factory Function
@@ -459,20 +387,9 @@ def create_yolov12_multitask_loss(
 
     This is the intended entry point for creating the loss function in the
     training script.
-
-    Args:
-        tasks: The tasks to enable, e.g., ['detection', 'segmentation'].
-        num_classes: Number of object classes.
-        input_shape: Model input shape (height, width).
-        **kwargs: Additional arguments for YOLOv12MultiTaskLoss, such as
-                  `use_uncertainty_weighting` or static weights.
-
-    Returns:
-        An instance of YOLOv12MultiTaskLoss configured for the specified tasks.
     """
-    task_config = parse_task_list(tasks)
     return YOLOv12MultiTaskLoss(
-        task_config=task_config,
+        tasks=tasks,
         num_classes=num_classes,
         input_shape=input_shape,
         **kwargs
