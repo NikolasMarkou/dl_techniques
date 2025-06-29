@@ -36,8 +36,6 @@ Key Features
   and flexible head configurations
 - **Serialization Support**: Full Keras serialization compatibility with get_config()
   and from_config() methods
-- **Task-Aware Compilation**: Convenient compile_for_multitask() method that handles
-  task-specific losses, metrics, and loss weighting automatically
 - **Factory Functions**: Pre-configured convenience functions for common task combinations
 
 Usage Examples
@@ -58,10 +56,6 @@ Multi-Task (Detection + Segmentation):
     ... )
     >>> outputs = model(images)  # Returns {"detection": tensor, "segmentation": tensor}
 
-Using Factory Functions:
-    >>> model = create_yolov12_all_tasks(num_classes=20, scale='l')
-    >>> model = create_yolov12_detection_segmentation(num_classes=10, scale='n')
-
 Task Configuration
 -----------------
 Tasks can be specified in multiple flexible ways:
@@ -70,16 +64,6 @@ Tasks can be specified in multiple flexible ways:
 - String representations: "detection" or ["detection", "segmentation"]
 - TaskConfiguration objects for advanced configuration
 - Predefined CommonTaskConfigurations for common combinations
-
-Model Compilation
-----------------
-For multi-task models, use the convenience compilation method:
-    >>> model.compile_for_multitask(
-    ...     optimizer='adam',
-    ...     task_losses={'detection': 'yolo_loss', 'segmentation': 'focal_loss'},
-    ...     task_loss_weights={'detection': 1.0, 'segmentation': 0.5},
-    ...     task_metrics={'detection': ['map'], 'segmentation': ['iou']}
-    ... )
 
 """
 
@@ -366,82 +350,6 @@ class YOLOv12MultiTask(keras.Model):
         feature_extractor = self.get_feature_extractor()
         return feature_extractor(inputs, training=training)
 
-    def compile_for_multitask(
-        self,
-        optimizer: str = "adam",
-        task_losses: Optional[Dict[str, str]] = None,
-        task_loss_weights: Optional[Dict[str, float]] = None,
-        task_metrics: Optional[Dict[str, List[str]]] = None,
-        **kwargs
-    ) -> None:
-        """
-        Convenience method for compiling multi-task model with task-specific configurations.
-
-        Args:
-            optimizer: Optimizer to use.
-            task_losses: Dictionary mapping task names to loss functions.
-            task_loss_weights: Dictionary mapping task names to loss weights.
-            task_metrics: Dictionary mapping task names to list of metrics.
-            **kwargs: Additional arguments for model.compile().
-
-        Example:
-            >>> model.compile_for_multitask(
-            ...     optimizer="adam",
-            ...     task_losses={
-            ...         "detection": "yolo_loss",
-            ...         "segmentation": "focal_loss"
-            ...     },
-            ...     task_loss_weights={
-            ...         "detection": 1.0,
-            ...         "segmentation": 0.5
-            ...     }
-            ... )
-        """
-        enabled_tasks = self.get_enabled_task_names()
-
-        # Set default losses if not provided
-        if task_losses is None:
-            task_losses = {}
-            for task in enabled_tasks:
-                if task == "detection":
-                    task_losses[task] = "sparse_categorical_crossentropy"
-                elif task == "segmentation":
-                    task_losses[task] = "sparse_categorical_crossentropy"
-                elif task == "classification":
-                    task_losses[task] = "sparse_categorical_crossentropy"
-
-        # Set default loss weights if not provided
-        if task_loss_weights is None:
-            task_loss_weights = {task: 1.0 for task in enabled_tasks}
-
-        # Set default metrics if not provided
-        if task_metrics is None:
-            task_metrics = {}
-            for task in enabled_tasks:
-                if task == "classification":
-                    task_metrics[task] = ["accuracy"]
-                else:
-                    task_metrics[task] = ["mae"]
-
-        # Handle single task case
-        if len(enabled_tasks) == 1:
-            task_name = enabled_tasks[0]
-            self.compile(
-                optimizer=optimizer,
-                loss=task_losses.get(task_name, "sparse_categorical_crossentropy"),
-                metrics=task_metrics.get(task_name, ["accuracy"]),
-                **kwargs
-            )
-        else:
-            # Multi-task case with named outputs
-            self.compile(
-                optimizer=optimizer,
-                loss=task_losses,
-                loss_weights=task_loss_weights,
-                metrics=task_metrics,
-                **kwargs
-            )
-
 
 def create_yolov12_multitask(
     num_classes: int = 80,
@@ -496,74 +404,3 @@ def create_yolov12_multitask(
     task_names = task_config.get_task_names()
     logger.info(f"YOLOv12MultiTask-{scale} created with tasks: {task_names}")
     return model
-
-
-# Convenience functions for specific task combinations using predefined configurations
-def create_yolov12_detection_segmentation(
-    num_classes: int = 80,
-    scale: str = "n",
-    **kwargs
-) -> YOLOv12MultiTask:
-    """Create YOLOv12 model for detection + segmentation."""
-    return create_yolov12_multitask(
-        num_classes=num_classes,
-        scale=scale,
-        tasks=CommonTaskConfigurations.DETECTION_SEGMENTATION,
-        **kwargs
-    )
-
-
-def create_yolov12_all_tasks(
-    num_classes: int = 80,
-    scale: str = "n",
-    **kwargs
-) -> YOLOv12MultiTask:
-    """Create YOLOv12 model with all tasks enabled."""
-    return create_yolov12_multitask(
-        num_classes=num_classes,
-        scale=scale,
-        tasks=CommonTaskConfigurations.ALL_TASKS,
-        **kwargs
-    )
-
-
-def create_yolov12_segmentation_only(
-    num_classes: int = 80,
-    scale: str = "n",
-    **kwargs
-) -> YOLOv12MultiTask:
-    """Create YOLOv12 model for segmentation only."""
-    return create_yolov12_multitask(
-        num_classes=num_classes,
-        scale=scale,
-        tasks=CommonTaskConfigurations.SEGMENTATION_ONLY,
-        **kwargs
-    )
-
-
-def create_yolov12_detection_only(
-    num_classes: int = 80,
-    scale: str = "n",
-    **kwargs
-) -> YOLOv12MultiTask:
-    """Create YOLOv12 model for detection only."""
-    return create_yolov12_multitask(
-        num_classes=num_classes,
-        scale=scale,
-        tasks=CommonTaskConfigurations.DETECTION_ONLY,
-        **kwargs
-    )
-
-
-def create_yolov12_classification_only(
-    num_classes: int = 80,
-    scale: str = "n",
-    **kwargs
-) -> YOLOv12MultiTask:
-    """Create YOLOv12 model for classification only."""
-    return create_yolov12_multitask(
-        num_classes=num_classes,
-        scale=scale,
-        tasks=CommonTaskConfigurations.CLASSIFICATION_ONLY,
-        **kwargs
-    )
