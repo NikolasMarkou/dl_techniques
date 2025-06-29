@@ -142,7 +142,7 @@ References
 
 import keras
 import tensorflow as tf
-from typing import Tuple, Optional, Union, List, Dict, Any, Callable
+from typing import Tuple, Optional, Union, Dict, Any, Callable
 
 @keras.utils.register_keras_serializable()
 class SOM2dLayer(keras.layers.Layer):
