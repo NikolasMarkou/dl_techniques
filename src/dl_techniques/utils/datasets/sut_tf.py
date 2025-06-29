@@ -305,35 +305,23 @@ class TensorFlowNativePatchSampler:
             global_y_end = tf.minimum(global_y_end, max_center_y)
 
             def create_grid():
-                # Generate global grid - this approach balances vectorization with memory usage
-                # Alternative: per-bbox grids with tf.map_fn, but current approach is more readable
                 x_coords = tf.range(global_x_start, global_x_end, grid_spacing)
                 y_coords = tf.range(global_y_start, global_y_end, grid_spacing)
-
-                # Create meshgrid
                 x_grid, y_grid = tf.meshgrid(x_coords, y_coords)
                 all_grid_points = tf.stack([tf.reshape(x_grid, [-1]), tf.reshape(y_grid, [-1])], axis=1)
 
-                # Filter points that are within any bbox region
-                valid_mask = tf.zeros([tf.shape(all_grid_points)[0]], dtype=tf.bool)
+                # --- High-Performance Vectorized Filtering ---
+                points_expanded = tf.expand_dims(all_grid_points, 1)
+                x_start_exp = tf.expand_dims(x_start, 0)
+                x_end_exp = tf.expand_dims(x_end, 0)
+                y_start_exp = tf.expand_dims(y_start, 0)
+                y_end_exp = tf.expand_dims(y_end, 0)
 
-                # Check each bbox - this loop is necessary for complex region filtering
-                for i in tf.range(tf.shape(bboxes)[0]):
-                    # Check if points are within this bbox's expanded region
-                    in_bbox = tf.logical_and(
-                        tf.logical_and(
-                            all_grid_points[:, 0] >= x_start[i],
-                            all_grid_points[:, 0] <= x_end[i]
-                        ),
-                        tf.logical_and(
-                            all_grid_points[:, 1] >= y_start[i],
-                            all_grid_points[:, 1] <= y_end[i]
-                        )
-                    )
-                    valid_mask = tf.logical_or(valid_mask, in_bbox)
+                in_x_range = (points_expanded[:, :, 0] >= x_start_exp) & (points_expanded[:, :, 0] <= x_end_exp)
+                in_y_range = (points_expanded[:, :, 1] >= y_start_exp) & (points_expanded[:, :, 1] <= y_end_exp)
 
-                # Filter valid points
-                valid_centers = tf.boolean_mask(all_grid_points, valid_mask)
+                in_any_bbox_region = tf.reduce_any(in_x_range & in_y_range, axis=1)
+                valid_centers = tf.boolean_mask(all_grid_points, in_any_bbox_region)
                 return valid_centers
 
             # Check if valid region exists after bounds enforcement
@@ -565,7 +553,8 @@ class TensorFlowNativePatchSampler:
         image: tf.Tensor,
         mask: tf.Tensor,
         centers: tf.Tensor,
-        bboxes: tf.Tensor
+        bboxes: tf.Tensor,
+        max_boxes_per_patch: int
     ) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
         """Extract patches and their corresponding data vectorized."""
         num_patches = tf.shape(centers)[0]
@@ -723,7 +712,7 @@ class TensorFlowNativePatchSampler:
                         ], axis=1)
 
                         # Pad or truncate to max_boxes (10)
-                        max_boxes = 10
+                        max_boxes = max_boxes_per_patch
                         num_boxes = tf.shape(adjusted)[0]
 
                         adjusted = tf.cond(
@@ -762,7 +751,7 @@ class TensorFlowNativePatchSampler:
                     tf.TensorSpec([self.patch_size, self.patch_size, 3], tf.float32),
                     tf.TensorSpec([self.patch_size, self.patch_size], tf.float32),
                     tf.TensorSpec([], tf.int32),
-                    tf.TensorSpec([10, 5], tf.float32)
+                    tf.TensorSpec([max_boxes_per_patch, 5], tf.float32)
                 ),
                 parallel_iterations=10
             )
@@ -1028,30 +1017,45 @@ class OptimizedSUTDataset:
         logger.info(f"Data splits created - Train: {len(self.train_annotations)}, "
                    f"Validation: {len(self.val_annotations)}")
 
+    # In dl_techniques/utils/datasets/sut_tf.py
+
+    # ... (inside the OptimizedSUTDataset class) ...
+
     def create_tf_dataset(
-        self,
-        batch_size: int = 32,
-        shuffle: bool = True,
-        repeat: bool = True,
-        prefetch_buffer: int = tf.data.AUTOTUNE,
-        subset: str = "train",
-        cache: bool = True,
-        num_parallel_calls: int = tf.data.AUTOTUNE
+            self,
+            batch_size: int = 32,
+            shuffle: bool = True,
+            repeat: bool = False,  # Default to False, handle repeat explicitly in train script
+            prefetch_buffer: int = tf.data.AUTOTUNE,
+            subset: str = "train",
+            cache: bool = True,
+            num_parallel_calls: int = tf.data.AUTOTUNE
     ) -> tf.data.Dataset:
         """
-        Create optimized TensorFlow dataset.
+        Create an optimized TensorFlow dataset with high-performance ordering.
+
+        The order of operations is crucial for performance:
+        1. Source: Create dataset from annotations.
+        2. Map: Apply parallel processing to generate patches.
+        3. Cache: Store the processed patches in memory/on disk. This avoids
+           re-running the expensive mapping step on every epoch.
+        4. Shuffle: Shuffle the in-memory cached data.
+        5. Repeat: Repeat the shuffled data for multiple epochs.
+        6. Batch: Group items into batches.
+        7. Prefetch: Prepare the next batches while the current one is being processed.
 
         Args:
             batch_size: Batch size for training.
             shuffle: Whether to shuffle data.
-            repeat: Whether to repeat dataset.
+            repeat: Whether to repeat dataset. It's recommended to handle this in the
+                    training script for clarity (e.g., train_ds.repeat()).
             prefetch_buffer: Prefetch buffer size.
             subset: Which subset to use ('train', 'validation', 'all').
             cache: Whether to cache the dataset.
             num_parallel_calls: Number of parallel calls for processing.
 
         Returns:
-            Optimized TensorFlow dataset.
+            An optimized and high-performance TensorFlow dataset.
         """
         # Select appropriate annotations
         if subset == "train" and hasattr(self, 'train_annotations'):
@@ -1061,14 +1065,23 @@ class OptimizedSUTDataset:
         else:
             annotations = self.annotations
 
-        logger.info(f"Creating {subset} dataset with {len(annotations)} annotations")
+        logger.info(f"Creating '{subset}' dataset with {len(annotations)} annotations")
+
+        if not annotations:
+            logger.warning(f"No annotations found for subset '{subset}'. Returning an empty dataset.")
+            # Return an empty dataset with the correct structure to avoid errors downstream
+            empty_images = tf.zeros([0, self.patch_size, self.patch_size, 3], dtype=tf.float32)
+            empty_targets = {
+                'detection': tf.zeros([0, self.max_boxes_per_patch, 5], dtype=tf.float32),
+                'segmentation': tf.zeros([0, self.patch_size, self.patch_size, 1], dtype=tf.float32),
+                'classification': tf.zeros([0], dtype=tf.int32)
+            }
+            return tf.data.Dataset.from_tensor_slices((empty_images, empty_targets)).batch(batch_size)
 
         # Convert annotations to tensor format
-        annotation_tensors = []
-        for ann in annotations:
-            annotation_tensors.append(ann.to_tensor_dict())
+        annotation_tensors = [ann.to_tensor_dict() for ann in annotations]
 
-        # Create dataset from annotations
+        # Step 1: Create dataset from the source annotations
         dataset = tf.data.Dataset.from_generator(
             lambda: annotation_tensors,
             output_signature={
@@ -1082,13 +1095,9 @@ class OptimizedSUTDataset:
             }
         )
 
-        # Process each annotation to generate patches
-        def process_annotation(annotation_dict):
-            return self._process_single_annotation_tf(annotation_dict)
-
-        # Apply processing with parallelization
+        # Step 2: Map the processing function in parallel
         dataset = dataset.map(
-            process_annotation,
+            self._process_single_annotation_tf,
             num_parallel_calls=num_parallel_calls,
             deterministic=False
         )
@@ -1096,22 +1105,23 @@ class OptimizedSUTDataset:
         # Flatten the dataset (each annotation produces multiple patches)
         dataset = dataset.flat_map(lambda x: x)
 
-        # Apply caching if requested
+        # Step 3: Cache the dataset after the expensive map operations
         if cache:
             if self.cache_dir:
                 cache_path = os.path.join(self.cache_dir, f"{subset}_cache")
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
                 dataset = dataset.cache(cache_path)
+                logger.info(f"Dataset caching enabled for '{subset}' subset at: {cache_path}")
             else:
                 dataset = dataset.cache()
+                logger.info(f"In-memory dataset caching enabled for '{subset}' subset.")
 
-        # Shuffle if requested
+        # Step 4: Shuffle the now-cached dataset
         if shuffle:
-            # --- START FIX ---
-            num_annotations = len(annotations)
-            if num_annotations > 0:
-                # Calculate buffer size, ensuring it's at least 1.
-                # This prevents a buffer_size of 0 for small annotation lists.
-                buffer_size = max(1, min(1000, num_annotations * self.patches_per_image))
+            # Robust buffer size calculation to prevent errors with small/empty datasets
+            num_patches = len(annotations) * self.patches_per_image
+            if num_patches > 0:
+                buffer_size = max(1, min(1000, num_patches))
                 logger.info(f"Shuffling dataset with buffer size: {buffer_size}")
                 dataset = dataset.shuffle(
                     buffer_size=buffer_size,
@@ -1120,14 +1130,18 @@ class OptimizedSUTDataset:
                 )
             else:
                 logger.warning("Skipping shuffle for dataset with 0 annotations.")
-            # --- END FIX ---
 
-        # Repeat if requested
+        # Step 5: Repeat the dataset (if specified)
+        # Note: It's often better to call .repeat() in the training script itself
+        # for clarity, especially for the training set.
         if repeat:
             dataset = dataset.repeat()
 
-        # Batch and prefetch
+        # Step 6: Batch the data
+        # drop_remainder=True can sometimes improve performance on GPU but is False by default
         dataset = dataset.batch(batch_size, drop_remainder=False)
+
+        # Step 7: Prefetch to overlap data preparation and model execution
         dataset = dataset.prefetch(prefetch_buffer)
 
         return dataset
@@ -1187,7 +1201,7 @@ class OptimizedSUTDataset:
         # Extract patches
         if tf.greater(tf.shape(all_centers)[0], 0):
             image_patches, mask_patches, labels, bbox_patches = self.sampler._extract_patches_vectorized(
-                image, mask, all_centers, annotation_dict['bboxes']
+                image, mask, all_centers, annotation_dict['bboxes'], self.max_boxes_per_patch
             )
 
             # Apply augmentation
