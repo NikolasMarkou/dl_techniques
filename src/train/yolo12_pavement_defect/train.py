@@ -343,7 +343,7 @@ def test_model_compilation(model: keras.Model,
 
         # Test loss computation
         loss_value = model.evaluate(sample_x, sample_y, steps=1, verbose=0)
-        logger.info(f"✓ Model compilation test successful - Loss: {loss_value:.6f}")
+        logger.info(f"✓ Model compilation test successful")
 
         return True
 
