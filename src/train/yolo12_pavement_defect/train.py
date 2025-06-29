@@ -1,5 +1,5 @@
 """
-Comprehensive Training Script for YOLOv12 Multi-Task Model
+Comprehensive Training Script for YOLOv12 Multi-Task Model - FIXED VERSION
 
 This script provides complete training pipeline for simultaneous object detection,
 segmentation, and classification on crack detection datasets using patch-based learning.
@@ -44,7 +44,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.datasets.sut_tf import SUTDataset
+from dl_techniques.utils.datasets.sut_optimized import OptimizedSUTDataset
 from dl_techniques.models.yolo12_multitask import create_yolov12_multitask
 from dl_techniques.utils.vision_task_types import (
     TaskType,
@@ -183,7 +183,7 @@ def create_dataset_splits(
     val_ratio: float = 0.2,
     test_ratio: float = 0.1,
     random_seed: int = 42
-) -> Tuple[SUTDataset, SUTDataset, SUTDataset]:
+) -> Tuple[OptimizedSUTDataset, OptimizedSUTDataset, OptimizedSUTDataset]:
     """
     Create train/validation/test dataset splits.
 
@@ -199,7 +199,7 @@ def create_dataset_splits(
         Tuple of (train_dataset, val_dataset, test_dataset).
     """
     # Create full dataset to get annotations
-    full_dataset = SUTDataset(
+    full_dataset = OptimizedSUTDataset(
         data_dir=data_dir,
         patch_size=patch_size,
         patches_per_image=1,  # Just for getting annotations
@@ -223,7 +223,7 @@ def create_dataset_splits(
                f"Val: {len(val_annotations)}, Test: {len(test_annotations)}")
 
     # Create dataset objects with split annotations
-    train_dataset = SUTDataset(
+    train_dataset = OptimizedSUTDataset(
         data_dir=data_dir,
         patch_size=patch_size,
         patches_per_image=16,  # More patches for training
@@ -232,7 +232,7 @@ def create_dataset_splits(
     )
     train_dataset.annotations = train_annotations
 
-    val_dataset = SUTDataset(
+    val_dataset = OptimizedSUTDataset(
         data_dir=data_dir,
         patch_size=patch_size,
         patches_per_image=8,  # Fewer patches for validation
@@ -241,7 +241,7 @@ def create_dataset_splits(
     )
     val_dataset.annotations = val_annotations
 
-    test_dataset = SUTDataset(
+    test_dataset = OptimizedSUTDataset(
         data_dir=data_dir,
         patch_size=patch_size,
         patches_per_image=8,
@@ -300,31 +300,43 @@ def create_model_and_loss(
 # ---------------------------------------------------------------------
 
 def test_model_compilation(model: keras.Model,
-                           train_dataset,
-                           task_config: TaskConfiguration,
-                           run_eagerly: bool = False) -> bool:
-    """Test model compilation with sample data to ensure compatibility."""
+                          train_dataset,
+                          task_config: TaskConfiguration,
+                          run_eagerly: bool = False) -> bool:
+    """
+    Test model compilation with sample data to ensure compatibility.
+
+    Args:
+        model: Compiled Keras model.
+        train_dataset: Training dataset.
+        task_config: Task configuration.
+        run_eagerly: Whether to run in eager mode.
+
+    Returns:
+        True if compilation test succeeds, False otherwise.
+    """
     logger.info("Testing model compilation...")
 
     try:
         # Get a sample batch
         sample_batch = next(iter(train_dataset))
 
-        # Handle the data structure correctly
-        if isinstance(sample_batch, dict):
-            # Data comes as {'input_images': tensor, 'labels': {...}}
-            sample_x = sample_batch['input_images']
-            sample_y = sample_batch['labels']
+        # With the corrected dataset format, this should now be (inputs, targets)
+        sample_x, sample_y = sample_batch
+
+        logger.info(f"Sample input shape: {sample_x.shape}")
+        if isinstance(sample_y, dict):
+            target_info = {k: str(v.shape) for k, v in sample_y.items()}
+            logger.info(f"Sample targets (dict): {target_info}")
         else:
-            # Data comes as tuple (x, y)
-            sample_x, sample_y = sample_batch
+            logger.info(f"Sample targets: {sample_y.shape}")
 
         # Test forward pass
         predictions = model(sample_x, training=False)
 
         # Log prediction format
         if isinstance(predictions, dict):
-            pred_info = {k: v.shape for k, v in predictions.items()}
+            pred_info = {k: str(v.shape) for k, v in predictions.items()}
             logger.info(f"Model outputs (dict): {pred_info}")
         else:
             logger.info(f"Model output (tensor): {predictions.shape}")
@@ -337,6 +349,9 @@ def test_model_compilation(model: keras.Model,
 
     except Exception as e:
         logger.error(f"✗ Model compilation test failed: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+
         if not run_eagerly:
             logger.info("Suggestion: Try running with --run-eagerly flag")
         return False
@@ -421,7 +436,7 @@ def create_callbacks(
 # ---------------------------------------------------------------------
 
 def train_model(args: argparse.Namespace) -> None:
-    """Enhanced main training function."""
+    """Enhanced main training function - FIXED VERSION."""
     logger.info("Starting YOLOv12 Multi-Task training with Named Outputs")
     logger.info(f"Arguments: {vars(args)}")
 
@@ -520,10 +535,12 @@ def train_model(args: argparse.Namespace) -> None:
 
     logger.info(f"Using optimizer: {type(optimizer).__name__}")
 
-    # Compile model
+    # FIXED COMPILATION: Simple compilation with single loss function
+    # The YOLOv12MultiTaskLoss handles all task routing internally
+    logger.info("Compiling model with multi-task loss...")
     model.compile(
         optimizer=optimizer,
-        loss=loss_fn,
+        loss=loss_fn,  # Single loss function, not a dictionary!
         run_eagerly=args.run_eagerly
     )
 
@@ -568,6 +585,8 @@ def train_model(args: argparse.Namespace) -> None:
         )
     except Exception as e:
         logger.error(f"Training failed: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
 
         # Save partial results if training was interrupted
         if 'history' in locals():

@@ -1122,6 +1122,8 @@ class OptimizedSUTDataset:
 
         return dataset
 
+    # In sut_optimized.py, completely replace the _process_single_annotation_tf method:
+
     @tf.function
     def _process_single_annotation_tf(self, annotation_dict: Dict[str, tf.Tensor]) -> tf.data.Dataset:
         """Process a single annotation to generate patches using TensorFlow operations."""
@@ -1184,25 +1186,29 @@ class OptimizedSUTDataset:
             # Normalize images
             image_patches = image_patches / 255.0
 
-            # Create output tensors
-            outputs = tf.data.Dataset.from_tensor_slices({
-                'input_images': image_patches,
-                'labels': {
-                    'detection': bbox_patches,
-                    'segmentation': tf.expand_dims(mask_patches, -1),
-                    'classification': labels
-                }
-            })
+            # CORRECTED: Create proper format for multi-task training
+            # The dataset should return (inputs, targets) where:
+            # - inputs: the image patches (single tensor)
+            # - targets: dictionary matching the model output structure
+
+            targets = {
+                'detection': bbox_patches,
+                'segmentation': tf.expand_dims(mask_patches, -1),
+                'classification': labels
+            }
+
+            # Create dataset with correct structure
+            outputs = tf.data.Dataset.from_tensor_slices((image_patches, targets))
+
         else:
             # Empty dataset if no valid patches
-            outputs = tf.data.Dataset.from_tensor_slices({
-                'input_images': tf.zeros([0, self.patch_size, self.patch_size, 3], dtype=tf.float32),
-                'labels': {
-                    'detection': tf.zeros([0, self.max_boxes_per_patch, 5], dtype=tf.float32),
-                    'segmentation': tf.zeros([0, self.patch_size, self.patch_size, 1], dtype=tf.float32),
-                    'classification': tf.zeros([0], dtype=tf.int32)
-                }
-            })
+            empty_images = tf.zeros([0, self.patch_size, self.patch_size, 3], dtype=tf.float32)
+            empty_targets = {
+                'detection': tf.zeros([0, self.max_boxes_per_patch, 5], dtype=tf.float32),
+                'segmentation': tf.zeros([0, self.patch_size, self.patch_size, 1], dtype=tf.float32),
+                'classification': tf.zeros([0], dtype=tf.int32)
+            }
+            outputs = tf.data.Dataset.from_tensor_slices((empty_images, empty_targets))
 
         return outputs
 
