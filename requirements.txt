@@ -13,3 +13,4 @@ pylint
 pre-commit
 pandas~=2.2.3
 psutil
+tensorflow-datasets
