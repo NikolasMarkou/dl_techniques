@@ -6,6 +6,10 @@ perform object detection, instance segmentation, and image classification using 
 feature extraction backbone. The implementation uses Keras Functional API with named
 outputs for clean, dictionary-based results in multi-task scenarios.
 
+FIXED VERSION: Now supports separate class counts for detection and segmentation tasks.
+This allows COCO pretraining with 80-class segmentation and crack detection fine-tuning
+with binary segmentation.
+
 Architecture Overview
 --------------------
 The model follows a multitask learning architecture with three main components:
@@ -34,27 +38,38 @@ Key Features
   (e.g., {"detection": tensor, "segmentation": tensor}) or single tensor for single tasks
 - **Configurable Architecture**: Supports multiple YOLOv12 scales ('n', 's', 'm', 'l', 'x')
   and flexible head configurations
+- **Separate Class Configuration**: Detection and segmentation can have different numbers
+  of classes (e.g., 80 classes for COCO detection, 80 classes for COCO segmentation,
+  but 1 class for crack detection, 1 class for crack segmentation)
 - **Serialization Support**: Full Keras serialization compatibility with get_config()
   and from_config() methods
 - **Factory Functions**: Pre-configured convenience functions for common task combinations
 
 Usage Examples
 --------------
-Single Task (Detection Only):
+COCO Pretraining (80 detection classes, 80 segmentation classes):
     >>> model = YOLOv12MultiTask(
-    ...     num_classes=80,
-    ...     task_config=TaskType.DETECTION,
+    ...     num_detection_classes=80,
+    ...     num_segmentation_classes=80,
+    ...     task_config=[TaskType.DETECTION, TaskType.SEGMENTATION],
     ...     scale='s'
     ... )
-    >>> output = model(images)  # Returns detection tensor directly
 
-Multi-Task (Detection + Segmentation):
+Crack Detection Fine-tuning (1 detection class, 1 segmentation class):
     >>> model = YOLOv12MultiTask(
-    ...     num_classes=20,
+    ...     num_detection_classes=1,
+    ...     num_segmentation_classes=1,
     ...     task_config=[TaskType.DETECTION, TaskType.SEGMENTATION],
-    ...     scale='m'
+    ...     scale='s'
     ... )
-    >>> outputs = model(images)  # Returns {"detection": tensor, "segmentation": tensor}
+
+Mixed Configuration (80 detection classes, 1 segmentation class):
+    >>> model = YOLOv12MultiTask(
+    ...     num_detection_classes=80,
+    ...     num_segmentation_classes=1,
+    ...     task_config=[TaskType.DETECTION, TaskType.SEGMENTATION],
+    ...     scale='s'
+    ... )
 
 Task Configuration
 -----------------
@@ -94,8 +109,13 @@ class YOLOv12MultiTask(keras.Model):
     heads to perform simultaneous object detection, segmentation, and classification.
     Uses Keras Functional API with named outputs for clean dictionary-based results.
 
+    FIXED VERSION: Now supports separate class counts for detection and segmentation.
+
     Args:
-        num_classes: Number of classes for detection and classification tasks.
+        num_detection_classes: Number of classes for detection task.
+        num_segmentation_classes: Number of classes for segmentation task.
+        num_classification_classes: Number of classes for classification task.
+        num_classes: Backward compatibility - used for all tasks if specific counts not provided.
         input_shape: Input image shape (height, width, channels).
         scale: Model scale configuration ('n', 's', 'm', 'l', 'x').
         reg_max: Maximum value for DFL regression in detection.
@@ -108,16 +128,29 @@ class YOLOv12MultiTask(keras.Model):
         name: Model name.
 
     Example:
+        >>> # COCO pretraining
         >>> model = YOLOv12MultiTask(
-        ...     num_classes=20,
+        ...     num_detection_classes=80,
+        ...     num_segmentation_classes=80,
         ...     task_config=[TaskType.DETECTION, TaskType.SEGMENTATION]
         ... )
-        >>> outputs = model(images)  # Returns {"detection": tensor, "segmentation": tensor}
+        >>>
+        >>> # Crack detection fine-tuning
+        >>> model = YOLOv12MultiTask(
+        ...     num_detection_classes=1,
+        ...     num_segmentation_classes=1,
+        ...     task_config=[TaskType.DETECTION, TaskType.SEGMENTATION]
+        ... )
     """
 
     def __init__(
         self,
-        num_classes: int = 80,
+        # Class configuration - now separate for each task
+        num_detection_classes: Optional[int] = None,
+        num_segmentation_classes: Optional[int] = None,
+        num_classification_classes: Optional[int] = None,
+        num_classes: int = 80,  # Backward compatibility fallback
+        # Model configuration
         input_shape: Tuple[int, int, int] = (640, 640, 3),
         scale: str = "n",
         reg_max: int = 16,
@@ -144,7 +177,10 @@ class YOLOv12MultiTask(keras.Model):
         Initialize YOLOv12 multi-task model using Functional API.
 
         Args:
-            num_classes: Number of classes for classification tasks.
+            num_detection_classes: Number of classes for detection task.
+            num_segmentation_classes: Number of classes for segmentation task.
+            num_classification_classes: Number of classes for classification task.
+            num_classes: Fallback for backward compatibility.
             input_shape: Input image shape (height, width, channels).
             scale: Model scale ('n', 's', 'm', 'l', 'x').
             reg_max: Maximum value for DFL regression.
@@ -161,8 +197,13 @@ class YOLOv12MultiTask(keras.Model):
         # Parse task configuration
         self.task_config = parse_task_list(task_config)
 
+        # Configure class counts for each task
+        self.num_detection_classes = num_detection_classes if num_detection_classes is not None else num_classes
+        self.num_segmentation_classes = num_segmentation_classes if num_segmentation_classes is not None else num_classes
+        self.num_classification_classes = num_classification_classes if num_classification_classes is not None else num_classes
+
         # Store configuration for serialization
-        self.num_classes = num_classes
+        self.num_classes = num_classes  # Keep for backward compatibility
         self.input_shape_config = input_shape
         self.scale = scale
         self.reg_max = reg_max
@@ -185,9 +226,11 @@ class YOLOv12MultiTask(keras.Model):
 
         enabled_tasks = self.task_config.get_task_names()
         logger.info(
-            f"Created YOLOv12MultiTask-{scale} with {num_classes} classes. "
-            f"Enabled tasks: {enabled_tasks}"
+            f"Created YOLOv12MultiTask-{scale} with enabled tasks: {enabled_tasks}"
         )
+        logger.info(f"  Detection classes: {self.num_detection_classes}")
+        logger.info(f"  Segmentation classes: {self.num_segmentation_classes}")
+        logger.info(f"  Classification classes: {self.num_classification_classes}")
 
     def _build_functional_model(self) -> Tuple[keras.KerasTensor, Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]]:
         """
@@ -216,7 +259,7 @@ class YOLOv12MultiTask(keras.Model):
 
         if self.task_config.has_detection():
             detection_head = YOLOv12DetectionHead(
-                num_classes=self.num_classes,
+                num_classes=self.num_detection_classes,  # Use detection-specific class count
                 reg_max=self.reg_max,
                 kernel_initializer=self.kernel_initializer,
                 name="detection_head"
@@ -226,7 +269,7 @@ class YOLOv12MultiTask(keras.Model):
 
         if self.task_config.has_segmentation():
             segmentation_head = YOLOv12SegmentationHead(
-                num_classes=self.num_classes,
+                num_classes=self.num_segmentation_classes,  # Use segmentation-specific class count
                 intermediate_filters=self.segmentation_filters,
                 dropout_rate=self.segmentation_dropout,
                 kernel_initializer=self.kernel_initializer,
@@ -237,7 +280,7 @@ class YOLOv12MultiTask(keras.Model):
 
         if self.task_config.has_classification():
             classification_head = YOLOv12ClassificationHead(
-                num_classes=self.num_classes,
+                num_classes=self.num_classification_classes,  # Use classification-specific class count
                 hidden_dims=self.classification_hidden_dims,
                 dropout_rate=self.classification_dropout,
                 kernel_initializer=self.kernel_initializer,
@@ -254,7 +297,13 @@ class YOLOv12MultiTask(keras.Model):
         """Get model configuration for serialization."""
         config = super().get_config()
         config.update({
+            # Separate class counts
+            "num_detection_classes": self.num_detection_classes,
+            "num_segmentation_classes": self.num_segmentation_classes,
+            "num_classification_classes": self.num_classification_classes,
+            # Backward compatibility
             "num_classes": self.num_classes,
+            # Other config
             "input_shape": self.input_shape_config,
             "scale": self.scale,
             "reg_max": self.reg_max,
@@ -350,9 +399,25 @@ class YOLOv12MultiTask(keras.Model):
         feature_extractor = self.get_feature_extractor()
         return feature_extractor(inputs, training=training)
 
+    def get_class_counts(self) -> Dict[str, int]:
+        """
+        Get the number of classes for each task.
+
+        Returns:
+            Dictionary mapping task names to class counts.
+        """
+        return {
+            'detection': self.num_detection_classes,
+            'segmentation': self.num_segmentation_classes,
+            'classification': self.num_classification_classes
+        }
+
 
 def create_yolov12_multitask(
-    num_classes: int = 80,
+    num_detection_classes: Optional[int] = None,
+    num_segmentation_classes: Optional[int] = None,
+    num_classification_classes: Optional[int] = None,
+    num_classes: int = 80,  # Backward compatibility
     input_shape: Tuple[int, int, int] = (640, 640, 3),
     scale: str = "n",
     tasks: Union[
@@ -365,10 +430,13 @@ def create_yolov12_multitask(
     **kwargs
 ) -> YOLOv12MultiTask:
     """
-    Create YOLOv12 multi-task model with specified tasks.
+    Create YOLOv12 multi-task model with specified tasks and class counts.
 
     Args:
-        num_classes: Number of classes.
+        num_detection_classes: Number of detection classes.
+        num_segmentation_classes: Number of segmentation classes.
+        num_classification_classes: Number of classification classes.
+        num_classes: Fallback class count for backward compatibility.
         input_shape: Input image shape.
         scale: Model scale.
         tasks: Tasks to enable - can be TaskConfiguration, list of TaskType enums,
@@ -379,20 +447,34 @@ def create_yolov12_multitask(
         YOLOv12MultiTask model instance.
 
     Example:
+        >>> # COCO pretraining - 80 classes for both detection and segmentation
         >>> model = create_yolov12_multitask(
-        ...     num_classes=20,
+        ...     num_detection_classes=80,
+        ...     num_segmentation_classes=80,
         ...     tasks=[TaskType.DETECTION, TaskType.SEGMENTATION],
         ...     scale="s"
         ... )
         >>>
-        >>> # Also works with strings
+        >>> # Crack detection - binary for both tasks
         >>> model = create_yolov12_multitask(
-        ...     num_classes=20,
-        ...     tasks=["detection", "segmentation"],
+        ...     num_detection_classes=1,
+        ...     num_segmentation_classes=1,
+        ...     tasks=[TaskType.DETECTION, TaskType.SEGMENTATION],
+        ...     scale="s"
+        ... )
+        >>>
+        >>> # Mixed - many detection classes, binary segmentation
+        >>> model = create_yolov12_multitask(
+        ...     num_detection_classes=80,
+        ...     num_segmentation_classes=1,
+        ...     tasks=[TaskType.DETECTION, TaskType.SEGMENTATION],
         ...     scale="s"
         ... )
     """
     model = YOLOv12MultiTask(
+        num_detection_classes=num_detection_classes,
+        num_segmentation_classes=num_segmentation_classes,
+        num_classification_classes=num_classification_classes,
         num_classes=num_classes,
         input_shape=input_shape,
         scale=scale,
@@ -402,5 +484,68 @@ def create_yolov12_multitask(
 
     task_config = parse_task_list(tasks)
     task_names = task_config.get_task_names()
+    class_counts = model.get_class_counts()
+
     logger.info(f"YOLOv12MultiTask-{scale} created with tasks: {task_names}")
+    logger.info(f"Class counts: {class_counts}")
     return model
+
+
+def create_yolov12_coco_pretrain(
+    scale: str = "s",
+    input_shape: Tuple[int, int, int] = (640, 640, 3),
+    **kwargs
+) -> YOLOv12MultiTask:
+    """
+    Create YOLOv12 model specifically configured for COCO pretraining.
+
+    Args:
+        scale: Model scale.
+        input_shape: Input image shape.
+        **kwargs: Additional arguments.
+
+    Returns:
+        YOLOv12MultiTask model configured for COCO pretraining.
+
+    Example:
+        >>> model = create_yolov12_coco_pretrain(scale="s")
+    """
+    return create_yolov12_multitask(
+        num_detection_classes=80,      # COCO has 80 object classes
+        num_segmentation_classes=80,   # COCO has 80 segmentation classes
+        num_classification_classes=80, # COCO has 80 classes for image classification
+        tasks=[TaskType.DETECTION, TaskType.SEGMENTATION],
+        input_shape=input_shape,
+        scale=scale,
+        **kwargs
+    )
+
+
+def create_yolov12_crack_detection(
+    scale: str = "s",
+    input_shape: Tuple[int, int, int] = (640, 640, 3),
+    **kwargs
+) -> YOLOv12MultiTask:
+    """
+    Create YOLOv12 model specifically configured for crack detection fine-tuning.
+
+    Args:
+        scale: Model scale.
+        input_shape: Input image shape.
+        **kwargs: Additional arguments.
+
+    Returns:
+        YOLOv12MultiTask model configured for crack detection.
+
+    Example:
+        >>> model = create_yolov12_crack_detection(scale="s")
+    """
+    return create_yolov12_multitask(
+        num_detection_classes=1,      # Binary crack detection
+        num_segmentation_classes=1,   # Binary crack segmentation
+        num_classification_classes=1, # Binary crack classification
+        tasks=[TaskType.DETECTION, TaskType.SEGMENTATION],
+        input_shape=input_shape,
+        scale=scale,
+        **kwargs
+    )

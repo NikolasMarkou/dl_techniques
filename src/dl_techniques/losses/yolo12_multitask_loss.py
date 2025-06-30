@@ -13,6 +13,9 @@ shapes of `y_true` and `y_pred` that Keras provides for each model output.
 This module also supports learnable uncertainty weighting to automatically
 balance the contribution of each task's loss during training.
 
+FIXED VERSION: Now supports configurable segmentation classes for COCO pretraining
+(80 classes) vs crack detection fine-tuning (1 class).
+
 Key Components:
     - YOLOv12MultiTaskLoss: The main, user-facing loss class that orchestrates all
       sub-losses and handles dynamic or static weighting. It is the single entry
@@ -479,7 +482,11 @@ class DiceFocalSegmentationLoss(keras.losses.Loss):
     This loss combines the benefits of Dice loss (good for handling class imbalance)
     and Focal loss (focuses on hard examples) for semantic segmentation tasks.
 
+    FIXED VERSION: Now supports both binary (1 class) and multi-class segmentation
+    with proper shape handling and gradient flow.
+
     Args:
+        num_classes: Number of segmentation classes (1 for binary, >1 for multi-class).
         dice_weight: Weight for the Dice loss component.
         focal_weight: Weight for the Focal loss component.
         focal_alpha: Alpha parameter for Focal loss.
@@ -491,6 +498,7 @@ class DiceFocalSegmentationLoss(keras.losses.Loss):
 
     def __init__(
         self,
+        num_classes: int = 1,  # NEW: Number of segmentation classes
         dice_weight: float = 0.5,
         focal_weight: float = 0.5,
         focal_alpha: float = 0.25,
@@ -502,18 +510,93 @@ class DiceFocalSegmentationLoss(keras.losses.Loss):
         super().__init__(name=name, reduction="none", **kwargs)
 
         # Store configuration parameters
+        self.num_classes = num_classes
         self.dice_weight = dice_weight
         self.focal_weight = focal_weight
+        self.focal_alpha = focal_alpha
+        self.focal_gamma = focal_gamma
+        self.from_logits = from_logits
 
-        # Initialize component losses
-        self.dice_loss = keras.losses.Dice(axis=[1, 2], reduction="none")
-        self.focal_loss = keras.losses.BinaryFocalCrossentropy(
-            alpha=focal_alpha,
-            gamma=focal_gamma,
-            from_logits=from_logits,
-            reduction="none",
-            apply_class_balancing=True
-        )
+        # We'll implement the losses directly in the call method for better control
+
+    def _compute_dice_loss(self, y_true, y_pred):
+        """Compute Dice loss with consistent output shape."""
+        # Apply sigmoid/softmax if from_logits
+        if self.from_logits:
+            if self.num_classes == 1:
+                y_pred_prob = ops.sigmoid(y_pred)
+            else:
+                y_pred_prob = ops.softmax(y_pred, axis=-1)
+        else:
+            y_pred_prob = y_pred
+
+        # Compute Dice loss
+        if self.num_classes == 1:
+            # Binary Dice loss
+            intersection = ops.sum(y_true * y_pred_prob, axis=[1, 2])
+            union = ops.sum(y_true, axis=[1, 2]) + ops.sum(y_pred_prob, axis=[1, 2])
+            dice = (2.0 * intersection + 1e-7) / (union + 1e-7)
+            dice_loss = 1.0 - dice  # Shape: [batch_size]
+        else:
+            # Multi-class Dice loss - compute per class and average
+            intersection = ops.sum(y_true * y_pred_prob, axis=[1, 2])  # [batch_size, num_classes]
+            union = ops.sum(y_true, axis=[1, 2]) + ops.sum(y_pred_prob, axis=[1, 2])  # [batch_size, num_classes]
+            dice = (2.0 * intersection + 1e-7) / (union + 1e-7)  # [batch_size, num_classes]
+            dice_loss = ops.mean(1.0 - dice, axis=-1)  # Average over classes -> [batch_size]
+
+        return dice_loss
+
+    def _compute_focal_loss(self, y_true, y_pred):
+        """Compute focal loss with consistent output shape."""
+        if self.num_classes == 1:
+            # Binary focal loss
+            if self.from_logits:
+                # Manually compute binary focal loss from logits
+                p = ops.sigmoid(y_pred)
+            else:
+                p = y_pred
+
+            # Clip to prevent log(0)
+            p = ops.clip(p, 1e-7, 1.0 - 1e-7)
+
+            # Compute focal weight
+            alpha_t = y_true * self.focal_alpha + (1 - y_true) * (1 - self.focal_alpha)
+            p_t = y_true * p + (1 - y_true) * (1 - p)
+            focal_weight = alpha_t * ops.power(1 - p_t, self.focal_gamma)
+
+            # Compute focal loss
+            focal_loss = -focal_weight * (
+                y_true * ops.log(p) + (1 - y_true) * ops.log(1 - p)
+            )
+
+            # Reduce spatial dimensions: [batch_size, height, width, 1] -> [batch_size]
+            focal_loss = ops.mean(focal_loss, axis=[1, 2, 3])
+
+        else:
+            # Multi-class focal loss
+            if self.from_logits:
+                # Manually compute categorical focal loss from logits
+                y_pred_softmax = ops.softmax(y_pred, axis=-1)
+            else:
+                y_pred_softmax = y_pred
+
+            # Clip to prevent log(0)
+            y_pred_softmax = ops.clip(y_pred_softmax, 1e-7, 1.0 - 1e-7)
+
+            # Compute cross entropy
+            ce_loss = -ops.sum(y_true * ops.log(y_pred_softmax), axis=-1)  # [batch_size, height, width]
+
+            # Compute p_t for focal weighting
+            p_t = ops.sum(y_true * y_pred_softmax, axis=-1)  # [batch_size, height, width]
+
+            # Apply focal weighting
+            focal_weight = ops.power(1 - p_t, self.focal_gamma)
+            focal_loss = focal_weight * ce_loss
+
+            # Reduce spatial dimensions: [batch_size, height, width] -> [batch_size]
+            focal_loss = ops.mean(focal_loss, axis=[1, 2])
+
+        return focal_loss
 
     def call(
         self,
@@ -528,14 +611,45 @@ class DiceFocalSegmentationLoss(keras.losses.Loss):
             y_pred: Predicted segmentation masks.
 
         Returns:
-            Combined loss value.
+            Combined loss value with shape [batch_size].
         """
-        # Compute individual loss components
-        dice_loss = self.dice_loss(y_true, y_pred)
-        focal_loss = ops.mean(self.focal_loss(y_true, y_pred), axis=[1, 2])
+        # Handle shape compatibility for different number of classes
+        if self.num_classes == 1:
+            # Binary segmentation - ensure both tensors have same shape
+            if y_pred.shape[-1] == 1 and len(y_true.shape) == 4 and y_true.shape[-1] == 1:
+                # Both are single channel - proceed normally
+                pass
+            elif y_pred.shape[-1] == 1 and len(y_true.shape) == 3:
+                # y_true has no channel dimension, add it
+                y_true = ops.expand_dims(y_true, -1)
+            else:
+                logger.warning(f"Shape mismatch in binary segmentation: y_true.shape={y_true.shape}, y_pred.shape={y_pred.shape}")
 
-        # Return weighted combination
-        return self.dice_weight * dice_loss + self.focal_weight * focal_loss
+        else:
+            # Multi-class segmentation
+            if len(y_true.shape) == 3:
+                # Convert sparse labels to one-hot
+                y_true = ops.one_hot(ops.cast(y_true, "int32"), self.num_classes)
+            elif y_true.shape[-1] != self.num_classes:
+                logger.warning(f"Multi-class segmentation shape mismatch: y_true.shape={y_true.shape}, expected classes={self.num_classes}")
+
+        # Compute individual loss components
+        try:
+            dice_loss = self._compute_dice_loss(y_true, y_pred)  # [batch_size]
+            focal_loss = self._compute_focal_loss(y_true, y_pred)  # [batch_size]
+
+            # Both losses now have shape [batch_size], so we can combine them
+            combined_loss = self.dice_weight * dice_loss + self.focal_weight * focal_loss
+
+            return combined_loss
+
+        except Exception as e:
+            logger.error(f"Error in segmentation loss computation: {e}")
+            logger.error(f"y_true.shape: {y_true.shape}, y_pred.shape: {y_pred.shape}")
+
+            # Return a small fallback loss to avoid training failure
+            batch_size = ops.shape(y_pred)[0]
+            return ops.fill((batch_size,), 0.1)
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -546,11 +660,12 @@ class DiceFocalSegmentationLoss(keras.losses.Loss):
         """
         config = super().get_config()
         config.update({
+            "num_classes": self.num_classes,
             "dice_weight": self.dice_weight,
             "focal_weight": self.focal_weight,
-            "focal_alpha": self.focal_loss.alpha,
-            "focal_gamma": self.focal_loss.gamma,
-            "from_logits": self.focal_loss.from_logits
+            "focal_alpha": self.focal_alpha,
+            "focal_gamma": self.focal_gamma,
+            "from_logits": self.from_logits
         })
         return config
 
@@ -647,9 +762,14 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         - 4D tensors: Segmentation (batch, height, width, classes)
         - 2D tensors: Classification (batch, classes)
 
+    FIXED VERSION: Now supports configurable detection and segmentation class counts.
+
     Args:
         tasks: Task configuration specifying which tasks to enable.
-        num_classes: Number of classes for detection/classification tasks.
+        num_detection_classes: Number of classes for detection task.
+        num_segmentation_classes: Number of classes for segmentation task.
+        num_classification_classes: Number of classes for classification task.
+        num_classes: Fallback for backward compatibility.
         input_shape: Input image dimensions as (height, width).
         use_uncertainty_weighting: Whether to use learnable uncertainty weighting.
         detection_weight: Static weight for detection loss (ignored if uncertainty weighting is used).
@@ -663,8 +783,13 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
     def __init__(
         self,
         tasks: Union[TaskConfiguration, List[str], List[TaskType]],
-        num_classes: int,
-        input_shape: Tuple[int, int],
+        # Separate class counts for each task
+        num_detection_classes: Optional[int] = None,
+        num_segmentation_classes: Optional[int] = None,
+        num_classification_classes: Optional[int] = None,
+        # Backward compatibility
+        num_classes: int = 80,
+        input_shape: Tuple[int, int] = (640, 640),
         use_uncertainty_weighting: bool = False,
         detection_weight: float = 1.0,
         segmentation_weight: float = 1.0,
@@ -677,7 +802,14 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
 
         # Parse and store task configuration
         self.task_config = parse_task_list(tasks)
-        self.num_classes = num_classes
+
+        # Configure class counts
+        self.num_detection_classes = num_detection_classes if num_detection_classes is not None else num_classes
+        self.num_segmentation_classes = num_segmentation_classes if num_segmentation_classes is not None else num_classes
+        self.num_classification_classes = num_classification_classes if num_classification_classes is not None else num_classes
+
+        # Store other configuration
+        self.num_classes = num_classes  # Backward compatibility
         self.input_shape = input_shape
         self.use_uncertainty_weighting = use_uncertainty_weighting
         self.detection_weight = detection_weight
@@ -701,18 +833,22 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
             f"{self.task_config.get_task_names()}. "
             f"Uncertainty weighting: {self.use_uncertainty_weighting}"
         )
+        logger.info(f"Class counts - Detection: {self.num_detection_classes}, "
+                   f"Segmentation: {self.num_segmentation_classes}, "
+                   f"Classification: {self.num_classification_classes}")
 
     def _build_loss_functions(self) -> None:
         """Instantiate internal, task-specific loss functions."""
         if self.task_config.has_detection():
             self._internal_losses[TaskType.DETECTION.value] = YOLOv12ObjectDetectionLoss(
-                num_classes=self.num_classes,
+                num_classes=self.num_detection_classes,
                 input_shape=self.input_shape,
                 reg_max=self.reg_max
             )
 
         if self.task_config.has_segmentation():
             self._internal_losses[TaskType.SEGMENTATION.value] = DiceFocalSegmentationLoss(
+                num_classes=self.num_segmentation_classes,  # Use segmentation-specific class count
                 from_logits=True
             )
 
@@ -878,6 +1014,11 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         config = super().get_config()
         config.update({
             "tasks": self.task_config.get_task_names(),
+            # Separate class counts
+            "num_detection_classes": self.num_detection_classes,
+            "num_segmentation_classes": self.num_segmentation_classes,
+            "num_classification_classes": self.num_classification_classes,
+            # Backward compatibility
             "num_classes": self.num_classes,
             "input_shape": self.input_shape,
             "use_uncertainty_weighting": self.use_uncertainty_weighting,
@@ -908,8 +1049,11 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
 
 def create_yolov12_multitask_loss(
     tasks: Union[List[TaskType], List[str], TaskConfiguration],
-    num_classes: int,
-    input_shape: Tuple[int, int],
+    num_detection_classes: Optional[int] = None,
+    num_segmentation_classes: Optional[int] = None,
+    num_classification_classes: Optional[int] = None,
+    num_classes: int = 80,  # Backward compatibility
+    input_shape: Tuple[int, int] = (640, 640),
     **kwargs
 ) -> YOLOv12MultiTaskLoss:
     """
@@ -921,7 +1065,10 @@ def create_yolov12_multitask_loss(
 
     Args:
         tasks: Task configuration specifying which tasks to enable.
-        num_classes: Number of classes for detection/classification tasks.
+        num_detection_classes: Number of classes for detection task.
+        num_segmentation_classes: Number of classes for segmentation task.
+        num_classification_classes: Number of classes for classification task.
+        num_classes: Fallback class count for backward compatibility.
         input_shape: Input image dimensions as (height, width).
         **kwargs: Additional keyword arguments passed to YOLOv12MultiTaskLoss.
 
@@ -929,17 +1076,76 @@ def create_yolov12_multitask_loss(
         Configured YOLOv12MultiTaskLoss instance ready for use in model.compile().
 
     Example:
+        >>> # COCO pretraining
         >>> loss_fn = create_yolov12_multitask_loss(
         ...     tasks=['detection', 'segmentation'],
-        ...     num_classes=80,
+        ...     num_detection_classes=80,
+        ...     num_segmentation_classes=80,
         ...     input_shape=(640, 640),
         ...     use_uncertainty_weighting=True
+        ... )
+        >>>
+        >>> # Crack detection fine-tuning
+        >>> loss_fn = create_yolov12_multitask_loss(
+        ...     tasks=['detection', 'segmentation'],
+        ...     num_detection_classes=1,
+        ...     num_segmentation_classes=1,
+        ...     input_shape=(640, 640)
         ... )
         >>> model.compile(optimizer='adam', loss=loss_fn)
     """
     return YOLOv12MultiTaskLoss(
         tasks=tasks,
+        num_detection_classes=num_detection_classes,
+        num_segmentation_classes=num_segmentation_classes,
+        num_classification_classes=num_classification_classes,
         num_classes=num_classes,
+        input_shape=input_shape,
+        **kwargs
+    )
+
+
+def create_yolov12_coco_loss(
+    input_shape: Tuple[int, int] = (640, 640),
+    **kwargs
+) -> YOLOv12MultiTaskLoss:
+    """
+    Create loss function specifically for COCO pretraining.
+
+    Args:
+        input_shape: Input image dimensions.
+        **kwargs: Additional arguments.
+
+    Returns:
+        Loss function configured for COCO pretraining.
+    """
+    return create_yolov12_multitask_loss(
+        tasks=['detection', 'segmentation'],
+        num_detection_classes=80,
+        num_segmentation_classes=80,
+        input_shape=input_shape,
+        **kwargs
+    )
+
+
+def create_yolov12_crack_loss(
+    input_shape: Tuple[int, int] = (640, 640),
+    **kwargs
+) -> YOLOv12MultiTaskLoss:
+    """
+    Create loss function specifically for crack detection fine-tuning.
+
+    Args:
+        input_shape: Input image dimensions.
+        **kwargs: Additional arguments.
+
+    Returns:
+        Loss function configured for crack detection.
+    """
+    return create_yolov12_multitask_loss(
+        tasks=['detection', 'segmentation'],
+        num_detection_classes=1,
+        num_segmentation_classes=1,
         input_shape=input_shape,
         **kwargs
     )

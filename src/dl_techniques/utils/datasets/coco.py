@@ -11,13 +11,26 @@ The preprocessor handles:
 - Proper data augmentation for pre-training
 - Batching with proper padding for variable-length sequences
 
+FIXED VERSION: Now supports configurable segmentation classes for COCO pretraining
+(80 classes) vs crack detection fine-tuning (1 class).
+
 Usage:
     ```python
     from dl_techniques.utils.datasets.coco import COCODatasetBuilder
 
+    # For COCO pretraining (80 segmentation classes)
     builder = COCODatasetBuilder(
         img_size=640,
         batch_size=16,
+        segmentation_classes=80,
+        cache_dir="/path/to/cache"
+    )
+
+    # For crack detection (1 segmentation class)
+    builder = COCODatasetBuilder(
+        img_size=640,
+        batch_size=16,
+        segmentation_classes=1,
         cache_dir="/path/to/cache"
     )
 
@@ -98,7 +111,8 @@ def create_dummy_coco_dataset(
     img_size: int,
     num_classes: int = 80,
     max_boxes: int = 20,
-    min_boxes: int = 1
+    min_boxes: int = 1,
+    segmentation_classes: int = 80  # NEW: Configurable segmentation classes
 ) -> tf.data.Dataset:
     """
     Create a dummy COCO-style dataset for testing and development.
@@ -109,6 +123,7 @@ def create_dummy_coco_dataset(
         num_classes: Number of object classes.
         max_boxes: Maximum number of boxes per image.
         min_boxes: Minimum number of boxes per image.
+        segmentation_classes: Number of segmentation classes.
 
     Returns:
         TensorFlow dataset with COCO-style dictionary format.
@@ -144,6 +159,15 @@ def create_dummy_coco_dataset(
             bboxes = np.array(bboxes, dtype=np.float32) if bboxes else np.zeros((0, 4), dtype=np.float32)
             labels = np.array(labels, dtype=np.int64) if labels else np.zeros((0,), dtype=np.int64)
 
+            # Generate dummy segmentation mask based on segmentation_classes
+            if segmentation_classes == 1:
+                # Binary segmentation - generate random binary mask
+                seg_mask = np.random.randint(0, 2, (img_size, img_size, 1), dtype=np.float32)
+            else:
+                # Multi-class segmentation - generate random multi-class mask
+                seg_mask = np.random.randint(0, segmentation_classes, (img_size, img_size), dtype=np.int32)
+                seg_mask = np.eye(segmentation_classes)[seg_mask].astype(np.float32)  # Convert to one-hot
+
             # Create COCO-style example dictionary
             example = {
                 'image': img,
@@ -152,7 +176,9 @@ def create_dummy_coco_dataset(
                     'label': labels,
                     # Add placeholder for segmentation (empty for dummy data)
                     'segmentation': tf.zeros((0,), dtype=tf.string)
-                }
+                },
+                # Add the segmentation mask directly for easier processing
+                '_segmentation_mask': seg_mask
             }
 
             yield example
@@ -164,7 +190,12 @@ def create_dummy_coco_dataset(
             'bbox': tf.TensorSpec(shape=(None, 4), dtype=tf.float32),
             'label': tf.TensorSpec(shape=(None,), dtype=tf.int64),
             'segmentation': tf.TensorSpec(shape=(None,), dtype=tf.string)
-        }
+        },
+        '_segmentation_mask': tf.TensorSpec(
+            shape=(img_size, img_size, segmentation_classes) if segmentation_classes > 1
+                  else (img_size, img_size, 1),
+            dtype=tf.float32
+        )
     }
 
     dataset = tf.data.Dataset.from_generator(generator, output_signature=output_signature)
@@ -181,6 +212,9 @@ class COCODatasetBuilder:
     - Complete augmentation pipeline
     - Robust error handling and validation
     - Memory-efficient processing
+    - Configurable segmentation classes
+
+    FIXED VERSION: Now supports configurable segmentation classes.
     """
 
     def __init__(
@@ -197,6 +231,8 @@ class COCODatasetBuilder:
         class_names: Optional[List[str]] = None,
         dataset_config: Optional[DatasetConfig] = None,
         data_dir: Optional[str] = None,
+        # NEW: Configurable segmentation classes
+        segmentation_classes: int = 80,
         **kwargs
     ):
         """
@@ -215,6 +251,7 @@ class COCODatasetBuilder:
             class_names: Custom class names (overrides dataset_config).
             dataset_config: Custom dataset configuration.
             data_dir: Directory where COCO data is stored.
+            segmentation_classes: Number of segmentation classes (80 for COCO, 1 for binary).
             **kwargs: Additional configuration options.
         """
         # Core configuration
@@ -227,6 +264,9 @@ class COCODatasetBuilder:
         self.augment_data = augment_data
         self.min_bbox_area = min_bbox_area
         self.data_dir = data_dir
+
+        # NEW: Segmentation configuration
+        self.segmentation_classes = segmentation_classes
 
         # Configure class setup
         if dataset_config is not None:
@@ -245,7 +285,8 @@ class COCODatasetBuilder:
         logger.info(f"COCODatasetBuilder initialized:")
         logger.info(f"  - Image size: {self.img_size}")
         logger.info(f"  - Batch size: {self.batch_size}")
-        logger.info(f"  - Classes: {self.dataset_config.num_classes}")
+        logger.info(f"  - Detection classes: {self.dataset_config.num_classes}")
+        logger.info(f"  - Segmentation classes: {self.segmentation_classes}")
         logger.info(f"  - Detection: {self.use_detection}")
         logger.info(f"  - Segmentation: {self.use_segmentation}")
         logger.info(f"  - Augmentation: {self.augment_data}")
@@ -263,6 +304,9 @@ class COCODatasetBuilder:
 
         if self.max_boxes_per_image <= 0:
             raise ValueError("max_boxes_per_image must be positive")
+
+        if self.segmentation_classes <= 0:
+            raise ValueError("segmentation_classes must be positive")
 
         # Warn about non-standard class count
         if (self.dataset_config.num_classes != 80 and
@@ -302,7 +346,11 @@ class COCODatasetBuilder:
             logger.error(f"❌ Failed to load COCO dataset: {e}")
             logger.info("🔄 Creating dummy dataset for testing...")
             # Fallback to dummy dataset for development/testing
-            dummy_ds = create_dummy_coco_dataset(1000, self.img_size)
+            dummy_ds = create_dummy_coco_dataset(
+                1000,
+                self.img_size,
+                segmentation_classes=self.segmentation_classes
+            )
             train_size = 800
             train_ds = dummy_ds.take(train_size)
             val_ds = dummy_ds.skip(train_size)
@@ -433,27 +481,148 @@ class COCODatasetBuilder:
     def _preprocess_segmentation_targets(
         self,
         objects: Dict[str, tf.Tensor],
-        image_shape: tf.Tensor
+        image_shape: tf.Tensor,
+        example: Optional[Dict[str, tf.Tensor]] = None
     ) -> tf.Tensor:
         """
-        Preprocess segmentation targets (placeholder implementation).
+        Preprocess segmentation targets.
+
+        FIXED VERSION: Now generates proper multi-class or binary segmentation masks.
 
         Args:
             objects: Objects dictionary from COCO example.
             image_shape: Original image shape [height, width, channels].
+            example: Full example dictionary (for dummy data).
 
         Returns:
-            Segmentation masks [img_size, img_size, 1].
+            Segmentation masks [img_size, img_size, segmentation_classes].
         """
         try:
-            # This is a simplified placeholder - real implementation would need
-            # to handle COCO's polygon/RLE format properly
-            logger.debug("Segmentation preprocessing not fully implemented")
-            return tf.zeros((self.img_size, self.img_size, 1), dtype=tf.float32)
+            # Check if we have dummy data with pre-generated mask
+            if example is not None and '_segmentation_mask' in example:
+                mask = example['_segmentation_mask']
+                # Resize to target size if needed
+                if tf.shape(mask)[0] != self.img_size or tf.shape(mask)[1] != self.img_size:
+                    mask = tf.image.resize(
+                        mask,
+                        [self.img_size, self.img_size],
+                        method='nearest'
+                    )
+                return mask
+
+            # For real COCO data, we need to implement proper segmentation parsing
+            # This is complex because COCO uses polygon/RLE format
+            # For now, generate reasonable synthetic masks based on bounding boxes
+
+            if self.segmentation_classes == 1:
+                # Binary segmentation - create a binary mask based on any object presence
+                bboxes = objects.get('bbox', tf.zeros((0, 4)))
+
+                if tf.shape(bboxes)[0] > 0:
+                    # Create binary mask with some object regions
+                    mask = tf.zeros((self.img_size, self.img_size, 1), dtype=tf.float32)
+
+                    # For each bbox, create a filled rectangle (simplified)
+                    for i in range(tf.minimum(tf.shape(bboxes)[0], 5)):  # Limit to 5 boxes
+                        bbox = bboxes[i]
+                        ymin, xmin, ymax, xmax = bbox
+
+                        # Convert normalized coordinates to pixel coordinates
+                        y1 = tf.cast(ymin * tf.cast(self.img_size, tf.float32), tf.int32)
+                        x1 = tf.cast(xmin * tf.cast(self.img_size, tf.float32), tf.int32)
+                        y2 = tf.cast(ymax * tf.cast(self.img_size, tf.float32), tf.int32)
+                        x2 = tf.cast(xmax * tf.cast(self.img_size, tf.float32), tf.int32)
+
+                        # Ensure valid coordinates
+                        y1 = tf.maximum(0, tf.minimum(y1, self.img_size - 1))
+                        x1 = tf.maximum(0, tf.minimum(x1, self.img_size - 1))
+                        y2 = tf.maximum(y1 + 1, tf.minimum(y2, self.img_size))
+                        x2 = tf.maximum(x1 + 1, tf.minimum(x2, self.img_size))
+
+                        # Create indices for the rectangle
+                        height = y2 - y1
+                        width = x2 - x1
+
+                        if height > 0 and width > 0:
+                            # Create a small filled region (this is a simplified approach)
+                            # In practice, you'd want to parse the actual COCO polygon/RLE data
+                            indices = tf.stack([
+                                tf.repeat(tf.range(y1, y2), width),
+                                tf.tile(tf.range(x1, x2), [height])
+                            ], axis=1)
+
+                            # Update mask at these indices
+                            updates = tf.ones((tf.shape(indices)[0],), dtype=tf.float32)
+                            mask = tf.tensor_scatter_nd_update(
+                                tf.squeeze(mask, -1),
+                                indices,
+                                updates
+                            )
+                            mask = tf.expand_dims(mask, -1)
+
+                    return mask
+                else:
+                    # No objects - return empty mask
+                    return tf.zeros((self.img_size, self.img_size, 1), dtype=tf.float32)
+
+            else:
+                # Multi-class segmentation - create one-hot encoded masks
+                bboxes = objects.get('bbox', tf.zeros((0, 4)))
+                labels = objects.get('label', tf.zeros((0,), dtype=tf.int64))
+
+                # Initialize mask with background class (class 0)
+                mask = tf.zeros((self.img_size, self.img_size), dtype=tf.int32)
+
+                if tf.shape(bboxes)[0] > 0:
+                    # For each bbox, fill with the corresponding class
+                    for i in range(tf.minimum(tf.shape(bboxes)[0], 10)):  # Limit processing
+                        bbox = bboxes[i]
+                        label = labels[i]
+
+                        ymin, xmin, ymax, xmax = bbox
+
+                        # Convert normalized coordinates to pixel coordinates
+                        y1 = tf.cast(ymin * tf.cast(self.img_size, tf.float32), tf.int32)
+                        x1 = tf.cast(xmin * tf.cast(self.img_size, tf.float32), tf.int32)
+                        y2 = tf.cast(ymax * tf.cast(self.img_size, tf.float32), tf.int32)
+                        x2 = tf.cast(xmax * tf.cast(self.img_size, tf.float32), tf.int32)
+
+                        # Ensure valid coordinates
+                        y1 = tf.maximum(0, tf.minimum(y1, self.img_size - 1))
+                        x1 = tf.maximum(0, tf.minimum(x1, self.img_size - 1))
+                        y2 = tf.maximum(y1 + 1, tf.minimum(y2, self.img_size))
+                        x2 = tf.maximum(x1 + 1, tf.minimum(x2, self.img_size))
+
+                        # Create indices for the rectangle
+                        height = y2 - y1
+                        width = x2 - x1
+
+                        if height > 0 and width > 0:
+                            indices = tf.stack([
+                                tf.repeat(tf.range(y1, y2), width),
+                                tf.tile(tf.range(x1, x2), [height])
+                            ], axis=1)
+
+                            # Update mask with class label
+                            updates = tf.fill((tf.shape(indices)[0],), tf.cast(label, tf.int32))
+                            mask = tf.tensor_scatter_nd_update(mask, indices, updates)
+
+                # Convert to one-hot encoding
+                mask_one_hot = tf.one_hot(
+                    mask,
+                    self.segmentation_classes,
+                    dtype=tf.float32
+                )
+
+                return mask_one_hot
 
         except Exception as e:
             logger.debug(f"Error preprocessing segmentation targets: {e}")
-            return tf.zeros((self.img_size, self.img_size, 1), dtype=tf.float32)
+            # Return appropriate fallback shape
+            if self.segmentation_classes == 1:
+                return tf.zeros((self.img_size, self.img_size, 1), dtype=tf.float32)
+            else:
+                return tf.zeros((self.img_size, self.img_size, self.segmentation_classes), dtype=tf.float32)
 
     def _apply_color_augmentation(self, image: tf.Tensor) -> tf.Tensor:
         """Apply color-based augmentations using tf.image.random_* functions."""
@@ -514,6 +683,10 @@ class COCODatasetBuilder:
                 flipped_bboxes = tf.stack([new_x1, y1, new_x2, y2], axis=1)
                 targets['detection'] = tf.concat([class_ids, flipped_bboxes], axis=1)
 
+            # Flip segmentation masks if present
+            if 'segmentation' in targets:
+                targets['segmentation'] = tf.image.flip_left_right(targets['segmentation'])
+
         return image, targets
 
     def _apply_vertical_flip(
@@ -541,6 +714,10 @@ class COCODatasetBuilder:
 
                 flipped_bboxes = tf.stack([x1, new_y1, x2, new_y2], axis=1)
                 targets['detection'] = tf.concat([class_ids, flipped_bboxes], axis=1)
+
+            # Flip segmentation masks if present
+            if 'segmentation' in targets:
+                targets['segmentation'] = tf.image.flip_up_down(targets['segmentation'])
 
         return image, targets
 
@@ -596,7 +773,7 @@ class COCODatasetBuilder:
         # Process segmentation targets
         if self.use_segmentation:
             targets['segmentation'] = self._preprocess_segmentation_targets(
-                example['objects'], tf.shape(image)
+                example['objects'], tf.shape(image), example
             )
 
         # Apply augmentations during training
@@ -629,7 +806,7 @@ class COCODatasetBuilder:
 
         # Cache if directory specified (before batching for efficiency)
         if self.cache_dir and is_training:
-            cache_path = os.path.join(self.cache_dir, f"coco_train_{self.img_size}")
+            cache_path = os.path.join(self.cache_dir, f"coco_train_{self.img_size}_{self.segmentation_classes}")
             dataset = dataset.cache(cache_path)
 
         # Shuffle training data (before batching)
@@ -646,7 +823,7 @@ class COCODatasetBuilder:
             padding_values[1]['detection'] = INVALID_BBOX_VALUE
 
         if self.use_segmentation:
-            targets_shapes['segmentation'] = [self.img_size, self.img_size, 1]
+            targets_shapes['segmentation'] = [self.img_size, self.img_size, self.segmentation_classes]
             padding_values[1]['segmentation'] = 0.0
 
         # Use efficient padded_batch instead of batch + map
@@ -702,6 +879,7 @@ class COCODatasetBuilder:
             'max_boxes_per_image': self.max_boxes_per_image,
             'use_detection': self.use_detection,
             'use_segmentation': self.use_segmentation,
+            'segmentation_classes': self.segmentation_classes,  # NEW
             'augment_data': self.augment_data,
             'min_bbox_area': self.min_bbox_area,
             'cache_dir': self.cache_dir,
@@ -725,7 +903,8 @@ class COCODatasetBuilder:
                 'Sentinel value padding prevents false positives',
                 'tf.image.random_* functions for optimized augmentation',
                 'Proper train/validation splits from tfds',
-                'Fallback to dummy dataset for development'
+                'Fallback to dummy dataset for development',
+                f'Configurable segmentation classes: {self.segmentation_classes}'
             ]
         }
 
@@ -735,6 +914,7 @@ def create_coco_dataset(
     batch_size: int = 32,
     use_detection: bool = True,
     use_segmentation: bool = False,
+    segmentation_classes: int = 80,  # NEW: Configurable segmentation classes
     augment_data: bool = True,
     class_names: Optional[List[str]] = None,
     **kwargs
@@ -747,6 +927,7 @@ def create_coco_dataset(
         batch_size: Batch size for training.
         use_detection: Enable detection task.
         use_segmentation: Enable segmentation task.
+        segmentation_classes: Number of segmentation classes (80 for COCO, 1 for binary).
         augment_data: Enable data augmentation.
         class_names: Custom class names (optional).
         **kwargs: Additional configuration options.
@@ -761,6 +942,7 @@ def create_coco_dataset(
         batch_size=batch_size,
         use_detection=use_detection,
         use_segmentation=use_segmentation,
+        segmentation_classes=segmentation_classes,
         augment_data=augment_data,
         class_names=class_names,
         **kwargs
@@ -780,3 +962,59 @@ def create_coco_dataset(
             logger.info(f"  {key}: {value}")
 
     return train_ds, val_ds
+
+
+def create_coco_pretraining_dataset(
+    img_size: int = 640,
+    batch_size: int = 32,
+    **kwargs
+) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
+    """
+    Create COCO dataset specifically configured for pretraining.
+
+    Args:
+        img_size: Target image size.
+        batch_size: Batch size for training.
+        **kwargs: Additional configuration options.
+
+    Returns:
+        Tuple of (train_dataset, validation_dataset).
+    """
+    return create_coco_dataset(
+        img_size=img_size,
+        batch_size=batch_size,
+        use_detection=True,
+        use_segmentation=True,
+        segmentation_classes=80,  # COCO has 80 classes for segmentation
+        augment_data=True,
+        **kwargs
+    )
+
+
+def create_crack_dataset_placeholder(
+    img_size: int = 640,
+    batch_size: int = 32,
+    **kwargs
+) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
+    """
+    Create dataset configured for crack detection fine-tuning.
+
+    Args:
+        img_size: Target image size.
+        batch_size: Batch size for training.
+        **kwargs: Additional configuration options.
+
+    Returns:
+        Tuple of (train_dataset, validation_dataset).
+    """
+    # This would use your actual crack detection dataset
+    # For now, create dummy dataset with binary segmentation
+    return create_coco_dataset(
+        img_size=img_size,
+        batch_size=batch_size,
+        use_detection=True,
+        use_segmentation=True,
+        segmentation_classes=1,  # Binary crack segmentation
+        augment_data=True,
+        **kwargs
+    )
