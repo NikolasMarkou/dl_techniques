@@ -804,28 +804,13 @@ class COCODatasetBuilder:
             num_parallel_calls=tf.data.AUTOTUNE
         )
 
-        # # Cache if directory specified (before batching for efficiency)
-        # if self.cache_dir and is_training:
-        #     cache_path = os.path.join(self.cache_dir, f"coco_train_{self.img_size}_{self.segmentation_classes}")
-        #     dataset = dataset.cache(cache_path)
-        #
-        # # Shuffle training data (before batching)
-        # # Use configurable buffer size to avoid memory exhaustion with high-res images
-        # if is_training:
-        #     dataset = dataset.shuffle(buffer_size=self.shuffle_buffer_size)
-        #     logger.info(f"Using shuffle buffer size: {self.shuffle_buffer_size}")
-        #
-        # # IMPORTANT: Repeat dataset to allow multiple epochs
-        # # This ensures the dataset can be iterated over multiple times
-        # dataset = dataset.repeat()
-
-        # Cache if directory specified
+        # Cache if directory specified (before batching for efficiency)
         if self.cache_dir and is_training:
             cache_path = os.path.join(self.cache_dir, f"coco_train_{self.img_size}_{self.segmentation_classes}")
             dataset = dataset.cache(cache_path)
 
         if is_training:
-            # IMPORTANT: Repeat the dataset indefinitely BEFORE shuffling.
+            # IMPORTANT: Repeat the dataset BEFORE shuffling.
             # This ensures that data is shuffled differently across epochs.
             dataset = dataset.repeat()
 
@@ -833,7 +818,8 @@ class COCODatasetBuilder:
             dataset = dataset.shuffle(buffer_size=self.shuffle_buffer_size)
             logger.info(f"Using shuffle buffer size: {self.shuffle_buffer_size}")
         else:
-            # For validation, just repeat once to be safe with steps_per_epoch logic
+            # For validation, no need to shuffle, but repeat is good practice
+            # to prevent OutOfRange errors if validation_steps is large.
             dataset = dataset.repeat()
 
         # Define shapes and padding values for efficient padded_batch
