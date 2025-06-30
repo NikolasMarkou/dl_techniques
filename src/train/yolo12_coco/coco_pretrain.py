@@ -880,7 +880,7 @@ def main():
     # Visualization arguments
     parser.add_argument('--no-visualizations', action='store_true',
                         help='Disable per-epoch visualizations')
-    parser.add_argument('--visualization-freq', type=int, default=5,
+    parser.add_argument('--visualization-freq', type=int, default=1,
                         help='Frequency of visualization (every N epochs)')
     parser.add_argument('--viz-samples', type=int, default=4,
                         help='Number of samples to visualize per epoch')
@@ -1021,13 +1021,17 @@ def main():
     )
 
     # Calculate steps (estimate for COCO train: ~118k images, but adapt to actual dataset)
-    steps_per_epoch = calculate_steps_per_epoch(
-        dataset=train_ds,
-        batch_size=args.batch_size,
-        default_size=118000,  # COCO training set size
-        min_steps=100,        # Minimum for testing
-        max_steps=500         # Maximum for dummy datasets
-    )
+    if args.limit_train_samples:
+        steps_per_epoch = args.limit_train_samples // args.batch_size
+        logger.info(f"Using limited samples: steps per epoch set to {steps_per_epoch}")
+    else:
+        steps_per_epoch = calculate_steps_per_epoch(
+            dataset=train_ds,
+            batch_size=args.batch_size,
+            default_size=118000,  # COCO training set size
+            min_steps=100,  # Minimum for testing
+            max_steps=500  # Maximum for dummy datasets
+        )
 
     # Train model
     logger.info("🏋️ Starting COCO pre-training...")

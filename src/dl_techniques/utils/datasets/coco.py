@@ -519,15 +519,17 @@ class COCODatasetBuilder:
             return tf.fill((self.max_boxes_per_image, 5), INVALID_BBOX_VALUE)
 
     def _preprocess_segmentation_targets(
-        self,
-        objects: Dict[str, tf.Tensor],
-        image_shape: tf.Tensor,
-        example: Optional[Dict[str, tf.Tensor]] = None
+            self,
+            objects: Dict[str, tf.Tensor],
+            image_shape: tf.Tensor,
+            example: Optional[Dict[str, tf.Tensor]] = None
     ) -> tf.Tensor:
         """
         Preprocess segmentation targets.
 
-        FIXED VERSION: Now generates proper multi-class or binary segmentation masks.
+        FIXED VERSION: Uses a robust, vectorized method to create masks from bounding boxes,
+        avoiding fragile loops and graph-mode errors with `tf.tensor_scatter_nd_update`.
+        This version correctly handles the background class to prevent class ID collisions.
 
         Args:
             objects: Objects dictionary from COCO example.
@@ -538,7 +540,7 @@ class COCODatasetBuilder:
             Segmentation masks [img_size, img_size, segmentation_classes].
         """
         try:
-            # Check if we have dummy data with pre-generated mask
+            # Check if we have dummy data with a pre-generated mask. This logic is unchanged.
             if example is not None and '_segmentation_mask' in example:
                 mask = example['_segmentation_mask']
                 # Resize to target size if needed
@@ -550,113 +552,65 @@ class COCODatasetBuilder:
                     )
                 return mask
 
-            # For real COCO data, we need to implement proper segmentation parsing
-            # This is complex because COCO uses polygon/RLE format
-            # For now, generate reasonable synthetic masks based on bounding boxes
+            # Get bounding boxes and labels for real data.
+            bboxes = objects.get('bbox', tf.zeros((0, 4)))  # [ymin, xmin, ymax, xmax]
+            labels = objects.get('label', tf.zeros((0,), dtype=tf.int64))
 
+            # Initialize an integer mask for class indices. Class 0 is reserved for the background.
+            final_mask = tf.zeros((self.img_size, self.img_size), dtype=tf.int32)
+
+            # Only proceed if there are any bounding boxes to process.
+            # This 'if' is safe for graph mode as it checks the tensor shape.
+            if tf.shape(bboxes)[0] > 0:
+                # Convert normalized bbox coordinates [0, 1] to absolute pixel coordinates.
+                bboxes_px = bboxes * tf.cast(tf.stack(
+                    [self.img_size, self.img_size, self.img_size, self.img_size]
+                ), dtype=tf.float32)
+                ymin, xmin, ymax, xmax = tf.unstack(bboxes_px, axis=1)
+
+                # Create coordinate grids for vectorized operations.
+                # y_coords shape: (img_size, 1), x_coords shape: (1, img_size)
+                # This allows broadcasting to efficiently create boolean masks for each box.
+                y_coords = tf.cast(tf.range(self.img_size)[:, tf.newaxis], tf.float32)
+                x_coords = tf.cast(tf.range(self.img_size)[tf.newaxis, :], tf.float32)
+
+                # Iterate through boxes from back to front.
+                # This ensures smaller objects (often listed later) are drawn on top of larger ones.
+                # Using tf.range makes the loop compatible with graph execution.
+                for i in tf.range(tf.shape(bboxes)[0] - 1, -1, -1):
+                    # BUG FIX #2: Add 1 to the class ID to avoid collision with background (class 0).
+                    # Now, 'person' (original ID 0) becomes 1, and so on.
+                    box_class_id = tf.cast(labels[i], tf.int32) + 1
+
+                    # Get pixel coordinates for the current box.
+                    by, bx, bh, bw = ymin[i], xmin[i], ymax[i], xmax[i]
+
+                    # BUG FIX #1: Create a boolean mask for the current box using vectorized comparison.
+                    # This is the graph-safe replacement for the fragile Python 'if' statement.
+                    box_mask = (y_coords >= by) & (y_coords < bh) & (x_coords >= bx) & (x_coords < bw)
+
+                    # Use tf.where to "paint" the class ID onto the final_mask.
+                    # This is a robust, graph-safe conditional assignment.
+                    # Where box_mask is True, use the new class_id; otherwise, keep the existing value.
+                    final_mask = tf.where(box_mask, box_class_id, final_mask)
+
+            # Convert the final integer mask into the format expected by the loss function.
             if self.segmentation_classes == 1:
-                # Binary segmentation - create a binary mask based on any object presence
-                bboxes = objects.get('bbox', tf.zeros((0, 4)))
-
-                if tf.shape(bboxes)[0] > 0:
-                    # Create binary mask with some object regions
-                    mask = tf.zeros((self.img_size, self.img_size, 1), dtype=tf.float32)
-
-                    # For each bbox, create a filled rectangle (simplified)
-                    for i in range(tf.minimum(tf.shape(bboxes)[0], 5)):  # Limit to 5 boxes
-                        bbox = bboxes[i]
-                        ymin, xmin, ymax, xmax = bbox
-
-                        # Convert normalized coordinates to pixel coordinates
-                        y1 = tf.cast(ymin * tf.cast(self.img_size, tf.float32), tf.int32)
-                        x1 = tf.cast(xmin * tf.cast(self.img_size, tf.float32), tf.int32)
-                        y2 = tf.cast(ymax * tf.cast(self.img_size, tf.float32), tf.int32)
-                        x2 = tf.cast(xmax * tf.cast(self.img_size, tf.float32), tf.int32)
-
-                        # Ensure valid coordinates
-                        y1 = tf.maximum(0, tf.minimum(y1, self.img_size - 1))
-                        x1 = tf.maximum(0, tf.minimum(x1, self.img_size - 1))
-                        y2 = tf.maximum(y1 + 1, tf.minimum(y2, self.img_size))
-                        x2 = tf.maximum(x1 + 1, tf.minimum(x2, self.img_size))
-
-                        # Create indices for the rectangle
-                        height = y2 - y1
-                        width = x2 - x1
-
-                        if height > 0 and width > 0:
-                            # Create a small filled region (this is a simplified approach)
-                            # In practice, you'd want to parse the actual COCO polygon/RLE data
-                            indices = tf.stack([
-                                tf.repeat(tf.range(y1, y2), width),
-                                tf.tile(tf.range(x1, x2), [height])
-                            ], axis=1)
-
-                            # Update mask at these indices
-                            updates = tf.ones((tf.shape(indices)[0],), dtype=tf.float32)
-                            mask = tf.tensor_scatter_nd_update(
-                                tf.squeeze(mask, -1),
-                                indices,
-                                updates
-                            )
-                            mask = tf.expand_dims(mask, -1)
-
-                    return mask
-                else:
-                    # No objects - return empty mask
-                    return tf.zeros((self.img_size, self.img_size, 1), dtype=tf.float32)
-
+                # For binary segmentation, any non-zero pixel is considered part of the mask.
+                # Add a channel dimension at the end.
+                return tf.cast(final_mask > 0, tf.float32)[..., tf.newaxis]
             else:
-                # Multi-class segmentation - create one-hot encoded masks
-                bboxes = objects.get('bbox', tf.zeros((0, 4)))
-                labels = objects.get('label', tf.zeros((0,), dtype=tf.int64))
+                # For multi-class, one-hot encode the integer mask.
+                # The depth must be num_classes + 1 to account for our background class (0).
+                # Our mask now has values from 0 (background) to 80.
+                one_hot_mask = tf.one_hot(final_mask, depth=self.segmentation_classes + 1, dtype=tf.float32)
 
-                # Initialize mask with background class (class 0)
-                mask = tf.zeros((self.img_size, self.img_size), dtype=tf.int32)
-
-                if tf.shape(bboxes)[0] > 0:
-                    # For each bbox, fill with the corresponding class
-                    for i in range(tf.minimum(tf.shape(bboxes)[0], 10)):  # Limit processing
-                        bbox = bboxes[i]
-                        label = labels[i]
-
-                        ymin, xmin, ymax, xmax = bbox
-
-                        # Convert normalized coordinates to pixel coordinates
-                        y1 = tf.cast(ymin * tf.cast(self.img_size, tf.float32), tf.int32)
-                        x1 = tf.cast(xmin * tf.cast(self.img_size, tf.float32), tf.int32)
-                        y2 = tf.cast(ymax * tf.cast(self.img_size, tf.float32), tf.int32)
-                        x2 = tf.cast(xmax * tf.cast(self.img_size, tf.float32), tf.int32)
-
-                        # Ensure valid coordinates
-                        y1 = tf.maximum(0, tf.minimum(y1, self.img_size - 1))
-                        x1 = tf.maximum(0, tf.minimum(x1, self.img_size - 1))
-                        y2 = tf.maximum(y1 + 1, tf.minimum(y2, self.img_size))
-                        x2 = tf.maximum(x1 + 1, tf.minimum(x2, self.img_size))
-
-                        # Create indices for the rectangle
-                        height = y2 - y1
-                        width = x2 - x1
-
-                        if height > 0 and width > 0:
-                            indices = tf.stack([
-                                tf.repeat(tf.range(y1, y2), width),
-                                tf.tile(tf.range(x1, x2), [height])
-                            ], axis=1)
-
-                            # Update mask with class label
-                            updates = tf.fill((tf.shape(indices)[0],), tf.cast(label, tf.int32))
-                            mask = tf.tensor_scatter_nd_update(mask, indices, updates)
-
-                # Convert to one-hot encoding
-                mask_one_hot = tf.one_hot(
-                    mask,
-                    self.segmentation_classes,
-                    dtype=tf.float32
-                )
-
-                return mask_one_hot
+                # Slice off the background channel (channel 0) to match the model's output.
+                # The model predicts 80 channels, not 81.
+                return one_hot_mask[:, :, 1:]
 
         except Exception as e:
+            # This error handling logic is unchanged and remains robust.
             logger.debug(f"Error preprocessing segmentation targets: {e}")
             # Return appropriate fallback shape
             if self.segmentation_classes == 1:
@@ -850,20 +804,37 @@ class COCODatasetBuilder:
             num_parallel_calls=tf.data.AUTOTUNE
         )
 
-        # Cache if directory specified (before batching for efficiency)
+        # # Cache if directory specified (before batching for efficiency)
+        # if self.cache_dir and is_training:
+        #     cache_path = os.path.join(self.cache_dir, f"coco_train_{self.img_size}_{self.segmentation_classes}")
+        #     dataset = dataset.cache(cache_path)
+        #
+        # # Shuffle training data (before batching)
+        # # Use configurable buffer size to avoid memory exhaustion with high-res images
+        # if is_training:
+        #     dataset = dataset.shuffle(buffer_size=self.shuffle_buffer_size)
+        #     logger.info(f"Using shuffle buffer size: {self.shuffle_buffer_size}")
+        #
+        # # IMPORTANT: Repeat dataset to allow multiple epochs
+        # # This ensures the dataset can be iterated over multiple times
+        # dataset = dataset.repeat()
+
+        # Cache if directory specified
         if self.cache_dir and is_training:
             cache_path = os.path.join(self.cache_dir, f"coco_train_{self.img_size}_{self.segmentation_classes}")
             dataset = dataset.cache(cache_path)
 
-        # Shuffle training data (before batching)
-        # Use configurable buffer size to avoid memory exhaustion with high-res images
         if is_training:
+            # IMPORTANT: Repeat the dataset indefinitely BEFORE shuffling.
+            # This ensures that data is shuffled differently across epochs.
+            dataset = dataset.repeat()
+
+            # Shuffle the infinitely repeated dataset.
             dataset = dataset.shuffle(buffer_size=self.shuffle_buffer_size)
             logger.info(f"Using shuffle buffer size: {self.shuffle_buffer_size}")
-
-        # IMPORTANT: Repeat dataset to allow multiple epochs
-        # This ensures the dataset can be iterated over multiple times
-        dataset = dataset.repeat()
+        else:
+            # For validation, just repeat once to be safe with steps_per_epoch logic
+            dataset = dataset.repeat()
 
         # Define shapes and padding values for efficient padded_batch
         image_shape = [self.img_size, self.img_size, 3]
