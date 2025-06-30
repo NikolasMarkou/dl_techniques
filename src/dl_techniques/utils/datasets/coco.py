@@ -14,6 +14,11 @@ The preprocessor handles:
 FIXED VERSION: Now supports configurable segmentation classes for COCO pretraining
 (80 classes) vs crack detection fine-tuning (1 class).
 
+Fixed Issues:
+- Relaxed filtering to only require object presence (not both detection and segmentation)
+- Improved dummy dataset generation to pass filters
+- More robust error handling
+
 Usage:
     ```python
     from dl_techniques.utils.datasets.coco import COCODatasetBuilder
@@ -117,6 +122,8 @@ def create_dummy_coco_dataset(
     """
     Create a dummy COCO-style dataset for testing and development.
 
+    FIXED: Now creates dummy data that passes the relaxed filter.
+
     Args:
         num_samples: Number of samples to generate.
         img_size: Input image size.
@@ -134,8 +141,8 @@ def create_dummy_coco_dataset(
             # Generate dummy image
             img = np.random.uniform(0, 255, (img_size, img_size, 3)).astype(np.uint8)
 
-            # Generate random number of boxes
-            num_boxes = np.random.randint(min_boxes, max_boxes + 1)
+            # Generate random number of boxes (ensure at least 1 for filter)
+            num_boxes = np.random.randint(max(min_boxes, 1), max_boxes + 1)
 
             # Create bounding boxes in COCO format [ymin, xmin, ymax, xmax]
             bboxes = []
@@ -156,8 +163,8 @@ def create_dummy_coco_dataset(
                 labels.append(cls_id)
 
             # Convert to numpy arrays
-            bboxes = np.array(bboxes, dtype=np.float32) if bboxes else np.zeros((0, 4), dtype=np.float32)
-            labels = np.array(labels, dtype=np.int64) if labels else np.zeros((0,), dtype=np.int64)
+            bboxes = np.array(bboxes, dtype=np.float32)
+            labels = np.array(labels, dtype=np.int64)
 
             # Generate dummy segmentation mask based on segmentation_classes
             if segmentation_classes == 1:
@@ -168,14 +175,18 @@ def create_dummy_coco_dataset(
                 seg_mask = np.random.randint(0, segmentation_classes, (img_size, img_size), dtype=np.int32)
                 seg_mask = np.eye(segmentation_classes)[seg_mask].astype(np.float32)  # Convert to one-hot
 
+            # FIXED: Create dummy segmentation data that indicates presence
+            # This ensures the dummy data passes the filter
+            dummy_segmentation = tf.constant(['dummy_segmentation'] * num_boxes, dtype=tf.string)
+
             # Create COCO-style example dictionary
             example = {
                 'image': img,
                 'objects': {
                     'bbox': bboxes,
                     'label': labels,
-                    # Add placeholder for segmentation (empty for dummy data)
-                    'segmentation': tf.zeros((0,), dtype=tf.string)
+                    # FIXED: Add non-empty segmentation field for filter compatibility
+                    'segmentation': dummy_segmentation
                 },
                 # Add the segmentation mask directly for easier processing
                 '_segmentation_mask': seg_mask
@@ -214,7 +225,7 @@ class COCODatasetBuilder:
     - Memory-efficient processing
     - Configurable segmentation classes
 
-    FIXED VERSION: Now supports configurable segmentation classes.
+    FIXED VERSION: Now supports configurable segmentation classes and relaxed filtering.
     """
 
     def __init__(
@@ -233,6 +244,9 @@ class COCODatasetBuilder:
         data_dir: Optional[str] = None,
         # NEW: Configurable segmentation classes
         segmentation_classes: int = 80,
+        # NEW: Memory management options
+        shuffle_buffer_size: int = 100,
+        limit_train_samples: Optional[int] = None,
         **kwargs
     ):
         """
@@ -252,6 +266,8 @@ class COCODatasetBuilder:
             dataset_config: Custom dataset configuration.
             data_dir: Directory where COCO data is stored.
             segmentation_classes: Number of segmentation classes (80 for COCO, 1 for binary).
+            shuffle_buffer_size: Size of shuffle buffer (reduce if out of memory).
+            limit_train_samples: Limit training samples for memory efficiency.
             **kwargs: Additional configuration options.
         """
         # Core configuration
@@ -267,6 +283,13 @@ class COCODatasetBuilder:
 
         # NEW: Segmentation configuration
         self.segmentation_classes = segmentation_classes
+
+        # NEW: Memory management
+        self.shuffle_buffer_size = shuffle_buffer_size
+        self.limit_train_samples = limit_train_samples
+
+        # NEW: Track if using dummy data
+        self.using_dummy_data = False
 
         # Configure class setup
         if dataset_config is not None:
@@ -290,6 +313,11 @@ class COCODatasetBuilder:
         logger.info(f"  - Detection: {self.use_detection}")
         logger.info(f"  - Segmentation: {self.use_segmentation}")
         logger.info(f"  - Augmentation: {self.augment_data}")
+        logger.info(f"  - Shuffle buffer size: {self.shuffle_buffer_size}")
+        if self.limit_train_samples:
+            logger.info(f"  - Train sample limit: {self.limit_train_samples}")
+        else:
+            logger.info(f"  - Train sample limit: None (full dataset)")
 
     def _validate_configuration(self) -> None:
         """Validate configuration parameters."""
@@ -340,25 +368,40 @@ class COCODatasetBuilder:
             val_ds = tfds.load('coco/2017', split='validation', **load_kwargs)
 
             logger.info("✅ Successfully loaded COCO dataset from tfds")
+            self.using_dummy_data = False
             return train_ds, val_ds
 
         except Exception as e:
             logger.error(f"❌ Failed to load COCO dataset: {e}")
             logger.info("🔄 Creating dummy dataset for testing...")
-            # Fallback to dummy dataset for development/testing
+
+            # Set flag to indicate we're using dummy data
+            self.using_dummy_data = True
+
+            # Create larger dummy dataset for proper training simulation
+            # Generate enough samples for multiple epochs
+            samples_needed = max(10000, self.batch_size * 100)  # At least 100 batches worth
+
             dummy_ds = create_dummy_coco_dataset(
-                1000,
-                self.img_size,
+                num_samples=samples_needed,
+                img_size=self.img_size,
                 segmentation_classes=self.segmentation_classes
             )
-            train_size = 800
+
+            # Split 80/20 for train/val
+            train_size = int(samples_needed * 0.8)
             train_ds = dummy_ds.take(train_size)
-            val_ds = dummy_ds.skip(train_size)
+            val_ds = dummy_ds.skip(train_size).take(int(samples_needed * 0.2))
+
+            logger.info(f"Created dummy dataset with {train_size} training and {int(samples_needed * 0.2)} validation samples")
             return train_ds, val_ds
 
     def _filter_valid_examples(self, example: Dict[str, tf.Tensor]) -> tf.Tensor:
         """
         Filter examples that have valid annotations for enabled tasks.
+
+        FIXED: Now only requires the presence of objects/labels, not both detection and segmentation.
+        Since we create synthetic segmentation masks from bounding boxes, we only need objects.
 
         Args:
             example: COCO example from tfds.
@@ -368,22 +411,19 @@ class COCODatasetBuilder:
         """
         try:
             objects = example['objects']
-            valid = tf.constant(True, dtype=tf.bool)
 
+            # FIXED: Simplified filter - only check for presence of objects/labels
+            # Since we create synthetic segmentation from detection, we only need objects
+            labels = objects.get('label', tf.zeros((0,), dtype=tf.int64))
+            has_objects = tf.greater(tf.shape(labels)[0], 0)
+
+            # Optional: Additional validation for detection if enabled
             if self.use_detection:
-                # Check for valid bounding boxes
                 bboxes = objects.get('bbox', tf.zeros((0, 4)))
-                has_detection = tf.greater(tf.shape(bboxes)[0], 0)
-                valid = tf.logical_and(valid, has_detection)
+                has_valid_bboxes = tf.greater(tf.shape(bboxes)[0], 0)
+                has_objects = tf.logical_and(has_objects, has_valid_bboxes)
 
-            if self.use_segmentation:
-                # Check for segmentation masks (this key might vary in tfds)
-                # Note: COCO in tfds might have 'segmentation' or 'mask' depending on version
-                segmentation = objects.get('segmentation', objects.get('mask', tf.zeros((0,))))
-                has_segmentation = tf.greater(tf.shape(segmentation)[0], 0)
-                valid = tf.logical_and(valid, has_segmentation)
-
-            return valid
+            return has_objects
 
         except Exception as e:
             logger.debug(f"Error filtering example: {e}")
@@ -798,6 +838,12 @@ class COCODatasetBuilder:
         Returns:
             Processed and batched dataset.
         """
+        # Apply filtering first to reduce data volume
+        if is_training and self.limit_train_samples is not None:
+            # Take a subset for memory efficiency during development
+            dataset = dataset.take(self.limit_train_samples)
+            logger.info(f"Limited training dataset to {self.limit_train_samples} samples for memory efficiency")
+
         # Preprocess examples
         dataset = dataset.map(
             lambda x: self._preprocess_example(x, is_training),
@@ -810,8 +856,14 @@ class COCODatasetBuilder:
             dataset = dataset.cache(cache_path)
 
         # Shuffle training data (before batching)
+        # Use configurable buffer size to avoid memory exhaustion with high-res images
         if is_training:
-            dataset = dataset.shuffle(buffer_size=1000)
+            dataset = dataset.shuffle(buffer_size=self.shuffle_buffer_size)
+            logger.info(f"Using shuffle buffer size: {self.shuffle_buffer_size}")
+
+        # IMPORTANT: Repeat dataset to allow multiple epochs
+        # This ensures the dataset can be iterated over multiple times
+        dataset = dataset.repeat()
 
         # Define shapes and padding values for efficient padded_batch
         image_shape = [self.img_size, self.img_size, 3]
@@ -880,6 +932,7 @@ class COCODatasetBuilder:
             'use_detection': self.use_detection,
             'use_segmentation': self.use_segmentation,
             'segmentation_classes': self.segmentation_classes,  # NEW
+            'using_dummy_data': self.using_dummy_data,  # NEW
             'augment_data': self.augment_data,
             'min_bbox_area': self.min_bbox_area,
             'cache_dir': self.cache_dir,
@@ -903,8 +956,12 @@ class COCODatasetBuilder:
                 'Sentinel value padding prevents false positives',
                 'tf.image.random_* functions for optimized augmentation',
                 'Proper train/validation splits from tfds',
-                'Fallback to dummy dataset for development',
-                f'Configurable segmentation classes: {self.segmentation_classes}'
+                'Dataset repeats for multiple epochs',
+                f'Fallback to dummy dataset: {"Yes" if self.using_dummy_data else "No"}',
+                f'Configurable segmentation classes: {self.segmentation_classes}',
+                'FIXED: Relaxed filtering only requires object presence',
+                f'Memory-efficient shuffle buffer: {self.shuffle_buffer_size}',
+                f'Sample limit: {self.limit_train_samples or "None"}'
             ]
         }
 
@@ -917,6 +974,8 @@ def create_coco_dataset(
     segmentation_classes: int = 80,  # NEW: Configurable segmentation classes
     augment_data: bool = True,
     class_names: Optional[List[str]] = None,
+    shuffle_buffer_size: int = 100,  # NEW: Memory management
+    limit_train_samples: Optional[int] = None,  # NEW: Memory management
     **kwargs
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
     """
@@ -930,6 +989,8 @@ def create_coco_dataset(
         segmentation_classes: Number of segmentation classes (80 for COCO, 1 for binary).
         augment_data: Enable data augmentation.
         class_names: Custom class names (optional).
+        shuffle_buffer_size: Size of shuffle buffer (reduce if out of memory).
+        limit_train_samples: Limit training samples for memory efficiency.
         **kwargs: Additional configuration options.
 
     Returns:
@@ -945,6 +1006,8 @@ def create_coco_dataset(
         segmentation_classes=segmentation_classes,
         augment_data=augment_data,
         class_names=class_names,
+        shuffle_buffer_size=shuffle_buffer_size,
+        limit_train_samples=limit_train_samples,
         **kwargs
     )
 

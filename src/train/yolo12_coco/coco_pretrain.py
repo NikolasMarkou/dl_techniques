@@ -15,10 +15,27 @@ FIXED VERSION: Now supports configurable detection and segmentation classes.
 For COCO pretraining: 80 detection classes, 80 segmentation classes.
 For crack detection fine-tuning: 1 detection class, 1 segmentation class.
 
+Fixed Issues:
+- Visualizations now respect the --no-visualizations argument
+- Improved validation data handling for real vs dummy datasets
+- Better steps per epoch calculation
+- Memory management options to prevent OOM errors
+
+Memory Management:
+- Use --shuffle-buffer 50 if you get "Killed" errors
+- Use --limit-train-samples 5000 for testing/development
+- Use --batch-size 4 or lower if you run out of GPU memory
+- Use --img-size 416 instead of 640 to reduce memory usage
+
 Usage:
     # COCO pretraining (default)
     python coco_pretrain.py --scale s --epochs 50 --batch-size 16 \
                            --img-size 640 --cache-dir /path/to/cache
+
+    # Memory-constrained training
+    python coco_pretrain.py --scale s --epochs 10 --batch-size 4 \
+                           --img-size 416 --shuffle-buffer 50 \
+                           --limit-train-samples 5000
 
     # Custom class configuration
     python coco_pretrain.py --scale s --detection-classes 80 \
@@ -46,11 +63,11 @@ from matplotlib import patches
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 
-from dl_techniques.utils.datasets.coco import COCODatasetBuilder, create_coco_pretraining_dataset
-from dl_techniques.models.yolo12_multitask import create_yolov12_multitask, create_yolov12_coco_pretrain
-from dl_techniques.losses.yolo12_multitask_loss import create_yolov12_multitask_loss, create_yolov12_coco_loss
-from dl_techniques.utils.vision_task_types import TaskType
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.vision_task_types import TaskType
+from dl_techniques.utils.datasets.coco import COCODatasetBuilder
+from dl_techniques.models.yolo12_multitask import create_yolov12_multitask
+from dl_techniques.losses.yolo12_multitask_loss import create_yolov12_multitask_loss
 
 def setup_gpu():
     """Configure GPU settings for optimal training."""
@@ -722,22 +739,61 @@ def save_feature_extractor_weights(
 
 
 def calculate_steps_per_epoch(
-        dataset_size: int,
+        dataset: tf.data.Dataset,
         batch_size: int,
-        min_steps: int = 100
+        default_size: int = 118000,
+        min_steps: int = 100,
+        max_steps: int = 1000
 ) -> int:
     """
-    Calculate appropriate steps per epoch.
+    Calculate appropriate steps per epoch based on actual dataset size.
+
+    FIXED: Improved error handling for empty datasets.
 
     Args:
-        dataset_size: Total number of examples in dataset.
+        dataset: The training dataset.
         batch_size: Batch size.
+        default_size: Default dataset size (e.g., COCO train size).
         min_steps: Minimum steps per epoch.
+        max_steps: Maximum steps per epoch for dummy datasets.
 
     Returns:
         Steps per epoch.
     """
-    steps = max(dataset_size // batch_size, min_steps)
+    try:
+        # Try to get the actual size of the dataset
+        # For dummy datasets, we'll estimate based on the first few batches
+        sample_count = 0
+        max_sample_batches = min_steps  # Limit sampling to avoid hanging
+
+        try:
+            for batch in dataset.take(max_sample_batches):
+                sample_count += 1
+
+            logger.info(f"Sampled {sample_count} batches from dataset")
+
+            if sample_count == 0:
+                logger.warning("Dataset appears to be empty! Using minimum steps.")
+                return min_steps
+            elif sample_count < min_steps:
+                # Dataset is smaller than expected, likely a dummy dataset
+                steps = min(sample_count * 10, max_steps)  # Scale up but cap
+                logger.info(f"Detected small dataset, using {steps} steps per epoch")
+            else:
+                # Larger dataset, use default calculation
+                steps = max(default_size // batch_size, min_steps)
+                logger.info(f"Using default steps calculation: {steps} steps per epoch")
+
+        except tf.errors.OutOfRangeError:
+            logger.warning("Dataset exhausted during sampling, using minimum steps")
+            return min_steps
+
+    except Exception as e:
+        logger.warning(f"Could not determine dataset size: {e}")
+        # Fallback to a reasonable default for testing
+        steps = min_steps
+        logger.info(f"Using fallback steps per epoch: {steps}")
+
     logger.info(f"Calculated steps per epoch: {steps}")
     return steps
 
@@ -800,6 +856,10 @@ def main():
                         help='Directory to cache COCO dataset')
     parser.add_argument('--max-boxes', type=int, default=100,
                         help='Maximum boxes per image')
+    parser.add_argument('--shuffle-buffer', type=int, default=100,
+                        help='Shuffle buffer size (reduce if out of memory)')
+    parser.add_argument('--limit-train-samples', type=int, default=None,
+                        help='Limit training samples for memory efficiency')
 
     # Loss arguments
     parser.add_argument('--uncertainty-weighting', action='store_true',
@@ -851,12 +911,19 @@ def main():
     logger.info(f"Arguments: {vars(args)}")
     logger.info(f"Results directory: {results_dir}")
 
-    # Log visualization settings
+    # Log visualization settings respecting the argument
     if not args.no_visualizations:
         logger.info(f"📊 Per-epoch visualizations enabled (every {args.visualization_freq} epochs)")
         logger.info(f"📊 Visualizations will be saved to: {os.path.join(results_dir, 'coco_epoch_visualizations')}")
     else:
         logger.info("📊 Per-epoch visualizations disabled")
+
+    # Memory management advice
+    if args.limit_train_samples:
+        logger.info(f"💾 Training limited to {args.limit_train_samples} samples for memory efficiency")
+    if args.shuffle_buffer < 1000:
+        logger.info(f"💾 Using reduced shuffle buffer ({args.shuffle_buffer}) for memory efficiency")
+        logger.info("💾 Consider using --shuffle-buffer 1000 if you have more RAM available")
 
     # Create COCO dataset
     logger.info("📁 Creating COCO dataset...")
@@ -868,7 +935,9 @@ def main():
         use_detection=True,
         use_segmentation=True,
         segmentation_classes=args.segmentation_classes,  # Use configurable segmentation classes
-        augment_data=True
+        augment_data=True,
+        shuffle_buffer_size=args.shuffle_buffer,  # Pass shuffle buffer size
+        limit_train_samples=args.limit_train_samples  # Pass sample limit
     )
 
     train_ds, val_ds = dataset_builder.create_datasets()
@@ -923,29 +992,56 @@ def main():
         run_eagerly=args.run_eagerly
     )
 
-    # Create callbacks with corrected parameters
+    # FIXED: Determine validation usage and visualization settings
+    dataset_info = dataset_builder.get_dataset_info()
+    use_validation = not dataset_info.get('using_dummy_data', False)
+
+    if use_validation:
+        monitor = 'val_loss'
+        logger.info("📊 Using validation-based monitoring")
+    else:
+        monitor = 'loss'
+        logger.info("📊 Using training loss monitoring (dummy data mode)")
+
+    # FIXED: Respect the --no-visualizations argument
+    enable_visualizations = not args.no_visualizations and use_validation
+    if args.no_visualizations:
+        logger.info("📊 Visualizations disabled by --no-visualizations flag")
+    elif not use_validation:
+        logger.info("📊 Visualizations disabled for dummy data mode")
+
     callbacks = create_coco_callbacks(
         results_dir=results_dir,
-        validation_dataset=val_ds,
+        validation_dataset=val_ds if use_validation else None,
         img_size=args.img_size,
-        monitor='val_loss',
+        monitor=monitor,
         patience=args.patience,
-        enable_visualizations=not args.no_visualizations,
+        enable_visualizations=enable_visualizations,  # FIXED: Use computed value
         visualization_freq=args.visualization_freq
     )
 
-    # Calculate steps (estimate for COCO train: ~118k images)
-    steps_per_epoch = calculate_steps_per_epoch(118000, args.batch_size)
+    # Calculate steps (estimate for COCO train: ~118k images, but adapt to actual dataset)
+    steps_per_epoch = calculate_steps_per_epoch(
+        dataset=train_ds,
+        batch_size=args.batch_size,
+        default_size=118000,  # COCO training set size
+        min_steps=100,        # Minimum for testing
+        max_steps=500         # Maximum for dummy datasets
+    )
 
     # Train model
     logger.info("🏋️ Starting COCO pre-training...")
     try:
+        # Determine validation data and steps
+        validation_data = val_ds if use_validation else None
+        validation_steps = None if not use_validation else 50  # Limit validation steps for efficiency
+
         history = model.fit(
             train_ds,
-            validation_data=val_ds,
+            validation_data=validation_data,
             epochs=args.epochs,
             steps_per_epoch=steps_per_epoch,
-            validation_steps=None,  # Use full validation set
+            validation_steps=validation_steps,
             callbacks=callbacks,
             verbose=1
         )
