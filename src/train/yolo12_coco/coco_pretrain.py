@@ -127,7 +127,7 @@ def create_coco_model_and_loss(
         use_uncertainty_weighting=use_uncertainty_weighting,
         # COCO-specific loss weights (can be tuned)
         detection_weight=1.0,
-        segmentation_weight=0.5  # Lower weight for segmentation
+        segmentation_weight=0.1  # Lower weight for segmentation
     )
 
     return model, loss_fn
