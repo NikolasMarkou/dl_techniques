@@ -384,25 +384,19 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
             -1
         )
 
-        # --- FIX THE BUG HERE ---
-        # Scale the predicted distances by the strides of their respective feature map levels.
         scaled_pred_dist = pred_dist_mean * self.strides
 
-        # Now use the SCALED distances to decode the bounding boxes
         pred_bboxes = self._dist_to_bbox(
-            scaled_pred_dist,  # Use the corrected, scaled distances
+            scaled_pred_dist,
             self.anchors * self.strides
         )
 
         # Extract ground truth labels and bounding boxes
-        gt_labels, gt_bboxes_normalized = y_true[..., :1], y_true[..., 1:]  # Note the new variable name
+        gt_labels, gt_bboxes_normalized = y_true[..., :1], y_true[..., 1:]
 
-        # --- START FIX ---
-        # Un-normalize ground truth bboxes from [0,1] to pixel coordinates
         patch_h, patch_w = self.input_shape
         scale_tensor = ops.cast([patch_w, patch_h, patch_w, patch_h], dtype=gt_bboxes_normalized.dtype)
         gt_bboxes = gt_bboxes_normalized * scale_tensor
-        # --- END FIX ---
 
         mask_gt = ops.sum(gt_bboxes, -1, keepdims=True) > 0
 

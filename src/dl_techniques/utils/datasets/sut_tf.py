@@ -5,6 +5,17 @@ This module provides a highly optimized, TensorFlow-native implementation of the
 SUT-Crack dataset loader with dramatic performance improvements while maintaining
 the same functionality and API as the original loader.
 
+Expected Directory Structure:
+/path/to/root/
+├── segmentation/
+│   ├── Ground Truth/      (Contains binary .png mask images)
+│   └── Original Image/    (Contains full-resolution .jpg source images)
+├── object_detection/
+│   └── (Contains .xml annotations for images with cracks)
+└── classification/
+    ├── With Crack/        (Contains .jpg images with cracks)
+    └── Without Crack/     (Contains .jpg images without cracks)
+
 Key Optimizations:
 - Full TensorFlow operations (no numpy/python loops)
 - Vectorized patch sampling and bounding box operations
@@ -12,14 +23,6 @@ Key Optimizations:
 - Parallel image loading and processing
 - TensorFlow-native augmentation
 - Memory-efficient batch processing
-
-Performance Improvements:
-- 10-50x faster patch generation
-- Better GPU utilization
-- Lower memory footprint
-- Scalable to larger datasets
-
-File: src/dl_techniques/utils/datasets/sut_optimized.py
 """
 
 import os
@@ -1017,15 +1020,11 @@ class OptimizedSUTDataset:
         logger.info(f"Data splits created - Train: {len(self.train_annotations)}, "
                    f"Validation: {len(self.val_annotations)}")
 
-    # In dl_techniques/utils/datasets/sut_tf.py
-
-    # ... (inside the OptimizedSUTDataset class) ...
-
     def create_tf_dataset(
             self,
             batch_size: int = 32,
             shuffle: bool = True,
-            repeat: bool = False,  # Default to False, handle repeat explicitly in train script
+            repeat: bool = False,
             prefetch_buffer: int = tf.data.AUTOTUNE,
             subset: str = "train",
             cache: bool = True,

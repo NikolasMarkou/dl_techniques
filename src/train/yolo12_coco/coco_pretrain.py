@@ -11,16 +11,6 @@ The script will:
 3. Train the model on COCO for a substantial number of epochs
 4. Save the trained feature extractor weights for later fine-tuning
 
-FIXED VERSION: Now supports configurable detection and segmentation classes.
-For COCO pretraining: 80 detection classes, 80 segmentation classes.
-For crack detection fine-tuning: 1 detection class, 1 segmentation class.
-
-Fixed Issues:
-- Visualizations now respect the --no-visualizations argument
-- Improved validation data handling for real vs dummy datasets
-- Better steps per epoch calculation
-- Memory management options to prevent OOM errors
-
 Memory Management:
 - Use --shuffle-buffer 50 if you get "Killed" errors
 - Use --limit-train-samples 5000 for testing/development
@@ -68,6 +58,8 @@ from dl_techniques.utils.vision_task_types import TaskType
 from dl_techniques.utils.datasets.coco import COCODatasetBuilder
 from dl_techniques.models.yolo12_multitask import create_yolov12_multitask
 from dl_techniques.losses.yolo12_multitask_loss import create_yolov12_multitask_loss
+
+keras.mixed_precision.set_global_policy("mixed_float16")
 
 def setup_gpu():
     """Configure GPU settings for optimal training."""
@@ -182,15 +174,15 @@ def create_coco_callbacks(
             verbose=1
         ),
 
-        # Learning rate reduction
-        keras.callbacks.ReduceLROnPlateau(
-            monitor=monitor,
-            factor=0.5,
-            patience=max(patience // 2, 3),
-            min_lr=1e-7,
-            verbose=1,
-            cooldown=2
-        ),
+        # # Learning rate reduction
+        # keras.callbacks.ReduceLROnPlateau(
+        #     monitor=monitor,
+        #     factor=0.5,
+        #     patience=max(patience // 2, 3),
+        #     min_lr=1e-7,
+        #     verbose=1,
+        #     cooldown=2
+        # ),
 
         # CSV logging
         keras.callbacks.CSVLogger(
@@ -356,31 +348,41 @@ class COCOVisualizationCallback(keras.callbacks.Callback):
             self.sample_images = None
             self.sample_targets = None
 
-    def _get_anchor_grid(self):
-        """Generate anchor grid for YOLOv12 detection decoding."""
-        if hasattr(self, '_anchor_grid_cache'):
-            return self._anchor_grid_cache
+
+    def _get_anchor_grid_and_strides(self):
+        """Generate anchor grid and corresponding strides for YOLOv12 decoding."""
+        if hasattr(self, '_anchor_cache'):
+            return self._anchor_cache
 
         strides_config = [8, 16, 32]  # Match YOLOv12 architecture
-        anchor_points = []
+        anchor_points, stride_tensor = [], []
 
         for stride in strides_config:
             h, w = self.img_size // stride, self.img_size // stride
             # Generate anchor centers (offset by 0.5 to center in grid cell)
-            x_coords = (np.arange(w) + 0.5) * stride
-            y_coords = (np.arange(h) + 0.5) * stride
+            x_coords = (np.arange(w) + 0.5)
+            y_coords = (np.arange(h) + 0.5)
             y_grid, x_grid = np.meshgrid(y_coords, x_coords, indexing='ij')
+
+            # Stack and reshape grid coordinates
             xy_grid = np.stack([x_grid, y_grid], axis=-1).reshape(-1, 2)
-            anchor_points.append(xy_grid)
+            anchor_points.append(xy_grid * stride)  # Convert to pixel coordinates
+
+            # Create stride tensor for this level
+            level_strides = np.full((h * w, 1), stride, dtype=np.float32)
+            stride_tensor.append(level_strides)
 
         # Cache the result
-        self._anchor_grid_cache = np.concatenate(anchor_points, 0)
-        return self._anchor_grid_cache
+        self._anchor_cache = (
+            np.concatenate(anchor_points, 0),
+            np.concatenate(stride_tensor, 0)
+        )
+        return self._anchor_cache
 
     def _decode_coco_detections(
             self,
             detection_pred: np.ndarray,
-            max_detections: int = 10
+            max_detections: int = 100
     ) -> List[Dict[str, any]]:
         """
         Decode YOLOv12 detection predictions for COCO dataset.
@@ -393,54 +395,72 @@ class COCOVisualizationCallback(keras.callbacks.Callback):
             List of decoded detections.
         """
         try:
-            # detection_pred shape: (1, num_anchors, 4*reg_max + num_classes)
-            batch_size, num_anchors, features = detection_pred.shape
-            num_classes = features - 4 * self.reg_max
+            # Explicitly define feature splits
+            dist_features = 4 * self.reg_max
 
-            # Split into distance and classification
-            dist_pred = detection_pred[0, :, :4 * self.reg_max]  # (num_anchors, 4*reg_max)
-            cls_pred = detection_pred[0, :, 4 * self.reg_max:]  # (num_anchors, num_classes)
+            # detection_pred shape: (1, num_anchors, dist_features + num_classes)
+            batch_size, num_anchors, total_features = detection_pred.shape
+            num_classes = total_features - dist_features
+
+            # Split into distance and classification using the explicit split point
+            dist_pred = detection_pred[0, :, :dist_features]
+            cls_pred = detection_pred[0, :, dist_features:]
 
             # Apply sigmoid to classification scores
+            # Shape of cls_scores is now explicitly known to be (num_anchors, num_classes)
             cls_scores = 1 / (1 + np.exp(-cls_pred))
 
             # Find top detections across all classes
             max_scores = np.max(cls_scores, axis=1)
             best_classes = np.argmax(cls_scores, axis=1)
 
-            # Get top detections
-            top_indices = np.argsort(max_scores)[-max_detections:][::-1]
-            valid_indices = top_indices[max_scores[top_indices] > self.confidence_threshold]
-
+            # Get top detections based on confidence threshold
+            valid_indices = np.where(max_scores > self.confidence_threshold)[0]
             if len(valid_indices) == 0:
                 return []
 
+            # If too many, take the top `max_detections`
+            if len(valid_indices) > max_detections:
+                top_indices = np.argsort(max_scores[valid_indices])[-max_detections:]
+                valid_indices = valid_indices[top_indices]
+
             # Decode distance predictions for valid anchors
-            valid_dist = dist_pred[valid_indices]  # (num_valid, 4*reg_max)
-            valid_scores = cls_scores[valid_indices]  # (num_valid, num_classes)
+            valid_dist_logits = dist_pred[valid_indices]
+            valid_scores = cls_scores[valid_indices]
             valid_classes = best_classes[valid_indices]
 
-            # Reshape and apply softmax to distance predictions
-            valid_dist = valid_dist.reshape(-1, 4, self.reg_max)
-            softmax_dist = np.exp(valid_dist) / (np.sum(np.exp(valid_dist), axis=-1, keepdims=True) + 1e-8)
+            # Reshape for softmax operation
+            valid_dist_logits = valid_dist_logits.reshape(-1, 4, self.reg_max)
 
-            # Compute weighted distances
+            # Numerically Stable Softmax
+            max_logits = np.max(valid_dist_logits, axis=-1, keepdims=True)
+            stable_logits = valid_dist_logits - max_logits
+            exp_logits = np.exp(stable_logits)
+            softmax_dist = exp_logits / np.sum(exp_logits, axis=-1, keepdims=True)
+
+            # Compute weighted distances (in grid cell units)
             range_vals = np.arange(self.reg_max)
-            decoded_dist = np.sum(softmax_dist * range_vals, axis=-1)  # (num_valid, 4)
+            decoded_dist = np.sum(softmax_dist * range_vals, axis=-1)
 
-            # Get anchor coordinates
-            anchor_grid = self._get_anchor_grid()
+            # Get anchor coordinates and strides
+            anchor_grid, stride_tensor = self._get_anchor_grid_and_strides()
             valid_anchor_coords = anchor_grid[valid_indices]
+            valid_strides = stride_tensor[valid_indices]
+
+            # Scale the decoded distances by the stride to get pixel values
+            pixel_dist = decoded_dist * valid_strides
 
             # Convert distances to bounding boxes
             detections = []
-            for i, (anchor_coords, distances, scores, class_id) in enumerate(
-                    zip(valid_anchor_coords, decoded_dist, valid_scores, valid_classes)
-            ):
+            for i in range(len(valid_indices)):
+                anchor_coords = valid_anchor_coords[i]
+                distances = pixel_dist[i]
+                scores = valid_scores[i]
+                class_id = valid_classes[i]
+
                 cx, cy = anchor_coords
                 l, t, r, b = distances
 
-                # Convert to x1, y1, x2, y2
                 x1 = max(0, cx - l)
                 y1 = max(0, cy - t)
                 x2 = min(self.img_size, cx + r)
@@ -450,12 +470,15 @@ class COCOVisualizationCallback(keras.callbacks.Callback):
                 confidence = scores[class_id]
 
                 if confidence > self.confidence_threshold:
+                    # Use num_classes for a safer boundary check on the class name
+                    class_name = self.COCO_CLASSES[class_id] if class_id < len(
+                        self.COCO_CLASSES) and class_id < num_classes else f'class_{class_id}'
+
                     detection = {
                         'bbox': [x1, y1, x2, y2],
                         'confidence': float(confidence),
                         'class_id': int(class_id),
-                        'class_name': self.COCO_CLASSES[class_id] if class_id < len(
-                            self.COCO_CLASSES) else f'class_{class_id}'
+                        'class_name': class_name
                     }
                     detections.append(detection)
 
@@ -954,6 +977,40 @@ def main():
         use_uncertainty_weighting=args.uncertainty_weighting
     )
 
+    # Calculate steps (estimate for COCO train: ~118k images, but adapt to actual dataset)
+    if args.limit_train_samples:
+        steps_per_epoch = args.limit_train_samples // args.batch_size
+        logger.info(f"Using limited samples: steps per epoch set to {steps_per_epoch}")
+    else:
+        steps_per_epoch = calculate_steps_per_epoch(
+            dataset=train_ds,
+            batch_size=args.batch_size,
+            default_size=118000,  # COCO training set size
+            min_steps=100,  # Minimum for testing
+            max_steps=500  # Maximum for dummy datasets
+        )
+
+    total_steps = steps_per_epoch * args.epochs
+    warmup_steps = int(total_steps * 0.1)  # 10% of total steps for warmup
+    logger.info(f"Total training steps: {total_steps}, Warmup steps: {warmup_steps}")
+
+    # Create a Cosine Decay learning rate schedule
+    lr_schedule = keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate=args.learning_rate,
+        decay_steps=total_steps - warmup_steps,
+        alpha=0.1, # The minimum learning rate as a fraction of the initial
+    )
+
+    # (Optional but recommended) Create a warmup schedule
+    # This is a bit more advanced but highly effective
+    def warmup_cosine_decay(step):
+        # Use tf.cond for a graph-compatible conditional
+        return tf.cond(
+            step < warmup_steps,
+            lambda: (tf.cast(step, tf.float32) / tf.cast(warmup_steps, tf.float32)) * args.learning_rate,
+            lambda: lr_schedule(step - warmup_steps)
+        )
+
     # Build model
     sample_input = tf.zeros((1, args.img_size, args.img_size, 3))
     _ = model(sample_input, training=False)
@@ -965,7 +1022,7 @@ def main():
     # Create optimizer
     if args.optimizer.lower() == 'adamw':
         optimizer = keras.optimizers.AdamW(
-            learning_rate=args.learning_rate,
+            learning_rate=warmup_cosine_decay,
             weight_decay=args.weight_decay,
             clipnorm=1.0
         )
@@ -989,10 +1046,10 @@ def main():
     model.compile(
         optimizer=optimizer,
         loss=loss_fn,
-        run_eagerly=args.run_eagerly
+        run_eagerly=args.run_eagerly,
+        jit_compile=True
     )
 
-    # FIXED: Determine validation usage and visualization settings
     dataset_info = dataset_builder.get_dataset_info()
     use_validation = not dataset_info.get('using_dummy_data', False)
 
@@ -1003,7 +1060,6 @@ def main():
         monitor = 'loss'
         logger.info("📊 Using training loss monitoring (dummy data mode)")
 
-    # FIXED: Respect the --no-visualizations argument
     enable_visualizations = not args.no_visualizations and use_validation
     if args.no_visualizations:
         logger.info("📊 Visualizations disabled by --no-visualizations flag")
@@ -1020,18 +1076,7 @@ def main():
         visualization_freq=args.visualization_freq
     )
 
-    # Calculate steps (estimate for COCO train: ~118k images, but adapt to actual dataset)
-    if args.limit_train_samples:
-        steps_per_epoch = args.limit_train_samples // args.batch_size
-        logger.info(f"Using limited samples: steps per epoch set to {steps_per_epoch}")
-    else:
-        steps_per_epoch = calculate_steps_per_epoch(
-            dataset=train_ds,
-            batch_size=args.batch_size,
-            default_size=118000,  # COCO training set size
-            min_steps=100,  # Minimum for testing
-            max_steps=500  # Maximum for dummy datasets
-        )
+
 
     # Train model
     logger.info("🏋️ Starting COCO pre-training...")
