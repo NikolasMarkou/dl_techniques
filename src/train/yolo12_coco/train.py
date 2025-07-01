@@ -36,7 +36,7 @@ Requirements:
     - Sufficient disk space for COCO dataset (~37GB)
     - GPU with adequate memory for chosen batch size and image size
 
-File: coco_pretrain.py
+File: train.py
 """
 
 import os
