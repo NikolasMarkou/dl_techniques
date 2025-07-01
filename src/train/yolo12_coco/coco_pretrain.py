@@ -50,16 +50,16 @@ File: coco_pretrain.py
 """
 
 import os
-import argparse
 import json
 import keras
-import tensorflow as tf
+import argparse
 import numpy as np
+import tensorflow as tf
 from datetime import datetime
 from typing import Dict, Tuple, List
+
 import matplotlib
 from matplotlib import patches
-
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 

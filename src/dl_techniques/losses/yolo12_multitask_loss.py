@@ -330,8 +330,14 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
             ops.arange(self.reg_max, dtype="float32"),
             -1
         )
+
+        # --- FIX THE BUG HERE ---
+        # Scale the predicted distances by the strides of their respective feature map levels.
+        scaled_pred_dist = pred_dist_mean * self.strides
+
+        # Now use the SCALED distances to decode the bounding boxes
         pred_bboxes = self._dist_to_bbox(
-            pred_dist_mean,
+            scaled_pred_dist,  # Use the corrected, scaled distances
             self.anchors * self.strides
         )
 
