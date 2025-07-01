@@ -97,7 +97,9 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         # Initialize binary focal cross-entropy loss for classification
         # focal cross entropy handles class imbalance better
         self.bce = keras.losses.BinaryFocalCrossentropy(
-            apply_class_balancing=True,
+            apply_class_balancing=False,  # Turn this off to use our explicit alpha
+            alpha=0.25,
+            gamma=2.0,
             from_logits=True,
             reduction="none"
         )
@@ -247,18 +249,30 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         cls_scores = ops.sum(gt_labels_one_hot * ops.nn.sigmoid(pred_scores_exp), -1)
         cls_scores = ops.where(candidate_mask, cls_scores, 0.0)
 
-        # Compute the final task-aligned assignment metric using the filtered inputs.
-        align_metric = (
-                ops.power(cls_scores, self.assigner_alpha) *
-                ops.power(ious, self.assigner_beta)
-        )
+        # --- START FINAL, CORRECT FIX ---
+        # The original alignment metric `cls**alpha * iou**beta` is a product,
+        # which is numerically unstable. If the classification score for the
+        # correct class is zero, the entire metric becomes zero, preventing
+        # the anchor from being assigned, regardless of its IoU. This leads
+        # to the mode collapse on the "person" class.
+        #
+        # A more robust and stable approach, used in many modern detectors,
+        # is to use a WEIGHTED SUM of the two metrics. This ensures that an
+        # anchor with excellent IoU can still be a top candidate even if its
+        # initial classification is wrong.
+
+        # We keep the alpha and beta hyperparameters but use them as weights.
+        align_metric = self.assigner_alpha * cls_scores + self.assigner_beta * ious
+        # --- END FINAL, CORRECT FIX ---
 
         # Apply the mask for valid (non-padded) ground truth boxes to ignore padded GTs.
         mask_gt_broadcast = ops.cast(ops.expand_dims(ops.squeeze(mask_gt, -1), -1), "bool")
         align_metric = ops.where(mask_gt_broadcast, align_metric, 0.0)
 
-        # --- Final Assignment ---
+        # We also need to ensure that we only consider candidates for the final assignment.
+        align_metric = ops.where(candidate_mask, align_metric, 0.0)
 
+        # --- Final Assignment ---
         # For each anchor, find the GT box that gives it the highest alignment score.
         target_gt_idx = ops.argmax(align_metric, axis=1)
 
