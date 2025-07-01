@@ -147,80 +147,114 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         )
 
     def _task_aligned_assigner(
-        self,
-        pred_scores: keras.KerasTensor,
-        pred_bboxes: keras.KerasTensor,
-        anchors: keras.KerasTensor,
-        gt_labels: keras.KerasTensor,
-        gt_bboxes: keras.KerasTensor,
-        mask_gt: keras.KerasTensor
+            self,
+            pred_scores: keras.KerasTensor,
+            pred_bboxes: keras.KerasTensor,
+            anchors: keras.KerasTensor,
+            gt_labels: keras.KerasTensor,
+            gt_bboxes: keras.KerasTensor,
+            mask_gt: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
-        Vectorized Task-Aligned Assigner for optimal anchor-target matching.
+        Performs task-aligned assignment of ground truth boxes to anchor points.
+
+        This assigner determines which anchors should be responsible for detecting which
+        ground truth objects. It addresses the issue of early-stage training bias towards
+        small boxes by defining a set of "candidate" anchors before calculating the final
+        assignment metric.
+
+        An anchor is considered a candidate for a ground truth box if:
+        1.  Its center point falls inside the ground truth box (`is_in_gt`).
+            OR
+        2.  It is one of the top 10 anchors with the highest IoU with that ground truth box.
+
+        This ensures that for large objects, anchors across the entire object are
+        considered for assignment, encouraging the model to learn to predict large boxes.
 
         Args:
-            pred_scores: Predicted classification scores.
-            pred_bboxes: Predicted bounding boxes.
-            anchors: Anchor points.
-            gt_labels: Ground truth labels.
-            gt_bboxes: Ground truth bounding boxes.
-            mask_gt: Mask for valid ground truth boxes.
+            pred_scores: Predicted classification scores. Shape: (batch_size, num_anchors, num_classes).
+            pred_bboxes: Predicted bounding boxes in pixel coordinates. Shape: (batch_size, num_anchors, 4).
+            anchors: Anchor center points in pixel coordinates. Shape: (num_anchors, 2).
+            gt_labels: Ground truth labels. Shape: (batch_size, num_gt, 1).
+            gt_bboxes: Ground truth bounding boxes in pixel coordinates. Shape: (batch_size, num_gt, 4).
+            mask_gt: A mask indicating valid (non-padded) ground truth boxes. Shape: (batch_size, num_gt, 1).
 
         Returns:
-            Tuple of target ground truth indices and foreground mask.
+            A tuple containing:
+            - target_gt_idx: The index of the GT box assigned to each anchor. Shape: (batch_size, num_anchors).
+            - fg_mask: A boolean mask indicating which anchors are foreground (positive). Shape: (batch_size, num_anchors).
         """
         num_anchors = ops.shape(pred_scores)[1]
 
-        # Expand dimensions for broadcasting
-        anchors_exp = ops.reshape(anchors, (1, 1, num_anchors, 2))
-        gt_bboxes_exp = ops.expand_dims(gt_bboxes, 2)
+        # Prepare tensors for vectorized operations by adding new dimensions.
+        # This allows for batch-wise comparison between all anchors and all GT boxes.
+        anchors_exp = ops.reshape(anchors, (1, 1, num_anchors, 2))  # -> (1, 1, num_anchors, 2)
+        gt_bboxes_exp = ops.expand_dims(gt_bboxes, 2)  # -> (batch_size, num_gt, 1, 4)
+        pred_bboxes_exp = ops.expand_dims(pred_bboxes, 1)  # -> (batch_size, 1, num_anchors, 4)
+        pred_scores_exp = ops.expand_dims(pred_scores, 1)  # -> (batch_size, 1, num_anchors, num_classes)
 
-        # Check if anchors are inside ground truth boxes
+        # --- Candidate Selection ---
+
+        # 1. Select candidates based on spatial location (`is_in_gt`).
+        # An anchor is a candidate if its center point is inside the GT box.
         gt_x1y1, gt_x2y2 = ops.split(gt_bboxes_exp, 2, axis=-1)
         is_in_gt = (
-            ops.all(anchors_exp >= gt_x1y1, -1) &
-            ops.all(anchors_exp <= gt_x2y2, -1)
-        )
+                ops.all(anchors_exp >= gt_x1y1, -1) &
+                ops.all(anchors_exp <= gt_x2y2, -1)
+        )  # Shape: (batch_size, num_gt, num_anchors)
 
-        # Calculate IoU between predictions and ground truth
-        ious = bbox_iou(
-            ops.expand_dims(pred_bboxes, 1),
-            gt_bboxes_exp,
-            xywh=False,
-            CIoU=True
-        )
+        # 2. Select candidates based on IoU (`topk`).
+        # This focuses the assignment on the 10 anchors that best match the GT box's shape.
+        topk = 10
+        # Calculate IoU between all predictions and all GTs.
+        iou_candidates = bbox_iou(pred_bboxes_exp, gt_bboxes_exp, xywh=False,
+                                  CIoU=False)  # Shape: (batch_size, num_gt, num_anchors)
 
-        # Convert labels to one-hot encoding
+        # Get the indices of the top 10 anchors for each GT box.
+        _, topk_idx = ops.top_k(iou_candidates, k=min(topk, num_anchors), axis=2)
+
+        # Create a one-hot mask from the top-k indices.
+        is_in_topk = ops.one_hot(topk_idx, num_anchors, dtype=iou_candidates.dtype)
+        is_in_topk = ops.sum(is_in_topk, axis=2)  # Shape: (batch_size, num_gt, num_anchors)
+
+        # Combine the two candidate masks. An anchor is a candidate if it meets either condition.
+        # This ensures both spatially relevant and geometrically similar anchors are considered.
+        candidate_mask = ops.where(is_in_gt, ops.cast(1.0, iou_candidates.dtype), is_in_topk) > 0
+
+        # --- Alignment Metric Calculation ---
+
+        # Calculate the final IoU (using CIoU for a better metric) and classification scores
+        # only for the candidate anchors to save computation.
+        # `ops.where` is used to effectively mask out non-candidates.
+        ious = bbox_iou(pred_bboxes_exp, gt_bboxes_exp, xywh=False, CIoU=True)
+        ious = ops.where(candidate_mask, ious, 0.0)
+
         gt_labels_int = ops.cast(ops.squeeze(gt_labels, -1), "int32")
         gt_labels_one_hot = ops.one_hot(gt_labels_int, self.num_classes)
+        gt_labels_one_hot = ops.expand_dims(gt_labels_one_hot, 2)  # -> (batch_size, num_gt, 1, num_classes)
 
-        # Calculate classification scores for alignment metric
-        cls_scores = ops.sum(
-            ops.expand_dims(gt_labels_one_hot, 2) *
-            ops.nn.sigmoid(ops.expand_dims(pred_scores, 1)),
-            -1
-        )
+        cls_scores = ops.sum(gt_labels_one_hot * ops.nn.sigmoid(pred_scores_exp), -1)
+        cls_scores = ops.where(candidate_mask, cls_scores, 0.0)
 
-        # Compute task-aligned assignment metric
+        # Compute the final task-aligned assignment metric.
         align_metric = (
-            ops.power(cls_scores, self.assigner_alpha) *
-            ops.power(ious, self.assigner_beta)
+                ops.power(cls_scores, self.assigner_alpha) *
+                ops.power(ious, self.assigner_beta)
         )
 
-        # Apply ground truth mask
-        mask_gt_broadcast = ops.cast(
-            ops.expand_dims(ops.squeeze(mask_gt, -1), -1),
-            "bool"
-        )
-        align_metric = ops.where(
-            is_in_gt & mask_gt_broadcast,
-            align_metric,
-            0.0
-        )
+        # Apply the mask for valid (non-padded) ground truth boxes.
+        mask_gt_broadcast = ops.cast(ops.expand_dims(ops.squeeze(mask_gt, -1), -1), "bool")
+        align_metric = ops.where(mask_gt_broadcast, align_metric, 0.0)
 
-        # Find best matching ground truth for each anchor
-        target_gt_idx = ops.argmax(align_metric, axis=1)
-        fg_mask = ops.max(align_metric, axis=1) > 0
+        # --- Final Assignment ---
+
+        # For each anchor, find the GT box that gives it the highest alignment score.
+        target_gt_idx = ops.argmax(align_metric, axis=1)  # Shape: (batch_size, num_anchors)
+
+        # An anchor is considered foreground (positive) if its highest alignment score is greater than 0.
+        fg_mask = ops.max(align_metric, axis=1) > 0  # Shape: (batch_size, num_anchors)
+        # Also, ensure the assigned GT is a valid one (not a padded one).
+        target_gt_idx = ops.where(fg_mask, target_gt_idx, 0)  # Assign to a dummy GT if background.
 
         return target_gt_idx, fg_mask
 
