@@ -291,31 +291,21 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         """
         batch_size = ops.shape(target_gt_idx)[0]
         num_anchors = ops.shape(target_gt_idx)[1]
-        max_gt = ops.shape(gt_labels)[1]
 
-        # Create batch indices for gathering
+        # Create batch indices to pair with target_gt_idx.
+        # Shape: (batch_size, num_anchors) -> e.g., [[0,0,0...], [1,1,1...], ...]
         batch_indices = ops.tile(
-            ops.expand_dims(ops.arange(batch_size), 1),
+            ops.expand_dims(ops.arange(batch_size, dtype=target_gt_idx.dtype), 1),
             [1, num_anchors]
         )
 
-        # Flatten indices for gathering operation
-        flat_indices = ops.reshape(
-            batch_indices * max_gt + target_gt_idx,
-            [-1]
-        )
+        # Stack indices to create a coordinate for each anchor in the batch.
+        # Shape: (batch_size, num_anchors, 2) where each element is [batch_idx, gt_idx_to_gather]
+        gather_indices = ops.stack([batch_indices, target_gt_idx], axis=-1)
 
-        # Gather target labels
-        target_labels = ops.reshape(
-            ops.take(ops.reshape(gt_labels, [-1, 1]), flat_indices, 0),
-            [batch_size, num_anchors, 1]
-        )
-
-        # Gather target bounding boxes
-        target_bboxes = ops.reshape(
-            ops.take(ops.reshape(gt_bboxes, [-1, 4]), flat_indices, 0),
-            [batch_size, num_anchors, 4]
-        )
+        # Gather target labels and bounding boxes using the generated indices.
+        target_labels = ops.gather_nd(gt_labels, gather_indices)
+        target_bboxes = ops.gather_nd(gt_bboxes, gather_indices)
 
         # Convert labels to one-hot scores with foreground mask
         target_labels_int = ops.cast(ops.squeeze(target_labels, -1), "int32")
@@ -456,21 +446,15 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
                 target_scores_pos = ops.reshape(target_scores, [-1, self.num_classes])[flat_fg_mask]
 
                 # --- Bounding Box Regression Loss (CIoU Loss) ---
-                # This loss penalizes the difference between predicted and target box shapes.
-                iou = bbox_iou(
-                    pred_bboxes_pos,
-                    target_bboxes_pos,
-                    xywh=False,
-                    CIoU=True
-                )
+                iou = bbox_iou(pred_bboxes_pos, target_bboxes_pos, xywh=False, CIoU=True)
                 loss_box = (
                         ops.sum((1.0 - iou) * ops.sum(target_scores_pos, -1)) /
                         target_scores_sum
                 )
 
-                # --- Distribution Focal Loss (DFL) ---
+                # --- START DFL CORRECTION: IMPLEMENTING GENERALIZED FOCAL LOSS ---
                 # This loss encourages the predicted distribution of distances to be close
-                # to the actual target distances.
+                # to the actual target distances using a superior "soft" target.
 
                 # Get the coordinates and strides of the positive anchors.
                 anchor_indices = ops.tile(ops.arange(ops.shape(pred_bboxes)[1]), [ops.shape(pred_bboxes)[0]])
@@ -478,35 +462,47 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
                 strides_pos = ops.take(ops.squeeze(self.strides), anchor_indices[flat_fg_mask], 0)
                 strides_pos = ops.expand_dims(strides_pos, -1)
 
-                # Calculate the ground truth distances (left, top, right, bottom) in PIXEL units.
+                # Calculate the ground truth distances (l,t,r,b) and scale them by stride.
                 target_ltrb_pixels = ops.concatenate([
                     anchors_pos - target_bboxes_pos[..., :2],
                     target_bboxes_pos[..., 2:] - anchors_pos
                 ], -1)
-
-                # --- THIS IS THE CRITICAL FIX ---
-                # Convert the PIXEL-unit targets to DFL-compatible GRID-unit targets by dividing by the stride.
-                # This ensures the target is in the same small-scale space as the prediction.
                 target_ltrb = target_ltrb_pixels / strides_pos
-
-                # Clip the scaled target to ensure it's within the valid DFL range [0, reg_max-1].
                 target_ltrb = ops.clip(target_ltrb, 0, self.reg_max - 1.01)
+
+                # Get the two integer bins surrounding the float target.
+                target_ltrb_left = ops.floor(target_ltrb)
+                target_ltrb_right = target_ltrb_left + 1
+
+                # Calculate the weights for each bin (linear interpolation).
+                # The closer bin gets a higher weight.
+                weight_left = target_ltrb_right - target_ltrb
+                weight_right = target_ltrb - target_ltrb_left
 
                 # Gather the DFL predictions for the positive anchors.
                 pred_dist_pos = ops.reshape(pred_dist_reshaped, [-1, 4, self.reg_max])[flat_fg_mask]
 
-                # Reshape for the cross-entropy loss function.
-                target_ltrb_flat = ops.reshape(target_ltrb, [-1])
-                pred_dist_flat = ops.reshape(pred_dist_pos, [-1, self.reg_max])
-
-                # Calculate the DFL using sparse categorical cross-entropy.
-                loss_dfl = (
-                        ops.sum(keras.losses.sparse_categorical_crossentropy(
-                            ops.cast(target_ltrb_flat, "int32"),
-                            pred_dist_flat,
-                            from_logits=True
-                        )) / target_scores_sum
+                # Compute the cross-entropy loss for both the left and right bins.
+                loss_dfl_left = keras.losses.sparse_categorical_crossentropy(
+                    ops.cast(target_ltrb_left, "int32"),
+                    ops.reshape(pred_dist_pos, [-1, self.reg_max]),
+                    from_logits=True
                 )
+                loss_dfl_right = keras.losses.sparse_categorical_crossentropy(
+                    ops.cast(target_ltrb_right, "int32"),
+                    ops.reshape(pred_dist_pos, [-1, self.reg_max]),
+                    from_logits=True
+                )
+
+                # Combine the two losses, weighted by their distance from the target,
+                # and normalize by the number of positive assignments.
+                loss_dfl = (
+                        ops.sum(
+                            ops.reshape(loss_dfl_left * weight_left, [-1, 4]) +
+                            ops.reshape(loss_dfl_right * weight_right, [-1, 4])
+                        ) / target_scores_sum
+                )
+                # --- END DFL CORRECTION ---
 
                 return loss_box, loss_dfl
 
@@ -719,22 +715,13 @@ class DiceFocalSegmentationLoss(keras.losses.Loss):
                 logger.warning(f"Multi-class segmentation shape mismatch: y_true.shape={y_true.shape}, expected classes={self.num_classes}")
 
         # Compute individual loss components
-        try:
-            dice_loss = self._compute_dice_loss(y_true, y_pred)  # [batch_size]
-            focal_loss = self._compute_focal_loss(y_true, y_pred)  # [batch_size]
+        dice_loss = self._compute_dice_loss(y_true, y_pred)  # [batch_size]
+        focal_loss = self._compute_focal_loss(y_true, y_pred)  # [batch_size]
 
-            # Both losses now have shape [batch_size], so we can combine them
-            combined_loss = self.dice_weight * dice_loss + self.focal_weight * focal_loss
+        # Both losses now have shape [batch_size], so we can combine them
+        combined_loss = self.dice_weight * dice_loss + self.focal_weight * focal_loss
 
-            return combined_loss
-
-        except Exception as e:
-            logger.error(f"Error in segmentation loss computation: {e}")
-            logger.error(f"y_true.shape: {y_true.shape}, y_pred.shape: {y_pred.shape}")
-
-            # Return a small fallback loss to avoid training failure
-            batch_size = ops.shape(y_pred)[0]
-            return ops.fill((batch_size,), 0.1)
+        return combined_loss
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -973,13 +960,22 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         y_pred: keras.KerasTensor
     ) -> Optional[str]:
         """
-        Infers the current task by inspecting the shape of the prediction tensor.
+        Infers the current task by inspecting the rank of the prediction tensor.
+
+        This method relies on the architectural assumption that each task output has a
+        unique tensor rank:
+            - Rank 3 (batch, anchors, features): Object Detection
+            - Rank 4 (batch, height, width, classes): Segmentation
+            - Rank 2 (batch, classes): Classification
+
+        If future tasks are added that collide in rank (e.g., another 4D tensor task),
+        this inference mechanism will need to be replaced with a more explicit one.
 
         Args:
-            y_pred: Prediction tensor from model output.
+            y_pred: Prediction tensor from a model output.
 
         Returns:
-            Task name string or None if task cannot be inferred.
+            The corresponding task name string or None if the rank is unrecognized.
         """
         pred_shape = y_pred.shape
 
