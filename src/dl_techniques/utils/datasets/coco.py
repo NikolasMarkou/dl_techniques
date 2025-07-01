@@ -804,22 +804,31 @@ class COCODatasetBuilder:
             num_parallel_calls=tf.data.AUTOTUNE
         )
 
-        # Cache if directory specified (before batching for efficiency)
-        if self.cache_dir and is_training:
-            cache_path = os.path.join(self.cache_dir, f"coco_train_{self.img_size}_{self.segmentation_classes}")
-            dataset = dataset.cache(cache_path)
-
         if is_training:
-            # IMPORTANT: Repeat the dataset BEFORE shuffling.
-            # This ensures that data is shuffled differently across epochs.
-            dataset = dataset.repeat()
+            # IMPORTANT: The order of `shuffle`, `cache`, and `repeat` is critical
+            # for both correctness and performance.
 
-            # Shuffle the infinitely repeated dataset.
+            # 1. Shuffle the entire dataset. This is the most important step for ensuring
+            #    the model sees a different order of examples in each epoch.
+            logger.info(f"Shuffling training dataset with buffer size: {self.shuffle_buffer_size}")
             dataset = dataset.shuffle(buffer_size=self.shuffle_buffer_size)
-            logger.info(f"Using shuffle buffer size: {self.shuffle_buffer_size}")
+
+            # 2. Cache the result of the mapping and shuffling. Caching after shuffling
+            #    is often a good tradeoff, as shuffling can be I/O intensive.
+            #    The first epoch will be slow as it builds the cache. Subsequent epochs
+            #    will be much faster as they read from the pre-shuffled, pre-processed cache.
+            if self.cache_dir:
+                cache_path = os.path.join(self.cache_dir, f"coco_train_{self.img_size}_{self.segmentation_classes}")
+                dataset = dataset.cache(cache_path)
+                logger.info(f"Training dataset will be cached at: {cache_path}")
+
+            # 3. Repeat the dataset for multiple epochs. Since the dataset is already
+            #    shuffled, Keras will just pull from this infinite stream of data.
+            #    A re-shuffling will happen when the original dataset is fully iterated through.
+            dataset = dataset.repeat()
         else:
-            # For validation, no need to shuffle, but repeat is good practice
-            # to prevent OutOfRange errors if validation_steps is large.
+            # For validation, no need to shuffle.
+            # Repeat is good practice to prevent OutOfRange errors if validation_steps is large.
             dataset = dataset.repeat()
 
         # Define shapes and padding values for efficient padded_batch

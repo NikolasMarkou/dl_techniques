@@ -13,9 +13,6 @@ shapes of `y_true` and `y_pred` that Keras provides for each model output.
 This module also supports learnable uncertainty weighting to automatically
 balance the contribution of each task's loss during training.
 
-FIXED VERSION: Now supports configurable segmentation classes for COCO pretraining
-(80 classes) vs crack detection fine-tuning (1 class).
-
 Key Components:
     - YOLOv12MultiTaskLoss: The main, user-facing loss class that orchestrates all
       sub-losses and handles dynamic or static weighting. It is the single entry
@@ -96,15 +93,31 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
 
         # Initialize binary focal cross-entropy loss for classification
         # focal cross entropy handles class imbalance better
-        self.cfc_loss_fn = keras.losses.CategoricalFocalCrossentropy(
+        self.bce = keras.losses.BinaryFocalCrossentropy(
             alpha=0.25,
             gamma=2.0,
             from_logits=True,
             reduction="none"
         )
 
-        # Generate anchor points and strides for all feature map levels
-        self.anchors, self.strides = self._make_anchors()
+        # Generate anchor points and strides ONCE during initialization.
+        anchors, strides = self._make_anchors()
+
+        # Store them as non-trainable weights (buffers). This is the key change.
+        # It ensures these tensors are managed correctly by Keras and are not
+        # problematic static constants inside the compiled training graph.
+        self.anchors = self.add_weight(
+            name="anchors",
+            shape=anchors.shape,
+            initializer=keras.initializers.Constant(anchors.numpy()), # Use numpy value for initializer
+            trainable=False
+        )
+        self.strides = self.add_weight(
+            name="strides",
+            shape=strides.shape,
+            initializer=keras.initializers.Constant(strides.numpy()), # Use numpy value for initializer
+            trainable=False
+        )
 
     def _make_anchors(
         self,
@@ -216,7 +229,6 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         iou_candidates = bbox_iou(pred_bboxes_exp, gt_bboxes_exp, xywh=False,
                                   CIoU=False)  # Shape: (batch_size, num_gt, num_anchors)
 
-        # --- THE FIX FOR THE TypeError ---
         # Find the top `k` IoU values and their indices along the last axis (num_anchors).
         # The `axis` argument is removed because it is not supported by `keras.ops.top_k`.
         # The function operates on the last axis by default, which is correct for our tensor shape.
@@ -248,7 +260,6 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         cls_scores = ops.sum(gt_labels_one_hot * ops.nn.sigmoid(pred_scores_exp), -1)
         cls_scores = ops.where(candidate_mask, cls_scores, 0.0)
 
-        # --- START FINAL, CORRECT FIX ---
         # The original alignment metric `cls**alpha * iou**beta` is a product,
         # which is numerically unstable. If the classification score for the
         # correct class is zero, the entire metric becomes zero, preventing
@@ -262,7 +273,6 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
 
         # We keep the alpha and beta hyperparameters but use them as weights.
         align_metric = self.assigner_alpha * cls_scores + self.assigner_beta * ious
-        # --- END FINAL, CORRECT FIX ---
 
         # Apply the mask for valid (non-padded) ground truth boxes to ignore padded GTs.
         mask_gt_broadcast = ops.cast(ops.expand_dims(ops.squeeze(mask_gt, -1), -1), "bool")
@@ -449,7 +459,7 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
             # The background anchors are penalized for any confident predictions, while
             # foreground anchors are rewarded for correctly classifying their target.
             loss_cls = (
-                    ops.sum(self.cfc_loss_fn(target_scores, pred_scores)) /
+                    ops.sum(self.bce(target_scores, pred_scores)) /
                     target_scores_sum
             )
 
@@ -475,11 +485,6 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
                         ops.sum((1.0 - iou) * ops.sum(target_scores_pos, -1)) /
                         target_scores_sum
                 )
-
-                # --- START DFL CORRECTION: FIXING TENSOR SHAPES ---
-                # The previous implementation failed because the tensor shapes were incorrect
-                # for sparse_categorical_crossentropy. We must flatten the LTRB dimension
-                # into the batch dimension to properly compute the loss.
 
                 # Get the coordinates and strides of the positive anchors.
                 anchor_indices = ops.tile(ops.arange(ops.shape(pred_bboxes)[1]), [ops.shape(pred_bboxes)[0]])
@@ -589,9 +594,6 @@ class DiceFocalSegmentationLoss(keras.losses.Loss):
 
     This loss combines the benefits of Dice loss (good for handling class imbalance)
     and Focal loss (focuses on hard examples) for semantic segmentation tasks.
-
-    FIXED VERSION: Now supports both binary (1 class) and multi-class segmentation
-    with proper shape handling and gradient flow.
 
     Args:
         num_classes: Number of segmentation classes (1 for binary, >1 for multi-class).
@@ -860,8 +862,6 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         - 3D tensors: Object detection (batch, anchors, features)
         - 4D tensors: Segmentation (batch, height, width, classes)
         - 2D tensors: Classification (batch, classes)
-
-    FIXED VERSION: Now supports configurable detection and segmentation class counts.
 
     Args:
         tasks: Task configuration specifying which tasks to enable.
