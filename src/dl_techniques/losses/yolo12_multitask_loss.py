@@ -354,38 +354,63 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         mask_gt = ops.sum(gt_bboxes, -1, keepdims=True) > 0
 
         def compute_losses():
-            """Compute all loss components when ground truth exists."""
-            # Perform task-aligned assignment
+            """
+            Compute all loss components for a batch of images with ground truth.
+            This function is called only when at least one ground truth box exists in the batch.
+            It performs the following steps:
+            1.  Assigns ground truth boxes to the most suitable anchor points.
+            2.  Calculates classification loss for all assigned anchors.
+            3.  Calculates bounding box (IoU) and Distribution Focal Loss (DFL) only for
+                the positive anchor assignments (foreground).
+
+            Returns:
+                A tuple of three scalar tensors: (loss_cls, loss_box, loss_dfl).
+            """
+            # Step 1: Assign ground truth boxes to anchor points using Task-Aligned Assigner.
+            # This determines which anchors are responsible for which ground truth objects (fg_mask)
+            # and gets the index of the ground truth box assigned to each anchor (target_gt_idx).
             target_gt_idx, fg_mask = self._task_aligned_assigner(
                 pred_scores, pred_bboxes, self.anchors * self.strides,
                 gt_labels, gt_bboxes, mask_gt
             )
 
-            # Get targets for assigned anchors
+            # Step 2: Gather the target labels and bounding boxes for each anchor based on the assignment.
+            # For background anchors, the target scores will be all zeros.
             target_bboxes, target_scores = self._get_targets(
                 gt_labels, gt_bboxes, target_gt_idx, fg_mask
             )
 
-            # Calculate normalization factor
+            # Step 3: Calculate a normalization factor. This is the total number of positive
+            # assignments across the batch, used to average the losses.
             target_scores_sum = ops.maximum(ops.sum(target_scores), 1.0)
 
-            # Classification loss
+            # Step 4: Calculate the Classification Loss (BCE Focal Loss).
+            # This is calculated for all anchors (both foreground and background).
+            # The background anchors are penalized for any confident predictions, while
+            # foreground anchors are rewarded for correctly classifying their target.
             loss_cls = (
-                ops.sum(self.bce(target_scores, pred_scores)) /
-                target_scores_sum
+                    ops.sum(self.bce(target_scores, pred_scores)) /
+                    target_scores_sum
             )
 
-            def compute_box_dfl_losses():
-                """Compute box regression and DFL losses for positive anchors."""
-                # Get positive anchor indices
+            def compute_box_and_dfl_only():
+                """
+                A nested function to compute losses that only apply to foreground anchors.
+                This is wrapped in an ops.cond to avoid running on batches with no positive assignments.
+
+                Returns:
+                    A tuple of two scalar tensors: (loss_box, loss_dfl).
+                """
+                # Get a boolean mask for only the positive (foreground) anchors.
                 flat_fg_mask = ops.reshape(fg_mask, [-1])
 
-                # Extract positive predictions and targets
+                # Gather the predictions and targets for only the positive anchors.
                 pred_bboxes_pos = ops.reshape(pred_bboxes, [-1, 4])[flat_fg_mask]
                 target_bboxes_pos = ops.reshape(target_bboxes, [-1, 4])[flat_fg_mask]
                 target_scores_pos = ops.reshape(target_scores, [-1, self.num_classes])[flat_fg_mask]
 
-                # Box regression loss (CIoU)
+                # --- Bounding Box Regression Loss (CIoU Loss) ---
+                # This loss penalizes the difference between predicted and target box shapes.
                 iou = bbox_iou(
                     pred_bboxes_pos,
                     target_bboxes_pos,
@@ -393,54 +418,62 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
                     CIoU=True
                 )
                 loss_box = (
-                    ops.sum((1.0 - iou) * ops.sum(target_scores_pos, -1)) /
-                    target_scores_sum
+                        ops.sum((1.0 - iou) * ops.sum(target_scores_pos, -1)) /
+                        target_scores_sum
                 )
 
-                # Distribution Focal Loss (DFL) computation
-                anchor_indices = ops.tile(
-                    ops.arange(ops.shape(pred_bboxes)[1]),
-                    [ops.shape(pred_bboxes)[0]]
-                )
-                anchors_pos = ops.take(
-                    self.anchors * self.strides,
-                    anchor_indices[flat_fg_mask],
-                    0
-                )
+                # --- Distribution Focal Loss (DFL) ---
+                # This loss encourages the predicted distribution of distances to be close
+                # to the actual target distances.
 
-                # Convert to left-top-right-bottom format and clip
-                target_ltrb = ops.concatenate([
+                # Get the coordinates and strides of the positive anchors.
+                anchor_indices = ops.tile(ops.arange(ops.shape(pred_bboxes)[1]), [ops.shape(pred_bboxes)[0]])
+                anchors_pos = ops.take(self.anchors * self.strides, anchor_indices[flat_fg_mask], 0)
+                strides_pos = ops.take(ops.squeeze(self.strides), anchor_indices[flat_fg_mask], 0)
+                strides_pos = ops.expand_dims(strides_pos, -1)
+
+                # Calculate the ground truth distances (left, top, right, bottom) in PIXEL units.
+                target_ltrb_pixels = ops.concatenate([
                     anchors_pos - target_bboxes_pos[..., :2],
                     target_bboxes_pos[..., 2:] - anchors_pos
                 ], -1)
+
+                # --- THIS IS THE CRITICAL FIX ---
+                # Convert the PIXEL-unit targets to DFL-compatible GRID-unit targets by dividing by the stride.
+                # This ensures the target is in the same small-scale space as the prediction.
+                target_ltrb = target_ltrb_pixels / strides_pos
+
+                # Clip the scaled target to ensure it's within the valid DFL range [0, reg_max-1].
                 target_ltrb = ops.clip(target_ltrb, 0, self.reg_max - 1.01)
 
-                # Prepare tensors for DFL loss
-                pred_dist_pos = ops.reshape(
-                    pred_dist_reshaped,
-                    [-1, 4, self.reg_max]
-                )[flat_fg_mask]
+                # Gather the DFL predictions for the positive anchors.
+                pred_dist_pos = ops.reshape(pred_dist_reshaped, [-1, 4, self.reg_max])[flat_fg_mask]
+
+                # Reshape for the cross-entropy loss function.
                 target_ltrb_flat = ops.reshape(target_ltrb, [-1])
                 pred_dist_flat = ops.reshape(pred_dist_pos, [-1, self.reg_max])
 
-                # Compute DFL loss
+                # Calculate the DFL using sparse categorical cross-entropy.
                 loss_dfl = (
-                    ops.sum(keras.losses.sparse_categorical_crossentropy(
-                        ops.cast(target_ltrb_flat, "int32"),
-                        pred_dist_flat,
-                        from_logits=True
-                    )) / target_scores_sum
+                        ops.sum(keras.losses.sparse_categorical_crossentropy(
+                            ops.cast(target_ltrb_flat, "int32"),
+                            pred_dist_flat,
+                            from_logits=True
+                        )) / target_scores_sum
                 )
 
                 return loss_box, loss_dfl
 
-            # Compute box and DFL losses only if there are positive anchors
+            # Step 5: Conditionally compute the box and DFL losses.
+            # These are only computed if there is at least one positive anchor in the batch
+            # to avoid errors with empty tensors.
             loss_box, loss_dfl = ops.cond(
                 ops.sum(ops.cast(fg_mask, "float32")) > 0,
-                compute_box_dfl_losses,
-                lambda: (0.0, 0.0)
+                compute_box_and_dfl_only,  # If true, call the function that returns 2 values
+                lambda: (ops.convert_to_tensor(0.0), ops.convert_to_tensor(0.0))  # If false, return 2 zero tensors
             )
 
+            # Step 6: Return all three loss components.
             return loss_cls, loss_box, loss_dfl
 
         # Compute losses only if ground truth exists
