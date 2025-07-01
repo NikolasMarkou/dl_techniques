@@ -188,15 +188,19 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
 
         # Prepare tensors for vectorized operations by adding new dimensions.
         # This allows for batch-wise comparison between all anchors and all GT boxes.
-        anchors_exp = ops.reshape(anchors, (1, 1, num_anchors, 2))  # -> (1, 1, num_anchors, 2)
-        gt_bboxes_exp = ops.expand_dims(gt_bboxes, 2)  # -> (batch_size, num_gt, 1, 4)
-        pred_bboxes_exp = ops.expand_dims(pred_bboxes, 1)  # -> (batch_size, 1, num_anchors, 4)
-        pred_scores_exp = ops.expand_dims(pred_scores, 1)  # -> (batch_size, 1, num_anchors, num_classes)
+        anchors_exp = ops.reshape(anchors, (1, 1, num_anchors, 2))
+        gt_bboxes_exp = ops.expand_dims(gt_bboxes, 2)
+        pred_bboxes_exp = ops.expand_dims(pred_bboxes, 1)
+        pred_scores_exp = ops.expand_dims(pred_scores, 1)
 
         # --- Candidate Selection ---
+        # This is the core logic to counteract the small-box bias. We create a mask
+        # of potential "good" anchors before calculating the final assignment metric.
 
         # 1. Select candidates based on spatial location (`is_in_gt`).
-        # An anchor is a candidate if its center point is inside the GT box.
+        # An anchor is a candidate if its center point is physically inside the GT box.
+        # This is crucial for large objects, as it ensures anchors across the entire
+        # object are considered, even if their initial predicted box is small and has poor IoU.
         gt_x1y1, gt_x2y2 = ops.split(gt_bboxes_exp, 2, axis=-1)
         is_in_gt = (
                 ops.all(anchors_exp >= gt_x1y1, -1) &
@@ -204,57 +208,65 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         )  # Shape: (batch_size, num_gt, num_anchors)
 
         # 2. Select candidates based on IoU (`topk`).
-        # This focuses the assignment on the 10 anchors that best match the GT box's shape.
+        # This focuses the assignment on the `topk` anchors that best match the GT box's shape,
+        # providing stability by limiting the number of candidates per GT.
         topk = 10
-        # Calculate IoU between all predictions and all GTs.
+        # Calculate a simple IoU (not CIoU, for speed) between all predictions and all GTs.
         iou_candidates = bbox_iou(pred_bboxes_exp, gt_bboxes_exp, xywh=False,
                                   CIoU=False)  # Shape: (batch_size, num_gt, num_anchors)
 
-        # Get the indices of the top 10 anchors for each GT box.
-        _, topk_idx = ops.top_k(iou_candidates, k=min(topk, num_anchors), axis=2)
+        # --- THE FIX FOR THE TypeError ---
+        # Find the top `k` IoU values and their indices along the last axis (num_anchors).
+        # The `axis` argument is removed because it is not supported by `keras.ops.top_k`.
+        # The function operates on the last axis by default, which is correct for our tensor shape.
+        _, topk_idx = ops.top_k(iou_candidates, k=min(topk, num_anchors))
 
-        # Create a one-hot mask from the top-k indices.
+        # Create a one-hot mask from the top-k indices to identify which anchors were selected.
         is_in_topk = ops.one_hot(topk_idx, num_anchors, dtype=iou_candidates.dtype)
         is_in_topk = ops.sum(is_in_topk, axis=2)  # Shape: (batch_size, num_gt, num_anchors)
 
-        # Combine the two candidate masks. An anchor is a candidate if it meets either condition.
-        # This ensures both spatially relevant and geometrically similar anchors are considered.
+        # Combine the two candidate masks. An anchor is a candidate if it's in the GT box OR in the top-k IoU.
+        # This provides a robust set of potential assignments for the next step.
         candidate_mask = ops.where(is_in_gt, ops.cast(1.0, iou_candidates.dtype), is_in_topk) > 0
 
         # --- Alignment Metric Calculation ---
+        # Now we calculate the final metric, but only for the candidates we just selected.
 
-        # Calculate the final IoU (using CIoU for a better metric) and classification scores
-        # only for the candidate anchors to save computation.
-        # `ops.where` is used to effectively mask out non-candidates.
+        # Calculate the final IoU (using CIoU for a more accurate regression signal).
+        # We then use the candidate mask to zero out the IoU for all non-candidate pairs.
         ious = bbox_iou(pred_bboxes_exp, gt_bboxes_exp, xywh=False, CIoU=True)
         ious = ops.where(candidate_mask, ious, 0.0)
 
+        # Prepare one-hot labels for classification score calculation.
         gt_labels_int = ops.cast(ops.squeeze(gt_labels, -1), "int32")
         gt_labels_one_hot = ops.one_hot(gt_labels_int, self.num_classes)
-        gt_labels_one_hot = ops.expand_dims(gt_labels_one_hot, 2)  # -> (batch_size, num_gt, 1, num_classes)
+        gt_labels_one_hot = ops.expand_dims(gt_labels_one_hot, 2)
 
+        # Calculate classification alignment scores.
+        # Zero out scores for all non-candidate pairs.
         cls_scores = ops.sum(gt_labels_one_hot * ops.nn.sigmoid(pred_scores_exp), -1)
         cls_scores = ops.where(candidate_mask, cls_scores, 0.0)
 
-        # Compute the final task-aligned assignment metric.
+        # Compute the final task-aligned assignment metric using the filtered inputs.
         align_metric = (
                 ops.power(cls_scores, self.assigner_alpha) *
                 ops.power(ious, self.assigner_beta)
         )
 
-        # Apply the mask for valid (non-padded) ground truth boxes.
+        # Apply the mask for valid (non-padded) ground truth boxes to ignore padded GTs.
         mask_gt_broadcast = ops.cast(ops.expand_dims(ops.squeeze(mask_gt, -1), -1), "bool")
         align_metric = ops.where(mask_gt_broadcast, align_metric, 0.0)
 
         # --- Final Assignment ---
 
         # For each anchor, find the GT box that gives it the highest alignment score.
-        target_gt_idx = ops.argmax(align_metric, axis=1)  # Shape: (batch_size, num_anchors)
+        target_gt_idx = ops.argmax(align_metric, axis=1)
 
-        # An anchor is considered foreground (positive) if its highest alignment score is greater than 0.
-        fg_mask = ops.max(align_metric, axis=1) > 0  # Shape: (batch_size, num_anchors)
-        # Also, ensure the assigned GT is a valid one (not a padded one).
-        target_gt_idx = ops.where(fg_mask, target_gt_idx, 0)  # Assign to a dummy GT if background.
+        # An anchor is considered foreground (positive) if its best score is greater than 0.
+        fg_mask = ops.max(align_metric, axis=1) > 0
+
+        # If an anchor is background, assign it to a dummy GT index (0) to prevent errors.
+        target_gt_idx = ops.where(fg_mask, target_gt_idx, 0)
 
         return target_gt_idx, fg_mask
 
