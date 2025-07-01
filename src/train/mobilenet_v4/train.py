@@ -1,6 +1,6 @@
 import keras
 import tensorflow as tf
-from typing import List, Tuple, Optional, Any
+from typing import List, Tuple, Any
 
 # ---------------------------------------------------------------------
 # local imports
