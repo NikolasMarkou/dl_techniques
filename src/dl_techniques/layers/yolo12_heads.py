@@ -462,9 +462,8 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"{self.name}_final_conv"
-            ),
-            keras.layers.Activation("sigmoid" if self.num_classes == 1 else "softmax",
-                                    name=f"{self.name}_final_activation")
+            )
+            # the activation is handled by the loss
         ], name=f"{self.name}_final")
 
         # Dropout for regularization
@@ -734,7 +733,7 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
         # Final classification layer
         self.final_dense = keras.layers.Dense(
             self.num_classes,
-            activation="sigmoid" if self.num_classes == 1 else "softmax",
+            activation=None, # explicitly output logits
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name=f"{self.name}_final_dense"
