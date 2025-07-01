@@ -206,10 +206,9 @@ class CLIPContrastiveLoss(keras.losses.Loss):
             logits_per_text = logits_per_text / self.temperature
 
         # Create target labels (diagonal matrix - correct pairs)
-        labels = ops.arange(batch_size, dtype='int32')
+        labels = ops.arange(ops.shape(logits_per_image)[0], dtype='int32')
 
-        # Compute cross-entropy loss for both directions
-        # Image-to-text: each image should match its corresponding text
+        # Compute cross-entropy loss for both directions (per-sample)
         loss_i2t = keras.losses.sparse_categorical_crossentropy(
             labels,
             logits_per_image,
@@ -217,7 +216,6 @@ class CLIPContrastiveLoss(keras.losses.Loss):
             label_smoothing=self.label_smoothing
         )
 
-        # Text-to-image: each text should match its corresponding image
         loss_t2i = keras.losses.sparse_categorical_crossentropy(
             labels,
             logits_per_text,
@@ -225,15 +223,12 @@ class CLIPContrastiveLoss(keras.losses.Loss):
             label_smoothing=self.label_smoothing
         )
 
-        # Reduce losses to scalars
-        loss_i2t_mean = ops.mean(loss_i2t)
-        loss_t2i_mean = ops.mean(loss_t2i)
+        # Combine the per-sample losses with weights.
+        # The parent Loss class will handle the reduction (mean, sum, etc.)
+        total_loss_per_sample = (self.loss_weight_i2t * loss_i2t +
+                                 self.loss_weight_t2i * loss_t2i)
 
-        # Combine losses with weights
-        total_loss = (self.loss_weight_i2t * loss_i2t_mean +
-                      self.loss_weight_t2i * loss_t2i_mean)
-
-        return total_loss
+        return total_loss_per_sample
 
     def _parse_predictions(
             self,
@@ -296,6 +291,13 @@ class CLIPContrastiveLoss(keras.losses.Loss):
             raise ValueError(
                 f"Logits must be 2D tensors, got shapes: "
                 f"logits_per_image={img_shape}, logits_per_text={txt_shape}"
+            )
+
+        if img_shape != txt_shape:
+            raise ValueError(
+                f"Logit matrix shapes must be identical. "
+                f"Got logits_per_image shape {img_shape} and "
+                f"logits_per_text shape {txt_shape}."
             )
 
         # Check if matrices are square (batch_size x batch_size)
