@@ -469,9 +469,10 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
                         target_scores_sum
                 )
 
-                # --- START DFL CORRECTION: IMPLEMENTING GENERALIZED FOCAL LOSS ---
-                # This loss encourages the predicted distribution of distances to be close
-                # to the actual target distances using a superior "soft" target.
+                # --- START DFL CORRECTION: FIXING TENSOR SHAPES ---
+                # The previous implementation failed because the tensor shapes were incorrect
+                # for sparse_categorical_crossentropy. We must flatten the LTRB dimension
+                # into the batch dimension to properly compute the loss.
 
                 # Get the coordinates and strides of the positive anchors.
                 anchor_indices = ops.tile(ops.arange(ops.shape(pred_bboxes)[1]), [ops.shape(pred_bboxes)[0]])
@@ -479,7 +480,7 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
                 strides_pos = ops.take(ops.squeeze(self.strides), anchor_indices[flat_fg_mask], 0)
                 strides_pos = ops.expand_dims(strides_pos, -1)
 
-                # Calculate the ground truth distances (l,t,r,b) and scale them by stride.
+                # Calculate scaled ground truth distances. Shape: (num_pos, 4)
                 target_ltrb_pixels = ops.concatenate([
                     anchors_pos - target_bboxes_pos[..., :2],
                     target_bboxes_pos[..., 2:] - anchors_pos
@@ -487,38 +488,40 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
                 target_ltrb = target_ltrb_pixels / strides_pos
                 target_ltrb = ops.clip(target_ltrb, 0, self.reg_max - 1.01)
 
-                # Get the two integer bins surrounding the float target.
+                # Get integer bins and interpolation weights. Shape of all: (num_pos, 4)
                 target_ltrb_left = ops.floor(target_ltrb)
                 target_ltrb_right = target_ltrb_left + 1
-
-                # Calculate the weights for each bin (linear interpolation).
-                # The closer bin gets a higher weight.
                 weight_left = target_ltrb_right - target_ltrb
                 weight_right = target_ltrb - target_ltrb_left
 
-                # Gather the DFL predictions for the positive anchors.
+                # Gather DFL predictions. Shape: (num_pos, 4, reg_max)
                 pred_dist_pos = ops.reshape(pred_dist_reshaped, [-1, 4, self.reg_max])[flat_fg_mask]
 
-                # Compute the cross-entropy loss for both the left and right bins.
+                # Reshape all tensors to flatten the LTRB dimension into the batch dimension.
+                # This creates the (batch_size, num_classes) structure required by the loss function.
+                target_left_flat = ops.reshape(target_ltrb_left, [-1])  # Shape: (num_pos * 4,)
+                target_right_flat = ops.reshape(target_ltrb_right, [-1])  # Shape: (num_pos * 4,)
+                weight_left_flat = ops.reshape(weight_left, [-1])  # Shape: (num_pos * 4,)
+                weight_right_flat = ops.reshape(weight_right, [-1])  # Shape: (num_pos * 4,)
+                pred_dist_flat = ops.reshape(pred_dist_pos, [-1, self.reg_max])  # Shape: (num_pos * 4, reg_max)
+
+                # Compute the cross-entropy loss for both the left and right bins with the correct shapes.
                 loss_dfl_left = keras.losses.sparse_categorical_crossentropy(
-                    ops.cast(target_ltrb_left, "int32"),
-                    ops.reshape(pred_dist_pos, [-1, self.reg_max]),
+                    ops.cast(target_left_flat, "int32"),
+                    pred_dist_flat,
                     from_logits=True
                 )
                 loss_dfl_right = keras.losses.sparse_categorical_crossentropy(
-                    ops.cast(target_ltrb_right, "int32"),
-                    ops.reshape(pred_dist_pos, [-1, self.reg_max]),
+                    ops.cast(target_right_flat, "int32"),
+                    pred_dist_flat,
                     from_logits=True
                 )
 
-                # Combine the two losses, weighted by their distance from the target,
-                # and normalize by the number of positive assignments.
+                # Combine the weighted losses and normalize.
                 loss_dfl = (
-                        ops.sum(
-                            ops.reshape(loss_dfl_left * weight_left, [-1, 4]) +
-                            ops.reshape(loss_dfl_right * weight_right, [-1, 4])
-                        ) / target_scores_sum
-                )
+                                   ops.sum(loss_dfl_left * weight_left_flat) +
+                                   ops.sum(loss_dfl_right * weight_right_flat)
+                           ) / target_scores_sum
                 # --- END DFL CORRECTION ---
 
                 return loss_box, loss_dfl
