@@ -91,33 +91,8 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         self.assigner_alpha = assigner_alpha
         self.assigner_beta = assigner_beta
 
-        # Initialize binary focal cross-entropy loss for classification
-        # focal cross entropy handles class imbalance better
-        self.bce = keras.losses.BinaryFocalCrossentropy(
-            alpha=0.25,
-            gamma=2.0,
-            from_logits=True,
-            reduction="none"
-        )
-
-        # Generate anchor points and strides ONCE during initialization.
-        anchors, strides = self._make_anchors()
-
-        # Store them as non-trainable weights (buffers). This is the key change.
-        # It ensures these tensors are managed correctly by Keras and are not
-        # problematic static constants inside the compiled training graph.
-        self.anchors = self.add_weight(
-            name="anchors",
-            shape=anchors.shape,
-            initializer=keras.initializers.Constant(anchors.numpy()), # Use numpy value for initializer
-            trainable=False
-        )
-        self.strides = self.add_weight(
-            name="strides",
-            shape=strides.shape,
-            initializer=keras.initializers.Constant(strides.numpy()), # Use numpy value for initializer
-            trainable=False
-        )
+        # Generate anchor points and strides for all feature map levels
+        self.anchors, self.strides = self._make_anchors()
 
     def _make_anchors(
         self,
