@@ -91,6 +91,15 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         self.assigner_alpha = assigner_alpha
         self.assigner_beta = assigner_beta
 
+        # Initialize binary focal cross-entropy loss for classification
+        # focal cross entropy handles class imbalance better
+        self.bce = keras.losses.BinaryFocalCrossentropy(
+            alpha=0.25,
+            gamma=2.0,
+            from_logits=True,
+            reduction="none"
+        )
+
         # Generate anchor points and strides for all feature map levels
         self.anchors, self.strides = self._make_anchors()
 
