@@ -97,7 +97,6 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         # Initialize binary focal cross-entropy loss for classification
         # focal cross entropy handles class imbalance better
         self.cfc_loss_fn = keras.losses.CategoricalFocalCrossentropy(
-            apply_class_balancing=False,  # Turn this off to use our explicit alpha
             alpha=0.25,
             gamma=2.0,
             from_logits=True,
