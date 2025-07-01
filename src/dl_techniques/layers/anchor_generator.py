@@ -1,10 +1,10 @@
 import keras
 from keras import ops
-from typing import Tuple, Any, Dict, List, Union, Optional
+from typing import Tuple, Any, Dict, List, Optional
 from dl_techniques.utils.logger import logger
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques")
+@keras.saving.register_keras_serializable()
 class AnchorGenerator(keras.layers.Layer):
     """Anchor generator layer for YOLOv12 object detection.
 
