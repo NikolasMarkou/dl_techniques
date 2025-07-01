@@ -53,13 +53,17 @@ from matplotlib import patches
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.vision_task_types import TaskType
 from dl_techniques.utils.datasets.coco import COCODatasetBuilder
 from dl_techniques.models.yolo12_multitask import create_yolov12_multitask
 from dl_techniques.losses.yolo12_multitask_loss import create_yolov12_multitask_loss
 
-keras.mixed_precision.set_global_policy("mixed_float16")
+# ---------------------------------------------------------------------
 
 def setup_gpu():
     """Configure GPU settings for optimal training."""
@@ -74,6 +78,85 @@ def setup_gpu():
     else:
         logger.info("No GPUs found, using CPU")
 
+# ---------------------------------------------------------------------
+
+
+@keras.saving.register_keras_serializable()
+class WarmupCosineDecay(keras.optimizers.schedules.LearningRateSchedule):
+    """A learning rate schedule that combines linear warmup and cosine decay."""
+
+    def __init__(
+            self,
+            initial_learning_rate: float,
+            decay_steps: int,
+            warmup_steps: int,
+            alpha: float = 0.0,
+            name: str = None
+    ):
+        """
+        Initializes the schedule.
+        Args:
+            initial_learning_rate: The starting learning rate.
+            decay_steps: The number of steps to decay over after warmup.
+            warmup_steps: The number of steps to warm up over.
+            alpha: The minimum learning rate as a fraction of the initial one.
+            name: Optional name for the schedule.
+        """
+        super().__init__()
+        self.initial_learning_rate = initial_learning_rate
+        self.decay_steps = decay_steps
+        self.warmup_steps = warmup_steps
+        self.alpha = alpha
+        self.name = name
+
+        # The cosine decay part is a separate schedule itself
+        self.cosine_decay = keras.optimizers.schedules.CosineDecay(
+            initial_learning_rate=initial_learning_rate,
+            decay_steps=self.decay_steps,
+            alpha=self.alpha
+        )
+
+    def __call__(self, step):
+        """
+        Calculates the learning rate for a given step.
+        This method is called automatically by the Keras optimizer.
+        """
+        with tf.name_scope(self.name or "WarmupCosineDecay"):
+            initial_learning_rate = tf.convert_to_tensor(
+                self.initial_learning_rate, name="initial_learning_rate"
+            )
+            dtype = initial_learning_rate.dtype
+
+            warmup_steps_tf = tf.cast(self.warmup_steps, dtype)
+            global_step_tf = tf.cast(step, dtype)
+
+            # Calculate the warmup learning rate
+            warmup_percent_done = global_step_tf / warmup_steps_tf
+            warmup_learning_rate = initial_learning_rate * warmup_percent_done
+
+            # Determine whether we are in the warmup phase or cosine decay phase
+            is_warmup = global_step_tf < warmup_steps_tf
+
+            # The `step` for cosine decay starts from 0 after the warmup phase
+            cosine_step = global_step_tf - warmup_steps_tf
+
+            return tf.cond(
+                is_warmup,
+                lambda: warmup_learning_rate,
+                lambda: self.cosine_decay(cosine_step)
+            )
+
+    def get_config(self):
+        """Returns the config of the schedule for serialization."""
+        return {
+            "initial_learning_rate": self.initial_learning_rate,
+            "decay_steps": self.decay_steps,
+            "warmup_steps": self.warmup_steps,
+            "alpha": self.alpha,
+            "name": self.name,
+        }
+
+# ---------------------------------------------------------------------
 
 def create_coco_model_and_loss(
         scale: str,
@@ -84,8 +167,6 @@ def create_coco_model_and_loss(
 ) -> Tuple[keras.Model, keras.losses.Loss]:
     """
     Create YOLOv12 multi-task model and loss for COCO pre-training.
-
-    FIXED VERSION: Now supports separate class counts for detection and segmentation.
 
     Args:
         scale: Model scale ('n', 's', 'm', 'l', 'x').
@@ -117,12 +198,13 @@ def create_coco_model_and_loss(
         num_segmentation_classes=segmentation_classes,
         input_shape=(img_size, img_size),
         use_uncertainty_weighting=use_uncertainty_weighting,
-        # COCO-specific loss weights (can be tuned)
         detection_weight=1.0,
         segmentation_weight=0.1  # Lower weight for segmentation
     )
 
     return model, loss_fn
+
+# ---------------------------------------------------------------------
 
 
 def create_coco_callbacks(
@@ -174,16 +256,6 @@ def create_coco_callbacks(
             verbose=1
         ),
 
-        # # Learning rate reduction
-        # keras.callbacks.ReduceLROnPlateau(
-        #     monitor=monitor,
-        #     factor=0.5,
-        #     patience=max(patience // 2, 3),
-        #     min_lr=1e-7,
-        #     verbose=1,
-        #     cooldown=2
-        # ),
-
         # CSV logging
         keras.callbacks.CSVLogger(
             filename=os.path.join(results_dir, 'coco_training_log.csv'),
@@ -224,6 +296,8 @@ def create_coco_callbacks(
 
     return callbacks
 
+# ---------------------------------------------------------------------
+
 
 class ProgressLoggingCallback(keras.callbacks.Callback):
     """Custom callback for enhanced progress logging during COCO pre-training."""
@@ -253,6 +327,7 @@ class ProgressLoggingCallback(keras.callbacks.Callback):
 
         logger.info(f"Epoch {epoch + 1}/{self.params.get('epochs', '?')} - {loss_str}")
 
+# ---------------------------------------------------------------------
 
 class COCOVisualizationCallback(keras.callbacks.Callback):
     """
@@ -992,24 +1067,18 @@ def main():
 
     total_steps = steps_per_epoch * args.epochs
     warmup_steps = int(total_steps * 0.1)  # 10% of total steps for warmup
-    logger.info(f"Total training steps: {total_steps}, Warmup steps: {warmup_steps}")
 
-    # Create a Cosine Decay learning rate schedule
-    lr_schedule = keras.optimizers.schedules.CosineDecay(
+    logger.info(f"Using Warmup+CosineDecay schedule:")
+    logger.info(f"  Total training steps: {total_steps}")
+    logger.info(f"  Warmup steps: {warmup_steps}")
+
+    # Instantiate our new robust learning rate schedule class
+    lr_schedule = WarmupCosineDecay(
         initial_learning_rate=args.learning_rate,
         decay_steps=total_steps - warmup_steps,
-        alpha=0.1, # The minimum learning rate as a fraction of the initial
+        warmup_steps=warmup_steps,
+        alpha=0.1  # The minimum learning rate as a fraction of the initial
     )
-
-    # (Optional but recommended) Create a warmup schedule
-    # This is a bit more advanced but highly effective
-    def warmup_cosine_decay(step):
-        # Use tf.cond for a graph-compatible conditional
-        return tf.cond(
-            step < warmup_steps,
-            lambda: (tf.cast(step, tf.float32) / tf.cast(warmup_steps, tf.float32)) * args.learning_rate,
-            lambda: lr_schedule(step - warmup_steps)
-        )
 
     # Build model
     sample_input = tf.zeros((1, args.img_size, args.img_size, 3))
@@ -1022,20 +1091,20 @@ def main():
     # Create optimizer
     if args.optimizer.lower() == 'adamw':
         optimizer = keras.optimizers.AdamW(
-            learning_rate=warmup_cosine_decay,
+            learning_rate=lr_schedule,
             weight_decay=args.weight_decay,
             clipnorm=1.0
         )
     elif args.optimizer.lower() == 'sgd':
         optimizer = keras.optimizers.SGD(
-            learning_rate=args.learning_rate,
+            learning_rate=lr_schedule,
             momentum=0.9,
             nesterov=True,
             clipnorm=1.0
         )
     else:
         optimizer = keras.optimizers.Adam(
-            learning_rate=args.learning_rate,
+            learning_rate=lr_schedule,
             clipnorm=1.0
         )
 

@@ -65,7 +65,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.datasets.sut_tf import OptimizedSUTDataset
+from dl_techniques.utils.datasets.sut import OptimizedSUTDataset
 from dl_techniques.models.yolo12_multitask import create_yolov12_multitask
 from dl_techniques.utils.vision_task_types import (
     TaskType,
