@@ -34,9 +34,6 @@ References:
 
     - Ainslie, J., et al. (2023). "GQA: Training Generalized Multi-Query Transformer
       Models from Multi-Head Checkpoints." https://arxiv.org/abs/2305.13245
-
-Author: Deep Learning Techniques Library
-License: MIT
 """
 
 import keras
@@ -52,7 +49,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn.swiglu_ffn import SwiGLUFFN
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.layers.stochastic_depth import StochasticDepth
-from dl_techniques.layers.group_query_attention_layer import GroupedQueryAttention
+from dl_techniques.layers.group_query_attention import GroupedQueryAttention
 
 # ---------------------------------------------------------------------
 
