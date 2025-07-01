@@ -289,25 +289,41 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         Returns:
             Tuple of target bounding boxes and target scores.
         """
+        # --- START CORRECTION: REVERTING TO THE ORIGINAL, WORKING `ops.take` LOGIC ---
+        # The recommendation to use `ops.gather_nd` was incorrect as the function
+        # does not exist in the public `keras.ops` API. The original implementation
+        # using manual index flattening is the correct and functional approach.
+
         batch_size = ops.shape(target_gt_idx)[0]
         num_anchors = ops.shape(target_gt_idx)[1]
+        max_gt = ops.shape(gt_labels)[1]
 
-        # Create batch indices to pair with target_gt_idx.
-        # Shape: (batch_size, num_anchors) -> e.g., [[0,0,0...], [1,1,1...], ...]
+        # Create batch indices for gathering.
         batch_indices = ops.tile(
             ops.expand_dims(ops.arange(batch_size, dtype=target_gt_idx.dtype), 1),
             [1, num_anchors]
         )
 
-        # Stack indices to create a coordinate for each anchor in the batch.
-        # Shape: (batch_size, num_anchors, 2) where each element is [batch_idx, gt_idx_to_gather]
-        gather_indices = ops.stack([batch_indices, target_gt_idx], axis=-1)
+        # Flatten indices for the `ops.take` operation.
+        # This correctly maps each anchor to its assigned ground truth within the flattened tensor.
+        flat_indices = ops.reshape(
+            batch_indices * max_gt + target_gt_idx,
+            [-1]
+        )
 
-        # Gather target labels and bounding boxes using the generated indices.
-        target_labels = ops.gather_nd(gt_labels, gather_indices)
-        target_bboxes = ops.gather_nd(gt_bboxes, gather_indices)
+        # Gather target labels by taking from the flattened ground truth tensor.
+        target_labels = ops.reshape(
+            ops.take(ops.reshape(gt_labels, [-1, 1]), flat_indices, axis=0),
+            [batch_size, num_anchors, 1]
+        )
 
-        # Convert labels to one-hot scores with foreground mask
+        # Gather target bounding boxes.
+        target_bboxes = ops.reshape(
+            ops.take(ops.reshape(gt_bboxes, [-1, 4]), flat_indices, axis=0),
+            [batch_size, num_anchors, 4]
+        )
+
+        # Convert labels to one-hot scores with foreground mask.
         target_labels_int = ops.cast(ops.squeeze(target_labels, -1), "int32")
         target_scores = (
             ops.one_hot(target_labels_int, self.num_classes) *
@@ -315,6 +331,7 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         )
 
         return target_bboxes, target_scores
+        # --- END CORRECTION ---
 
     def _dist_to_bbox(
         self,
