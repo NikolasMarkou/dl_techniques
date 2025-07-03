@@ -1,5 +1,5 @@
 """
-Mixture Density Network (MDN) Layer Implementation for Keras 3.x.
+Mixture Density Network (MDN) Layer
 
 A Mixture Density Network combines a neural network with a mixture density model
 to predict probability distributions rather than single point estimates. This

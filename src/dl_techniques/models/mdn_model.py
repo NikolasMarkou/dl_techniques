@@ -59,7 +59,7 @@ The model consists of:
 - **Handles complex distributions**: Can model multi-modal and skewed target distributions
 - **Flexible architecture**: Configurable hidden layers, regularization, and normalization
 - **Production ready**: Full serialization support, logging, and robust error handling
-- **Interpretable**: Separates different types of uncertainty for better decision making
+- **Interpretable**: Separates different types of uncertainty for better decision-making
 
 ## Mathematical Foundation
 
@@ -87,8 +87,8 @@ from typing import List, Union, Optional, Dict, Any, Tuple
 
 from dl_techniques.layers.mdn_layer import (
     MDNLayer,
-    get_point_estimate,
     get_uncertainty,
+    get_point_estimate,
     get_prediction_intervals
 )
 from dl_techniques.utils.logger import logger
