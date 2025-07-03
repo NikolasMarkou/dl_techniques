@@ -41,7 +41,7 @@ References:
 import keras
 from keras import ops
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Union, Any
+from typing import Dict, Optional, Tuple, Union, Any
 
 # ---------------------------------------------------------------------
 # local imports
@@ -49,6 +49,10 @@ from typing import Dict, List, Optional, Tuple, Union, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import gaussian_probability
+
+# ---------------------------------------------------------------------
+
+EPSILON_SIGMA = 1e-6
 
 # ---------------------------------------------------------------------
 
@@ -196,6 +200,7 @@ class MDNLayer(keras.layers.Layer):
             name='mdn_mus'
         )
 
+        # notice the activation that forces the output to be always positive
         self.mdn_sigmas = keras.layers.Dense(
             self.num_mix * self.output_dim,
             activation=elu_plus_one_plus_epsilon,
@@ -223,7 +228,11 @@ class MDNLayer(keras.layers.Layer):
         super().build(input_shape)
         logger.debug(f"MDN layer built with input shape: {input_shape}")
 
-    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """Forward pass of the layer.
 
         Parameters
@@ -241,6 +250,7 @@ class MDNLayer(keras.layers.Layer):
         # Compute mixture parameters using sublayers
         mu_output = self.mdn_mus(inputs, training=training)
         sigma_output = self.mdn_sigmas(inputs, training=training)
+        sigma_output = ops.maximum(sigma_output, EPSILON_SIGMA)
         pi_output = self.mdn_pi(inputs, training=training)
 
         # Concatenate all parameters
@@ -249,7 +259,10 @@ class MDNLayer(keras.layers.Layer):
             name='mdn_outputs'
         )
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
         Parameters
@@ -267,7 +280,10 @@ class MDNLayer(keras.layers.Layer):
         output_size = (2 * self.output_dim * self.num_mix) + self.num_mix
         return tuple(input_shape_list[:-1] + [output_size])
 
-    def split_mixture_params(self, y_pred: keras.KerasTensor) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
+    def split_mixture_params(
+            self,
+            y_pred: keras.KerasTensor
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
         """Split the mixture parameters into components.
 
         Parameters
@@ -295,7 +311,11 @@ class MDNLayer(keras.layers.Layer):
 
         return out_mu, out_sigma, out_pi
 
-    def loss_func(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
+    def loss_func(
+            self,
+            y_true: keras.KerasTensor,
+            y_pred: keras.KerasTensor
+    ) -> keras.KerasTensor:
         """MDN loss function implementation using negative log likelihood.
 
         This function computes the negative log likelihood of the target values
@@ -342,13 +362,13 @@ class MDNLayer(keras.layers.Layer):
         total_prob = ops.sum(weighted_probs, axis=-1)  # [batch]
 
         # Prevent log(0) with improved numerical stability
-        total_prob = ops.maximum(total_prob, 1e-10)
+        total_prob = ops.maximum(total_prob, EPSILON_SIGMA)
         log_prob = ops.log(total_prob)
 
         # Calculate negative log likelihood
         loss = -ops.mean(log_prob)
 
-        return loss
+        return ops.maximum(loss, 0.0)
 
     def sample(self, y_pred: keras.KerasTensor, temperature: float = 1.0) -> keras.KerasTensor:
         """Sample from the mixture distribution.
@@ -466,6 +486,7 @@ class MDNLayer(keras.layers.Layer):
 
         return cls(**config_copy)
 
+# ---------------------------------------------------------------------
 
 def get_point_estimate(
     model: keras.Model,
@@ -520,6 +541,7 @@ def get_point_estimate(
 
     return point_estimates
 
+# ---------------------------------------------------------------------
 
 def get_uncertainty(
     model: keras.Model,
@@ -585,6 +607,7 @@ def get_uncertainty(
 
     return total_variance, aleatoric_variance
 
+# ---------------------------------------------------------------------
 
 def get_prediction_intervals(
     point_estimates: np.ndarray,
@@ -628,3 +651,5 @@ def get_prediction_intervals(
     upper_bound = point_estimates + z_score * std_dev
 
     return lower_bound, upper_bound
+
+# ---------------------------------------------------------------------
