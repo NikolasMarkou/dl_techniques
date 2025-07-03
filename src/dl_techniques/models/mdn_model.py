@@ -1,5 +1,5 @@
 """
-Mixture Density Network (MDN) Model Implementation for Keras.
+Mixture Density Network (MDN) Model.
 
 A Mixture Density Network is a neural network architecture that predicts probability
 distributions rather than single point estimates, making it particularly valuable for
