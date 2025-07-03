@@ -703,14 +703,13 @@ class MultiTaskMDNModel(keras.Model):
         sequence_shape, task_shape = input_shape
         self._build_input_shape = input_shape
 
-        window_size = sequence_shape[-2]
-        input_features = sequence_shape[-1]
+        _ = sequence_shape[-2]
+        _ = sequence_shape[-1]
 
         # Build task embedding
         self.task_embedding.build(task_shape)
 
         # Sequence processing layers (1D convolutions for feature extraction)
-        # TODO: VERY NAIVE
         self.sequence_layers = [
             keras.layers.Conv1D(64, 7, activation=None, padding='same', name='conv1d_1'),
             keras.layers.LayerNormalization(),
