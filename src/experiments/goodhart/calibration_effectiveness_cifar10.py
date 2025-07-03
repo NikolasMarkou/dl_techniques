@@ -812,7 +812,7 @@ def main() -> None:
 
     try:
         # Run the complete experiment
-        results = run_experiment(config)
+        _ = run_experiment(config)
         logger.info("✅ Experiment completed successfully!")
 
     except Exception as e:

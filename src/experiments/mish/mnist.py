@@ -183,12 +183,6 @@ choices affect optimization landscapes, including:
 - Gradient flow and vanishing/exploding gradient problems
 - Loss surface smoothness and convexity
 - Critical points and saddle point escape
-
-**Information Theory**: The experiment leverages information-theoretic metrics
-to understand how different activations affect information processing:
-- Mutual information between layers
-- Activation entropy and capacity
-- Information bottleneck principles
 """
 
 # ==============================================================================
@@ -196,30 +190,24 @@ to understand how different activations affect information processing:
 # ==============================================================================
 
 import gc
+import keras
+import numpy as np
 from pathlib import Path
-from functools import partial
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Callable
 
-
-
-import keras
-import numpy as np
-
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.activations.mish import mish
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.utils.datasets import load_and_preprocess_mnist
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
-from dl_techniques.layers.activations.mish import mish, saturated_mish, SaturatedMish
 
 from dl_techniques.utils.analyzer import (
     ModelAnalyzer,
     AnalysisConfig,
-    AnalysisResults,
     DataInput
 )
-
 
 # ==============================================================================
 # EXPERIMENT CONFIGURATION
@@ -252,7 +240,7 @@ class ExperimentConfig:
     use_residual: bool = True  # Enable residual connections
 
     # --- Training Parameters ---
-    epochs: int = 20  # Number of training epochs
+    epochs: int = 100  # Number of training epochs
     batch_size: int = 128  # Training batch size
     learning_rate: float = 0.001  # Adam optimizer learning rate
     early_stopping_patience: int = 10  # Patience for early stopping
@@ -720,30 +708,33 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
                 f"{cal_metrics['brier_score']:<15.4f} {cal_metrics['mean_entropy']:<12.4f}"
             )
 
-    # ===== WEIGHT STATISTICS SECTION =====
-    if model_analysis and model_analysis.weight_metrics:
-        logger.info("⚖️ WEIGHT STATISTICS SUMMARY:")
-        logger.info(f"{'Model':<20} {'Mean L2':<12} {'Max Weight':<12} {'Sparsity':<12}")
-        logger.info("-" * 60)
-
-        for model_name, weight_stats in model_analysis.weight_metrics.items():
-            mean_l2 = np.mean([layer['l2_norm'] for layer in weight_stats.values()])
-            max_weight = max([layer['max'] for layer in weight_stats.values()])
-            sparsity = np.mean([layer.get('sparsity', 0.0) for layer in weight_stats.values()])
-            logger.info(f"{model_name:<20} {mean_l2:<12.4f} {max_weight:<12.4f} {sparsity:<12.4f}")
-
     # ===== TRAINING METRICS SECTION =====
     if 'histories' in results and results['histories']:
-        logger.info("🏁 FINAL TRAINING METRICS (on Validation Set):")
-        logger.info(f"{'Model':<20} {'Val Accuracy':<15} {'Val Loss':<12} {'Epochs':<10}")
-        logger.info("-" * 60)
-
+        # Check if any model actually has training history data
+        has_training_data = False
         for model_name, history_dict in results['histories'].items():
-            if (history_dict.get('val_accuracy') and len(history_dict['val_accuracy']) > 0):
-                final_val_acc = history_dict['val_accuracy'][-1]
-                final_val_loss = history_dict['val_loss'][-1]
-                num_epochs = len(history_dict['val_accuracy'])
-                logger.info(f"{model_name:<20} {final_val_acc:<15.4f} {final_val_loss:<12.4f} {num_epochs:<10}")
+            if (history_dict.get('val_accuracy') and len(history_dict['val_accuracy']) > 0 and
+                history_dict.get('val_loss') and len(history_dict['val_loss']) > 0):
+                has_training_data = True
+                break
+
+        if has_training_data:
+            logger.info("🏁 FINAL TRAINING METRICS (on Validation Set):")
+            logger.info(f"{'Model':<20} {'Val Accuracy':<15} {'Val Loss':<12}")
+            logger.info("-" * 50)
+
+            for model_name, history_dict in results['histories'].items():
+                # Check if this specific model has actual training data
+                if (history_dict.get('val_accuracy') and len(history_dict['val_accuracy']) > 0 and
+                    history_dict.get('val_loss') and len(history_dict['val_loss']) > 0):
+                    final_val_acc = history_dict['val_accuracy'][-1]
+                    final_val_loss = history_dict['val_loss'][-1]
+                    logger.info(f"{model_name:<20} {final_val_acc:<15.4f} {final_val_loss:<12.4f}")
+                else:
+                    logger.info(f"{model_name:<20} {'Not trained':<15} {'Not trained':<12}")
+        else:
+            logger.info("🏁 TRAINING STATUS:")
+            logger.info("⚠️  Models were not trained (epochs=0) - no training metrics available")
 
     logger.info("=" * 80)
 
@@ -777,7 +768,7 @@ def main() -> None:
 
     try:
         # Run the complete experiment
-        results = run_experiment(config)
+        _ = run_experiment(config)
         logger.info("✅ Experiment completed successfully!")
 
     except Exception as e:
