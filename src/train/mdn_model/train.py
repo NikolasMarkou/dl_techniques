@@ -710,10 +710,17 @@ class MultiTaskMDNModel(keras.Model):
         self.task_embedding.build(task_shape)
 
         # Sequence processing layers (1D convolutions for feature extraction)
+        # TODO: VERY NAIVE
         self.sequence_layers = [
-            keras.layers.Conv1D(64, 3, activation='relu', padding='same', name='conv1d_1'),
-            keras.layers.Conv1D(128, 3, activation='relu', padding='same', name='conv1d_2'),
-            keras.layers.Conv1D(256, 3, activation='relu', padding='same', name='conv1d_3'),
+            keras.layers.Conv1D(64, 7, activation=None, padding='same', name='conv1d_1'),
+            keras.layers.LayerNormalization(),
+            keras.layers.Activation("gelu"),
+            keras.layers.Conv1D(128, 5, activation=None, padding='same', name='conv1d_2'),
+            keras.layers.LayerNormalization(),
+            keras.layers.Activation("gelu"),
+            keras.layers.Conv1D(256, 3, activation=None, padding='same', name='conv1d_3'),
+            keras.layers.LayerNormalization(),
+            keras.layers.Activation("gelu"),
         ]
 
         # Attention mechanism
