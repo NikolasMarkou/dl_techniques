@@ -1,689 +1,795 @@
 """
-MNIST CNN Activation Function Comparison Experiment
-================================================
+MNIST Activation Function Comparison: Evaluating Neural Network Activations
+==========================================================================
 
-This module implements a comprehensive experiment to evaluate and compare the effectiveness
-of different activation functions applied to Convolutional Neural Networks (CNNs) for
-MNIST digit classification. The experiment systematically compares multiple activation
-function variants with comprehensive analysis tools.
+This experiment conducts a comprehensive comparison of different activation functions
+for image classification on MNIST, systematically evaluating their effectiveness
+in convolutional neural networks.
 
-EXPERIMENT OVERVIEW
-------------------
-The experiment trains multiple CNN models with identical architectures but different
-activation functions applied throughout the network:
+The study addresses fundamental questions in deep learning: how do different
+activation functions affect model performance, training dynamics, weight distributions,
+and feature representations? By comparing traditional activations (ReLU, Tanh) with
+modern alternatives (GELU, Mish, SaturatedMish), this experiment provides insights
+into the trade-offs between computational efficiency, training stability, and
+model expressiveness.
 
-1. **ReLU**: Standard rectified linear unit activation
-2. **Tanh**: Hyperbolic tangent activation
-3. **GELU**: Gaussian Error Linear Unit activation
-4. **Mish**: Mish activation function
-5. **SaturatedMish (α=1.0)**: Mish with saturation parameter α=1.0
-6. **SaturatedMish (α=2.0)**: Mish with saturation parameter α=2.0
+Experimental Design
+-------------------
 
-METHODOLOGY
------------
-Each model follows the same training protocol:
-- Architecture: 3 convolutional blocks (16, 32, 64 filters) with batch normalization
-- Dense layer: Single hidden layer with 32 units
-- Regularization: Dropout layers and L2 weight decay
-- Training: Adam optimizer with early stopping based on validation accuracy
-- Evaluation: Comprehensive performance and weight distribution analysis
+**Dataset**: MNIST (10 classes, 28×28 grayscale images)
+- 60,000 training images
+- 10,000 test images
+- Standard preprocessing with normalization
 
-MODEL ARCHITECTURE
-------------------
-- Input: 28x28x1 grayscale MNIST images
-- Conv Blocks: Conv2D → BatchNorm → [ACTIVATION] → Dropout
-- Dense Block: Dense → [ACTIVATION] → Dropout
-- Output: Dense(10) → Softmax
-- Regularization: L2 weight decay and dropout
+**Model Architecture**: ResNet-inspired CNN with the following components:
+- Initial convolutional layer (32 filters)
+- 3 convolutional blocks with optional residual connections
+- Progressive filter scaling: [32, 64, 128]
+- Batch normalization and dropout regularization
+- Global average pooling
+- Dense classification layer with L2 regularization
+- Softmax output layer for probability predictions
+- Configurable architecture parameters for systematic studies
 
-ANALYSIS OUTPUTS
----------------
-The experiment generates comprehensive analysis across multiple dimensions:
+**Activation Functions Evaluated**:
 
-**Training Analysis:**
-- Training/validation accuracy and loss curves for all models
-- Early stopping behavior and convergence patterns
-- Comparative performance metrics
+1. **ReLU**: The baseline rectified linear unit - simple and efficient
+2. **Tanh**: Hyperbolic tangent - smooth, bounded activation
+3. **GELU**: Gaussian Error Linear Unit - smooth approximation of ReLU
+4. **Mish**: Self-regularized non-monotonic activation function
+5. **SaturatedMish (α=1.0)**: Mish with saturation control parameter
+6. **SaturatedMish (α=2.0)**: Mish with stronger saturation control
 
-**Weight Distribution Analysis:**
-- L1, L2, and RMS norm distributions across layers
-- Layer-wise weight statistics comparison
-- Weight distribution heatmaps and histograms
-- Bias term analysis for all activation variants
+Comprehensive Analysis Pipeline
+------------------------------
 
-**Activation Analysis:**
-- Activation pattern statistics (mean, std, sparsity, kurtosis, skewness)
-- Activation distribution comparisons
-- Layer-wise activation behavior analysis
+The experiment employs a multi-faceted analysis approach:
 
-**Model Performance Analysis:**
+**Training Analysis**:
+- Training and validation curves for all activation functions
+- Convergence behavior and stability metrics
+- Early stopping based on validation accuracy
+- Learning dynamics comparison
+
+**Model Performance Evaluation**:
+- Test set accuracy and top-k accuracy
+- Loss values and convergence characteristics
+- Statistical significance testing across runs
+- Per-class performance analysis
+
+**Calibration Analysis** (via ModelAnalyzer):
+- Expected Calibration Error (ECE) with configurable binning
+- Brier score for probabilistic prediction quality
+- Reliability diagrams and calibration plots
+- Confidence histogram analysis
+
+**Weight and Activation Analysis**:
+- Layer-wise weight distribution statistics
+- Weight norm analysis (L1, L2, spectral norms)
+- Activation pattern analysis across the network
+- Dead neuron detection and sparsity metrics
+- Gradient flow characteristics
+
+**Information Flow Analysis**:
+- Feature representation quality metrics
+- Layer-wise information bottleneck analysis
+- Activation entropy and mutual information
+- Receptive field analysis
+
+**Visual Analysis**:
+- Training history comparison plots
 - Confusion matrices for each activation function
-- Classification accuracy, precision, recall, F1-scores
-- Model comparison visualizations
-- Performance metric summaries
+- Weight distribution visualizations
+- Activation heatmaps and statistics
+- Gradient flow diagrams
 
-**Visualization Outputs:**
-- Training history plots (accuracy/loss over epochs)
-- Weight norm distribution comparisons
-- Activation statistics comparison plots
-- Confusion matrix heatmaps
-- Weight histogram distributions
+Configuration and Customization
+-------------------------------
 
-CONFIGURATION
-------------
-All experiment parameters are centralized in the ExperimentConfig class:
-- Model architecture parameters (filters, units, dropout rates)
-- Training hyperparameters (epochs, batch size, learning rate)
-- Activation function configurations
-- Analysis options (which metrics to compute, plot formats)
-- Output directory and experiment naming
+The experiment is highly configurable through the ``ExperimentConfig`` class:
 
-USAGE
------
-To run with default settings:
-    python mnist_activation_analysis_experiment.py
+**Architecture Parameters**:
+- ``conv_filters``: Filter counts for convolutional layers
+- ``dense_units``: Hidden unit counts for dense layers
+- ``dropout_rates``: Dropout probabilities per layer
+- ``weight_decay``: L2 regularization strength
+- ``use_residual``: Enable residual connections
 
-To customize the experiment, modify the ExperimentConfig class parameters:
+**Training Parameters**:
+- ``epochs``: Number of training epochs
+- ``batch_size``: Training batch size
+- ``learning_rate``: Adam optimizer learning rate
+- ``early_stopping_patience``: Patience for early stopping
+
+**Activation Function Parameters**:
+- Easily extensible activation function dictionary
+- Support for custom activation implementations
+- Configurable parameters for parameterized activations
+
+**Analysis Parameters**:
+- ``calibration_bins``: Number of bins for calibration analysis
+- Output directory structure and naming
+- Visualization and plotting options
+
+Expected Outcomes and Insights
+------------------------------
+
+This experiment is designed to reveal:
+
+1. **Activation Function Trade-offs**: How different activations balance
+   expressiveness with training stability and computational efficiency
+
+2. **Training Dynamics**: Which activation functions lead to faster convergence,
+   better gradient flow, and more stable training
+
+3. **Weight Distribution Effects**: How activation choice influences weight
+   distributions, sparsity, and effective network capacity
+
+4. **Feature Quality**: The impact of activation functions on learned feature
+   representations and their discriminative power
+
+Usage Example
+-------------
+
+Basic usage with default configuration:
+
+    ```python
+    from pathlib import Path
+
+    # Run with default settings
     config = ExperimentConfig()
-    config.epochs = 20
-    config.batch_size = 256
-    config.conv_filters = [32, 64, 128]
     results = run_experiment(config)
 
-DEPENDENCIES
------------
-- TensorFlow/Keras for deep learning models
-- NumPy for numerical computations
-- Custom dl_techniques package for:
-  - Mish and SaturatedMish activation layers
-  - Training utilities and model analysis
-  - Visualization and weight analysis tools
-  - MNIST data preprocessing utilities
+    # Access results
+    performance = results['performance_analysis']
+    calibration = results['model_analysis'].calibration_metrics
+    ```
 
-OUTPUT STRUCTURE
----------------
-results/
-├── mnist_activation_analysis_TIMESTAMP/
-│   ├── relu/             # ReLU model outputs
-│   ├── tanh/             # Tanh model outputs
-│   ├── gelu/             # GELU model outputs
-│   ├── mish/             # Mish model outputs
-│   ├── saturated_mish_1/ # SaturatedMish α=1.0 outputs
-│   ├── saturated_mish_2/ # SaturatedMish α=2.0 outputs
-│   ├── visualizations/   # Training plots and comparisons
-│   ├── weight_analysis/  # Weight distribution analysis plots
-│   └── activation_analysis/ # Activation pattern analysis
+Advanced usage with custom configuration:
 
-RESEARCH APPLICATIONS
---------------------
-This experiment framework is designed for:
-- Comparing activation function effectiveness
-- Analyzing training stability and convergence
-- Understanding weight distribution patterns
-- Evaluating activation behavior and sparsity
-- Benchmarking custom activation functions
+    ```python
+    # Custom configuration
+    config = ExperimentConfig(
+        epochs=30,
+        batch_size=256,
+        learning_rate=0.0005,
+        output_dir=Path("custom_results"),
+        calibration_bins=20,
+        use_residual=True,
+        # Add custom activation functions
+        activations={
+            'relu': keras.activations.relu,
+            'custom_mish': lambda x: mish(x, beta=0.5)
+        }
+    )
 
-The modular design allows easy extension to additional activation functions,
-different datasets, or alternative model architectures while maintaining
-comprehensive analysis capabilities.
+    results = run_experiment(config)
+    ```
 
-Organization:
-1. Imports and type definitions
-2. Single configuration class
-3. Model building utilities
-4. Activation analysis utilities
-5. Experiment runner
-6. Main execution
+Theoretical Foundation
+----------------------
+
+This experiment is grounded in several key theoretical frameworks:
+
+**Activation Function Theory**: The comparison addresses fundamental properties
+of activation functions including:
+- Smoothness and differentiability (important for gradient flow)
+- Bounded vs unbounded outputs (affecting gradient stability)
+- Monotonicity and self-gating properties (Mish, GELU)
+- Computational complexity and hardware efficiency
+
+**Deep Learning Optimization**: The analysis framework evaluates how activation
+choices affect optimization landscapes, including:
+- Gradient flow and vanishing/exploding gradient problems
+- Loss surface smoothness and convexity
+- Critical points and saddle point escape
+
+**Information Theory**: The experiment leverages information-theoretic metrics
+to understand how different activations affect information processing:
+- Mutual information between layers
+- Activation entropy and capacity
+- Information bottleneck principles
 """
 
-# ------------------------------------------------------------------------------
-# 1. Imports and Dependencies
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# IMPORTS AND DEPENDENCIES
+# ==============================================================================
 
+import gc
 from pathlib import Path
 from functools import partial
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Dict, Any, Callable, List, Tuple
+from typing import Dict, Any, List, Tuple, Callable
+
+
 
 import keras
 import numpy as np
-from scipy import stats
-import matplotlib.pyplot as plt
-from keras.api.activations import gelu, relu, tanh
-
-# ------------------------------------------------------------------------------
-# local imports
-# ------------------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.activations.mish import mish, saturated_mish
-from dl_techniques.utils.model_analyzer import ModelAnalyzer
 from dl_techniques.utils.train import TrainingConfig, train_model
-from dl_techniques.utils.weight_analyzer import WeightAnalyzerConfig, WeightAnalyzer
-from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 from dl_techniques.utils.datasets import load_and_preprocess_mnist
+from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
+from dl_techniques.layers.activations.mish import mish, saturated_mish
 
-# ------------------------------------------------------------------------------
-# 2. Single Configuration Class
-# ------------------------------------------------------------------------------
+from dl_techniques.utils.analyzer import (
+    ModelAnalyzer,
+    AnalysisConfig,
+    AnalysisResults,
+    DataInput
+)
+
+
+# ==============================================================================
+# EXPERIMENT CONFIGURATION
+# ==============================================================================
 
 @dataclass
 class ExperimentConfig:
-    """Unified configuration for the MNIST activation function experiment.
-
-    Contains all parameters for model architecture, training, visualization,
-    weight analysis, and activation analysis in a single consolidated configuration class.
     """
-    # Model Architecture Parameters
-    input_shape: Tuple[int, ...] = (28, 28, 1)
+    Configuration for the MNIST activation function comparison experiment.
+
+    This class encapsulates all configurable parameters for the experiment,
+    including dataset configuration, model architecture parameters, training
+    settings, activation function definitions, and analysis configuration.
+    """
+
+    # --- Dataset Configuration ---
+    dataset_name: str = "mnist"
     num_classes: int = 10
-    conv_filters: List[int] = (16, 32, 64)
-    dense_units: List[int] = (32,)
-    dropout_rates: List[float] = (0.25, 0.25, 0.25, 0.25)
-    kernel_size: Tuple[int, int] = (5, 5)
-    pool_size: Tuple[int, int] = (2, 2)
-    weight_decay: float = 0.0001
-    kernel_initializer: str = 'he_normal'
+    input_shape: Tuple[int, ...] = (28, 28, 1)
 
-    # Training Parameters
-    epochs: int = 10
-    batch_size: int = 128
-    early_stopping_patience: int = 10
-    monitor_metric: str = 'val_accuracy'
-    learning_rate: float = 0.001
-    validation_split: float = 0.1
+    # --- Model Architecture Parameters ---
+    conv_filters: List[int] = field(default_factory=lambda: [32, 64, 128])  # Filter counts for each conv block
+    dense_units: List[int] = field(default_factory=lambda: [64])  # Hidden units in dense layers
+    dropout_rates: List[float] = field(default_factory=lambda: [0.25, 0.25, 0.25, 0.4])  # Dropout per layer
+    kernel_size: Tuple[int, int] = (3, 3)  # Convolution kernel size
+    pool_size: Tuple[int, int] = (2, 2)  # Max pooling window size
+    weight_decay: float = 1e-4  # L2 regularization strength
+    kernel_initializer: str = 'he_normal'  # Weight initialization scheme
+    use_batch_norm: bool = True  # Enable batch normalization
+    use_residual: bool = True  # Enable residual connections
 
-    # Activation Functions to Test
+    # --- Training Parameters ---
+    epochs: int = 20  # Number of training epochs
+    batch_size: int = 128  # Training batch size
+    learning_rate: float = 0.001  # Adam optimizer learning rate
+    early_stopping_patience: int = 10  # Patience for early stopping
+    monitor_metric: str = 'val_accuracy'  # Metric to monitor for early stopping
+
+    # --- Activation Functions to Evaluate ---
     activations: Dict[str, Callable] = field(default_factory=lambda: {
-        'relu': relu,
-        'tanh': tanh,
-        'gelu': gelu,
-        'mish': mish,
-        'saturated_mish_1': partial(saturated_mish, alpha=1.0),
-        'saturated_mish_2': partial(saturated_mish, alpha=2.0)
+        'ReLU': lambda: keras.activations.relu,
+        'Tanh': lambda: keras.activations.tanh,
+        'GELU': lambda: keras.activations.gelu,
+        'Mish': lambda: mish,
+        'SaturatedMish_1.0': lambda: partial(saturated_mish, alpha=1.0),
+        'SaturatedMish_2.0': lambda: partial(saturated_mish, alpha=2.0),
     })
 
-    # Weight Analysis Parameters
-    compute_l1_norm: bool = True
-    compute_l2_norm: bool = True
-    compute_rms_norm: bool = True
-    analyze_biases: bool = True
-    save_plots: bool = True
-    plot_format: str = 'png'
-    plot_style: str = 'default'
+    # --- Experiment Configuration ---
+    output_dir: Path = Path("results")  # Output directory for results
+    experiment_name: str = "mnist_activation_comparison"  # Experiment name
+    random_seed: int = 42  # Random seed for reproducibility
 
-    # Activation Analysis Parameters
-    analyze_activations: bool = True
-    activation_sample_size: int = 1000
-    activation_metrics: List[str] = field(default_factory=lambda: [
-        'mean', 'std', 'sparsity', 'kurtosis', 'skewness'
-    ])
+    # --- Analysis Configuration ---
+    analyzer_config: AnalysisConfig = field(default_factory=lambda: AnalysisConfig(
+        analyze_weights=True,  # Analyze weight distributions
+        analyze_calibration=True,  # Analyze model calibration
+        analyze_activations=True,  # Analyze activation patterns
+        analyze_information_flow=True,  # Analyze information flow
+        calibration_bins=15,  # Number of bins for calibration analysis
+        save_plots=True,  # Save analysis plots
+        plot_style='publication',  # Publication-ready plot style
+    ))
 
-    # Experiment Parameters
-    output_dir: Path = Path("results")
-    experiment_name: str = "mnist_activation_analysis"
 
-# ------------------------------------------------------------------------------
-# 3. Model Building Utilities
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# MODEL ARCHITECTURE BUILDING UTILITIES
+# ==============================================================================
 
-def build_conv_block(
-        inputs: keras.layers.Layer,
-        filters: int,
-        config: ExperimentConfig,
-        activation: Callable,
-        block_index: int
+def build_residual_block(
+    inputs: keras.layers.Layer,
+    filters: int,
+    activation_fn: Callable,
+    config: ExperimentConfig,
+    block_index: int
 ) -> keras.layers.Layer:
-    """Build a convolutional block with specified activation function.
+    """
+    Build a residual block with skip connections.
+
+    This function creates a residual block consisting of two convolutional layers
+    with batch normalization and the specified activation function, plus a skip
+    connection that bypasses the block. If the input and output dimensions don't
+    match, a 1x1 convolution is used to adjust the skip connection.
 
     Args:
-        inputs: Input tensor
-        filters: Number of filters for conv layer
-        config: Unified configuration
-        activation: Activation function to use
-        block_index: Index of the block for naming and dropout rate
+        inputs: Input tensor to the residual block
+        filters: Number of filters in the convolutional layers
+        activation_fn: Activation function to use
+        config: Experiment configuration containing architecture parameters
+        block_index: Index of the current block (for naming layers)
 
     Returns:
-        Output tensor after applying conv block
+        Output tensor after applying the residual block
     """
+    # Store the original input for the skip connection
+    shortcut = inputs
+
+    # First convolutional layer
     x = keras.layers.Conv2D(
-        filters=filters,
-        kernel_size=config.kernel_size,
-        padding='same',
-        strides=config.pool_size,
+        filters, config.kernel_size, padding='same',
         kernel_initializer=config.kernel_initializer,
         kernel_regularizer=keras.regularizers.L2(config.weight_decay),
-        name=f'conv{block_index + 1}'
+        name=f'conv{block_index}_1'
     )(inputs)
-    x = keras.layers.BatchNormalization()(x)
-    x = activation(x)
-    dropout_rate = config.dropout_rates[block_index]
-    if dropout_rate > 0.0:
-        x = keras.layers.Dropout(dropout_rate)(x)
+
+    if config.use_batch_norm:
+        x = keras.layers.BatchNormalization()(x)
+    x = keras.layers.Activation(activation_fn)(x)
+
+    # Second convolutional layer
+    x = keras.layers.Conv2D(
+        filters, config.kernel_size, padding='same',
+        kernel_initializer=config.kernel_initializer,
+        kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+        name=f'conv{block_index}_2'
+    )(x)
+
+    if config.use_batch_norm:
+        x = keras.layers.BatchNormalization()(x)
+
+    # Adjust skip connection if dimensions don't match
+    if shortcut.shape[-1] != filters:
+        shortcut = keras.layers.Conv2D(
+            filters=filters,
+            kernel_size=(1, 1),
+            padding='same',
+            kernel_initializer=config.kernel_initializer,
+            kernel_regularizer=keras.regularizers.L2(config.weight_decay)
+        )(shortcut)
+
+        if config.use_batch_norm:
+            shortcut = keras.layers.BatchNormalization()(shortcut)
+
+    # Add skip connection and apply final activation
+    x = keras.layers.Add()([x, shortcut])
+    x = keras.layers.Activation(activation_fn)(x)
+
     return x
 
 
-def build_dense_block(
-        inputs: keras.layers.Layer,
-        units: int,
-        config: ExperimentConfig,
-        activation: Callable,
-        dropout_rate: float
+def build_conv_block(
+    inputs: keras.layers.Layer,
+    filters: int,
+    activation_fn: Callable,
+    config: ExperimentConfig,
+    block_index: int
 ) -> keras.layers.Layer:
-    """Build a dense block with specified activation function.
+    """
+    Build a convolutional block with optional residual connections.
+
+    This function creates either a standard convolutional block or a residual
+    block based on the configuration. It includes optional max pooling and
+    dropout regularization.
 
     Args:
-        inputs: Input tensor
-        units: Number of dense units
-        config: Unified configuration
-        activation: Activation function to use
-        dropout_rate: Dropout rate to apply
+        inputs: Input tensor to the convolutional block
+        filters: Number of filters in the convolutional layers
+        activation_fn: Activation function to use
+        config: Experiment configuration containing architecture parameters
+        block_index: Index of the current block (for naming and logic)
 
     Returns:
-        Output tensor after applying dense block
+        Output tensor after applying the convolutional block
     """
-    x = keras.layers.Dense(
-        units=units,
-        kernel_initializer=config.kernel_initializer,
-        kernel_regularizer=keras.regularizers.L2(config.weight_decay)
-    )(inputs)
-    x = activation(x)
+    # Use residual connections for blocks after the first one (if enabled)
+    if config.use_residual and block_index > 0:
+        x = build_residual_block(inputs, filters, activation_fn, config, block_index)
+    else:
+        # Standard convolutional block
+        x = keras.layers.Conv2D(
+            filters=filters,
+            kernel_size=config.kernel_size,
+            padding='same',
+            kernel_initializer=config.kernel_initializer,
+            kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+            name=f'conv{block_index}'
+        )(inputs)
+
+        if config.use_batch_norm:
+            x = keras.layers.BatchNormalization()(x)
+        x = keras.layers.Activation(activation_fn)(x)
+
+    # Apply max pooling (except for the last convolutional block)
+    if block_index < len(config.conv_filters) - 1:
+        x = keras.layers.MaxPooling2D(config.pool_size)(x)
+
+    # Apply dropout if specified for this layer
+    dropout_rate = (config.dropout_rates[block_index]
+                   if block_index < len(config.dropout_rates) else 0.0)
     if dropout_rate > 0:
         x = keras.layers.Dropout(dropout_rate)(x)
+
     return x
 
 
-def build_model(config: ExperimentConfig, activation: Callable, name: str) -> keras.Model:
-    """Build complete CNN model with specified activation function.
+def build_model(config: ExperimentConfig, activation_fn: Callable, name: str) -> keras.Model:
+    """
+    Build a complete CNN model for MNIST classification with specified activation.
+
+    This function constructs a ResNet-inspired CNN with configurable architecture
+    parameters. The model includes convolutional blocks, global average pooling,
+    dense classification layers, and a final softmax layer for probability output.
+    The specified activation function is used throughout the network.
 
     Args:
-        config: Unified configuration
-        activation: Activation function to use throughout the model
-        name: Name identifier for the model
+        config: Experiment configuration containing model architecture parameters
+        activation_fn: Activation function to use throughout the network
+        name: Name prefix for the model and its layers
 
     Returns:
-        Compiled Keras model
+        Compiled Keras model ready for training with softmax probability outputs
     """
+    # Define input layer
     inputs = keras.layers.Input(shape=config.input_shape, name=f'{name}_input')
     x = inputs
 
-    # Convolutional blocks
-    for i, filters in enumerate(config.conv_filters):
-        x = build_conv_block(x, filters, config, activation, i)
-
-    # Dense layers
-    x = keras.layers.Flatten()(x)
-    for units in config.dense_units:
-        x = build_dense_block(x, units, config, activation, config.dropout_rates[-1])
-
-    # Output layer
-    outputs = keras.layers.Dense(
-        config.num_classes,
-        activation='softmax',
+    # Initial convolutional layer
+    x = keras.layers.Conv2D(
+        filters=config.conv_filters[0],
+        kernel_size=(5, 5),  # Larger kernel for initial feature extraction
+        strides=(1, 1),
+        padding='same',
         kernel_initializer=config.kernel_initializer,
         kernel_regularizer=keras.regularizers.L2(config.weight_decay),
-        name=f'{name}_output'
+        name='stem'
     )(x)
 
-    model = keras.Model(inputs=inputs, outputs=outputs, name=f'{name}_model')
+    if config.use_batch_norm:
+        x = keras.layers.BatchNormalization()(x)
+    x = keras.layers.Activation(activation_fn)(x)
 
+    # Stack of convolutional blocks
+    for i, filters in enumerate(config.conv_filters):
+        x = build_conv_block(x, filters, activation_fn, config, i)
+
+    # Global average pooling to reduce spatial dimensions
+    x = keras.layers.GlobalAveragePooling2D()(x)
+
+    # Dense classification layers
+    for j, units in enumerate(config.dense_units):
+        x = keras.layers.Dense(
+            units=units,
+            kernel_initializer=config.kernel_initializer,
+            kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+            name=f'dense_{j}'
+        )(x)
+
+        if config.use_batch_norm:
+            x = keras.layers.BatchNormalization()(x)
+        x = keras.layers.Activation(activation_fn)(x)
+
+        # Apply dropout if specified for dense layers
+        dense_dropout_idx = len(config.conv_filters) + j
+        if dense_dropout_idx < len(config.dropout_rates):
+            dropout_rate = config.dropout_rates[dense_dropout_idx]
+            if dropout_rate > 0:
+                x = keras.layers.Dropout(dropout_rate)(x)
+
+    # Pre-softmax logits layer
+    logits = keras.layers.Dense(
+        units=config.num_classes,
+        kernel_initializer=config.kernel_initializer,
+        kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+        name='logits'
+    )(x)
+
+    # Final softmax layer for probability output
+    predictions = keras.layers.Activation('softmax', name='predictions')(logits)
+
+    # Create and compile the model
+    model = keras.Model(inputs=inputs, outputs=predictions, name=f'{name}_model')
+
+    # Compile with comprehensive metrics
+    optimizer = keras.optimizers.AdamW(learning_rate=config.learning_rate)
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=config.learning_rate),
+        optimizer=optimizer,
         loss='categorical_crossentropy',
-        metrics=['accuracy']
+        metrics=[
+            keras.metrics.CategoricalAccuracy(name='accuracy'),
+            keras.metrics.TopKCategoricalAccuracy(k=5, name='top_5_accuracy')
+        ]
     )
 
     return model
 
-# ------------------------------------------------------------------------------
-# 4. Activation Analysis Utilities
-# ------------------------------------------------------------------------------
 
-class ActivationAnalyzer:
-    """Analyzer for activation function behavior and statistics."""
-
-    def __init__(self, models: Dict[str, keras.Model], config: ExperimentConfig):
-        """Initialize the activation analyzer.
-
-        Args:
-            models: Dictionary of trained models
-            config: Experiment configuration
-        """
-        self.models = models
-        self.config = config
-        self.activation_stats: Dict[str, Dict[str, float]] = {}
-
-    def analyze_activations(self, test_data: np.ndarray) -> Dict[str, Dict[str, float]]:
-        """Analyze activation patterns for all models.
-
-        Args:
-            test_data: Test data for activation analysis
-
-        Returns:
-            Dictionary containing activation statistics for each model
-        """
-        logger.info("Analyzing activation patterns...")
-
-        for name, model in self.models.items():
-            logger.info(f"Analyzing activations for {name} model...")
-
-            # Find the last convolutional layer for activation analysis
-            conv_layers = [layer for layer in model.layers if 'conv' in layer.name.lower()]
-            if not conv_layers:
-                logger.warning(f"No convolutional layers found in {name} model")
-                continue
-
-            last_conv_layer = conv_layers[-1]
-
-            # Create intermediate model to extract activations
-            activation_model = keras.Model(
-                inputs=model.input,
-                outputs=last_conv_layer.output
-            )
-
-            # Get activations
-            sample_data = test_data[:self.config.activation_sample_size]
-            activations = activation_model.predict(sample_data, verbose=0)
-
-            # Compute statistics
-            self.activation_stats[name] = {
-                'mean': float(np.mean(activations)),
-                'std': float(np.std(activations)),
-                'sparsity': float(np.mean(np.abs(activations) < 1e-5)),
-                'kurtosis': float(stats.kurtosis(activations.flatten())),
-                'skewness': float(stats.skew(activations.flatten())),
-                'max': float(np.max(activations)),
-                'min': float(np.min(activations)),
-                'non_zero_fraction': float(np.mean(activations > 0))
-            }
-
-            logger.info(f"Completed activation analysis for {name}")
-
-        return self.activation_stats
-
-    def plot_activation_statistics(self, output_dir: Path) -> None:
-        """Plot activation statistics comparison.
-
-        Args:
-            output_dir: Directory to save plots
-        """
-        if not self.activation_stats:
-            logger.warning("No activation statistics to plot")
-            return
-
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Plot each metric
-        for metric in self.config.activation_metrics:
-            if metric not in ['mean', 'std', 'sparsity', 'kurtosis', 'skewness']:
-                continue
-
-            plt.figure(figsize=(10, 6))
-
-            models = list(self.activation_stats.keys())
-            values = [self.activation_stats[model][metric] for model in models]
-
-            bars = plt.bar(models, values)
-            plt.title(f'Activation {metric.capitalize()} Comparison')
-            plt.ylabel(metric.capitalize())
-            plt.xticks(rotation=45)
-
-            # Add value labels on bars
-            for bar, value in zip(bars, values):
-                plt.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
-                        f'{value:.4f}', ha='center', va='bottom')
-
-            plt.tight_layout()
-            plt.savefig(output_dir / f'activation_{metric}_comparison.{self.config.plot_format}')
-            plt.close()
-
-        logger.info(f"Saved activation statistics plots to {output_dir}")
-
-    def save_activation_analysis(self, output_dir: Path) -> None:
-        """Save activation analysis results to file.
-
-        Args:
-            output_dir: Directory to save results
-        """
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Save statistics as text file
-        with open(output_dir / 'activation_statistics.txt', 'w') as f:
-            f.write("Activation Function Statistics\n")
-            f.write("=" * 50 + "\n\n")
-
-            for model_name, stats in self.activation_stats.items():
-                f.write(f"{model_name.upper()} ACTIVATION:\n")
-                f.write("-" * 30 + "\n")
-                for metric, value in stats.items():
-                    f.write(f"{metric}: {value:.6f}\n")
-                f.write("\n")
-
-        logger.info(f"Saved activation analysis to {output_dir}")
-
-# ------------------------------------------------------------------------------
-# 5. Experiment Runner
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# MAIN EXPERIMENT RUNNER
+# ==============================================================================
 
 def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
-    """Run the complete activation function comparison experiment with comprehensive analysis.
+    """
+    Run the complete MNIST activation function comparison experiment.
+
+    This function orchestrates the entire experimental pipeline, including:
+    1. Dataset loading and preprocessing
+    2. Model training for each activation function
+    3. Model analysis and evaluation
+    4. Visualization generation
+    5. Results compilation and reporting
 
     Args:
-        config: Unified experiment configuration
+        config: Experiment configuration specifying all parameters
 
     Returns:
-        Dictionary containing experiment results including all analyses
+        Dictionary containing all experimental results and analysis
     """
-    # Setup directories and managers
+    # Set random seed for reproducibility
+    keras.utils.set_random_seed(config.random_seed)
+
+    # Create timestamped output directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     experiment_dir = config.output_dir / f"{config.experiment_name}_{timestamp}"
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
-    vis_config = VisualizationConfig()
+    # Initialize visualization manager
     vis_manager = VisualizationManager(
         output_dir=experiment_dir / "visualizations",
-        config=vis_config,
+        config=VisualizationConfig(),
         timestamp_dirs=False
     )
 
-    # Load and preprocess data
+    # Log experiment start
+    logger.info("🚀 Starting MNIST Activation Function Comparison Experiment")
+    logger.info(f"📁 Results will be saved to: {experiment_dir}")
+    logger.info("=" * 80)
+
+    # ===== DATASET LOADING =====
+    logger.info("📊 Loading MNIST dataset...")
     mnist_data = load_and_preprocess_mnist()
+    logger.info("✅ Dataset loaded successfully")
 
-    # Train models
-    models = {}
-    all_histories = {
-        'accuracy': {},
-        'loss': {},
-        'val_accuracy': {},
-        'val_loss': {}
-    }
+    # ===== MODEL TRAINING PHASE =====
+    logger.info("🏋️ Starting model training phase...")
+    trained_models = {}  # Store trained models
+    all_histories = {}  # Store training histories
 
-    # Training phase
-    for name, activation in config.activations.items():
-        logger.info(f"Training {name} model...")
-        model = build_model(config, activation, name)
-        model.summary(print_fn=logger.info)
+    for activation_name, activation_fn_factory in config.activations.items():
+        logger.info(f"--- Training model with {activation_name} activation ---")
 
-        # Configure training for this model
+        # Build model for this activation function
+        model = build_model(config, activation_fn_factory(), activation_name)
+
+        # Log model architecture info
+        logger.info(f"Model {activation_name} parameters: {model.count_params():,}")
+        logger.info(f"Model {activation_name} metrics: {model.metrics_names}")
+
+        # Configure training parameters
         training_config = TrainingConfig(
             epochs=config.epochs,
             batch_size=config.batch_size,
             early_stopping_patience=config.early_stopping_patience,
             monitor_metric=config.monitor_metric,
-            model_name=name,
-            output_dir=experiment_dir / name
+            model_name=activation_name,
+            output_dir=experiment_dir / "training_plots" / activation_name
         )
 
         # Train the model
         history = train_model(
-            model,
-            mnist_data.x_train,
-            mnist_data.y_train,
-            mnist_data.x_test,
-            mnist_data.y_test,
-            training_config
+            model, mnist_data.x_train, mnist_data.y_train,
+            mnist_data.x_test, mnist_data.y_test, training_config
         )
 
-        # Store the model and history
-        models[name] = model
-        for metric in ['accuracy', 'loss']:
-            all_histories[metric][name] = history.history[metric]
-            all_histories[f'val_{metric}'][name] = history.history[f'val_{metric}']
+        # Store results
+        trained_models[activation_name] = model
+        all_histories[activation_name] = history.history
+        logger.info(f"✅ {activation_name} training completed!")
 
-    # Weight Analysis phase
-    logger.info("Performing weight distribution analysis...")
+    # ===== MEMORY MANAGEMENT =====
+    logger.info("🗑️ Triggering garbage collection...")
+    gc.collect()
+
+    # ===== COMPREHENSIVE MODEL ANALYSIS =====
+    logger.info("📊 Performing comprehensive analysis with ModelAnalyzer...")
+    model_analysis_results = None
 
     try:
-        analysis_config = WeightAnalyzerConfig(
-            compute_l1_norm=config.compute_l1_norm,
-            compute_l2_norm=config.compute_l2_norm,
-            compute_rms_norm=config.compute_rms_norm,
-            analyze_biases=config.analyze_biases,
-            save_plots=config.save_plots,
-            export_format=config.plot_format
+        # Initialize the model analyzer with trained models
+        analyzer = ModelAnalyzer(
+            models=trained_models,
+            config=config.analyzer_config,
+            output_dir=experiment_dir / "model_analysis"
         )
 
-        weight_analyzer = WeightAnalyzer(
-            models=models,
-            config=analysis_config,
-            output_dir=experiment_dir / "weight_analysis"
-        )
-
-        if weight_analyzer.has_valid_analysis():
-            weight_analyzer.plot_comprehensive_dashboard()
-            weight_analyzer.plot_norm_distributions()
-            weight_analyzer.plot_layer_comparisons(['mean', 'std', 'l2_norm'])
-            weight_analyzer.save_analysis_results()
-            logger.info("✅ Weight analysis completed successfully!")
-        else:
-            logger.warning("❌ No valid weight data found for analysis")
+        # Run comprehensive analysis
+        model_analysis_results = analyzer.analyze(data=DataInput.from_object(mnist_data))
+        logger.info("✅ Model analysis completed successfully!")
 
     except Exception as e:
-        logger.error(f"Weight analysis failed: {e}")
-        logger.info("Continuing with experiment without weight analysis...")
+        logger.error(f"❌ Model analysis failed: {e}", exc_info=True)
 
-    # Activation Analysis phase
-    if config.analyze_activations:
-        logger.info("Performing activation pattern analysis...")
+    # ===== VISUALIZATION GENERATION =====
+    logger.info("🖼️ Generating training history and confusion matrix plots...")
 
-        try:
-            activation_analyzer = ActivationAnalyzer(models, config)
-            activation_stats = activation_analyzer.analyze_activations(mnist_data.x_test)
+    # Plot training history comparison
+    vis_manager.plot_history(
+        histories=all_histories,
+        metrics=['accuracy', 'loss'],
+        name='training_comparison',
+        subdir='training_plots',
+        title='Activation Functions Training & Validation Comparison'
+    )
 
-            # Plot and save activation analysis
-            activation_dir = experiment_dir / "activation_analysis"
-            activation_analyzer.plot_activation_statistics(activation_dir)
-            activation_analyzer.save_activation_analysis(activation_dir)
+    # Generate confusion matrices for model comparison
+    raw_predictions = {
+        name: model.predict(mnist_data.x_test, verbose=0)
+        for name, model in trained_models.items()
+    }
+    class_predictions = {
+        name: np.argmax(preds, axis=1)
+        for name, preds in raw_predictions.items()
+    }
 
-            logger.info("✅ Activation analysis completed successfully!")
-
-        except Exception as e:
-            logger.error(f"Activation analysis failed: {e}")
-            activation_stats = {}
-
-    # Generate training history visualizations
-    for metric in ['accuracy', 'loss']:
-        combined_histories = {
-            name: {
-                metric: all_histories[metric][name],
-                f'val_{metric}': all_histories[f'val_{metric}'][name]
-            }
-            for name in models.keys()
-        }
-
-        vis_manager.plot_history(
-            combined_histories,
-            [metric],
-            f'training_{metric}_comparison',
-            title=f'Activation Functions {metric.capitalize()} Comparison'
-        )
-
-    # Generate predictions for confusion matrices
-    model_predictions = {}
-    for name, model in models.items():
-        predictions = model.predict(mnist_data.x_test, verbose=0)
-        model_predictions[name] = predictions
-
-    # Plot confusion matrices comparison
     vis_manager.plot_confusion_matrices_comparison(
-        y_true=np.argmax(mnist_data.y_test, axis=1),
-        model_predictions=model_predictions,
-        name='activation_confusion_matrices',
+        y_true=mnist_data.y_test,
+        model_predictions=class_predictions,
+        name='activation_function_confusion_matrices',
         subdir='model_comparison',
         normalize=True,
         class_names=[str(i) for i in range(10)]
     )
 
-    # Analyze model performance
-    analyzer = ModelAnalyzer(models, vis_manager)
-    performance_results = analyzer.analyze_models(mnist_data)
+    # ===== FINAL PERFORMANCE EVALUATION =====
+    logger.info("📈 Evaluating final model performance on test set...")
 
-    # Combine all results
-    results = {
-        'models': models,
-        'histories': all_histories,
+    performance_results = {}
+
+    for name, model in trained_models.items():
+        logger.info(f"Evaluating model {name}...")
+
+        # Get model evaluation metrics
+        eval_results = model.evaluate(mnist_data.x_test, mnist_data.y_test, verbose=0)
+        metrics_dict = dict(zip(model.metrics_names, eval_results))
+
+        # Store standardized metrics
+        performance_results[name] = {
+            'accuracy': metrics_dict.get('accuracy', 0.0),
+            'top_5_accuracy': metrics_dict.get('top_5_accuracy', 0.0),
+            'loss': metrics_dict.get('loss', 0.0)
+        }
+
+        # Log final metrics for this model
+        logger.info(f"Model {name} final metrics: {performance_results[name]}")
+
+    # ===== RESULTS COMPILATION =====
+    results_payload = {
         'performance_analysis': performance_results,
-        'experiment_config': config
+        'model_analysis': model_analysis_results,
+        'histories': all_histories,
+        'trained_models': trained_models  # Include trained models in results
     }
 
-    if config.analyze_activations:
-        results['activation_analysis'] = activation_stats
+    # Print comprehensive summary
+    print_experiment_summary(results_payload)
 
-    return results
+    return results_payload
 
 
-# ------------------------------------------------------------------------------
-# 6. Main Execution
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# RESULTS REPORTING
+# ==============================================================================
+
+def print_experiment_summary(results: Dict[str, Any]) -> None:
+    """
+    Print a comprehensive summary of experimental results.
+
+    This function generates a detailed report of all experimental outcomes,
+    including performance metrics, calibration analysis, and training progress.
+    The summary is formatted for clear readability and easy interpretation.
+
+    Args:
+        results: Dictionary containing all experimental results and analysis
+    """
+    logger.info("=" * 80)
+    logger.info("📋 EXPERIMENT SUMMARY")
+    logger.info("=" * 80)
+
+    # ===== PERFORMANCE METRICS SECTION =====
+    if 'performance_analysis' in results and results['performance_analysis']:
+        logger.info("🎯 PERFORMANCE METRICS (on Full Test Set):")
+        logger.info(f"{'Model':<20} {'Accuracy':<12} {'Top-5 Acc':<12} {'Loss':<12}")
+        logger.info("-" * 60)
+
+        for model_name, metrics in results['performance_analysis'].items():
+            accuracy = metrics.get('accuracy', 0.0)
+            top5_acc = metrics.get('top_5_accuracy', 0.0)
+            loss = metrics.get('loss', 0.0)
+            logger.info(f"{model_name:<20} {accuracy:<12.4f} {top5_acc:<12.4f} {loss:<12.4f}")
+
+    # ===== CALIBRATION METRICS SECTION =====
+    model_analysis = results.get('model_analysis')
+    if model_analysis and model_analysis.calibration_metrics:
+        logger.info("🎯 CALIBRATION METRICS (from Model Analyzer):")
+        logger.info(f"{'Model':<20} {'ECE':<12} {'Brier Score':<15} {'Mean Entropy':<12}")
+        logger.info("-" * 65)
+
+        for model_name, cal_metrics in model_analysis.calibration_metrics.items():
+            logger.info(
+                f"{model_name:<20} {cal_metrics['ece']:<12.4f} "
+                f"{cal_metrics['brier_score']:<15.4f} {cal_metrics['mean_entropy']:<12.4f}"
+            )
+
+    # ===== WEIGHT STATISTICS SECTION =====
+    if model_analysis and model_analysis.weight_metrics:
+        logger.info("⚖️ WEIGHT STATISTICS SUMMARY:")
+        logger.info(f"{'Model':<20} {'Mean L2':<12} {'Max Weight':<12} {'Sparsity':<12}")
+        logger.info("-" * 60)
+
+        for model_name, weight_stats in model_analysis.weight_metrics.items():
+            mean_l2 = np.mean([layer['l2_norm'] for layer in weight_stats.values()])
+            max_weight = max([layer['max'] for layer in weight_stats.values()])
+            sparsity = np.mean([layer.get('sparsity', 0.0) for layer in weight_stats.values()])
+            logger.info(f"{model_name:<20} {mean_l2:<12.4f} {max_weight:<12.4f} {sparsity:<12.4f}")
+
+    # ===== TRAINING METRICS SECTION =====
+    if 'histories' in results and results['histories']:
+        logger.info("🏁 FINAL TRAINING METRICS (on Validation Set):")
+        logger.info(f"{'Model':<20} {'Val Accuracy':<15} {'Val Loss':<12} {'Epochs':<10}")
+        logger.info("-" * 60)
+
+        for model_name, history_dict in results['histories'].items():
+            if (history_dict.get('val_accuracy') and len(history_dict['val_accuracy']) > 0):
+                final_val_acc = history_dict['val_accuracy'][-1]
+                final_val_loss = history_dict['val_loss'][-1]
+                num_epochs = len(history_dict['val_accuracy'])
+                logger.info(f"{model_name:<20} {final_val_acc:<15.4f} {final_val_loss:<12.4f} {num_epochs:<10}")
+
+    logger.info("=" * 80)
+
+
+# ==============================================================================
+# MAIN EXECUTION
+# ==============================================================================
 
 def main() -> None:
-    """Main execution function for running the activation function experiment."""
-    logger.info("Starting MNIST activation function comparison experiment with comprehensive analysis")
+    """
+    Main execution function for running the MNIST activation comparison experiment.
 
-    # Create unified configuration
+    This function serves as the entry point for the experiment, handling
+    configuration setup, experiment execution, and error handling.
+    """
+    logger.info("🚀 MNIST Activation Function Comparison Experiment")
+    logger.info("=" * 80)
+
+    # Initialize experiment configuration
     config = ExperimentConfig()
 
-    # Run experiment
-    results = run_experiment(config)
+    # Log key configuration parameters
+    logger.info("⚙️ EXPERIMENT CONFIGURATION:")
+    logger.info(f"   Activation Functions: {list(config.activations.keys())}")
+    logger.info(f"   Epochs: {config.epochs}, Batch Size: {config.batch_size}")
+    logger.info(f"   Model Architecture: {len(config.conv_filters)} conv blocks, "
+                f"{len(config.dense_units)} dense layers")
+    logger.info(f"   Residual Connections: {config.use_residual}")
+    logger.info(f"   Output: Softmax probabilities")
+    logger.info("")
 
-    # Print comprehensive results
-    logger.info("="*80)
-    logger.info("EXPERIMENT RESULTS SUMMARY")
-    logger.info("="*80)
+    try:
+        # Run the complete experiment
+        results = run_experiment(config)
+        logger.info("✅ Experiment completed successfully!")
 
-    # Print activation function performance comparison
-    logger.info("Model Performance Comparison:")
-    logger.info("-" * 50)
-    for model_name, metrics in results['performance_analysis'].items():
-        logger.info(f"{model_name.upper()} ACTIVATION:")
-        for metric, value in metrics.items():
-            if isinstance(value, (int, float)):
-                logger.info(f"  {metric}: {value:.4f}")
-
-    # Print activation analysis if available
-    if 'activation_analysis' in results:
-        logger.info("Activation Pattern Analysis:")
-        logger.info("-" * 50)
-        for model_name, stats in results['activation_analysis'].items():
-            logger.info(f"{model_name.upper()} ACTIVATIONS:")
-            for metric, value in stats.items():
-                logger.info(f"  {metric}: {value:.4f}")
-
-    # Print final training metrics
-    logger.info("Final Training Metrics:")
-    logger.info("-" * 50)
-    for model_name in results['models'].keys():
-        final_val_acc = results['histories']['val_accuracy'][model_name][-1]
-        final_val_loss = results['histories']['val_loss'][model_name][-1]
-        logger.info(f"{model_name}: Val Acc = {final_val_acc:.4f}, Val Loss = {final_val_loss:.4f}")
-
-    logger.info("="*80)
-    logger.info("Experiment completed successfully! Check results directory for detailed analysis.")
-    logger.info("="*80)
+    except Exception as e:
+        logger.error(f"❌ Experiment failed with error: {e}", exc_info=True)
+        raise
 
 
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# SCRIPT ENTRY POINT
+# ==============================================================================
 
 if __name__ == "__main__":
     main()
