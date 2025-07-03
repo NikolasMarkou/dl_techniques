@@ -42,7 +42,7 @@ to provide interpretable uncertainty bounds.
 - **Noisy data**: When you need to model and account for heteroscedastic noise
 - **Risk assessment**: When prediction confidence is as important as the prediction itself
 - **Active learning**: To identify regions where the model is most uncertain
-- **Robust decision making**: When downstream decisions need uncertainty estimates
+- **Robust decision-making**: When downstream decisions need uncertainty estimates
 
 ## Architecture
 
