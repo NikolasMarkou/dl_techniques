@@ -260,12 +260,10 @@ class ExperimentConfig:
 
     # --- Activation Functions to Evaluate ---
     activations: Dict[str, Callable] = field(default_factory=lambda: {
-        'SaturatedMish_1.0': SaturatedMish(alpha=1.0),
-        'SaturatedMish_2.0': SaturatedMish(alpha=2.0),
+        'Mish': lambda: mish,
         'ReLU': lambda: keras.activations.relu,
         'Tanh': lambda: keras.activations.tanh,
         'GELU': lambda: keras.activations.gelu,
-        'Mish': lambda: mish,
     })
 
     # --- Experiment Configuration ---
