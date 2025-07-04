@@ -246,8 +246,7 @@ class ExperimentConfig:
     analyzer_config: AnalysisConfig = field(default_factory=lambda: AnalysisConfig(
         analyze_weights=True,  # Analyze weight distributions
         analyze_calibration=True,  # Analyze model calibration
-        analyze_activations=True,  # Analyze activation patterns
-        analyze_information_flow=True,  # Analyze information flow
+        analyze_information_flow=True,  # Analyze information flow / activation patterns
         calibration_bins=15,  # Number of bins for calibration analysis
         save_plots=True,  # Save analysis plots
         plot_style='publication',  # Publication-ready plot style
