@@ -23,8 +23,8 @@ Key Findings and Architectural Details:
 """
 
 import keras
-from keras import regularizers, layers, ops
-from typing import List, Tuple, Optional, Any
+from keras import regularizers, layers
+from typing import List, Tuple, Optional
 
 # ---------------------------------------------------------------------
 # local imports
