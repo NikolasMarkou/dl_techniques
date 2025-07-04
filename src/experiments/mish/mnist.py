@@ -37,8 +37,6 @@ Experimental Design
 2. **Tanh**: Hyperbolic tangent - smooth, bounded activation
 3. **GELU**: Gaussian Error Linear Unit - smooth approximation of ReLU
 4. **Mish**: Self-regularized non-monotonic activation function
-5. **SaturatedMish (α=1.0)**: Mish with saturation control parameter
-6. **SaturatedMish (α=2.0)**: Mish with stronger saturation control
 
 Comprehensive Analysis Pipeline
 ------------------------------
@@ -180,9 +178,9 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Callable
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.activations.mish import mish
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.utils.datasets import load_and_preprocess_mnist
+from dl_techniques.layers.activations.mish import mish, saturated_mish
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 
 
@@ -191,6 +189,15 @@ from dl_techniques.utils.analyzer import (
     AnalysisConfig,
     DataInput
 )
+# ==============================================================================
+# SETUP SATURATED MISH
+# ==============================================================================
+
+def saturated_mish_1(x):
+    return saturated_mish(x, alpha=1.0)
+
+def saturated_mish_2(x):
+    return saturated_mish(x, alpha=2.0)
 
 # ==============================================================================
 # EXPERIMENT CONFIGURATION
@@ -223,18 +230,20 @@ class ExperimentConfig:
     use_residual: bool = True  # Enable residual connections
 
     # --- Training Parameters ---
-    epochs: int = 50  # Number of training epochs
+    epochs: int = 100  # Number of training epochs
     batch_size: int = 128  # Training batch size
     learning_rate: float = 0.001  # Adam optimizer learning rate
-    early_stopping_patience: int = 10  # Patience for early stopping
+    early_stopping_patience: int = 50  # Patience for early stopping
     monitor_metric: str = 'val_accuracy'  # Metric to monitor for early stopping
 
     # --- Activation Functions to Evaluate ---
     activations: Dict[str, Callable] = field(default_factory=lambda: {
+        'Mish': lambda: mish,
+        'Sat_Mish_1': lambda: saturated_mish_1,
+        'Sat_Mish_2': lambda: saturated_mish_2,
         'ReLU': lambda: keras.activations.relu,
         'Tanh': lambda: keras.activations.tanh,
         'GELU': lambda: keras.activations.gelu,
-        'Mish': lambda: mish
     })
 
     # --- Experiment Configuration ---
@@ -383,7 +392,10 @@ def build_conv_block(
     return x
 
 
-def build_model(config: ExperimentConfig, activation_fn: Callable, name: str) -> keras.Model:
+def build_model(
+        config: ExperimentConfig,
+        activation_fn: Callable,
+        name: str) -> keras.Model:
     """
     Build a complete CNN model for MNIST classification with specified activation.
 
@@ -540,7 +552,8 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         # Build model for this activation function
         model = build_model(config, activation_fn_factory(), activation_name)
 
-        # Log model architecture info
+        # Log model architecture
+        model.summary(print_fn=logger.info)
         logger.info(f"Model {activation_name} parameters: {model.count_params():,}")
         logger.info(f"Model {activation_name} metrics: {model.metrics_names}")
 
