@@ -175,23 +175,22 @@ import gc
 import keras
 import numpy as np
 from pathlib import Path
-from functools import partial
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Callable
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.activations.mish import mish
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.utils.datasets import load_and_preprocess_mnist
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
-from dl_techniques.layers.activations.mish import mish, saturated_mish
+
 
 from dl_techniques.utils.analyzer import (
     ModelAnalyzer,
     AnalysisConfig,
     DataInput
 )
-
 
 # ==============================================================================
 # EXPERIMENT CONFIGURATION
@@ -235,9 +234,7 @@ class ExperimentConfig:
         'ReLU': lambda: keras.activations.relu,
         'Tanh': lambda: keras.activations.tanh,
         'GELU': lambda: keras.activations.gelu,
-        'Mish': lambda: mish,
-        'SaturatedMish_1.0': lambda: partial(saturated_mish, alpha=1.0),
-        'SaturatedMish_2.0': lambda: partial(saturated_mish, alpha=2.0),
+        'Mish': lambda: mish
     })
 
     # --- Experiment Configuration ---
