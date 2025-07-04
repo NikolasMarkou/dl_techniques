@@ -178,7 +178,7 @@ from pathlib import Path
 from functools import partial
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Tuple, Callable,
+from typing import Dict, Any, List, Tuple, Callable
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
@@ -189,7 +189,6 @@ from dl_techniques.layers.activations.mish import mish, saturated_mish
 from dl_techniques.utils.analyzer import (
     ModelAnalyzer,
     AnalysisConfig,
-    AnalysisResults,
     DataInput
 )
 
