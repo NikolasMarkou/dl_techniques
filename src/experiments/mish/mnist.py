@@ -165,45 +165,20 @@ Advanced usage with custom configuration:
 
     results = run_experiment(config)
     ```
-
-Theoretical Foundation
-----------------------
-
-This experiment is grounded in several key theoretical frameworks:
-
-**Activation Function Theory**: The comparison addresses fundamental properties
-of activation functions including:
-- Smoothness and differentiability (important for gradient flow)
-- Bounded vs unbounded outputs (affecting gradient stability)
-- Monotonicity and self-gating properties (Mish, GELU)
-- Computational complexity and hardware efficiency
-
-**Deep Learning Optimization**: The analysis framework evaluates how activation
-choices affect optimization landscapes, including:
-- Gradient flow and vanishing/exploding gradient problems
-- Loss surface smoothness and convexity
-- Critical points and saddle point escape
-
-**Information Theory**: The experiment leverages information-theoretic metrics
-to understand how different activations affect information processing:
-- Mutual information between layers
-- Activation entropy and capacity
-- Information bottleneck principles
 """
 
 # ==============================================================================
 # IMPORTS AND DEPENDENCIES
 # ==============================================================================
 
-from pathlib import Path
-from datetime import datetime
-from dataclasses import dataclass, field
-from typing import Dict, Any, List, Tuple, Callable, Optional
-from functools import partial
 import gc
-
 import keras
 import numpy as np
+from pathlib import Path
+from functools import partial
+from datetime import datetime
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Tuple, Callable,
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
@@ -250,7 +225,7 @@ class ExperimentConfig:
     use_residual: bool = True  # Enable residual connections
 
     # --- Training Parameters ---
-    epochs: int = 20  # Number of training epochs
+    epochs: int = 1  # Number of training epochs
     batch_size: int = 128  # Training batch size
     learning_rate: float = 0.001  # Adam optimizer learning rate
     early_stopping_patience: int = 10  # Patience for early stopping
