@@ -1,16 +1,16 @@
 """
-Enhanced Model Analyzer for Neural Networks
+Model Analyzer for Neural Networks
 ============================================================================
 
 A comprehensive, modular analyzer with training dynamics and refined visualizations
 
-Key Enhancements:
-- Added comprehensive training dynamics analysis
-- Removed configuration redundancy
-- Improved weight correlation methodology
-- Added quantitative training metrics
-- Enhanced summary dashboard with training insights
-- Refined code organization and documentation
+Key Features:
+- Comprehensive training dynamics analysis
+- Weight distribution and health analysis
+- Confidence and calibration metrics
+- Information flow through network layers
+- Quantitative training metrics
+- Summary dashboard with training insights
 
 Example Usage:
     ```python
@@ -40,7 +40,6 @@ Example Usage:
 import json
 import keras
 import scipy
-import scipy.stats
 import warnings
 import numpy as np
 import pandas as pd
@@ -48,15 +47,9 @@ import seaborn as sns
 from tqdm import tqdm
 from pathlib import Path
 from datetime import datetime
-import matplotlib
-# Set backend before importing pyplot
-try:
-    matplotlib.use('Agg')  # Use non-interactive backend
-except Exception:
-    pass  # If backend already set, continue
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
-from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
+from matplotlib.gridspec import GridSpecFromSubplotSpec
 from sklearn.decomposition import PCA
 from dataclasses import dataclass, field
 from sklearn.preprocessing import StandardScaler
@@ -171,6 +164,9 @@ class AnalysisConfig:
 
     def setup_plotting_style(self) -> None:
         """Set up matplotlib style based on configuration."""
+        # Save current rcParams to restore later if needed
+        self._original_rcParams = plt.rcParams.copy()
+
         plt.style.use('default')
 
         # Apply style presets
@@ -355,12 +351,12 @@ def find_metric_in_history(history: Dict[str, List[float]], patterns: List[str])
     return None
 
 # ------------------------------------------------------------------------------
-# Enhanced Model Analyzer
+# Model Analyzer
 # ------------------------------------------------------------------------------
 
 class ModelAnalyzer:
     """
-    Enhanced model analyzer with training dynamics and improved visualizations.
+    Model analyzer with training dynamics and improved visualizations.
     """
 
     def __init__(
@@ -423,14 +419,35 @@ class ModelAnalyzer:
 
         for model_name, model in self.models.items():
             try:
+                # Check if model has accessible input
+                if not hasattr(model, 'input') or model.input is None:
+                    logger.warning(f"Model {model_name} has no accessible input attribute")
+                    self.layer_extraction_models[model_name] = None
+                    continue
+
                 # Set up multi-layer extraction for information flow
                 extraction_layers = self._get_extraction_layers(model)
                 if extraction_layers:
                     try:
-                        self.layer_extraction_models[model_name] = {
-                            'model': keras.Model(inputs=model.input, outputs=[l['output'] for l in extraction_layers]),
-                            'layer_info': extraction_layers
-                        }
+                        # Validate outputs
+                        valid_outputs = []
+                        valid_layer_info = []
+                        for layer_info in extraction_layers:
+                            if layer_info['output'] is not None:
+                                valid_outputs.append(layer_info['output'])
+                                valid_layer_info.append(layer_info)
+                            else:
+                                logger.warning(f"Layer {layer_info['name']} has None output")
+
+                        if valid_outputs:
+                            self.layer_extraction_models[model_name] = {
+                                'model': keras.Model(inputs=model.input, outputs=valid_outputs),
+                                'layer_info': valid_layer_info
+                            }
+                        else:
+                            logger.warning(f"No valid layer outputs found for {model_name}")
+                            self.layer_extraction_models[model_name] = None
+
                     except Exception as e:
                         logger.warning(f"Could not create layer extraction model for {model_name}: {e}")
                         self.layer_extraction_models[model_name] = None
@@ -450,28 +467,6 @@ class ModelAnalyzer:
             if not hasattr(model, 'layers'):
                 logger.warning(f"Model does not have 'layers' attribute")
                 return extraction_layers
-
-    def cleanup_cache(self) -> None:
-        """Clean up cached predictions to free memory."""
-        self._prediction_cache.clear()
-
-    def __enter__(self):
-        """Context manager entry."""
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit with cleanup."""
-        self.cleanup_cache()
-        plt.close('all')  # Close all matplotlib figures
-        return False  # Don't suppress exceptions
-
-    def __del__(self):
-        """Cleanup when analyzer is destroyed."""
-        try:
-            self.cleanup_cache()
-            plt.close('all')  # Close all matplotlib figures
-        except Exception:
-            pass  # Ignore errors during cleanup
 
             for layer in model.layers:
                 try:
@@ -560,7 +555,7 @@ class ModelAnalyzer:
         return self.results
 
     def _cache_predictions(self, data: DataInput) -> None:
-        """Cache model predictions with robust error handling."""
+        """Cache model predictions to avoid redundant computation."""
         x_data, y_data = data.x_data, data.y_data
 
         # Sample if needed
@@ -571,68 +566,37 @@ class ModelAnalyzer:
 
         logger.info("Caching model predictions...")
         for model_name, model in tqdm(self.models.items(), desc="Computing predictions"):
-            try:
-                predictions = model.predict(x_data, verbose=0)
-                self._prediction_cache[model_name] = {
-                    'predictions': predictions,
-                    'x_data': x_data,
-                    'y_data': y_data
-                }
-            except Exception as e:
-                logger.error(f"Failed to compute predictions for {model_name}: {e}")
-                continue
+            predictions = model.predict(x_data, verbose=0)
+            self._prediction_cache[model_name] = {
+                'predictions': predictions,
+                'x_data': x_data,
+                'y_data': y_data
+            }
 
-        # Evaluate models with robust error handling
+        # Also evaluate models with better metric handling
         for model_name, model in self.models.items():
             try:
-                # Try to evaluate
-                result = model.evaluate(x_data, y_data, verbose=0)
+                metrics = model.evaluate(x_data, y_data, verbose=0)
+                metric_names = getattr(model, 'metrics_names', ['loss'])
 
-                # Handle different return types
-                if isinstance(result, (list, tuple)):
-                    metrics = result
-                else:
-                    metrics = [result]
-
-                # Get metric names safely
-                metric_names = []
-                if hasattr(model, 'metrics_names'):
-                    metric_names = model.metrics_names
-                elif hasattr(model, 'compiled_metrics'):
-                    metric_names = [m.name for m in model.compiled_metrics.metrics]
-                else:
-                    metric_names = ['loss'] + [f'metric_{i}' for i in range(len(metrics)-1)]
-
-                # Ensure we have names for all metrics
-                while len(metric_names) < len(metrics):
-                    metric_names.append(f'metric_{len(metric_names)}')
-
-                # Build metric dictionary safely
+                # Handle different metric name patterns
                 metric_dict = {}
                 for i, name in enumerate(metric_names):
                     if i < len(metrics):
-                        value = metrics[i]
-                        if np.isfinite(value):  # Check for NaN/Inf
-                            metric_dict[name] = float(value)
-                        else:
-                            metric_dict[name] = 0.0
+                        value = metrics[i] if isinstance(metrics, (list, tuple)) else metrics
+                        metric_dict[name] = value
 
-                        # Add common aliases
+                        # Add common aliases for accuracy
                         if name in ['compile_metrics', 'categorical_accuracy', 'sparse_categorical_accuracy']:
-                            metric_dict['accuracy'] = metric_dict[name]
+                            metric_dict['accuracy'] = value
 
                 self.results.model_metrics[model_name] = metric_dict
-
             except Exception as e:
                 logger.warning(f"Could not evaluate model {model_name}: {e}")
-                # Provide fallback metrics
-                self.results.model_metrics[model_name] = {
-                    'loss': float('inf'),
-                    'accuracy': 0.0
-                }
+                self.results.model_metrics[model_name] = {'loss': 0.0, 'accuracy': 0.0}
 
     # ------------------------------------------------------------------------------
-    # Enhanced Weight Analysis
+    # Weight Analysis
     # ------------------------------------------------------------------------------
 
     def analyze_weights(self) -> None:
@@ -664,7 +628,7 @@ class ModelAnalyzer:
             self._compute_weight_pca()
 
         # Create visualizations
-        self._plot_enhanced_weight_analysis()
+        self._plot_weight_analysis()
 
     def _compute_weight_statistics(self, weights: np.ndarray) -> Dict[str, Any]:
         """Compute comprehensive statistics for a weight tensor."""
@@ -703,85 +667,62 @@ class ModelAnalyzer:
         return stats
 
     def _compute_weight_pca(self) -> None:
-        """Perform PCA analysis with robust error handling."""
-        try:
-            final_layer_features = []
-            labels = []
+        """Perform PCA analysis specifically on final layer weights."""
+        final_layer_features = []
+        labels = []
 
-            for model_name, model in self.models.items():
-                # Find the final dense layer
-                final_dense = None
-                for layer in reversed(model.layers):
-                    if isinstance(layer, keras.layers.Dense):
-                        final_dense = layer
-                        break
+        for model_name, model in self.models.items():
+            # Find the final dense layer
+            final_dense = None
+            for layer in reversed(model.layers):
+                if isinstance(layer, keras.layers.Dense):
+                    final_dense = layer
+                    break
 
-                if final_dense:
-                    weights = final_dense.get_weights()
-                    if weights and len(weights) > 0:
-                        kernel_weights = weights[0]  # Get kernel weights
+            if final_dense:
+                weights_list = final_dense.get_weights()
+                if weights_list and len(weights_list) > 0:
+                    weights = weights_list[0]  # Get kernel weights
 
-                        # Validate weight shape
-                        if len(kernel_weights.shape) >= 2:
-                            # Flatten and subsample if needed
-                            flat_weights = kernel_weights.flatten()
-                            if len(flat_weights) > 1000:
-                                flat_weights = flat_weights[::len(flat_weights)//1000]
+                    # Validate weight shape
+                    if len(weights.shape) >= 2:
+                        # Flatten and take a subset if too large
+                        flat_weights = weights.flatten()
+                        if len(flat_weights) > 1000:
+                            flat_weights = flat_weights[::len(flat_weights)//1000]
 
-                            # Check for finite values
-                            if np.all(np.isfinite(flat_weights)) and len(flat_weights) > 0:
-                                final_layer_features.append(flat_weights)
-                                labels.append(model_name)
-                            else:
-                                logger.warning(f"Skipping {model_name} in PCA: non-finite or empty weights")
+                        # Check for finite values
+                        if np.all(np.isfinite(flat_weights)):
+                            final_layer_features.append(flat_weights)
+                            labels.append(model_name)
+                        else:
+                            logger.warning(f"Skipping {model_name} in PCA due to non-finite weights")
+                    else:
+                        logger.warning(f"Skipping {model_name} in PCA due to invalid weight shape")
 
-            # Need at least 2 models for meaningful PCA
-            if len(final_layer_features) < 2:
-                logger.warning("Need at least 2 models with valid weights for PCA")
-                return
-
+        if len(final_layer_features) >= 2:
             # Ensure all features have same length
             min_len = min(len(f) for f in final_layer_features)
-            if min_len == 0:
-                logger.warning("All feature vectors are empty")
-                return
-
             aligned_features = [f[:min_len] for f in final_layer_features]
-            feature_matrix = np.array(aligned_features)
 
-            # Check for zero variance features
-            if np.any(np.var(feature_matrix, axis=0) == 0):
-                logger.warning("Some features have zero variance")
+            try:
+                # Standardize features
+                scaler = StandardScaler()
+                features_scaled = scaler.fit_transform(aligned_features)
 
-            # Standardize features
-            scaler = StandardScaler()
-            features_scaled = scaler.fit_transform(feature_matrix)
+                # Perform PCA
+                pca = PCA(n_components=min(3, len(features_scaled)))
+                pca_result = pca.fit_transform(features_scaled)
 
-            # Check for NaN after scaling
-            if np.any(np.isnan(features_scaled)):
-                logger.warning("NaN values after scaling")
-                return
+                self.results.weight_pca = {
+                    'components': pca_result,
+                    'explained_variance': pca.explained_variance_ratio_,
+                    'labels': labels
+                }
+            except Exception as e:
+                logger.warning(f"Could not perform PCA on final layer weights: {e}")
 
-            # Perform PCA
-            n_components = min(3, len(features_scaled), features_scaled.shape[1])
-            if n_components < 2:
-                logger.warning("Insufficient components for PCA")
-                return
-
-            pca = PCA(n_components=n_components)
-            pca_result = pca.fit_transform(features_scaled)
-
-            self.results.weight_pca = {
-                'components': pca_result,
-                'explained_variance': pca.explained_variance_ratio_,
-                'labels': labels
-            }
-
-        except Exception as e:
-            logger.error(f"PCA computation failed: {e}")
-            self.results.weight_pca = None
-
-    def _plot_enhanced_weight_analysis(self) -> None:
+    def _plot_weight_analysis(self) -> None:
         """Create unified Weight Learning Journey visualization."""
         fig = plt.figure(figsize=(14, 10))
         gs = plt.GridSpec(2, 1, figure=fig, hspace=0.4, height_ratios=[1, 1])
@@ -950,10 +891,14 @@ class ModelAnalyzer:
 
             # Convert to class indices if needed - handle different data types
             y_true = np.asarray(y_true)  # Ensure numpy array
-            if len(y_true.shape) > 1 and y_true.shape[1] > 1:
-                y_true_idx = np.argmax(y_true, axis=1)
-            else:
-                y_true_idx = y_true.flatten().astype(int)
+            try:
+                if len(y_true.shape) > 1 and y_true.shape[1] > 1:
+                    y_true_idx = np.argmax(y_true, axis=1)
+                else:
+                    y_true_idx = y_true.flatten().astype(int)
+            except (ValueError, TypeError) as e:
+                logger.error(f"Cannot convert y_true to integer indices for {model_name}: {e}")
+                continue
 
             # Compute calibration metrics
             ece = compute_ece(y_true_idx, y_pred_proba, self.config.calibration_bins)
@@ -1013,7 +958,7 @@ class ModelAnalyzer:
 
         # 1. Reliability Diagram
         ax1 = fig.add_subplot(gs[0, 0])
-        self._plot_enhanced_reliability_diagram(ax1)
+        self._plot_reliability_diagram(ax1)
 
         # 2. Confidence Distributions (Raincloud)
         ax2 = fig.add_subplot(gs[0, 1])
@@ -1034,8 +979,8 @@ class ModelAnalyzer:
             self._save_figure(fig, 'confidence_calibration_analysis')
         plt.close(fig)
 
-    def _plot_enhanced_reliability_diagram(self, ax) -> None:
-        """Plot enhanced reliability diagram with confidence intervals."""
+    def _plot_reliability_diagram(self, ax) -> None:
+        """Plot reliability diagram with confidence intervals."""
         ax.plot([0, 1], [0, 1], 'k--', alpha=0.6, label='Perfect Calibration')
 
         for model_name, rel_data in self.results.reliability_data.items():
@@ -1065,7 +1010,7 @@ class ModelAnalyzer:
         ax.set_ylim([0, 1])
 
     def _plot_confidence_raincloud(self, ax) -> None:
-        """Plot confidence distributions with validation."""
+        """Plot confidence distributions as raincloud plot."""
         confidence_data = []
 
         for model_name, metrics in self.results.confidence_metrics.items():
@@ -1080,61 +1025,46 @@ class ModelAnalyzer:
                     'Confidence': conf
                 })
 
-        # Validate before creating DataFrame
-        if not confidence_data:
-            ax.text(0.5, 0.5, 'No confidence data available',
-                   ha='center', va='center', transform=ax.transAxes)
+        if confidence_data:
+            df = pd.DataFrame(confidence_data)
+
+            # Sort models to match color order
+            model_order = sorted(df['Model'].unique())
+
+            # Create violin plot with quartiles using matplotlib
+            parts = ax.violinplot([df[df['Model'] == m]['Confidence'].values
+                                  for m in model_order],
+                                 positions=range(len(model_order)),
+                                 vert=False, showmeans=False, showmedians=True,
+                                 showextrema=True)
+
+            # Color the violin plots
+            for i, model in enumerate(model_order):
+                color = self.model_colors.get(model, '#333333')
+                parts['bodies'][i].set_facecolor(color)
+                parts['bodies'][i].set_alpha(0.7)
+
+            # Color other violin parts
+            for partname in ['cmeans', 'cmaxes', 'cmins', 'cbars', 'cmedians', 'cquantiles']:
+                if partname in parts:
+                    parts[partname].set_color('black')
+                    parts[partname].set_alpha(0.8)
+
+            # Add model labels
+            ax.set_yticks(range(len(model_order)))
+            ax.set_yticklabels(model_order)
+
+            # Add summary statistics as text
+            for i, model in enumerate(model_order):
+                model_data = df[df['Model'] == model]['Confidence']
+                mean_conf = model_data.mean()
+                ax.text(mean_conf, i, f'{mean_conf:.3f}',
+                       ha='center', va='bottom', fontsize=9)
+
+            ax.set_xlabel('Confidence (Max Probability)')
+            ax.set_ylabel('')  # Remove the y-axis label
             ax.set_title('Confidence Score Distributions')
-            ax.axis('off')
-            return
-
-        df = pd.DataFrame(confidence_data)
-
-        # Validate DataFrame has required columns
-        if 'Model' not in df.columns or 'Confidence' not in df.columns:
-            ax.text(0.5, 0.5, 'Invalid confidence data format',
-                   ha='center', va='center', transform=ax.transAxes)
-            ax.set_title('Confidence Score Distributions')
-            ax.axis('off')
-            return
-
-        # Sort models to match color order
-        model_order = sorted(df['Model'].unique())
-
-        # Create violin plot with quartiles using matplotlib
-        parts = ax.violinplot([df[df['Model'] == m]['Confidence'].values
-                              for m in model_order],
-                             positions=range(len(model_order)),
-                             vert=False, showmeans=False, showmedians=True,
-                             showextrema=True)
-
-        # Color the violin plots
-        for i, model in enumerate(model_order):
-            color = self.model_colors.get(model, '#333333')
-            parts['bodies'][i].set_facecolor(color)
-            parts['bodies'][i].set_alpha(0.7)
-
-        # Color other violin parts
-        for partname in ['cmeans', 'cmaxes', 'cmins', 'cbars', 'cmedians', 'cquantiles']:
-            if partname in parts:
-                parts[partname].set_color('black')
-                parts[partname].set_alpha(0.8)
-
-        # Add model labels
-        ax.set_yticks(range(len(model_order)))
-        ax.set_yticklabels(model_order)
-
-        # Add summary statistics as text
-        for i, model in enumerate(model_order):
-            model_data = df[df['Model'] == model]['Confidence']
-            mean_conf = model_data.mean()
-            ax.text(mean_conf, i, f'{mean_conf:.3f}',
-                   ha='center', va='bottom', fontsize=9)
-
-        ax.set_xlabel('Confidence (Max Probability)')
-        ax.set_ylabel('')  # Remove the y-axis label
-        ax.set_title('Confidence Score Distributions')
-        ax.grid(True, alpha=0.3, axis='x')
+            ax.grid(True, alpha=0.3, axis='x')
 
     def _plot_per_class_ece(self, ax) -> None:
         """Plot per-class Expected Calibration Error."""
@@ -1149,36 +1079,30 @@ class ModelAnalyzer:
                         'ECE': ece
                     })
 
-        if not ece_data:
-            ax.text(0.5, 0.5, 'No per-class ECE data available',
-                   ha='center', va='center', transform=ax.transAxes)
+        if ece_data:
+            df = pd.DataFrame(ece_data)
+
+            # Sort models to match color order
+            model_order = sorted(df['Model'].unique())
+            n_models = len(model_order)
+            n_classes = len(df['Class'].unique())
+
+            x = np.arange(n_classes)
+            width = 0.8 / n_models
+
+            for i, model in enumerate(model_order):
+                model_data = df[df['Model'] == model]
+                color = self.model_colors.get(model, '#333333')
+                ax.bar(x + i * width, model_data['ECE'], width,
+                       label=model, alpha=0.8, color=color)
+
+            ax.set_xlabel('Class')
+            ax.set_ylabel('Expected Calibration Error')
             ax.set_title('Per-Class Calibration Error')
-            ax.axis('off')
-            return
-
-        df = pd.DataFrame(ece_data)
-
-        # Sort models to match color order
-        model_order = sorted(df['Model'].unique())
-        n_models = len(model_order)
-        n_classes = len(df['Class'].unique())
-
-        x = np.arange(n_classes)
-        width = 0.8 / n_models
-
-        for i, model in enumerate(model_order):
-            model_data = df[df['Model'] == model]
-            color = self.model_colors.get(model, '#333333')
-            ax.bar(x + i * width, model_data['ECE'], width,
-                   label=model, alpha=0.8, color=color)
-
-        ax.set_xlabel('Class')
-        ax.set_ylabel('Expected Calibration Error')
-        ax.set_title('Per-Class Calibration Error')
-        ax.set_xticks(x + width * (n_models - 1) / 2)
-        ax.set_xticklabels([str(i) for i in range(n_classes)])
-        ax.legend()
-        ax.grid(True, alpha=0.3, axis='y')
+            ax.set_xticks(x + width * (n_models - 1) / 2)
+            ax.set_xticklabels([str(i) for i in range(n_classes)])
+            ax.legend()
+            ax.grid(True, alpha=0.3, axis='y')
 
     def _plot_uncertainty_landscape(self, ax) -> None:
         """Plot uncertainty landscape with density contours for each model."""
@@ -1255,7 +1179,7 @@ class ModelAnalyzer:
         ax.set_ylim(0, None)
 
     # ------------------------------------------------------------------------------
-    # Enhanced Information Flow Analysis
+    # Information Flow Analysis
     # ------------------------------------------------------------------------------
 
     def analyze_information_flow(self, data: DataInput) -> None:
@@ -1275,6 +1199,10 @@ class ModelAnalyzer:
                 layer_outputs = extraction_data['model'].predict(x_sample, verbose=0)
                 layer_info = extraction_data['layer_info']
 
+                # Handle single output case
+                if not isinstance(layer_outputs, (list, tuple)):
+                    layer_outputs = [layer_outputs]
+
                 # Analyze each layer
                 layer_analysis = {}
                 for i, (output, info) in enumerate(zip(layer_outputs, layer_info)):
@@ -1290,10 +1218,10 @@ class ModelAnalyzer:
                 continue
 
         # Create visualizations
-        self._plot_enhanced_information_flow()
+        self._plot_information_flow()
 
     def _analyze_layer_information(self, output: np.ndarray, layer_info: Dict) -> Dict[str, Any]:
-        """Enhanced analysis of layer information content."""
+        """Analysis of layer information content."""
         # Flatten spatial dimensions if needed
         if len(output.shape) == 4:  # Conv layer
             output_flat = np.mean(output, axis=(1, 2))
@@ -1322,8 +1250,9 @@ class ModelAnalyzer:
         if output_flat.shape[1] > 1:
             try:
                 _, s, _ = np.linalg.svd(output_flat, full_matrices=False)
+                s = s + 1e-10  # Avoid log(0)
                 s_normalized = s / np.sum(s)
-                effective_rank = np.exp(-np.sum(s_normalized * np.log(s_normalized + 1e-10)))
+                effective_rank = np.exp(-np.sum(s_normalized * np.log(s_normalized)))
                 analysis['effective_rank'] = float(effective_rank)
             except:
                 analysis['effective_rank'] = 0.0
@@ -1366,8 +1295,8 @@ class ModelAnalyzer:
                     'sample_activations': activations[:10] if len(activations.shape) == 4 else None
                 }
 
-    def _plot_enhanced_information_flow(self) -> None:
-        """Create enhanced information flow visualizations."""
+    def _plot_information_flow(self) -> None:
+        """Create information flow visualizations."""
         fig = plt.figure(figsize=(14, 10))
         gs = plt.GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.3)
 
@@ -1652,7 +1581,7 @@ class ModelAnalyzer:
             ax.axis('off')
 
     # ------------------------------------------------------------------------------
-    # NEW: Training Dynamics Analysis
+    # Training Dynamics Analysis
     # ------------------------------------------------------------------------------
 
     def analyze_training_dynamics(self) -> None:
@@ -1678,7 +1607,7 @@ class ModelAnalyzer:
         self._plot_training_dynamics()
 
     def _compute_training_metrics(self, model_name: str, history: Dict[str, List[float]]) -> None:
-        """Compute quantitative metrics from training history with bounds checking."""
+        """Compute quantitative metrics from training history."""
         metrics = self.results.training_metrics
 
         # Extract metrics using flexible pattern matching
@@ -1687,37 +1616,33 @@ class ModelAnalyzer:
         train_acc = find_metric_in_history(history, ACC_PATTERNS)
         val_acc = find_metric_in_history(history, VAL_ACC_PATTERNS)
 
-        # Validate array lengths before operations
-        if train_loss and val_loss and len(train_loss) == len(val_loss) and len(train_loss) > 0:
-            # Safe to compute final gap
-            metrics.final_gap[model_name] = val_loss[-1] - train_loss[-1]
-
-            # Overfitting index with bounds checking
-            n_epochs = len(train_loss)
-            if n_epochs > 3:  # Need minimum epochs for meaningful analysis
-                final_third_start = max(0, int(n_epochs * (1 - OVERFITTING_ANALYSIS_FRACTION)))
-
-                train_final = np.mean(train_loss[final_third_start:])
-                val_final = np.mean(val_loss[final_third_start:])
-                metrics.overfitting_index[model_name] = val_final - train_final
-
-        # Epochs to convergence with validation
-        if val_acc and len(val_acc) > 0:
+        # Epochs to convergence (95% of max validation accuracy)
+        if val_acc:
             max_val_acc = max(val_acc)
-            if max_val_acc > 0:  # Avoid division by zero
-                threshold = CONVERGENCE_THRESHOLD * max_val_acc
-                epochs_to_conv = next((i for i, acc in enumerate(val_acc) if acc >= threshold), len(val_acc))
-                metrics.epochs_to_convergence[model_name] = epochs_to_conv
+            threshold = CONVERGENCE_THRESHOLD * max_val_acc
+            epochs_to_conv = next((i for i, acc in enumerate(val_acc) if acc >= threshold), len(val_acc))
+            metrics.epochs_to_convergence[model_name] = epochs_to_conv
 
-        # Training stability with bounds checking
+        # Training stability score (lower is more stable)
         if val_loss and len(val_loss) > TRAINING_STABILITY_WINDOW:
             recent_losses = val_loss[-TRAINING_STABILITY_WINDOW:]
-            if len(recent_losses) > 1:  # Need at least 2 values for std
-                stability_score = np.std(recent_losses)
-                metrics.training_stability_score[model_name] = stability_score
+            stability_score = np.std(recent_losses)
+            metrics.training_stability_score[model_name] = stability_score
 
-        # Peak performance with bounds checking
-        if val_acc and len(val_acc) > 0:
+        # Overfitting index
+        if train_loss and val_loss:
+            n_epochs = len(train_loss)
+            final_third_start = int(n_epochs * (1 - OVERFITTING_ANALYSIS_FRACTION))
+
+            train_final = np.mean(train_loss[final_third_start:])
+            val_final = np.mean(val_loss[final_third_start:])
+            overfitting_index = val_final - train_final
+
+            metrics.overfitting_index[model_name] = overfitting_index
+            metrics.final_gap[model_name] = val_loss[-1] - train_loss[-1]
+
+        # Peak performance
+        if val_acc:
             best_epoch = np.argmax(val_acc)
             metrics.peak_performance[model_name] = {
                 'epoch': best_epoch,
@@ -1874,7 +1799,7 @@ class ModelAnalyzer:
             train_loss = find_metric_in_history(history, LOSS_PATTERNS)
             val_loss = find_metric_in_history(history, VAL_LOSS_PATTERNS)
 
-            if train_loss and val_loss and len(train_loss) == len(val_loss) and len(train_loss) > 0:
+            if train_loss and val_loss and len(train_loss) == len(val_loss):
                 # Calculate gap over time
                 gap = np.array(val_loss) - np.array(train_loss)
 
@@ -1882,7 +1807,7 @@ class ModelAnalyzer:
                 epochs = range(len(gap))
 
                 # Apply smoothing to gap if requested
-                if self.config.smooth_training_curves and len(gap) > self.config.smoothing_window:
+                if self.config.smooth_training_curves:
                     gap_smooth = smooth_curve(gap, self.config.smoothing_window)
                     ax.plot(epochs, gap_smooth, '-', color=color,
                            linewidth=2.5, label=model_name)
@@ -2037,18 +1962,18 @@ class ModelAnalyzer:
         ax.set_title('Training Metrics Summary', fontsize=12, fontweight='bold', pad=10)
 
     # ------------------------------------------------------------------------------
-    # Enhanced Summary Dashboard
+    # Summary Dashboard
     # ------------------------------------------------------------------------------
 
     def create_summary_dashboard(self) -> None:
-        """Create an enhanced summary dashboard with training insights."""
+        """Create a summary dashboard with training insights."""
         fig = plt.figure(figsize=(16, 10))
         gs = plt.GridSpec(2, 2, figure=fig, hspace=0.35, wspace=0.25,
                          height_ratios=[1, 1], width_ratios=[1.2, 1])
 
-        # 1. Enhanced Performance Table (with training metrics)
+        # 1. Performance Table (with training metrics)
         ax1 = fig.add_subplot(gs[0, 0])
-        self._plot_enhanced_performance_table(ax1)
+        self._plot_performance_table(ax1)
 
         # 2. Model Similarity (unchanged)
         ax2 = fig.add_subplot(gs[0, 1])
@@ -2066,11 +1991,11 @@ class ModelAnalyzer:
         fig.subplots_adjust(top=0.93, bottom=0.07, left=0.08, right=0.96)
 
         if self.config.save_plots:
-            self._save_figure(fig, 'enhanced_summary_dashboard')
+            self._save_figure(fig, 'summary_dashboard')
         plt.close(fig)
 
-    def _plot_enhanced_performance_table(self, ax) -> None:
-        """Create enhanced performance table including training metrics."""
+    def _plot_performance_table(self, ax) -> None:
+        """Create performance table including training metrics."""
         # Prepare data for the table
         table_data = []
 
@@ -2266,7 +2191,7 @@ class ModelAnalyzer:
             ax.axis('off')
             return
 
-        # Create enhanced scatter plot using consistent colors
+        # Create scatter plot using consistent colors
         for i, (label, comp) in enumerate(zip(labels, components)):
             color = self.model_colors.get(label, '#333333')
             ax.scatter(comp[0], comp[1], c=[color], label=label,
@@ -2301,39 +2226,33 @@ class ModelAnalyzer:
                     'Confidence': conf
                 })
 
-        if not confidence_data:
-            ax.text(0.5, 0.5, 'No confidence data available',
-                   ha='center', va='center', transform=ax.transAxes)
+        if confidence_data:
+            df = pd.DataFrame(confidence_data)
+            model_order = sorted(df['Model'].unique())
+
+            # Create violin plot
+            parts = ax.violinplot([df[df['Model'] == m]['Confidence'].values
+                                  for m in model_order],
+                                 positions=range(len(model_order)),
+                                 showmeans=True, showmedians=True)
+
+            # Customize colors using consistent palette
+            for i, model in enumerate(model_order):
+                color = self.model_colors.get(model, '#333333')
+                parts['bodies'][i].set_facecolor(color)
+                parts['bodies'][i].set_alpha(0.6)
+
+            ax.set_xticks(range(len(model_order)))
+            ax.set_xticklabels([])  # Remove model names from x-axis
+            ax.set_ylabel('Confidence (Max Probability)')
             ax.set_title('Confidence Distribution Profiles')
-            ax.axis('off')
-            return
-
-        df = pd.DataFrame(confidence_data)
-        model_order = sorted(df['Model'].unique())
-
-        # Create enhanced violin plot
-        parts = ax.violinplot([df[df['Model'] == m]['Confidence'].values
-                              for m in model_order],
-                             positions=range(len(model_order)),
-                             showmeans=True, showmedians=True)
-
-        # Customize colors using consistent palette
-        for i, model in enumerate(model_order):
-            color = self.model_colors.get(model, '#333333')
-            parts['bodies'][i].set_facecolor(color)
-            parts['bodies'][i].set_alpha(0.6)
-
-        ax.set_xticks(range(len(model_order)))
-        ax.set_xticklabels([])  # Remove model names from x-axis
-        ax.set_ylabel('Confidence (Max Probability)')
-        ax.set_title('Confidence Distribution Profiles')
-        ax.grid(True, alpha=0.3, axis='y')
+            ax.grid(True, alpha=0.3, axis='y')
 
     # ------------------------------------------------------------------------------
     # Utility Methods
     # ------------------------------------------------------------------------------
 
-    def _lighten_color(self, color: str, factor: float) -> str:
+    def _lighten_color(self, color: str, factor: float) -> Tuple[float, float, float]:
         """Lighten a color by interpolating towards white."""
         import matplotlib.colors as mcolors
 
@@ -2346,27 +2265,14 @@ class ModelAnalyzer:
         return lightened
 
     def _save_figure(self, fig: plt.Figure, name: str) -> None:
-        """Save figure with thread-safe error handling."""
+        """Save figure with configured settings."""
         try:
-            # Ensure output directory exists
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-
             filepath = self.output_dir / f"{name}.{self.config.save_format}"
-
-            # Use thread-safe saving
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                fig.savefig(filepath, dpi=self.config.dpi, bbox_inches='tight',
-                           facecolor='white', edgecolor='none', pad_inches=0.1)
-
+            fig.savefig(filepath, dpi=self.config.dpi, bbox_inches='tight',
+                       facecolor='white', edgecolor='none', pad_inches=0.1)
             logger.info(f"Saved plot: {filepath}")
-
         except Exception as e:
             logger.error(f"Could not save figure {name}: {e}")
-
-        finally:
-            # Always close the figure to free memory
-            plt.close(fig)
 
     def save_results(self, filename: str = "analysis_results.json") -> None:
         """Save analysis results to JSON file."""
@@ -2380,15 +2286,7 @@ class ModelAnalyzer:
         }
 
         # Convert numpy arrays to lists for JSON serialization
-        def convert_numpy(obj, seen=None):
-            """Convert numpy types to JSON-serializable types with cycle detection."""
-            if seen is None:
-                seen = set()
-
-            obj_id = id(obj)
-            if obj_id in seen:
-                return f"<Circular reference: {type(obj).__name__}>"
-
+        def convert_numpy(obj):
             if isinstance(obj, np.integer):
                 return int(obj)
             elif isinstance(obj, np.floating):
@@ -2398,16 +2296,10 @@ class ModelAnalyzer:
             elif isinstance(obj, pd.DataFrame):
                 return obj.to_dict()
             elif isinstance(obj, dict):
-                seen.add(obj_id)
-                result = {k: convert_numpy(v, seen) for k, v in obj.items()
-                         if k not in ['raw_activations', 'sample_activations']}
-                seen.remove(obj_id)
-                return result
+                return {k: convert_numpy(v) for k, v in obj.items()
+                       if k not in ['raw_activations', 'sample_activations']}
             elif isinstance(obj, list):
-                seen.add(obj_id)
-                result = [convert_numpy(item, seen) for item in obj]
-                seen.remove(obj_id)
-                return result
+                return [convert_numpy(item) for item in obj]
             else:
                 return obj
 
