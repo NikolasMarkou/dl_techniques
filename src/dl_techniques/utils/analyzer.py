@@ -1066,7 +1066,6 @@ class ModelAnalyzer:
             ax.set_title('Per-Class Calibration Error')
             ax.set_xticks(x + width * (n_models - 1) / 2)
             ax.set_xticklabels([str(i) for i in range(n_classes)])
-            ax.legend()
             ax.grid(True, alpha=0.3, axis='y')
 
     def _plot_uncertainty_landscape(self, ax) -> None:
@@ -1124,7 +1123,7 @@ class ModelAnalyzer:
                 ax.clabel(contours, inline=True, fontsize=8, fmt='%.2f')
 
                 # Plot filled contours with transparency
-                ax.contourf(X, Y, Z, levels=5, colors=[color], alpha=0.2)
+                ax.contourf(X, Y, Z, levels=5, colors=[color], alpha=0.05)
 
                 # Add a dummy line for the legend
                 ax.plot([], [], color=color, linewidth=3, label=model_name)
@@ -1138,7 +1137,6 @@ class ModelAnalyzer:
         ax.set_xlabel('Confidence (Max Probability)')
         ax.set_ylabel('Entropy')
         ax.set_title('Uncertainty Landscape (Density Contours)')
-        ax.legend()
         ax.grid(True, alpha=0.3)
         ax.set_xlim(0, 1)
         ax.set_ylim(0, None)
@@ -1310,7 +1308,7 @@ class ModelAnalyzer:
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-    def _plot_effective_rank_evolution(self, ax) -> None:
+    def _plot_effective_rank_evolution(self, ax, show_legend: bool = False) -> None:
         """Plot effective rank evolution through network."""
         for model_name in sorted(self.results.information_flow.keys()):
             layer_analysis = self.results.information_flow[model_name]
@@ -1330,7 +1328,8 @@ class ModelAnalyzer:
         ax.set_xlabel('Layer Depth')
         ax.set_ylabel('Effective Rank')
         ax.set_title('Information Dimensionality Evolution')
-        ax.legend()
+        if show_legend:
+            ax.legend()
         ax.grid(True, alpha=0.3)
 
     def _plot_activation_health_dashboard(self, ax) -> None:
