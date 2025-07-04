@@ -1,9 +1,9 @@
 """
-MNIST Activation Function Comparison: Evaluating Neural Network Activations
-==========================================================================
+CIFAR-10 Activation Function Comparison: Evaluating Neural Network Activations
+==============================================================================
 
 This experiment conducts a comprehensive comparison of different activation functions
-for image classification on MNIST, systematically evaluating their effectiveness
+for image classification on CIFAR-10, systematically evaluating their effectiveness
 in convolutional neural networks.
 
 The study addresses fundamental questions in deep learning: how do different
@@ -16,15 +16,15 @@ model expressiveness.
 Experimental Design
 -------------------
 
-**Dataset**: MNIST (10 classes, 28×28 grayscale images)
-- 60,000 training images
+**Dataset**: CIFAR-10 (10 classes, 32×32 RGB images)
+- 50,000 training images
 - 10,000 test images
 - Standard preprocessing with normalization
 
 **Model Architecture**: ResNet-inspired CNN with the following components:
 - Initial convolutional layer (32 filters)
-- 3 convolutional blocks with optional residual connections
-- Progressive filter scaling: [32, 64, 128]
+- 4 convolutional blocks with optional residual connections
+- Progressive filter scaling: [32, 64, 128, 256]
 - Batch normalization and dropout regularization
 - Global average pooling
 - Dense classification layer with L2 regularization
@@ -180,7 +180,7 @@ from typing import Dict, Any, List, Tuple, Callable
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
-from dl_techniques.utils.datasets import load_and_preprocess_mnist
+from dl_techniques.utils.datasets import load_and_preprocess_cifar10
 from dl_techniques.layers.activations.mish import mish, saturated_mish
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 
@@ -208,7 +208,7 @@ def saturated_mish_2(x):
 @dataclass
 class ExperimentConfig:
     """
-    Configuration for the MNIST activation function comparison experiment.
+    Configuration for the CIFAR-10 activation function comparison experiment.
 
     This class encapsulates all configurable parameters for the experiment,
     including dataset configuration, model architecture parameters, training
@@ -216,9 +216,9 @@ class ExperimentConfig:
     """
 
     # --- Dataset Configuration ---
-    dataset_name: str = "mnist"
+    dataset_name: str = "cifar10"
     num_classes: int = 10
-    input_shape: Tuple[int, ...] = (28, 28, 1)
+    input_shape: Tuple[int, ...] = (32, 32, 3)
 
     # --- Model Architecture Parameters ---
     conv_filters: List[int] = field(default_factory=lambda: [32, 64, 128, 256])  # Filter counts for each conv block
@@ -233,7 +233,7 @@ class ExperimentConfig:
 
     # --- Training Parameters ---
     epochs: int = 100  # Number of training epochs
-    batch_size: int = 128  # Training batch size
+    batch_size: int = 64  # Training batch size
     learning_rate: float = 0.001  # Adam optimizer learning rate
     early_stopping_patience: int = 50  # Patience for early stopping
     monitor_metric: str = 'val_accuracy'  # Metric to monitor for early stopping
@@ -250,7 +250,7 @@ class ExperimentConfig:
 
     # --- Experiment Configuration ---
     output_dir: Path = Path("results")  # Output directory for results
-    experiment_name: str = "mnist_activation_comparison"  # Experiment name
+    experiment_name: str = "cifar10_activation_comparison"  # Experiment name
     random_seed: int = 42  # Random seed for reproducibility
 
     # --- Analysis Configuration ---
@@ -399,7 +399,7 @@ def build_model(
         activation_fn: Callable,
         name: str) -> keras.Model:
     """
-    Build a complete CNN model for MNIST classification with specified activation.
+    Build a complete CNN model for CIFAR-10 classification with specified activation.
 
     This function constructs a ResNet-inspired CNN with configurable architecture
     parameters. The model includes convolutional blocks, global average pooling,
@@ -494,7 +494,7 @@ def build_model(
 
 def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     """
-    Run the complete MNIST activation function comparison experiment.
+    Run the complete CIFAR-10 activation function comparison experiment.
 
     This function orchestrates the entire experimental pipeline, including:
     1. Dataset loading and preprocessing
@@ -525,23 +525,23 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     )
 
     # Log experiment start
-    logger.info("🚀 Starting MNIST Activation Function Comparison Experiment")
+    logger.info("🚀 Starting CIFAR-10 Activation Function Comparison Experiment")
     logger.info(f"📁 Results will be saved to: {experiment_dir}")
     logger.info("=" * 80)
 
     # ===== DATASET LOADING =====
-    logger.info("📊 Loading MNIST dataset...")
-    mnist_data = load_and_preprocess_mnist()
+    logger.info("📊 Loading CIFAR-10 dataset...")
+    cifar10_data = load_and_preprocess_cifar10()
     logger.info("✅ Dataset loaded successfully")
 
     # ===== MODEL TRAINING PHASE =====
     logger.info("🏋️ Starting model training phase...")
 
     # Log data format for debugging
-    logger.info(f"Training data shape: {mnist_data.x_train.shape}, {mnist_data.y_train.shape}")
-    logger.info(f"Test data shape: {mnist_data.x_test.shape}, {mnist_data.y_test.shape}")
-    if len(mnist_data.y_train.shape) > 1:
-        logger.info(f"Labels are one-hot encoded with {mnist_data.y_train.shape[1]} classes")
+    logger.info(f"Training data shape: {cifar10_data.x_train.shape}, {cifar10_data.y_train.shape}")
+    logger.info(f"Test data shape: {cifar10_data.x_test.shape}, {cifar10_data.y_test.shape}")
+    if len(cifar10_data.y_train.shape) > 1:
+        logger.info(f"Labels are one-hot encoded with {cifar10_data.y_train.shape[1]} classes")
     else:
         logger.info("Labels are integer encoded")
 
@@ -571,8 +571,8 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
         # Train the model
         history = train_model(
-            model, mnist_data.x_train, mnist_data.y_train,
-            mnist_data.x_test, mnist_data.y_test, training_config
+            model, cifar10_data.x_train, cifar10_data.y_train,
+            cifar10_data.x_test, cifar10_data.y_test, training_config
         )
 
         # Store results
@@ -597,7 +597,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         )
 
         # Run comprehensive analysis
-        model_analysis_results = analyzer.analyze(data=DataInput.from_object(mnist_data))
+        model_analysis_results = analyzer.analyze(data=DataInput.from_object(cifar10_data))
         logger.info("✅ Model analysis completed successfully!")
 
     except Exception as e:
@@ -617,7 +617,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
     # Generate confusion matrices for model comparison
     raw_predictions = {
-        name: model.predict(mnist_data.x_test, verbose=0)
+        name: model.predict(cifar10_data.x_test, verbose=0)
         for name, model in trained_models.items()
     }
     class_predictions = {
@@ -626,10 +626,10 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     }
 
     # Handle y_true format - convert to class indices if one-hot encoded
-    if len(mnist_data.y_test.shape) > 1 and mnist_data.y_test.shape[1] > 1:
-        y_true_classes = np.argmax(mnist_data.y_test, axis=1)
+    if len(cifar10_data.y_test.shape) > 1 and cifar10_data.y_test.shape[1] > 1:
+        y_true_classes = np.argmax(cifar10_data.y_test, axis=1)
     else:
-        y_true_classes = mnist_data.y_test
+        y_true_classes = cifar10_data.y_test
 
     vis_manager.plot_confusion_matrices_comparison(
         y_true=y_true_classes,
@@ -649,12 +649,12 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         logger.info(f"Evaluating model {name}...")
 
         # Get predictions for debugging
-        predictions = model.predict(mnist_data.x_test, verbose=0)
+        predictions = model.predict(cifar10_data.x_test, verbose=0)
 
         # Check label format and evaluate accordingly
         try:
             # First try evaluation with original labels
-            eval_results = model.evaluate(mnist_data.x_test, mnist_data.y_test, verbose=0)
+            eval_results = model.evaluate(cifar10_data.x_test, cifar10_data.y_test, verbose=0)
             metrics_dict = dict(zip(model.metrics_names, eval_results))
 
             # If accuracy seems incorrect, calculate manually
@@ -665,10 +665,10 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
                 y_pred_classes = np.argmax(predictions, axis=1)
 
                 # Get true classes (handle both one-hot and integer labels)
-                if len(mnist_data.y_test.shape) > 1 and mnist_data.y_test.shape[1] > 1:
-                    y_true_classes = np.argmax(mnist_data.y_test, axis=1)
+                if len(cifar10_data.y_test.shape) > 1 and cifar10_data.y_test.shape[1] > 1:
+                    y_true_classes = np.argmax(cifar10_data.y_test, axis=1)
                 else:
-                    y_true_classes = mnist_data.y_test.astype(int)
+                    y_true_classes = cifar10_data.y_test.astype(int)
 
                 # Calculate accuracy
                 manual_accuracy = np.mean(y_pred_classes == y_true_classes)
@@ -691,15 +691,15 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             logger.error(f"Error evaluating {name}: {e}")
             # Fallback to manual calculation
             y_pred_classes = np.argmax(predictions, axis=1)
-            if len(mnist_data.y_test.shape) > 1:
-                y_true_classes = np.argmax(mnist_data.y_test, axis=1)
+            if len(cifar10_data.y_test.shape) > 1:
+                y_true_classes = np.argmax(cifar10_data.y_test, axis=1)
             else:
-                y_true_classes = mnist_data.y_test.astype(int)
+                y_true_classes = cifar10_data.y_test.astype(int)
 
             manual_accuracy = np.mean(y_pred_classes == y_true_classes)
             metrics_dict = {
                 'accuracy': manual_accuracy,
-                'top_5_accuracy': manual_accuracy,  # MNIST typically has very high accuracy
+                'top_5_accuracy': manual_accuracy,  # CIFAR-10 typically has very high accuracy
                 'loss': 0.0
             }
 
@@ -808,12 +808,12 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
 def main() -> None:
     """
-    Main execution function for running the MNIST activation comparison experiment.
+    Main execution function for running the CIFAR-10 activation comparison experiment.
 
     This function serves as the entry point for the experiment, handling
     configuration setup, experiment execution, and error handling.
     """
-    logger.info("🚀 MNIST Activation Function Comparison Experiment")
+    logger.info("🚀 CIFAR-10 Activation Function Comparison Experiment")
     logger.info("=" * 80)
 
     gpus = tf.config.experimental.list_physical_devices('GPU')
