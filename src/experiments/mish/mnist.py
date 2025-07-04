@@ -223,7 +223,7 @@ class ExperimentConfig:
     use_residual: bool = True  # Enable residual connections
 
     # --- Training Parameters ---
-    epochs: int = 1  # Number of training epochs
+    epochs: int = 2  # Number of training epochs
     batch_size: int = 128  # Training batch size
     learning_rate: float = 0.001  # Adam optimizer learning rate
     early_stopping_patience: int = 10  # Patience for early stopping
@@ -247,6 +247,7 @@ class ExperimentConfig:
         analyze_weights=True,  # Analyze weight distributions
         analyze_calibration=True,  # Analyze model calibration
         analyze_information_flow=True,  # Analyze information flow / activation patterns
+        analyze_training_dynamics=True, # Analyze training dynamics
         calibration_bins=15,  # Number of bins for calibration analysis
         save_plots=True,  # Save analysis plots
         plot_style='publication',  # Publication-ready plot style
