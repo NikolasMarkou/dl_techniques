@@ -247,7 +247,6 @@ class ExperimentConfig:
         analyze_weights=True,  # Analyze weight distributions
         analyze_calibration=True,  # Analyze model calibration
         analyze_information_flow=True,  # Analyze information flow / activation patterns
-        analyze_training_dynamics=True, # Analyze training dynamics
         calibration_bins=15,  # Number of bins for calibration analysis
         save_plots=True,  # Save analysis plots
         plot_style='publication',  # Publication-ready plot style
