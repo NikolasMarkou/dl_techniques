@@ -201,7 +201,7 @@ class BandRMSExperimentConfig:
     activation: str = 'gelu'
 
     # --- Training Parameters ---
-    epochs: int = 10
+    epochs: int = 3
     batch_size: int = 128
     learning_rate: float = 0.001
     early_stopping_patience: int = 20
