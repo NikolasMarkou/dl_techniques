@@ -1,505 +1,604 @@
 """
-# Vision Transformer (ViT) Layer Implementation Documentation
+Vision Transformer (ViT) Layer Implementation
 
-## Table of Contents
-1. [Overview](#overview)
-2. [Theoretical Background](#theoretical-background)
-3. [Architecture Details](#architecture-details)
-4. [Implementation Details](#implementation-details)
-5. [Usage Guidelines](#usage-guidelines)
-6. [Performance Considerations](#performance-considerations)
-
-## Overview
-
-This implementation provides a modular Vision Transformer (ViT) layer based on the architecture proposed in
-"An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale" (Dosovitskiy et al., 2020).
-The implementation follows Keras best practices and includes comprehensive type hinting and documentation.
-
-## Theoretical Background
-
-### Vision Transformer Principles
-
-Vision Transformers adapt the transformer architecture, originally designed for NLP tasks, to computer vision by:
-
-1. **Patch Embedding**:
-   - Images are split into fixed-size patches (e.g., 16x16 pixels)
-   - Each patch is flattened and linearly projected to create a sequence of embeddings
-   - Position embeddings are added to maintain spatial information
-
-2. **Self-Attention Mechanism**:
-   - Enables global interaction between all patches
-   - Computes attention weights using scaled dot-product attention:
-     ```
-     Attention(Q, K, V) = softmax(QK^T / √d_k)V
-     ```
-   - Uses multiple attention heads for parallel attention computation
-
-3. **Transformer Encoder**:
-   - Combines self-attention with MLP blocks
-   - Uses Layer Normalization and residual connections
-   - Pre-norm architecture for improved training stability
-
-## Architecture Details
-
-### Component Breakdown
-
-1. **PatchEmbed Layer**:
-   ```python
-   Input Image (H×W×C) → Patches ((H/P)×(W/P)×(P²×C)) → Linear Projection (N×D)
-   ```
-   - H, W: Image height and width
-   - C: Number of channels
-   - P: Patch size
-   - N: Number of patches ((H×W)/(P×P))
-   - D: Embedding dimension
-
-2. **Multi-Head Attention**:
-   ```
-   MultiHead(Q, K, V) = Concat(head_1, ..., head_h)W^O
-   where head_i = Attention(QW^Q_i, KW^K_i, VW^V_i)
-   ```
-   - Splits embedding dimension into h heads
-   - Each head processes a different projection of the input
-   - Outputs are concatenated and linearly projected
-
-3. **MLP Block**:
-   ```
-   Linear → GELU → Dropout → Linear → Dropout
-   ```
-   - Hidden dimension typically 4x input dimension
-   - GELU activation for better performance
-   - Dropout for regularization
-
-### Layer Normalization Strategy
-
-The implementation uses pre-norm architecture:
-```
-x → LayerNorm → Attention → Dropout → Add → LayerNorm → MLP → Add
-```
-
-Benefits of pre-norm:
-- More stable gradients
-- Enables deeper architectures
-- Better training dynamics
-
-## Implementation Details
-
-### Key Features
-
-1. **Modular Design**:
-   ```python
-   PatchEmbed → Optional[CLS Token + Position Embedding] → TransformerLayer
-   ```
-   - Each component is a separate layer
-   - Easy to modify or extend
-
-2. **Initialization and Regularization**:
-   - He initialization for better gradient flow
-   - L2 regularization support
-   - Dropout in attention and MLP paths
-
-3. **Shape Handling**:
-   ```python
-   # For 224×224 image, 16×16 patches, 768-dim embedding
-   Input: (B, 224, 224, 3)
-   Patches: (B, 196, 768)  # 196 = (224/16)²
-   Output: (B, 196, 768)
-   ```
-   - B: Batch size
-   - Automatic shape inference
-   - Dynamic batch size support
-
-### Optimization Techniques
-
-1. **Attention Computation**:
-   ```python
-   scale = (embed_dim // num_heads) ** -0.5  # Scaling factor
-   attention = softmax(QK^T * scale)
-   ```
-   - Scaled dot-product attention
-   - Efficient matrix multiplication
-   - Proper numerical stability
-
-2. **Memory Efficiency**:
-   - Fused QKV computation
-   - Proper reshaping for attention heads
-   - Minimal tensor copies
-
-## Usage Guidelines
-
-### Basic Usage
-
-```python
-# Create patch embedding
-patch_embed = PatchEmbed(
-    patch_size=16,
-    embed_dim=768,
-    kernel_regularizer=L2(1e-4)
-)
-
-# Create transformer layer
-transformer = VisionTransformerLayer(
-    embed_dim=768,
-    num_heads=12,
-    mlp_ratio=4.0,
-    dropout_rate=0.1
-)
-
-# Process image
-x = patch_embed(images)  # (B, N, D)
-x = transformer(x)       # (B, N, D)
-```
-
-### Hyperparameter Guidelines
-
-1. **Patch Size**:
-   - Typical values: 16×16 or 32×32
-   - Larger patches → fewer tokens → faster computation
-   - Smaller patches → finer granularity → better detail
-
-2. **Embedding Dimension**:
-   - Should be divisible by number of heads
-   - Typical values: 768 (ViT-Base), 1024 (ViT-Large)
-   - Affects model capacity and computation
-
-3. **Number of Heads**:
-   - Typical values: 12 (ViT-Base), 16 (ViT-Large)
-   - More heads → more parallel attention computation
-   - Each head should have reasonable dimension (>=64)
-
-4. **Dropout Rates**:
-   - Attention dropout: 0.0-0.1
-   - MLP dropout: 0.1-0.2
-   - Higher for smaller datasets
-
-## Performance Considerations
-
-### Memory Usage
-
-Memory complexity of self-attention:
-- O(N²) memory usage where N is number of patches
-- For 224×224 image with 16×16 patches:
-  - N = 196 patches
-  - Attention matrix size: 196×196 = 38,416 elements per head
-
-### Computation Efficiency
-
-1. **Patch Embedding**:
-   - Uses Conv2D for efficient patch extraction
-   - Single matrix multiplication for embedding
-
-2. **Attention Computation**:
-   - Fused QKV transformation
-   - Parallel processing across heads
-   - Efficient batch matrix multiplication
-
-3. **Training Tips**:
-   - Gradient checkpointing for large models
-   - Mixed precision training recommended
-   - Proper batch size selection important
-
-### Recommended Configurations
-
-1. **Small-Scale (ViT-Tiny)**:
-   ```python
-   patch_size=16
-   embed_dim=192
-   num_heads=3
-   mlp_ratio=4.0
-   ```
-
-2. **Medium-Scale (ViT-Base)**:
-   ```python
-   patch_size=16
-   embed_dim=768
-   num_heads=12
-   mlp_ratio=4.0
-   ```
-
-3. **Large-Scale (ViT-Large)**:
-   ```python
-   patch_size=16
-   embed_dim=1024
-   num_heads=16
-   mlp_ratio=4.0
-   ```
+This module provides an improved Vision Transformer layer implementation that follows
+the project's best practices and reuses existing components where possible.
 """
 
 import keras
-import tensorflow as tf
-from typing import Optional, Tuple, Union
-from keras import Layer, Regularizer, Initializer
+from keras import ops
+from typing import Optional, Tuple, Union, Any, Dict
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.layers.ffn.mlp import MLPBlock
+from dl_techniques.layers.norms.rms_norm import RMSNorm
+from dl_techniques.layers.patch_embedding import PatchEmbedding2D
+from dl_techniques.layers.positional_embedding import PositionalEmbedding
 
 # ---------------------------------------------------------------------
 
-@keras.utils.register_keras_serializable()
-class PatchEmbed(Layer):
-    """2D Image to Patch Embedding Layer.
+@keras.saving.register_keras_serializable()
+class MultiHeadAttention(keras.layers.Layer):
+    """Multi-Head Self Attention mechanism optimized for vision tasks.
 
-    Splits images into patches and linearly embeds each patch.
+    This implementation uses keras.ops for backend compatibility and follows
+    the project's serialization patterns.
 
     Args:
-        patch_size: Size of patches to split the input image into
-        embed_dim: Embedding dimension for patches
-        kernel_initializer: Initializer for the projection matrix
-        kernel_regularizer: Regularizer function for the projection matrix
-        name: Optional name for the layer
-        **kwargs: Additional layer arguments
+        embed_dim: Dimension of input embeddings.
+        num_heads: Number of attention heads.
+        dropout_rate: Dropout rate for attention weights.
+        kernel_initializer: Initializer for weight matrices.
+        kernel_regularizer: Regularizer for weight matrices.
+        use_bias: Whether to use bias in dense layers.
+        **kwargs: Additional layer arguments.
     """
 
     def __init__(
-            self,
-            patch_size: Union[int, Tuple[int, int]],
-            embed_dim: int,
-            kernel_initializer: Union[str, Initializer] = "glorot_normal",
-            kernel_regularizer: Optional[Regularizer] = None,
-            activation: Union[str, None] = "linear",
-            name: Optional[str] = None,
-            **kwargs
-    ):
-        """Initialize the PatchEmbed layer.
+        self,
+        embed_dim: int,
+        num_heads: int,
+        dropout_rate: float = 0.0,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        use_bias: bool = True,
+        **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
 
-        Args:
-            patch_size: Size of patches to split the input image into
-            embed_dim: Embedding dimension for patches
-            kernel_initializer: Initializer for the projection matrix
-            kernel_regularizer: Regularizer function for the projection matrix
-            activation: Activation function to use (default is 'linear')
-            name: Optional name for the layer
-            **kwargs: Additional layer arguments
-        """
-        super().__init__(name=name, **kwargs)
-        self.patch_size = patch_size if isinstance(patch_size, tuple) else (patch_size, patch_size)
-        self.embed_dim = embed_dim
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
-        self.activation = keras.activations.get(activation)
+        if embed_dim % num_heads != 0:
+            raise ValueError(f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})")
 
-        # Use Keras Conv2D layer for the projection
-        self.proj = keras.layers.Conv2D(
-            filters=embed_dim,
-            kernel_size=self.patch_size,
-            strides=self.patch_size,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            activation=self.activation,
-            padding="valid",
-            name=f"{name}_projection" if name else None
-        )
-
-    def call(self, x: tf.Tensor) -> tf.Tensor:
-        """Forward pass of the layer.
-
-        Args:
-            x: Input tensor of shape (batch_size, height, width, channels)
-
-        Returns:
-            Embedded patches tensor of shape (batch_size, n_patches, embed_dim)
-        """
-        # Apply convolution to extract patches
-        x = self.proj(x)  # (batch_size, h', w', embed_dim)
-
-        # Reshape to (batch_size, n_patches, embed_dim)
-        x = keras.layers.Reshape((-1, self.embed_dim))(x)
-
-        return x
-
-    def get_config(self) -> dict:
-        """Return the configuration of the layer for serialization.
-
-        Returns:
-            Dictionary containing the layer configuration
-        """
-        config = super().get_config()
-        config.update({
-            'patch_size': self.patch_size,
-            'embed_dim': self.embed_dim,
-            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
-            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
-            'activation': keras.activations.serialize(self.activation),
-        })
-        return config
-
-
-# ---------------------------------------------------------------------
-
-@keras.utils.register_keras_serializable()
-class MultiHeadAttention(Layer):
-    """Multi-Head Self Attention mechanism.
-
-    Args:
-        embed_dim: Dimension of input embeddings
-        num_heads: Number of attention heads
-        dropout_rate: Dropout rate for attention weights
-        kernel_initializer: Initializer for weight matrices
-        kernel_regularizer: Regularizer for weight matrices
-        name: Optional name for the layer
-        **kwargs: Additional layer arguments
-    """
-
-    def __init__(
-            self,
-            embed_dim: int,
-            num_heads: int,
-            dropout_rate: float = 0.0,
-            kernel_initializer: Union[str, Initializer] = "he_normal",
-            kernel_regularizer: Optional[Regularizer] = None,
-            name: Optional[str] = None,
-            **kwargs
-    ):
-        super().__init__(name=name, **kwargs)
         self.embed_dim = embed_dim
         self.num_heads = num_heads
-        self.scale = (embed_dim // num_heads) ** -0.5
+        self.head_dim = embed_dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        self.dropout_rate = dropout_rate
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.use_bias = use_bias
 
+        # Initialize to None, will be created in build()
+        self.qkv = None
+        self.proj = None
+        self.dropout = None
+        self._build_input_shape = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the layer's weights.
+
+        Args:
+            input_shape: Shape of the input tensor.
+        """
+        self._build_input_shape = input_shape
+
+        # Create QKV projection layer
         self.qkv = keras.layers.Dense(
-            embed_dim * 3,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            name=f"{name}_qkv" if name else None
+            self.embed_dim * 3,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            use_bias=self.use_bias,
+            name="qkv"
         )
-        self.proj = keras.layers.Dense(
-            embed_dim,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            name=f"{name}_proj" if name else None
-        )
-        self.dropout = keras.layers.Dropout(dropout_rate)
 
-    def call(self, x: tf.Tensor, training: bool = False) -> tf.Tensor:
+        # Create output projection layer
+        self.proj = keras.layers.Dense(
+            self.embed_dim,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            use_bias=self.use_bias,
+            name="proj"
+        )
+
+        # Create dropout layer
+        self.dropout = keras.layers.Dropout(self.dropout_rate)
+
+        # Build sublayers
+        self.qkv.build(input_shape)
+        self.proj.build(input_shape[:-1] + (self.embed_dim,))
+
+        super().build(input_shape)
+
+    def call(self, x: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """Forward pass of the layer.
 
         Args:
-            x: Input tensor of shape (batch_size, seq_len, embed_dim)
-            training: Whether in training mode
+            x: Input tensor of shape (batch_size, seq_len, embed_dim).
+            training: Whether in training mode.
 
         Returns:
-            Attention output tensor of shape (batch_size, seq_len, embed_dim)
+            Attention output tensor of shape (batch_size, seq_len, embed_dim).
         """
-        batch_size, seq_len, _ = tf.unstack(tf.shape(x))
-        head_dim = self.embed_dim // self.num_heads
+        batch_size = ops.shape(x)[0]
+        seq_len = ops.shape(x)[1]
 
+        # Generate Q, K, V
         qkv = self.qkv(x)  # (batch_size, seq_len, embed_dim * 3)
-        qkv = tf.reshape(qkv, (batch_size, seq_len, 3, self.num_heads, head_dim))
-        qkv = tf.transpose(qkv, (2, 0, 3, 1, 4))
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        qkv = ops.reshape(qkv, (batch_size, seq_len, 3, self.num_heads, self.head_dim))
+        qkv = ops.transpose(qkv, (2, 0, 3, 1, 4))  # (3, batch_size, num_heads, seq_len, head_dim)
 
-        attn = tf.matmul(q, k, transpose_b=True) * self.scale
-        attn = tf.nn.softmax(attn, axis=-1)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # Each: (batch_size, num_heads, seq_len, head_dim)
+
+        # Compute attention scores
+        attn = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2))) * self.scale
+        attn = ops.softmax(attn, axis=-1)
         attn = self.dropout(attn, training=training)
 
-        x = tf.matmul(attn, v)
-        x = tf.transpose(x, (0, 2, 1, 3))
-        x = tf.reshape(x, (batch_size, seq_len, self.embed_dim))
+        # Apply attention to values
+        x = ops.matmul(attn, v)  # (batch_size, num_heads, seq_len, head_dim)
+        x = ops.transpose(x, (0, 2, 1, 3))  # (batch_size, seq_len, num_heads, head_dim)
+        x = ops.reshape(x, (batch_size, seq_len, self.embed_dim))
 
         return self.proj(x)
 
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Compute the output shape of the layer.
 
-# ---------------------------------------------------------------------
+        Args:
+            input_shape: Shape of the input.
 
-@keras.utils.register_keras_serializable()
-class VisionTransformerLayer(Layer):
+        Returns:
+            Output shape.
+        """
+        return input_shape
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get the layer configuration.
+
+        Returns:
+            Dictionary containing the layer configuration.
+        """
+        config = super().get_config()
+        config.update({
+            "embed_dim": self.embed_dim,
+            "num_heads": self.num_heads,
+            "dropout_rate": self.dropout_rate,
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "use_bias": self.use_bias,
+        })
+        return config
+
+    def get_build_config(self) -> Dict[str, Any]:
+        """Get the build configuration.
+
+        Returns:
+            Dictionary containing the build configuration.
+        """
+        return {"input_shape": self._build_input_shape}
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Build the layer from a config.
+
+        Args:
+            config: Dictionary containing the build configuration.
+        """
+        if config.get("input_shape") is not None:
+            self.build(config["input_shape"])
+
+
+@keras.saving.register_keras_serializable()
+class VisionTransformerLayer(keras.layers.Layer):
     """Vision Transformer (ViT) Layer.
 
-    Implements a single transformer encoder layer for vision tasks.
+    Implements a single transformer encoder layer for vision tasks, reusing
+    existing project components where possible.
 
     Args:
-        embed_dim: Dimension of input embeddings
-        num_heads: Number of attention heads
-        mlp_ratio: Ratio of mlp hidden dim to embedding dim
-        dropout_rate: Dropout rate
-        attention_dropout_rate: Dropout rate for attention weights
-        kernel_initializer: Initializer for weight matrices
-        kernel_regularizer: Regularizer for weight matrices
-        name: Optional name for the layer
-        **kwargs: Additional layer arguments
+        embed_dim: Dimension of input embeddings.
+        num_heads: Number of attention heads.
+        mlp_ratio: Ratio of MLP hidden dim to embedding dim.
+        dropout_rate: Dropout rate for residual connections.
+        attention_dropout_rate: Dropout rate for attention weights.
+        kernel_initializer: Initializer for weight matrices.
+        kernel_regularizer: Regularizer for weight matrices.
+        use_bias: Whether to use bias in dense layers.
+        norm_type: Type of normalization ('layer' or 'rms').
+        **kwargs: Additional layer arguments.
     """
 
     def __init__(
-            self,
-            embed_dim: int,
-            num_heads: int,
-            mlp_ratio: float = 4.0,
-            dropout_rate: float = 0.0,
-            attention_dropout_rate: float = 0.0,
-            kernel_initializer: Union[str, Initializer] = "he_normal",
-            kernel_regularizer: Optional[Regularizer] = None,
-            name: Optional[str] = None,
-            **kwargs
-    ):
-        super().__init__(name=name, **kwargs)
+        self,
+        embed_dim: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        dropout_rate: float = 0.0,
+        attention_dropout_rate: float = 0.0,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        use_bias: bool = True,
+        norm_type: str = "layer",
+        **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
 
-        # Layer Norm 1 (before attention)
-        self.norm1 = keras.layers.LayerNormalization(epsilon=1e-6, name=f"{name}_norm1" if name else None)
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.mlp_ratio = mlp_ratio
+        self.dropout_rate = dropout_rate
+        self.attention_dropout_rate = attention_dropout_rate
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.use_bias = use_bias
+        self.norm_type = norm_type
 
-        # Multi-head Self Attention
+        if norm_type not in ["layer", "rms"]:
+            raise ValueError(f"norm_type must be 'layer' or 'rms', got {norm_type}")
+
+        # Initialize to None, will be created in build()
+        self.norm1 = None
+        self.attn = None
+        self.dropout1 = None
+        self.norm2 = None
+        self.mlp = None
+        self._build_input_shape = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the layer's weights.
+
+        Args:
+            input_shape: Shape of the input tensor.
+        """
+        self._build_input_shape = input_shape
+
+        # Create normalization layers
+        if self.norm_type == "rms":
+            self.norm1 = RMSNorm(name="norm1")
+            self.norm2 = RMSNorm(name="norm2")
+        else:
+            self.norm1 = keras.layers.LayerNormalization(epsilon=1e-6, name="norm1")
+            self.norm2 = keras.layers.LayerNormalization(epsilon=1e-6, name="norm2")
+
+        # Create multi-head attention
         self.attn = MultiHeadAttention(
-            embed_dim=embed_dim,
-            num_heads=num_heads,
-            dropout_rate=attention_dropout_rate,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            name=f"{name}_attn" if name else None
+            embed_dim=self.embed_dim,
+            num_heads=self.num_heads,
+            dropout_rate=self.attention_dropout_rate,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            use_bias=self.use_bias,
+            name="attn"
         )
-        self.dropout1 = keras.layers.Dropout(dropout_rate)
 
-        # Layer Norm 2 (before MLP)
-        self.norm2 = keras.layers.LayerNormalization(epsilon=1e-6, name=f"{name}_norm2" if name else None)
+        # Create dropout layer
+        self.dropout1 = keras.layers.Dropout(self.dropout_rate)
 
-        # MLP block
-        mlp_hidden_dim = int(embed_dim * mlp_ratio)
-        self.mlp = keras.Sequential([
-            keras.layers.Dense(
-                mlp_hidden_dim,
-                kernel_initializer=kernel_initializer,
-                kernel_regularizer=kernel_regularizer,
-                name=f"{name}_mlp1" if name else None
-            ),
-            keras.layers.Activation("gelu"),
-            keras.layers.Dropout(dropout_rate),
-            keras.layers.Dense(
-                embed_dim,
-                kernel_initializer=kernel_initializer,
-                kernel_regularizer=kernel_regularizer,
-                name=f"{name}_mlp2" if name else None
-            ),
-            keras.layers.Dropout(dropout_rate)
-        ], name=f"{name}_mlp" if name else None)
+        # Create MLP block using existing MLP layer
+        mlp_hidden_dim = int(self.embed_dim * self.mlp_ratio)
+        self.mlp = MLPBlock(
+            hidden_units=[mlp_hidden_dim, self.embed_dim],
+            activation="gelu",
+            dropout_rate=self.dropout_rate,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            use_bias=self.use_bias,
+            name="mlp"
+        )
 
-    def call(self, x: tf.Tensor, training: bool = False) -> tf.Tensor:
+        # Build sublayers
+        self.norm1.build(input_shape)
+        self.attn.build(input_shape)
+        self.dropout1.build(input_shape)
+        self.norm2.build(input_shape)
+        self.mlp.build(input_shape)
+
+        super().build(input_shape)
+
+    def call(self, x: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """Forward pass of the layer.
 
         Args:
-            x: Input tensor of shape (batch_size, seq_len, embed_dim)
-            training: Whether in training mode
+            x: Input tensor of shape (batch_size, seq_len, embed_dim).
+            training: Whether in training mode.
 
         Returns:
-            Output tensor of shape (batch_size, seq_len, embed_dim)
+            Output tensor of shape (batch_size, seq_len, embed_dim).
         """
-        # Attention block (with residual)
-        x1 = self.norm1(x)
+        # Attention block with residual connection
+        x1 = self.norm1(x, training=training)
         x1 = self.attn(x1, training=training)
         x1 = self.dropout1(x1, training=training)
         x = x + x1
 
-        # MLP block (with residual)
-        x2 = self.norm2(x)
+        # MLP block with residual connection
+        x2 = self.norm2(x, training=training)
         x2 = self.mlp(x2, training=training)
-        return x + x2
+        x = x + x2
 
-    def get_config(self) -> dict:
-        """Gets layer configuration for serialization."""
+        return x
+
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Compute the output shape of the layer.
+
+        Args:
+            input_shape: Shape of the input.
+
+        Returns:
+            Output shape.
+        """
+        return input_shape
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get the layer configuration.
+
+        Returns:
+            Dictionary containing the layer configuration.
+        """
         config = super().get_config()
         config.update({
-            "embed_dim": self.attn.embed_dim,
-            "num_heads": self.attn.num_heads,
-            "mlp_ratio": self.mlp.layers[0].units / self.attn.embed_dim,
-            "dropout_rate": self.dropout1.rate,
-            "attention_dropout_rate": self.attn.dropout.rate,
-            "kernel_initializer": keras.initializers.serialize(self.attn.qkv.kernel_initializer),
-            "kernel_regularizer": keras.regularizers.serialize(self.attn.qkv.kernel_regularizer)
+            "embed_dim": self.embed_dim,
+            "num_heads": self.num_heads,
+            "mlp_ratio": self.mlp_ratio,
+            "dropout_rate": self.dropout_rate,
+            "attention_dropout_rate": self.attention_dropout_rate,
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "use_bias": self.use_bias,
+            "norm_type": self.norm_type,
         })
         return config
+
+    def get_build_config(self) -> Dict[str, Any]:
+        """Get the build configuration.
+
+        Returns:
+            Dictionary containing the build configuration.
+        """
+        return {"input_shape": self._build_input_shape}
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Build the layer from a config.
+
+        Args:
+            config: Dictionary containing the build configuration.
+        """
+        if config.get("input_shape") is not None:
+            self.build(config["input_shape"])
+
+
+@keras.saving.register_keras_serializable()
+class VisionTransformerBlock(keras.layers.Layer):
+    """Complete Vision Transformer Block.
+
+    Combines patch embedding, positional embedding, and transformer layers
+    to create a complete vision transformer block.
+
+    Args:
+        patch_size: Size of patches to extract from input images.
+        embed_dim: Dimension of patch embeddings.
+        num_heads: Number of attention heads.
+        num_layers: Number of transformer layers.
+        mlp_ratio: Ratio of MLP hidden dim to embedding dim.
+        dropout_rate: Dropout rate for residual connections.
+        attention_dropout_rate: Dropout rate for attention weights.
+        kernel_initializer: Initializer for weight matrices.
+        kernel_regularizer: Regularizer for weight matrices.
+        use_bias: Whether to use bias in dense layers.
+        norm_type: Type of normalization ('layer' or 'rms').
+        use_cls_token: Whether to add a classification token.
+        **kwargs: Additional layer arguments.
+    """
+
+    def __init__(
+        self,
+        patch_size: Union[int, Tuple[int, int]] = 16,
+        embed_dim: int = 768,
+        num_heads: int = 12,
+        num_layers: int = 12,
+        mlp_ratio: float = 4.0,
+        dropout_rate: float = 0.0,
+        attention_dropout_rate: float = 0.0,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        use_bias: bool = True,
+        norm_type: str = "layer",
+        use_cls_token: bool = True,
+        **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+        self.mlp_ratio = mlp_ratio
+        self.dropout_rate = dropout_rate
+        self.attention_dropout_rate = attention_dropout_rate
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.use_bias = use_bias
+        self.norm_type = norm_type
+        self.use_cls_token = use_cls_token
+
+        # Initialize to None, will be created in build()
+        self.patch_embed = None
+        self.pos_embed = None
+        self.cls_token = None
+        self.transformer_layers = None
+        self.norm = None
+        self._build_input_shape = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the layer's weights.
+
+        Args:
+            input_shape: Shape of the input tensor.
+        """
+        self._build_input_shape = input_shape
+
+        # Create patch embedding layer
+        self.patch_embed = PatchEmbedding2D(
+            patch_size=self.patch_size,
+            embed_dim=self.embed_dim,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            name="patch_embed"
+        )
+
+        # Calculate number of patches
+        if isinstance(self.patch_size, int):
+            patch_h = patch_w = self.patch_size
+        else:
+            patch_h, patch_w = self.patch_size
+
+        img_h, img_w = input_shape[1], input_shape[2]
+        num_patches = (img_h // patch_h) * (img_w // patch_w)
+
+        # Add cls token if requested
+        if self.use_cls_token:
+            self.cls_token = self.add_weight(
+                name="cls_token",
+                shape=(1, 1, self.embed_dim),
+                initializer="zeros",
+                trainable=True
+            )
+            seq_len = num_patches + 1
+        else:
+            seq_len = num_patches
+
+        # Create positional embedding
+        self.pos_embed = PositionalEmbedding(
+            sequence_length=seq_len,
+            embed_dim=self.embed_dim,
+            name="pos_embed"
+        )
+
+        # Create transformer layers
+        self.transformer_layers = [
+            VisionTransformerLayer(
+                embed_dim=self.embed_dim,
+                num_heads=self.num_heads,
+                mlp_ratio=self.mlp_ratio,
+                dropout_rate=self.dropout_rate,
+                attention_dropout_rate=self.attention_dropout_rate,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                use_bias=self.use_bias,
+                norm_type=self.norm_type,
+                name=f"transformer_{i}"
+            )
+            for i in range(self.num_layers)
+        ]
+
+        # Create final normalization layer
+        if self.norm_type == "rms":
+            self.norm = RMSNorm(name="norm")
+        else:
+            self.norm = keras.layers.LayerNormalization(epsilon=1e-6, name="norm")
+
+        # Build sublayers
+        patch_embed_shape = (input_shape[0], num_patches, self.embed_dim)
+        self.patch_embed.build(input_shape)
+        self.pos_embed.build(patch_embed_shape)
+
+        if self.use_cls_token:
+            transformer_input_shape = (input_shape[0], seq_len, self.embed_dim)
+        else:
+            transformer_input_shape = patch_embed_shape
+
+        for layer in self.transformer_layers:
+            layer.build(transformer_input_shape)
+
+        self.norm.build(transformer_input_shape)
+
+        super().build(input_shape)
+
+    def call(self, x: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+        """Forward pass of the layer.
+
+        Args:
+            x: Input tensor of shape (batch_size, height, width, channels).
+            training: Whether in training mode.
+
+        Returns:
+            Output tensor of shape (batch_size, seq_len, embed_dim).
+        """
+        # Convert image to patches
+        x = self.patch_embed(x)  # (batch_size, num_patches, embed_dim)
+
+        # Add cls token if requested
+        if self.use_cls_token:
+            batch_size = ops.shape(x)[0]
+            cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
+            x = ops.concatenate([cls_tokens, x], axis=1)
+
+        # Add positional embeddings
+        x = self.pos_embed(x)
+
+        # Apply transformer layers
+        for layer in self.transformer_layers:
+            x = layer(x, training=training)
+
+        # Apply final normalization
+        x = self.norm(x, training=training)
+
+        return x
+
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Compute the output shape of the layer.
+
+        Args:
+            input_shape: Shape of the input.
+
+        Returns:
+            Output shape.
+        """
+        if isinstance(self.patch_size, int):
+            patch_h = patch_w = self.patch_size
+        else:
+            patch_h, patch_w = self.patch_size
+
+        img_h, img_w = input_shape[1], input_shape[2]
+        num_patches = (img_h // patch_h) * (img_w // patch_w)
+
+        if self.use_cls_token:
+            seq_len = num_patches + 1
+        else:
+            seq_len = num_patches
+
+        return (input_shape[0], seq_len, self.embed_dim)
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get the layer configuration.
+
+        Returns:
+            Dictionary containing the layer configuration.
+        """
+        config = super().get_config()
+        config.update({
+            "patch_size": self.patch_size,
+            "embed_dim": self.embed_dim,
+            "num_heads": self.num_heads,
+            "num_layers": self.num_layers,
+            "mlp_ratio": self.mlp_ratio,
+            "dropout_rate": self.dropout_rate,
+            "attention_dropout_rate": self.attention_dropout_rate,
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "use_bias": self.use_bias,
+            "norm_type": self.norm_type,
+            "use_cls_token": self.use_cls_token,
+        })
+        return config
+
+    def get_build_config(self) -> Dict[str, Any]:
+        """Get the build configuration.
+
+        Returns:
+            Dictionary containing the build configuration.
+        """
+        return {"input_shape": self._build_input_shape}
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Build the layer from a config.
+
+        Args:
+            config: Dictionary containing the build configuration.
+        """
+        if config.get("input_shape") is not None:
+            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------

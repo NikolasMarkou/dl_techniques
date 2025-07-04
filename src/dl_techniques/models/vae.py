@@ -57,9 +57,14 @@ from keras import ops
 import tensorflow as tf
 from typing import Optional, Tuple, Union, Dict, Any, List
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.sampling import Sampling
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class VAE(keras.Model):
@@ -633,6 +638,7 @@ class VAE(keras.Model):
             )
         return cls(**config)
 
+# ---------------------------------------------------------------------
 
 def create_vae(
     input_shape: Tuple[int, int, int],
@@ -700,3 +706,5 @@ def create_vae(
                f"latent_dim={latent_dim}")
 
     return model
+
+# ---------------------------------------------------------------------
