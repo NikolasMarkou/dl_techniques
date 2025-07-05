@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
 """
-Enhanced training script for Keras-compliant CapsNet with comprehensive visualizations.
+CapsNet with comprehensive visualizations.
 
 This script demonstrates how to train the CapsNet model using standard Keras
 workflows with model.compile() and model.fit(). The script handles data loading,
@@ -11,27 +10,34 @@ Usage:
     python train.py [--dataset mnist] [--epochs 50] [--batch-size 32]
 """
 
-import argparse
-import os
-import numpy as np
-import keras
-import tensorflow as tf
-import matplotlib
 
+import os
+import keras
+import argparse
+import matplotlib
+import numpy as np
+import tensorflow as tf
 matplotlib.use('Agg')  # Use non-interactive backend
-import matplotlib.pyplot as plt
-import seaborn as sns
 import pandas as pd
+import seaborn as sns
 from datetime import datetime
+import matplotlib.pyplot as plt
 from typing import Tuple, Dict, Any, Optional
 
-from dl_techniques.models.capsnet import CapsNet, create_capsnet, CapsuleAccuracy
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.models.capsnet import create_capsnet
 from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
 
 # Set style for better plots
 plt.style.use('seaborn-v0_8')
 sns.set_palette("husl")
 
+# ---------------------------------------------------------------------
 
 def setup_gpu():
     """Configure GPU settings for optimal training."""
@@ -47,6 +53,7 @@ def setup_gpu():
     else:
         logger.info("No GPUs found, using CPU")
 
+# ---------------------------------------------------------------------
 
 def load_mnist_data(
         validation_split: float = 0.1,
