@@ -1739,7 +1739,8 @@ class ModelAnalyzer:
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Loss')
         ax.set_title('Training and Validation Loss Evolution')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+        # disable legend
+        #ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
         ax.grid(True, alpha=0.3)
         ax.set_yscale('log')  # Log scale often better for loss
 
