@@ -1617,7 +1617,7 @@ class ModelAnalyzer:
         val_acc = find_metric_in_history(history, VAL_ACC_PATTERNS)
 
         # Epochs to convergence (95% of max validation accuracy)
-        if val_acc:
+        if val_acc is not None and len(val_acc) > 0:
             max_val_acc = max(val_acc)
             threshold = CONVERGENCE_THRESHOLD * max_val_acc
             epochs_to_conv = next((i for i, acc in enumerate(val_acc) if acc >= threshold), len(val_acc))
@@ -1642,7 +1642,7 @@ class ModelAnalyzer:
             metrics.final_gap[model_name] = val_loss[-1] - train_loss[-1]
 
         # Peak performance
-        if val_acc:
+        if val_acc is not None and len(val_acc) > 0:
             best_epoch = np.argmax(val_acc)
             metrics.peak_performance[model_name] = {
                 'epoch': best_epoch,
@@ -1718,7 +1718,7 @@ class ModelAnalyzer:
             else:
                 train_loss = curves.get('loss', find_metric_in_history(curves, LOSS_PATTERNS))
 
-            if train_loss:
+            if train_loss is not None and len(train_loss) > 0:
                 epochs = range(len(train_loss))
                 ax.plot(epochs, train_loss, '-', color=color,
                        linewidth=2, label=f'{model_name} (train)', alpha=0.8)
@@ -1729,7 +1729,7 @@ class ModelAnalyzer:
             else:
                 val_loss = curves.get('val_loss', find_metric_in_history(curves, VAL_LOSS_PATTERNS))
 
-            if val_loss:
+            if val_loss is not None and len(val_loss) > 0:
                 epochs = range(len(val_loss))
                 ax.plot(epochs, val_loss, '--', color=color,
                        linewidth=2, label=f'{model_name} (val)', alpha=0.8)
@@ -1759,7 +1759,7 @@ class ModelAnalyzer:
             else:
                 train_acc = curves.get('accuracy', find_metric_in_history(curves, ACC_PATTERNS))
 
-            if train_acc:
+            if train_acc is not None and len(train_acc) > 0:
                 epochs = range(len(train_acc))
                 ax.plot(epochs, train_acc, '-', color=color,
                        linewidth=2, label=f'{model_name} (train)', alpha=0.8)
@@ -1770,7 +1770,7 @@ class ModelAnalyzer:
             else:
                 val_acc = curves.get('val_accuracy', find_metric_in_history(curves, VAL_ACC_PATTERNS))
 
-            if val_acc:
+            if val_acc is not None and len(val_acc) > 0:
                 epochs = range(len(val_acc))
                 ax.plot(epochs, val_acc, '--', color=color,
                        linewidth=2, label=f'{model_name} (val)', alpha=0.8)
@@ -1799,7 +1799,8 @@ class ModelAnalyzer:
             train_loss = find_metric_in_history(history, LOSS_PATTERNS)
             val_loss = find_metric_in_history(history, VAL_LOSS_PATTERNS)
 
-            if train_loss and val_loss and len(train_loss) == len(val_loss):
+            if (train_loss is not None and val_loss is not None and
+                    len(train_loss) > 0 and 0 < len(val_loss) == len(train_loss)):
                 # Calculate gap over time
                 gap = np.array(val_loss) - np.array(train_loss)
 
