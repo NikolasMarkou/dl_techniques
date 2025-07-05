@@ -201,7 +201,7 @@ class BandRMSExperimentConfig:
     activation: str = 'gelu'
 
     # --- Training Parameters ---
-    epochs: int = 100
+    epochs: int = 10
     batch_size: int = 128
     learning_rate: float = 0.001
     early_stopping_patience: int = 20
@@ -891,6 +891,24 @@ def save_experiment_results(results: Dict[str, Any], experiment_dir: Path) -> No
         experiment_dir: Directory to save results
     """
     try:
+        # Helper function to convert numpy types to Python native types
+        def convert_numpy_to_python(obj):
+            """Recursively convert numpy types to Python native types."""
+            if isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {key: convert_numpy_to_python(value) for key, value in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy_to_python(item) for item in obj]
+            elif isinstance(obj, tuple):
+                return tuple(convert_numpy_to_python(item) for item in obj)
+            else:
+                return obj
+
         # Save configuration
         config_dict = {
             'experiment_name': results['config'].experiment_name,
@@ -910,9 +928,10 @@ def save_experiment_results(results: Dict[str, Any], experiment_dir: Path) -> No
         with open(experiment_dir / "experiment_config.json", 'w') as f:
             json.dump(config_dict, f, indent=2)
 
-        # Save statistical results
+        # Convert and save statistical results
+        statistical_results_converted = convert_numpy_to_python(results['run_statistics'])
         with open(experiment_dir / "statistical_results.json", 'w') as f:
-            json.dump(results['run_statistics'], f, indent=2)
+            json.dump(statistical_results_converted, f, indent=2)
 
         # Save models
         models_dir = experiment_dir / "models"
@@ -925,7 +944,7 @@ def save_experiment_results(results: Dict[str, Any], experiment_dir: Path) -> No
         logger.info("✅ Experiment results saved successfully")
 
     except Exception as e:
-        logger.error(f"❌ Failed to save experiment results: {e}")
+        logger.error(f"❌ Failed to save experiment results: {e}", exc_info=True)
 
 def print_experiment_summary(results: Dict[str, Any]) -> None:
     """

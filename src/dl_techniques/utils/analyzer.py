@@ -1713,7 +1713,7 @@ class ModelAnalyzer:
                 curves = history
 
             # Plot training loss using flexible pattern matching
-            if curves == history:
+            if curves is history:
                 train_loss = find_metric_in_history(curves, LOSS_PATTERNS)
             else:
                 train_loss = curves.get('loss', find_metric_in_history(curves, LOSS_PATTERNS))
@@ -1724,7 +1724,7 @@ class ModelAnalyzer:
                        linewidth=2, label=f'{model_name} (train)', alpha=0.8)
 
             # Plot validation loss using flexible pattern matching
-            if curves == history:
+            if curves is history:
                 val_loss = find_metric_in_history(curves, VAL_LOSS_PATTERNS)
             else:
                 val_loss = curves.get('val_loss', find_metric_in_history(curves, VAL_LOSS_PATTERNS))
@@ -1754,7 +1754,7 @@ class ModelAnalyzer:
                 curves = history
 
             # Plot training accuracy using flexible pattern matching
-            if curves == history:
+            if curves is history:
                 train_acc = find_metric_in_history(curves, ACC_PATTERNS)
             else:
                 train_acc = curves.get('accuracy', find_metric_in_history(curves, ACC_PATTERNS))
@@ -1765,7 +1765,7 @@ class ModelAnalyzer:
                        linewidth=2, label=f'{model_name} (train)', alpha=0.8)
 
             # Plot validation accuracy using flexible pattern matching
-            if curves == history:
+            if curves is history:
                 val_acc = find_metric_in_history(curves, VAL_ACC_PATTERNS)
             else:
                 val_acc = curves.get('val_accuracy', find_metric_in_history(curves, VAL_ACC_PATTERNS))
