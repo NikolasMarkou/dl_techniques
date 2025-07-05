@@ -1829,7 +1829,8 @@ class ModelAnalyzer:
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Validation Loss - Training Loss')
         ax.set_title('Overfitting Analysis (Gap Evolution)')
-        ax.legend()
+        # disable legend
+        # ax.legend()
         ax.grid(True, alpha=0.3)
 
         # Add annotation
