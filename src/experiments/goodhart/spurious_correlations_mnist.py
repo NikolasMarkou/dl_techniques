@@ -16,10 +16,10 @@ Experimental Design
 -------------------
 
 **Dataset**: Colored MNIST (10 classes, 28×28 RGB images)
-- A synthetic dataset with a controlled distribution shift.
-- **Training Set**: High (95%) spurious correlation between digit class and color.
-- **Test Set**: Zero correlation; color is random and uninformative.
-- **Validation Set**: Intermediate (50%) correlation for monitoring.
+- A synthetic dataset with a controlled distribution shift
+- **Training Set**: High (95%) spurious correlation between digit class and color
+- **Test Set**: Zero correlation; color is random and uninformative
+- **Validation Set**: Intermediate (50%) correlation for monitoring
 
 **Model Architecture**: ResNet-inspired CNN with the following components:
 - Initial convolutional layer (32 filters)
@@ -28,14 +28,15 @@ Experimental Design
 - Batch normalization and dropout regularization
 - Global average pooling
 - Dense classification layers with L2 regularization
+- Softmax output layer for probability predictions
 
 **Loss Functions Evaluated**:
 
-1.  **Standard Cross-Entropy**: The baseline, expected to overfit to spurious features.
-2.  **Label Smoothing**: Regularization to reduce overconfidence.
-3.  **Focal Loss**: Down-weights easy examples to focus on hard ones.
-4.  **Goodhart-Aware Loss**: Combines cross-entropy with entropy and mutual
-    information regularization to improve robustness.
+1. **Standard Cross-Entropy**: The baseline, expected to overfit to spurious features
+2. **Label Smoothing**: Regularization to reduce overconfidence
+3. **Focal Loss**: Down-weights easy examples to focus on hard ones
+4. **Goodhart-Aware Loss**: Combines cross-entropy with entropy and mutual
+   information regularization to improve robustness
 
 Comprehensive Analysis Pipeline
 ------------------------------
@@ -44,39 +45,83 @@ The experiment employs a multi-faceted analysis approach using the `ModelAnalyze
 and experiment-specific metrics:
 
 **Training Analysis**:
-- Training and validation curves for all loss functions.
-- Convergence behavior and early stopping.
+- Training and validation curves for all loss functions
+- Convergence behavior and early stopping
 
 **Model Performance Evaluation**:
-- **Test Set Accuracy**: The primary metric for robustness on the uncorrelated test set.
-- Top-k accuracy and loss values.
+- **Test Set Accuracy**: The primary metric for robustness on the uncorrelated test set
+- Top-k accuracy and loss values
 
 **Calibration and Distribution Analysis** (via `ModelAnalyzer`):
-- Expected Calibration Error (ECE) and Brier score.
-- Reliability diagrams and confidence histograms.
-- Entropy and probability distribution analysis of model outputs.
+- Expected Calibration Error (ECE) and Brier score
+- Reliability diagrams and confidence histograms
+- Entropy and probability distribution analysis of model outputs
 
 **Weight and Activation Analysis** (via `ModelAnalyzer`):
-- Layer-wise weight distribution statistics.
-- Analysis of information flow and feature representations.
+- Layer-wise weight distribution statistics
+- Analysis of information flow and feature representations
 
 **Spurious Correlation Analysis** (Custom Metrics):
 - **Generalization Gap**: `Train Accuracy - Test Accuracy`, measuring overfitting
-  to spurious correlations.
+  to spurious correlations
 - **Color Dependency Score**: Quantifies how much predictions change when image
-  colors are shuffled, directly measuring reliance on the spurious feature.
+  colors are shuffled, directly measuring reliance on the spurious feature
 
 Expected Outcomes and Insights
 ------------------------------
 
 This experiment is designed to reveal:
 
-1.  **Robustness to Spurious Correlations**: Which loss functions produce models
-    that maintain high accuracy when the spurious correlation is removed.
-2.  **Generalization vs. Shortcut Learning**: The extent to which models learn
-    the intended features (digit shape) versus unintended shortcuts (color).
-3.  **Information-Theoretic Benefits**: Whether the Goodhart-Aware Loss provides
-    measurable advantages in preventing overfitting to spurious signals.
+1. **Robustness to Spurious Correlations**: Which loss functions produce models
+   that maintain high accuracy when the spurious correlation is removed
+
+2. **Generalization vs. Shortcut Learning**: The extent to which models learn
+   the intended features (digit shape) versus unintended shortcuts (color)
+
+3. **Information-Theoretic Benefits**: Whether the Goodhart-Aware Loss provides
+   measurable advantages in preventing overfitting to spurious signals
+
+Usage Example
+-------------
+
+Basic usage with default configuration:
+
+    ```python
+    config = ExperimentConfig()
+    results = run_experiment(config)
+
+    # Access results
+    robustness = results['robustness_analysis']
+    performance = results['performance_analysis']
+    ```
+
+Advanced usage with custom configuration:
+
+    ```python
+    config = ExperimentConfig(
+        train_correlation_strength=0.9,
+        epochs=50,
+        loss_functions={
+            'CrossEntropy': lambda: keras.losses.CategoricalCrossentropy(from_logits=False),
+            'CustomGoodhart': lambda: GoodhartAwareLoss(
+                entropy_weight=0.2,
+                mi_weight=0.05,
+                from_logits=False
+            )
+        }
+    )
+    results = run_experiment(config)
+    ```
+
+Theoretical Foundation
+----------------------
+
+This experiment tests the practical implications of Goodhart's Law in machine
+learning: "When a measure becomes a target, it ceases to be a good measure."
+By introducing spurious correlations, we create a scenario where models can
+achieve high training accuracy through shortcuts rather than learning robust
+features. The information-theoretic regularization in GoodhartAwareLoss aims
+to prevent this by encouraging models to compress away spurious signals.
 """
 
 # ==============================================================================
@@ -89,17 +134,13 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Callable
 
-
 import keras
 import numpy as np
 
-# --- Core project utilities ---
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.goodhart_loss import GoodhartAwareLoss
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
-
-# --- ModelAnalyzer for comprehensive analysis ---
 from dl_techniques.utils.analyzer import (
     ModelAnalyzer,
     AnalysisConfig,
@@ -114,7 +155,13 @@ from dl_techniques.utils.analyzer import (
 
 @dataclass
 class ExperimentConfig:
-    """Unified configuration for the Colored MNIST spurious correlation experiment."""
+    """
+    Configuration for the Colored MNIST spurious correlation experiment.
+
+    This class encapsulates all configurable parameters for the experiment,
+    including dataset configuration, model architecture parameters, training
+    settings, loss function definitions, and analysis configuration.
+    """
 
     # --- Dataset Configuration ---
     dataset_name: str = "colored_mnist"
@@ -139,23 +186,25 @@ class ExperimentConfig:
     use_residual: bool = True
 
     # --- Training Parameters ---
-    epochs: int = 10
+    epochs: int = 30
     batch_size: int = 128
     learning_rate: float = 0.001
-    early_stopping_patience: int = 8
+    early_stopping_patience: int = 10
     monitor_metric: str = 'val_accuracy'
 
-    # --- Loss Functions to Evaluate ---
+    # --- Loss Functions to Evaluate (Updated for softmax outputs) ---
     loss_functions: Dict[str, Callable] = field(default_factory=lambda: {
-        'CrossEntropy': lambda: keras.losses.CategoricalCrossentropy(from_logits=True),
+        'CrossEntropy': lambda: keras.losses.CategoricalCrossentropy(
+            from_logits=False
+        ),
         'LabelSmoothing': lambda: keras.losses.CategoricalCrossentropy(
-            label_smoothing=0.1, from_logits=True
+            label_smoothing=0.1, from_logits=False
         ),
         'FocalLoss': lambda: keras.losses.CategoricalFocalCrossentropy(
-            gamma=2.0, from_logits=True
+            gamma=2.0, from_logits=False
         ),
         'GoodhartAware': lambda: GoodhartAwareLoss(
-            entropy_weight=0.15, mi_weight=0.02, from_logits=True
+            entropy_weight=0.1, mi_weight=0.01, from_logits=False
         ),
     })
 
@@ -168,9 +217,7 @@ class ExperimentConfig:
     analyzer_config: AnalysisConfig = field(default_factory=lambda: AnalysisConfig(
         analyze_weights=True,
         analyze_calibration=True,
-        analyze_probability_distributions=True,
-        analyze_activations=False,  # Can be slow, disable by default
-        analyze_information_flow=False,
+        analyze_information_flow=True,
         calibration_bins=15,
         save_plots=True,
         plot_style='publication',
@@ -191,49 +238,104 @@ class ColoredMNISTData:
     x_test: np.ndarray
     y_test: np.ndarray
 
+
 def colorize_mnist(
-    images: np.ndarray, labels: np.ndarray, correlation: float, num_classes: int
+    images: np.ndarray,
+    labels: np.ndarray,
+    correlation: float,
+    num_classes: int
 ) -> np.ndarray:
-    """Colorizes MNIST images with a specified label-color correlation."""
+    """
+    Colorizes MNIST images with a specified label-color correlation.
+
+    Args:
+        images: Grayscale MNIST images
+        labels: Integer labels for the images
+        correlation: Strength of correlation between labels and colors (0.0 to 1.0)
+        num_classes: Number of classes (colors) to use
+
+    Returns:
+        RGB images with applied color based on correlation strength
+    """
+    # Define a distinct color palette for each digit class
     color_palette = [
-        (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255),
-        (0, 255, 255), (128, 0, 0), (0, 128, 0), (0, 0, 128), (128, 128, 0)
+        (255, 0, 0),    # Red for 0
+        (0, 255, 0),    # Green for 1
+        (0, 0, 255),    # Blue for 2
+        (255, 255, 0),  # Yellow for 3
+        (255, 0, 255),  # Magenta for 4
+        (0, 255, 255),  # Cyan for 5
+        (128, 0, 0),    # Dark red for 6
+        (0, 128, 0),    # Dark green for 7
+        (0, 0, 128),    # Dark blue for 8
+        (128, 128, 0)   # Olive for 9
     ]
+
+    # Normalize grayscale images and add channel dimension
     normalized_images = np.expand_dims(images.astype(np.float32) / 255.0, axis=-1)
     colored_images = np.zeros((*images.shape, 3), dtype=np.float32)
 
     for i, label in enumerate(labels):
+        # Decide whether to use correlated or random color
         if np.random.rand() < correlation:
-            color_idx = int(label)
+            color_idx = int(label)  # Use label-correlated color
         else:
-            color_idx = np.random.randint(num_classes)
+            color_idx = np.random.randint(num_classes)  # Use random color
+
+        # Apply the selected color
         color = np.array(color_palette[color_idx], dtype=np.float32) / 255.0
         colored_images[i] = normalized_images[i] * color
+
     return colored_images
 
+
 def create_colored_mnist_dataset(config: ExperimentConfig) -> ColoredMNISTData:
-    """Generates the full Colored MNIST dataset with specified correlations."""
+    """
+    Generates the full Colored MNIST dataset with specified correlations.
+
+    Args:
+        config: Experiment configuration containing correlation parameters
+
+    Returns:
+        ColoredMNISTData object containing all dataset splits
+    """
     logger.info("🎨 Generating Colored MNIST dataset...")
+
+    # Set random seed for reproducibility
     np.random.seed(config.random_seed)
+
+    # Load original MNIST data
     (x_train_orig, y_train_orig), (x_test_orig, y_test_orig) = keras.datasets.mnist.load_data()
 
-    # Create validation split
+    # Create validation split from training data
     val_size = int(len(x_train_orig) * config.validation_split)
     indices = np.random.permutation(len(x_train_orig))
-    x_train_split, y_train_split = x_train_orig[indices[val_size:]], y_train_orig[indices[val_size:]]
-    x_val_split, y_val_split = x_train_orig[indices[:val_size]], y_train_orig[indices[:val_size]]
 
-    # Colorize each split
-    x_train = colorize_mnist(x_train_split, y_train_split, config.train_correlation_strength, config.num_classes)
-    x_val = colorize_mnist(x_val_split, y_val_split, config.validation_correlation_strength, config.num_classes)
-    x_test = colorize_mnist(x_test_orig, y_test_orig, config.test_correlation_strength, config.num_classes)
+    x_train_split = x_train_orig[indices[val_size:]]
+    y_train_split = y_train_orig[indices[val_size:]]
+    x_val_split = x_train_orig[indices[:val_size]]
+    y_val_split = y_train_orig[indices[:val_size]]
+
+    # Colorize each split with appropriate correlation
+    x_train = colorize_mnist(
+        x_train_split, y_train_split,
+        config.train_correlation_strength, config.num_classes
+    )
+    x_val = colorize_mnist(
+        x_val_split, y_val_split,
+        config.validation_correlation_strength, config.num_classes
+    )
+    x_test = colorize_mnist(
+        x_test_orig, y_test_orig,
+        config.test_correlation_strength, config.num_classes
+    )
 
     # One-hot encode labels
     y_train = keras.utils.to_categorical(y_train_split, config.num_classes)
     y_val = keras.utils.to_categorical(y_val_split, config.num_classes)
     y_test = keras.utils.to_categorical(y_test_orig, config.num_classes)
 
-    logger.info("✅ Dataset generated:")
+    logger.info("✅ Dataset generated successfully:")
     logger.info(f"   Train: {len(x_train)} samples, {config.train_correlation_strength:.0%} correlation")
     logger.info(f"   Val:   {len(x_val)} samples, {config.validation_correlation_strength:.0%} correlation")
     logger.info(f"   Test:  {len(x_test)} samples, {config.test_correlation_strength:.0%} correlation")
@@ -242,95 +344,216 @@ def create_colored_mnist_dataset(config: ExperimentConfig) -> ColoredMNISTData:
 
 
 # ==============================================================================
-# MODEL ARCHITECTURE (Adapted from Experiment 1)
+# MODEL ARCHITECTURE BUILDING UTILITIES
 # ==============================================================================
 
 def build_residual_block(
-    inputs: keras.layers.Layer, filters: int, config: ExperimentConfig, block_index: int
+    inputs: keras.layers.Layer,
+    filters: int,
+    config: ExperimentConfig,
+    block_index: int
 ) -> keras.layers.Layer:
-    """Builds a residual block with skip connections."""
+    """
+    Build a residual block with skip connections.
+
+    This function creates a residual block consisting of two convolutional layers
+    with batch normalization and ReLU activation, plus a skip connection that
+    bypasses the block. If the input and output dimensions don't match, a 1x1
+    convolution is used to adjust the skip connection.
+
+    Args:
+        inputs: Input tensor to the residual block
+        filters: Number of filters in the convolutional layers
+        config: Experiment configuration containing architecture parameters
+        block_index: Index of the current block (for naming layers)
+
+    Returns:
+        Output tensor after applying the residual block
+    """
+    # Store the original input for the skip connection
     shortcut = inputs
-    x = keras.layers.Conv2D(filters, config.kernel_size, padding='same',
-                            kernel_initializer=config.kernel_initializer,
-                            kernel_regularizer=keras.regularizers.L2(config.weight_decay),
-                            name=f'conv{block_index}_1')(inputs)
+
+    # First convolutional layer
+    x = keras.layers.Conv2D(
+        filters, config.kernel_size, padding='same',
+        kernel_initializer=config.kernel_initializer,
+        kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+        name=f'conv{block_index}_1'
+    )(inputs)
+
     if config.use_batch_norm:
         x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Activation('relu')(x)
 
-    x = keras.layers.Conv2D(filters, config.kernel_size, padding='same',
-                            kernel_initializer=config.kernel_initializer,
-                            kernel_regularizer=keras.regularizers.L2(config.weight_decay),
-                            name=f'conv{block_index}_2')(x)
+    # Second convolutional layer
+    x = keras.layers.Conv2D(
+        filters, config.kernel_size, padding='same',
+        kernel_initializer=config.kernel_initializer,
+        kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+        name=f'conv{block_index}_2'
+    )(x)
+
     if config.use_batch_norm:
         x = keras.layers.BatchNormalization()(x)
 
+    # Adjust skip connection if dimensions don't match
     if shortcut.shape[-1] != filters:
-        shortcut = keras.layers.Conv2D(filters, (1, 1), padding='same',
-                                       kernel_initializer=config.kernel_initializer,
-                                       kernel_regularizer=keras.regularizers.L2(config.weight_decay))(shortcut)
+        shortcut = keras.layers.Conv2D(
+            filters=filters,
+            kernel_size=(1, 1),
+            padding='same',
+            kernel_initializer=config.kernel_initializer,
+            kernel_regularizer=keras.regularizers.L2(config.weight_decay)
+        )(shortcut)
+
         if config.use_batch_norm:
             shortcut = keras.layers.BatchNormalization()(shortcut)
 
+    # Add skip connection and apply final activation
     x = keras.layers.Add()([x, shortcut])
-    return keras.layers.Activation('relu')(x)
+    x = keras.layers.Activation('relu')(x)
+
+    return x
+
 
 def build_conv_block(
-    inputs: keras.layers.Layer, filters: int, config: ExperimentConfig, block_index: int
+    inputs: keras.layers.Layer,
+    filters: int,
+    config: ExperimentConfig,
+    block_index: int
 ) -> keras.layers.Layer:
-    """Builds a convolutional block, optionally with residual connections."""
+    """
+    Build a convolutional block with optional residual connections.
+
+    This function creates either a standard convolutional block or a residual
+    block based on the configuration. It includes optional max pooling and
+    dropout regularization.
+
+    Args:
+        inputs: Input tensor to the convolutional block
+        filters: Number of filters in the convolutional layers
+        config: Experiment configuration containing architecture parameters
+        block_index: Index of the current block (for naming and logic)
+
+    Returns:
+        Output tensor after applying the convolutional block
+    """
+    # Use residual connections for blocks after the first one (if enabled)
     if config.use_residual and block_index > 0:
         x = build_residual_block(inputs, filters, config, block_index)
     else:
-        x = keras.layers.Conv2D(filters, config.kernel_size, padding='same',
-                                kernel_initializer=config.kernel_initializer,
-                                kernel_regularizer=keras.regularizers.L2(config.weight_decay),
-                                name=f'conv{block_index}')(inputs)
+        # Standard convolutional block
+        x = keras.layers.Conv2D(
+            filters=filters,
+            kernel_size=config.kernel_size,
+            padding='same',
+            kernel_initializer=config.kernel_initializer,
+            kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+            name=f'conv{block_index}'
+        )(inputs)
+
         if config.use_batch_norm:
             x = keras.layers.BatchNormalization()(x)
         x = keras.layers.Activation('relu')(x)
 
+    # Apply max pooling (except for the last convolutional block)
     if block_index < len(config.conv_filters) - 1:
         x = keras.layers.MaxPooling2D(config.pool_size)(x)
 
-    dropout_rate = config.dropout_rates[block_index] if block_index < len(config.dropout_rates) else 0.0
+    # Apply dropout if specified for this layer
+    dropout_rate = (config.dropout_rates[block_index]
+                   if block_index < len(config.dropout_rates) else 0.0)
     if dropout_rate > 0:
         x = keras.layers.Dropout(dropout_rate)(x)
+
     return x
 
+
 def build_model(config: ExperimentConfig, loss_fn: Callable, name: str) -> keras.Model:
-    """Builds a complete CNN model for Colored MNIST classification."""
+    """
+    Build a complete CNN model for Colored MNIST classification with softmax output.
+
+    This function constructs a ResNet-inspired CNN with configurable architecture
+    parameters. The model includes convolutional blocks, global average pooling,
+    dense classification layers, and a final softmax layer for probability output.
+
+    Args:
+        config: Experiment configuration containing model architecture parameters
+        loss_fn: Loss function to use for training
+        name: Name prefix for the model and its layers
+
+    Returns:
+        Compiled Keras model ready for training with softmax probability outputs
+    """
+    # Define input layer
     inputs = keras.layers.Input(shape=config.input_shape, name=f'{name}_input')
-    x = keras.layers.Conv2D(config.conv_filters[0], config.kernel_size, padding='same',
-                            kernel_initializer=config.kernel_initializer,
-                            kernel_regularizer=keras.regularizers.L2(config.weight_decay),
-                            name='initial_conv')(inputs)
+
+    # Initial convolutional layer
+    x = keras.layers.Conv2D(
+        filters=config.conv_filters[0],
+        kernel_size=config.kernel_size,
+        padding='same',
+        kernel_initializer=config.kernel_initializer,
+        kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+        name='initial_conv'
+    )(inputs)
+
     if config.use_batch_norm:
         x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Activation('relu')(x)
 
+    # Stack of convolutional blocks
     for i, filters in enumerate(config.conv_filters):
         x = build_conv_block(x, filters, config, i)
 
+    # Global average pooling to reduce spatial dimensions
     x = keras.layers.GlobalAveragePooling2D()(x)
 
+    # Dense classification layers
     for j, units in enumerate(config.dense_units):
-        x = keras.layers.Dense(units, kernel_initializer=config.kernel_initializer,
-                               kernel_regularizer=keras.regularizers.L2(config.weight_decay),
-                               name=f'dense_{j}')(x)
+        x = keras.layers.Dense(
+            units=units,
+            kernel_initializer=config.kernel_initializer,
+            kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+            name=f'dense_{j}'
+        )(x)
+
         if config.use_batch_norm:
             x = keras.layers.BatchNormalization()(x)
         x = keras.layers.Activation('relu')(x)
-        dense_dropout_idx = len(config.conv_filters) + j
-        if dense_dropout_idx < len(config.dropout_rates) and config.dropout_rates[dense_dropout_idx] > 0:
-            x = keras.layers.Dropout(config.dropout_rates[dense_dropout_idx])(x)
 
-    logits = keras.layers.Dense(config.num_classes, kernel_initializer=config.kernel_initializer,
-                                kernel_regularizer=keras.regularizers.L2(config.weight_decay),
-                                name='logits')(x)
-    model = keras.Model(inputs=inputs, outputs=logits, name=f'{name}_model')
-    optimizer = keras.optimizers.Adam(learning_rate=config.learning_rate)
-    model.compile(optimizer=optimizer, loss=loss_fn, metrics=['accuracy'])
+        # Apply dropout if specified for dense layers
+        dense_dropout_idx = len(config.conv_filters) + j
+        if dense_dropout_idx < len(config.dropout_rates):
+            dropout_rate = config.dropout_rates[dense_dropout_idx]
+            if dropout_rate > 0:
+                x = keras.layers.Dropout(dropout_rate)(x)
+
+    # Pre-softmax logits layer
+    logits = keras.layers.Dense(
+        units=config.num_classes,
+        kernel_initializer=config.kernel_initializer,
+        kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+        name='logits'
+    )(x)
+
+    # Final softmax layer for probability output
+    predictions = keras.layers.Activation('softmax', name='predictions')(logits)
+
+    # Create and compile the model
+    model = keras.Model(inputs=inputs, outputs=predictions, name=f'{name}_model')
+
+    # Compile with comprehensive metrics
+    optimizer = keras.optimizers.AdamW(learning_rate=config.learning_rate)
+    model.compile(
+        optimizer=optimizer,
+        loss=loss_fn,
+        metrics=[
+            keras.metrics.CategoricalAccuracy(name='accuracy'),
+            keras.metrics.TopKCategoricalAccuracy(k=5, name='top_5_accuracy')
+        ]
+    )
+
     return model
 
 
@@ -338,122 +561,273 @@ def build_model(config: ExperimentConfig, loss_fn: Callable, name: str) -> keras
 # EXPERIMENT-SPECIFIC ANALYSIS
 # ==============================================================================
 
-def compute_color_dependency_score(model: keras.Model, x_test: np.ndarray, n_shuffles: int = 3) -> float:
-    """Computes how much a model's predictions change when colors are shuffled."""
+def compute_color_dependency_score(
+    model: keras.Model,
+    x_test: np.ndarray,
+    n_shuffles: int = 5
+) -> float:
+    """
+    Computes how much a model's predictions change when colors are shuffled.
+
+    This metric directly measures the model's reliance on color information.
+    A high score indicates the model depends heavily on color (spurious feature),
+    while a low score suggests the model relies on shape (robust feature).
+
+    Args:
+        model: Trained Keras model
+        x_test: Test images to evaluate
+        n_shuffles: Number of times to shuffle colors for averaging
+
+    Returns:
+        Average fraction of predictions that change when colors are shuffled
+    """
+    # Get original predictions
     original_preds = np.argmax(model.predict(x_test, verbose=0), axis=1)
+
     changes = []
     for _ in range(n_shuffles):
+        # Create a copy of test images
         shuffled_images = x_test.copy()
+
+        # Shuffle RGB channels for each image independently
         for i in range(len(shuffled_images)):
+            # Randomly permute the color channels
             shuffled_images[i] = shuffled_images[i][:, :, np.random.permutation(3)]
+
+        # Get predictions on shuffled images
         shuffled_preds = np.argmax(model.predict(shuffled_images, verbose=0), axis=1)
+
+        # Calculate fraction of changed predictions
         changes.append(np.mean(original_preds != shuffled_preds))
+
     return float(np.mean(changes))
+
 
 def analyze_robustness(
     models: Dict[str, keras.Model],
-    data: ColoredMNISTData
+    data: ColoredMNISTData,
+    config: ExperimentConfig
 ) -> Dict[str, Dict[str, float]]:
-    """Computes experiment-specific robustness metrics."""
+    """
+    Computes experiment-specific robustness metrics.
+
+    This function evaluates how well each model resists spurious correlations
+    by measuring the generalization gap and color dependency.
+
+    Args:
+        models: Dictionary of trained models
+        data: Colored MNIST dataset
+        config: Experiment configuration
+
+    Returns:
+        Dictionary of robustness metrics for each model
+    """
     logger.info("🛡️ Computing spurious correlation robustness metrics...")
+
     robustness_results = {}
+
     for name, model in models.items():
         logger.info(f"   Analyzing robustness for {name}...")
-        train_loss, train_acc = model.evaluate(data.x_train, data.y_train, verbose=0, batch_size=512)
-        test_loss, test_acc = model.evaluate(data.x_test, data.y_test, verbose=0, batch_size=512)
+
+        # Evaluate on training set (high correlation)
+        train_metrics = model.evaluate(
+            data.x_train, data.y_train,
+            verbose=0, batch_size=512
+        )
+        train_metrics_dict = dict(zip(model.metrics_names, train_metrics))
+
+        # Evaluate on test set (zero correlation)
+        test_metrics = model.evaluate(
+            data.x_test, data.y_test,
+            verbose=0, batch_size=512
+        )
+        test_metrics_dict = dict(zip(model.metrics_names, test_metrics))
+
+        # Compute color dependency score
         color_dependency = compute_color_dependency_score(model, data.x_test)
+
+        # Store results
         robustness_results[name] = {
-            'train_accuracy': train_acc,
-            'test_accuracy': test_acc,
-            'generalization_gap': train_acc - test_acc,
+            'train_accuracy': train_metrics_dict.get('accuracy', 0.0),
+            'test_accuracy': test_metrics_dict.get('accuracy', 0.0),
+            'generalization_gap': train_metrics_dict.get('accuracy', 0.0) - test_metrics_dict.get('accuracy', 0.0),
             'color_dependency': color_dependency,
+            'train_loss': train_metrics_dict.get('loss', 0.0),
+            'test_loss': test_metrics_dict.get('loss', 0.0),
         }
+
+        # Log detailed metrics
+        logger.info(f"     Train accuracy: {robustness_results[name]['train_accuracy']:.4f}")
+        logger.info(f"     Test accuracy:  {robustness_results[name]['test_accuracy']:.4f}")
+        logger.info(f"     Gen. gap:       {robustness_results[name]['generalization_gap']:.4f}")
+        logger.info(f"     Color dep.:     {robustness_results[name]['color_dependency']:.4f}")
+
     logger.info("✅ Robustness analysis completed.")
+
     return robustness_results
+
 
 # ==============================================================================
 # MAIN EXPERIMENT RUNNER
 # ==============================================================================
 
 def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
-    """Runs the complete Colored MNIST spurious correlation experiment."""
+    """
+    Run the complete Colored MNIST spurious correlation experiment.
+
+    This function orchestrates the entire experimental pipeline, including:
+    1. Dataset generation with controlled spurious correlations
+    2. Model training for each loss function
+    3. Model analysis and evaluation
+    4. Robustness metric computation
+    5. Visualization generation
+    6. Results compilation and reporting
+
+    Args:
+        config: Experiment configuration specifying all parameters
+
+    Returns:
+        Dictionary containing all experimental results and analysis
+    """
+    # Set random seed for reproducibility
     keras.utils.set_random_seed(config.random_seed)
+
+    # Create timestamped output directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     experiment_dir = config.output_dir / f"{config.experiment_name}_{timestamp}"
     experiment_dir.mkdir(parents=True, exist_ok=True)
-    vis_manager = VisualizationManager(output_dir=experiment_dir / "visualizations", timestamp_dirs=False)
 
+    # Initialize visualization manager
+    vis_manager = VisualizationManager(
+        output_dir=experiment_dir / "visualizations",
+        config=VisualizationConfig(),
+        timestamp_dirs=False
+    )
+
+    # Log experiment start
     logger.info("🚀 Starting Colored MNIST Spurious Correlation Experiment")
     logger.info(f"📁 Results will be saved to: {experiment_dir}")
     logger.info("=" * 80)
 
-    # ===== DATASET LOADING =====
+    # ===== DATASET GENERATION =====
+    logger.info("📊 Generating Colored MNIST dataset...")
     dataset = create_colored_mnist_dataset(config)
+    logger.info("✅ Dataset generation completed")
 
     # ===== MODEL TRAINING PHASE =====
     logger.info("🏋️ Starting model training phase...")
-    models, all_histories = {}, {}
+    trained_models = {}  # Store trained models (already with softmax output)
+    all_histories = {}  # Store training histories
+
     for loss_name, loss_fn_factory in config.loss_functions.items():
         logger.info(f"--- Training model with {loss_name} loss ---")
+
+        # Build model for this loss function (with softmax output)
         model = build_model(config, loss_fn_factory(), loss_name)
+
+        # Log model architecture info
+        logger.info(f"Model {loss_name} output layer: {model.output.name}")
+        logger.info(f"Model {loss_name} parameters: {model.count_params():,}")
+
+        # Configure training parameters
         training_config = TrainingConfig(
-            epochs=config.epochs, batch_size=config.batch_size,
+            epochs=config.epochs,
+            batch_size=config.batch_size,
             early_stopping_patience=config.early_stopping_patience,
-            monitor_metric=config.monitor_metric, model_name=loss_name,
+            monitor_metric=config.monitor_metric,
+            model_name=loss_name,
             output_dir=experiment_dir / "training_plots" / loss_name
         )
-        history = train_model(model, dataset.x_train, dataset.y_train,
-                              dataset.x_val, dataset.y_val, training_config)
-        models[loss_name] = model
+
+        # Train the model
+        history = train_model(
+            model,
+            dataset.x_train, dataset.y_train,
+            dataset.x_val, dataset.y_val,
+            training_config
+        )
+
+        # Store results
+        trained_models[loss_name] = model
         all_histories[loss_name] = history.history
+        logger.info(f"✅ {loss_name} training completed!")
 
-    # ===== MODEL ANALYSIS PREPARATION =====
-    logger.info("🛠️ Creating analysis models with softmax outputs...")
-    analysis_models = {}
-    for name, trained_model in models.items():
-        logits_output = trained_model.output
-        probs_output = keras.layers.Activation('softmax', name='predictions')(logits_output)
-        analysis_model = keras.Model(inputs=trained_model.input, outputs=probs_output, name=f"{name}_prediction")
-        analysis_model.set_weights(trained_model.get_weights())
-        analysis_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-        analysis_models[name] = analysis_model
-
+    # ===== MEMORY MANAGEMENT =====
+    logger.info("🗑️ Triggering garbage collection...")
     gc.collect()
 
     # ===== COMPREHENSIVE MODEL ANALYSIS =====
     logger.info("📊 Performing comprehensive analysis with ModelAnalyzer...")
     model_analysis_results = None
+
     try:
-        analyzer = ModelAnalyzer(models=analysis_models, config=config.analyzer_config,
-                                 output_dir=experiment_dir / "model_analysis")
+        # Initialize the model analyzer with trained models (already have softmax outputs)
+        analyzer = ModelAnalyzer(
+            models=trained_models,
+            config=config.analyzer_config,
+            output_dir=experiment_dir / "model_analysis"
+        )
+
+        # Run comprehensive analysis
         model_analysis_results = analyzer.analyze(data=DataInput.from_object(dataset))
         logger.info("✅ Model analysis completed successfully!")
+
     except Exception as e:
         logger.error(f"❌ Model analysis failed: {e}", exc_info=True)
 
     # ===== SPURIOUS CORRELATION ANALYSIS =====
-    robustness_results = analyze_robustness(analysis_models, dataset)
+    robustness_results = analyze_robustness(trained_models, dataset, config)
 
     # ===== VISUALIZATION GENERATION =====
     logger.info("🖼️ Generating training history and confusion matrix plots...")
-    vis_manager.plot_history(all_histories, ['accuracy', 'loss'], 'training_comparison',
-                             title='Loss Functions Training & Validation Comparison')
 
-    class_predictions = {name: np.argmax(model.predict(dataset.x_test, verbose=0), axis=1)
-                         for name, model in analysis_models.items()}
+    # Plot training history comparison
+    vis_manager.plot_history(
+        histories=all_histories,
+        metrics=['accuracy', 'loss'],
+        name='training_comparison',
+        subdir='training_plots',
+        title='Loss Functions Training & Validation Comparison'
+    )
+
+    # Generate confusion matrices for model comparison
+    raw_predictions = {
+        name: model.predict(dataset.x_test, verbose=0)
+        for name, model in trained_models.items()
+    }
+    class_predictions = {
+        name: np.argmax(preds, axis=1)
+        for name, preds in raw_predictions.items()
+    }
+
     vis_manager.plot_confusion_matrices_comparison(
         y_true=np.argmax(dataset.y_test, axis=1),
         model_predictions=class_predictions,
         name='loss_function_confusion_matrices',
-        subdir='model_comparison', normalize=True,
+        subdir='model_comparison',
+        normalize=True,
         class_names=[str(i) for i in range(config.num_classes)]
     )
 
     # ===== FINAL PERFORMANCE EVALUATION =====
     logger.info("📈 Evaluating final model performance on test set...")
-    performance_results = {name: dict(zip(model.metrics_names,
-                                          model.evaluate(dataset.x_test, dataset.y_test, verbose=0)))
-                           for name, model in analysis_models.items()}
+
+    performance_results = {}
+
+    for name, model in trained_models.items():
+        # Get model evaluation metrics
+        eval_results = model.evaluate(dataset.x_test, dataset.y_test, verbose=0)
+        metrics_dict = dict(zip(model.metrics_names, eval_results))
+
+        # Store standardized metrics
+        performance_results[name] = {
+            'accuracy': metrics_dict.get('accuracy', 0.0),
+            'top_5_accuracy': metrics_dict.get('top_5_accuracy', 0.0),
+            'loss': metrics_dict.get('loss', 0.0)
+        }
+
+        # Log final metrics for this model
+        logger.info(f"Model {name} final test metrics: {performance_results[name]}")
 
     # ===== RESULTS COMPILATION =====
     results_payload = {
@@ -461,9 +835,13 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         'performance_analysis': performance_results,
         'model_analysis': model_analysis_results,
         'robustness_analysis': robustness_results,
-        'histories': all_histories
+        'histories': all_histories,
+        'trained_models': trained_models  # Include trained models in results
     }
+
+    # Print comprehensive summary
     print_experiment_summary(results_payload)
+
     return results_payload
 
 
@@ -472,59 +850,116 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 # ==============================================================================
 
 def print_experiment_summary(results: Dict[str, Any]) -> None:
-    """Prints a comprehensive summary of the spurious correlation experiment results."""
+    """
+    Print a comprehensive summary of experimental results.
+
+    This function generates a detailed report of all experimental outcomes,
+    including performance metrics, robustness analysis, calibration metrics,
+    and the final verdict on loss function effectiveness against spurious
+    correlations.
+
+    Args:
+        results: Dictionary containing all experimental results and analysis
+    """
     logger.info("=" * 80)
     logger.info("📋 SPURIOUS CORRELATION EXPERIMENT SUMMARY")
     logger.info("=" * 80)
 
-    # --- Performance Metrics ---
-    if results.get('performance_analysis'):
+    # ===== EXPERIMENT CONFIGURATION =====
+    config = results.get('config')
+    if config:
+        logger.info("⚙️ EXPERIMENT SETUP:")
+        logger.info(f"   Train/Val/Test Correlation: {config.train_correlation_strength:.0%} / "
+                   f"{config.validation_correlation_strength:.0%} / {config.test_correlation_strength:.0%}")
+        logger.info("")
+
+    # ===== PERFORMANCE METRICS =====
+    if 'performance_analysis' in results and results['performance_analysis']:
         logger.info("🎯 PERFORMANCE METRICS (on Test Set with 0% Color Correlation):")
-        logger.info(f"{'Model':<20} {'Accuracy':<12} {'Loss':<12}")
-        logger.info("-" * 45)
-        for name, metrics in results['performance_analysis'].items():
-            logger.info(f"{name:<20} {metrics.get('accuracy', 0.0):<12.4f} {metrics.get('loss', 0.0):<12.4f}")
+        logger.info(f"{'Model':<20} {'Accuracy':<12} {'Top-5 Acc':<12} {'Loss':<12}")
+        logger.info("-" * 60)
 
-    # --- Robustness Metrics ---
-    if results.get('robustness_analysis'):
+        for model_name, metrics in results['performance_analysis'].items():
+            accuracy = metrics.get('accuracy', 0.0)
+            top5_acc = metrics.get('top_5_accuracy', 0.0)
+            loss = metrics.get('loss', 0.0)
+            logger.info(f"{model_name:<20} {accuracy:<12.4f} {top5_acc:<12.4f} {loss:<12.4f}")
+
+    # ===== ROBUSTNESS METRICS =====
+    if 'robustness_analysis' in results and results['robustness_analysis']:
         logger.info("\n🛡️ ROBUSTNESS METRICS:")
-        logger.info(f"{'Model':<20} {'Test Acc':<12} {'Gen Gap':<12} {'Color Dep':<12}")
-        logger.info("-" * 58)
-        for name, metrics in results['robustness_analysis'].items():
-            logger.info(f"{name:<20} {metrics.get('test_accuracy', 0.0):<12.4f} "
-                        f"{metrics.get('generalization_gap', 0.0):<12.4f} "
-                        f"{metrics.get('color_dependency', 0.0):<12.4f}")
+        logger.info(f"{'Model':<20} {'Train Acc':<12} {'Test Acc':<12} {'Gen Gap':<12} {'Color Dep':<12}")
+        logger.info("-" * 70)
 
-    # --- Calibration Metrics ---
-    analysis = results.get('model_analysis')
-    if analysis and analysis.calibration_metrics:
+        for model_name, metrics in results['robustness_analysis'].items():
+            train_acc = metrics.get('train_accuracy', 0.0)
+            test_acc = metrics.get('test_accuracy', 0.0)
+            gen_gap = metrics.get('generalization_gap', 0.0)
+            color_dep = metrics.get('color_dependency', 0.0)
+
+            logger.info(
+                f"{model_name:<20} {train_acc:<12.4f} {test_acc:<12.4f} "
+                f"{gen_gap:<12.4f} {color_dep:<12.4f}"
+            )
+
+    # ===== CALIBRATION METRICS =====
+    model_analysis = results.get('model_analysis')
+    if model_analysis and model_analysis.calibration_metrics:
         logger.info("\n🎯 CALIBRATION METRICS (from Model Analyzer):")
-        logger.info(f"{'Model':<20} {'ECE':<12} {'Brier Score':<15}")
-        logger.info("-" * 49)
-        for name, metrics in analysis.calibration_metrics.items():
-            logger.info(f"{name:<20} {metrics.get('ece', 0.0):<12.4f} {metrics.get('brier_score', 0.0):<15.4f}")
+        logger.info(f"{'Model':<20} {'ECE':<12} {'Brier Score':<15} {'Mean Entropy':<12}")
+        logger.info("-" * 65)
 
-    # --- Final Verdict ---
-    if results.get('robustness_analysis'):
+        for model_name, cal_metrics in model_analysis.calibration_metrics.items():
+            logger.info(
+                f"{model_name:<20} {cal_metrics['ece']:<12.4f} "
+                f"{cal_metrics['brier_score']:<15.4f} {cal_metrics['mean_entropy']:<12.4f}"
+            )
+
+    # ===== EXPERIMENTAL VERDICT =====
+    if 'robustness_analysis' in results and results['robustness_analysis']:
         logger.info("\n" + "=" * 80)
         logger.info("🔍 EXPERIMENTAL VERDICT:")
-        rob_res = results['robustness_analysis']
-        best_model = max(rob_res, key=lambda k: rob_res[k]['test_accuracy'])
-        most_robust = min(rob_res, key=lambda k: rob_res[k]['color_dependency'])
-        logger.info(f"🏆 Highest Test Accuracy:      {best_model} ({rob_res[best_model]['test_accuracy']:.4f})")
-        logger.info(f"🛡️ Lowest Color Dependency:    {most_robust} ({rob_res[most_robust]['color_dependency']:.4f})")
 
+        rob_res = results['robustness_analysis']
+
+        # Find best models according to different criteria
+        best_test_acc = max(rob_res, key=lambda k: rob_res[k]['test_accuracy'])
+        most_robust = min(rob_res, key=lambda k: rob_res[k]['color_dependency'])
+        smallest_gap = min(rob_res, key=lambda k: rob_res[k]['generalization_gap'])
+
+        logger.info(f"🏆 Highest Test Accuracy:      {best_test_acc} ({rob_res[best_test_acc]['test_accuracy']:.4f})")
+        logger.info(f"🛡️  Lowest Color Dependency:    {most_robust} ({rob_res[most_robust]['color_dependency']:.4f})")
+        logger.info(f"📊 Smallest Generalization Gap: {smallest_gap} ({rob_res[smallest_gap]['generalization_gap']:.4f})")
+
+        # Compare GoodhartAware loss to baseline
         if 'GoodhartAware' in rob_res and 'CrossEntropy' in rob_res:
-            gal_acc = rob_res['GoodhartAware']['test_accuracy']
-            ce_acc = rob_res['CrossEntropy']['test_accuracy']
-            acc_diff = gal_acc - ce_acc
-            logger.info(f"   GoodhartAware vs. CrossEntropy Accuracy: {acc_diff:+.4f}")
-            if acc_diff > 0.02:
-                logger.info("   VERDICT: 🎉 Strong support for Goodhart-Aware loss effectiveness.")
-            elif acc_diff > 0:
-                logger.info("   VERDICT: ✅ Positive result for Goodhart-Aware loss.")
+            gal_metrics = rob_res['GoodhartAware']
+            ce_metrics = rob_res['CrossEntropy']
+
+            acc_diff = gal_metrics['test_accuracy'] - ce_metrics['test_accuracy']
+            color_diff = ce_metrics['color_dependency'] - gal_metrics['color_dependency']
+            gap_diff = ce_metrics['generalization_gap'] - gal_metrics['generalization_gap']
+
+            logger.info("\n📊 GoodhartAware vs. CrossEntropy:")
+            logger.info(f"   Test Accuracy Improvement:      {acc_diff:+.4f}")
+            logger.info(f"   Color Dependency Reduction:     {color_diff:+.4f}")
+            logger.info(f"   Generalization Gap Reduction:   {gap_diff:+.4f}")
+
+            # Overall assessment
+            positive_indicators = sum([acc_diff > 0.01, color_diff > 0.05, gap_diff > 0.05])
+
+            if positive_indicators >= 3:
+                logger.info("\n   VERDICT: 🎉 Strong support for Goodhart-Aware loss effectiveness!")
+                logger.info("             The model successfully resists spurious correlations.")
+            elif positive_indicators >= 2:
+                logger.info("\n   VERDICT: ✅ Positive evidence for Goodhart-Aware loss benefits.")
+                logger.info("             Some improvement in robustness to spurious features.")
+            elif positive_indicators >= 1:
+                logger.info("\n   VERDICT: 🔶 Mixed results - some benefits observed.")
+                logger.info("             Consider tuning hyperparameters for this task.")
             else:
-                logger.info("   VERDICT: ➖ Neutral or negative result for this configuration.")
+                logger.info("\n   VERDICT: ➖ Limited benefit observed in this configuration.")
+                logger.info("             May need different hyperparameters or architecture.")
 
     logger.info("=" * 80)
 
@@ -534,24 +969,42 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 # ==============================================================================
 
 def main() -> None:
-    """Main execution function for running the experiment."""
+    """
+    Main execution function for running the Colored MNIST spurious correlation experiment.
+
+    This function serves as the entry point for the experiment, handling
+    configuration setup, experiment execution, and error handling.
+    """
     logger.info("🚀 Colored MNIST Spurious Correlation Experiment")
     logger.info("=" * 80)
+
+    # Initialize experiment configuration
     config = ExperimentConfig()
 
+    # Log key configuration parameters
     logger.info("⚙️ EXPERIMENT CONFIGURATION:")
-    logger.info(f"   Train/Val/Test Correlation: {config.train_correlation_strength:.0%} / "
-                f"{config.validation_correlation_strength:.0%} / {config.test_correlation_strength:.0%}")
     logger.info(f"   Loss Functions: {list(config.loss_functions.keys())}")
     logger.info(f"   Epochs: {config.epochs}, Batch Size: {config.batch_size}")
+    logger.info(f"   Model Architecture: {len(config.conv_filters)} conv blocks, "
+               f"{len(config.dense_units)} dense layers")
+    logger.info(f"   Spurious Correlation: Train={config.train_correlation_strength:.0%}, "
+               f"Test={config.test_correlation_strength:.0%}")
+    logger.info(f"   Output: Softmax probabilities (from_logits=False)")
     logger.info("")
 
     try:
-        run_experiment(config)
+        # Run the complete experiment
+        _ = run_experiment(config)
         logger.info("✅ Experiment completed successfully!")
+
     except Exception as e:
         logger.error(f"❌ Experiment failed with error: {e}", exc_info=True)
         raise
+
+
+# ==============================================================================
+# SCRIPT ENTRY POINT
+# ==============================================================================
 
 if __name__ == "__main__":
     main()
