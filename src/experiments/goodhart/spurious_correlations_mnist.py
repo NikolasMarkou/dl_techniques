@@ -543,15 +543,12 @@ def build_model(config: ExperimentConfig, loss_fn: Callable, name: str) -> keras
     # Create and compile the model
     model = keras.Model(inputs=inputs, outputs=predictions, name=f'{name}_model')
 
-    # Compile with comprehensive metrics
+    # Compile with optimizer and metrics
     optimizer = keras.optimizers.AdamW(learning_rate=config.learning_rate)
     model.compile(
         optimizer=optimizer,
         loss=loss_fn,
-        metrics=[
-            keras.metrics.CategoricalAccuracy(name='accuracy'),
-            keras.metrics.TopKCategoricalAccuracy(k=5, name='top_5_accuracy')
-        ]
+        metrics=['accuracy']  # Use string shorthand for compatibility
     )
 
     return model
@@ -643,14 +640,29 @@ def analyze_robustness(
         )
         test_metrics_dict = dict(zip(model.metrics_names, test_metrics))
 
+        # Manual accuracy calculation as fallback
+        train_preds = np.argmax(model.predict(data.x_train, verbose=0, batch_size=512), axis=1)
+        train_true = np.argmax(data.y_train, axis=1)
+        manual_train_acc = np.mean(train_preds == train_true)
+
+        test_preds = np.argmax(model.predict(data.x_test, verbose=0, batch_size=512), axis=1)
+        test_true = np.argmax(data.y_test, axis=1)
+        manual_test_acc = np.mean(test_preds == test_true)
+
+        # Handle both 'accuracy' and 'categorical_accuracy' metric names, with manual fallback
+        train_acc = train_metrics_dict.get('accuracy',
+                    train_metrics_dict.get('categorical_accuracy', manual_train_acc))
+        test_acc = test_metrics_dict.get('accuracy',
+                   test_metrics_dict.get('categorical_accuracy', manual_test_acc))
+
         # Compute color dependency score
         color_dependency = compute_color_dependency_score(model, data.x_test)
 
         # Store results
         robustness_results[name] = {
-            'train_accuracy': train_metrics_dict.get('accuracy', 0.0),
-            'test_accuracy': test_metrics_dict.get('accuracy', 0.0),
-            'generalization_gap': train_metrics_dict.get('accuracy', 0.0) - test_metrics_dict.get('accuracy', 0.0),
+            'train_accuracy': train_acc,
+            'test_accuracy': test_acc,
+            'generalization_gap': train_acc - test_acc,
             'color_dependency': color_dependency,
             'train_loss': train_metrics_dict.get('loss', 0.0),
             'test_loss': test_metrics_dict.get('loss', 0.0),
@@ -714,6 +726,12 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     dataset = create_colored_mnist_dataset(config)
     logger.info("✅ Dataset generation completed")
 
+    # Debug information about data format
+    logger.info(f"Dataset shapes - Train: {dataset.x_train.shape}, {dataset.y_train.shape}")
+    logger.info(f"Dataset shapes - Test: {dataset.x_test.shape}, {dataset.y_test.shape}")
+    logger.info(f"Sample labels (one-hot): {dataset.y_train[:3]}")
+    logger.info(f"Data range - Min: {dataset.x_train.min():.3f}, Max: {dataset.x_train.max():.3f}")
+
     # ===== MODEL TRAINING PHASE =====
     logger.info("🏋️ Starting model training phase...")
     trained_models = {}  # Store trained models (already with softmax output)
@@ -728,6 +746,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         # Log model architecture info
         logger.info(f"Model {loss_name} output layer: {model.output.name}")
         logger.info(f"Model {loss_name} parameters: {model.count_params():,}")
+        logger.info(f"Model {loss_name} metrics: {model.metrics_names}")
 
         # Configure training parameters
         training_config = TrainingConfig(
@@ -746,6 +765,10 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             dataset.x_val, dataset.y_val,
             training_config
         )
+
+        # Quick evaluation after training to verify
+        quick_eval = model.evaluate(dataset.x_val, dataset.y_val, verbose=0)
+        logger.info(f"Post-training validation metrics: {dict(zip(model.metrics_names, quick_eval))}")
 
         # Store results
         trained_models[loss_name] = model
@@ -819,10 +842,22 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         eval_results = model.evaluate(dataset.x_test, dataset.y_test, verbose=0)
         metrics_dict = dict(zip(model.metrics_names, eval_results))
 
-        # Store standardized metrics
+        # Debug logging to inspect metrics
+        logger.debug(f"Model {name} metrics names: {model.metrics_names}")
+        logger.debug(f"Model {name} eval results: {eval_results}")
+
+        # Manual accuracy calculation for verification
+        predictions = model.predict(dataset.x_test, verbose=0)
+        y_true_indices = np.argmax(dataset.y_test, axis=1)
+        y_pred_indices = np.argmax(predictions, axis=1)
+        manual_accuracy = np.mean(y_pred_indices == y_true_indices)
+
+        logger.info(f"Model {name} - Manual accuracy: {manual_accuracy:.4f}")
+
+        # Store standardized metrics - handle both 'accuracy' and 'categorical_accuracy'
+        accuracy_value = metrics_dict.get('accuracy', metrics_dict.get('categorical_accuracy', manual_accuracy))
         performance_results[name] = {
-            'accuracy': metrics_dict.get('accuracy', 0.0),
-            'top_5_accuracy': metrics_dict.get('top_5_accuracy', 0.0),
+            'accuracy': accuracy_value,
             'loss': metrics_dict.get('loss', 0.0)
         }
 
@@ -876,14 +911,13 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     # ===== PERFORMANCE METRICS =====
     if 'performance_analysis' in results and results['performance_analysis']:
         logger.info("🎯 PERFORMANCE METRICS (on Test Set with 0% Color Correlation):")
-        logger.info(f"{'Model':<20} {'Accuracy':<12} {'Top-5 Acc':<12} {'Loss':<12}")
-        logger.info("-" * 60)
+        logger.info(f"{'Model':<20} {'Accuracy':<12} {'Loss':<12}")
+        logger.info("-" * 45)
 
         for model_name, metrics in results['performance_analysis'].items():
             accuracy = metrics.get('accuracy', 0.0)
-            top5_acc = metrics.get('top_5_accuracy', 0.0)
             loss = metrics.get('loss', 0.0)
-            logger.info(f"{model_name:<20} {accuracy:<12.4f} {top5_acc:<12.4f} {loss:<12.4f}")
+            logger.info(f"{model_name:<20} {accuracy:<12.4f} {loss:<12.4f}")
 
     # ===== ROBUSTNESS METRICS =====
     if 'robustness_analysis' in results and results['robustness_analysis']:
