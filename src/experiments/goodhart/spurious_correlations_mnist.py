@@ -186,7 +186,7 @@ class ExperimentConfig:
     use_residual: bool = True
 
     # --- Training Parameters ---
-    epochs: int = 30
+    epochs: int = 100
     batch_size: int = 128
     learning_rate: float = 0.001
     early_stopping_patience: int = 10
@@ -195,16 +195,27 @@ class ExperimentConfig:
     # --- Loss Functions to Evaluate (Updated for softmax outputs) ---
     loss_functions: Dict[str, Callable] = field(default_factory=lambda: {
         'CrossEntropy': lambda: keras.losses.CategoricalCrossentropy(
-            from_logits=False
-        ),
+            from_logits=False),
         'LabelSmoothing': lambda: keras.losses.CategoricalCrossentropy(
             label_smoothing=0.1, from_logits=False
         ),
         'FocalLoss': lambda: keras.losses.CategoricalFocalCrossentropy(
             gamma=2.0, from_logits=False
         ),
-        'GoodhartAware': lambda: GoodhartAwareLoss(
+        'GAL_0': lambda: GoodhartAwareLoss(
+            entropy_weight=0.0, mi_weight=0.01, from_logits=False
+        ),
+        'GAL_01': lambda: GoodhartAwareLoss(
             entropy_weight=0.1, mi_weight=0.01, from_logits=False
+        ),
+        'GAL_001': lambda: GoodhartAwareLoss(
+            entropy_weight=0.01, mi_weight=0.01, from_logits=False
+        ),
+        'GAL_005': lambda: GoodhartAwareLoss(
+            entropy_weight=0.05, mi_weight=0.01, from_logits=False
+        ),
+        'GAL_0001': lambda: GoodhartAwareLoss(
+            entropy_weight=0.001, mi_weight=0.01, from_logits=False
         ),
     })
 
