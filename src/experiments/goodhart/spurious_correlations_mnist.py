@@ -932,7 +932,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
     # ===== ROBUSTNESS METRICS =====
     if 'robustness_analysis' in results and results['robustness_analysis']:
-        logger.info("\n🛡️ ROBUSTNESS METRICS:")
+        logger.info("🛡️ ROBUSTNESS METRICS:")
         logger.info(f"{'Model':<20} {'Train Acc':<12} {'Test Acc':<12} {'Gen Gap':<12} {'Color Dep':<12}")
         logger.info("-" * 70)
 
@@ -950,7 +950,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     # ===== CALIBRATION METRICS =====
     model_analysis = results.get('model_analysis')
     if model_analysis and model_analysis.calibration_metrics:
-        logger.info("\n🎯 CALIBRATION METRICS (from Model Analyzer):")
+        logger.info("🎯 CALIBRATION METRICS (from Model Analyzer):")
         logger.info(f"{'Model':<20} {'ECE':<12} {'Brier Score':<15} {'Mean Entropy':<12}")
         logger.info("-" * 65)
 
@@ -962,7 +962,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
     # ===== EXPERIMENTAL VERDICT =====
     if 'robustness_analysis' in results and results['robustness_analysis']:
-        logger.info("\n" + "=" * 80)
+        logger.info("=" * 80)
         logger.info("🔍 EXPERIMENTAL VERDICT:")
 
         rob_res = results['robustness_analysis']
@@ -985,7 +985,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             color_diff = ce_metrics['color_dependency'] - gal_metrics['color_dependency']
             gap_diff = ce_metrics['generalization_gap'] - gal_metrics['generalization_gap']
 
-            logger.info("\n📊 GoodhartAware vs. CrossEntropy:")
+            logger.info("📊 GoodhartAware vs. CrossEntropy:")
             logger.info(f"   Test Accuracy Improvement:      {acc_diff:+.4f}")
             logger.info(f"   Color Dependency Reduction:     {color_diff:+.4f}")
             logger.info(f"   Generalization Gap Reduction:   {gap_diff:+.4f}")
@@ -994,16 +994,16 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             positive_indicators = sum([acc_diff > 0.01, color_diff > 0.05, gap_diff > 0.05])
 
             if positive_indicators >= 3:
-                logger.info("\n   VERDICT: 🎉 Strong support for Goodhart-Aware loss effectiveness!")
+                logger.info("   VERDICT: 🎉 Strong support for Goodhart-Aware loss effectiveness!")
                 logger.info("             The model successfully resists spurious correlations.")
             elif positive_indicators >= 2:
-                logger.info("\n   VERDICT: ✅ Positive evidence for Goodhart-Aware loss benefits.")
+                logger.info("   VERDICT: ✅ Positive evidence for Goodhart-Aware loss benefits.")
                 logger.info("             Some improvement in robustness to spurious features.")
             elif positive_indicators >= 1:
-                logger.info("\n   VERDICT: 🔶 Mixed results - some benefits observed.")
+                logger.info("   VERDICT: 🔶 Mixed results - some benefits observed.")
                 logger.info("             Consider tuning hyperparameters for this task.")
             else:
-                logger.info("\n   VERDICT: ➖ Limited benefit observed in this configuration.")
+                logger.info("   VERDICT: ➖ Limited benefit observed in this configuration.")
                 logger.info("             May need different hyperparameters or architecture.")
 
     logger.info("=" * 80)
