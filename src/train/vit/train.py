@@ -6,8 +6,28 @@ workflows with model.compile() and model.fit(). The script handles data loading,
 model creation, training, evaluation, and generates comprehensive visualizations
 including training curves, confusion matrices, and attention visualizations.
 
+Key Features:
+- Supports MNIST, CIFAR-10, and CIFAR-100 datasets
+- Multiple ViT scales (tiny, small, base, large, huge)
+- Flexible learning rate scheduling (constant, cosine, exponential)
+- Data augmentation pipeline
+- Comprehensive visualization callbacks
+- Gradient clipping and weight decay for stable training
+- Proper handling of learning rate schedules vs. ReduceLROnPlateau
+- Detailed training metrics and analysis
+
 Usage:
-    python vit/train.py [--dataset cifar10] [--epochs 100] [--batch-size 128] [--scale base]
+    python vit/train.py [--dataset cifar10] [--epochs 100] [--batch-size 128] [--scale tiny]
+
+Examples:
+    # Basic training with constant learning rate
+    python vit/train.py --dataset cifar10 --scale tiny --lr-schedule constant
+
+    # Training with cosine decay and data augmentation
+    python vit/train.py --dataset cifar10 --scale small --lr-schedule cosine --augment
+
+    # Training on CIFAR-100 with higher dropout
+    python vit/train.py --dataset cifar100 --scale base --epochs 200
 """
 
 import argparse
@@ -21,7 +41,7 @@ matplotlib.use('Agg')  # Use non-interactive backend for server environments
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
-from typing import Tuple, Dict, Any, Optional, List
+from typing import Tuple, Dict, Any, Optional, List, Union
 from sklearn.metrics import classification_report, confusion_matrix
 import itertools
 
@@ -172,12 +192,12 @@ def create_model_config(dataset: str, scale: str) -> Dict[str, Any]:
 
 
 def plot_sample_images(
-        x_data: np.ndarray,
-        y_data: np.ndarray,
-        class_names: List[str],
-        save_path: str,
-        dataset: str,
-        n_samples: int = 20
+    x_data: np.ndarray,
+    y_data: np.ndarray,
+    class_names: List[str],
+    save_path: str,
+    dataset: str,
+    n_samples: int = 20
 ) -> None:
     """Plot sample images from the dataset."""
     fig, axes = plt.subplots(4, 5, figsize=(12, 10))
@@ -207,11 +227,11 @@ def plot_sample_images(
 
 
 def plot_confusion_matrix(
-        y_true: np.ndarray,
-        y_pred: np.ndarray,
-        class_names: List[str],
-        save_path: str,
-        normalize: bool = True
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    class_names: List[str],
+    save_path: str,
+    normalize: bool = True
 ) -> None:
     """Plot confusion matrix."""
     cm = confusion_matrix(y_true, y_pred)
@@ -261,13 +281,23 @@ def plot_training_history(history: keras.callbacks.History, save_dir: str) -> No
     axes[0, 1].legend()
     axes[0, 1].grid(True, alpha=0.3)
 
-    # Learning Rate
+    # Learning Rate (if available)
     if 'lr' in history_dict:
         axes[1, 0].plot(epochs, history_dict['lr'], 'g-', label='Learning Rate')
         axes[1, 0].set_title('Learning Rate', fontsize=14)
         axes[1, 0].set_xlabel('Epoch')
         axes[1, 0].set_ylabel('Learning Rate')
         axes[1, 0].set_yscale('log')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True, alpha=0.3)
+    else:
+        # Loss difference plot
+        loss_diff = np.array(history_dict['loss']) - np.array(history_dict['val_loss'])
+        axes[1, 0].plot(epochs, loss_diff, 'purple', label='Train-Val Loss Diff')
+        axes[1, 0].set_title('Loss Difference (Train - Val)', fontsize=14)
+        axes[1, 0].set_xlabel('Epoch')
+        axes[1, 0].set_ylabel('Loss Difference')
+        axes[1, 0].axhline(y=0, color='k', linestyle='--', alpha=0.5)
         axes[1, 0].legend()
         axes[1, 0].grid(True, alpha=0.3)
 
@@ -281,13 +311,13 @@ def plot_training_history(history: keras.callbacks.History, save_dir: str) -> No
         axes[1, 1].legend()
         axes[1, 1].grid(True, alpha=0.3)
     else:
-        # Loss zoom-in for better visualization
-        axes[1, 1].plot(epochs, history_dict['loss'], 'b-', label='Training Loss')
-        axes[1, 1].plot(epochs, history_dict['val_loss'], 'r-', label='Validation Loss')
-        axes[1, 1].set_title('Loss (Zoomed)', fontsize=14)
+        # Accuracy difference plot
+        acc_diff = np.array(history_dict['val_accuracy']) - np.array(history_dict['accuracy'])
+        axes[1, 1].plot(epochs, acc_diff, 'orange', label='Val-Train Acc Diff')
+        axes[1, 1].set_title('Accuracy Difference (Val - Train)', fontsize=14)
         axes[1, 1].set_xlabel('Epoch')
-        axes[1, 1].set_ylabel('Loss')
-        axes[1, 1].set_ylim(0, max(min(history_dict['loss']), min(history_dict['val_loss'])) * 2)
+        axes[1, 1].set_ylabel('Accuracy Difference')
+        axes[1, 1].axhline(y=0, color='k', linestyle='--', alpha=0.5)
         axes[1, 1].legend()
         axes[1, 1].grid(True, alpha=0.3)
 
@@ -297,10 +327,10 @@ def plot_training_history(history: keras.callbacks.History, save_dir: str) -> No
 
 
 def plot_class_accuracy(
-        y_true: np.ndarray,
-        y_pred: np.ndarray,
-        class_names: List[str],
-        save_path: str
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    class_names: List[str],
+    save_path: str
 ) -> None:
     """Plot per-class accuracy."""
     cm = confusion_matrix(y_true, y_pred)
@@ -315,8 +345,8 @@ def plot_class_accuracy(
 
     # Add value labels on bars
     for i, (bar, acc) in enumerate(zip(bars, per_class_accuracy)):
-        plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
-                 f'{acc:.3f}', ha='center', va='bottom', fontsize=10)
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                f'{acc:.3f}', ha='center', va='bottom', fontsize=10)
 
     plt.grid(True, alpha=0.3, axis='y')
     plt.tight_layout()
@@ -328,12 +358,12 @@ class ViTVisualizationCallback(keras.callbacks.Callback):
     """Callback to generate ViT visualizations during training."""
 
     def __init__(
-            self,
-            validation_data: Tuple[np.ndarray, np.ndarray],
-            class_names: List[str],
-            save_dir: str,
-            dataset: str,
-            frequency: int = 10
+        self,
+        validation_data: Tuple[np.ndarray, np.ndarray],
+        class_names: List[str],
+        save_dir: str,
+        dataset: str,
+        frequency: int = 10
     ):
         super().__init__()
         self.x_val, self.y_val = validation_data
@@ -383,13 +413,14 @@ def get_class_names(dataset: str) -> List[str]:
 
 
 def create_callbacks(
-        model_name: str,
-        validation_data: Tuple[np.ndarray, np.ndarray],
-        class_names: List[str],
-        dataset: str,
-        monitor: str = 'val_accuracy',
-        patience: int = 15,
-        viz_frequency: int = 10
+    model_name: str,
+    validation_data: Tuple[np.ndarray, np.ndarray],
+    class_names: List[str],
+    dataset: str,
+    use_lr_schedule: bool = True,
+    monitor: str = 'val_accuracy',
+    patience: int = 15,
+    viz_frequency: int = 10
 ) -> Tuple[List, str]:
     """Create training callbacks."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -411,13 +442,6 @@ def create_callbacks(
             verbose=1,
             mode='max'
         ),
-        keras.callbacks.ReduceLROnPlateau(
-            monitor='val_loss',
-            factor=0.2,
-            patience=5,
-            min_lr=1e-7,
-            verbose=1
-        ),
         keras.callbacks.CSVLogger(
             filename=os.path.join(results_dir, 'training_log.csv')
         ),
@@ -436,15 +460,30 @@ def create_callbacks(
         )
     ]
 
+    # Only add ReduceLROnPlateau if not using learning rate schedule
+    if not use_lr_schedule:
+        callbacks.append(
+            keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.2,
+                patience=5,
+                min_lr=1e-7,
+                verbose=1
+            )
+        )
+        logger.info("Added ReduceLROnPlateau callback")
+    else:
+        logger.info("Skipping ReduceLROnPlateau callback due to learning rate schedule")
+
     logger.info(f"Results will be saved to: {results_dir}")
     return callbacks, results_dir
 
 
 def create_learning_rate_schedule(
-        initial_lr: float,
-        schedule_type: str = 'cosine',
-        warmup_epochs: int = 5,
-        total_epochs: int = 100
+    initial_lr: float,
+    schedule_type: str = 'cosine',
+    warmup_epochs: int = 5,
+    total_epochs: int = 100
 ) -> keras.optimizers.schedules.LearningRateSchedule:
     """Create learning rate schedule."""
     if schedule_type == 'cosine':
@@ -486,6 +525,7 @@ def train_model(args: argparse.Namespace):
     model_config = create_model_config(args.dataset, args.scale)
 
     # Create learning rate schedule
+    use_lr_schedule = args.lr_schedule != 'constant'
     lr_schedule = create_learning_rate_schedule(
         initial_lr=args.learning_rate,
         schedule_type=args.lr_schedule,
@@ -504,24 +544,52 @@ def train_model(args: argparse.Namespace):
         outputs = model(x)
         model = keras.Model(inputs, outputs, name=f"augmented_{model.name}")
 
-    # Compile model
-    optimizer = keras.optimizers.AdamW(
-        learning_rate=lr_schedule,
-        weight_decay=args.weight_decay
-    )
+    # Create optimizer - use Adam for simpler learning rate management
+    if use_lr_schedule:
+        optimizer = keras.optimizers.Adam(
+            learning_rate=lr_schedule,
+            weight_decay=args.weight_decay,
+            clipnorm=1.0  # Gradient clipping for stability
+        )
+    else:
+        optimizer = keras.optimizers.Adam(
+            learning_rate=lr_schedule,  # This is just a float when constant
+            weight_decay=args.weight_decay,
+            clipnorm=1.0
+        )
 
+    # Compile model
     metrics = ['accuracy']
     if model_config['num_classes'] > 10:
         metrics.append('top_5_accuracy')
 
     model.compile(
         optimizer=optimizer,
-        loss='sparse_categorical_crossentropy',
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),  # Explicit about logits
         metrics=metrics
     )
 
+    # Build model explicitly to show correct parameter count
+    dummy_input = np.zeros((1,) + model_config['input_shape'], dtype=np.float32)
+    logger.info("Building model with dummy input...")
+    _ = model(dummy_input, training=False)
+
     # Print model summary
+    logger.info("Model architecture:")
     model.summary(print_fn=logger.info)
+
+    # Print detailed ViT summary
+    if hasattr(model, 'summary_detailed'):
+        model.summary_detailed()
+    elif hasattr(model, 'layers') and len(model.layers) > 0:
+        # For augmented models, get the underlying ViT model
+        vit_model = None
+        for layer in model.layers:
+            if hasattr(layer, 'summary_detailed'):
+                vit_model = layer
+                break
+        if vit_model:
+            vit_model.summary_detailed()
 
     # Create callbacks
     callbacks, results_dir = create_callbacks(
@@ -529,6 +597,7 @@ def train_model(args: argparse.Namespace):
         validation_data=(x_test, y_test),
         class_names=class_names,
         dataset=args.dataset,
+        use_lr_schedule=use_lr_schedule,
         patience=args.patience,
         viz_frequency=args.viz_frequency
     )
@@ -539,6 +608,16 @@ def train_model(args: argparse.Namespace):
 
     # Train model
     logger.info("Starting model training...")
+    logger.info(f"Training parameters:")
+    logger.info(f"  - Dataset: {args.dataset}")
+    logger.info(f"  - Model scale: {args.scale}")
+    logger.info(f"  - Learning rate: {args.learning_rate}")
+    logger.info(f"  - LR schedule: {args.lr_schedule}")
+    logger.info(f"  - Batch size: {args.batch_size}")
+    logger.info(f"  - Epochs: {args.epochs}")
+    logger.info(f"  - Weight decay: {args.weight_decay}")
+    logger.info(f"  - Data augmentation: {args.augment}")
+
     history = model.fit(
         x_train, y_train,
         batch_size=args.batch_size,
@@ -599,8 +678,10 @@ def train_model(args: argparse.Namespace):
         f.write(f"Training Epochs: {len(history.history['loss'])}\n")
         f.write(f"Batch Size: {args.batch_size}\n")
         f.write(f"Initial Learning Rate: {args.learning_rate}\n")
+        f.write(f"LR Schedule: {args.lr_schedule}\n")
         f.write(f"Weight Decay: {args.weight_decay}\n")
-        f.write(f"Data Augmentation: {args.augment}\n\n")
+        f.write(f"Data Augmentation: {args.augment}\n")
+        f.write(f"Warmup Epochs: {args.warmup_epochs}\n\n")
 
         f.write(f"Final Test Results:\n")
         for key, val in test_results.items():
@@ -611,7 +692,7 @@ def train_model(args: argparse.Namespace):
             if class_name in report:
                 metrics = report[class_name]
                 f.write(f"  {class_name}: Precision={metrics['precision']:.4f}, "
-                        f"Recall={metrics['recall']:.4f}, F1={metrics['f1-score']:.4f}\n")
+                       f"Recall={metrics['recall']:.4f}, F1={metrics['f1-score']:.4f}\n")
 
     logger.info("Training completed successfully!")
 
@@ -622,17 +703,17 @@ def main():
 
     # Dataset and model arguments
     parser.add_argument('--dataset', type=str, default='cifar10',
-                        choices=['mnist', 'cifar10', 'cifar100'], help='Dataset to use')
+                       choices=['mnist', 'cifar10', 'cifar100'], help='Dataset to use')
     parser.add_argument('--scale', type=str, default='tiny',
-                        choices=['tiny', 'small', 'base', 'large', 'huge'], help='Model scale')
+                       choices=['tiny', 'small', 'base', 'large', 'huge'], help='Model scale')
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--batch-size', type=int, default=128, help='Training batch size')
-    parser.add_argument('--learning-rate', type=float, default=1e-3, help='Initial learning rate')
-    parser.add_argument('--weight-decay', type=float, default=1e-4, help='Weight decay for AdamW')
-    parser.add_argument('--lr-schedule', type=str, default='cosine',
-                        choices=['cosine', 'exponential', 'constant'], help='Learning rate schedule')
+    parser.add_argument('--learning-rate', type=float, default=3e-4, help='Initial learning rate')
+    parser.add_argument('--weight-decay', type=float, default=1e-4, help='Weight decay for optimizer')
+    parser.add_argument('--lr-schedule', type=str, default='constant',
+                       choices=['cosine', 'exponential', 'constant'], help='Learning rate schedule')
     parser.add_argument('--warmup-epochs', type=int, default=5, help='Warmup epochs for learning rate')
 
     # Regularization and augmentation
@@ -641,7 +722,7 @@ def main():
 
     # Visualization arguments
     parser.add_argument('--viz-frequency', type=int, default=10,
-                        help='Frequency of visualization callbacks (in epochs)')
+                       help='Frequency of visualization callbacks (in epochs)')
 
     args = parser.parse_args()
 

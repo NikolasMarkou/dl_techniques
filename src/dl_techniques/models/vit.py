@@ -57,6 +57,7 @@ class ViT(keras.Model):
 
     # Scale configurations: [embed_dim, num_heads, num_layers, mlp_ratio]
     SCALE_CONFIGS = {
+        "micro": [64, 3, 4, 4.0],  # ViT-Micro
         "tiny": [192, 3, 12, 4.0],  # ViT-Tiny
         "small": [384, 6, 12, 4.0],  # ViT-Small
         "base": [768, 12, 12, 4.0],  # ViT-Base
