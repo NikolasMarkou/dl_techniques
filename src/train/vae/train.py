@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# train_vae.py
-
 """
 Enhanced training script for Keras-compliant VAE with comprehensive visualizations.
 
@@ -10,7 +7,7 @@ model creation, training, evaluation, and generates comprehensive visualizations
 including per-epoch reconstructions and latent space distributions.
 
 Usage:
-    python train_vae.py [--dataset mnist] [--epochs 50] [--batch-size 128] [--latent-dim 2]
+    python vae/train.py [--dataset mnist] [--epochs 50] [--batch-size 128] [--latent-dim 2]
 """
 
 import argparse
@@ -26,7 +23,7 @@ import seaborn as sns
 from datetime import datetime
 from typing import Tuple, Dict, Any, Optional
 
-# Make sure the import path is correct for your project structure
+
 from dl_techniques.models.vae import VAE, create_vae
 from dl_techniques.utils.logger import logger
 

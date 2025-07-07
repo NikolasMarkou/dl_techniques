@@ -1,5 +1,5 @@
 """
-Vision Transformer (ViT) Model Implementation
+Vision Transformer (ViT) Model Implementation (Refined Version)
 
 This module provides a complete Vision Transformer model implementation
 that can be used for various computer vision tasks including image classification,
@@ -45,6 +45,7 @@ class ViT(keras.Model):
         pooling: Pooling mode for feature extraction ('cls', 'mean', 'max', None).
         dropout_rate: Dropout rate for regularization.
         attention_dropout_rate: Dropout rate for attention weights.
+        pos_dropout_rate: Dropout rate for positional embeddings.
         kernel_initializer: Weight initializer for all layers.
         kernel_regularizer: Weight regularizer for all layers.
         norm_type: Type of normalization ('layer' or 'rms').
@@ -73,6 +74,7 @@ class ViT(keras.Model):
             pooling: Optional[str] = None,
             dropout_rate: float = 0.0,
             attention_dropout_rate: float = 0.0,
+            pos_dropout_rate: float = 0.0,
             kernel_initializer: str = "he_normal",
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             norm_type: str = "layer",
@@ -91,6 +93,7 @@ class ViT(keras.Model):
             pooling: Pooling mode for feature extraction ('cls', 'mean', 'max', None).
             dropout_rate: Dropout rate for regularization.
             attention_dropout_rate: Dropout rate for attention weights.
+            pos_dropout_rate: Dropout rate for positional embeddings.
             kernel_initializer: Weight initializer for all layers.
             kernel_regularizer: Weight regularizer for all layers.
             norm_type: Type of normalization ('layer' or 'rms').
@@ -101,6 +104,7 @@ class ViT(keras.Model):
             name = f"vision_transformer_{scale}"
         super().__init__(name=name, **kwargs)
 
+        # Store configuration
         self.input_shape_config = input_shape
         self.num_classes = num_classes
         self.scale = scale
@@ -109,10 +113,12 @@ class ViT(keras.Model):
         self.pooling = pooling
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
+        self.pos_dropout_rate = pos_dropout_rate
         self.kernel_initializer = kernel_initializer
         self.kernel_regularizer = kernel_regularizer
         self.norm_type = norm_type
 
+        # Validate inputs
         if scale not in self.SCALE_CONFIGS:
             raise ValueError(
                 f"Unsupported scale: {scale}. Choose from {list(self.SCALE_CONFIGS.keys())}"
@@ -131,7 +137,8 @@ class ViT(keras.Model):
         # Get model configuration
         self.embed_dim, self.num_heads, self.num_layers, self.mlp_ratio = self.SCALE_CONFIGS[scale]
 
-        # Calculate number of patches
+        # Calculate maximum sequence length for positional embeddings
+        # Add some buffer for different input sizes
         if isinstance(patch_size, int):
             patch_h = patch_w = patch_size
         else:
@@ -139,7 +146,17 @@ class ViT(keras.Model):
 
         img_h, img_w = input_shape[:2]
         self.num_patches = (img_h // patch_h) * (img_w // patch_w)
-        self.seq_len = self.num_patches + 1  # +1 for CLS token
+        self.max_seq_len = self.num_patches + 1  # +1 for CLS token
+
+        # Initialize layers as None - they will be created in build()
+        self.patch_embed = None
+        self.cls_token = None
+        self.pos_embed = None
+        self.transformer_layers = None
+        self.norm = None
+        self.head_dropout = None
+        self.head = None
+        self.global_pool = None
 
         # Store build state for serialization
         self._build_input_shape = None
@@ -168,6 +185,16 @@ class ViT(keras.Model):
             name="patch_embed"
         )
 
+        # Build patch embedding to get actual number of patches
+        dummy_input_shape = (None,) + self.input_shape_config
+        self.patch_embed.build(dummy_input_shape)
+
+        # Get actual number of patches from built layer
+        actual_num_patches = self.patch_embed.num_patches
+        if actual_num_patches is not None:
+            self.num_patches = actual_num_patches
+            self.max_seq_len = self.num_patches + 1
+
         # CLS token
         self.cls_token = self.add_weight(
             name="cls_token",
@@ -176,10 +203,11 @@ class ViT(keras.Model):
             trainable=True
         )
 
-        # Positional embedding
+        # Positional embedding with proper parameter names
         self.pos_embed = PositionalEmbedding(
-            sequence_length=self.seq_len,
-            embed_dim=self.embed_dim,
+            max_seq_len=self.max_seq_len,
+            dim=self.embed_dim,
+            dropout=self.pos_dropout_rate,
             name="pos_embed"
         )
 
@@ -237,15 +265,15 @@ class ViT(keras.Model):
             Model output tensor. Shape depends on include_top and pooling settings.
         """
         # Convert image to patches
-        x = self.patch_embed(inputs)  # (batch_size, num_patches, embed_dim)
+        x = self.patch_embed(inputs, training=training)  # (batch_size, num_patches, embed_dim)
 
         # Add CLS token
         batch_size = ops.shape(x)[0]
         cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
         x = ops.concatenate([cls_tokens, x], axis=1)  # (batch_size, seq_len, embed_dim)
 
-        # Add positional embeddings
-        x = self.pos_embed(x)
+        # Add positional embeddings (includes dropout)
+        x = self.pos_embed(x, training=training)
 
         # Apply transformer layers
         for layer in self.transformer_layers:
@@ -294,7 +322,7 @@ class ViT(keras.Model):
             if self.pooling in ["cls", "mean", "max"]:
                 return (batch_size, self.embed_dim)
             else:
-                return (batch_size, self.seq_len, self.embed_dim)
+                return (batch_size, self.max_seq_len, self.embed_dim)
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
@@ -308,6 +336,7 @@ class ViT(keras.Model):
             "pooling": self.pooling,
             "dropout_rate": self.dropout_rate,
             "attention_dropout_rate": self.attention_dropout_rate,
+            "pos_dropout_rate": self.pos_dropout_rate,
             "kernel_initializer": self.kernel_initializer,
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "norm_type": self.norm_type,
@@ -346,11 +375,54 @@ class ViT(keras.Model):
             pooling="cls",
             dropout_rate=self.dropout_rate,
             attention_dropout_rate=self.attention_dropout_rate,
+            pos_dropout_rate=self.pos_dropout_rate,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             norm_type=self.norm_type,
             name=f"{self.name}_feature_extractor"
         )
+
+    def get_attention_weights(
+        self,
+        inputs: keras.KerasTensor,
+        layer_idx: Optional[int] = None
+    ) -> Union[keras.KerasTensor, Dict[int, keras.KerasTensor]]:
+        """
+        Extract attention weights from transformer layers.
+
+        Args:
+            inputs: Input tensor.
+            layer_idx: Specific layer index to extract weights from.
+                      If None, returns weights from all layers.
+
+        Returns:
+            Attention weights tensor or dictionary of weights.
+        """
+        if not self._layers_built:
+            raise ValueError("Model must be built before extracting attention weights")
+
+        # Forward pass through patch embedding and positional encoding
+        x = self.patch_embed(inputs)
+        batch_size = ops.shape(x)[0]
+        cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
+        x = ops.concatenate([cls_tokens, x], axis=1)
+        x = self.pos_embed(x)
+
+        attention_weights = {}
+
+        # Extract attention weights from each transformer layer
+        for i, layer in enumerate(self.transformer_layers):
+            if hasattr(layer, 'get_attention_weights'):
+                attention_weights[i] = layer.get_attention_weights(x)
+                x = layer(x)
+            else:
+                # If layer doesn't support attention weight extraction, just forward
+                x = layer(x)
+
+        if layer_idx is not None:
+            return attention_weights.get(layer_idx, None)
+
+        return attention_weights
 
     def summary_detailed(self) -> None:
         """Print detailed model summary."""
@@ -359,18 +431,20 @@ class ViT(keras.Model):
         logger.info(f"Input Shape: {self.input_shape_config}")
         logger.info(f"Patch Size: {self.patch_size}")
         logger.info(f"Number of Patches: {self.num_patches}")
-        logger.info(f"Sequence Length: {self.seq_len}")
+        logger.info(f"Sequence Length: {self.max_seq_len}")
         logger.info(f"Embedding Dimension: {self.embed_dim}")
         logger.info(f"Number of Heads: {self.num_heads}")
         logger.info(f"Number of Layers: {self.num_layers}")
         logger.info(f"MLP Ratio: {self.mlp_ratio}")
         logger.info(f"Dropout Rate: {self.dropout_rate}")
         logger.info(f"Attention Dropout Rate: {self.attention_dropout_rate}")
+        logger.info(f"Positional Dropout Rate: {self.pos_dropout_rate}")
         logger.info(f"Normalization Type: {self.norm_type}")
         logger.info(f"Include Top: {self.include_top}")
         logger.info(f"Pooling: {self.pooling}")
         logger.info(f"Number of Classes: {self.num_classes}")
-        logger.info(f"Total Parameters: {self.count_params():,}")
+        if self._layers_built:
+            logger.info(f"Total Parameters: {self.count_params():,}")
 
 
 def create_vision_transformer(
@@ -382,6 +456,7 @@ def create_vision_transformer(
         pooling: Optional[str] = None,
         dropout_rate: float = 0.0,
         attention_dropout_rate: float = 0.0,
+        pos_dropout_rate: float = 0.0,
         kernel_initializer: str = "he_normal",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         norm_type: str = "layer",
@@ -399,6 +474,7 @@ def create_vision_transformer(
         pooling: Pooling mode for feature extraction ('cls', 'mean', 'max', None).
         dropout_rate: Dropout rate for regularization.
         attention_dropout_rate: Dropout rate for attention weights.
+        pos_dropout_rate: Dropout rate for positional embeddings.
         kernel_initializer: Weight initializer for all layers.
         kernel_regularizer: Weight regularizer for all layers.
         norm_type: Type of normalization ('layer' or 'rms').
@@ -429,7 +505,8 @@ def create_vision_transformer(
         ...     num_classes=10,
         ...     scale="tiny",
         ...     patch_size=4,
-        ...     dropout_rate=0.1
+        ...     dropout_rate=0.1,
+        ...     pos_dropout_rate=0.1
         ... )
     """
     model = ViT(
@@ -441,6 +518,7 @@ def create_vision_transformer(
         pooling=pooling,
         dropout_rate=dropout_rate,
         attention_dropout_rate=attention_dropout_rate,
+        pos_dropout_rate=pos_dropout_rate,
         kernel_initializer=kernel_initializer,
         kernel_regularizer=kernel_regularizer,
         norm_type=norm_type,
