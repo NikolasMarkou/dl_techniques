@@ -720,9 +720,9 @@ def main():
                        choices=['tiny', 'small', 'base', 'large', 'huge'], help='Model scale')
 
     # Training arguments
-    parser.add_argument('--epochs', type=int, default=3, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--batch-size', type=int, default=128, help='Training batch size')
-    parser.add_argument('--learning-rate', type=float, default=3e-4, help='Initial learning rate')
+    parser.add_argument('--learning-rate', type=float, default=3e-3, help='Initial learning rate')
     parser.add_argument('--weight-decay', type=float, default=1e-4, help='Weight decay for optimizer')
     parser.add_argument('--lr-schedule', type=str, default='constant',
                        choices=['cosine', 'exponential', 'constant'], help='Learning rate schedule')
