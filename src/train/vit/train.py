@@ -632,7 +632,15 @@ def train_model(args: argparse.Namespace):
     best_model_path = os.path.join(results_dir, 'best_model.keras')
     if os.path.exists(best_model_path):
         logger.info(f"Loading best model from: {best_model_path}")
-        best_model = keras.models.load_model(best_model_path)
+        try:
+            # Try to load the saved model with custom objects
+            custom_objects = {"ViT": ViT}
+            best_model = keras.models.load_model(best_model_path, custom_objects=custom_objects)
+            logger.info("Successfully loaded best model from checkpoint")
+        except Exception as e:
+            logger.warning(f"Failed to load saved model: {e}")
+            logger.warning("Using the current model state instead.")
+            best_model = model
     else:
         logger.warning("No best model found, using the final model state.")
         best_model = model
@@ -663,8 +671,12 @@ def train_model(args: argparse.Namespace):
 
     # Save final model
     final_model_path = os.path.join(results_dir, f"vit_{args.dataset}_{args.scale}_final.keras")
-    best_model.save(final_model_path)
-    logger.info(f"Final model saved to: {final_model_path}")
+    try:
+        best_model.save(final_model_path)
+        logger.info(f"Final model saved to: {final_model_path}")
+    except Exception as e:
+        logger.warning(f"Failed to save final model: {e}")
+        logger.warning("Training completed but model could not be saved.")
 
     # Save training summary
     with open(os.path.join(results_dir, 'training_summary.txt'), 'w') as f:
@@ -708,7 +720,7 @@ def main():
                        choices=['tiny', 'small', 'base', 'large', 'huge'], help='Model scale')
 
     # Training arguments
-    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=3, help='Number of training epochs')
     parser.add_argument('--batch-size', type=int, default=128, help='Training batch size')
     parser.add_argument('--learning-rate', type=float, default=3e-4, help='Initial learning rate')
     parser.add_argument('--weight-decay', type=float, default=1e-4, help='Weight decay for optimizer')

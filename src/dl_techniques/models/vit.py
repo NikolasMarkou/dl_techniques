@@ -57,7 +57,6 @@ class ViT(keras.Model):
 
     # Scale configurations: [embed_dim, num_heads, num_layers, mlp_ratio]
     SCALE_CONFIGS = {
-        "micro": [64, 3, 4, 4.0],  # ViT-Micro
         "tiny": [192, 3, 12, 4.0],  # ViT-Tiny
         "small": [384, 6, 12, 4.0],  # ViT-Small
         "base": [768, 12, 12, 4.0],  # ViT-Base
@@ -105,11 +104,37 @@ class ViT(keras.Model):
             name = f"vision_transformer_{scale}"
         super().__init__(name=name, **kwargs)
 
-        # Store configuration
-        self.input_shape_config = input_shape
+        # Validate input_shape
+        if len(input_shape) != 3:
+            raise ValueError(f"input_shape must be a 3-tuple (height, width, channels), got {input_shape}")
+
+        img_h, img_w, img_c = input_shape
+        if img_h <= 0 or img_w <= 0 or img_c <= 0:
+            raise ValueError(f"All input_shape dimensions must be positive, got {input_shape}")
+
+        # Validate and normalize patch_size
+        if isinstance(patch_size, int):
+            if patch_size <= 0:
+                raise ValueError(f"patch_size must be positive, got {patch_size}")
+            patch_h = patch_w = patch_size
+        else:
+            if len(patch_size) != 2:
+                raise ValueError(f"patch_size must be int or tuple of 2 ints, got {patch_size}")
+            patch_h, patch_w = patch_size
+            if patch_h <= 0 or patch_w <= 0:
+                raise ValueError(f"patch_size dimensions must be positive, got {patch_size}")
+
+        # Validate that image dimensions are divisible by patch dimensions
+        if img_h % patch_h != 0:
+            raise ValueError(f"Image height ({img_h}) must be divisible by patch height ({patch_h})")
+        if img_w % patch_w != 0:
+            raise ValueError(f"Image width ({img_w}) must be divisible by patch width ({patch_w})")
+
+        # Store configuration - ensure input_shape is always a tuple
+        self.input_shape_config = tuple(input_shape) if not isinstance(input_shape, tuple) else input_shape
         self.num_classes = num_classes
         self.scale = scale
-        self.patch_size = patch_size
+        self.patch_size = (patch_h, patch_w)  # Always store as tuple
         self.include_top = include_top
         self.pooling = pooling
         self.dropout_rate = dropout_rate
@@ -138,16 +163,13 @@ class ViT(keras.Model):
         # Get model configuration
         self.embed_dim, self.num_heads, self.num_layers, self.mlp_ratio = self.SCALE_CONFIGS[scale]
 
-        # Calculate maximum sequence length for positional embeddings
-        # Add some buffer for different input sizes
-        if isinstance(patch_size, int):
-            patch_h = patch_w = patch_size
-        else:
-            patch_h, patch_w = patch_size
-
-        img_h, img_w = input_shape[:2]
+        # Calculate number of patches (safe from division by zero due to validation above)
         self.num_patches = (img_h // patch_h) * (img_w // patch_w)
         self.max_seq_len = self.num_patches + 1  # +1 for CLS token
+
+        # Validate we have at least one patch
+        if self.num_patches <= 0:
+            raise ValueError(f"Number of patches must be positive, got {self.num_patches}")
 
         # Initialize layers as None - they will be created in build()
         self.patch_embed = None
@@ -164,6 +186,7 @@ class ViT(keras.Model):
         self._layers_built = False
 
         logger.info(f"Created VisionTransformer-{scale} with {self.embed_dim}d, {self.num_heads}h, {self.num_layers}L")
+        logger.info(f"Image shape: {self.input_shape_config}, Patch size: {self.patch_size}, Num patches: {self.num_patches}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the model layers."""
@@ -179,7 +202,7 @@ class ViT(keras.Model):
         """Initialize all model layers."""
         # Patch embedding layer
         self.patch_embed = PatchEmbedding2D(
-            patch_size=self.patch_size,
+            patch_size=self.patch_size,  # Already validated and stored as tuple
             embed_dim=self.embed_dim,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -187,14 +210,33 @@ class ViT(keras.Model):
         )
 
         # Build patch embedding to get actual number of patches
-        dummy_input_shape = (None,) + self.input_shape_config
+        # Convert input_shape_config to tuple to handle TrackedList during deserialization
+        try:
+            input_shape_tuple = tuple(self.input_shape_config)
+        except (TypeError, ValueError):
+            # Fallback if conversion fails
+            if hasattr(self.input_shape_config, '__iter__'):
+                input_shape_tuple = tuple(list(self.input_shape_config))
+            else:
+                # Last resort - use what we have
+                input_shape_tuple = self.input_shape_config
+
+        dummy_input_shape = (None,) + input_shape_tuple
         self.patch_embed.build(dummy_input_shape)
 
-        # Get actual number of patches from built layer
+        # Get actual number of patches from built layer and validate
         actual_num_patches = self.patch_embed.num_patches
         if actual_num_patches is not None:
+            if actual_num_patches <= 0:
+                raise ValueError(f"Invalid number of patches: {actual_num_patches}")
             self.num_patches = actual_num_patches
             self.max_seq_len = self.num_patches + 1
+        elif self.num_patches <= 0:
+            raise ValueError(f"Invalid number of patches: {self.num_patches}")
+
+        # Validate max_seq_len is reasonable
+        if self.max_seq_len <= 1:
+            raise ValueError(f"Invalid sequence length: {self.max_seq_len}")
 
         # CLS token
         self.cls_token = self.add_weight(
@@ -315,6 +357,9 @@ class ViT(keras.Model):
         Returns:
             Output shape.
         """
+        if len(input_shape) < 4:
+            raise ValueError(f"Expected 4D input shape (batch, height, width, channels), got {input_shape}")
+
         batch_size = input_shape[0]
 
         if self.include_top:
@@ -323,24 +368,50 @@ class ViT(keras.Model):
             if self.pooling in ["cls", "mean", "max"]:
                 return (batch_size, self.embed_dim)
             else:
-                return (batch_size, self.max_seq_len, self.embed_dim)
+                # Safely calculate the number of patches if not already set
+                if hasattr(self, 'max_seq_len') and self.max_seq_len > 0:
+                    return (batch_size, self.max_seq_len, self.embed_dim)
+                else:
+                    # Fallback calculation
+                    img_h, img_w = input_shape[1], input_shape[2]
+                    if img_h is not None and img_w is not None:
+                        patch_h, patch_w = self.patch_size
+                        if patch_h > 0 and patch_w > 0:  # Avoid division by zero
+                            num_patches = (img_h // patch_h) * (img_w // patch_w)
+                            seq_len = num_patches + 1  # +1 for CLS token
+                            return (batch_size, seq_len, self.embed_dim)
+
+                    # If we can't calculate, return None for unknown dimensions
+                    return (batch_size, None, self.embed_dim)
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
         config = super().get_config()
+
+        # Ensure all values are properly serializable
+        input_shape_tuple = tuple(self.input_shape_config)
+        if hasattr(self.input_shape_config, '__iter__') and not isinstance(self.input_shape_config, (str, tuple)):
+            try:
+                input_shape_tuple = tuple(list(self.input_shape_config))
+            except (TypeError, ValueError):
+                input_shape_tuple = self.input_shape_config
+
+        # Ensure patch_size is properly serialized
+        patch_size_tuple = tuple(self.patch_size) if hasattr(self.patch_size, '__iter__') else self.patch_size
+
         config.update({
-            "input_shape": self.input_shape_config,
-            "num_classes": self.num_classes,
-            "scale": self.scale,
-            "patch_size": self.patch_size,
-            "include_top": self.include_top,
+            "input_shape": input_shape_tuple,
+            "num_classes": int(self.num_classes),
+            "scale": str(self.scale),
+            "patch_size": patch_size_tuple,
+            "include_top": bool(self.include_top),
             "pooling": self.pooling,
-            "dropout_rate": self.dropout_rate,
-            "attention_dropout_rate": self.attention_dropout_rate,
-            "pos_dropout_rate": self.pos_dropout_rate,
-            "kernel_initializer": self.kernel_initializer,
+            "dropout_rate": float(self.dropout_rate),
+            "attention_dropout_rate": float(self.attention_dropout_rate),
+            "pos_dropout_rate": float(self.pos_dropout_rate),
+            "kernel_initializer": str(self.kernel_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
-            "norm_type": self.norm_type,
+            "norm_type": str(self.norm_type),
         })
         return config
 
@@ -352,8 +423,12 @@ class ViT(keras.Model):
 
     def build_from_config(self, config: Dict[str, Any]) -> None:
         """Build model from configuration."""
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
+        input_shape = config.get("input_shape")
+        if input_shape is not None:
+            # Ensure input_shape is a tuple
+            if not isinstance(input_shape, tuple):
+                input_shape = tuple(input_shape)
+            self.build(input_shape)
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "ViT":
@@ -367,6 +442,10 @@ class ViT(keras.Model):
         Returns:
             New ViT configured for feature extraction.
         """
+        # Ensure we have valid configuration before creating feature extractor
+        if not hasattr(self, 'input_shape_config') or not self.input_shape_config:
+            raise ValueError("Model must be properly initialized before creating feature extractor")
+
         return ViT(
             input_shape=self.input_shape_config,
             num_classes=self.num_classes,
@@ -402,6 +481,12 @@ class ViT(keras.Model):
         if not self._layers_built:
             raise ValueError("Model must be built before extracting attention weights")
 
+        if not hasattr(self, 'transformer_layers') or not self.transformer_layers:
+            raise ValueError("No transformer layers found in the model")
+
+        if layer_idx is not None and (layer_idx < 0 or layer_idx >= len(self.transformer_layers)):
+            raise ValueError(f"layer_idx must be between 0 and {len(self.transformer_layers)-1}, got {layer_idx}")
+
         # Forward pass through patch embedding and positional encoding
         x = self.patch_embed(inputs)
         batch_size = ops.shape(x)[0]
@@ -414,8 +499,12 @@ class ViT(keras.Model):
         # Extract attention weights from each transformer layer
         for i, layer in enumerate(self.transformer_layers):
             if hasattr(layer, 'get_attention_weights'):
-                attention_weights[i] = layer.get_attention_weights(x)
-                x = layer(x)
+                try:
+                    attention_weights[i] = layer.get_attention_weights(x)
+                    x = layer(x)
+                except Exception as e:
+                    logger.warning(f"Failed to extract attention weights from layer {i}: {e}")
+                    x = layer(x)
             else:
                 # If layer doesn't support attention weight extraction, just forward
                 x = layer(x)
@@ -446,6 +535,12 @@ class ViT(keras.Model):
         logger.info(f"Number of Classes: {self.num_classes}")
         if self._layers_built:
             logger.info(f"Total Parameters: {self.count_params():,}")
+
+        # Additional safety information
+        patch_h, patch_w = self.patch_size
+        img_h, img_w = self.input_shape_config[:2]
+        logger.info(f"Patches per dimension: {img_h // patch_h} x {img_w // patch_w}")
+        logger.info(f"Patch coverage: {(img_h // patch_h) * patch_h}x{(img_w // patch_w) * patch_w} of {img_h}x{img_w}")
 
 
 def create_vision_transformer(
@@ -484,6 +579,9 @@ def create_vision_transformer(
     Returns:
         ViT instance.
 
+    Raises:
+        ValueError: If input parameters are invalid.
+
     Examples:
         >>> # Create a ViT-Base model for ImageNet classification
         >>> model = create_vision_transformer(
@@ -510,6 +608,41 @@ def create_vision_transformer(
         ...     pos_dropout_rate=0.1
         ... )
     """
+    # Validate basic parameters before creating the model
+    if num_classes <= 0:
+        raise ValueError(f"num_classes must be positive, got {num_classes}")
+
+    if not isinstance(input_shape, (tuple, list)) or len(input_shape) != 3:
+        raise ValueError(f"input_shape must be a 3-element tuple/list, got {input_shape}")
+
+    if any(dim <= 0 for dim in input_shape):
+        raise ValueError(f"All input_shape dimensions must be positive, got {input_shape}")
+
+    # Validate patch_size and ensure compatibility with input_shape
+    if isinstance(patch_size, int):
+        if patch_size <= 0:
+            raise ValueError(f"patch_size must be positive, got {patch_size}")
+        patch_h = patch_w = patch_size
+    else:
+        if not isinstance(patch_size, (tuple, list)) or len(patch_size) != 2:
+            raise ValueError(f"patch_size must be int or 2-element tuple/list, got {patch_size}")
+        patch_h, patch_w = patch_size
+        if patch_h <= 0 or patch_w <= 0:
+            raise ValueError(f"patch_size dimensions must be positive, got {patch_size}")
+
+    img_h, img_w = input_shape[:2]
+    if img_h % patch_h != 0:
+        raise ValueError(f"Image height ({img_h}) must be divisible by patch height ({patch_h})")
+    if img_w % patch_w != 0:
+        raise ValueError(f"Image width ({img_w}) must be divisible by patch width ({patch_w})")
+
+    # Calculate number of patches to ensure it's reasonable
+    num_patches = (img_h // patch_h) * (img_w // patch_w)
+    if num_patches <= 0:
+        raise ValueError(f"Number of patches must be positive, got {num_patches}")
+    if num_patches > 10000:  # Reasonable upper limit
+        logger.warning(f"Large number of patches ({num_patches}) may cause memory issues")
+
     model = ViT(
         input_shape=input_shape,
         num_classes=num_classes,
@@ -527,6 +660,7 @@ def create_vision_transformer(
     )
 
     logger.info(f"VisionTransformer-{scale} created successfully")
+    logger.info(f"Configuration: {num_patches} patches ({img_h//patch_h}x{img_w//patch_w}), {num_classes} classes")
     return model
 
 
