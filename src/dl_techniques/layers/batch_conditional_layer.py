@@ -10,9 +10,8 @@ Example:
 """
 
 import keras
-import numpy as np
 import tensorflow as tf
-from typing import List, Tuple, Optional, Union, Sequence
+from typing import List, Tuple, Optional, Sequence
 
 # ---------------------------------------------------------------------
 

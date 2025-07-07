@@ -252,7 +252,10 @@ class SquashLayer(keras.layers.Layer):
         # Apply squashing: scale * unit_vector
         return scale * unit_vector
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
         Args:

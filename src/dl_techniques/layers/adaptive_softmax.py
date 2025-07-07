@@ -54,7 +54,7 @@ Implementation Details:
 
 References:
 ----------
-1. Original Paper: "Softmax is not enough (for sharp out-of-distribution)"
+1. Original Paper: "Softmax is not enough (for sharp out-of-distribution), 2024"
 """
 
 import keras

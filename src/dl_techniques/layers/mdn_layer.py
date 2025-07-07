@@ -39,8 +39,8 @@ References:
 """
 
 import keras
-from keras import ops
 import numpy as np
+from keras import ops
 from typing import Dict, Optional, Tuple, Union, Any
 
 # ---------------------------------------------------------------------
@@ -80,7 +80,7 @@ def elu_plus_one_plus_epsilon(x: keras.KerasTensor) -> keras.KerasTensor:
 
 @keras.saving.register_keras_serializable()
 class MDNLayer(keras.layers.Layer):
-    """Mixture Density Network Layer for Keras 3.x.
+    """Mixture Density Network Layer
 
     This layer outputs parameters for a mixture of Gaussian distributions.
     It includes safeguards against numerical instability and follows Keras 3.x

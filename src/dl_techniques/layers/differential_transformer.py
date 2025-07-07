@@ -111,14 +111,13 @@ Implementation Details:
 """
 
 import keras
-import numpy as np
 import tensorflow as tf
 from keras.api import Model
 from keras.api import layers
 from keras.api import losses
 from keras.api import optimizers
 from keras.api import initializers
-from typing import Optional, Dict, Any, List, Tuple, Union
+from typing import Optional, Dict, Any
 
 # ---------------------------------------------------------------------
 # local imports

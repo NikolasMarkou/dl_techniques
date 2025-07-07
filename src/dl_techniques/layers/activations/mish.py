@@ -3,7 +3,6 @@ import numpy as np
 from keras import ops
 from typing import Any, Dict, Optional
 
-
 # ---------------------------------------------------------------------
 
 def mish(inputs):
@@ -221,3 +220,5 @@ class SaturatedMish(keras.layers.Layer):
         """
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
+
+# ---------------------------------------------------------------------

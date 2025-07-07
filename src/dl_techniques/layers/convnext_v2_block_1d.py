@@ -78,7 +78,6 @@ Notes:
 
 import copy
 import keras
-import tensorflow as tf
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Tuple
 
@@ -304,9 +303,9 @@ class ConvNextV2Block1D(keras.layers.Layer):
 
     def call(
             self,
-            inputs: tf.Tensor,
+            inputs: keras.KerasTensor,
             training: Optional[bool] = None
-    ) -> tf.Tensor:
+    ) -> keras.KerasTensor:
         """Forward pass of the ConvNext 1D block.
 
         Args:

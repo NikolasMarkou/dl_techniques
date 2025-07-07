@@ -29,7 +29,7 @@ KEY FEATURES:
 
 import keras
 import tensorflow as tf
-from typing import Tuple, Optional, Union, List
+from typing import Tuple, Optional
 
 
 from .capsules import CapsuleBlock

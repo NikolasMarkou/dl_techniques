@@ -15,7 +15,7 @@ from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 @keras.saving.register_keras_serializable()
 class OrthoBlock(keras.layers.Layer):
     """
-    A layer implementing: Dense → Orthonormal Reg → LayerNorm → Constrained Scale → Activation.
+    A layer implementing: Dense → Orthonormal Reg → {Norm} → Constrained Scale → Activation.
 
     This block learns a decorrelated feature representation by enforcing an orthonormal
     constraint on the dense layer's weights. It then uses Layer Normalization to

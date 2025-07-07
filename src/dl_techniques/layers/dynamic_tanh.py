@@ -341,3 +341,5 @@ class DynamicTanh(keras.layers.Layer):
         """
         if config.get('input_shape') is not None:
             self.build(config['input_shape'])
+
+# ---------------------------------------------------------------------

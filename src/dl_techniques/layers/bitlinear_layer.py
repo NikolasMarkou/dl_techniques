@@ -68,23 +68,21 @@ layer = BitLinear(
     use_norm=True
 )
 ```
-
-Notes:
------
-- Implements straight-through estimator for gradient flow
-- Supports different quantization strategies (rounding, sampling)
-- Can be used as a drop-in replacement for keras.layers.Dense
-- Serializable and compatible with TF/Keras model saving
-- Implementation initializes all sublayers in the build method
 """
 
 import copy
 import keras
 import tensorflow as tf
-from dataclasses import dataclass, field, asdict
-from typing import Optional, Dict, Union, Tuple, Callable, List, Any, Type, cast
+from dataclasses import dataclass, asdict
+from typing import Optional, Dict, Union, List, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.scaling import *
+
+# ---------------------------------------------------------------------
 
 @dataclass
 class BitLinearConfig:
@@ -153,6 +151,8 @@ class BitLinearConfig:
 
         if not isinstance(self.eps, float) or self.eps <= 0:
             raise ValueError(f"eps must be a positive float, got {self.eps}")
+
+# ---------------------------------------------------------------------
 
 
 @keras.utils.register_keras_serializable(package="BitLinear")
@@ -402,3 +402,5 @@ class BitLinear(keras.layers.Layer):
 
         # Create the BitLinear with the recreated BitLinearConfig
         return cls(bit_config=bit_config, **config_copy)
+
+# ---------------------------------------------------------------------

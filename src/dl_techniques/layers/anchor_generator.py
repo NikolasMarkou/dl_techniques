@@ -1,8 +1,14 @@
 import keras
 from keras import ops
 from typing import Tuple, Any, Dict, List, Optional
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class AnchorGenerator(keras.layers.Layer):
@@ -307,3 +313,5 @@ class AnchorGenerator(keras.layers.Layer):
             total += feat_h * feat_w
 
         return total
+
+# ---------------------------------------------------------------------

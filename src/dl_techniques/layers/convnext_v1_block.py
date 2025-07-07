@@ -85,8 +85,7 @@ Notes:
 """
 import copy
 import keras
-import tensorflow as tf
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Union, Tuple
 
 # ---------------------------------------------------------------------
@@ -95,7 +94,6 @@ from typing import Optional, Dict, Union, Tuple
 
 from .layer_scale import LearnableMultiplier
 from dl_techniques.regularizers.soft_orthogonal import (
-    SoftOrthogonalConstraintRegularizer,
     SoftOrthonormalConstraintRegularizer
 )
 from dl_techniques.constraints.value_range_constraint import (
@@ -244,9 +242,9 @@ class ConvNextV1Block(keras.layers.Layer):
 
     def call(
             self,
-            inputs: tf.Tensor,
+            inputs: keras.KerasTensor,
             training: Optional[bool] = None
-    ) -> tf.Tensor:
+    ) -> keras.KerasTensor:
         """Forward pass of the ConvNext block.
 
         Args:

@@ -1,4 +1,5 @@
-"""Basis function activation layer implementation for Keras 3.x.
+"""
+Basis function activation layer
 
 This module implements the basis function activation used in PowerMLP,
 which applies a smooth, differentiable transformation to enhance network expressiveness.
@@ -6,8 +7,15 @@ which applies a smooth, differentiable transformation to enhance network express
 
 import keras
 from keras import ops
-from typing import Optional, Union, Any, Dict, Tuple
+from typing import Optional, Any, Dict, Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -42,10 +50,6 @@ class BasisFunction(keras.layers.Layer):
         Same shape as the input.
 
     Example:
-        >>> import numpy as np
-        >>> import keras
-        >>> from dl_techniques.layers.activations import BasisFunction
-        >>>
         >>> # Create basis function layer
         >>> basis_layer = BasisFunction()
         >>>
@@ -186,3 +190,4 @@ class BasisFunction(keras.layers.Layer):
         """
         return f"BasisFunction(name='{self.name}')"
 
+# ---------------------------------------------------------------------

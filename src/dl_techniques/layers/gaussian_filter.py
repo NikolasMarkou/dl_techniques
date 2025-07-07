@@ -7,6 +7,7 @@ from typing import Tuple, Union, List, Optional, Sequence
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import depthwise_gaussian_kernel
 
 # ---------------------------------------------------------------------
@@ -98,6 +99,12 @@ class GaussianFilter(keras.layers.Layer):
 
         # Will be set in build()
         self.kernel = None
+
+        logger.info(
+            f"kernel_size: {self.kernel_size}, "
+            f"padding: {self.padding}, "
+            f"sigma: {self.sigma}"
+        )
 
     def build(self, input_shape):
         """Build the Gaussian kernel weights based on input shape.
