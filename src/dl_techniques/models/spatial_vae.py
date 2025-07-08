@@ -41,6 +41,8 @@ from typing import Optional, Tuple, Union, Dict, Any, List
 
 from dl_techniques.utils.logger import logger
 
+
+# Export the classes so they can be imported for model loading
 __all__ = ['SpatialSampling', 'SpatialVAE', 'create_spatial_vae']
 
 
@@ -142,20 +144,20 @@ class SpatialVAE(keras.Model):
     """
 
     def __init__(
-            self,
-            latent_dim: int,
-            spatial_latent_size: Optional[Tuple[int, int]] = None,
-            encoder_filters: List[int] = None,
-            decoder_filters: List[int] = None,
-            kl_loss_weight: float = 1.0,
-            input_shape: Optional[Tuple[int, int, int]] = None,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
-            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            use_batch_norm: bool = True,
-            dropout_rate: float = 0.0,
-            activation: Union[str, callable] = "leaky_relu",
-            name: Optional[str] = "spatial_vae",
-            **kwargs: Any
+        self,
+        latent_dim: int,
+        spatial_latent_size: Optional[Tuple[int, int]] = None,
+        encoder_filters: List[int] = None,
+        decoder_filters: List[int] = None,
+        kl_loss_weight: float = 1.0,
+        input_shape: Optional[Tuple[int, int, int]] = None,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        use_batch_norm: bool = True,
+        dropout_rate: float = 0.0,
+        activation: Union[str, callable] = "leaky_relu",
+        name: Optional[str] = "spatial_vae",
+        **kwargs: Any
     ) -> None:
         """Initialize the Spatial VAE model."""
         super().__init__(name=name, **kwargs)
@@ -190,8 +192,8 @@ class SpatialVAE(keras.Model):
         self.kl_loss_tracker = keras.metrics.Mean(name="kl_loss")
 
         logger.info(f"Initialized Spatial VAE with latent_dim={latent_dim}, "
-                    f"spatial_latent_size={spatial_latent_size}, "
-                    f"encoder_filters={self.encoder_filters}")
+                   f"spatial_latent_size={spatial_latent_size}, "
+                   f"encoder_filters={self.encoder_filters}")
 
         # Build immediately if input_shape is provided
         if self._input_shape_arg is not None:
@@ -242,6 +244,21 @@ class SpatialVAE(keras.Model):
         # Build decoder
         if self.decoder is None:
             self._build_decoder()
+
+        # Build all sublayers properly
+        if self._input_shape_arg is not None:
+            dummy_input = ops.zeros((1,) + tuple(self._input_shape_arg))
+
+            # Build encoder
+            encoder_features = self.encoder(dummy_input)
+
+            # Build spatial convolution layers
+            _ = self.spatial_z_mean_conv(encoder_features)
+            _ = self.spatial_z_log_var_conv(encoder_features)
+
+            # Build decoder
+            dummy_latent = ops.zeros((1,) + self.spatial_latent_size + (self.latent_dim,))
+            _ = self.decoder(dummy_latent)
 
         super().build(input_shape)
         logger.info(f"Spatial VAE built successfully with input shape: {input_shape}")
@@ -395,9 +412,9 @@ class SpatialVAE(keras.Model):
         ]
 
     def call(
-            self,
-            inputs: keras.KerasTensor,
-            training: Optional[bool] = None
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
     ) -> Dict[str, keras.KerasTensor]:
         """Forward pass through the Spatial VAE.
 
@@ -535,9 +552,9 @@ class SpatialVAE(keras.Model):
         return {m.name: m.result() for m in self.metrics}
 
     def _compute_reconstruction_loss(
-            self,
-            y_true: keras.KerasTensor,
-            y_pred: keras.KerasTensor
+        self,
+        y_true: keras.KerasTensor,
+        y_pred: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Compute reconstruction loss (MSE)."""
         y_true_flat = ops.reshape(y_true, (ops.shape(y_true)[0], -1))
@@ -548,9 +565,9 @@ class SpatialVAE(keras.Model):
         return reconstruction_loss
 
     def _compute_spatial_kl_loss(
-            self,
-            z_mean: keras.KerasTensor,
-            z_log_var: keras.KerasTensor
+        self,
+        z_mean: keras.KerasTensor,
+        z_log_var: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Compute spatial KL divergence loss.
 
@@ -602,12 +619,12 @@ class SpatialVAE(keras.Model):
 
 
 def create_spatial_vae(
-        input_shape: Tuple[int, int, int],
-        latent_dim: int,
-        spatial_latent_size: Optional[Tuple[int, int]] = None,
-        optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
-        learning_rate: float = 0.001,
-        **kwargs
+    input_shape: Tuple[int, int, int],
+    latent_dim: int,
+    spatial_latent_size: Optional[Tuple[int, int]] = None,
+    optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
+    learning_rate: float = 0.001,
+    **kwargs
 ) -> SpatialVAE:
     """Create and compile a Spatial VAE model.
 
@@ -652,7 +669,11 @@ def create_spatial_vae(
     # Compile the model
     model.compile(optimizer=optimizer_instance)
 
+    # Ensure the model is built and summary is meaningful
+    if not model.built:
+        model.build((None,) + input_shape)
+
     logger.info(f"Created and compiled Spatial VAE with input_shape={input_shape}, "
-                f"latent_dim={latent_dim}, spatial_latent_size={spatial_latent_size}")
+               f"latent_dim={latent_dim}, spatial_latent_size={spatial_latent_size}")
 
     return model

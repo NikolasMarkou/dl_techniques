@@ -22,6 +22,7 @@ import seaborn as sns
 from datetime import datetime
 from typing import Tuple, Dict, Any, Optional
 
+
 from dl_techniques.models.spatial_vae import SpatialVAE, create_spatial_vae, SpatialSampling
 from dl_techniques.utils.logger import logger
 
@@ -139,7 +140,7 @@ def plot_spatial_latent_maps(
     n_latent_dims = min(4, model.latent_dim)
 
     fig, axes = plt.subplots(n_samples, n_latent_dims + 1,
-                             figsize=((n_latent_dims + 1) * 2, n_samples * 2))
+                            figsize=((n_latent_dims + 1) * 2, n_samples * 2))
 
     if n_samples == 1:
         axes = axes.reshape(1, -1)
@@ -147,16 +148,16 @@ def plot_spatial_latent_maps(
     for i in range(n_samples):
         # Original image
         axes[i, 0].imshow(sample_images[i].squeeze(), cmap=cmap)
-        axes[i, 0].set_title(f'Original {i + 1}', fontsize=10)
+        axes[i, 0].set_title(f'Original {i+1}', fontsize=10)
         axes[i, 0].axis('off')
 
         # Spatial latent maps for different dimensions
         for j in range(n_latent_dims):
             latent_map = z_mean[i, :, :, j]
-            im = axes[i, j + 1].imshow(latent_map, cmap='viridis')
-            axes[i, j + 1].set_title(f'Latent Dim {j + 1}', fontsize=10)
-            axes[i, j + 1].axis('off')
-            plt.colorbar(im, ax=axes[i, j + 1], fraction=0.046, pad=0.04)
+            im = axes[i, j+1].imshow(latent_map, cmap='viridis')
+            axes[i, j+1].set_title(f'Latent Dim {j+1}', fontsize=10)
+            axes[i, j+1].axis('off')
+            plt.colorbar(im, ax=axes[i, j+1], fraction=0.046, pad=0.04)
 
     title = f'Spatial Latent Maps - Epoch {epoch}' if epoch is not None else 'Final Spatial Latent Maps'
     fig.suptitle(title, fontsize=14, fontweight='bold')
@@ -226,7 +227,7 @@ def plot_latent_statistics(
 
     # Calculate statistics
     mean_activations = np.mean(z_mean, axis=0)  # (H, W, latent_dim)
-    std_activations = np.std(z_mean, axis=0)  # (H, W, latent_dim)
+    std_activations = np.std(z_mean, axis=0)    # (H, W, latent_dim)
     var_activations = np.mean(np.exp(z_log_var), axis=0)  # (H, W, latent_dim)
 
     # Plot statistics for first few latent dimensions
@@ -239,19 +240,19 @@ def plot_latent_statistics(
     for i in range(n_dims):
         # Mean activations
         im1 = axes[0, i].imshow(mean_activations[:, :, i], cmap='viridis')
-        axes[0, i].set_title(f'Mean - Latent Dim {i + 1}', fontsize=12)
+        axes[0, i].set_title(f'Mean - Latent Dim {i+1}', fontsize=12)
         axes[0, i].axis('off')
         plt.colorbar(im1, ax=axes[0, i], fraction=0.046, pad=0.04)
 
         # Standard deviation
         im2 = axes[1, i].imshow(std_activations[:, :, i], cmap='viridis')
-        axes[1, i].set_title(f'Std Dev - Latent Dim {i + 1}', fontsize=12)
+        axes[1, i].set_title(f'Std Dev - Latent Dim {i+1}', fontsize=12)
         axes[1, i].axis('off')
         plt.colorbar(im2, ax=axes[1, i], fraction=0.046, pad=0.04)
 
         # Learned variance
         im3 = axes[2, i].imshow(var_activations[:, :, i], cmap='viridis')
-        axes[2, i].set_title(f'Learned Var - Latent Dim {i + 1}', fontsize=12)
+        axes[2, i].set_title(f'Learned Var - Latent Dim {i+1}', fontsize=12)
         axes[2, i].axis('off')
         plt.colorbar(im3, ax=axes[2, i], fraction=0.046, pad=0.04)
 
@@ -348,36 +349,47 @@ def create_callbacks(
 def plot_training_history(history: keras.callbacks.History, save_dir: str):
     """Plot training history curves for Spatial VAE."""
     history_dict = history.history
-    epochs = range(1, len(history_dict['loss']) + 1)
-    fig, axes = plt.subplots(1, 3, figsize=(21, 6), sharey=False)
-    fig.suptitle("Spatial VAE Training and Validation Loss", fontsize=16, fontweight='bold')
 
     # Use the correct keys from the Spatial VAE metrics
     loss_key = 'total_loss'
     recon_loss_key = 'reconstruction_loss'
     kl_loss_key = 'kl_loss'
 
+    # Check if keys exist in history
+    if loss_key not in history_dict:
+        logger.warning(f"Key '{loss_key}' not found in history. Available keys: {list(history_dict.keys())}")
+        return
+
+    epochs = range(1, len(history_dict[loss_key]) + 1)
+    fig, axes = plt.subplots(1, 3, figsize=(21, 6), sharey=False)
+    fig.suptitle("Spatial VAE Training and Validation Loss", fontsize=16, fontweight='bold')
+
     # Total Loss
     axes[0].plot(epochs, history_dict[loss_key], 'b-', label='Training Loss')
-    axes[0].plot(epochs, history_dict[f'val_{loss_key}'], 'r-', label='Validation Loss')
+    if f'val_{loss_key}' in history_dict:
+        axes[0].plot(epochs, history_dict[f'val_{loss_key}'], 'r-', label='Validation Loss')
     axes[0].set_title('Total Loss', fontsize=14)
     axes[0].set_xlabel('Epoch')
     axes[0].set_ylabel('Loss')
     axes[0].legend()
 
     # Reconstruction Loss
-    axes[1].plot(epochs, history_dict[recon_loss_key], 'b-', label='Training')
-    axes[1].plot(epochs, history_dict[f'val_{recon_loss_key}'], 'r-', label='Validation')
-    axes[1].set_title('Reconstruction Loss', fontsize=14)
-    axes[1].set_xlabel('Epoch')
-    axes[1].legend()
+    if recon_loss_key in history_dict:
+        axes[1].plot(epochs, history_dict[recon_loss_key], 'b-', label='Training')
+        if f'val_{recon_loss_key}' in history_dict:
+            axes[1].plot(epochs, history_dict[f'val_{recon_loss_key}'], 'r-', label='Validation')
+        axes[1].set_title('Reconstruction Loss', fontsize=14)
+        axes[1].set_xlabel('Epoch')
+        axes[1].legend()
 
     # KL Loss
-    axes[2].plot(epochs, history_dict[kl_loss_key], 'b-', label='Training')
-    axes[2].plot(epochs, history_dict[f'val_{kl_loss_key}'], 'r-', label='Validation')
-    axes[2].set_title('Spatial KL Divergence Loss', fontsize=14)
-    axes[2].set_xlabel('Epoch')
-    axes[2].legend()
+    if kl_loss_key in history_dict:
+        axes[2].plot(epochs, history_dict[kl_loss_key], 'b-', label='Training')
+        if f'val_{kl_loss_key}' in history_dict:
+            axes[2].plot(epochs, history_dict[f'val_{kl_loss_key}'], 'r-', label='Validation')
+        axes[2].set_title('Spatial KL Divergence Loss', fontsize=14)
+        axes[2].set_xlabel('Epoch')
+        axes[2].legend()
 
     for ax in axes:
         ax.grid(True, alpha=0.3)
@@ -428,10 +440,14 @@ def train_model(args: argparse.Namespace):
     best_model_path = os.path.join(results_dir, 'best_model.keras')
     if os.path.exists(best_model_path):
         logger.info(f"Loading best model from: {best_model_path}")
-        best_model = keras.models.load_model(
-            best_model_path,
-            custom_objects={'SpatialVAE': SpatialVAE, 'SpatialSampling': SpatialSampling}
-        )
+        try:
+            best_model = keras.models.load_model(
+                best_model_path,
+                custom_objects={'SpatialVAE': SpatialVAE, 'SpatialSampling': SpatialSampling}
+            )
+        except Exception as e:
+            logger.warning(f"Failed to load best model: {e}. Using final model state.")
+            best_model = model
     else:
         logger.warning("No best model found, using the final model state.")
         best_model = model
@@ -440,32 +456,43 @@ def train_model(args: argparse.Namespace):
     logger.info(f"Final Test Results (from best model): {test_results}")
 
     logger.info("Generating final Spatial VAE visualizations...")
-    plot_training_history(history, results_dir)
+    try:
+        plot_training_history(history, results_dir)
+    except Exception as e:
+        logger.error(f"Failed to plot training history: {e}")
 
     # Final visualizations
-    sample_indices = np.random.choice(len(x_test), size=5, replace=False)
-    sample_images = x_test[sample_indices]
+    try:
+        sample_indices = np.random.choice(len(x_test), size=5, replace=False)
+        sample_images = x_test[sample_indices]
 
-    # Final reconstructions
-    outputs = best_model.predict(sample_images, verbose=0)
-    final_recon_path = os.path.join(results_dir, 'final_reconstructions.png')
-    plot_reconstruction_comparison(sample_images, outputs['reconstruction'], final_recon_path, dataset=args.dataset)
+        # Final reconstructions
+        outputs = best_model.predict(sample_images, verbose=0)
+        final_recon_path = os.path.join(results_dir, 'final_reconstructions.png')
+        plot_reconstruction_comparison(sample_images, outputs['reconstruction'], final_recon_path, dataset=args.dataset)
 
-    # Final spatial latent maps
-    final_spatial_path = os.path.join(results_dir, 'final_spatial_latent_maps.png')
-    plot_spatial_latent_maps(best_model, sample_images, final_spatial_path, dataset=args.dataset)
+        # Final spatial latent maps
+        final_spatial_path = os.path.join(results_dir, 'final_spatial_latent_maps.png')
+        plot_spatial_latent_maps(best_model, sample_images, final_spatial_path, dataset=args.dataset)
 
-    # Final interpolation
-    final_interp_path = os.path.join(results_dir, 'final_spatial_interpolation.png')
-    plot_spatial_interpolation(best_model, sample_images, final_interp_path, dataset=args.dataset)
+        # Final interpolation
+        final_interp_path = os.path.join(results_dir, 'final_spatial_interpolation.png')
+        plot_spatial_interpolation(best_model, sample_images, final_interp_path, dataset=args.dataset)
 
-    # Final latent statistics
-    final_stats_path = os.path.join(results_dir, 'final_latent_statistics.png')
-    plot_latent_statistics(best_model, x_test[:1000], final_stats_path, batch_size=args.batch_size)
+        # Final latent statistics
+        final_stats_path = os.path.join(results_dir, 'final_latent_statistics.png')
+        plot_latent_statistics(best_model, x_test[:1000], final_stats_path, batch_size=args.batch_size)
 
-    final_model_path = os.path.join(results_dir, f"spatial_vae_{args.dataset}_final.keras")
-    best_model.save(final_model_path)
-    logger.info(f"Final best model saved to: {final_model_path}")
+        logger.info("All visualizations generated successfully.")
+    except Exception as e:
+        logger.error(f"Failed to generate some visualizations: {e}")
+
+    try:
+        final_model_path = os.path.join(results_dir, f"spatial_vae_{args.dataset}_final.keras")
+        best_model.save(final_model_path)
+        logger.info(f"Final best model saved to: {final_model_path}")
+    except Exception as e:
+        logger.error(f"Failed to save final model: {e}")
 
     # Save training summary
     with open(os.path.join(results_dir, 'training_summary.txt'), 'w') as f:
