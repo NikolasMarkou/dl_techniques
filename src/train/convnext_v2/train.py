@@ -457,7 +457,7 @@ def main():
                         help='Model variant')
 
     # Training arguments
-    parser.add_argument('--epochs', type=int, default=2, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--batch-size', type=int, default=64, help='Training batch size')
     parser.add_argument('--learning-rate', type=float, default=1e-3, help='Initial learning rate')
     parser.add_argument('--weight-decay', type=float, default=1e-4, help='Weight decay for optimizer')
