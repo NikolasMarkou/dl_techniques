@@ -268,16 +268,15 @@ class SpatialVAE(keras.Model):
         encoder_layers = []
 
         for i, filters in enumerate(self.encoder_filters):
-            # Convolutional layer
             encoder_layers.append(
                 keras.layers.Conv2D(
                     filters=filters,
                     kernel_size=3,
-                    strides=2,
+                    strides=1,
                     padding="same",
                     kernel_initializer=self.kernel_initializer,
                     kernel_regularizer=self.kernel_regularizer,
-                    name=f"encoder_conv_{i}"
+                    name=f"encoder_conv_{2*i}"
                 )
             )
 
@@ -287,13 +286,37 @@ class SpatialVAE(keras.Model):
                     keras.layers.BatchNormalization(name=f"encoder_bn_{i}")
                 )
 
-            # Activation
-            if self.activation == "leaky_relu":
-                encoder_layers.append(keras.layers.LeakyReLU(name=f"encoder_act_{i}"))
-            else:
+            encoder_layers.append(
+                keras.layers.Activation(self.activation, name=f"encoder_act_{i}")
+            )
+
+            # Dropout
+            if self.dropout_rate > 0:
                 encoder_layers.append(
-                    keras.layers.Activation(self.activation, name=f"encoder_act_{i}")
+                    keras.layers.Dropout(self.dropout_rate, name=f"encoder_dropout_{i}")
                 )
+
+            encoder_layers.append(
+                keras.layers.Conv2D(
+                    filters=filters,
+                    kernel_size=3,
+                    strides=2,
+                    padding="same",
+                    kernel_initializer=self.kernel_initializer,
+                    kernel_regularizer=self.kernel_regularizer,
+                    name=f"encoder_conv_{2*i + 1}"
+                )
+            )
+
+            # Batch normalization
+            if self.use_batch_norm:
+                encoder_layers.append(
+                    keras.layers.BatchNormalization(name=f"encoder_bn_{i}")
+                )
+
+            encoder_layers.append(
+                keras.layers.Activation(self.activation, name=f"encoder_act_{i}")
+            )
 
             # Dropout
             if self.dropout_rate > 0:
@@ -369,7 +392,7 @@ class SpatialVAE(keras.Model):
                     padding="same",
                     kernel_initializer=self.kernel_initializer,
                     kernel_regularizer=self.kernel_regularizer,
-                    name=f"decoder_conv_transpose_{i}"
+                    name=f"decoder_conv_{2*i}"
                 )
             )
 
@@ -380,12 +403,38 @@ class SpatialVAE(keras.Model):
                 )
 
             # Activation
-            if self.activation == "leaky_relu":
-                decoder_layers.append(keras.layers.LeakyReLU(name=f"decoder_act_{i}"))
-            else:
+            decoder_layers.append(
+                keras.layers.Activation(self.activation, name=f"decoder_act_{i}")
+            )
+
+            # Dropout
+            if self.dropout_rate > 0:
                 decoder_layers.append(
-                    keras.layers.Activation(self.activation, name=f"decoder_act_{i}")
+                    keras.layers.Dropout(self.dropout_rate, name=f"decoder_dropout_{i}")
                 )
+
+            decoder_layers.append(
+                keras.layers.Conv2D(
+                    filters=filters,
+                    kernel_size=3,
+                    strides=1,
+                    padding="same",
+                    kernel_initializer=self.kernel_initializer,
+                    kernel_regularizer=self.kernel_regularizer,
+                    name=f"decoder_conv_{2*i + 1}"
+                )
+            )
+
+            # Batch normalization
+            if self.use_batch_norm:
+                decoder_layers.append(
+                    keras.layers.BatchNormalization(name=f"decoder_bn_{i}")
+                )
+
+            # Activation
+            decoder_layers.append(
+                keras.layers.Activation(self.activation, name=f"decoder_act_{i}")
+            )
 
             # Dropout
             if self.dropout_rate > 0:
