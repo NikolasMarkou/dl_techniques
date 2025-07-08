@@ -80,7 +80,7 @@ class ValueRangeConstraint(keras.constraints.Constraint):
         self.max_value = float(max_value) if max_value is not None else None
         self.clip_gradients = clip_gradients
 
-        logger.info(
+        logger.debug(
             f"Initialized ValueRangeConstraint with min_value={self.min_value}, "
             f"max_value={self.max_value}, clip_gradients={self.clip_gradients}"
         )

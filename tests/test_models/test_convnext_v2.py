@@ -180,7 +180,7 @@ class TestConvNeXtV2:
 
     def test_forward_pass_with_top(self, num_classes, sample_data):
         """Test forward pass with classification head."""
-        model = ConvNeXtV2(num_classes=num_classes)
+        model = ConvNeXtV2(num_classes=num_classes, depths=[1, 1], dims=[32, 64])
 
         outputs = model(sample_data)
 
@@ -471,8 +471,8 @@ class TestConvNeXtV2:
         """Test training integration with a small dataset."""
         model = ConvNeXtV2(
             num_classes=num_classes,
-            depths=[1, 1, 2, 1],
-            dims=[32, 64, 128, 256],
+            depths=[1, 1],
+            dims=[32, 64,],
             input_shape=cifar_input_shape  # Specify correct input shape
         )
         model.compile(
@@ -503,8 +503,8 @@ class TestConvNeXtV2:
         """Test gradient flow through the model."""
         model = ConvNeXtV2(
             num_classes=num_classes,
-            depths=[1, 1, 2, 1],
-            dims=[32, 64, 128, 256],
+            depths=[1, 1],
+            dims=[32, 64],
             input_shape=cifar_input_shape  # Specify correct input shape
         )
 
@@ -572,8 +572,8 @@ class TestConvNeXtV2:
         input_shape = (32, 32, 3)
         model = ConvNeXtV2(
             num_classes=num_classes,
-            depths=[1, 1, 2, 1],
-            dims=[16, 32, 64, 128],
+            depths=[1, 1],
+            dims=[16, 32],
             input_shape=input_shape  # Specify correct input shape
         )
 
@@ -596,8 +596,8 @@ class TestConvNeXtV2:
         """Test that model works with different batch sizes."""
         model = ConvNeXtV2(
             num_classes=num_classes,
-            depths=[1, 1, 2, 1],
-            dims=[32, 64, 128, 256],
+            depths=[1, 1],
+            dims=[32, 64],
             input_shape=cifar_input_shape  # Specify correct input shape
         )
 
