@@ -500,7 +500,9 @@ def train_model(args: argparse.Namespace):
         f.write(f"Dataset: {args.dataset}\n")
         f.write(f"Latent Dim: {args.latent_dim}\n")
         f.write(f"Spatial Latent Size: {model_config.get('spatial_latent_size', 'Auto')}\n")
-        f.write(f"Stopped at Epoch: {len(history.history['loss'])}\n\n")
+        # Use the correct key for epoch count
+        epoch_count = len(history.history.get('total_loss', history.history.get('loss', [])))
+        f.write(f"Stopped at Epoch: {epoch_count}\n\n")
         f.write(f"Final Test Results (from best model):\n")
         for key, val in test_results.items():
             f.write(f"  {key.replace('_', ' ').title()}: {val:.4f}\n")

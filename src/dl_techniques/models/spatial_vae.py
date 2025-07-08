@@ -356,15 +356,10 @@ class SpatialVAE(keras.Model):
         # Transposed convolutional layers
         for i, filters in enumerate(self.decoder_filters):
             decoder_layers.append(
-                keras.layers.UpSampling2D(
-                    size=(2, 2),
-                    interpolation="nearest"
-                )
-            )
-            decoder_layers.append(
-                keras.layers.Conv2D(
+                keras.layers.Conv2DTranspose(
                     filters=filters,
                     kernel_size=3,
+                    strides=2,
                     padding="same",
                     kernel_initializer=self.kernel_initializer,
                     kernel_regularizer=self.kernel_regularizer,
@@ -595,11 +590,11 @@ class SpatialVAE(keras.Model):
         config = super().get_config()
         config.update({
             "latent_dim": self.latent_dim,
-            "spatial_latent_size": self.spatial_latent_size,
+            "spatial_latent_size": tuple(self.spatial_latent_size) if self.spatial_latent_size else None,
             "encoder_filters": self.encoder_filters,
             "decoder_filters": self.decoder_filters,
             "kl_loss_weight": self.kl_loss_weight,
-            "input_shape": self._input_shape_arg,
+            "input_shape": tuple(self._input_shape_arg) if self._input_shape_arg else None,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "use_batch_norm": self.use_batch_norm,
@@ -620,6 +615,15 @@ class SpatialVAE(keras.Model):
             config["kernel_regularizer"] = keras.regularizers.deserialize(
                 config["kernel_regularizer"]
             )
+
+        # Ensure spatial_latent_size is a tuple (handle both tuple and list from serialization)
+        if "spatial_latent_size" in config and config["spatial_latent_size"] is not None:
+            config["spatial_latent_size"] = tuple(config["spatial_latent_size"])
+
+        # Ensure input_shape is a tuple (handle both tuple and list from serialization)
+        if "input_shape" in config and config["input_shape"] is not None:
+            config["input_shape"] = tuple(config["input_shape"])
+
         return cls(**config)
 
 
