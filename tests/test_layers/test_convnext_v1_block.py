@@ -12,7 +12,7 @@ import pytest
 import tensorflow as tf
 import numpy as np
 import keras
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 
@@ -31,7 +31,6 @@ def default_block_params() -> Dict[str, Any]:
     return {
         "kernel_size": 7,
         "filters": 64,
-        "strides": (1, 1),
         "activation": "gelu",
         "kernel_regularizer": keras.regularizers.L2(0.01),
         "use_bias": True,
@@ -58,7 +57,6 @@ def test_block_initialization(default_block_params: Dict[str, Any]) -> None:
 
     assert block.kernel_size == default_block_params["kernel_size"]
     assert block.filters == default_block_params["filters"]
-    assert block.strides == default_block_params["strides"]
     assert block.activation_name == default_block_params["activation"]
     assert block.use_bias == default_block_params["use_bias"]
     assert block.dropout_rate == default_block_params["dropout_rate"]
@@ -73,8 +71,6 @@ def test_block_minimal_initialization(minimal_block_params: Dict[str, Any]) -> N
 
     assert block.kernel_size == minimal_block_params["kernel_size"]
     assert block.filters == minimal_block_params["filters"]
-    # Check default values
-    assert block.strides == (1, 1)
     assert block.activation_name == "gelu"
     assert block.use_bias is True
     assert block.dropout_rate == 0.0
@@ -105,50 +101,13 @@ def test_block_output_shape(sample_inputs: tf.Tensor, default_block_params: Dict
     assert outputs.shape == sample_inputs.shape
 
 
-def test_block_output_shape_with_stride(sample_inputs: tf.Tensor, default_block_params: Dict[str, Any]) -> None:
-    """Test if block correctly changes output shape when using stride > 1."""
-    # Create params with stride 2
-    strided_params = default_block_params.copy()
-    strided_params["strides"] = (2, 2)
-
-    block = ConvNextV1Block(**strided_params)
-    outputs = block(sample_inputs)
-
-    # With stride (2, 2), output spatial dimensions should be halved
-    expected_shape = (sample_inputs.shape[0],
-                      sample_inputs.shape[1] // 2,
-                      sample_inputs.shape[2] // 2,
-                      sample_inputs.shape[3])
-    assert outputs.shape == expected_shape
-
-
 def test_block_compute_output_shape(sample_inputs: tf.Tensor, default_block_params: Dict[str, Any]) -> None:
     """Test compute_output_shape method."""
     block = ConvNextV1Block(**default_block_params)
 
-    # Test with stride (1, 1)
+
     computed_shape = block.compute_output_shape(sample_inputs.shape)
     expected_shape = (sample_inputs.shape[0], sample_inputs.shape[1], sample_inputs.shape[2], default_block_params["filters"])
-    assert computed_shape == expected_shape
-
-    # Test with stride (2, 2)
-    strided_params = default_block_params.copy()
-    strided_params["strides"] = (2, 2)
-    strided_block = ConvNextV1Block(**strided_params)
-
-    computed_shape = strided_block.compute_output_shape(sample_inputs.shape)
-    expected_shape = (sample_inputs.shape[0], sample_inputs.shape[1] // 2, sample_inputs.shape[2] // 2, default_block_params["filters"])
-    assert computed_shape == expected_shape
-
-
-def test_block_compute_output_shape_with_int_stride(sample_inputs: tf.Tensor, default_block_params: Dict[str, Any]) -> None:
-    """Test compute_output_shape method with integer stride."""
-    strided_params = default_block_params.copy()
-    strided_params["strides"] = 2  # Integer instead of tuple
-
-    block = ConvNextV1Block(**strided_params)
-    computed_shape = block.compute_output_shape(sample_inputs.shape)
-    expected_shape = (sample_inputs.shape[0], sample_inputs.shape[1] // 2, sample_inputs.shape[2] // 2, default_block_params["filters"])
     assert computed_shape == expected_shape
 
 
@@ -197,7 +156,6 @@ def test_block_serialization(default_block_params: Dict[str, Any], sample_inputs
     # Check if the key properties match
     assert restored_block.kernel_size == original_block.kernel_size
     assert restored_block.filters == original_block.filters
-    assert restored_block.strides == original_block.strides
     assert restored_block.activation_name == original_block.activation_name
     assert restored_block.use_bias == original_block.use_bias
     assert restored_block.dropout_rate == original_block.dropout_rate

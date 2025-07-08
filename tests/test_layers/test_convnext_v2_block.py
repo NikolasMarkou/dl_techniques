@@ -38,7 +38,6 @@ def default_params() -> Dict[str, Any]:
     return {
         "kernel_size": 7,
         "filters": 64,
-        "strides": (1, 1),
         "activation": "gelu",
         "kernel_regularizer": keras.regularizers.L2(0.01),
         "use_bias": True,
@@ -65,7 +64,6 @@ def test_block_initialization(default_params: Dict[str, Any]) -> None:
 
     assert block.kernel_size == default_params["kernel_size"]
     assert block.filters == default_params["filters"]
-    assert block.strides == default_params["strides"]
     assert block.activation_name == default_params["activation"]
     assert block.use_bias == default_params["use_bias"]
     assert block.dropout_rate == default_params["dropout_rate"]
@@ -80,8 +78,6 @@ def test_block_minimal_initialization(minimal_params: Dict[str, Any]) -> None:
 
     assert block.kernel_size == minimal_params["kernel_size"]
     assert block.filters == minimal_params["filters"]
-    # Check default values
-    assert block.strides == (1, 1)
     assert block.activation_name == "gelu"
     assert block.use_bias is True
     assert block.dropout_rate == 0.0
@@ -95,7 +91,6 @@ def test_block_output_shape(sample_inputs: tf.Tensor, default_params: Dict[str, 
     block = ConvNextV2Block(**default_params)
     outputs = block(sample_inputs)
 
-    # With stride (1, 1), output shape should be the same as input
     assert outputs.shape == sample_inputs.shape
 
 
@@ -103,47 +98,9 @@ def test_block_compute_output_shape(sample_inputs: tf.Tensor, default_params: Di
     """Test compute_output_shape method."""
     block = ConvNextV2Block(**default_params)
 
-    # Test with stride (1, 1)
     computed_shape = block.compute_output_shape(sample_inputs.shape)
     expected_shape = (sample_inputs.shape[0], sample_inputs.shape[1], sample_inputs.shape[2], default_params["filters"])
     assert computed_shape == expected_shape
-
-    # Test with stride (2, 2)
-    strided_params = default_params.copy()
-    strided_params["strides"] = (2, 2)
-    strided_block = ConvNextV2Block(**strided_params)
-
-    computed_shape = strided_block.compute_output_shape(sample_inputs.shape)
-    expected_shape = (sample_inputs.shape[0], sample_inputs.shape[1] // 2, sample_inputs.shape[2] // 2, default_params["filters"])
-    assert computed_shape == expected_shape
-
-
-def test_block_compute_output_shape_with_int_stride(sample_inputs: tf.Tensor, default_params: Dict[str, Any]) -> None:
-    """Test compute_output_shape method with integer stride."""
-    strided_params = default_params.copy()
-    strided_params["strides"] = 2  # Integer instead of tuple
-
-    block = ConvNextV2Block(**strided_params)
-    computed_shape = block.compute_output_shape(sample_inputs.shape)
-    expected_shape = (sample_inputs.shape[0], sample_inputs.shape[1] // 2, sample_inputs.shape[2] // 2, default_params["filters"])
-    assert computed_shape == expected_shape
-
-
-def test_block_output_shape_with_stride(sample_inputs: tf.Tensor, default_params: Dict[str, Any]) -> None:
-    """Test if block correctly changes output shape when using stride > 1."""
-    # Create params with stride 2
-    strided_params = default_params.copy()
-    strided_params["strides"] = (2, 2)
-
-    block = ConvNextV2Block(**strided_params)
-    outputs = block(sample_inputs)
-
-    # With stride (2, 2), output spatial dimensions should be halved
-    expected_shape = (sample_inputs.shape[0],
-                      sample_inputs.shape[1] // 2,
-                      sample_inputs.shape[2] // 2,
-                      sample_inputs.shape[3])
-    assert outputs.shape == expected_shape
 
 
 def test_block_training_behavior(sample_inputs: tf.Tensor, default_params: Dict[str, Any]) -> None:
@@ -165,7 +122,6 @@ def test_block_without_dropout(sample_inputs: tf.Tensor) -> None:
     block = ConvNextV2Block(
         kernel_size=7,
         filters=64,
-        strides=(1, 1),
         activation="gelu",
         dropout_rate=0.0,  # Explicitly set to 0.0
         spatial_dropout_rate=0.0,  # Explicitly set to 0.0
@@ -184,7 +140,6 @@ def test_block_with_none_dropout(sample_inputs: tf.Tensor) -> None:
     block = ConvNextV2Block(
         kernel_size=7,
         filters=64,
-        strides=(1, 1),
         activation="gelu",
         dropout_rate=None,  # None instead of 0.0
         spatial_dropout_rate=None,  # None instead of 0.0
@@ -214,7 +169,6 @@ def test_block_serialization(default_params: Dict[str, Any], sample_inputs: tf.T
     # Check if the key properties match
     assert restored_block.kernel_size == original_block.kernel_size
     assert restored_block.filters == original_block.filters
-    assert restored_block.strides == original_block.strides
     assert restored_block.activation_name == original_block.activation_name
     assert restored_block.use_bias == original_block.use_bias
     assert restored_block.dropout_rate == original_block.dropout_rate
@@ -317,7 +271,7 @@ def test_different_kernel_sizes(kernel_size: int, sample_inputs: tf.Tensor) -> N
     )
 
     output = block(sample_inputs)
-    assert output.shape == sample_inputs.shape  # Same shape with stride=1
+    assert output.shape == sample_inputs.shape
 
 
 @pytest.mark.parametrize("filters", [32, 64, 128, 256])
@@ -525,7 +479,6 @@ def test_compute_output_shape_list_input() -> None:
     block = ConvNextV2Block(
         kernel_size=7,
         filters=128,
-        strides=(1, 1)
     )
 
     input_shapes = [(None, 32, 32, 64), (None, 16, 16, 64)]
@@ -540,7 +493,6 @@ def test_compute_output_shape_invalid_input() -> None:
     block = ConvNextV2Block(
         kernel_size=7,
         filters=128,
-        strides=(1, 1)
     )
 
     with pytest.raises(ValueError, match="Expected 4D input tensor"):
