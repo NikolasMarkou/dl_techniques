@@ -322,7 +322,7 @@ def create_callbacks(
         validation_data: Tuple[np.ndarray, np.ndarray],
         dataset: str,
         batch_size: int,
-        monitor: str = 'val_loss',
+        monitor: str = 'val_total_loss',
         patience: int = 10,
         viz_frequency: int = 5
 ) -> Tuple[list, str]:
@@ -337,7 +337,7 @@ def create_callbacks(
             filepath=os.path.join(results_dir, 'best_model.keras'),
             monitor=monitor, save_best_only=True, verbose=1
         ),
-        keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6, verbose=1),
+        keras.callbacks.ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=5, min_lr=1e-6, verbose=1),
         keras.callbacks.CSVLogger(filename=os.path.join(results_dir, 'training_log.csv')),
         keras.callbacks.TensorBoard(log_dir=os.path.join(results_dir, 'tensorboard'), histogram_freq=1),
         SpatialVisualizationCallback(validation_data, results_dir, dataset, viz_frequency, batch_size)
