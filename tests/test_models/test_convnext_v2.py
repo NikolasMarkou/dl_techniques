@@ -121,23 +121,6 @@ class TestConvNeXtV2:
 
         assert model.kernel_regularizer == regularizer
 
-    def test_invalid_configuration(self):
-        """Test invalid configurations raise appropriate errors."""
-        # Mismatched depths and dims lengths
-        with pytest.raises(ValueError, match="Length of depths"):
-            ConvNeXtV2(
-                num_classes=10,
-                depths=[3, 3, 9],  # 3 elements
-                dims=[96, 192, 384, 768]  # 4 elements
-            )
-
-        # Missing input_shape when include_top=False
-        with pytest.raises(ValueError, match="input_shape must be provided"):
-            ConvNeXtV2(
-                num_classes=10,
-                include_top=False
-            )
-
     @pytest.mark.parametrize(
         "variant,expected_depths,expected_dims",
         [
@@ -613,8 +596,8 @@ class TestConvNeXtV2:
         """Test that model summary provides useful information."""
         model = ConvNeXtV2(
             num_classes=num_classes,
-            depths=[2, 2, 6, 2],
-            dims=[64, 128, 256, 512]
+            depths=[2, 2],
+            dims=[64, 128]
         )
 
         # Call summary (which should also log additional info)

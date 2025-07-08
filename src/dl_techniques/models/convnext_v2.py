@@ -105,6 +105,7 @@ class ConvNeXtV2(keras.Model):
 
     # Model variant configurations
     MODEL_VARIANTS = {
+        "cifar10": {"depths": [5, 5], "dims": [48, 96]},
         "atto": {"depths": [2, 2, 6, 2], "dims": [40, 80, 160, 320]},
         "femto": {"depths": [2, 2, 6, 2], "dims": [48, 96, 192, 384]},
         "pico": {"depths": [2, 2, 6, 2], "dims": [64, 128, 256, 512]},
@@ -135,7 +136,7 @@ class ConvNeXtV2(keras.Model):
         use_gamma: bool = True,
         use_softorthonormal_regularizer: bool = False,
         include_top: bool = True,
-        input_shape: Optional[Tuple[int, ...]] = None,
+        input_shape: Tuple[int, ...] = (None, None, 3),
         **kwargs
     ):
         # Validate configuration
@@ -148,6 +149,8 @@ class ConvNeXtV2(keras.Model):
             logger.warning(
                 f"ConvNeXt typically uses 4 stages, got {len(depths)} stages"
             )
+        if input_shape is None:
+            input_shape = (None, None, 3)
 
         # Store configuration
         self.num_classes = num_classes
@@ -171,16 +174,11 @@ class ConvNeXtV2(keras.Model):
         self.downsample_layers = []
         self.head_layers = []
 
-        # Determine input shape with improved logic
-        actual_input_shape = self._determine_input_shape(include_top, input_shape)
-
         # Validate input shape
-        if len(actual_input_shape) != 3:
-            raise ValueError(f"input_shape must be 3D, got {actual_input_shape}")
+        if len(input_shape) != 3:
+            raise ValueError(f"input_shape must be 3D, got {input_shape}")
 
-        height, width, channels = actual_input_shape
-        if height < 16 or width < 16:
-            raise ValueError(f"Input size too small: {height}x{width}. Minimum is 16x16")
+        height, width, channels = input_shape
 
         if channels not in [1, 3]:
             logger.warning(f"Unusual number of channels: {channels}. ConvNeXt typically uses 3 channels")
@@ -191,7 +189,7 @@ class ConvNeXtV2(keras.Model):
         self.input_channels = channels
 
         # Set input shape for the model
-        inputs = keras.Input(shape=actual_input_shape)
+        inputs = keras.Input(shape=input_shape)
 
         # Build the model
         outputs = self._build_model(inputs)
@@ -200,55 +198,9 @@ class ConvNeXtV2(keras.Model):
         super().__init__(inputs=inputs, outputs=outputs, **kwargs)
 
         logger.info(
-            f"Created ConvNeXt V2 model for input {actual_input_shape} "
+            f"Created ConvNeXt V2 model for input {input_shape} "
             f"with {sum(depths)} blocks"
         )
-
-    def _determine_input_shape(self, include_top: bool, input_shape: Optional[Tuple[int, ...]]) -> Tuple[int, int, int]:
-        """Determine the actual input shape to use for the model.
-
-        Args:
-            include_top: Whether the model includes the classification head
-            input_shape: Provided input shape
-
-        Returns:
-            Tuple representing the actual input shape to use
-
-        Raises:
-            ValueError: If input_shape is required but not provided
-        """
-        if input_shape is not None:
-            # Use provided input shape
-            actual_input_shape = input_shape
-            logger.info(f"Using provided input shape: {actual_input_shape}")
-        elif include_top:
-            # Default ImageNet input shape for classification models
-            actual_input_shape = (224, 224, 3)
-            logger.info(f"Using default ImageNet input shape: {actual_input_shape}")
-        else:
-            # For feature extraction models, input_shape must be provided
-            raise ValueError("input_shape must be provided when include_top=False")
-
-        return actual_input_shape
-
-    def _get_downsample_config(self, stage_idx: int) -> Tuple[int, int]:
-        """Determine downsampling configuration based on input size and stage."""
-        min_size = min(self.input_height, self.input_width)
-
-        # Calculate current feature map size after stem and previous downsamples
-        stem_kernel, stem_stride = 4, 4
-        current_size = min_size // stem_stride
-        for i in range(stage_idx):
-            current_size = current_size // 2  # Each downsample halves the size
-
-        # If feature map would become too small, skip downsampling
-        if current_size <= 4:
-            kernel_size, stride = 1, 1  # No downsampling
-            logger.info(f"Stage {stage_idx}: Skipping downsample (feature map too small: {current_size}x{current_size})")
-        else:
-            kernel_size, stride = 2, 2  # Standard downsampling
-
-        return kernel_size, stride
 
     def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Build the complete ConvNeXt V2 model architecture.
@@ -263,7 +215,7 @@ class ConvNeXtV2(keras.Model):
 
         x = self._build_stem(x)
 
-        # Build stages downsampling
+        # Build stages with downsampling
         for stage_idx in range(len(self.depths)):
             # Add downsampling layer (except for first stage)
             if stage_idx > 0:
@@ -275,9 +227,6 @@ class ConvNeXtV2(keras.Model):
         # Build classification head if requested
         if self.include_top:
             x = self._build_head(x)
-        else:
-            # For feature extraction, apply global average pooling and normalization
-            x = self._build_feature_head(x)
 
         return x
 
@@ -414,7 +363,6 @@ class ConvNeXtV2(keras.Model):
             block = ConvNextV2Block(
                 kernel_size=self.kernel_size,
                 filters=dim,
-                strides=(1, 1),  # No spatial reduction within stage
                 activation=self.activation,
                 kernel_regularizer=self.kernel_regularizer,
                 use_bias=self.use_bias,
@@ -444,32 +392,6 @@ class ConvNeXtV2(keras.Model):
             stage_blocks.append(block)
 
         self.stages.append(stage_blocks)
-
-        return x
-
-    def _build_feature_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the feature extraction head (without classification).
-
-        Args:
-            x: Input feature tensor
-
-        Returns:
-            Feature tensor after global pooling and normalization
-        """
-        # Global average pooling
-        gap = keras.layers.GlobalAveragePooling2D(name="global_avg_pool")
-        x = gap(x)
-
-        # Layer normalization before output
-        head_norm = keras.layers.LayerNormalization(
-            epsilon=self.LAYERNORM_EPSILON,
-            center=self.use_bias,
-            scale=True,
-            name="head_norm"
-        )
-        x = head_norm(x)
-
-        self.head_layers = [gap, head_norm]
 
         return x
 
@@ -626,7 +548,7 @@ class ConvNeXtV2(keras.Model):
 def create_convnext_v2(
     variant: str = "tiny",
     num_classes: int = 1000,
-    input_shape: Optional[Tuple[int, ...]] = None,
+    input_shape: Optional[Tuple[int, ...]] = (None, None, 3),
     pretrained: bool = False,
     **kwargs
 ) -> ConvNeXtV2:

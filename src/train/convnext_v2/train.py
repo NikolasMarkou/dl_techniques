@@ -415,7 +415,6 @@ def train_model(args: argparse.Namespace):
         if hasattr(model, 'depths'):
             f.write(f"Model Depths: {model.depths}\n")
             f.write(f"Model Dimensions: {model.dims}\n")
-            f.write(f"Adapted Dimensions: {model.adapted_dims}\n")
             f.write(f"Drop Path Rate: {model.drop_path_rate}\n")
             f.write(f"Input Size: {model.input_height}x{model.input_width}x{model.input_channels}\n")
 
@@ -453,8 +452,8 @@ def main():
     # Dataset and model arguments
     parser.add_argument('--dataset', type=str, default='cifar10',
                         choices=['mnist', 'cifar10', 'cifar100'], help='Dataset to use')
-    parser.add_argument('--variant', type=str, default='tiny',
-                        choices=['atto', 'femto', 'pico', 'nano', 'tiny', 'base', 'large', 'huge'],
+    parser.add_argument('--variant', type=str, default='cifar10',
+                        choices=['cifar10', 'atto', 'femto', 'pico', 'nano', 'tiny', 'base', 'large', 'huge'],
                         help='Model variant')
 
     # Training arguments

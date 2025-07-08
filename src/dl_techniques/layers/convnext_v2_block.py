@@ -97,7 +97,6 @@ class ConvNextV2Block(keras.layers.Layer):
     Args:
         kernel_size: Size of the convolution kernel
         filters: Number of output filters
-        strides: Convolution stride length
         activation: Activation function to use
         kernel_regularizer: Optional regularization for kernel weights
         use_bias: Whether to include a bias term
@@ -119,12 +118,12 @@ class ConvNextV2Block(keras.layers.Layer):
     GAMMA_INITIAL_VALUE = 1.0  # Initial value for gamma multiplier
     GAMMA_MIN_VALUE = 0.0  # Minimum value for gamma constraint
     GAMMA_MAX_VALUE = 1.0  # Maximum value for gamma constraint
+    STRIDES = (1, 1) # Strides for depthwise
 
     def __init__(
             self,
             kernel_size: Union[int, Tuple[int, int]],
             filters: int,
-            strides: Union[int, Tuple[int, int]] = (1, 1),
             activation: str = "gelu",
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             use_bias: bool = True,
@@ -139,7 +138,6 @@ class ConvNextV2Block(keras.layers.Layer):
         # Store configuration parameters
         self.kernel_size = kernel_size
         self.filters = filters
-        self.strides = strides
         self.activation_name = activation
         self.kernel_regularizer = kernel_regularizer
         self.use_bias = use_bias
@@ -167,7 +165,7 @@ class ConvNextV2Block(keras.layers.Layer):
         # Depthwise convolution
         self.conv_1 = keras.layers.DepthwiseConv2D(
             kernel_size=self.kernel_size,
-            strides=self.strides,
+            strides=self.STRIDES,
             padding="same",
             depthwise_initializer=keras.initializers.TruncatedNormal(
                 mean=self.INITIALIZER_MEAN,
@@ -332,20 +330,10 @@ class ConvNextV2Block(keras.layers.Layer):
         # Extract dimensions (NHWC format)
         batch_size, height, width, _ = input_shape
 
-        # Normalize strides to tuple format
-        if isinstance(self.strides, int):
-            strides = (self.strides, self.strides)
-        else:
-            strides = self.strides
-
-        # Calculate new height and width based on strides
-        new_height = height // strides[0]
-        new_width = width // strides[1]
-
         # Output channels determined by the filters parameter
         output_channels = self.filters
 
-        return (batch_size, new_height, new_width, output_channels)
+        return (batch_size, height, width, output_channels)
 
     def get_config(self) -> Dict:
         """Returns the config of the layer for serialization.
@@ -357,7 +345,6 @@ class ConvNextV2Block(keras.layers.Layer):
         config.update({
             "kernel_size": self.kernel_size,
             "filters": self.filters,
-            "strides": self.strides,
             "activation": self.activation_name,
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "use_bias": self.use_bias,

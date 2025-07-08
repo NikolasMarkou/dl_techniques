@@ -1,7 +1,7 @@
 """
-Comprehensive test suite for the VAE model.
+Comprehensive test suite for the ConvNeXt V1 model.
 
-This module contains all tests for the VAE model implementation,
+This module contains all tests for the ConvNeXt V1 model implementation,
 covering initialization, forward pass, training, serialization,
 model integration, and edge cases.
 """
@@ -12,471 +12,488 @@ import tensorflow as tf
 import keras
 import tempfile
 import os
-from typing import Tuple
+from typing import Tuple, List
 
-from dl_techniques.layers.sampling import Sampling
-from dl_techniques.models.vae import VAE, create_vae
+from dl_techniques.models.convnext_v1 import ConvNeXtV1, create_convnext_v1
+from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 
 
-class TestVAE:
-    """Test suite for VAE model implementation."""
+class TestConvNeXtV1:
+    """Test suite for ConvNeXt V1 model implementation."""
 
     @pytest.fixture
     def input_shape(self) -> Tuple[int, int, int]:
-        """Create test input shape for small images."""
+        """Create test input shape for standard images."""
+        return (224, 224, 3)
+
+    @pytest.fixture
+    def small_input_shape(self) -> Tuple[int, int, int]:
+        """Create test input shape for smaller images."""
+        return (64, 64, 3)
+
+    @pytest.fixture
+    def cifar_input_shape(self) -> Tuple[int, int, int]:
+        """Create test input shape for CIFAR-10 like images."""
         return (32, 32, 3)
 
     @pytest.fixture
-    def mnist_input_shape(self) -> Tuple[int, int, int]:
-        """Create test input shape for MNIST-like images."""
-        return (28, 28, 1)
-
-    @pytest.fixture
-    def latent_dim(self) -> int:
-        """Create test latent dimension."""
-        return 16
+    def num_classes(self) -> int:
+        """Create test number of classes."""
+        return 10
 
     @pytest.fixture
     def sample_data(self, input_shape):
         """Create sample input data."""
-        batch_size = 8
+        batch_size = 4
         return tf.random.uniform([batch_size] + list(input_shape), 0, 1)
 
     @pytest.fixture
-    def mnist_sample_data(self, mnist_input_shape):
-        """Create sample MNIST-like data."""
+    def small_sample_data(self, small_input_shape):
+        """Create small sample input data."""
+        batch_size = 4
+        return tf.random.uniform([batch_size] + list(small_input_shape), 0, 1)
+
+    @pytest.fixture
+    def cifar_sample_data(self, cifar_input_shape):
+        """Create CIFAR-like sample data."""
         batch_size = 8
-        return tf.random.uniform([batch_size] + list(mnist_input_shape), 0, 1)
+        return tf.random.uniform([batch_size] + list(cifar_input_shape), 0, 1)
 
-    def test_initialization_defaults(self, latent_dim):
+    def test_initialization_defaults(self, num_classes):
         """Test initialization with default parameters."""
-        vae = VAE(latent_dim=latent_dim)
+        model = ConvNeXtV1(num_classes=num_classes)
 
-        assert vae.latent_dim == latent_dim
-        assert vae.encoder_filters == [32, 64]
-        assert vae.decoder_filters == [64, 32]
-        assert vae.kl_loss_weight == 1.0
-        assert vae.use_batch_norm is True
-        assert vae.dropout_rate == 0.0
-        assert vae.activation == "leaky_relu"
-        assert vae.name == "vae"
-        assert vae.built is False
+        assert model.num_classes == num_classes
+        assert model.depths == [3, 3, 9, 3]  # ConvNeXt-Tiny defaults
+        assert model.dims == [96, 192, 384, 768]
+        assert model.drop_path_rate == 0.0
+        assert model.kernel_size == 7
+        assert model.activation == "gelu"
+        assert model.use_bias is True
+        assert model.kernel_regularizer is None
+        assert model.dropout_rate == 0.0
+        assert model.spatial_dropout_rate == 0.0
+        assert model.use_gamma is True
+        assert model.use_softorthonormal_regularizer is False
+        assert model.include_top is True
 
-        # Check that encoder and decoder are not built yet
-        assert vae.encoder is None
-        assert vae.decoder is None
-        assert vae.sampling_layer is None
-
-    def test_initialization_custom(self, latent_dim, input_shape):
+    def test_initialization_custom(self, num_classes, small_input_shape):
         """Test initialization with custom parameters."""
-        vae = VAE(
-            latent_dim=latent_dim,
-            encoder_filters=[16, 32, 64],
-            decoder_filters=[64, 32, 16],
-            kl_loss_weight=0.5,
-            input_shape=input_shape,
-            kernel_initializer="glorot_uniform",
-            use_batch_norm=False,
-            dropout_rate=0.2,
+        custom_depths = [2, 2, 6, 2]
+        custom_dims = [64, 128, 256, 512]
+
+        model = ConvNeXtV1(
+            num_classes=num_classes,
+            depths=custom_depths,
+            dims=custom_dims,
+            drop_path_rate=0.1,
+            kernel_size=5,
             activation="relu",
-            name="custom_vae"
+            use_bias=False,
+            dropout_rate=0.2,
+            spatial_dropout_rate=0.1,
+            use_gamma=False,
+            use_softorthonormal_regularizer=True,
+            include_top=False,
+            input_shape=small_input_shape
         )
 
-        assert vae.latent_dim == latent_dim
-        assert vae.encoder_filters == [16, 32, 64]
-        assert vae.decoder_filters == [64, 32, 16]
-        assert vae.kl_loss_weight == 0.5
-        assert vae._input_shape_arg == input_shape
-        assert vae.use_batch_norm is False
-        assert vae.dropout_rate == 0.2
-        assert vae.activation == "relu"
-        assert vae.name == "custom_vae"
-        assert vae.built is True  # Should be built if input_shape provided
+        assert model.num_classes == num_classes
+        assert model.depths == custom_depths
+        assert model.dims == custom_dims
+        assert model.drop_path_rate == 0.1
+        assert model.kernel_size == 5
+        assert model.activation == "relu"
+        assert model.use_bias is False
+        assert model.dropout_rate == 0.2
+        assert model.spatial_dropout_rate == 0.1
+        assert model.use_gamma is False
+        assert model.use_softorthonormal_regularizer is True
+        assert model.include_top is False
 
-        # Check that encoder and decoder are built
-        assert vae.encoder is not None
-        assert vae.decoder is not None
-        assert vae.sampling_layer is not None
-
-    def test_initialization_with_regularization(self, latent_dim):
+    def test_initialization_with_regularization(self, num_classes):
         """Test initialization with regularization."""
-        vae = VAE(
-            latent_dim=latent_dim,
-            kernel_regularizer="l2"
+        regularizer = keras.regularizers.L2(0.01)
+        model = ConvNeXtV1(
+            num_classes=num_classes,
+            kernel_regularizer=regularizer
         )
 
-        assert vae.kernel_regularizer is not None
-        assert isinstance(vae.kernel_regularizer, keras.regularizers.L2)
+        assert model.kernel_regularizer == regularizer
 
-    def test_build_process(self, latent_dim, input_shape, sample_data):
-        """Test that the model builds properly."""
-        vae = VAE(latent_dim=latent_dim)
+    def test_invalid_configuration(self):
+        """Test invalid configurations raise appropriate errors."""
+        # Mismatched depths and dims lengths
+        with pytest.raises(ValueError, match="Length of depths"):
+            ConvNeXtV1(
+                num_classes=10,
+                depths=[3, 3, 9],  # 3 elements
+                dims=[96, 192, 384, 768]  # 4 elements
+            )
 
-        # Build by calling with data
-        output = vae(sample_data)
+        # Missing input_shape when include_top=False
+        with pytest.raises(ValueError, match="input_shape must be provided"):
+            ConvNeXtV1(
+                num_classes=10,
+                include_top=False
+            )
 
-        assert vae.built is True
-        assert vae._input_shape_arg == input_shape
-        assert vae.encoder is not None
-        assert vae.decoder is not None
-        assert vae.sampling_layer is not None
-        assert vae._encoder_output_shape is not None
+    @pytest.mark.parametrize(
+        "variant,expected_depths,expected_dims",
+        [
+            ("tiny", [3, 3, 9, 3], [96, 192, 384, 768]),
+            ("small", [3, 3, 27, 3], [96, 192, 384, 768]),
+            ("base", [3, 3, 27, 3], [128, 256, 512, 1024]),
+            ("large", [3, 3, 27, 3], [192, 384, 768, 1536]),
+            ("xlarge", [3, 3, 27, 3], [256, 512, 1024, 2048]),
+        ],
+    )
+    def test_model_variants(self, variant, expected_depths, expected_dims, num_classes):
+        """Test all predefined model variants."""
+        model = ConvNeXtV1.from_variant(variant, num_classes=num_classes)
 
-    def test_encoder_output_shape_calculation(self, latent_dim, input_shape):
-        """Test encoder output shape calculation."""
-        vae = VAE(
-            latent_dim=latent_dim,
-            input_shape=input_shape,
-            encoder_filters=[32, 64]
-        )
+        assert model.num_classes == num_classes
+        assert model.depths == expected_depths
+        assert model.dims == expected_dims
 
-        # For input (32, 32, 3) with 2 stride-2 convolutions:
-        # 32 -> 16 -> 8
-        expected_height = expected_width = 8
-        expected_channels = 64  # Last encoder filter
+    def test_invalid_variant(self, num_classes):
+        """Test invalid variant raises error."""
+        with pytest.raises(ValueError, match="Unknown variant"):
+            ConvNeXtV1.from_variant("invalid_variant", num_classes=num_classes)
 
-        assert vae._encoder_output_shape == (expected_height, expected_width, expected_channels)
+    def test_forward_pass_with_top(self, num_classes, sample_data):
+        """Test forward pass with classification head."""
+        model = ConvNeXtV1(num_classes=num_classes, depths=[1, 1], dims=[32, 64])
 
-    def test_forward_pass(self, latent_dim, input_shape, sample_data):
-        """Test forward pass produces expected outputs."""
-        vae = VAE(latent_dim=latent_dim, input_shape=input_shape)
+        outputs = model(sample_data)
 
-        outputs = vae(sample_data)
-
-        # Check output structure
-        assert isinstance(outputs, dict)
-        assert "reconstruction" in outputs
-        assert "z_mean" in outputs
-        assert "z_log_var" in outputs
-
-        # Check output shapes
-        assert outputs["reconstruction"].shape == sample_data.shape
-        assert outputs["z_mean"].shape == (sample_data.shape[0], latent_dim)
-        assert outputs["z_log_var"].shape == (sample_data.shape[0], latent_dim)
+        # Check output shape
+        expected_shape = (sample_data.shape[0], num_classes)
+        assert outputs.shape == expected_shape
 
         # Check for valid values
-        assert not np.any(np.isnan(outputs["reconstruction"].numpy()))
-        assert not np.any(np.isnan(outputs["z_mean"].numpy()))
-        assert not np.any(np.isnan(outputs["z_log_var"].numpy()))
+        assert not np.any(np.isnan(outputs.numpy()))
+        assert not np.any(np.isinf(outputs.numpy()))
 
-    def test_encode_method(self, latent_dim, input_shape, sample_data):
-        """Test the encode method."""
-        vae = VAE(latent_dim=latent_dim, input_shape=input_shape)
+    def test_forward_pass_without_top(self, small_input_shape, small_sample_data):
+        """Test forward pass without classification head (feature extraction)."""
+        model = ConvNeXtV1(
+            include_top=False,
+            input_shape=small_input_shape,
+            depths=[2, 2, 6, 2],
+            dims=[64, 128, 256, 512]
+        )
 
-        z_mean, z_log_var = vae.encode(sample_data)
+        features = model(small_sample_data)
 
-        assert z_mean.shape == (sample_data.shape[0], latent_dim)
-        assert z_log_var.shape == (sample_data.shape[0], latent_dim)
-        assert not np.any(np.isnan(z_mean.numpy()))
-        assert not np.any(np.isnan(z_log_var.numpy()))
+        # After global average pooling and head norm, should have last dim features
+        expected_shape = (small_sample_data.shape[0], 512)  # Last dim value
+        assert features.shape == expected_shape
 
-    def test_decode_method(self, latent_dim, input_shape):
-        """Test the decode method."""
-        vae = VAE(latent_dim=latent_dim, input_shape=input_shape)
+        # Check for valid values
+        assert not np.any(np.isnan(features.numpy()))
+        assert not np.any(np.isinf(features.numpy()))
 
-        # Create latent samples
-        batch_size = 4
-        z_samples = tf.random.normal([batch_size, latent_dim])
-
-        reconstructions = vae.decode(z_samples)
-
-        assert reconstructions.shape == (batch_size,) + input_shape
-        assert not np.any(np.isnan(reconstructions.numpy()))
-        # Check sigmoid output range
-        assert np.all(reconstructions.numpy() >= 0)
-        assert np.all(reconstructions.numpy() <= 1)
-
-    def test_decode_method_unbuilt_model(self, latent_dim):
-        """Test decode method on unbuilt model raises error."""
-        vae = VAE(latent_dim=latent_dim)  # No input_shape
-        z_samples = tf.random.normal([4, latent_dim])
-
-        with pytest.raises(ValueError, match="Model must be built"):
-            vae.decode(z_samples)
-
-    def test_sample_method(self, latent_dim, input_shape):
-        """Test the sample method for generation."""
-        vae = VAE(latent_dim=latent_dim, input_shape=input_shape)
-
-        num_samples = 5
-        generated = vae.sample(num_samples)
-
-        assert generated.shape == (num_samples,) + input_shape
-        assert not np.any(np.isnan(generated.numpy()))
-        # Check sigmoid output range
-        assert np.all(generated.numpy() >= 0)
-        assert np.all(generated.numpy() <= 1)
-
-    def test_sample_method_unbuilt_model(self, latent_dim):
-        """Test sample method on unbuilt model raises error."""
-        vae = VAE(latent_dim=latent_dim)  # No input_shape
-
-        with pytest.raises(ValueError, match="Model must be built"):
-            vae.sample(5)
-
-    def test_different_input_shapes(self, latent_dim):
+    def test_different_input_shapes(self, num_classes):
         """Test with different input shapes."""
         test_shapes = [
-            (28, 28, 1),  # MNIST
-            (32, 32, 3),  # CIFAR-10
-            (64, 64, 3),  # Larger images
-            (16, 16, 1),  # Small images
+            (32, 32, 3),   # CIFAR-10
+            (64, 64, 3),   # Medium size
+            (128, 128, 3), # Larger
+            (224, 224, 1), # Grayscale ImageNet size
+            (256, 256, 3), # Large
         ]
 
         for shape in test_shapes:
-            vae = VAE(latent_dim=latent_dim, input_shape=shape)
+            model = ConvNeXtV1(
+                num_classes=num_classes,
+                depths=[2, 2, 4, 2],  # Smaller for faster testing
+                dims=[32, 64, 128, 256],
+                input_shape=shape  # Specify the correct input shape
+            )
             batch_data = tf.random.uniform([2] + list(shape), 0, 1)
 
-            outputs = vae(batch_data)
-            assert outputs["reconstruction"].shape == batch_data.shape
+            outputs = model(batch_data)
+            assert outputs.shape == (2, num_classes)
 
-    def test_different_latent_dimensions(self, input_shape):
-        """Test with different latent dimensions."""
-        latent_dims = [2, 8, 16, 32, 64, 128]
-
-        for latent_dim in latent_dims:
-            vae = VAE(latent_dim=latent_dim, input_shape=input_shape)
-            batch_data = tf.random.uniform([2] + list(input_shape), 0, 1)
-
-            outputs = vae(batch_data)
-            assert outputs["z_mean"].shape[1] == latent_dim
-            assert outputs["z_log_var"].shape[1] == latent_dim
-
-    def test_different_filter_configurations(self, latent_dim, input_shape):
-        """Test with different encoder/decoder filter configurations."""
-        filter_configs = [
-            ([16], [16]),
-            ([32, 64], [64, 32]),
-            ([16, 32, 64], [64, 32, 16]),
-            ([32, 64, 128, 256], [256, 128, 64, 32]),
+    def test_different_depths_configurations(self, num_classes, cifar_input_shape):
+        """Test with different depth configurations."""
+        depth_configs = [
+            [1, 1, 2, 1],     # Very small
+            [2, 2, 4, 2],     # Small
+            [3, 3, 9, 3],     # Tiny (default)
+            [2, 2, 6, 2],     # Custom
         ]
 
-        for enc_filters, dec_filters in filter_configs:
-            vae = VAE(
-                latent_dim=latent_dim,
-                input_shape=input_shape,
-                encoder_filters=enc_filters,
-                decoder_filters=dec_filters
+        for depths in depth_configs:
+            dims = [32, 64, 128, 256]  # Keep dims small for testing
+            model = ConvNeXtV1(
+                num_classes=num_classes,
+                depths=depths,
+                dims=dims,
+                input_shape=cifar_input_shape  # Specify correct input shape
             )
-            batch_data = tf.random.uniform([2] + list(input_shape), 0, 1)
+            batch_data = tf.random.uniform([2] + list(cifar_input_shape), 0, 1)
 
-            outputs = vae(batch_data)
-            assert outputs["reconstruction"].shape == batch_data.shape
+            outputs = model(batch_data)
+            assert outputs.shape == (2, num_classes)
 
-    def test_without_batch_norm(self, latent_dim, input_shape, sample_data):
-        """Test model without batch normalization."""
-        vae = VAE(
-            latent_dim=latent_dim,
-            input_shape=input_shape,
-            use_batch_norm=False
-        )
-
-        outputs = vae(sample_data)
-        assert outputs["reconstruction"].shape == sample_data.shape
-
-    def test_with_dropout(self, latent_dim, input_shape, sample_data):
-        """Test model with dropout."""
-        vae = VAE(
-            latent_dim=latent_dim,
-            input_shape=input_shape,
-            dropout_rate=0.3
-        )
-
-        # Test training mode (dropout active)
-        outputs_train = vae(sample_data, training=True)
-
-        # Test inference mode (dropout inactive)
-        outputs_test = vae(sample_data, training=False)
-
-        # Both should have correct shapes
-        assert outputs_train["reconstruction"].shape == sample_data.shape
-        assert outputs_test["reconstruction"].shape == sample_data.shape
-
-    def test_different_activations(self, latent_dim, input_shape):
+    def test_different_activations(self, num_classes, cifar_input_shape, cifar_sample_data):
         """Test with different activation functions."""
-        activations = ["relu", "leaky_relu", "elu", "gelu"]
+        activations = ["relu", "gelu", "leaky_relu", "elu", "swish"]
 
         for activation in activations:
-            vae = VAE(
-                latent_dim=latent_dim,
-                input_shape=input_shape,
-                activation=activation
+            model = ConvNeXtV1(
+                num_classes=num_classes,
+                depths=[1, 1, 2, 1],  # Small for faster testing
+                dims=[32, 64, 128, 256],
+                activation=activation,
+                input_shape=cifar_input_shape  # Specify correct input shape
             )
-            batch_data = tf.random.uniform([2] + list(input_shape), 0, 1)
 
-            outputs = vae(batch_data)
-            assert outputs["reconstruction"].shape == batch_data.shape
+            outputs = model(cifar_sample_data)
+            assert outputs.shape == (cifar_sample_data.shape[0], num_classes)
 
-    def test_loss_computation(self, latent_dim, input_shape, sample_data):
-        """Test loss computation methods."""
-        vae = VAE(latent_dim=latent_dim, input_shape=input_shape)
+    def test_stochastic_depth(self, num_classes, cifar_input_shape, cifar_sample_data):
+        """Test stochastic depth (drop path) functionality."""
+        drop_path_rates = [0.0, 0.1, 0.2, 0.3]
 
-        outputs = vae(sample_data)
-
-        # Test reconstruction loss
-        recon_loss = vae._compute_reconstruction_loss(
-            sample_data, outputs["reconstruction"]
-        )
-        assert recon_loss.shape == ()  # Scalar
-        assert recon_loss >= 0
-
-        # Test KL loss
-        kl_loss = vae._compute_kl_loss(
-            outputs["z_mean"], outputs["z_log_var"]
-        )
-        assert kl_loss.shape == ()  # Scalar
-        # KL loss can be negative (when posterior is more concentrated than prior)
-
-    def test_training_step(self, latent_dim, input_shape, sample_data):
-        """Test custom training step."""
-        vae = VAE(latent_dim=latent_dim, input_shape=input_shape)
-        vae.compile(optimizer="adam")
-
-        # Test training step
-        metrics = vae.train_step(sample_data)
-
-        # Check returned metrics
-        assert "total_loss" in metrics
-        assert "reconstruction_loss" in metrics
-        assert "kl_loss" in metrics
-
-        # Check metric values are scalars
-        for metric_value in metrics.values():
-            assert metric_value.shape == ()
-
-    def test_test_step(self, latent_dim, input_shape, sample_data):
-        """Test custom test step."""
-        vae = VAE(latent_dim=latent_dim, input_shape=input_shape)
-        vae.compile(optimizer="adam")
-
-        # Test evaluation step
-        metrics = vae.test_step(sample_data)
-
-        # Check returned metrics
-        assert "total_loss" in metrics
-        assert "reconstruction_loss" in metrics
-        assert "kl_loss" in metrics
-
-    def test_kl_loss_weight(self, latent_dim, input_shape, sample_data):
-        """Test different KL loss weights."""
-        kl_weights = [0.0, 0.5, 1.0, 2.0]
-
-        for kl_weight in kl_weights:
-            vae = VAE(
-                latent_dim=latent_dim,
-                input_shape=input_shape,
-                kl_loss_weight=kl_weight
+        for drop_path_rate in drop_path_rates:
+            model = ConvNeXtV1(
+                num_classes=num_classes,
+                depths=[2, 2, 4, 2],
+                dims=[32, 64, 128, 256],
+                drop_path_rate=drop_path_rate,
+                input_shape=cifar_input_shape  # Specify correct input shape
             )
-            vae.compile(optimizer="adam")
 
-            metrics = vae.train_step(sample_data)
-            assert "total_loss" in metrics
+            # Test training mode (stochastic depth active)
+            outputs_train = model(cifar_sample_data, training=True)
 
-    def test_serialization(self, latent_dim, input_shape):
+            # Test inference mode (stochastic depth inactive)
+            outputs_test = model(cifar_sample_data, training=False)
+
+            # Both should have correct shapes
+            expected_shape = (cifar_sample_data.shape[0], num_classes)
+            assert outputs_train.shape == expected_shape
+            assert outputs_test.shape == expected_shape
+
+    def test_dropout_configurations(self, num_classes, cifar_input_shape, cifar_sample_data):
+        """Test different dropout configurations."""
+        dropout_configs = [
+            (0.0, 0.0),   # No dropout
+            (0.1, 0.0),   # Only regular dropout
+            (0.0, 0.1),   # Only spatial dropout
+            (0.1, 0.1),   # Both dropouts
+        ]
+
+        for dropout_rate, spatial_dropout_rate in dropout_configs:
+            model = ConvNeXtV1(
+                num_classes=num_classes,
+                depths=[1, 1, 2, 1],
+                dims=[32, 64, 128, 256],
+                dropout_rate=dropout_rate,
+                spatial_dropout_rate=spatial_dropout_rate,
+                input_shape=cifar_input_shape  # Specify correct input shape
+            )
+
+            outputs = model(cifar_sample_data, training=True)
+            assert outputs.shape == (cifar_sample_data.shape[0], num_classes)
+
+    def test_gamma_scaling(self, num_classes, cifar_input_shape, cifar_sample_data):
+        """Test learnable gamma scaling."""
+        use_gamma_options = [True, False]
+
+        for use_gamma in use_gamma_options:
+            model = ConvNeXtV1(
+                num_classes=num_classes,
+                depths=[1, 1, 2, 1],
+                dims=[32, 64, 128, 256],
+                use_gamma=use_gamma,
+                input_shape=cifar_input_shape  # Specify correct input shape
+            )
+
+            outputs = model(cifar_sample_data)
+            assert outputs.shape == (cifar_sample_data.shape[0], num_classes)
+
+    def test_regularization_options(self, num_classes, cifar_input_shape):
+        """Test different regularization options."""
+        # Test kernel regularization
+        model_with_l2 = ConvNeXtV1(
+            num_classes=num_classes,
+            depths=[1, 1, 2, 1],
+            dims=[32, 64, 128, 256],
+            kernel_regularizer=keras.regularizers.L2(0.01),
+            input_shape=cifar_input_shape  # Specify correct input shape
+        )
+
+        # Test soft orthonormal regularization
+        model_with_orthonormal = ConvNeXtV1(
+            num_classes=num_classes,
+            depths=[1, 1, 2, 1],
+            dims=[32, 64, 128, 256],
+            use_softorthonormal_regularizer=True,
+            input_shape=cifar_input_shape  # Specify correct input shape
+        )
+
+        batch_data = tf.random.uniform([2] + list(cifar_input_shape), 0, 1)
+
+        outputs_l2 = model_with_l2(batch_data)
+        outputs_orthonormal = model_with_orthonormal(batch_data)
+
+        assert outputs_l2.shape == (2, num_classes)
+        assert outputs_orthonormal.shape == (2, num_classes)
+
+    def test_model_compilation(self, num_classes):
+        """Test model compilation with different optimizers and losses."""
+        model = ConvNeXtV1(
+            num_classes=num_classes,
+            depths=[1, 1, 2, 1],
+            dims=[32, 64, 128, 256]
+        )
+
+        # Test with different optimizers
+        optimizers = [
+            keras.optimizers.Adam(learning_rate=0.001),
+            keras.optimizers.SGD(learning_rate=0.01),
+            keras.optimizers.AdamW(learning_rate=0.001, weight_decay=0.01)
+        ]
+
+        for optimizer in optimizers:
+            model.compile(
+                optimizer=optimizer,
+                loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+                metrics=["accuracy"]
+            )
+            assert model.optimizer == optimizer
+
+    def test_serialization(self, num_classes):
         """Test serialization and deserialization of the model."""
-        original_vae = VAE(
-            latent_dim=latent_dim,
-            input_shape=input_shape,
-            encoder_filters=[32, 64],
-            decoder_filters=[64, 32],
-            kl_loss_weight=0.8,
-            use_batch_norm=False,
+        original_model = ConvNeXtV1(
+            num_classes=num_classes,
+            depths=[2, 2, 4, 2],
+            dims=[64, 128, 256, 512],
+            drop_path_rate=0.1,
+            kernel_size=5,
+            activation="relu",
+            use_bias=False,
             dropout_rate=0.1,
-            activation="relu"
+            spatial_dropout_rate=0.05,
+            use_gamma=False,
+            use_softorthonormal_regularizer=True
         )
 
-        # Get configs
-        config = original_vae.get_config()
-        build_config = original_vae.get_build_config()
+        # Get config
+        config = original_model.get_config()
 
         # Recreate the model
-        recreated_vae = VAE.from_config(config)
-        recreated_vae.build_from_config(build_config)
+        recreated_model = ConvNeXtV1.from_config(config)
 
         # Check configuration matches
-        assert recreated_vae.latent_dim == original_vae.latent_dim
-        assert recreated_vae.encoder_filters == original_vae.encoder_filters
-        assert recreated_vae.decoder_filters == original_vae.decoder_filters
-        assert recreated_vae.kl_loss_weight == original_vae.kl_loss_weight
-        assert recreated_vae.use_batch_norm == original_vae.use_batch_norm
-        assert recreated_vae.dropout_rate == original_vae.dropout_rate
-        assert recreated_vae.activation == original_vae.activation
+        assert recreated_model.num_classes == original_model.num_classes
+        assert recreated_model.depths == original_model.depths
+        assert recreated_model.dims == original_model.dims
+        assert recreated_model.drop_path_rate == original_model.drop_path_rate
+        assert recreated_model.kernel_size == original_model.kernel_size
+        assert recreated_model.activation == original_model.activation
+        assert recreated_model.use_bias == original_model.use_bias
+        assert recreated_model.dropout_rate == original_model.dropout_rate
+        assert recreated_model.spatial_dropout_rate == original_model.spatial_dropout_rate
+        assert recreated_model.use_gamma == original_model.use_gamma
+        assert recreated_model.use_softorthonormal_regularizer == original_model.use_softorthonormal_regularizer
 
-    def test_model_save_load(self, latent_dim, input_shape, sample_data):
-        """Test saving and loading a VAE model."""
+    def test_model_save_load(self, num_classes, cifar_input_shape, cifar_sample_data):
+        """Test saving and loading a ConvNeXt model."""
         # Create and compile model
-        vae = VAE(
-            latent_dim=latent_dim,
-            input_shape=input_shape,
-            name="test_vae"
+        model = ConvNeXtV1(
+            num_classes=num_classes,
+            depths=[1, 1, 2, 1],
+            dims=[32, 64, 128, 256],
+            input_shape=cifar_input_shape,  # Specify correct input shape
+            name="test_convnext"
         )
-        vae.compile(optimizer="adam")
+        model.compile(
+            optimizer="adam",
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+            metrics=["accuracy"]
+        )
 
-        # --- FIX: Train for one step to give Batch Norm layers a defined state. ---
-        vae.train_step(sample_data)
-        # --------------------------------------------------------------------------
-
-        # Generate prediction before saving (ensure training=False for deterministic output)
-        original_outputs = vae(sample_data, training=False)
+        # Generate prediction before saving
+        original_outputs = model(cifar_sample_data, training=False)
 
         # Create temporary directory for model
         with tempfile.TemporaryDirectory() as tmpdirname:
-            model_path = os.path.join(tmpdirname, "vae_model.keras")
+            model_path = os.path.join(tmpdirname, "convnext_model.keras")
 
             # Save the model
-            vae.save(model_path)
+            model.save(model_path)
 
             # Load the model
-            loaded_vae = keras.models.load_model(
+            loaded_model = keras.models.load_model(
                 model_path,
                 custom_objects={
-                    "VAE": VAE,
-                    # Make sure the Sampling class is imported in the test file
-                    "Sampling": Sampling
+                    "ConvNeXtV1": ConvNeXtV1,
+                    "ConvNextV1Block": ConvNextV1Block
                 }
             )
 
             # Generate prediction with loaded model
-            loaded_outputs = loaded_vae(sample_data, training=False)
+            loaded_outputs = loaded_model(cifar_sample_data, training=False)
 
-            # Check output shape match
-            assert original_outputs["reconstruction"].numpy().shape == loaded_outputs["reconstruction"].numpy().shape
+            # Check outputs match (shapes should be identical)
+            assert original_outputs.shape == loaded_outputs.shape
+            assert loaded_model.count_params() == model.count_params()
 
-
-    def test_training_integration(self, latent_dim, mnist_input_shape, mnist_sample_data):
+    def test_training_integration(self, num_classes, cifar_input_shape, cifar_sample_data):
         """Test training integration with a small dataset."""
-        vae = VAE(
-            latent_dim=latent_dim,
-            input_shape=mnist_input_shape,
-            encoder_filters=[16, 32],
-            decoder_filters=[32, 16]
+        model = ConvNeXtV1(
+            num_classes=num_classes,
+            depths=[1, 1, 2, 1],
+            dims=[32, 64, 128, 256],
+            input_shape=cifar_input_shape  # Specify correct input shape
         )
-        vae.compile(optimizer=keras.optimizers.Adam(learning_rate=0.01))
+        model.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=0.01),
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+            metrics=["accuracy"]
+        )
 
         # Create small dataset
-        dataset = tf.data.Dataset.from_tensor_slices(mnist_sample_data)
+        labels = tf.random.uniform([cifar_sample_data.shape[0]], 0, num_classes, dtype=tf.int32)
+        dataset = tf.data.Dataset.from_tensor_slices((cifar_sample_data, labels))
         dataset = dataset.batch(4)
 
         # Train for a few steps
-        history = vae.fit(dataset, epochs=2, verbose=0)
+        history = model.fit(dataset, epochs=2, verbose=0)
 
         # Check that training metrics are recorded
-        assert "total_loss" in history.history
-        assert "reconstruction_loss" in history.history
-        assert "kl_loss" in history.history
-        assert len(history.history["total_loss"]) == 2  # 2 epochs
+        assert "loss" in history.history
+        assert "accuracy" in history.history
+        assert len(history.history["loss"]) == 2  # 2 epochs
 
-    def test_gradient_flow(self, latent_dim, input_shape, sample_data):
+        # Check that loss decreases (or at least doesn't increase dramatically)
+        initial_loss = history.history["loss"][0]
+        final_loss = history.history["loss"][-1]
+        assert final_loss < initial_loss * 2  # Allow some variance
+
+    def test_gradient_flow(self, num_classes, cifar_input_shape, cifar_sample_data):
         """Test gradient flow through the model."""
-        vae = VAE(latent_dim=latent_dim, input_shape=input_shape)
-        vae.compile(optimizer="adam")
+        model = ConvNeXtV1(
+            num_classes=num_classes,
+            depths=[1, 1, 2, 1],
+            dims=[32, 64, 128, 256],
+            input_shape=cifar_input_shape  # Specify correct input shape
+        )
+
+        labels = tf.random.uniform([cifar_sample_data.shape[0]], 0, num_classes, dtype=tf.int32)
 
         with tf.GradientTape() as tape:
-            outputs = vae(sample_data, training=True)
-            loss = vae._compute_reconstruction_loss(sample_data, outputs["reconstruction"])
+            outputs = model(cifar_sample_data, training=True)
+            loss = keras.losses.sparse_categorical_crossentropy(labels, outputs, from_logits=True)
+            loss = tf.reduce_mean(loss)
 
         # Get gradients
-        grads = tape.gradient(loss, vae.trainable_variables)
+        grads = tape.gradient(loss, model.trainable_variables)
 
         # Check gradients exist and are not None
         assert all(g is not None for g in grads)
@@ -485,100 +502,169 @@ class TestVAE:
         has_nonzero_grad = any(np.any(g.numpy() != 0) for g in grads if g is not None)
         assert has_nonzero_grad
 
-    def test_create_vae_factory(self, latent_dim, input_shape):
-        """Test the create_vae factory function."""
-        vae = create_vae(
-            input_shape=input_shape,
-            latent_dim=latent_dim,
-            encoder_filters=[32, 64],
-            decoder_filters=[64, 32],
-            learning_rate=0.001
+    def test_create_convnext_v1_factory(self, num_classes):
+        """Test the create_convnext_v1 factory function."""
+        model = create_convnext_v1(
+            variant="tiny",
+            num_classes=num_classes,
+            drop_path_rate=0.1,
+            kernel_regularizer=keras.regularizers.L2(0.01)
         )
 
-        assert isinstance(vae, VAE)
-        assert vae.latent_dim == latent_dim
-        assert vae._input_shape_arg == input_shape
-        assert vae.built is True
-        assert vae.optimizer is not None
+        assert isinstance(model, ConvNeXtV1)
+        assert model.num_classes == num_classes
+        assert model.depths == [3, 3, 9, 3]  # Tiny variant
+        assert model.dims == [96, 192, 384, 768]
+        assert model.drop_path_rate == 0.1
 
-    def test_create_vae_with_custom_optimizer(self, latent_dim, input_shape):
-        """Test create_vae with custom optimizer."""
-        custom_optimizer = keras.optimizers.Adam(learning_rate=0.002)
-
-        vae = create_vae(
-            input_shape=input_shape,
-            latent_dim=latent_dim,
-            optimizer=custom_optimizer
+    def test_factory_with_pretrained_warning(self, num_classes):
+        """Test factory function with pretrained warning."""
+        # This should log a warning but still create the model
+        model = create_convnext_v1(
+            variant="base",
+            num_classes=num_classes,
+            pretrained=True
         )
 
-        assert vae.optimizer == custom_optimizer
+        assert isinstance(model, ConvNeXtV1)
+        assert model.depths == [3, 3, 27, 3]  # Base variant
 
-    def test_numerical_stability(self, latent_dim):
+    def test_numerical_stability(self, num_classes):
         """Test model stability with extreme input values."""
-        input_shape = (16, 16, 1)
-        vae = VAE(latent_dim=latent_dim, input_shape=input_shape)
+        input_shape = (32, 32, 3)
+        model = ConvNeXtV1(
+            num_classes=num_classes,
+            depths=[1, 1],
+            dims=[16, 32],
+            input_shape=input_shape  # Specify correct input shape
+        )
 
         test_cases = [
             tf.zeros((2,) + input_shape),  # All zeros
             tf.ones((2,) + input_shape),   # All ones
             tf.random.uniform((2,) + input_shape, 0, 1e-6),  # Very small values
             tf.random.uniform((2,) + input_shape, 1-1e-6, 1),  # Very close to 1
+            tf.random.normal((2,) + input_shape, 0, 10),  # Large variance
         ]
 
         for i, test_input in enumerate(test_cases):
-            outputs = vae(test_input)
+            outputs = model(test_input)
 
             # Check for NaN/Inf values
-            for key, tensor in outputs.items():
-                assert not np.any(np.isnan(tensor.numpy())), f"NaN in {key} for test case {i}"
-                assert not np.any(np.isinf(tensor.numpy())), f"Inf in {key} for test case {i}"
+            assert not np.any(np.isnan(outputs.numpy())), f"NaN in outputs for test case {i}"
+            assert not np.any(np.isinf(outputs.numpy())), f"Inf in outputs for test case {i}"
 
-    def test_metrics_reset(self, latent_dim, input_shape, sample_data):
-        """Test that metrics reset properly between epochs."""
-        vae = VAE(latent_dim=latent_dim, input_shape=input_shape)
-        vae.compile(optimizer="adam")
-
-        # Train step
-        metrics1 = vae.train_step(sample_data)
-
-        # Reset metrics
-        for metric in vae.metrics:
-            metric.reset_state()
-
-        # Another train step
-        metrics2 = vae.train_step(sample_data)
-
-        # Metrics should be different after reset
-        # (unless by coincidence they're the same)
-        assert isinstance(metrics1, dict)
-        assert isinstance(metrics2, dict)
-
-    def test_latent_space_properties(self, latent_dim, input_shape, sample_data):
-        """Test basic properties of the learned latent space."""
-        vae = VAE(latent_dim=latent_dim, input_shape=input_shape)
-
-        outputs = vae(sample_data)
-        z_mean = outputs["z_mean"]
-        z_log_var = outputs["z_log_var"]
-
-        # Check that latent means have reasonable range
-        mean_magnitude = tf.reduce_mean(tf.abs(z_mean))
-        assert mean_magnitude < 10.0  # Shouldn't be too large initially
-
-        # Check that log variances are reasonable
-        log_var_mean = tf.reduce_mean(z_log_var)
-        assert log_var_mean > -10.0 and log_var_mean < 10.0  # Reasonable range
-
-    def test_batch_size_independence(self, latent_dim, input_shape):
+    def test_batch_size_independence(self, num_classes, cifar_input_shape):
         """Test that model works with different batch sizes."""
-        vae = VAE(latent_dim=latent_dim, input_shape=input_shape)
+        model = ConvNeXtV1(
+            num_classes=num_classes,
+            depths=[1, 1, 2, 1],
+            dims=[32, 64, 128, 256]
+        )
 
-        batch_sizes = [1, 4, 8, 16]
+        batch_sizes = [1, 2, 4, 8, 16]
 
         for batch_size in batch_sizes:
-            test_data = tf.random.uniform((batch_size,) + input_shape, 0, 1)
-            outputs = vae(test_data)
+            test_data = tf.random.uniform((batch_size,) + cifar_input_shape, 0, 1)
+            outputs = model(test_data)
 
-            assert outputs["reconstruction"].shape[0] == batch_size
-            assert outputs["z_mean"].shape[0] == batch_size
-            assert outputs["z_log_var"].shape[0] == batch_size
+            assert outputs.shape == (batch_size, num_classes)
+
+    def test_model_summary_information(self, num_classes, capsys):
+        """Test that model summary provides useful information."""
+        model = ConvNeXtV1(
+            num_classes=num_classes,
+            depths=[2, 2, 4, 2],
+            dims=[64, 128, 256, 512]
+        )
+
+        # Call summary (which should also log additional info)
+        model.summary()
+
+        # Check that something was printed
+        captured = capsys.readouterr()
+        assert len(captured.out) > 0  # Summary was printed
+
+    def test_stage_structure(self, num_classes, cifar_input_shape, cifar_sample_data):
+        """Test that the model builds stages correctly."""
+        depths = [2, 2, 4, 2]
+        model = ConvNeXtV1(
+            num_classes=num_classes,
+            depths=depths,
+            dims=[32, 64, 128, 256]
+        )
+
+        # Trigger build by calling model
+        _ = model(cifar_sample_data)
+
+        # Check that stages were created
+        assert len(model.stages) == len(depths)
+
+        # Check that each stage has the correct number of blocks
+        for i, (stage, expected_depth) in enumerate(zip(model.stages, depths)):
+            assert len(stage) == expected_depth
+
+    def test_head_configurations(self, cifar_input_shape, cifar_sample_data):
+        """Test different head configurations."""
+        # Model with classification head
+        model_with_head = ConvNeXtV1(
+            num_classes=10,
+            depths=[1, 1, 2, 1],
+            dims=[32, 64, 128, 256],
+            include_top=True
+        )
+
+        # Model without classification head
+        model_without_head = ConvNeXtV1(
+            depths=[1, 1, 2, 1],
+            dims=[32, 64, 128, 256],
+            include_top=False,
+            input_shape=cifar_input_shape
+        )
+
+        outputs_with_head = model_with_head(cifar_sample_data)
+        outputs_without_head = model_without_head(cifar_sample_data)
+
+        # With head: should output class predictions
+        assert outputs_with_head.shape == (cifar_sample_data.shape[0], 10)
+
+        # Without head: should output features (after global pooling + norm)
+        assert outputs_without_head.shape == (cifar_sample_data.shape[0], 256)  # Last dim
+
+    def test_kernel_size_variations(self, num_classes, cifar_input_shape, cifar_sample_data):
+        """Test different kernel sizes."""
+        kernel_sizes = [3, 5, 7, 9]
+
+        for kernel_size in kernel_sizes:
+            model = ConvNeXtV1(
+                num_classes=num_classes,
+                depths=[1, 1, 2, 1],
+                dims=[32, 64, 128, 256],
+                kernel_size=kernel_size
+            )
+
+            outputs = model(cifar_sample_data)
+            assert outputs.shape == (cifar_sample_data.shape[0], num_classes)
+
+    def test_model_memory_efficiency(self, num_classes, cifar_input_shape):
+        """Test model creation and deletion for memory efficiency."""
+        # Create and delete multiple models to test memory management
+        for i in range(3):
+            model = ConvNeXtV1(
+                num_classes=num_classes,
+                depths=[1, 1, 2, 1],
+                dims=[16, 32, 64, 128]  # Small model
+            )
+
+            test_data = tf.random.uniform([2] + list(cifar_input_shape), 0, 1)
+            _ = model(test_data)
+
+            # Explicitly delete
+            del model
+
+        # If we get here without memory issues, the test passes
+        assert True
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])
