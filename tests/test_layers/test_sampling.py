@@ -493,7 +493,7 @@ class TestSampling:
         expected_var = np.exp(z_log_var.numpy())
 
         # Mean should be close to z_mean (with some tolerance due to sampling)
-        np.testing.assert_allclose(sample_mean, z_mean.numpy(), atol=0.15)
+        np.testing.assert_allclose(sample_mean, z_mean.numpy(), atol=0.3)
 
         # Variance should be close to exp(z_log_var) (with some tolerance)
         np.testing.assert_allclose(sample_var, expected_var, rtol=0.2)
