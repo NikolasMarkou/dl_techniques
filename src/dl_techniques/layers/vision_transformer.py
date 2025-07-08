@@ -18,6 +18,10 @@ from .multi_head_attention import MultiHeadAttention
 
 # ---------------------------------------------------------------------
 
+DEFAULT_EPSILON = 1e-6
+
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class VisionTransformerLayer(keras.layers.Layer):
@@ -88,8 +92,14 @@ class VisionTransformerLayer(keras.layers.Layer):
             self.norm1 = RMSNorm(name="norm1")
             self.norm2 = RMSNorm(name="norm2")
         else:
-            self.norm1 = keras.layers.LayerNormalization(epsilon=1e-6, name="norm1")
-            self.norm2 = keras.layers.LayerNormalization(epsilon=1e-6, name="norm2")
+            self.norm1 = keras.layers.LayerNormalization(
+                epsilon=DEFAULT_EPSILON,
+                name="norm1"
+            )
+            self.norm2 = keras.layers.LayerNormalization(
+                epsilon=DEFAULT_EPSILON,
+                name="norm2"
+            )
 
         # Create multi-head attention
         self.attn = MultiHeadAttention(
@@ -103,7 +113,10 @@ class VisionTransformerLayer(keras.layers.Layer):
         )
 
         # Create dropout layer
-        self.dropout1 = keras.layers.Dropout(self.dropout_rate)
+        if self.dropout_rate > 0.0:
+            self.dropout1 = keras.layers.Dropout(self.dropout_rate, name="dropout1")
+        else:
+            self.dropout1 = None
 
         # Create MLP block using existing MLP layer
         mlp_hidden_dim = int(self.embed_dim * self.mlp_ratio)
@@ -121,13 +134,18 @@ class VisionTransformerLayer(keras.layers.Layer):
         # Build sublayers
         self.norm1.build(input_shape)
         self.attn.build(input_shape)
-        self.dropout1.build(input_shape)
+        if self.dropout1 is not None:
+            self.dropout1.build(input_shape)
         self.norm2.build(input_shape)
         self.mlp.build(input_shape)
 
         super().build(input_shape)
 
-    def call(self, x: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+    def call(
+        self,
+        x: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """Forward pass of the layer.
 
         Args:
@@ -137,20 +155,24 @@ class VisionTransformerLayer(keras.layers.Layer):
         Returns:
             Output tensor of shape (batch_size, seq_len, embed_dim).
         """
-        # Attention block with residual connection
+        # Attention block with residual connection (Pre-LN)
         x1 = self.norm1(x, training=training)
         x1 = self.attn(x1, training=training)
-        x1 = self.dropout1(x1, training=training)
+        if self.dropout1 is not None:
+            x1 = self.dropout1(x1, training=training)
         x = x + x1
 
-        # MLP block with residual connection
+        # MLP block with residual connection (Pre-LN)
         x2 = self.norm2(x, training=training)
         x2 = self.mlp(x2, training=training)
         x = x + x2
 
         return x
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(
+        self,
+        input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
         Args:

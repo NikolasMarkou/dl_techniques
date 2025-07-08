@@ -1,5 +1,5 @@
 """
-Vision Transformer (ViT) Model Implementation (Refined Version)
+Vision Transformer (ViT) Model Implementation
 
 This module provides a complete Vision Transformer model implementation
 that can be used for various computer vision tasks including image classification,
@@ -7,8 +7,6 @@ feature extraction, and transfer learning.
 
 The model supports different scales and configurations similar to the original
 "An Image is Worth 16x16 Words" paper and its variants.
-
-File: src/dl_techniques/models/vit.py
 """
 
 import keras
@@ -65,41 +63,23 @@ class ViT(keras.Model):
     }
 
     def __init__(
-            self,
-            input_shape: Tuple[int, int, int] = (224, 224, 3),
-            num_classes: int = 1000,
-            scale: str = "base",
-            patch_size: Union[int, Tuple[int, int]] = 16,
-            include_top: bool = True,
-            pooling: Optional[str] = None,
-            dropout_rate: float = 0.0,
-            attention_dropout_rate: float = 0.0,
-            pos_dropout_rate: float = 0.0,
-            kernel_initializer: str = "he_normal",
-            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            norm_type: str = "layer",
-            name: Optional[str] = None,
-            **kwargs: Any
+        self,
+        input_shape: Tuple[int, int, int] = (224, 224, 3),
+        num_classes: int = 1000,
+        scale: str = "base",
+        patch_size: Union[int, Tuple[int, int]] = 16,
+        include_top: bool = True,
+        pooling: Optional[str] = None,
+        dropout_rate: float = 0.0,
+        attention_dropout_rate: float = 0.0,
+        pos_dropout_rate: float = 0.0,
+        kernel_initializer: str = "he_normal",
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        norm_type: str = "layer",
+        name: Optional[str] = None,
+        **kwargs: Any
     ) -> None:
-        """
-        Initialize Vision Transformer model.
-
-        Args:
-            input_shape: Input image shape (height, width, channels).
-            num_classes: Number of output classes for classification.
-            scale: Model scale ('tiny', 'small', 'base', 'large', 'huge').
-            patch_size: Size of patches to extract from input images.
-            include_top: Whether to include the classification head.
-            pooling: Pooling mode for feature extraction ('cls', 'mean', 'max', None).
-            dropout_rate: Dropout rate for regularization.
-            attention_dropout_rate: Dropout rate for attention weights.
-            pos_dropout_rate: Dropout rate for positional embeddings.
-            kernel_initializer: Weight initializer for all layers.
-            kernel_regularizer: Weight regularizer for all layers.
-            norm_type: Type of normalization ('layer' or 'rms').
-            name: Model name.
-            **kwargs: Additional keyword arguments.
-        """
+        """Initialize Vision Transformer model."""
         if name is None:
             name = f"vision_transformer_{scale}"
         super().__init__(name=name, **kwargs)
@@ -130,19 +110,19 @@ class ViT(keras.Model):
         if img_w % patch_w != 0:
             raise ValueError(f"Image width ({img_w}) must be divisible by patch width ({patch_w})")
 
-        # Store configuration - ensure input_shape is always a tuple
-        self.input_shape_config = tuple(input_shape) if not isinstance(input_shape, tuple) else input_shape
-        self.num_classes = num_classes
-        self.scale = scale
-        self.patch_size = (patch_h, patch_w)  # Always store as tuple
-        self.include_top = include_top
+        # Store configuration
+        self.input_shape_config = tuple(input_shape)
+        self.num_classes = int(num_classes)
+        self.scale = str(scale)
+        self.patch_size = (patch_h, patch_w)
+        self.include_top = bool(include_top)
         self.pooling = pooling
-        self.dropout_rate = dropout_rate
-        self.attention_dropout_rate = attention_dropout_rate
-        self.pos_dropout_rate = pos_dropout_rate
-        self.kernel_initializer = kernel_initializer
+        self.dropout_rate = float(dropout_rate)
+        self.attention_dropout_rate = float(attention_dropout_rate)
+        self.pos_dropout_rate = float(pos_dropout_rate)
+        self.kernel_initializer = str(kernel_initializer)
         self.kernel_regularizer = kernel_regularizer
-        self.norm_type = norm_type
+        self.norm_type = str(norm_type)
 
         # Validate inputs
         if scale not in self.SCALE_CONFIGS:
@@ -155,15 +135,10 @@ class ViT(keras.Model):
                 f"Unsupported pooling: {pooling}. Choose from [None, 'cls', 'mean', 'max']"
             )
 
-        if not include_top and pooling is None:
-            logger.warning(
-                "include_top=False and pooling=None will return the raw transformer output"
-            )
-
         # Get model configuration
         self.embed_dim, self.num_heads, self.num_layers, self.mlp_ratio = self.SCALE_CONFIGS[scale]
 
-        # Calculate number of patches (safe from division by zero due to validation above)
+        # Calculate number of patches
         self.num_patches = (img_h // patch_h) * (img_w // patch_w)
         self.max_seq_len = self.num_patches + 1  # +1 for CLS token
 
@@ -202,41 +177,16 @@ class ViT(keras.Model):
         """Initialize all model layers."""
         # Patch embedding layer
         self.patch_embed = PatchEmbedding2D(
-            patch_size=self.patch_size,  # Already validated and stored as tuple
+            patch_size=self.patch_size,
             embed_dim=self.embed_dim,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="patch_embed"
         )
 
-        # Build patch embedding to get actual number of patches
-        # Convert input_shape_config to tuple to handle TrackedList during deserialization
-        try:
-            input_shape_tuple = tuple(self.input_shape_config)
-        except (TypeError, ValueError):
-            # Fallback if conversion fails
-            if hasattr(self.input_shape_config, '__iter__'):
-                input_shape_tuple = tuple(list(self.input_shape_config))
-            else:
-                # Last resort - use what we have
-                input_shape_tuple = self.input_shape_config
-
-        dummy_input_shape = (None,) + input_shape_tuple
+        # Build patch embedding to validate dimensions
+        dummy_input_shape = (None,) + self.input_shape_config
         self.patch_embed.build(dummy_input_shape)
-
-        # Get actual number of patches from built layer and validate
-        actual_num_patches = self.patch_embed.num_patches
-        if actual_num_patches is not None:
-            if actual_num_patches <= 0:
-                raise ValueError(f"Invalid number of patches: {actual_num_patches}")
-            self.num_patches = actual_num_patches
-            self.max_seq_len = self.num_patches + 1
-        elif self.num_patches <= 0:
-            raise ValueError(f"Invalid number of patches: {self.num_patches}")
-
-        # Validate max_seq_len is reasonable
-        if self.max_seq_len <= 1:
-            raise ValueError(f"Invalid sequence length: {self.max_seq_len}")
 
         # CLS token
         self.cls_token = self.add_weight(
@@ -246,7 +196,7 @@ class ViT(keras.Model):
             trainable=True
         )
 
-        # Positional embedding with proper parameter names
+        # Positional embedding
         self.pos_embed = PositionalEmbedding(
             max_seq_len=self.max_seq_len,
             dim=self.embed_dim,
@@ -278,7 +228,11 @@ class ViT(keras.Model):
 
         # Classification head (if include_top)
         if self.include_top:
-            self.head_dropout = keras.layers.Dropout(self.dropout_rate, name="head_dropout")
+            if self.dropout_rate > 0.0:
+                self.head_dropout = keras.layers.Dropout(self.dropout_rate, name="head_dropout")
+            else:
+                self.head_dropout = None
+
             self.head = keras.layers.Dense(
                 self.num_classes,
                 kernel_initializer=self.kernel_initializer,
@@ -293,12 +247,11 @@ class ViT(keras.Model):
             self.global_pool = keras.layers.GlobalMaxPooling1D(name="global_max_pool")
 
     def call(
-            self,
-            inputs: keras.KerasTensor,
-            training: Optional[bool] = None
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through the model.
+        """Forward pass through the model.
 
         Args:
             inputs: Input tensor (batch_size, height, width, channels).
@@ -329,8 +282,9 @@ class ViT(keras.Model):
         if self.include_top:
             # Extract CLS token for classification
             cls_token = x[:, 0, :]  # (batch_size, embed_dim)
-            x = self.head_dropout(cls_token, training=training)
-            x = self.head(x)  # (batch_size, num_classes)
+            if self.head_dropout is not None:
+                cls_token = self.head_dropout(cls_token, training=training)
+            x = self.head(cls_token)  # (batch_size, num_classes)
             return x
         else:
             # Feature extraction mode
@@ -348,8 +302,7 @@ class ViT(keras.Model):
                 return x  # (batch_size, seq_len, embed_dim)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape.
+        """Compute output shape.
 
         Args:
             input_shape: Input tensor shape.
@@ -368,50 +321,24 @@ class ViT(keras.Model):
             if self.pooling in ["cls", "mean", "max"]:
                 return (batch_size, self.embed_dim)
             else:
-                # Safely calculate the number of patches if not already set
-                if hasattr(self, 'max_seq_len') and self.max_seq_len > 0:
-                    return (batch_size, self.max_seq_len, self.embed_dim)
-                else:
-                    # Fallback calculation
-                    img_h, img_w = input_shape[1], input_shape[2]
-                    if img_h is not None and img_w is not None:
-                        patch_h, patch_w = self.patch_size
-                        if patch_h > 0 and patch_w > 0:  # Avoid division by zero
-                            num_patches = (img_h // patch_h) * (img_w // patch_w)
-                            seq_len = num_patches + 1  # +1 for CLS token
-                            return (batch_size, seq_len, self.embed_dim)
-
-                    # If we can't calculate, return None for unknown dimensions
-                    return (batch_size, None, self.embed_dim)
+                return (batch_size, self.max_seq_len, self.embed_dim)
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
         config = super().get_config()
-
-        # Ensure all values are properly serializable
-        input_shape_tuple = tuple(self.input_shape_config)
-        if hasattr(self.input_shape_config, '__iter__') and not isinstance(self.input_shape_config, (str, tuple)):
-            try:
-                input_shape_tuple = tuple(list(self.input_shape_config))
-            except (TypeError, ValueError):
-                input_shape_tuple = self.input_shape_config
-
-        # Ensure patch_size is properly serialized
-        patch_size_tuple = tuple(self.patch_size) if hasattr(self.patch_size, '__iter__') else self.patch_size
-
         config.update({
-            "input_shape": input_shape_tuple,
-            "num_classes": int(self.num_classes),
-            "scale": str(self.scale),
-            "patch_size": patch_size_tuple,
-            "include_top": bool(self.include_top),
+            "input_shape": self.input_shape_config,
+            "num_classes": self.num_classes,
+            "scale": self.scale,
+            "patch_size": self.patch_size,
+            "include_top": self.include_top,
             "pooling": self.pooling,
-            "dropout_rate": float(self.dropout_rate),
-            "attention_dropout_rate": float(self.attention_dropout_rate),
-            "pos_dropout_rate": float(self.pos_dropout_rate),
-            "kernel_initializer": str(self.kernel_initializer),
+            "dropout_rate": self.dropout_rate,
+            "attention_dropout_rate": self.attention_dropout_rate,
+            "pos_dropout_rate": self.pos_dropout_rate,
+            "kernel_initializer": self.kernel_initializer,
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
-            "norm_type": str(self.norm_type),
+            "norm_type": self.norm_type,
         })
         return config
 
@@ -425,7 +352,6 @@ class ViT(keras.Model):
         """Build model from configuration."""
         input_shape = config.get("input_shape")
         if input_shape is not None:
-            # Ensure input_shape is a tuple
             if not isinstance(input_shape, tuple):
                 input_shape = tuple(input_shape)
             self.build(input_shape)
@@ -436,13 +362,11 @@ class ViT(keras.Model):
         return cls(**config)
 
     def get_feature_extractor(self) -> "ViT":
-        """
-        Get a feature extractor version of this model.
+        """Get a feature extractor version of this model.
 
         Returns:
             New ViT configured for feature extraction.
         """
-        # Ensure we have valid configuration before creating feature extractor
         if not hasattr(self, 'input_shape_config') or not self.input_shape_config:
             raise ValueError("Model must be properly initialized before creating feature extractor")
 
@@ -461,58 +385,6 @@ class ViT(keras.Model):
             norm_type=self.norm_type,
             name=f"{self.name}_feature_extractor"
         )
-
-    def get_attention_weights(
-        self,
-        inputs: keras.KerasTensor,
-        layer_idx: Optional[int] = None
-    ) -> Union[keras.KerasTensor, Dict[int, keras.KerasTensor]]:
-        """
-        Extract attention weights from transformer layers.
-
-        Args:
-            inputs: Input tensor.
-            layer_idx: Specific layer index to extract weights from.
-                      If None, returns weights from all layers.
-
-        Returns:
-            Attention weights tensor or dictionary of weights.
-        """
-        if not self._layers_built:
-            raise ValueError("Model must be built before extracting attention weights")
-
-        if not hasattr(self, 'transformer_layers') or not self.transformer_layers:
-            raise ValueError("No transformer layers found in the model")
-
-        if layer_idx is not None and (layer_idx < 0 or layer_idx >= len(self.transformer_layers)):
-            raise ValueError(f"layer_idx must be between 0 and {len(self.transformer_layers)-1}, got {layer_idx}")
-
-        # Forward pass through patch embedding and positional encoding
-        x = self.patch_embed(inputs)
-        batch_size = ops.shape(x)[0]
-        cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
-        x = ops.concatenate([cls_tokens, x], axis=1)
-        x = self.pos_embed(x)
-
-        attention_weights = {}
-
-        # Extract attention weights from each transformer layer
-        for i, layer in enumerate(self.transformer_layers):
-            if hasattr(layer, 'get_attention_weights'):
-                try:
-                    attention_weights[i] = layer.get_attention_weights(x)
-                    x = layer(x)
-                except Exception as e:
-                    logger.warning(f"Failed to extract attention weights from layer {i}: {e}")
-                    x = layer(x)
-            else:
-                # If layer doesn't support attention weight extraction, just forward
-                x = layer(x)
-
-        if layer_idx is not None:
-            return attention_weights.get(layer_idx, None)
-
-        return attention_weights
 
     def summary_detailed(self) -> None:
         """Print detailed model summary."""
@@ -544,22 +416,21 @@ class ViT(keras.Model):
 
 
 def create_vision_transformer(
-        input_shape: Tuple[int, int, int] = (224, 224, 3),
-        num_classes: int = 1000,
-        scale: str = "base",
-        patch_size: Union[int, Tuple[int, int]] = 16,
-        include_top: bool = True,
-        pooling: Optional[str] = None,
-        dropout_rate: float = 0.0,
-        attention_dropout_rate: float = 0.0,
-        pos_dropout_rate: float = 0.0,
-        kernel_initializer: str = "he_normal",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-        norm_type: str = "layer",
-        **kwargs: Any
+    input_shape: Tuple[int, int, int] = (224, 224, 3),
+    num_classes: int = 1000,
+    scale: str = "base",
+    patch_size: Union[int, Tuple[int, int]] = 16,
+    include_top: bool = True,
+    pooling: Optional[str] = None,
+    dropout_rate: float = 0.0,
+    attention_dropout_rate: float = 0.0,
+    pos_dropout_rate: float = 0.0,
+    kernel_initializer: str = "he_normal",
+    kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+    norm_type: str = "layer",
+    **kwargs: Any
 ) -> ViT:
-    """
-    Create a Vision Transformer model with specified configuration.
+    """Create a Vision Transformer model with specified configuration.
 
     Args:
         input_shape: Input image shape.
@@ -578,37 +449,8 @@ def create_vision_transformer(
 
     Returns:
         ViT instance.
-
-    Raises:
-        ValueError: If input parameters are invalid.
-
-    Examples:
-        >>> # Create a ViT-Base model for ImageNet classification
-        >>> model = create_vision_transformer(
-        ...     input_shape=(224, 224, 3),
-        ...     num_classes=1000,
-        ...     scale="base"
-        ... )
-
-        >>> # Create a ViT-Small feature extractor
-        >>> feature_extractor = create_vision_transformer(
-        ...     input_shape=(224, 224, 3),
-        ...     scale="small",
-        ...     include_top=False,
-        ...     pooling="cls"
-        ... )
-
-        >>> # Create a ViT-Tiny for CIFAR-10
-        >>> cifar_model = create_vision_transformer(
-        ...     input_shape=(32, 32, 3),
-        ...     num_classes=10,
-        ...     scale="tiny",
-        ...     patch_size=4,
-        ...     dropout_rate=0.1,
-        ...     pos_dropout_rate=0.1
-        ... )
     """
-    # Validate basic parameters before creating the model
+    # Validate basic parameters
     if num_classes <= 0:
         raise ValueError(f"num_classes must be positive, got {num_classes}")
 
