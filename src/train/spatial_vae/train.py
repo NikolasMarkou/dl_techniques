@@ -332,12 +332,12 @@ def create_callbacks(
     os.makedirs(results_dir, exist_ok=True)
 
     callbacks = [
-        keras.callbacks.EarlyStopping(monitor=monitor, patience=patience, restore_best_weights=True, verbose=1),
+        keras.callbacks.EarlyStopping(monitor=monitor, patience=patience, restore_best_weights=True, mode='min', verbose=1),
         keras.callbacks.ModelCheckpoint(
             filepath=os.path.join(results_dir, 'best_model.keras'),
-            monitor=monitor, save_best_only=True, verbose=1
+            monitor=monitor, save_best_only=True, mode='min', verbose=1
         ),
-        keras.callbacks.ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=5, min_lr=1e-6, verbose=1),
+        keras.callbacks.ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=5, min_lr=1e-6, mode='min', verbose=1),
         keras.callbacks.CSVLogger(filename=os.path.join(results_dir, 'training_log.csv')),
         keras.callbacks.TensorBoard(log_dir=os.path.join(results_dir, 'tensorboard'), histogram_freq=1),
         SpatialVisualizationCallback(validation_data, results_dir, dataset, viz_frequency, batch_size)
