@@ -511,7 +511,7 @@ def train_model(args: argparse.Namespace):
 def main():
     parser = argparse.ArgumentParser(description='Train a Spatial Variational Autoencoder on image data.')
     parser.add_argument('--dataset', type=str, default='mnist', choices=['mnist', 'cifar10'], help='Dataset to use')
-    parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--batch-size', type=int, default=128, help='Training batch size')
     parser.add_argument('--latent-dim', type=int, default=8,
                         help='Dimensionality of the latent space at each spatial location')
