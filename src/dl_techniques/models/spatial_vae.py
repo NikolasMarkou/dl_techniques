@@ -359,7 +359,7 @@ class SpatialVAE(keras.Model):
                 keras.layers.UpSampling2D(size=(2,2))
             )
             decoder_layers.append(
-                keras.layers.Conv2d(
+                keras.layers.Conv2D(
                     filters=filters,
                     kernel_size=3,
                     strides=1,
