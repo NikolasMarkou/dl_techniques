@@ -356,10 +356,15 @@ class SpatialVAE(keras.Model):
         # Transposed convolutional layers
         for i, filters in enumerate(self.decoder_filters):
             decoder_layers.append(
-                keras.layers.Conv2DTranspose(
+                keras.layers.UpSampling2D(
+                    size=(2, 2),
+                    interpolation="nearest"
+                )
+            )
+            decoder_layers.append(
+                keras.layers.Conv2D(
                     filters=filters,
                     kernel_size=3,
-                    strides=2,
                     padding="same",
                     kernel_initializer=self.kernel_initializer,
                     kernel_regularizer=self.kernel_regularizer,
