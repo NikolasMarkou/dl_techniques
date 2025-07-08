@@ -283,17 +283,17 @@ class SpatialVAE(keras.Model):
             # Batch normalization
             if self.use_batch_norm:
                 encoder_layers.append(
-                    keras.layers.BatchNormalization(name=f"encoder_bn_{i}")
+                    keras.layers.BatchNormalization(name=f"encoder_bn_{2*i}")
                 )
 
             encoder_layers.append(
-                keras.layers.Activation(self.activation, name=f"encoder_act_{i}")
+                keras.layers.Activation(self.activation, name=f"encoder_act_{2*i}")
             )
 
             # Dropout
             if self.dropout_rate > 0:
                 encoder_layers.append(
-                    keras.layers.Dropout(self.dropout_rate, name=f"encoder_dropout_{i}")
+                    keras.layers.Dropout(self.dropout_rate, name=f"encoder_dropout_{2*i}")
                 )
 
             encoder_layers.append(
@@ -311,17 +311,17 @@ class SpatialVAE(keras.Model):
             # Batch normalization
             if self.use_batch_norm:
                 encoder_layers.append(
-                    keras.layers.BatchNormalization(name=f"encoder_bn_{i}")
+                    keras.layers.BatchNormalization(name=f"encoder_bn_{2*i + 1}")
                 )
 
             encoder_layers.append(
-                keras.layers.Activation(self.activation, name=f"encoder_act_{i}")
+                keras.layers.Activation(self.activation, name=f"encoder_act_{2*i + 1}")
             )
 
             # Dropout
             if self.dropout_rate > 0:
                 encoder_layers.append(
-                    keras.layers.Dropout(self.dropout_rate, name=f"encoder_dropout_{i}")
+                    keras.layers.Dropout(self.dropout_rate, name=f"encoder_dropout_{2*i + 1}")
                 )
 
         self.encoder = keras.Sequential(encoder_layers, name="encoder")
