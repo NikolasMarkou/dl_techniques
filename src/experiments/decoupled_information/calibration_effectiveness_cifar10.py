@@ -1,192 +1,3 @@
-"""
-CIFAR-10 Loss Function Comparison: Evaluating Goodhart-Aware Training
-=====================================================================
-
-This experiment conducts a comprehensive comparison of different loss functions
-for image classification on CIFAR-10, with particular emphasis on evaluating
-the effectiveness of the GoodhartAwareLoss against traditional approaches.
-
-The study addresses a fundamental question in deep learning: how do different
-loss formulations affect model robustness, calibration, and generalization?
-By comparing standard cross-entropy with more sophisticated loss functions,
-this experiment provides insights into the trade-offs between accuracy,
-confidence calibration, and resistance to overfitting.
-
-Experimental Design
--------------------
-
-**Dataset**: CIFAR-10 (10 classes, 32×32 RGB images)
-- 50,000 training images
-- 10,000 test images
-- Standard preprocessing with normalization
-
-**Model Architecture**: ResNet-inspired CNN with the following components:
-- Initial convolutional layer (32 filters)
-- 4 convolutional blocks with residual connections
-- Progressive filter scaling: [32, 64, 128, 256]
-- Batch normalization and dropout regularization
-- Global average pooling
-- Dense classification layers with L2 regularization
-- Softmax output layer for probability predictions
-- Configurable architecture parameters for systematic studies
-
-**Loss Functions Evaluated**:
-
-1. **Standard Cross-Entropy**: The baseline approach for multi-class classification
-2. **Label Smoothing**: Cross-entropy with soft targets (α=0.1) to reduce overconfidence
-3. **Focal Loss**: Addresses class imbalance by down-weighting easy examples (γ=2.0)
-4. **Goodhart-Aware Loss**: Information-theoretic approach combining:
-   - Cross-entropy for task accuracy
-   - Entropy regularization to maintain prediction uncertainty
-   - Mutual information regularization to compress irrelevant features
-
-Comprehensive Analysis Pipeline
-------------------------------
-
-The experiment employs a multi-faceted analysis approach:
-
-**Training Analysis**:
-- Training and validation curves for all loss functions
-- Convergence behavior and stability metrics
-- Early stopping based on validation accuracy
-
-**Model Performance Evaluation**:
-- Test set accuracy and top-k accuracy
-- Loss values and convergence characteristics
-- Statistical significance testing across runs
-
-**Calibration Analysis** (via ModelAnalyzer):
-- Expected Calibration Error (ECE) with configurable binning
-- Brier score for probabilistic prediction quality
-- Reliability diagrams and calibration plots
-- Confidence histogram analysis
-
-**Weight and Activation Analysis**:
-- Layer-wise weight distribution statistics
-- Activation pattern analysis across the network
-- Information flow characteristics
-- Feature representation quality
-
-**Probability Distribution Analysis**:
-- Output probability distribution characteristics
-- Entropy analysis of predictions
-- Uncertainty quantification metrics
-
-**Visual Analysis**:
-- Training history comparison plots
-- Confusion matrices for each loss function
-- Calibration and reliability diagrams
-- Weight distribution visualizations
-
-Configuration and Customization
--------------------------------
-
-The experiment is highly configurable through the ``ExperimentConfig`` class:
-
-**Architecture Parameters**:
-- ``conv_filters``: Filter counts for convolutional layers
-- ``dense_units``: Hidden unit counts for dense layers
-- ``dropout_rates``: Dropout probabilities per layer
-- ``weight_decay``: L2 regularization strength
-
-**Training Parameters**:
-- ``epochs``: Number of training epochs
-- ``batch_size``: Training batch size
-- ``learning_rate``: Adam optimizer learning rate
-- ``early_stopping_patience``: Patience for early stopping
-
-**Loss Function Parameters**:
-- Easily extensible loss function dictionary
-- Configurable hyperparameters for each loss
-- Support for custom loss implementations
-
-**Analysis Parameters**:
-- ``calibration_bins``: Number of bins for calibration analysis
-- Output directory structure and naming
-- Visualization and plotting options
-
-Expected Outcomes and Insights
-------------------------------
-
-This experiment is designed to reveal:
-
-1. **Accuracy vs. Calibration Trade-offs**: How different loss functions balance
-   task performance with prediction reliability
-
-2. **Robustness Characteristics**: Which approaches produce more robust models
-   that generalize better to unseen data
-
-3. **Information-Theoretic Benefits**: Whether the Goodhart-Aware Loss's
-   information bottleneck principle provides measurable advantages
-
-4. **Training Dynamics**: How different loss formulations affect convergence
-   speed, stability, and final performance
-
-Usage Example
--------------
-
-Basic usage with default configuration:
-
-    ```python
-    from pathlib import Path
-
-    # Run with default settings
-    config = ExperimentConfig()
-    results = run_experiment(config)
-
-    # Access results
-    performance = results['performance_analysis']
-    calibration = results['model_analysis'].calibration_metrics
-    ```
-
-Advanced usage with custom configuration:
-
-    ```python
-    # Custom configuration
-    config = ExperimentConfig(
-        epochs=50,
-        batch_size=128,
-        learning_rate=0.0001,
-        output_dir=Path("custom_results"),
-        calibration_bins=20,
-        # Add custom loss functions
-        loss_functions={
-            'CrossEntropy': lambda: keras.losses.CategoricalCrossentropy(from_logits=False),
-            'CustomGoodhart': lambda: GoodhartAwareLoss(
-                entropy_weight=0.05,
-                mi_weight=0.005,
-                from_logits=False
-            )
-        }
-    )
-
-    results = run_experiment(config)
-    ```
-
-Theoretical Foundation
-----------------------
-
-This experiment is grounded in several key theoretical frameworks:
-
-**Information Theory**: The Goodhart-Aware Loss leverages information-theoretic
-principles to balance task performance with model robustness, drawing from:
-- Information Bottleneck Principle (Tishby et al.)
-- Entropy regularization for calibration (Pereyra et al.)
-- Mutual information constraints for generalization
-
-**Statistical Learning Theory**: The comparison addresses fundamental questions
-about the bias-variance trade-off and how different loss formulations affect
-generalization bounds.
-
-**Calibration Theory**: The analysis framework evaluates how well predicted
-probabilities reflect true confidence, crucial for reliable decision-making
-in real-world applications.
-"""
-
-# ==============================================================================
-# IMPORTS AND DEPENDENCIES
-# ==============================================================================
-
 import gc
 import keras
 import numpy as np
@@ -196,9 +7,9 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Callable
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.losses.goodhart_loss import GoodhartAwareLoss
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.utils.datasets import load_and_preprocess_cifar10
+from dl_techniques.losses.decoupled_information_loss import DecoupledInformationLoss
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 
 from dl_techniques.utils.analyzer import (
@@ -255,17 +66,11 @@ class ExperimentConfig:
         'FocalLoss': lambda: keras.losses.CategoricalFocalCrossentropy(
             gamma=2.0, from_logits=False
         ),
-        'GAL_0': lambda: GoodhartAwareLoss(
-            entropy_weight=0.0, mi_weight=0.01, from_logits=False
+        'DIL_0': lambda: DecoupledInformationLoss(
+            uncertainty_weight=0.2, diversity_weight=0.01, label_smoothing=0.0, from_logits=False
         ),
-        'GAL_01': lambda: GoodhartAwareLoss(
-            entropy_weight=0.1, mi_weight=0.01, from_logits=False
-        ),
-        'GAL_001': lambda: GoodhartAwareLoss(
-            entropy_weight=0.01, mi_weight=0.01, from_logits=False
-        ),
-        'GAL_0001': lambda: GoodhartAwareLoss(
-            entropy_weight=0.001, mi_weight=0.01, from_logits=False
+        'DIL_01': lambda: DecoupledInformationLoss(
+            uncertainty_weight=0.2, diversity_weight=0.01, label_smoothing=0.1, from_logits=False
         ),
     })
 

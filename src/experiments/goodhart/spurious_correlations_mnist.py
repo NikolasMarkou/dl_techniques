@@ -129,13 +129,12 @@ to prevent this by encouraging models to compress away spurious signals.
 # ==============================================================================
 
 import gc
+import keras
+import numpy as np
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Callable
-
-import keras
-import numpy as np
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.goodhart_loss import GoodhartAwareLoss
@@ -144,7 +143,6 @@ from dl_techniques.utils.visualization_manager import VisualizationManager, Visu
 from dl_techniques.utils.analyzer import (
     ModelAnalyzer,
     AnalysisConfig,
-    AnalysisResults,
     DataInput
 )
 
