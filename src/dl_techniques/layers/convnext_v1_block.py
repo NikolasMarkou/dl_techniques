@@ -35,7 +35,7 @@ input -> depthwise_conv -> layer_norm ->
 
 Configuration:
 -------------
-Supports extensive customization through ConvNextConfig:
+Supports extensive customization through direct parameters:
 - Kernel sizes and filter counts
 - Stride configuration
 - Activation functions
@@ -54,24 +54,20 @@ Usage Examples:
 -------------
 ```python
 # Basic configuration
-config = ConvNextConfig(
+block = ConvNextV1Block(
     kernel_size=7,
     filters=64,
     activation="gelu"
 )
-block = ConvNextBlock(config)
 
 # Advanced configuration with regularization
-config = ConvNextConfig(
+block = ConvNextV1Block(
     kernel_size=7,
     filters=128,
-    kernel_regularizer=keras.regularizers.L2(0.01)
-)
-block = ConvNextBlock(
-    conv_config=config,
+    kernel_regularizer=keras.regularizers.L2(0.01),
     dropout_rate=0.1,
     spatial_dropout_rate=0.1,
-    kernel_regularization="orthogonal"
+    use_softorthonormal_regularizer=True
 )
 ```
 
@@ -85,7 +81,6 @@ Notes:
 """
 import copy
 import keras
-from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Union, Tuple
 
 # ---------------------------------------------------------------------
@@ -103,9 +98,10 @@ from dl_techniques.constraints.value_range_constraint import (
 
 # ---------------------------------------------------------------------
 
-@dataclass
-class ConvNextV1Config:
-    """Configuration for ConvNext block parameters.
+
+@keras.utils.register_keras_serializable()
+class ConvNextV1Block(keras.layers.Layer):
+    """Implementation of ConvNext block with modern best practices.
 
     Args:
         kernel_size: Size of the convolution kernel
@@ -114,24 +110,6 @@ class ConvNextV1Config:
         activation: Activation function to use
         kernel_regularizer: Optional regularization for kernel weights
         use_bias: Whether to include a bias term
-    """
-    kernel_size: Union[int, Tuple[int, int]]
-    filters: int
-    strides: Union[int, Tuple[int, int]] = (1, 1)
-    activation: str = "gelu"
-    kernel_regularizer: Optional[keras.regularizers.Regularizer] = None
-    use_bias: bool = True
-
-
-# ---------------------------------------------------------------------
-
-
-@keras.utils.register_keras_serializable()
-class ConvNextV1Block(keras.layers.Layer):
-    """Implementation of ConvNext block with modern best practices.
-
-    Args:
-        conv_config: Configuration for convolution layers
         dropout_rate: Optional dropout rate
         spatial_dropout_rate: Optional spatial dropout rate
         use_gamma: Whether to use learnable multiplier
@@ -139,9 +117,25 @@ class ConvNextV1Block(keras.layers.Layer):
         name: Name of the layer
     """
 
+    # Important constants - following ConvNeXt paper specifications
+    EXPANSION_FACTOR = 4  # Bottleneck expansion factor (filters * 4)
+    INITIALIZER_MEAN = 0.0  # Mean for TruncatedNormal initializer
+    INITIALIZER_STDDEV = 0.02  # Standard deviation for TruncatedNormal initializer
+    LAYERNORM_EPSILON = 1e-6  # Epsilon for LayerNormalization
+    POINTWISE_KERNEL_SIZE = 1  # Kernel size for pointwise convolutions
+    GAMMA_L2_REGULARIZATION = 1e-5  # L2 regularization for gamma multiplier
+    GAMMA_INITIAL_VALUE = 1.0  # Initial value for gamma multiplier
+    GAMMA_MIN_VALUE = 0.0  # Minimum value for gamma constraint
+    GAMMA_MAX_VALUE = 1.0  # Maximum value for gamma constraint
+
     def __init__(
             self,
-            conv_config: ConvNextV1Config,
+            kernel_size: Union[int, Tuple[int, int]],
+            filters: int,
+            strides: Union[int, Tuple[int, int]] = (1, 1),
+            activation: str = "gelu",
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            use_bias: bool = True,
             dropout_rate: Optional[float] = 0.0,
             spatial_dropout_rate: Optional[float] = 0.0,
             use_gamma: bool = True,
@@ -150,8 +144,13 @@ class ConvNextV1Block(keras.layers.Layer):
     ):
         super().__init__(**kwargs)
 
-        # Store configurations
-        self.conv_config = conv_config
+        # Store configuration parameters
+        self.kernel_size = kernel_size
+        self.filters = filters
+        self.strides = strides
+        self.activation_name = activation
+        self.kernel_regularizer = kernel_regularizer
+        self.use_bias = use_bias
         self.dropout_rate = dropout_rate
         self.spatial_dropout_rate = spatial_dropout_rate
         self.use_gamma = use_gamma
@@ -165,80 +164,114 @@ class ConvNextV1Block(keras.layers.Layer):
         self.activation = None
         self.dropout = None
         self.spatial_dropout = None
-        self.gamma= None
+        self.gamma = None
 
     def build(self, input_shape) -> None:
         """Initialize all layers with proper configuration."""
+        # Store input shape for serialization
+        self._build_input_shape = input_shape
+
         # Depthwise convolution
         self.conv_1 = keras.layers.DepthwiseConv2D(
-            kernel_size=self.conv_config.kernel_size,
-            strides=self.conv_config.strides,
+            kernel_size=self.kernel_size,
+            strides=self.strides,
             padding="same",
             depthwise_initializer=keras.initializers.TruncatedNormal(
-                mean=0.0, stddev=0.02
+                mean=self.INITIALIZER_MEAN,
+                stddev=self.INITIALIZER_STDDEV
             ),
-            use_bias=self.conv_config.use_bias,
-            depthwise_regularizer=copy.deepcopy(self.conv_config.kernel_regularizer),
+            use_bias=self.use_bias,
+            depthwise_regularizer=copy.deepcopy(self.kernel_regularizer),
         )
+        self.conv_1.build(input_shape)
 
-        # Normalization layer
+        # Normalization layer (LayerNorm works on the last axis)
         self.norm = (
             keras.layers.LayerNormalization(
-                epsilon=1e-6,
-                center=self.conv_config.use_bias,
+                epsilon=self.LAYERNORM_EPSILON,
+                center=self.use_bias,
                 scale=True)
         )
+        # LayerNorm after depthwise conv, so same input shape
+        self.norm.build(input_shape)
 
         # Point-wise convolutions
         conv_params = {
-            "kernel_size": 1,
+            "kernel_size": self.POINTWISE_KERNEL_SIZE,
             "padding": "same",
-            "use_bias": self.conv_config.use_bias,
+            "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.TruncatedNormal(
-                mean=0.0, stddev=0.02
+                mean=self.INITIALIZER_MEAN,
+                stddev=self.INITIALIZER_STDDEV
             ),
-            "kernel_regularizer": copy.deepcopy(self.conv_config.kernel_regularizer)
+            "kernel_regularizer": copy.deepcopy(self.kernel_regularizer)
         }
 
-        if self.use_softorthonormal_regularizer == "orthonormal":
+        if self.use_softorthonormal_regularizer:
             conv_params["kernel_regularizer"] = SoftOrthonormalConstraintRegularizer()
 
-
+        # First pointwise conv (expansion)
         self.conv_2 = keras.layers.Conv2D(
-            filters=self.conv_config.filters * 4,
+            filters=self.filters * self.EXPANSION_FACTOR,
             **conv_params
         )
+        self.conv_2.build(input_shape)
+
+        # Calculate intermediate shape after expansion
+        intermediate_shape = list(input_shape)
+        intermediate_shape[-1] = self.filters * self.EXPANSION_FACTOR
+        intermediate_shape = tuple(intermediate_shape)
+
+        # Second pointwise conv (reduction)
         self.conv_3 = keras.layers.Conv2D(
-            filters=self.conv_config.filters,
+            filters=self.filters,
             **conv_params
         )
+        self.conv_3.build(intermediate_shape)
 
         # Activation layers
-        self.activation = keras.layers.Activation(self.conv_config.activation)
+        self.activation = keras.layers.Activation(self.activation_name)
+        self.activation.build(intermediate_shape)
 
         # Dropout layers
         if self.dropout_rate is not None and self.dropout_rate > 0:
             self.dropout = keras.layers.Dropout(self.dropout_rate)
+            self.dropout.build(intermediate_shape)
         else:
             self.dropout = keras.layers.Lambda(lambda x: x)
+            self.dropout.build(intermediate_shape)
 
         if self.spatial_dropout_rate is not None and self.spatial_dropout_rate > 0:
             self.spatial_dropout = keras.layers.SpatialDropout2D(
                 self.spatial_dropout_rate
             )
+            self.spatial_dropout.build(intermediate_shape)
         else:
             self.spatial_dropout = keras.layers.Lambda(lambda x: x)
+            self.spatial_dropout.build(intermediate_shape)
+
+        # Calculate final shape after second pointwise conv
+        final_shape = list(intermediate_shape)
+        final_shape[-1] = self.filters
+        final_shape = tuple(final_shape)
 
         # Learnable multiplier
         if self.use_gamma:
             self.gamma = LearnableMultiplier(
                 multiplier_type="CHANNEL",
-                regularizer=keras.regularizers.L2(1e-5),
-                initializer=keras.initializers.Constant(1.0),
-                constraint=ValueRangeConstraint(min_value=0.0, max_value=1.0),
+                regularizer=keras.regularizers.L2(self.GAMMA_L2_REGULARIZATION),
+                initializer=keras.initializers.Constant(self.GAMMA_INITIAL_VALUE),
+                constraint=ValueRangeConstraint(
+                    min_value=self.GAMMA_MIN_VALUE,
+                    max_value=self.GAMMA_MAX_VALUE
+                ),
             )
+            self.gamma.build(final_shape)
         else:
             self.gamma = keras.layers.Lambda(lambda x: x)
+            self.gamma.build(final_shape)
+
+        super().build(input_shape)
 
     def call(
             self,
@@ -285,7 +318,7 @@ class ConvNextV1Block(keras.layers.Layer):
 
         Returns:
             tuple: Output shape after applying the ConvNeXt block,
-            considering strides and output channels from conv_config.
+            considering strides and output channels from configuration.
 
         Raises:
             ValueError: If input shape doesn't have 4 dimensions.
@@ -299,15 +332,18 @@ class ConvNextV1Block(keras.layers.Layer):
         # Extract dimensions (NHWC format)
         batch_size, height, width, _ = input_shape
 
-        # Get strides from conv_config if it exists
-        strides = getattr(self.conv_config, 'strides', (1, 1))
+        # Normalize strides to tuple format
+        if isinstance(self.strides, int):
+            strides = (self.strides, self.strides)
+        else:
+            strides = self.strides
 
         # Calculate new height and width based on strides
         new_height = height // strides[0]
         new_width = width // strides[1]
 
-        # Output channels determined by the conv_config
-        output_channels = getattr(self.conv_config, 'filters', -1)
+        # Output channels determined by the filters parameter
+        output_channels = self.filters
 
         return (batch_size, new_height, new_width, output_channels)
 
@@ -319,7 +355,12 @@ class ConvNextV1Block(keras.layers.Layer):
         """
         config = super().get_config()
         config.update({
-            "conv_config": asdict(self.conv_config),
+            "kernel_size": self.kernel_size,
+            "filters": self.filters,
+            "strides": self.strides,
+            "activation": self.activation_name,
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "use_bias": self.use_bias,
             "dropout_rate": self.dropout_rate,
             "spatial_dropout_rate": self.spatial_dropout_rate,
             "use_gamma": self.use_gamma,
@@ -327,21 +368,47 @@ class ConvNextV1Block(keras.layers.Layer):
         })
         return config
 
+    def get_build_config(self):
+        """Get build configuration for proper serialization.
+
+        Returns:
+            Build configuration dictionary
+        """
+        return {
+            "input_shape": getattr(self, '_build_input_shape', None),
+        }
+
+    def build_from_config(self, config):
+        """Build layer from build configuration.
+
+        Args:
+            config: Build configuration dictionary
+        """
+        if config.get("input_shape") is not None:
+            self.build(config["input_shape"])
+
     @classmethod
     def from_config(cls, config):
-        """Creates a layer from its config."""
+        """Creates a layer from its config.
+
+        Args:
+            config: Configuration dictionary
+
+        Returns:
+            ConvNextV1Block instance
+        """
         from copy import deepcopy
 
         # Make a copy of the config to avoid modifying the original
         config_copy = deepcopy(config)
 
-        # Extract the conv_config dictionary
-        conv_config_dict = config_copy.pop("conv_config", {})
+        # Deserialize the kernel_regularizer if it exists
+        if "kernel_regularizer" in config_copy and config_copy["kernel_regularizer"] is not None:
+            config_copy["kernel_regularizer"] = keras.regularizers.deserialize(
+                config_copy["kernel_regularizer"]
+            )
 
-        # Recreate the ConvNextV1Config object
-        conv_config = ConvNextV1Config(**conv_config_dict)
-
-        # Create the ConvNextBlock with the recreated ConvNextConfig
-        return cls(conv_config=conv_config, **config_copy)
+        # Create the ConvNextV1Block with the configuration
+        return cls(**config_copy)
 
 # ---------------------------------------------------------------------
