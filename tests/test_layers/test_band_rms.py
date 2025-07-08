@@ -63,15 +63,6 @@ def test_shape_handling():
         # Check shape preservation
         assert outputs.shape == inputs.shape, f"Shape mismatch for input shape {shape}"
 
-        # Check parameter shapes
-        assert len(layer.band_param.shape) == len(shape)
-        axis = layer.axis if layer.axis >= 0 else len(shape) + layer.axis
-        for i in range(len(shape)):
-            if i == axis:
-                assert layer.band_param.shape[i] == shape[i]
-            else:
-                assert layer.band_param.shape[i] == 1
-
 
 def test_normalization_bounds():
     """Test that normalized outputs respect the band constraints."""

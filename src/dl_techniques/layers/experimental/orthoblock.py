@@ -6,9 +6,9 @@ from keras.api.layers import Dense, LayerNormalization
 # local imports
 # ---------------------------------------------------------------------
 
-from .layer_scale import LearnableMultiplier
-from ..constraints.value_range_constraint import ValueRangeConstraint
-from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
+from ..layer_scale import LearnableMultiplier
+from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
+from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 
 # ---------------------------------------------------------------------
 

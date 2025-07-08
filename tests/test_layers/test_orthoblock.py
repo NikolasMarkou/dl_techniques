@@ -5,7 +5,7 @@ import tempfile
 import numpy as np
 import tensorflow as tf
 
-from dl_techniques.layers.orthoblock import (
+from dl_techniques.layers.experimental.orthoblock import (
     OrthoBlock
 )
 

@@ -2,8 +2,8 @@ import pytest
 import tensorflow as tf
 from keras.api.regularizers import L2
 
+from dl_techniques.layers.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.vision_transformer import (
-    PatchEmbed,
     MultiHeadAttention,
     VisionTransformerLayer
 )
@@ -21,7 +21,7 @@ def sample_sequence():
 
 def test_patch_embed():
     """Test PatchEmbed layer."""
-    layer = PatchEmbed(
+    layer = PatchEmbedding2D(
         patch_size=16,
         embed_dim=768,
         kernel_initializer="he_normal",
@@ -83,14 +83,14 @@ def test_serialization():
     reconstructed_layer = VisionTransformerLayer.from_config(config)
 
     assert isinstance(reconstructed_layer, VisionTransformerLayer)
-    assert reconstructed_layer.attn.embed_dim == 768
-    assert reconstructed_layer.attn.num_heads == 12
+    assert reconstructed_layer.embed_dim == 768
+    assert reconstructed_layer.num_heads == 12
 
 
 def test_end_to_end(sample_image):
     """Test end-to-end pipeline."""
     # Create patch embedding
-    patch_embed = PatchEmbed(
+    patch_embed = PatchEmbedding2D(
         patch_size=16,
         embed_dim=768,
         kernel_regularizer=L2(1e-4)

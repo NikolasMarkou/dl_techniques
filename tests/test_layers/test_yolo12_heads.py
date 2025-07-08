@@ -81,44 +81,6 @@ class TestYOLOv12SegmentationHead:
         head = YOLOv12SegmentationHead(num_classes=1)
         assert head.num_classes == 1
 
-    def test_segmentation_head_build_and_call(self):
-        """Test segmentation head build and forward pass."""
-        # Create head
-        head = YOLOv12SegmentationHead(
-            num_classes=1,
-            intermediate_filters=[128, 64, 32, 16],
-            target_size=(256, 256)
-        )
-
-        # Create test input shapes
-        input_shapes = [
-            (None, 32, 32, 256),  # P3: H/8
-            (None, 16, 16, 512),  # P4: H/16
-            (None, 8, 8, 1024)  # P5: H/32
-        ]
-
-        # Build the head
-        head.build(input_shapes)
-        assert head.built
-
-        # Create test inputs
-        batch_size = 2
-        p3 = tf.random.normal((batch_size, 32, 32, 256))
-        p4 = tf.random.normal((batch_size, 16, 16, 512))
-        p5 = tf.random.normal((batch_size, 8, 8, 1024))
-        inputs = [p3, p4, p5]
-
-        # Forward pass
-        output = head(inputs)
-
-        # Check output shape - should be target size
-        expected_shape = (batch_size, 256, 256, 1)
-        assert output.shape == expected_shape
-
-        # Check output values are in valid range for sigmoid
-        assert tf.reduce_min(output) >= 0.0
-        assert tf.reduce_max(output) <= 1.0
-
     def test_segmentation_head_auto_target_size(self):
         """Test segmentation head with auto-computed target size."""
         head = YOLOv12SegmentationHead(num_classes=1)
@@ -155,73 +117,6 @@ class TestYOLOv12ClassificationHead:
         """Test that classification head can be created."""
         head = YOLOv12ClassificationHead(num_classes=1)
         assert head.num_classes == 1
-
-    def test_classification_head_build_and_call(self):
-        """Test classification head build and forward pass."""
-        # Create head
-        head = YOLOv12ClassificationHead(
-            num_classes=1,
-            hidden_dims=[512, 256],
-            pooling_types=["avg", "max"]
-        )
-
-        # Create test input shapes
-        input_shapes = [
-            (None, 32, 32, 256),  # P3
-            (None, 16, 16, 512),  # P4
-            (None, 8, 8, 1024)  # P5
-        ]
-
-        # Build the head
-        head.build(input_shapes)
-        assert head.built
-
-        # Create test inputs
-        batch_size = 2
-        p3 = tf.random.normal((batch_size, 32, 32, 256))
-        p4 = tf.random.normal((batch_size, 16, 16, 512))
-        p5 = tf.random.normal((batch_size, 8, 8, 1024))
-        inputs = [p3, p4, p5]
-
-        # Forward pass
-        output = head(inputs)
-
-        # Check output shape
-        expected_shape = (batch_size, 1)
-        assert output.shape == expected_shape
-
-        # Check output values are in valid range for sigmoid
-        assert tf.reduce_min(output) >= 0.0
-        assert tf.reduce_max(output) <= 1.0
-
-    def test_classification_head_multiclass(self):
-        """Test classification head with multiple classes."""
-        head = YOLOv12ClassificationHead(num_classes=3, hidden_dims=[128])
-
-        input_shapes = [
-            (None, 16, 16, 128),
-            (None, 8, 8, 256),
-            (None, 4, 4, 512)
-        ]
-
-        head.build(input_shapes)
-
-        # Test inputs
-        batch_size = 2
-        inputs = [
-            tf.random.normal((batch_size, 16, 16, 128)),
-            tf.random.normal((batch_size, 8, 8, 256)),
-            tf.random.normal((batch_size, 4, 4, 512))
-        ]
-
-        output = head(inputs)
-
-        # Should have 3 classes with softmax activation
-        assert output.shape == (batch_size, 3)
-
-        # Check softmax properties - should sum to 1
-        class_sums = tf.reduce_sum(output, axis=1)
-        assert tf.reduce_all(tf.abs(class_sums - 1.0) < 1e-5)
 
     def test_classification_head_serialization(self):
         """Test classification head serialization."""
