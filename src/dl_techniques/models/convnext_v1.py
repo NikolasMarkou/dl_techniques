@@ -108,6 +108,7 @@ class ConvNeXtV1(keras.Model):
 
     # Model variant configurations
     MODEL_VARIANTS = {
+        "cifar10": {"depths": [5, 5], "dims": [48, 96]},
         "tiny": {"depths": [3, 3, 9, 3], "dims": [96, 192, 384, 768]},
         "small": {"depths": [3, 3, 27, 3], "dims": [96, 192, 384, 768]},
         "base": {"depths": [3, 3, 27, 3], "dims": [128, 256, 512, 1024]},
@@ -135,7 +136,7 @@ class ConvNeXtV1(keras.Model):
         use_gamma: bool = True,
         use_softorthonormal_regularizer: bool = False,
         include_top: bool = True,
-        input_shape: Optional[Tuple[int, ...]] = (None, None, 3),
+        input_shape: Tuple[int, ...] = (None, None, 3),
         **kwargs
     ):
         # Validate configuration
@@ -148,6 +149,8 @@ class ConvNeXtV1(keras.Model):
             logger.warning(
                 f"ConvNeXt typically uses 4 stages, got {len(depths)} stages"
             )
+        if input_shape is None:
+            input_shape = (None, None, 3)
 
         # Store configuration
         self.num_classes = num_classes
@@ -171,16 +174,11 @@ class ConvNeXtV1(keras.Model):
         self.downsample_layers = []
         self.head_layers = []
 
-        # Determine input shape with improved logic
-        actual_input_shape = input_shape
-
         # Validate input shape
-        if len(actual_input_shape) != 3:
-            raise ValueError(f"input_shape must be 3D, got {actual_input_shape}")
+        if len(input_shape) != 3:
+            raise ValueError(f"input_shape must be 3D, got {input_shape}")
 
-        height, width, channels = actual_input_shape
-        if height < 16 or width < 16:
-            raise ValueError(f"Input size too small: {height}x{width}. Minimum is 16x16")
+        height, width, channels = input_shape
 
         if channels not in [1, 3]:
             logger.warning(f"Unusual number of channels: {channels}. ConvNeXt typically uses 3 channels")
@@ -191,7 +189,7 @@ class ConvNeXtV1(keras.Model):
         self.input_channels = channels
 
         # Set input shape for the model
-        inputs = keras.Input(shape=actual_input_shape)
+        inputs = keras.Input(shape=input_shape)
 
         # Build the model
         outputs = self._build_model(inputs)
@@ -200,7 +198,7 @@ class ConvNeXtV1(keras.Model):
         super().__init__(inputs=inputs, outputs=outputs, **kwargs)
 
         logger.info(
-            f"Created ConvNeXt V1 model for input {actual_input_shape} "
+            f"Created ConvNeXt V2 model for input {input_shape} "
             f"with {sum(depths)} blocks"
         )
 
@@ -366,7 +364,6 @@ class ConvNeXtV1(keras.Model):
             block = ConvNextV1Block(
                 kernel_size=self.kernel_size,
                 filters=dim,
-                strides=(1, 1),  # No spatial reduction within stage
                 activation=self.activation,
                 kernel_regularizer=self.kernel_regularizer,
                 use_bias=self.use_bias,
@@ -551,7 +548,7 @@ class ConvNeXtV1(keras.Model):
 def create_convnext_v1(
     variant: str = "tiny",
     num_classes: int = 1000,
-    input_shape: Optional[Tuple[int, ...]] = None,
+    input_shape: Optional[Tuple[int, ...]] = (None, None, 3),
     pretrained: bool = False,
     **kwargs
 ) -> ConvNeXtV1:
@@ -560,7 +557,7 @@ def create_convnext_v1(
     Args:
         variant: String, model variant ("tiny", "small", "base", "large", "xlarge")
         num_classes: Integer, number of output classes
-        input_shape: Tuple, input shape. If None and include_top=True, uses (224, 224, 3)
+        input_shape: Tuple, input shape.
         pretrained: Boolean, whether to load pretrained weights (not implemented)
         **kwargs: Additional arguments passed to the model constructor
 

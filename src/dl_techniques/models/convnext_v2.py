@@ -213,6 +213,7 @@ class ConvNeXtV2(keras.Model):
         """
         x = inputs
 
+        # Build stem
         x = self._build_stem(x)
 
         # Build stages with downsampling
@@ -558,7 +559,7 @@ def create_convnext_v2(
         variant: String, model variant ("atto", "femto", "pico", "nano",
             "tiny", "base", "large", "huge")
         num_classes: Integer, number of output classes
-        input_shape: Tuple, input shape. If None and include_top=True, uses (224, 224, 3)
+        input_shape: Tuple, input shape.
         pretrained: Boolean, whether to load pretrained weights (not implemented)
         **kwargs: Additional arguments passed to the model constructor
 
