@@ -428,18 +428,18 @@ class SpatialVAE(keras.Model):
             # Batch normalization
             if self.use_batch_norm:
                 decoder_layers.append(
-                    keras.layers.BatchNormalization(name=f"decoder_bn_{2*i + 1}")
+                    keras.layers.BatchNormalization()
                 )
 
             # Activation
             decoder_layers.append(
-                keras.layers.Activation(self.activation, name=f"decoder_act_{2*i + 1}")
+                keras.layers.Activation(self.activation)
             )
 
             # Dropout
             if self.dropout_rate > 0:
                 decoder_layers.append(
-                    keras.layers.Dropout(self.dropout_rate, name=f"decoder_dropout_{2*i + 1}")
+                    keras.layers.Dropout(self.dropout_rate)
                 )
 
         decoder_layers.append(
