@@ -123,7 +123,7 @@ class GlobalResponseNormalization(keras.layers.Layer):
         self._build_input_shape = None
         self._channels = None
 
-        logger.info(f"Initialized GlobalResponseNormalization with eps={eps}")
+        logger.debug(f"Initialized GlobalResponseNormalization with eps={eps}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """

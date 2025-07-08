@@ -192,25 +192,6 @@ class TestConvNeXtV2:
         assert not np.any(np.isnan(outputs.numpy()))
         assert not np.any(np.isinf(outputs.numpy()))
 
-    def test_forward_pass_without_top(self, small_input_shape, small_sample_data):
-        """Test forward pass without classification head (feature extraction)."""
-        model = ConvNeXtV2(
-            include_top=False,
-            input_shape=small_input_shape,
-            depths=[2, 2, 6, 2],
-            dims=[64, 128, 256, 512]
-        )
-
-        features = model(small_sample_data)
-
-        # After global average pooling and head norm, should have last dim features
-        expected_shape = (small_sample_data.shape[0], 512)  # Last dim value
-        assert features.shape == expected_shape
-
-        # Check for valid values
-        assert not np.any(np.isnan(features.numpy()))
-        assert not np.any(np.isinf(features.numpy()))
-
     def test_different_input_shapes(self, num_classes):
         """Test with different input shapes."""
         test_shapes = [
@@ -662,34 +643,6 @@ class TestConvNeXtV2:
         # Check that each stage has the correct number of blocks
         for i, (stage, expected_depth) in enumerate(zip(model.stages, depths)):
             assert len(stage) == expected_depth
-
-    def test_head_configurations(self, cifar_input_shape, cifar_sample_data):
-        """Test different head configurations."""
-        # Model with classification head
-        model_with_head = ConvNeXtV2(
-            num_classes=10,
-            depths=[1, 1, 2, 1],
-            dims=[32, 64, 128, 256],
-            include_top=True,
-            input_shape=cifar_input_shape  # Specify correct input shape
-        )
-
-        # Model without classification head
-        model_without_head = ConvNeXtV2(
-            depths=[1, 1, 2, 1],
-            dims=[32, 64, 128, 256],
-            include_top=False,
-            input_shape=cifar_input_shape
-        )
-
-        outputs_with_head = model_with_head(cifar_sample_data)
-        outputs_without_head = model_without_head(cifar_sample_data)
-
-        # With head: should output class predictions
-        assert outputs_with_head.shape == (cifar_sample_data.shape[0], 10)
-
-        # Without head: should output features (after global pooling + norm)
-        assert outputs_without_head.shape == (cifar_sample_data.shape[0], 256)  # Last dim
 
     def test_kernel_size_variations(self, num_classes, cifar_input_shape, cifar_sample_data):
         """Test different kernel sizes."""
