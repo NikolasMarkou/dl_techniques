@@ -1,31 +1,32 @@
 """
 ConvNeXt V1 Model Implementation
-===============================
+==================================================
 
-A complete implementation of the ConvNeXt V1 architecture as described in:
-"A ConvNet for the 2020s" (Liu et al., 2022)
+A complete implementation of the ConvNeXt V1 architecture with adaptive input handling.
+This version can natively handle different input sizes without requiring preprocessing.
+
+Based on: "A ConvNet for the 2020s" (Liu et al., 2022)
 https://arxiv.org/abs/2201.03545
-
-This implementation builds upon the ConvNextV1Block to create full model variants
-including ConvNeXt-T, ConvNeXt-S, ConvNeXt-B, ConvNeXt-L, and ConvNeXt-XL.
 
 Key Features:
 ------------
 - Modular design using ConvNextV1Block as building blocks
 - Support for all standard ConvNeXt variants
+- Adaptive input size handling (16x16 to any larger size)
+- Smart stem and downsampling strategies
 - Configurable stochastic depth (drop path)
 - Proper normalization and initialization strategies
 - Flexible head design (classification, feature extraction)
 - Complete serialization support
 - Production-ready implementation
 
-Architecture:
-------------
-The ConvNeXt model consists of:
-1. Patchify stem (4x4 conv with stride 4) + LayerNorm
-2. Four stages with varying depths and channel dimensions
-3. Downsampling layers between stages (2x2 conv with stride 2)
-4. Global average pooling + LayerNorm + Linear classifier
+Architecture Adaptations:
+------------------------
+- Small inputs (< 64x64): Uses 3x3 stem with stride 1, gentle downsampling
+- Medium inputs (64-128): Uses 4x4 stem with stride 2, moderate downsampling
+- Large inputs (>= 128): Uses original 4x4 stem with stride 4, standard downsampling
+- Adaptive channel scaling for very small inputs
+- Smart downsampling layer configuration that prevents over-downsampling
 
 Model Variants:
 --------------
@@ -38,23 +39,17 @@ Model Variants:
 Usage Examples:
 -------------
 ```python
-# Standard ConvNeXt-T for ImageNet classification
-model = ConvNeXtV1.from_variant("tiny", num_classes=1000)
+# CIFAR-10 model (32x32 input)
+model = ConvNeXtV1.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
 
-# Custom configuration
-model = ConvNeXtV1(
-    num_classes=10,
-    depths=[3, 3, 9, 3],
-    dims=[96, 192, 384, 768],
-    drop_path_rate=0.1
-)
+# MNIST model (28x28 input)
+model = ConvNeXtV1.from_variant("small", num_classes=10, input_shape=(28, 28, 3))
 
-# Feature extractor (no classification head)
-feature_extractor = ConvNeXtV1(
-    depths=[3, 3, 9, 3],
-    dims=[96, 192, 384, 768],
-    include_top=False
-)
+# ImageNet model (224x224 input)
+model = ConvNeXtV1.from_variant("base", num_classes=1000)
+
+# Custom dataset model (64x64 input)
+model = create_convnext_v1("large", num_classes=100, input_shape=(64, 64, 3))
 ```
 """
 
@@ -67,11 +62,11 @@ from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 
 @keras.saving.register_keras_serializable()
 class ConvNeXtV1(keras.Model):
-    """ConvNeXt V1 model implementation.
+    """ConvNeXt V1 model implementation with adaptive input handling.
 
     A modern ConvNet architecture that achieves competitive performance
     with Vision Transformers while maintaining the simplicity and efficiency
-    of convolutional networks.
+    of convolutional networks. This version adapts to different input sizes.
 
     Args:
         num_classes: Integer, number of output classes for classification.
@@ -94,7 +89,8 @@ class ConvNeXtV1(keras.Model):
         use_softorthonormal_regularizer: Boolean, whether to use soft
             orthonormal regularization in blocks.
         include_top: Boolean, whether to include the classification head.
-        input_shape: Tuple, input shape. Only used if include_top=False.
+        input_shape: Tuple, input shape. If None and include_top=True,
+            uses (224, 224, 3) for ImageNet. Must be provided for non-ImageNet inputs.
         **kwargs: Additional keyword arguments for the Model base class.
 
     Raises:
@@ -102,16 +98,14 @@ class ConvNeXtV1(keras.Model):
         ValueError: If invalid model configuration is provided.
 
     Example:
-        >>> # Create ConvNeXt-Tiny model
-        >>> model = ConvNeXtV1.from_variant("tiny", num_classes=1000)
+        >>> # Create ConvNeXt-Tiny model for CIFAR-10
+        >>> model = ConvNeXtV1.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
         >>>
-        >>> # Custom model configuration
-        >>> model = ConvNeXtV1(
-        ...     num_classes=10,
-        ...     depths=[2, 2, 6, 2],
-        ...     dims=[64, 128, 256, 512],
-        ...     drop_path_rate=0.1
-        ... )
+        >>> # Create ConvNeXt-Small for MNIST
+        >>> model = ConvNeXtV1.from_variant("small", num_classes=10, input_shape=(28, 28, 3))
+        >>>
+        >>> # Create standard ImageNet model
+        >>> model = ConvNeXtV1.from_variant("base", num_classes=1000)
     """
 
     # Model variant configurations
@@ -124,10 +118,6 @@ class ConvNeXtV1(keras.Model):
     }
 
     # Architecture constants
-    STEM_KERNEL_SIZE = 4
-    STEM_STRIDE = 4
-    DOWNSAMPLE_KERNEL_SIZE = 2
-    DOWNSAMPLE_STRIDE = 2
     LAYERNORM_EPSILON = 1e-6
     STEM_INITIALIZER = "truncated_normal"
     HEAD_INITIALIZER = "truncated_normal"
@@ -183,14 +173,30 @@ class ConvNeXtV1(keras.Model):
         self.downsample_layers = []
         self.head_layers = []
 
+        # Determine input shape with improved logic
+        actual_input_shape = self._determine_input_shape(include_top, input_shape)
+
+        # Validate input shape
+        if len(actual_input_shape) != 3:
+            raise ValueError(f"input_shape must be 3D, got {actual_input_shape}")
+
+        height, width, channels = actual_input_shape
+        if height < 16 or width < 16:
+            raise ValueError(f"Input size too small: {height}x{width}. Minimum is 16x16")
+
+        if channels not in [1, 3]:
+            logger.warning(f"Unusual number of channels: {channels}. ConvNeXt typically uses 3 channels")
+
+        # Store the actual input shape for stem adaptation
+        self.input_height = height
+        self.input_width = width
+        self.input_channels = channels
+
+        # Adapt dimensions for very small inputs
+        self.adapted_dims = self._adapt_dimensions_for_input_size(dims, height, width)
+
         # Set input shape for the model
-        if include_top:
-            # Default ImageNet input shape
-            inputs = keras.Input(shape=(224, 224, 3))
-        else:
-            if input_shape is None:
-                raise ValueError("input_shape must be provided when include_top=False")
-            inputs = keras.Input(shape=input_shape)
+        inputs = keras.Input(shape=actual_input_shape)
 
         # Build the model
         outputs = self._build_model(inputs)
@@ -199,9 +205,99 @@ class ConvNeXtV1(keras.Model):
         super().__init__(inputs=inputs, outputs=outputs, **kwargs)
 
         logger.info(
-            f"Created ConvNeXt V1 model with {sum(depths)} blocks, "
-            f"{sum(d * w * h for d, w, h in zip(dims, [56, 28, 14, 7], [56, 28, 14, 7]))} total parameters"
+            f"Created ConvNeXt V1 model for input {actual_input_shape} "
+            f"with {sum(depths)} blocks"
         )
+
+    def _determine_input_shape(self, include_top: bool, input_shape: Optional[Tuple[int, ...]]) -> Tuple[int, int, int]:
+        """Determine the actual input shape to use for the model.
+
+        Args:
+            include_top: Whether the model includes the classification head
+            input_shape: Provided input shape
+
+        Returns:
+            Tuple representing the actual input shape to use
+
+        Raises:
+            ValueError: If input_shape is required but not provided
+        """
+        if input_shape is not None:
+            # Use provided input shape
+            actual_input_shape = input_shape
+            logger.info(f"Using provided input shape: {actual_input_shape}")
+        elif include_top:
+            # Default ImageNet input shape for classification models
+            actual_input_shape = (224, 224, 3)
+            logger.info(f"Using default ImageNet input shape: {actual_input_shape}")
+        else:
+            # For feature extraction models, input_shape must be provided
+            raise ValueError("input_shape must be provided when include_top=False")
+
+        return actual_input_shape
+
+    def _adapt_dimensions_for_input_size(self, dims: List[int], height: int, width: int) -> List[int]:
+        """Adapt channel dimensions based on input size."""
+        min_size = min(height, width)
+
+        # For very small inputs, reduce dimensions to prevent overfitting
+        if min_size <= 32:
+            # Scale down dimensions for small inputs like CIFAR/MNIST
+            scale_factor = 0.75
+            adapted_dims = [max(32, int(d * scale_factor)) for d in dims]
+            logger.info(f"Adapted dimensions for small input {height}x{width}: {dims} -> {adapted_dims}")
+            return adapted_dims
+        elif min_size <= 64:
+            # Slight reduction for medium-small inputs
+            scale_factor = 0.875
+            adapted_dims = [max(48, int(d * scale_factor)) for d in dims]
+            logger.info(f"Adapted dimensions for medium input {height}x{width}: {dims} -> {adapted_dims}")
+            return adapted_dims
+        else:
+            # Use original dimensions for larger inputs
+            return dims
+
+    def _get_stem_config(self) -> Tuple[int, int]:
+        """Determine stem kernel size and stride based on input size."""
+        min_size = min(self.input_height, self.input_width)
+
+        if min_size <= 32:
+            # Small inputs (MNIST 28x28, CIFAR 32x32): gentle downsampling
+            kernel_size, stride = 3, 1
+            logger.info(f"Using small-input stem: {kernel_size}x{kernel_size} conv, stride {stride}")
+        elif min_size <= 64:
+            # Medium inputs: moderate downsampling
+            kernel_size, stride = 4, 2
+            logger.info(f"Using medium-input stem: {kernel_size}x{kernel_size} conv, stride {stride}")
+        elif min_size <= 128:
+            # Medium-large inputs: standard downsampling
+            kernel_size, stride = 4, 3
+            logger.info(f"Using medium-large-input stem: {kernel_size}x{kernel_size} conv, stride {stride}")
+        else:
+            # Large inputs (ImageNet): original ConvNeXt stem
+            kernel_size, stride = 4, 4
+            logger.info(f"Using large-input stem: {kernel_size}x{kernel_size} conv, stride {stride}")
+
+        return kernel_size, stride
+
+    def _get_downsample_config(self, stage_idx: int) -> Tuple[int, int]:
+        """Determine downsampling configuration based on input size and stage."""
+        min_size = min(self.input_height, self.input_width)
+
+        # Calculate current feature map size after stem and previous downsamples
+        stem_kernel, stem_stride = self._get_stem_config()
+        current_size = min_size // stem_stride
+        for i in range(stage_idx):
+            current_size = current_size // 2  # Each downsample halves the size
+
+        # If feature map would become too small, skip downsampling
+        if current_size <= 4:
+            kernel_size, stride = 1, 1  # No downsampling
+            logger.info(f"Stage {stage_idx}: Skipping downsample (feature map too small: {current_size}x{current_size})")
+        else:
+            kernel_size, stride = 2, 2  # Standard downsampling
+
+        return kernel_size, stride
 
     def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Build the complete ConvNeXt model architecture.
@@ -214,14 +310,14 @@ class ConvNeXtV1(keras.Model):
         """
         x = inputs
 
-        # Build stem
+        # Build adaptive stem
         x = self._build_stem(x)
 
-        # Build stages with downsampling
+        # Build stages with adaptive downsampling
         for stage_idx in range(len(self.depths)):
             # Add downsampling layer (except for first stage)
             if stage_idx > 0:
-                x = self._build_downsample_layer(x, self.dims[stage_idx])
+                x = self._build_downsample_layer(x, self.adapted_dims[stage_idx], stage_idx)
 
             # Build stage
             x = self._build_stage(x, stage_idx)
@@ -233,7 +329,7 @@ class ConvNeXtV1(keras.Model):
         return x
 
     def _build_stem(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the stem (patchify) layer.
+        """Build the adaptive stem (patchify) layer.
 
         Args:
             x: Input tensor
@@ -241,12 +337,14 @@ class ConvNeXtV1(keras.Model):
         Returns:
             Processed tensor after stem
         """
-        # Patchify layer: 4x4 conv with stride 4
+        stem_kernel_size, stem_stride = self._get_stem_config()
+
+        # Adaptive stem convolution
         stem_conv = keras.layers.Conv2D(
-            filters=self.dims[0],
-            kernel_size=self.STEM_KERNEL_SIZE,
-            strides=self.STEM_STRIDE,
-            padding="valid",  # No padding for patchify
+            filters=self.adapted_dims[0],
+            kernel_size=stem_kernel_size,
+            strides=stem_stride,
+            padding="same" if stem_stride == 1 else "valid",
             use_bias=self.use_bias,
             kernel_initializer=self.STEM_INITIALIZER,
             kernel_regularizer=self.kernel_regularizer,
@@ -270,17 +368,21 @@ class ConvNeXtV1(keras.Model):
     def _build_downsample_layer(
         self,
         x: keras.KerasTensor,
-        output_dim: int
+        output_dim: int,
+        stage_idx: int
     ) -> keras.KerasTensor:
-        """Build downsampling layer between stages.
+        """Build adaptive downsampling layer between stages.
 
         Args:
             x: Input tensor
             output_dim: Output channel dimension
+            stage_idx: Current stage index
 
         Returns:
             Downsampled tensor
         """
+        downsample_kernel_size, downsample_stride = self._get_downsample_config(stage_idx)
+
         # LayerNorm before downsampling
         downsample_norm = keras.layers.LayerNormalization(
             epsilon=self.LAYERNORM_EPSILON,
@@ -290,20 +392,40 @@ class ConvNeXtV1(keras.Model):
         )
         x = downsample_norm(x)
 
-        # 2x2 conv with stride 2 for spatial downsampling
-        downsample_conv = keras.layers.Conv2D(
-            filters=output_dim,
-            kernel_size=self.DOWNSAMPLE_KERNEL_SIZE,
-            strides=self.DOWNSAMPLE_STRIDE,
-            padding="valid",
-            use_bias=self.use_bias,
-            kernel_initializer=self.STEM_INITIALIZER,
-            kernel_regularizer=self.kernel_regularizer,
-            name=f"downsample_conv_{len(self.downsample_layers)}"
-        )
-        x = downsample_conv(x)
+        # Adaptive downsampling convolution
+        if downsample_stride > 1:
+            downsample_conv = keras.layers.Conv2D(
+                filters=output_dim,
+                kernel_size=downsample_kernel_size,
+                strides=downsample_stride,
+                padding="valid",
+                use_bias=self.use_bias,
+                kernel_initializer=self.STEM_INITIALIZER,
+                kernel_regularizer=self.kernel_regularizer,
+                name=f"downsample_conv_{len(self.downsample_layers)}"
+            )
+            x = downsample_conv(x)
+        else:
+            # If no spatial downsampling, just adjust channels if needed
+            if x.shape[-1] != output_dim:
+                downsample_conv = keras.layers.Conv2D(
+                    filters=output_dim,
+                    kernel_size=1,
+                    strides=1,
+                    padding="valid",
+                    use_bias=self.use_bias,
+                    kernel_initializer=self.STEM_INITIALIZER,
+                    kernel_regularizer=self.kernel_regularizer,
+                    name=f"downsample_conv_{len(self.downsample_layers)}"
+                )
+                x = downsample_conv(x)
+            else:
+                downsample_conv = None
 
-        self.downsample_layers.append([downsample_norm, downsample_conv])
+        if downsample_conv is not None:
+            self.downsample_layers.append([downsample_norm, downsample_conv])
+        else:
+            self.downsample_layers.append([downsample_norm])
 
         return x
 
@@ -319,7 +441,7 @@ class ConvNeXtV1(keras.Model):
         """
         stage_blocks = []
         depth = self.depths[stage_idx]
-        dim = self.dims[stage_idx]
+        dim = self.adapted_dims[stage_idx]
 
         # Calculate drop path rates for this stage
         total_blocks = sum(self.depths)
@@ -416,6 +538,7 @@ class ConvNeXtV1(keras.Model):
         cls,
         variant: str,
         num_classes: int = 1000,
+        input_shape: Optional[Tuple[int, ...]] = None,
         **kwargs
     ) -> "ConvNeXtV1":
         """Create a ConvNeXt model from a predefined variant.
@@ -423,6 +546,7 @@ class ConvNeXtV1(keras.Model):
         Args:
             variant: String, one of "tiny", "small", "base", "large", "xlarge"
             num_classes: Integer, number of output classes
+            input_shape: Tuple, input shape. If None and include_top=True, uses (224, 224, 3)
             **kwargs: Additional arguments passed to the constructor
 
         Returns:
@@ -432,7 +556,12 @@ class ConvNeXtV1(keras.Model):
             ValueError: If variant is not recognized
 
         Example:
-            >>> model = ConvNeXtV1.from_variant("tiny", num_classes=10)
+            >>> # CIFAR-10 model
+            >>> model = ConvNeXtV1.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
+            >>> # MNIST model
+            >>> model = ConvNeXtV1.from_variant("small", num_classes=10, input_shape=(28, 28, 3))
+            >>> # ImageNet model
+            >>> model = ConvNeXtV1.from_variant("base", num_classes=1000)
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -443,11 +572,13 @@ class ConvNeXtV1(keras.Model):
         config = cls.MODEL_VARIANTS[variant]
 
         logger.info(f"Creating ConvNeXt-{variant.upper()} model")
+        logger.info(f"from_variant received input_shape: {input_shape}")
 
         return cls(
             num_classes=num_classes,
             depths=config["depths"],
             dims=config["dims"],
+            input_shape=input_shape,
             **kwargs
         )
 
@@ -499,10 +630,12 @@ class ConvNeXtV1(keras.Model):
 
         # Print additional model information
         total_blocks = sum(self.depths)
-        logger.info(f"Model configuration:")
+        logger.info(f"Adaptive ConvNeXt V1 configuration:")
+        logger.info(f"  - Input shape: ({self.input_height}, {self.input_width}, {self.input_channels})")
         logger.info(f"  - Stages: {len(self.depths)}")
         logger.info(f"  - Depths: {self.depths}")
-        logger.info(f"  - Dimensions: {self.dims}")
+        logger.info(f"  - Original dimensions: {self.dims}")
+        logger.info(f"  - Adapted dimensions: {self.adapted_dims}")
         logger.info(f"  - Total blocks: {total_blocks}")
         logger.info(f"  - Drop path rate: {self.drop_path_rate}")
         logger.info(f"  - Kernel size: {self.kernel_size}")
@@ -514,14 +647,16 @@ class ConvNeXtV1(keras.Model):
 def create_convnext_v1(
     variant: str = "tiny",
     num_classes: int = 1000,
+    input_shape: Optional[Tuple[int, ...]] = None,
     pretrained: bool = False,
     **kwargs
 ) -> ConvNeXtV1:
-    """Convenience function to create ConvNeXt V1 models.
+    """Convenience function to create adaptive ConvNeXt V1 models.
 
     Args:
         variant: String, model variant ("tiny", "small", "base", "large", "xlarge")
         num_classes: Integer, number of output classes
+        input_shape: Tuple, input shape. If None and include_top=True, uses (224, 224, 3)
         pretrained: Boolean, whether to load pretrained weights (not implemented)
         **kwargs: Additional arguments passed to the model constructor
 
@@ -529,20 +664,23 @@ def create_convnext_v1(
         ConvNeXtV1 model instance
 
     Example:
-        >>> # Create ConvNeXt-Small for CIFAR-10
-        >>> model = create_convnext_v1("small", num_classes=10)
+        >>> # Create ConvNeXt-Tiny for CIFAR-10
+        >>> model = create_convnext_v1("tiny", num_classes=10, input_shape=(32, 32, 3))
         >>>
-        >>> # Create custom ConvNeXt with regularization
-        >>> model = create_convnext_v1(
-        ...     "base",
-        ...     num_classes=100,
-        ...     drop_path_rate=0.1,
-        ...     kernel_regularizer=keras.regularizers.L2(1e-4)
-        ... )
+        >>> # Create ConvNeXt-Small for MNIST
+        >>> model = create_convnext_v1("small", num_classes=10, input_shape=(28, 28, 3))
+        >>>
+        >>> # Create ConvNeXt-Base for ImageNet
+        >>> model = create_convnext_v1("base", num_classes=1000)
     """
     if pretrained:
         logger.warning("Pretrained weights are not yet implemented")
 
-    model = ConvNeXtV1.from_variant(variant, num_classes=num_classes, **kwargs)
+    model = ConvNeXtV1.from_variant(
+        variant,
+        num_classes=num_classes,
+        input_shape=input_shape,
+        **kwargs
+    )
 
     return model
