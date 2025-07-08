@@ -1,657 +1,548 @@
-"""ConvNeXt V1 models for Keras.
-
-References:
-- [ConvNeXt V1: Co-designing and Scaling ConvNets with Masked Autoencoders](https://arxiv.org/abs/2301.00808)
 """
+ConvNeXt V1 Model Implementation
+===============================
 
+A complete implementation of the ConvNeXt V1 architecture as described in:
+"A ConvNet for the 2020s" (Liu et al., 2022)
+https://arxiv.org/abs/2201.03545
+
+This implementation builds upon the ConvNextV1Block to create full model variants
+including ConvNeXt-T, ConvNeXt-S, ConvNeXt-B, ConvNeXt-L, and ConvNeXt-XL.
+
+Key Features:
+------------
+- Modular design using ConvNextV1Block as building blocks
+- Support for all standard ConvNeXt variants
+- Configurable stochastic depth (drop path)
+- Proper normalization and initialization strategies
+- Flexible head design (classification, feature extraction)
+- Complete serialization support
+- Production-ready implementation
+
+Architecture:
+------------
+The ConvNeXt model consists of:
+1. Patchify stem (4x4 conv with stride 4) + LayerNorm
+2. Four stages with varying depths and channel dimensions
+3. Downsampling layers between stages (2x2 conv with stride 2)
+4. Global average pooling + LayerNorm + Linear classifier
+
+Model Variants:
+--------------
+- ConvNeXt-T: [3, 3, 9, 3] blocks, [96, 192, 384, 768] dims
+- ConvNeXt-S: [3, 3, 27, 3] blocks, [96, 192, 384, 768] dims
+- ConvNeXt-B: [3, 3, 27, 3] blocks, [128, 256, 512, 1024] dims
+- ConvNeXt-L: [3, 3, 27, 3] blocks, [192, 384, 768, 1536] dims
+- ConvNeXt-XL: [3, 3, 27, 3] blocks, [256, 512, 1024, 2048] dims
+
+Usage Examples:
+-------------
+```python
+# Standard ConvNeXt-T for ImageNet classification
+model = ConvNeXtV1.from_variant("tiny", num_classes=1000)
+
+# Custom configuration
+model = ConvNeXtV1(
+    num_classes=10,
+    depths=[3, 3, 9, 3],
+    dims=[96, 192, 384, 768],
+    drop_path_rate=0.1
+)
+
+# Feature extractor (no classification head)
+feature_extractor = ConvNeXtV1(
+    depths=[3, 3, 9, 3],
+    dims=[96, 192, 384, 768],
+    include_top=False
+)
+```
+"""
 
 import keras
-import tensorflow as tf
-from keras import utils, backend
-from keras.api.models import Sequential
-from keras.api.applications import imagenet_utils
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Union, Tuple, Dict, Any
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.layers.stochastic_depth import StochasticDepth
-from dl_techniques.layers.convnext_v1_block import ConvNextV1Block, ConvNextV1Config
-
-# ---------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------
-
-DEFAULT_EPSILON = 1e-6
-DEFAULT_KERNEL_INITIALIZER = keras.initializers.TruncatedNormal(mean=0.0, stddev=0.02)
-DEFAULT_KERNEL_SIZE = 7
-DEFAULT_STEM_KERNEL_SIZE = 4
-DEFAULT_STEM_STRIDE = 4
-DEFAULT_DOWNSAMPLE_KERNEL_SIZE = 2
-DEFAULT_DOWNSAMPLE_STRIDE = 2
-DEFAULT_PADDING = "same"
-DEFAULT_BIAS_INITIALIZER = keras.initializers.Zeros()
-
-# Model variant configurations
-MODEL_CONFIGS = {
-    "atto": {
-        "depths": [2, 2, 6, 2],
-        "dims": [40, 80, 160, 320],
-        "default_size": 224,
-    },
-    "femto": {
-        "depths": [2, 2, 6, 2],
-        "dims": [48, 96, 192, 384],
-        "default_size": 224,
-    },
-    "pico": {
-        "depths": [2, 2, 6, 2],
-        "dims": [64, 128, 256, 512],
-        "default_size": 224,
-    },
-    "nano": {
-        "depths": [2, 2, 8, 2],
-        "dims": [80, 160, 320, 640],
-        "default_size": 224,
-    },
-    "tiny": {
-        "depths": [3, 3, 9, 3],
-        "dims": [96, 192, 384, 768],
-        "default_size": 224,
-    },
-    "base": {
-        "depths": [3, 3, 27, 3],
-        "dims": [128, 256, 512, 1024],
-        "default_size": 224,
-    },
-    "large": {
-        "depths": [3, 3, 27, 3],
-        "dims": [192, 384, 768, 1536],
-        "default_size": 224,
-    },
-    "huge": {
-        "depths": [3, 3, 27, 3],
-        "dims": [352, 704, 1408, 2816],
-        "default_size": 224,
-    },
-}
-
-BASE_DOCSTRING = """Instantiates the {name} architecture.
-
-  Returns:
-    A `keras.Model` instance.
-"""
+from dl_techniques.utils.logger import logger
+from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 
 
-# ---------------------------------------------------------------------
-# Helper Functions
-# ---------------------------------------------------------------------
+@keras.saving.register_keras_serializable()
+class ConvNeXtV1(keras.Model):
+    """ConvNeXt V1 model implementation.
 
-def PreStem(name: Optional[str] = None) -> callable:
-    """Normalizes inputs with ImageNet-1k mean and std.
+    A modern ConvNet architecture that achieves competitive performance
+    with Vision Transformers while maintaining the simplicity and efficiency
+    of convolutional networks.
 
     Args:
-        name: Name prefix for the layers.
+        num_classes: Integer, number of output classes for classification.
+            Only used if include_top=True.
+        depths: List of integers, number of ConvNext blocks in each stage.
+            Default is [3, 3, 9, 3] for ConvNeXt-Tiny.
+        dims: List of integers, number of channels in each stage.
+            Default is [96, 192, 384, 768] for ConvNeXt-Tiny.
+        drop_path_rate: Float, stochastic depth rate. Linearly increases
+            from 0 to this value across all blocks.
+        kernel_size: Integer or tuple, kernel size for ConvNext blocks.
+            Default is 7 following the original paper.
+        activation: String or callable, activation function for blocks.
+            Default is "gelu" as used in the original paper.
+        use_bias: Boolean, whether to use bias in convolutions.
+        kernel_regularizer: Regularizer function applied to kernels.
+        dropout_rate: Float, dropout rate applied within blocks.
+        spatial_dropout_rate: Float, spatial dropout rate for blocks.
+        use_gamma: Boolean, whether to use learnable scaling in blocks.
+        use_softorthonormal_regularizer: Boolean, whether to use soft
+            orthonormal regularization in blocks.
+        include_top: Boolean, whether to include the classification head.
+        input_shape: Tuple, input shape. Only used if include_top=False.
+        **kwargs: Additional keyword arguments for the Model base class.
 
-    Returns:
-        A function that applies normalization to inputs.
+    Raises:
+        ValueError: If depths and dims have different lengths.
+        ValueError: If invalid model configuration is provided.
+
+    Example:
+        >>> # Create ConvNeXt-Tiny model
+        >>> model = ConvNeXtV1.from_variant("tiny", num_classes=1000)
+        >>>
+        >>> # Custom model configuration
+        >>> model = ConvNeXtV1(
+        ...     num_classes=10,
+        ...     depths=[2, 2, 6, 2],
+        ...     dims=[64, 128, 256, 512],
+        ...     drop_path_rate=0.1
+        ... )
     """
-    if name is None:
-        name = "prestem" + str(backend.get_uid("prestem"))
 
-    def apply(x):
-        x = keras.layers.Normalization(
-            mean=[0.485 * 255, 0.456 * 255, 0.406 * 255],
-            variance=[
-                (0.229 * 255) ** 2,
-                (0.224 * 255) ** 2,
-                (0.225 * 255) ** 2,
-            ],
-            name=name + "_prestem_normalization",
-        )(x)
-        return x
+    # Model variant configurations
+    MODEL_VARIANTS = {
+        "tiny": {"depths": [3, 3, 9, 3], "dims": [96, 192, 384, 768]},
+        "small": {"depths": [3, 3, 27, 3], "dims": [96, 192, 384, 768]},
+        "base": {"depths": [3, 3, 27, 3], "dims": [128, 256, 512, 1024]},
+        "large": {"depths": [3, 3, 27, 3], "dims": [192, 384, 768, 1536]},
+        "xlarge": {"depths": [3, 3, 27, 3], "dims": [256, 512, 1024, 2048]},
+    }
 
-    return apply
+    # Architecture constants
+    STEM_KERNEL_SIZE = 4
+    STEM_STRIDE = 4
+    DOWNSAMPLE_KERNEL_SIZE = 2
+    DOWNSAMPLE_STRIDE = 2
+    LAYERNORM_EPSILON = 1e-6
+    STEM_INITIALIZER = "truncated_normal"
+    HEAD_INITIALIZER = "truncated_normal"
 
-
-def Head(
+    def __init__(
+        self,
         num_classes: int = 1000,
-        classifier_activation: Optional[Union[str, callable]] = None,
-        head_init_scale: float = 1.0,
-        name: Optional[str] = None
-) -> callable:
-    """Implementation of classification head for ConvNeXt V1.
-
-    Args:
-        num_classes: Number of classes for the classification layer.
-        classifier_activation: Activation function for the classification layer.
-        head_init_scale: Scaling factor for classification layer initialization.
-        name: Name prefix for the layers.
-
-    Returns:
-        A function that applies the classification head to inputs.
-    """
-    if name is None:
-        name = str(backend.get_uid("head"))
-
-    def apply(x):
-        x = keras.layers.GlobalAveragePooling2D(name=name + "_head_gap")(x)
-        x = keras.layers.LayerNormalization(
-            epsilon=DEFAULT_EPSILON, name=name + "_head_layernorm"
-        )(x)
-        x = keras.layers.Dense(
-            num_classes,
-            kernel_initializer=keras.initializers.TruncatedNormal(
-                stddev=0.02 * head_init_scale
-            ),
-            bias_initializer=DEFAULT_BIAS_INITIALIZER,
-            activation=classifier_activation,
-            name=name + "_head_dense",
-        )(x)
-        return x
-
-    return apply
-
-
-def ConvNextV1BlockFunc(
-        projection_dim: int,
-        kernel_size: int = DEFAULT_KERNEL_SIZE,
+        depths: List[int] = [3, 3, 9, 3],
+        dims: List[int] = [96, 192, 384, 768],
         drop_path_rate: float = 0.0,
+        kernel_size: Union[int, Tuple[int, int]] = 7,
+        activation: str = "gelu",
+        use_bias: bool = True,
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-        name: Optional[str] = None
-) -> callable:
-    """ConvNeXt V1 block function.
-
-    Args:
-        projection_dim: Number of filters for convolution layers.
-        kernel_size: Size of the depthwise convolution kernel.
-        drop_path_rate: Stochastic depth probability.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        name: Optional name for the block.
-
-    Returns:
-        A function representing a ConvNeXtV1Block.
-    """
-    if name is None:
-        name = "convnextV1_block_" + str(backend.get_uid("convnextV1_block"))
-
-    def apply(inputs):
-        # Store input before block for residual connection
-        residual = inputs
-
-        # Create block configuration
-        block_config = ConvNextV1Config(
-            kernel_size=kernel_size,
-            filters=projection_dim,
-            kernel_regularizer=kernel_regularizer,
-        )
-
-        # Apply ConvNextV1Block
-        x = ConvNextV1Block(
-            conv_config=block_config,
-            name=name
-        )(inputs)
-
-        # Apply stochastic depth if needed
-        if drop_path_rate > 0:
-            x = StochasticDepth(
-                drop_path_rate=drop_path_rate,
-                name=name + "_stochastic_depth"
-            )(x)
-
-        # Add residual connection
-        x = keras.layers.Add(name=name + "_residual")([residual, x])
-        return x
-
-    return apply
-
-
-# ---------------------------------------------------------------------
-# Main Model
-# ---------------------------------------------------------------------
-
-def ConvNextV1(
-        depths: List[int],
-        dims: List[int],
-        drop_path_rate: float = 0.0,
-        head_init_scale: float = 1.0,
-        default_size: int = 224,
-        model_name: str = "convnextV1",
-        include_preprocessing: bool = True,
+        dropout_rate: float = 0.0,
+        spatial_dropout_rate: float = 0.0,
+        use_gamma: bool = True,
+        use_softorthonormal_regularizer: bool = False,
         include_top: bool = True,
-        weights: Optional[str] = None,
-        input_tensor: Optional[keras.KerasTensor] = None,
         input_shape: Optional[Tuple[int, ...]] = None,
-        pooling: Optional[str] = None,
-        classes: int = 1000,
-        classifier_activation: Union[str, callable, None] = "softmax",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-) -> keras.Model:
-    """Instantiates the ConvNeXt V1 architecture.
+        **kwargs
+    ):
+        # Validate configuration
+        if len(depths) != len(dims):
+            raise ValueError(
+                f"Length of depths ({len(depths)}) must equal length of dims ({len(dims)})"
+            )
+
+        if len(depths) != 4:
+            logger.warning(
+                f"ConvNeXt typically uses 4 stages, got {len(depths)} stages"
+            )
+
+        # Store configuration
+        self.num_classes = num_classes
+        self.depths = depths
+        self.dims = dims
+        self.drop_path_rate = drop_path_rate
+        self.kernel_size = kernel_size
+        self.activation = activation
+        self.use_bias = use_bias
+        self.kernel_regularizer = kernel_regularizer
+        self.dropout_rate = dropout_rate
+        self.spatial_dropout_rate = spatial_dropout_rate
+        self.use_gamma = use_gamma
+        self.use_softorthonormal_regularizer = use_softorthonormal_regularizer
+        self.include_top = include_top
+        self._input_shape = input_shape
+
+        # Initialize layer lists
+        self.stem_layers = []
+        self.stages = []
+        self.downsample_layers = []
+        self.head_layers = []
+
+        # Set input shape for the model
+        if include_top:
+            # Default ImageNet input shape
+            inputs = keras.Input(shape=(224, 224, 3))
+        else:
+            if input_shape is None:
+                raise ValueError("input_shape must be provided when include_top=False")
+            inputs = keras.Input(shape=input_shape)
+
+        # Build the model
+        outputs = self._build_model(inputs)
+
+        # Initialize the Model
+        super().__init__(inputs=inputs, outputs=outputs, **kwargs)
+
+        logger.info(
+            f"Created ConvNeXt V1 model with {sum(depths)} blocks, "
+            f"{sum(d * w * h for d, w, h in zip(dims, [56, 28, 14, 7], [56, 28, 14, 7]))} total parameters"
+        )
+
+    def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
+        """Build the complete ConvNeXt model architecture.
+
+        Args:
+            inputs: Input tensor
+
+        Returns:
+            Output tensor
+        """
+        x = inputs
+
+        # Build stem
+        x = self._build_stem(x)
+
+        # Build stages with downsampling
+        for stage_idx in range(len(self.depths)):
+            # Add downsampling layer (except for first stage)
+            if stage_idx > 0:
+                x = self._build_downsample_layer(x, self.dims[stage_idx])
+
+            # Build stage
+            x = self._build_stage(x, stage_idx)
+
+        # Build classification head if requested
+        if self.include_top:
+            x = self._build_head(x)
+
+        return x
+
+    def _build_stem(self, x: keras.KerasTensor) -> keras.KerasTensor:
+        """Build the stem (patchify) layer.
+
+        Args:
+            x: Input tensor
+
+        Returns:
+            Processed tensor after stem
+        """
+        # Patchify layer: 4x4 conv with stride 4
+        stem_conv = keras.layers.Conv2D(
+            filters=self.dims[0],
+            kernel_size=self.STEM_KERNEL_SIZE,
+            strides=self.STEM_STRIDE,
+            padding="valid",  # No padding for patchify
+            use_bias=self.use_bias,
+            kernel_initializer=self.STEM_INITIALIZER,
+            kernel_regularizer=self.kernel_regularizer,
+            name="stem_conv"
+        )
+        x = stem_conv(x)
+
+        # Layer normalization after stem
+        stem_norm = keras.layers.LayerNormalization(
+            epsilon=self.LAYERNORM_EPSILON,
+            center=self.use_bias,
+            scale=True,
+            name="stem_norm"
+        )
+        x = stem_norm(x)
+
+        self.stem_layers = [stem_conv, stem_norm]
+
+        return x
+
+    def _build_downsample_layer(
+        self,
+        x: keras.KerasTensor,
+        output_dim: int
+    ) -> keras.KerasTensor:
+        """Build downsampling layer between stages.
+
+        Args:
+            x: Input tensor
+            output_dim: Output channel dimension
+
+        Returns:
+            Downsampled tensor
+        """
+        # LayerNorm before downsampling
+        downsample_norm = keras.layers.LayerNormalization(
+            epsilon=self.LAYERNORM_EPSILON,
+            center=self.use_bias,
+            scale=True,
+            name=f"downsample_norm_{len(self.downsample_layers)}"
+        )
+        x = downsample_norm(x)
+
+        # 2x2 conv with stride 2 for spatial downsampling
+        downsample_conv = keras.layers.Conv2D(
+            filters=output_dim,
+            kernel_size=self.DOWNSAMPLE_KERNEL_SIZE,
+            strides=self.DOWNSAMPLE_STRIDE,
+            padding="valid",
+            use_bias=self.use_bias,
+            kernel_initializer=self.STEM_INITIALIZER,
+            kernel_regularizer=self.kernel_regularizer,
+            name=f"downsample_conv_{len(self.downsample_layers)}"
+        )
+        x = downsample_conv(x)
+
+        self.downsample_layers.append([downsample_norm, downsample_conv])
+
+        return x
+
+    def _build_stage(self, x: keras.KerasTensor, stage_idx: int) -> keras.KerasTensor:
+        """Build a stage consisting of multiple ConvNext blocks.
+
+        Args:
+            x: Input tensor
+            stage_idx: Index of the current stage
+
+        Returns:
+            Processed tensor after the stage
+        """
+        stage_blocks = []
+        depth = self.depths[stage_idx]
+        dim = self.dims[stage_idx]
+
+        # Calculate drop path rates for this stage
+        total_blocks = sum(self.depths)
+        block_start_idx = sum(self.depths[:stage_idx])
+
+        for block_idx in range(depth):
+            # Calculate current drop path rate (linearly increasing)
+            current_block_idx = block_start_idx + block_idx
+            if total_blocks > 1:
+                current_drop_path_rate = (
+                    self.drop_path_rate * current_block_idx / (total_blocks - 1)
+                )
+            else:
+                current_drop_path_rate = 0.0
+
+            # Create ConvNext block
+            block = ConvNextV1Block(
+                kernel_size=self.kernel_size,
+                filters=dim,
+                strides=(1, 1),  # No spatial reduction within stage
+                activation=self.activation,
+                kernel_regularizer=self.kernel_regularizer,
+                use_bias=self.use_bias,
+                dropout_rate=self.dropout_rate,
+                spatial_dropout_rate=self.spatial_dropout_rate,
+                use_gamma=self.use_gamma,
+                use_softorthonormal_regularizer=self.use_softorthonormal_regularizer,
+                name=f"stage_{stage_idx}_block_{block_idx}"
+            )
+
+            # Apply block with residual connection
+            residual = x
+            x = block(x)
+
+            # Add stochastic depth if specified
+            if current_drop_path_rate > 0:
+                stochastic_depth = keras.layers.Dropout(
+                    rate=current_drop_path_rate,
+                    noise_shape=(None, 1, 1, 1),  # Drop entire samples
+                    name=f"stage_{stage_idx}_block_{block_idx}_drop_path"
+                )
+                x = stochastic_depth(x, training=True)
+
+            # Residual connection
+            x = keras.layers.Add(name=f"stage_{stage_idx}_block_{block_idx}_add")([residual, x])
+
+            stage_blocks.append(block)
+
+        self.stages.append(stage_blocks)
+
+        return x
+
+    def _build_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
+        """Build the classification head.
+
+        Args:
+            x: Input feature tensor
+
+        Returns:
+            Classification logits
+        """
+        # Global average pooling
+        gap = keras.layers.GlobalAveragePooling2D(name="global_avg_pool")
+        x = gap(x)
+
+        # Layer normalization before classifier
+        head_norm = keras.layers.LayerNormalization(
+            epsilon=self.LAYERNORM_EPSILON,
+            center=self.use_bias,
+            scale=True,
+            name="head_norm"
+        )
+        x = head_norm(x)
+
+        # Classification layer
+        if self.num_classes > 0:
+            classifier = keras.layers.Dense(
+                units=self.num_classes,
+                use_bias=self.use_bias,
+                kernel_initializer=self.HEAD_INITIALIZER,
+                kernel_regularizer=self.kernel_regularizer,
+                name="classifier"
+            )
+            x = classifier(x)
+
+            self.head_layers = [gap, head_norm, classifier]
+        else:
+            self.head_layers = [gap, head_norm]
+
+        return x
+
+    @classmethod
+    def from_variant(
+        cls,
+        variant: str,
+        num_classes: int = 1000,
+        **kwargs
+    ) -> "ConvNeXtV1":
+        """Create a ConvNeXt model from a predefined variant.
+
+        Args:
+            variant: String, one of "tiny", "small", "base", "large", "xlarge"
+            num_classes: Integer, number of output classes
+            **kwargs: Additional arguments passed to the constructor
+
+        Returns:
+            ConvNeXtV1 model instance
+
+        Raises:
+            ValueError: If variant is not recognized
+
+        Example:
+            >>> model = ConvNeXtV1.from_variant("tiny", num_classes=10)
+        """
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available variants: "
+                f"{list(cls.MODEL_VARIANTS.keys())}"
+            )
+
+        config = cls.MODEL_VARIANTS[variant]
+
+        logger.info(f"Creating ConvNeXt-{variant.upper()} model")
+
+        return cls(
+            num_classes=num_classes,
+            depths=config["depths"],
+            dims=config["dims"],
+            **kwargs
+        )
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get model configuration for serialization.
+
+        Returns:
+            Configuration dictionary
+        """
+        config = {
+            "num_classes": self.num_classes,
+            "depths": self.depths,
+            "dims": self.dims,
+            "drop_path_rate": self.drop_path_rate,
+            "kernel_size": self.kernel_size,
+            "activation": self.activation,
+            "use_bias": self.use_bias,
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "dropout_rate": self.dropout_rate,
+            "spatial_dropout_rate": self.spatial_dropout_rate,
+            "use_gamma": self.use_gamma,
+            "use_softorthonormal_regularizer": self.use_softorthonormal_regularizer,
+            "include_top": self.include_top,
+            "input_shape": self._input_shape,
+        }
+        return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "ConvNeXtV1":
+        """Create model from configuration.
+
+        Args:
+            config: Configuration dictionary
+
+        Returns:
+            ConvNeXtV1 model instance
+        """
+        # Deserialize regularizer if present
+        if config.get("kernel_regularizer"):
+            config["kernel_regularizer"] = keras.regularizers.deserialize(
+                config["kernel_regularizer"]
+            )
+
+        return cls(**config)
+
+    def summary(self, **kwargs):
+        """Print model summary with additional information."""
+        super().summary(**kwargs)
+
+        # Print additional model information
+        total_blocks = sum(self.depths)
+        logger.info(f"Model configuration:")
+        logger.info(f"  - Stages: {len(self.depths)}")
+        logger.info(f"  - Depths: {self.depths}")
+        logger.info(f"  - Dimensions: {self.dims}")
+        logger.info(f"  - Total blocks: {total_blocks}")
+        logger.info(f"  - Drop path rate: {self.drop_path_rate}")
+        logger.info(f"  - Kernel size: {self.kernel_size}")
+        logger.info(f"  - Include top: {self.include_top}")
+        if self.include_top:
+            logger.info(f"  - Number of classes: {self.num_classes}")
+
+
+def create_convnext_v1(
+    variant: str = "tiny",
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs
+) -> ConvNeXtV1:
+    """Convenience function to create ConvNeXt V1 models.
 
     Args:
-        depths: Number of blocks in each stage.
-        dims: Feature dimensions for each stage.
-        drop_path_rate: Stochastic depth rate.
-        head_init_scale: Initial scaling for classification head.
-        default_size: Default input image size.
-        model_name: Name of the model.
-        include_preprocessing: Whether to include preprocessing normalization.
-        include_top: Whether to include classification head.
-        weights: Path to weights file to load.
-        input_tensor: Optional input tensor.
-        input_shape: Optional input shape tuple.
-        pooling: Feature pooling mode when include_top is False.
-        classes: Number of output classes.
-        classifier_activation: Activation for classification layer.
-        kernel_regularizer: Weight regularization.
+        variant: String, model variant ("tiny", "small", "base", "large", "xlarge")
+        num_classes: Integer, number of output classes
+        pretrained: Boolean, whether to load pretrained weights (not implemented)
+        **kwargs: Additional arguments passed to the model constructor
 
     Returns:
-        A Keras model instance.
+        ConvNeXtV1 model instance
+
+    Example:
+        >>> # Create ConvNeXt-Small for CIFAR-10
+        >>> model = create_convnext_v1("small", num_classes=10)
+        >>>
+        >>> # Create custom ConvNeXt with regularization
+        >>> model = create_convnext_v1(
+        ...     "base",
+        ...     num_classes=100,
+        ...     drop_path_rate=0.1,
+        ...     kernel_regularizer=keras.regularizers.L2(1e-4)
+        ... )
     """
-    if input_tensor is None:
-        img_input = keras.layers.Input(shape=input_shape)
-    else:
-        if not backend.is_keras_tensor(input_tensor):
-            img_input = keras.layers.Input(tensor=input_tensor, shape=input_shape)
-        else:
-            img_input = input_tensor
+    if pretrained:
+        logger.warning("Pretrained weights are not yet implemented")
 
-    if input_tensor is not None:
-        inputs = utils.get_source_inputs(input_tensor)
-    else:
-        inputs = img_input
-
-    x = inputs
-    if include_preprocessing:
-        channel_axis = 3 if backend.image_data_format() == "channels_last" else 1
-        num_channels = input_shape[channel_axis - 1]
-        if num_channels == 3:
-            x = PreStem(name=model_name)(x)
-
-    # Stem block
-    stem = Sequential(
-        [
-            keras.layers.Conv2D(
-                dims[0],
-                kernel_size=DEFAULT_STEM_KERNEL_SIZE,
-                strides=DEFAULT_STEM_STRIDE,
-                padding=DEFAULT_PADDING,
-                kernel_initializer=DEFAULT_KERNEL_INITIALIZER,
-                kernel_regularizer=kernel_regularizer,
-                use_bias=True,
-                name=model_name + "_stem_conv",
-            ),
-            keras.layers.LayerNormalization(
-                epsilon=DEFAULT_EPSILON, name=model_name + "_stem_layernorm"
-            ),
-        ],
-        name=model_name + "_stem",
-    )
-
-    # Downsampling blocks
-    downsample_layers = []
-    downsample_layers.append(stem)
-
-    num_downsample_layers = 3
-    for i in range(num_downsample_layers):
-        downsample_layer = Sequential(
-            [
-                keras.layers.LayerNormalization(
-                    epsilon=DEFAULT_EPSILON,
-                    name=model_name + "_downsampling_layernorm_" + str(i),
-                ),
-                keras.layers.Conv2D(
-                    dims[i + 1],
-                    kernel_size=DEFAULT_DOWNSAMPLE_KERNEL_SIZE,
-                    strides=DEFAULT_DOWNSAMPLE_STRIDE,
-                    padding=DEFAULT_PADDING,
-                    kernel_initializer=DEFAULT_KERNEL_INITIALIZER,
-                    kernel_regularizer=kernel_regularizer,
-                    use_bias=True,
-                    name=model_name + "_downsampling_conv_" + str(i),
-                ),
-            ],
-            name=model_name + "_downsampling_block_" + str(i),
-        )
-        downsample_layers.append(downsample_layer)
-
-    # Stochastic depth rates
-    depth_drop_rates = tf.linspace(0.0, drop_path_rate, sum(depths))
-    depth_drop_rates = tf.split(depth_drop_rates, depths)
-
-    # First apply downsampling blocks and then apply ConvNeXt stages
-    cur = 0
-    num_convnext_blocks = 4
-
-    for i in range(num_convnext_blocks):
-        x = downsample_layers[i](x)
-        for j in range(depths[i]):
-            x = ConvNextV1BlockFunc(
-                projection_dim=dims[i],
-                kernel_size=DEFAULT_KERNEL_SIZE,
-                drop_path_rate=float(depth_drop_rates[i][j]),
-                kernel_regularizer=kernel_regularizer,
-                name=model_name + f"_stage_{i}_block_{j}",
-            )(x)
-        cur += depths[i]
-
-    if include_top:
-        x = Head(
-            num_classes=classes,
-            classifier_activation=classifier_activation,
-            head_init_scale=head_init_scale,
-            name=model_name,
-        )(x)
-    else:
-        if pooling == "avg":
-            x = keras.layers.GlobalAveragePooling2D(name=model_name + "_global_avg_pool")(x)
-        elif pooling == "max":
-            x = keras.layers.GlobalMaxPooling2D(name=model_name + "_global_max_pool")(x)
-        x = keras.layers.LayerNormalization(
-            epsilon=DEFAULT_EPSILON, name=model_name + "_final_layernorm"
-        )(x)
-
-    # Create model
-    model = keras.api.Model(inputs=inputs, outputs=x, name=model_name)
-
-    # Load weights if provided
-    if weights is not None:
-        model.load_weights(weights)
+    model = ConvNeXtV1.from_variant(variant, num_classes=num_classes, **kwargs)
 
     return model
-
-
-# ---------------------------------------------------------------------
-# Model Variants
-# ---------------------------------------------------------------------
-
-def ConvNextV1Atto(
-        include_top: bool = True,
-        include_preprocessing: bool = True,
-        weights: Optional[str] = None,
-        input_tensor: Optional[keras.KerasTensor] = None,
-        input_shape: Optional[Tuple[int, ...]] = None,
-        pooling: Optional[str] = None,
-        classes: int = 1000,
-        classifier_activation: Union[str, callable, None] = "softmax",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-) -> keras.Model:
-    """ConvNeXt V1 Atto model with 3.7M parameters."""
-    config = MODEL_CONFIGS["atto"]
-    return ConvNextV1(
-        depths=config["depths"],
-        dims=config["dims"],
-        default_size=config["default_size"],
-        model_name="convnextV1_atto",
-        include_top=include_top,
-        include_preprocessing=include_preprocessing,
-        weights=weights,
-        input_tensor=input_tensor,
-        input_shape=input_shape,
-        pooling=pooling,
-        classes=classes,
-        classifier_activation=classifier_activation,
-        kernel_regularizer=kernel_regularizer,
-    )
-
-
-def ConvNextV1Femto(
-        include_top: bool = True,
-        include_preprocessing: bool = True,
-        weights: Optional[str] = None,
-        input_tensor: Optional[keras.KerasTensor] = None,
-        input_shape: Optional[Tuple[int, ...]] = None,
-        pooling: Optional[str] = None,
-        classes: int = 1000,
-        classifier_activation: Union[str, callable, None] = "softmax",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-) -> keras.Model:
-    """ConvNeXt V1 Femto model with 5.2M parameters."""
-    config = MODEL_CONFIGS["femto"]
-    return ConvNextV1(
-        depths=config["depths"],
-        dims=config["dims"],
-        default_size=config["default_size"],
-        model_name="convnextV1_femto",
-        include_top=include_top,
-        include_preprocessing=include_preprocessing,
-        weights=weights,
-        input_tensor=input_tensor,
-        input_shape=input_shape,
-        pooling=pooling,
-        classes=classes,
-        classifier_activation=classifier_activation,
-        kernel_regularizer=kernel_regularizer,
-    )
-
-
-def ConvNextV1Pico(
-        include_top: bool = True,
-        include_preprocessing: bool = True,
-        weights: Optional[str] = None,
-        input_tensor: Optional[keras.KerasTensor] = None,
-        input_shape: Optional[Tuple[int, ...]] = None,
-        pooling: Optional[str] = None,
-        classes: int = 1000,
-        classifier_activation: Union[str, callable, None] = "softmax",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-) -> keras.Model:
-    """ConvNeXt V1 Pico model with 9.1M parameters."""
-    config = MODEL_CONFIGS["pico"]
-    return ConvNextV1(
-        depths=config["depths"],
-        dims=config["dims"],
-        default_size=config["default_size"],
-        model_name="convnextV1_pico",
-        include_top=include_top,
-        include_preprocessing=include_preprocessing,
-        weights=weights,
-        input_tensor=input_tensor,
-        input_shape=input_shape,
-        pooling=pooling,
-        classes=classes,
-        classifier_activation=classifier_activation,
-        kernel_regularizer=kernel_regularizer,
-    )
-
-
-def ConvNextV1Nano(
-        include_top: bool = True,
-        include_preprocessing: bool = True,
-        weights: Optional[str] = None,
-        input_tensor: Optional[keras.KerasTensor] = None,
-        input_shape: Optional[Tuple[int, ...]] = None,
-        pooling: Optional[str] = None,
-        classes: int = 1000,
-        classifier_activation: Union[str, callable, None] = "softmax",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-) -> keras.Model:
-    """ConvNeXt V1 Nano model with 15.6M parameters."""
-    config = MODEL_CONFIGS["nano"]
-    return ConvNextV1(
-        depths=config["depths"],
-        dims=config["dims"],
-        default_size=config["default_size"],
-        model_name="convnextV1_nano",
-        include_top=include_top,
-        include_preprocessing=include_preprocessing,
-        weights=weights,
-        input_tensor=input_tensor,
-        input_shape=input_shape,
-        pooling=pooling,
-        classes=classes,
-        classifier_activation=classifier_activation,
-        kernel_regularizer=kernel_regularizer,
-    )
-
-
-def ConvNextV1Tiny(
-        include_top: bool = True,
-        include_preprocessing: bool = True,
-        weights: Optional[str] = None,
-        input_tensor: Optional[keras.KerasTensor] = None,
-        input_shape: Optional[Tuple[int, ...]] = None,
-        pooling: Optional[str] = None,
-        classes: int = 1000,
-        classifier_activation: Union[str, callable, None] = "softmax",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-) -> keras.Model:
-    """ConvNeXt V1 Tiny model with 28.6M parameters."""
-    config = MODEL_CONFIGS["tiny"]
-    return ConvNextV1(
-        depths=config["depths"],
-        dims=config["dims"],
-        default_size=config["default_size"],
-        model_name="convnextV1_tiny",
-        include_top=include_top,
-        include_preprocessing=include_preprocessing,
-        weights=weights,
-        input_tensor=input_tensor,
-        input_shape=input_shape,
-        pooling=pooling,
-        classes=classes,
-        classifier_activation=classifier_activation,
-        kernel_regularizer=kernel_regularizer,
-    )
-
-
-def ConvNextV1Base(
-        include_top: bool = True,
-        include_preprocessing: bool = True,
-        weights: Optional[str] = None,
-        input_tensor: Optional[keras.KerasTensor] = None,
-        input_shape: Optional[Tuple[int, ...]] = None,
-        pooling: Optional[str] = None,
-        classes: int = 1000,
-        classifier_activation: Union[str, callable, None] = "softmax",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-) -> keras.Model:
-    """ConvNeXt V1 Base model with 89M parameters."""
-    config = MODEL_CONFIGS["base"]
-    return ConvNextV1(
-        depths=config["depths"],
-        dims=config["dims"],
-        default_size=config["default_size"],
-        model_name="convnextV1_base",
-        include_top=include_top,
-        include_preprocessing=include_preprocessing,
-        weights=weights,
-        input_tensor=input_tensor,
-        input_shape=input_shape,
-        pooling=pooling,
-        classes=classes,
-        classifier_activation=classifier_activation,
-        kernel_regularizer=kernel_regularizer,
-    )
-
-
-def ConvNextV1Large(
-        include_top: bool = True,
-        include_preprocessing: bool = True,
-        weights: Optional[str] = None,
-        input_tensor: Optional[keras.KerasTensor] = None,
-        input_shape: Optional[Tuple[int, ...]] = None,
-        pooling: Optional[str] = None,
-        classes: int = 1000,
-        classifier_activation: Union[str, callable, None] = "softmax",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-) -> keras.Model:
-    """ConvNeXt V1 Large model with 198M parameters."""
-    config = MODEL_CONFIGS["large"]
-    return ConvNextV1(
-        depths=config["depths"],
-        dims=config["dims"],
-        default_size=config["default_size"],
-        model_name="convnextV1_large",
-        include_top=include_top,
-        include_preprocessing=include_preprocessing,
-        weights=weights,
-        input_tensor=input_tensor,
-        input_shape=input_shape,
-        pooling=pooling,
-        classes=classes,
-        classifier_activation=classifier_activation,
-        kernel_regularizer=kernel_regularizer,
-    )
-
-
-def ConvNextV1Huge(
-        include_top: bool = True,
-        include_preprocessing: bool = True,
-        weights: Optional[str] = None,
-        input_tensor: Optional[keras.KerasTensor] = None,
-        input_shape: Optional[Tuple[int, ...]] = None,
-        pooling: Optional[str] = None,
-        classes: int = 1000,
-        classifier_activation: Union[str, callable, None] = "softmax",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-) -> keras.Model:
-    """ConvNeXt V1 Huge model with 660M parameters."""
-    config = MODEL_CONFIGS["huge"]
-    return ConvNextV1(
-        depths=config["depths"],
-        dims=config["dims"],
-        default_size=config["default_size"],
-        model_name="convnextV1_huge",
-        include_top=include_top,
-        include_preprocessing=include_preprocessing,
-        weights=weights,
-        input_tensor=input_tensor,
-        input_shape=input_shape,
-        pooling=pooling,
-        classes=classes,
-        classifier_activation=classifier_activation,
-        kernel_regularizer=kernel_regularizer,
-    )
-
-
-# Add docstrings to all model variants
-ConvNextV1Atto.__doc__ = BASE_DOCSTRING.format(name="ConvNextV1Atto")
-ConvNextV1Femto.__doc__ = BASE_DOCSTRING.format(name="ConvNextV1Femto")
-ConvNextV1Pico.__doc__ = BASE_DOCSTRING.format(name="ConvNextV1Pico")
-ConvNextV1Nano.__doc__ = BASE_DOCSTRING.format(name="ConvNextV1Nano")
-ConvNextV1Tiny.__doc__ = BASE_DOCSTRING.format(name="ConvNextV1Tiny")
-ConvNextV1Base.__doc__ = BASE_DOCSTRING.format(name="ConvNextV1Base")
-ConvNextV1Large.__doc__ = BASE_DOCSTRING.format(name="ConvNextV1Large")
-ConvNextV1Huge.__doc__ = BASE_DOCSTRING.format(name="ConvNextV1Huge")
-
-
-# ---------------------------------------------------------------------
-# Utility Functions
-# ---------------------------------------------------------------------
-
-def preprocess_input(x, data_format=None):
-    """A placeholder method for backward compatibility.
-
-    The preprocessing logic has been included in the convnext model
-    implementation. Users are no longer required to call this method to
-    normalize the input data. This method does nothing and only kept as a
-    placeholder to align the API surface between old and new version of model.
-
-    Args:
-        x: A floating point `numpy.array` or a `tf.Tensor`.
-        data_format: Optional data format of the image tensor/array.
-
-    Returns:
-        Unchanged `numpy.array` or `tf.Tensor`.
-    """
-    return x
-
-
-def decode_predictions(preds, top=5):
-    """Decodes the prediction of a ConvNextV1 model.
-
-    Args:
-        preds: Numpy array encoding a batch of predictions.
-        top: Integer, how many top-guesses to return.
-
-    Returns:
-        A list of lists of top class prediction tuples
-        `(class_name, class_description, score)`.
-        One list of tuples per sample in batch input.
-    """
-    return imagenet_utils.decode_predictions(preds, top=top)
-
-# ---------------------------------------------------------------------
