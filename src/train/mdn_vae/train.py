@@ -291,18 +291,14 @@ def plot_latent_space_mdn(
     ax.set_ylabel('Latent Dimension 2')
     ax.set_title('Mixture Component Means (size ∝ weight)')
 
-    # Set consistent axis limits
-    all_points = np.vstack([z_2d, means_2d.reshape(-1, 2)])
-    xlim = (np.min(all_points[:, 0]) - 1, np.max(all_points[:, 0]) + 1)
-    ylim = (np.min(all_points[:, 1]) - 1, np.max(all_points[:, 1]) + 1)
-
     for ax in axes:
-        ax.set_xlim(xlim)
-        ax.set_ylim(ylim)
+        ax.set_xlim(-4, 4)
+        ax.set_ylim(-4, 4)
         ax.grid(True, alpha=0.3)
 
-    title = f'MDN-VAE Latent Space - Epoch {epoch}' if epoch is not None else 'Final MDN-VAE Latent Space'
-    fig.suptitle(title, fontsize=16, fontweight='bold')
+    fig.suptitle(
+        f'MDN-VAE Latent Space - Epoch {epoch}' if epoch is not None else 'Final MDN-VAE Latent Space',
+        fontsize=16)
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
@@ -711,7 +707,7 @@ def main():
         help='Dimensionality of the latent space'
     )
     parser.add_argument(
-        '--num-mixtures', type=int, default=5,
+        '--num-mixtures', type=int, default=10,
         help='Number of Gaussian mixture components'
     )
     parser.add_argument(
