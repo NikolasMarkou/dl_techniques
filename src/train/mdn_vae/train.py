@@ -707,7 +707,7 @@ def main():
         help='Training batch size'
     )
     parser.add_argument(
-        '--latent-dim', type=int, default=10,
+        '--latent-dim', type=int, default=2,
         help='Dimensionality of the latent space'
     )
     parser.add_argument(
