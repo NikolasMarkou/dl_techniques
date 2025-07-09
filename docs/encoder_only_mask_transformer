@@ -101,48 +101,48 @@ ARCHITECTURAL SIMPLIFICATION:
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                                                                                 │
 │  REMOVED COMPONENTS:                           ADDED COMPONENTS:                                │
-│  ├─ ViT-Adapter                                ├─ Learnable Query Tokens (100-200)             │
-│  ├─ Pixel Decoder                              ├─ Simple Mask Module                           │
-│  ├─ Transformer Decoder                        └─ Mask Annealing Strategy                      │
-│  ├─ Multi-scale Processing                                                                     │
-│  └─ Complex Cross-Attention                                                                    │
+│  ├─ ViT-Adapter                                ├─ Learnable Query Tokens (100-200)              │
+│  ├─ Pixel Decoder                              ├─ Simple Mask Module                            │
+│  ├─ Transformer Decoder                        └─ Mask Annealing Strategy                       │
+│  ├─ Multi-scale Processing                                                                      │
+│  └─ Complex Cross-Attention                                                                     │
 │                                                                                                 │
 └─────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 TRAINING STRATEGY - MASK ANNEALING:
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                                                                                 │
-│  Epoch 0    ████████████████████████████████████████████████████████████████  100% Masked     │
-│  Epoch 3    ████████████████████████████████████████████████████████████████   90% Masked     │
-│  Epoch 6    ████████████████████████████████████████████████████████████████   50% Masked     │
-│  Epoch 9    ████████████████████████████████████████████████████████████████   10% Masked     │
-│  Epoch 12   ████████████████████████████████████████████████████████████████    0% Masked     │
+│  Epoch 0    ████████████████████████████████████████████████████████████████  100% Masked       │
+│  Epoch 3    ████████████████████████████████████████████████████████████████   90% Masked       │
+│  Epoch 6    ████████████████████████████████████████████████████████████████   50% Masked       │
+│  Epoch 9    ████████████████████████████████████████████████████████████████   10% Masked       │
+│  Epoch 12   ████████████████████████████████████████████████████████████████    0% Masked       │
 │                                                                                                 │
-│  Benefits: Initial convergence help → Efficient inference without masking                      │
+│  Benefits: Initial convergence help → Efficient inference without masking                       │
 │                                                                                                 │
 └─────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 PERFORMANCE COMPARISON:
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                                                                                 │
-│  Model          │  FPS   │  PQ    │  Params  │  GFLOPs │  Complexity                           │
+│  Model          │  FPS   │  PQ    │  Params  │  GFLOPs │  Complexity                            │
 │  ─────────────────────────────────────────────────────────────────────────────────────────────  │
-│  Mask2Former    │   29   │  57.1  │  349M    │   830   │  High (Multiple Modules)              │
-│  EoMT           │  128   │  56.0  │  316M    │   669   │  Low (Single ViT)                     │
-│                 │        │        │          │         │                                       │
-│  Improvement    │  4.4x  │ -1.1   │  -33M    │  -161   │  Significantly Simplified             │
-│                 │        │        │          │         │                                       │
+│  Mask2Former    │   29   │  57.1  │  349M    │   830   │  High (Multiple Modules)               │
+│  EoMT           │  128   │  56.0  │  316M    │   669   │  Low (Single ViT)                      │
+│                 │        │        │          │         │                                        │
+│  Improvement    │  4.4x  │ -1.1   │  -33M    │  -161   │  Significantly Simplified              │
+│                 │        │        │          │         │                                        │
 └─────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 SCALING BENEFITS:
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                                                                                 │
-│  Model Size  │  Traditional Gap  │  EoMT Performance  │  Insight                              │
+│  Model Size  │  Traditional Gap  │  EoMT Performance  │  Insight                                │
 │  ─────────────────────────────────────────────────────────────────────────────────────────────  │
-│  ViT-Small   │     -5.8 PQ      │     High Speed     │  Small models need complexity         │
-│  ViT-Base    │     -3.8 PQ      │     Balanced       │  Medium models show promise           │
-│  ViT-Large   │     -1.1 PQ      │     Competitive    │  Large models make complexity         │
-│  ViT-Giant   │     -0.7 PQ      │     Near-Parity    │  unnecessary                          │
+│  ViT-Small   │     -5.8 PQ      │     High Speed     │  Small models need complexity            │
+│  ViT-Base    │     -3.8 PQ      │     Balanced       │  Medium models show promise              │
+│  ViT-Large   │     -1.1 PQ      │     Competitive    │  Large models make complexity            │
+│  ViT-Giant   │     -0.7 PQ      │     Near-Parity    │  unnecessary                             │
 │                                                                                                 │
 └─────────────────────────────────────────────────────────────────────────────────────────────────┘
 
@@ -153,27 +153,27 @@ SCALING BENEFITS:
 CORE COMPONENTS:
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                                                                                 │
-│  dl_techniques.models.eomt.EoMT:                                                               │
-│  ├─ create_eomt_model()           # Factory function for different sizes                       │
-│  ├─ EoMTLayer()                   # Core transformer layer with masking                       │
-│  ├─ MaskModule()                  # Simple prediction head                                     │
-│  └─ MaskAnnealingCallback()       # Training strategy implementation                           │
+│  dl_techniques.models.eomt.EoMT:                                                                │
+│  ├─ create_eomt_model()           # Factory function for different sizes                        │
+│  ├─ EoMTLayer()                   # Core transformer layer with masking                         │
+│  ├─ MaskModule()                  # Simple prediction head                                      │
+│  └─ MaskAnnealingCallback()       # Training strategy implementation                            │
 │                                                                                                 │
-│  Usage:                                                                                        │
-│  model = create_eomt_model(num_classes=21, model_size="large")                                │
-│  trainer = EoMTTrainer(model, learning_rate=1e-4)                                            │
-│  history = trainer.train(train_ds, val_ds, epochs=12)                                        │
+│  Usage:                                                                                         │
+│  model = create_eomt_model(num_classes=21, model_size="large")                                  │
+│  trainer = EoMTTrainer(model, learning_rate=1e-4)                                               │
+│  history = trainer.train(train_ds, val_ds, epochs=12)                                           │
 │                                                                                                 │
 └─────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 SUPPORTED TASKS:
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                                                                                 │
-│  ├─ Semantic Segmentation     (100 queries, per-pixel classification)                         │
-│  ├─ Instance Segmentation     (200 queries, individual object instances)                      │
-│  └─ Panoptic Segmentation     (200 queries, semantic + instance combined)                     │
+│  ├─ Semantic Segmentation     (100 queries, per-pixel classification)                           │
+│  ├─ Instance Segmentation     (200 queries, individual object instances)                        │
+│  └─ Panoptic Segmentation     (200 queries, semantic + instance combined)                       │
 │                                                                                                 │
-│  All tasks use the same unified architecture with different query counts                       │
+│  All tasks use the same unified architecture with different query counts                        │
 │                                                                                                 │
 └─────────────────────────────────────────────────────────────────────────────────────────────────┘
 
