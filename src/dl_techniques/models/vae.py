@@ -1,8 +1,115 @@
 """
-ResNet VAE with exact shape matching for reconstruction loss.
+ResNet-based Variational Autoencoder (VAE) Implementation
+========================================================
 
-This version ensures that the decoder output exactly matches the input shape
-to prevent shape mismatch errors during training.
+This module implements a ResNet-based Variational Autoencoder (VAE) using Keras 3.8.0,
+designed for unsupervised learning of latent representations with generative capabilities.
+The implementation follows VAE principles with proper reparameterization trick, KL divergence
+regularization, and numerical stability measures.
+
+Key Features:
+    - **ResNet Architecture**: Utilizes residual connections in both encoder and decoder
+    - **Configurable Depth**: Adjustable network depth and steps per depth level
+    - **Proper VAE Loss**: Implements reconstruction loss + KL divergence regularization
+    - **Numerical Stability**: Gradient clipping, loss clamping, and proper initialization
+    - **Backend Agnostic**: Uses keras.ops for compatibility across TensorFlow, JAX, PyTorch
+    - **Full Serialization**: Proper get_config/from_config implementation
+    - **Custom Training**: Implements custom train_step and test_step methods
+    - **Sampling Capabilities**: Generate new samples from learned latent distribution
+
+Architecture Overview:
+    ```
+    Input Image → Encoder (ResNet blocks + downsampling) → μ, log(σ²)
+                                                              ↓
+    Reconstructed ← Decoder (ResNet blocks + upsampling) ← z ~ N(μ, σ²)
+    ```
+
+Mathematical Foundation:
+    - **Encoder**: q(z|x) - Approximate posterior distribution
+    - **Decoder**: p(x|z) - Likelihood distribution
+    - **Prior**: p(z) = N(0, I) - Standard normal prior
+    - **Loss**: L = E[log p(x|z)] - β * KL(q(z|x)||p(z))
+    - **Reparameterization**: z = μ + σ * ε, where ε ~ N(0, I)
+
+Classes:
+    VAE: Main ResNet-based Variational Autoencoder model
+
+Functions:
+    create_vae: Factory function for creating and compiling VAE models
+
+Dependencies:
+    - keras>=3.8.0
+    - tensorflow>=2.18.0 (backend)
+    - dl_techniques.utils.logger
+    - dl_techniques.layers.sampling.Sampling
+
+Usage Example:
+    ```python
+    # Create a VAE for 64x64 RGB images
+    vae = create_vae(
+        input_shape=(64, 64, 3),
+        latent_dim=128,
+        depths=3,
+        steps_per_depth=2,
+        filters=[32, 64, 128],
+        kl_loss_weight=0.001,
+        optimizer='adam'
+    )
+
+    # Train the model
+    vae.fit(train_data, epochs=50, validation_data=val_data)
+
+    # Generate new samples
+    samples = vae.sample(num_samples=10)
+
+    # Encode images to latent space
+    z_mean, z_log_var = vae.encode(images)
+
+    # Decode latent vectors to images
+    reconstructions = vae.decode(z_vectors)
+    ```
+
+Technical Details:
+    - **Encoder Architecture**:
+      * Initial convolution layer
+      * Progressive downsampling (stride=2) at each depth level
+      * Residual blocks with batch normalization and dropout
+      * Dense layers for μ and log(σ²) prediction
+
+    - **Decoder Architecture**:
+      * Dense projection from latent to feature maps
+      * Progressive upsampling (2x) at each depth level
+      * Residual blocks with batch normalization and dropout
+      * Final convolution with sigmoid activation
+
+    - **Loss Components**:
+      * Reconstruction Loss: Binary crossentropy between input and reconstruction
+      * KL Divergence: KL(q(z|x)||N(0,I)) for regularization
+      * Regularization: Optional kernel regularization terms
+
+    - **Numerical Stability**:
+      * Gradient clipping to prevent exploding gradients
+      * Loss clamping to prevent numerical overflow
+      * Proper weight initialization (He normal, small variance for latent layers)
+      * Epsilon clamping for log operations
+
+Performance Considerations:
+    - Memory efficient implementation with lazy weight creation
+    - Supports mixed precision training
+    - Configurable batch normalization and dropout for regularization
+    - Optimized for modern GPU architectures
+
+Model Persistence:
+    - Fully serializable using Keras .keras format
+    - Proper config serialization for all parameters
+    - Custom object registration for loading saved models
+
+Notes:
+    - Requires input images to be normalized to [0, 1] range
+    - Output reconstructions are in [0, 1] range (sigmoid activation)
+    - KL loss weight typically needs tuning based on dataset and latent dimension
+    - Larger latent dimensions may require higher KL loss weights
+    - ResNet blocks help with gradient flow in deeper architectures
 """
 
 import keras
@@ -10,12 +117,17 @@ from keras import ops
 import tensorflow as tf
 from typing import Optional, Tuple, Union, Dict, Any, List
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.sampling import Sampling
 
+# ---------------------------------------------------------------------
+
 @keras.saving.register_keras_serializable()
-class ResnetVAE(keras.Model):
-    """ResNet VAE with guaranteed shape matching."""
+class VAE(keras.Model):
 
     def __init__(
         self,
@@ -29,7 +141,7 @@ class ResnetVAE(keras.Model):
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         use_batch_norm: bool = True,
         dropout_rate: float = 0.0,
-        activation: Union[str, callable] = "gelu",
+        activation: Union[str, callable] = "leaky_relu",
         name: Optional[str] = "resnet_vae",
         **kwargs: Any
     ) -> None:
@@ -149,8 +261,7 @@ class ResnetVAE(keras.Model):
                 # Residual connection
                 x = keras.layers.Add()([x, residual])
 
-        # Global pooling and latent parameters
-        x = keras.layers.GlobalAveragePooling2D()(x)
+        x = keras.layers.Flatten()(x)
 
         z_mean = keras.layers.Dense(
             units=self.latent_dim,
@@ -168,10 +279,7 @@ class ResnetVAE(keras.Model):
             name="encoder_latent_var"
         )(x)
 
-        # Concatenate outputs
-        encoder_output = keras.layers.Concatenate(axis=-1, name="encoder_output")([z_mean, z_log_var])
-
-        self.encoder = keras.Model(inputs=x_input, outputs=encoder_output, name="encoder")
+        self.encoder = keras.Model(inputs=x_input, outputs=[z_mean, z_log_var], name="encoder")
 
     def _build_decoder(self) -> None:
         """Build the decoder network."""
@@ -198,7 +306,10 @@ class ResnetVAE(keras.Model):
         # Decoder blocks with upsampling
         for depth in range(self.depths - 1, -1, -1):
             # Upsample
-            x = keras.layers.UpSampling2D(size=(2, 2), name=f"decoder_upsample_{depth}")(x)
+            x = keras.layers.UpSampling2D(
+                size=(2, 2),
+                name=f"decoder_upsample_{depth}",
+                interpolation="nearest")(x)
 
             # Convolution after upsampling
             x = keras.layers.Conv2D(
@@ -283,8 +394,8 @@ class ResnetVAE(keras.Model):
         encoder_output = self.encoder(inputs, training=training)
 
         # Split into mean and log variance
-        z_mean = encoder_output[:, :self.latent_dim]
-        z_log_var = encoder_output[:, self.latent_dim:]
+        z_mean = encoder_output[0]
+        z_log_var = encoder_output[1]
         z = self.sampling_layer([z_mean, z_log_var], training=training)
 
         # Decoder pass
@@ -498,7 +609,7 @@ class ResnetVAE(keras.Model):
         return config
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "ResnetVAE":
+    def from_config(cls, config: Dict[str, Any]) -> "VAE":
         """Create ResnetVAE from configuration."""
         if "kernel_initializer" in config and isinstance(config["kernel_initializer"], dict):
             config["kernel_initializer"] = keras.initializers.deserialize(
@@ -510,15 +621,15 @@ class ResnetVAE(keras.Model):
             )
         return cls(**config)
 
+# ---------------------------------------------------------------------
 
 # Factory function for the ResNet VAE
-def create_resnet_vae(
+def create_vae(
     input_shape: Tuple[int, int, int],
     latent_dim: int,
     optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
-    learning_rate: float = 0.0001,  # Lower default learning rate
     **kwargs
-) -> ResnetVAE:
+) -> VAE:
     """Create and compile a ResNet VAE model."""
     # Default parameters for stability
     default_kwargs = {
@@ -537,7 +648,7 @@ def create_resnet_vae(
             kwargs[key] = value
 
     # Create the model
-    model = ResnetVAE(
+    model = VAE(
         latent_dim=latent_dim,
         input_shape=input_shape,
         **kwargs
@@ -565,83 +676,4 @@ def create_resnet_vae(
     return model
 
 
-# Debugging utility
-def debug_vae_training(model: ResnetVAE, x_sample: keras.KerasTensor) -> None:
-    """Debug VAE training step by step."""
-    logger.info("=== VAE Training Debug ===")
-
-    # Check input
-    logger.info(f"Input shape: {x_sample.shape}")
-    logger.info(f"Input stats: min={ops.min(x_sample):.4f}, max={ops.max(x_sample):.4f}, mean={ops.mean(x_sample):.4f}")
-
-    # Check encoder
-    encoder_output = model.encoder(x_sample, training=False)
-    logger.info(f"Encoder output shape: {encoder_output.shape}")
-
-    z_mean = encoder_output[:, :model.latent_dim]
-    z_log_var = encoder_output[:, model.latent_dim:]
-
-    logger.info(f"z_mean stats: min={ops.min(z_mean):.4f}, max={ops.max(z_mean):.4f}, mean={ops.mean(z_mean):.4f}")
-    logger.info(f"z_log_var stats: min={ops.min(z_log_var):.4f}, max={ops.max(z_log_var):.4f}, mean={ops.mean(z_log_var):.4f}")
-
-    # Check sampling
-    z = model.sampling_layer([z_mean, z_log_var], training=False)
-    logger.info(f"z stats: min={ops.min(z):.4f}, max={ops.max(z):.4f}, mean={ops.mean(z):.4f}")
-
-    # Check decoder
-    reconstruction = model.decoder(z, training=False)
-    logger.info(f"Reconstruction shape: {reconstruction.shape}")
-    logger.info(f"Reconstruction stats: min={ops.min(reconstruction):.4f}, max={ops.max(reconstruction):.4f}, mean={ops.mean(reconstruction):.4f}")
-
-    # Check losses
-    recon_loss = model._compute_reconstruction_loss(x_sample, reconstruction)
-    kl_loss = model._compute_kl_loss(z_mean, z_log_var)
-
-    logger.info(f"Reconstruction loss: {recon_loss:.4f}")
-    logger.info(f"KL loss: {kl_loss:.4f}")
-    logger.info(f"Total loss: {recon_loss + model.kl_loss_weight * kl_loss:.4f}")
-
-    # Check for NaN weights
-    if model.check_for_nan_weights():
-        logger.error("NaN detected in model weights!")
-    else:
-        logger.info("No NaN values in model weights")
-
-    logger.info("=== End Debug ===")
-
-
-# Usage example for training with debugging
-def train_vae_with_debugging(
-    model: ResnetVAE,
-    train_dataset,
-    validation_dataset=None,
-    epochs: int = 10,
-    debug_every: int = 5
-) -> keras.callbacks.History:
-    """Train VAE with periodic debugging."""
-
-    class DebugCallback(keras.callbacks.Callback):
-        def __init__(self, model, debug_every=5):
-            super().__init__()
-            self.vae_model = model
-            self.debug_every = debug_every
-
-        def on_epoch_end(self, epoch, logs=None):
-            if epoch % self.debug_every == 0:
-                # Get a sample batch for debugging
-                sample_batch = next(iter(train_dataset.take(1)))
-                if isinstance(sample_batch, tuple):
-                    sample_x = sample_batch[0][:1]  # Take first sample
-                else:
-                    sample_x = sample_batch[:1]
-
-                debug_vae_training(self.vae_model, sample_x)
-
-    callbacks = [DebugCallback(model, debug_every)]
-
-    return model.fit(
-        train_dataset,
-        validation_data=validation_dataset,
-        epochs=epochs,
-        callbacks=callbacks
-    )
+# ---------------------------------------------------------------------

@@ -1,5 +1,5 @@
 """
-Enhanced training script for Keras-compliant VAE with comprehensive visualizations.
+Training script for Keras-compliant VAE with comprehensive visualizations.
 
 This script demonstrates how to train the VAE model using standard Keras
 workflows with model.compile() and model.fit(). The script handles data loading,
@@ -23,14 +23,20 @@ import seaborn as sns
 from datetime import datetime
 from typing import Tuple, Dict, Any, Optional
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
-from dl_techniques.models.vae import ResnetVAE, create_resnet_vae
 from dl_techniques.utils.logger import logger
+from dl_techniques.models.vae import VAE, create_vae
+
+# ---------------------------------------------------------------------
 
 # Set style for better plots
 plt.style.use('seaborn-v0_8-darkgrid')
 sns.set_palette("viridis")
 
+# ---------------------------------------------------------------------
 
 def setup_gpu():
     """Configure GPU settings for optimal training."""
@@ -45,6 +51,7 @@ def setup_gpu():
     else:
         logger.info("No GPUs found, using CPU")
 
+# ---------------------------------------------------------------------
 
 def load_mnist_data() -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
     """Load and preprocess MNIST dataset for VAE."""
@@ -56,6 +63,7 @@ def load_mnist_data() -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, 
     logger.info(f"Test data shape: {x_test.shape}")
     return (x_train, y_train), (x_test, y_test)
 
+# ---------------------------------------------------------------------
 
 def load_cifar10_data() -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
     """Load and preprocess CIFAR-10 dataset for VAE."""
@@ -67,22 +75,30 @@ def load_cifar10_data() -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray
     logger.info(f"Test data shape: {x_test.shape}")
     return (x_train, y_train), (x_test, y_test)
 
+# ---------------------------------------------------------------------
 
 def create_model_config(dataset: str, latent_dim: int) -> Dict[str, Any]:
     """Create VAE model configuration based on dataset."""
     if dataset.lower() == 'mnist':
         return {
             'latent_dim': latent_dim,
-            'input_shape': (28, 28, 1)
+            'input_shape': (28, 28, 1),
+            'depths': 3,
+            'steps_per_depth': 3,
+            'filters': [32, 64, 128]
         }
     elif dataset.lower() == 'cifar10':
         return {
             'latent_dim': latent_dim,
-            'input_shape': (32, 32, 3)
+            'input_shape': (32, 32, 3),
+            'depths': 3,
+            'steps_per_depth': 3,
+            'filters': [32, 64, 128]
         }
     else:
         raise ValueError(f"Unsupported dataset: {dataset}")
 
+# ---------------------------------------------------------------------
 
 def plot_reconstruction_comparison(
         original_images: np.ndarray,
@@ -100,10 +116,10 @@ def plot_reconstruction_comparison(
         img_orig = original_images[i].squeeze()
         img_recon = reconstructed_images[i].squeeze()
         axes[0, i].imshow(img_orig, cmap=cmap)
-        axes[0, i].set_title('Original', fontsize=10)
+        axes[0, i].set_title('Original', fontsize=8)
         axes[0, i].axis('off')
         axes[1, i].imshow(np.clip(img_recon, 0, 1), cmap=cmap)
-        axes[1, i].set_title('Reconstructed', fontsize=10)
+        axes[1, i].set_title('Reconstructed', fontsize=8)
         axes[1, i].axis('off')
 
     title = f'Reconstruction Comparison - Epoch {epoch}' if epoch is not None else 'Final Reconstruction Comparison'
@@ -112,9 +128,10 @@ def plot_reconstruction_comparison(
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
 
+# ---------------------------------------------------------------------
 
 def plot_latent_space(
-        model: ResnetVAE,
+        model: VAE,
         data: np.ndarray,
         labels: np.ndarray,
         save_path: str,
@@ -150,6 +167,7 @@ def plot_latent_space(
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
 
+# ---------------------------------------------------------------------
 
 class VisualizationCallback(keras.callbacks.Callback):
     """Callback to generate VAE visualizations during training."""
@@ -191,6 +209,7 @@ class VisualizationCallback(keras.callbacks.Callback):
             # Use a subset of validation data for speed
             plot_latent_space(self.model, self.x_val[:5000], self.y_val[:5000], latent_path, epoch + 1, self.batch_size)
 
+# ---------------------------------------------------------------------
 
 def create_callbacks(
         model_name: str,
@@ -220,6 +239,7 @@ def create_callbacks(
     logger.info(f"Results will be saved to: {results_dir}")
     return callbacks, results_dir
 
+# ---------------------------------------------------------------------
 
 def plot_training_history(history: keras.callbacks.History, save_dir: str):
     """Plots training history curves."""
@@ -273,6 +293,7 @@ def plot_training_history(history: keras.callbacks.History, save_dir: str):
     plt.savefig(os.path.join(save_dir, 'training_history.png'), dpi=150)
     plt.close()
 
+# ---------------------------------------------------------------------
 
 def train_model(args: argparse.Namespace):
     """Main training function."""
@@ -287,8 +308,9 @@ def train_model(args: argparse.Namespace):
         raise ValueError(f"Unsupported dataset: {args.dataset}")
 
     model_config = create_model_config(args.dataset, args.latent_dim)
-    model = create_resnet_vae(
-        optimizer=args.optimizer, learning_rate=args.learning_rate, **model_config
+    model = create_vae(
+        optimizer=args.optimizer,
+        **model_config
     )
     model.summary(print_fn=logger.info)
 
@@ -320,7 +342,7 @@ def train_model(args: argparse.Namespace):
         from dl_techniques.layers.sampling import Sampling
         best_model = keras.models.load_model(
             best_model_path,
-            custom_objects={"VAE": ResnetVAE, "Sampling": Sampling}
+            custom_objects={"VAE": VAE, "Sampling": Sampling}
         )
     else:
         logger.warning("No best model found, using the final model state.")
@@ -353,11 +375,12 @@ def train_model(args: argparse.Namespace):
         for key, val in test_results.items():
             f.write(f"  {key.replace('_', ' ').title()}: {val:.4f}\n")
 
+# ---------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description='Train a Variational Autoencoder (VAE) on image data.')
     parser.add_argument('--dataset', type=str, default='mnist', choices=['mnist', 'cifar10'], help='Dataset to use')
-    parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--batch-size', type=int, default=128, help='Training batch size')
     parser.add_argument('--latent-dim', type=int, default=2,
                         help='Dimensionality of the latent space (use 2 for visualization)')
@@ -370,11 +393,12 @@ def main():
     try:
         train_model(args)
     except KeyboardInterrupt:
-        logger.info("\nTraining interrupted by user.")
+        logger.info("Training interrupted by user.")
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}", exc_info=True)
         raise
 
+# ---------------------------------------------------------------------
 
 if __name__ == '__main__':
     main()
