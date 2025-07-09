@@ -86,7 +86,7 @@ class TestVAE:
         assert vae.encoder_filters == [16, 32, 64]
         assert vae.decoder_filters == [64, 32, 16]
         assert vae.kl_loss_weight == 0.5
-        assert vae._input_shape_arg == input_shape
+        assert vae._input_shape == input_shape
         assert vae.use_batch_norm is False
         assert vae.dropout_rate == 0.2
         assert vae.activation == "relu"
@@ -116,7 +116,7 @@ class TestVAE:
         output = vae(sample_data)
 
         assert vae.built is True
-        assert vae._input_shape_arg == input_shape
+        assert vae._input_shape == input_shape
         assert vae.encoder is not None
         assert vae.decoder is not None
         assert vae.sampling_layer is not None
@@ -497,7 +497,7 @@ class TestVAE:
 
         assert isinstance(vae, VAE)
         assert vae.latent_dim == latent_dim
-        assert vae._input_shape_arg == input_shape
+        assert vae._input_shape == input_shape
         assert vae.built is True
         assert vae.optimizer is not None
 

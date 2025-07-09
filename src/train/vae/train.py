@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import Tuple, Dict, Any, Optional
 
 
-from dl_techniques.models.vae import VAE, create_vae
+from dl_techniques.models.vae import ResnetVAE, create_resnet_vae
 from dl_techniques.utils.logger import logger
 
 # Set style for better plots
@@ -73,20 +73,12 @@ def create_model_config(dataset: str, latent_dim: int) -> Dict[str, Any]:
     if dataset.lower() == 'mnist':
         return {
             'latent_dim': latent_dim,
-            'input_shape': (28, 28, 1),
-            'encoder_filters': [32, 64],
-            'decoder_filters': [64, 32],
-            'kl_loss_weight': 1.0,
-            'use_batch_norm': True,
+            'input_shape': (28, 28, 1)
         }
     elif dataset.lower() == 'cifar10':
         return {
             'latent_dim': latent_dim,
-            'input_shape': (32, 32, 3),
-            'encoder_filters': [32, 64, 128],
-            'decoder_filters': [128, 64, 32],
-            'kl_loss_weight': 1.0,
-            'use_batch_norm': True,
+            'input_shape': (32, 32, 3)
         }
     else:
         raise ValueError(f"Unsupported dataset: {dataset}")
@@ -122,7 +114,7 @@ def plot_reconstruction_comparison(
 
 
 def plot_latent_space(
-        model: VAE,
+        model: ResnetVAE,
         data: np.ndarray,
         labels: np.ndarray,
         save_path: str,
@@ -144,13 +136,11 @@ def plot_latent_space(
 
     scatter = plt.scatter(z_mean[:, 0], z_mean[:, 1], c=labels, cmap='viridis', s=5, alpha=0.7)
 
-    # --- START FIX ---
     # Create a discrete colorbar correctly.
     # The 'scatter' object itself is the "mappable" that the colorbar function needs.
     num_classes = len(np.unique(labels))
     cbar = plt.colorbar(scatter, ticks=np.arange(num_classes))
     cbar.set_label('Digit Class', rotation=270, labelpad=15, fontsize=12)
-    # --- END FIX ---
 
     plt.xlabel("Latent Dimension 1", fontsize=12)
     plt.ylabel("Latent Dimension 2", fontsize=12)
@@ -207,7 +197,7 @@ def create_callbacks(
         validation_data: Tuple[np.ndarray, np.ndarray],
         dataset: str,
         batch_size: int,
-        monitor: str = 'val_loss',
+        monitor: str = 'val_total_loss',  # Fixed: Use the correct metric name
         patience: int = 10,
         viz_frequency: int = 5
 ) -> Tuple[list, str]:
@@ -217,12 +207,12 @@ def create_callbacks(
     os.makedirs(results_dir, exist_ok=True)
 
     callbacks = [
-        keras.callbacks.EarlyStopping(monitor=monitor, patience=patience, restore_best_weights=True, verbose=1),
+        keras.callbacks.EarlyStopping(monitor=monitor, patience=patience, restore_best_weights=True, verbose=1, mode='min'),
         keras.callbacks.ModelCheckpoint(
             filepath=os.path.join(results_dir, 'best_model.keras'),
-            monitor=monitor, save_best_only=True, verbose=1
+            monitor=monitor, save_best_only=True, verbose=1, mode='min'
         ),
-        keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6, verbose=1),
+        keras.callbacks.ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=5, min_lr=1e-6, verbose=1, mode='min'),
         keras.callbacks.CSVLogger(filename=os.path.join(results_dir, 'training_log.csv')),
         keras.callbacks.TensorBoard(log_dir=os.path.join(results_dir, 'tensorboard'), histogram_freq=1),
         VisualizationCallback(validation_data, results_dir, dataset, viz_frequency, batch_size)
@@ -234,36 +224,47 @@ def create_callbacks(
 def plot_training_history(history: keras.callbacks.History, save_dir: str):
     """Plots training history curves."""
     history_dict = history.history
-    epochs = range(1, len(history_dict['loss']) + 1)
-    fig, axes = plt.subplots(1, 3, figsize=(21, 6), sharey=False)
-    fig.suptitle("VAE Training and Validation Loss", fontsize=16, fontweight='bold')
 
     # Use the correct keys from the VAE metrics
     loss_key = 'total_loss'
     recon_loss_key = 'reconstruction_loss'
     kl_loss_key = 'kl_loss'
 
+    # Check if the keys exist in the history
+    if loss_key not in history_dict:
+        logger.error(f"Key '{loss_key}' not found in history. Available keys: {list(history_dict.keys())}")
+        return
+
+    epochs = range(1, len(history_dict[loss_key]) + 1)
+    fig, axes = plt.subplots(1, 3, figsize=(21, 6), sharey=False)
+    fig.suptitle("VAE Training and Validation Loss", fontsize=16, fontweight='bold')
+
     # Total Loss
     axes[0].plot(epochs, history_dict[loss_key], 'b-', label='Training Loss')
-    axes[0].plot(epochs, history_dict[f'val_{loss_key}'], 'r-', label='Validation Loss')
+    if f'val_{loss_key}' in history_dict:
+        axes[0].plot(epochs, history_dict[f'val_{loss_key}'], 'r-', label='Validation Loss')
     axes[0].set_title('Total Loss', fontsize=14)
     axes[0].set_xlabel('Epoch')
     axes[0].set_ylabel('Loss')
     axes[0].legend()
 
     # Reconstruction Loss
-    axes[1].plot(epochs, history_dict[recon_loss_key], 'b-', label='Training')
-    axes[1].plot(epochs, history_dict[f'val_{recon_loss_key}'], 'r-', label='Validation')
-    axes[1].set_title('Reconstruction Loss', fontsize=14)
-    axes[1].set_xlabel('Epoch')
-    axes[1].legend()
+    if recon_loss_key in history_dict:
+        axes[1].plot(epochs, history_dict[recon_loss_key], 'b-', label='Training')
+        if f'val_{recon_loss_key}' in history_dict:
+            axes[1].plot(epochs, history_dict[f'val_{recon_loss_key}'], 'r-', label='Validation')
+        axes[1].set_title('Reconstruction Loss', fontsize=14)
+        axes[1].set_xlabel('Epoch')
+        axes[1].legend()
 
     # KL Loss
-    axes[2].plot(epochs, history_dict[kl_loss_key], 'b-', label='Training')
-    axes[2].plot(epochs, history_dict[f'val_{kl_loss_key}'], 'r-', label='Validation')
-    axes[2].set_title('KL Divergence Loss', fontsize=14)
-    axes[2].set_xlabel('Epoch')
-    axes[2].legend()
+    if kl_loss_key in history_dict:
+        axes[2].plot(epochs, history_dict[kl_loss_key], 'b-', label='Training')
+        if f'val_{kl_loss_key}' in history_dict:
+            axes[2].plot(epochs, history_dict[f'val_{kl_loss_key}'], 'r-', label='Validation')
+        axes[2].set_title('KL Divergence Loss', fontsize=14)
+        axes[2].set_xlabel('Epoch')
+        axes[2].legend()
 
     for ax in axes:
         ax.grid(True, alpha=0.3)
@@ -286,7 +287,7 @@ def train_model(args: argparse.Namespace):
         raise ValueError(f"Unsupported dataset: {args.dataset}")
 
     model_config = create_model_config(args.dataset, args.latent_dim)
-    model = create_vae(
+    model = create_resnet_vae(
         optimizer=args.optimizer, learning_rate=args.learning_rate, **model_config
     )
     model.summary(print_fn=logger.info)
@@ -296,6 +297,7 @@ def train_model(args: argparse.Namespace):
         validation_data=(x_test, y_test),
         dataset=args.dataset,
         batch_size=args.batch_size,
+        monitor='val_total_loss',  # Fixed: Use the correct metric name
         patience=args.patience,
         viz_frequency=args.viz_frequency
     )
@@ -314,7 +316,12 @@ def train_model(args: argparse.Namespace):
     best_model_path = os.path.join(results_dir, 'best_model.keras')
     if os.path.exists(best_model_path):
         logger.info(f"Loading best model from: {best_model_path}")
-        best_model = keras.models.load_model(best_model_path)
+        # Load with custom objects to handle the VAE class
+        from dl_techniques.layers.sampling import Sampling
+        best_model = keras.models.load_model(
+            best_model_path,
+            custom_objects={"VAE": ResnetVAE, "Sampling": Sampling}
+        )
     else:
         logger.warning("No best model found, using the final model state.")
         best_model = model
@@ -341,7 +348,7 @@ def train_model(args: argparse.Namespace):
         f.write(f"VAE Training Summary\n====================\n")
         f.write(f"Dataset: {args.dataset}\n")
         f.write(f"Latent Dim: {args.latent_dim}\n")
-        f.write(f"Stopped at Epoch: {len(history.history['loss'])}\n\n")
+        f.write(f"Stopped at Epoch: {len(history.history['total_loss'])}\n\n")
         f.write(f"Final Test Results (from best model):\n")
         for key, val in test_results.items():
             f.write(f"  {key.replace('_', ' ').title()}: {val:.4f}\n")
