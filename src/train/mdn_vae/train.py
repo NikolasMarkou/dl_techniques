@@ -29,9 +29,8 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.mdn_vae import MDN_VAE, create_mdn_vae
 from dl_techniques.layers.mdn_layer import MDNLayer
-from dl_techniques.layers.sampling import Sampling
+from dl_techniques.models.mdn_vae import MDN_VAE, create_mdn_vae
 
 # ---------------------------------------------------------------------
 
@@ -621,7 +620,6 @@ def train_model(args: argparse.Namespace):
             custom_objects={
                 "MDN_VAE": MDN_VAE,
                 "MDNLayer": MDNLayer,
-                "Sampling": Sampling,
                 "SamplingMDN": model.sampling_layer.__class__
             }
         )

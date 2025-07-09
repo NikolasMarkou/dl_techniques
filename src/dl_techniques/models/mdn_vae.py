@@ -50,32 +50,45 @@ class SamplingMDN(keras.layers.Layer):
     the MDN parameters.
     """
 
-    def __init__(self, seed: Optional[int] = None, **kwargs):
+    def __init__(self,
+                 num_mixtures: int,
+                 latent_dim: int,
+                 seed: Optional[int] = None,
+                 **kwargs):
+        self.num_mixtures = num_mixtures
+        self.latent_dim = latent_dim
         super().__init__(**kwargs)
         self.seed = seed
 
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        batch_size = input_shape[0]
+        return batch_size, self.latent_dim
+
     def call(
             self,
-            inputs: List[keras.KerasTensor],
+            inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Sample from the mixture distribution.
 
         Args:
-            inputs: List containing [mdn_params, num_mixtures, latent_dim]
+            inputs: mdn_params
             training: Whether in training mode
 
         Returns:
             Sampled latent vectors
         """
-        mdn_params, num_mixtures, latent_dim = inputs
+        mdn_params = inputs
 
         # Extract mixture parameters
         batch_size = ops.shape(mdn_params)[0]
 
         # Calculate split points
-        mu_end = num_mixtures * latent_dim
-        sigma_end = mu_end + (num_mixtures * latent_dim)
+        mu_end = self.num_mixtures * self.latent_dim
+        sigma_end = mu_end + (self.num_mixtures * self.latent_dim)
 
         # Split parameters
         out_mu = mdn_params[..., :mu_end]
@@ -83,8 +96,8 @@ class SamplingMDN(keras.layers.Layer):
         out_pi = mdn_params[..., sigma_end:]
 
         # Reshape means and sigmas
-        out_mu = ops.reshape(out_mu, [batch_size, num_mixtures, latent_dim])
-        out_sigma = ops.reshape(out_sigma, [batch_size, num_mixtures, latent_dim])
+        out_mu = ops.reshape(out_mu, [batch_size, self.num_mixtures, self.latent_dim])
+        out_sigma = ops.reshape(out_sigma, [batch_size, self.num_mixtures, self.latent_dim])
 
         # Ensure numerical stability
         out_sigma = ops.maximum(out_sigma, 1e-6)
@@ -113,7 +126,7 @@ class SamplingMDN(keras.layers.Layer):
         else:
             # During inference, use hard selection
             selected_components = ops.argmax(mix_weights, axis=-1)
-            one_hot = ops.one_hot(selected_components, num_classes=num_mixtures)
+            one_hot = ops.one_hot(selected_components, num_classes=self.num_mixtures)
             one_hot_expanded = ops.expand_dims(one_hot, -1)
 
             selected_mu = ops.sum(out_mu * one_hot_expanded, axis=1)
@@ -121,7 +134,7 @@ class SamplingMDN(keras.layers.Layer):
 
         # Sample from selected Gaussian
         epsilon = keras.random.normal(
-            shape=(batch_size, latent_dim),
+            shape=(batch_size, self.latent_dim),
             seed=self.seed
         )
         z = selected_mu + selected_sigma * epsilon
@@ -233,7 +246,12 @@ class MDN_VAE(keras.Model):
         )
 
         # Build sampling layer
-        self.sampling_layer = SamplingMDN(seed=42, name="mdn_sampling")
+        self.sampling_layer = SamplingMDN(
+            seed=42,
+            latent_dim=self.latent_dim,
+            num_mixtures=self.num_mixtures,
+            name="mdn_sampling"
+        )
 
         # Build decoder (same as original VAE)
         self._build_decoder()
@@ -466,7 +484,7 @@ class MDN_VAE(keras.Model):
 
         # Sample from mixture distribution
         z = self.sampling_layer(
-            [mdn_params, self.num_mixtures, self.latent_dim],
+            mdn_params,
             training=training
         )
 
