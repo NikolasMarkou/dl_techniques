@@ -10,18 +10,20 @@ Usage:
     python vae/train.py [--dataset mnist] [--epochs 50] [--batch-size 128] [--latent-dim 2]
 """
 
-import argparse
-import os
-import numpy as np
-import keras
-import tensorflow as tf
-import matplotlib
 
-matplotlib.use('Agg')  # Use non-interactive backend for server environments
-import matplotlib.pyplot as plt
-import seaborn as sns
+import os
+import keras
+import argparse
+import matplotlib
+import numpy as np
+import tensorflow as tf
 from datetime import datetime
 from typing import Tuple, Dict, Any, Optional
+
+matplotlib.use('Agg')  # Use non-interactive backend for server environments
+import seaborn as sns
+import matplotlib.pyplot as plt
+
 
 # ---------------------------------------------------------------------
 # local imports
@@ -163,7 +165,74 @@ def plot_latent_space(
     plt.ylabel("Latent Dimension 2", fontsize=12)
     title = f'Latent Space Distribution - Epoch {epoch}' if epoch is not None else 'Final Latent Space'
     plt.title(title, fontsize=14, fontweight='bold')
+
+    # Fix axes limits to [-4, +4] for consistent visualization across epochs
+    plt.xlim(-4, 4)
+    plt.ylim(-4, 4)
+
     plt.grid(True, alpha=0.3)
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+# ---------------------------------------------------------------------
+
+def plot_interpolation(
+        model: VAE,
+        data: np.ndarray,
+        save_path: str,
+        n_interpolations: int = 10,
+        n_steps: int = 10,
+        epoch: Optional[int] = None,
+        dataset: str = 'mnist'
+) -> None:
+    """Plot interpolations between pairs of samples in latent space."""
+    # Select pairs of samples randomly
+    indices = np.random.choice(len(data), size=n_interpolations * 2, replace=False)
+    sample_pairs = data[indices].reshape(n_interpolations, 2, *data.shape[1:])
+
+    fig, axes = plt.subplots(n_interpolations, n_steps, figsize=(n_steps * 1.2, n_interpolations * 1.2))
+    cmap = 'gray' if dataset.lower() == 'mnist' else None
+
+    for i, (img1, img2) in enumerate(sample_pairs):
+        # Encode both images to latent space
+        img1_batch = np.expand_dims(img1, axis=0)
+        img2_batch = np.expand_dims(img2, axis=0)
+
+        outputs1 = model.predict(img1_batch, verbose=0)
+        outputs2 = model.predict(img2_batch, verbose=0)
+
+        z1 = outputs1['z_mean']
+        z2 = outputs2['z_mean']
+
+        # Create interpolation steps
+        alphas = np.linspace(0, 1, n_steps)
+
+        for j, alpha in enumerate(alphas):
+            # Interpolate in latent space
+            z_interp = (1 - alpha) * z1 + alpha * z2
+
+            # Decode interpolated latent vector
+            reconstructed = model.decode(z_interp)
+
+            # Handle single vs multiple interpolations
+            if n_interpolations == 1:
+                ax = axes[j]
+            else:
+                ax = axes[i, j]
+
+            # Plot interpolated image - Fix: Convert to numpy and use ops.squeeze
+            img_to_plot = keras.ops.squeeze(reconstructed[0])
+            img_to_plot = np.array(img_to_plot)  # Convert to numpy array
+            ax.imshow(np.clip(img_to_plot, 0, 1), cmap=cmap)
+            ax.axis('off')
+
+            # Add alpha value as title for the first row
+            if i == 0:
+                ax.set_title(f'α={alpha:.1f}', fontsize=8)
+
+    title = f'Latent Space Interpolation - Epoch {epoch}' if epoch is not None else 'Final Latent Space Interpolation'
+    fig.suptitle(title, fontsize=14, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
 
@@ -189,8 +258,11 @@ class VisualizationCallback(keras.callbacks.Callback):
 
         self.recon_dir = os.path.join(save_dir, 'reconstructions_per_epoch')
         self.latent_dir = os.path.join(save_dir, 'latent_space_per_epoch')
+        self.interp_dir = os.path.join(save_dir, 'interpolations_per_epoch')
+
         os.makedirs(self.recon_dir, exist_ok=True)
         os.makedirs(self.latent_dir, exist_ok=True)
+        os.makedirs(self.interp_dir, exist_ok=True)
 
         indices = np.random.choice(len(self.x_val), size=10, replace=False)
         self.sample_images = self.x_val[indices]
@@ -208,6 +280,11 @@ class VisualizationCallback(keras.callbacks.Callback):
             latent_path = os.path.join(self.latent_dir, f'epoch_{epoch + 1:03d}.png')
             # Use a subset of validation data for speed
             plot_latent_space(self.model, self.x_val[:5000], self.y_val[:5000], latent_path, epoch + 1, self.batch_size)
+
+            # Interpolation visualization
+            interp_path = os.path.join(self.interp_dir, f'epoch_{epoch + 1:03d}.png')
+            plot_interpolation(self.model, self.x_val[:100], interp_path, n_interpolations=10,
+                               n_steps=10, epoch=epoch + 1, dataset=self.dataset)
 
 # ---------------------------------------------------------------------
 
@@ -355,13 +432,14 @@ def train_model(args: argparse.Namespace):
     plot_training_history(history, results_dir)
     final_recon_path = os.path.join(results_dir, 'final_reconstructions.png')
     final_latent_path = os.path.join(results_dir, 'final_latent_space.png')
+    final_interp_path = os.path.join(results_dir, 'final_interpolations.png')
 
     sample_indices = np.random.choice(len(x_test), size=10, replace=False)
     sample_images = x_test[sample_indices]
     outputs = best_model.predict(sample_images, verbose=0)
     plot_reconstruction_comparison(sample_images, outputs['reconstruction'], final_recon_path, dataset=args.dataset)
     plot_latent_space(best_model, x_test[:5000], y_test[:5000], final_latent_path, batch_size=args.batch_size)
-
+    plot_interpolation(best_model, x_test[:100], final_interp_path, n_interpolations=10, n_steps=10, dataset=args.dataset)
     final_model_path = os.path.join(results_dir, f"vae_{args.dataset}_final.keras")
     best_model.save(final_model_path)
     logger.info(f"Final best model saved to: {final_model_path}")

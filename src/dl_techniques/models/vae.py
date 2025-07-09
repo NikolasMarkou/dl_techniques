@@ -140,6 +140,7 @@ class VAE(keras.Model):
         kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         use_batch_norm: bool = True,
+        use_bias: bool = True,
         dropout_rate: float = 0.0,
         activation: Union[str, callable] = "leaky_relu",
         name: Optional[str] = "resnet_vae",
@@ -159,6 +160,7 @@ class VAE(keras.Model):
         self.use_batch_norm = use_batch_norm
         self.dropout_rate = dropout_rate
         self.activation = activation
+        self.use_bias = use_bias
 
         # Components to be built
         self.encoder = None
@@ -170,8 +172,8 @@ class VAE(keras.Model):
 
         # Metrics
         self.total_loss_tracker = keras.metrics.Mean(name="total_loss")
-        self.reconstruction_loss_tracker = keras.metrics.Mean(name="reconstruction_loss")
         self.kl_loss_tracker = keras.metrics.Mean(name="kl_loss")
+        self.reconstruction_loss_tracker = keras.metrics.Mean(name="reconstruction_loss")
 
         # Validation
         if self._input_shape is None:
@@ -211,13 +213,14 @@ class VAE(keras.Model):
             kernel_size=3,
             strides=1,
             padding="same",
+            use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="stem_conv"
         )(x)
 
         if self.use_batch_norm:
-            x = keras.layers.BatchNormalization()(x)
+            x = keras.layers.BatchNormalization(center=self.use_bias)(x)
         x = keras.layers.Activation(self.activation)(x)
 
         # Encoder blocks with downsampling
@@ -225,16 +228,17 @@ class VAE(keras.Model):
             # First layer in each depth does downsampling
             x = keras.layers.Conv2D(
                 filters=self.filters[depth],
-                kernel_size=3,
-                strides=2,  # Downsample by 2
+                kernel_size=2,
+                strides=2,
                 padding="same",
+                use_bias=self.use_bias,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"encoder_downsample_{depth}"
             )(x)
 
             if self.use_batch_norm:
-                x = keras.layers.BatchNormalization()(x)
+                x = keras.layers.BatchNormalization(center=self.use_bias)(x)
             x = keras.layers.Activation(self.activation)(x)
 
             # Additional layers at this depth
@@ -246,17 +250,31 @@ class VAE(keras.Model):
                     kernel_size=3,
                     strides=1,
                     padding="same",
+                    use_bias=self.use_bias,
                     kernel_initializer=self.kernel_initializer,
                     kernel_regularizer=self.kernel_regularizer,
-                    name=f"encoder_conv_{depth}_{step}"
+                    name=f"encoder_conv_{depth}_{step}_0"
                 )(x)
 
                 if self.use_batch_norm:
-                    x = keras.layers.BatchNormalization()(x)
+                    x = keras.layers.BatchNormalization(center=self.use_bias)(x)
                 x = keras.layers.Activation(self.activation)(x)
 
                 if self.dropout_rate > 0:
                     x = keras.layers.Dropout(self.dropout_rate)(x)
+
+                x = keras.layers.Conv2D(
+                    filters=self.filters[depth],
+                    kernel_size=1,
+                    strides=1,
+                    padding="same",
+                    use_bias=self.use_bias,
+                    kernel_initializer=self.kernel_initializer,
+                    kernel_regularizer=self.kernel_regularizer,
+                    name=f"encoder_conv_{depth}_{step}_1"
+                )(x)
+
+                x = keras.layers.Activation(self.activation)(x)
 
                 # Residual connection
                 x = keras.layers.Add()([x, residual])
@@ -265,6 +283,7 @@ class VAE(keras.Model):
 
         z_mean = keras.layers.Dense(
             units=self.latent_dim,
+            use_bias=self.use_bias,
             kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.01),
             bias_initializer='zeros',
             kernel_regularizer=self.kernel_regularizer,
@@ -273,13 +292,20 @@ class VAE(keras.Model):
 
         z_log_var = keras.layers.Dense(
             units=self.latent_dim,
+            use_bias=self.use_bias,
             kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.01),
             bias_initializer=keras.initializers.Constant(-2.0),  # Initialize to small variance
             kernel_regularizer=self.kernel_regularizer,
             name="encoder_latent_var"
         )(x)
 
-        self.encoder = keras.Model(inputs=x_input, outputs=[z_mean, z_log_var], name="encoder")
+        self.encoder = (
+            keras.Model(
+                inputs=x_input,
+                outputs=[z_mean, z_log_var],
+                name="encoder"
+            )
+        )
 
     def _build_decoder(self) -> None:
         """Build the decoder network."""
@@ -296,6 +322,7 @@ class VAE(keras.Model):
         # Project latent to feature map
         x = keras.layers.Dense(
             units=feature_height * feature_width * self.filters[-1],
+            use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="decoder_projection"
@@ -317,13 +344,14 @@ class VAE(keras.Model):
                 kernel_size=3,
                 strides=1,
                 padding="same",
+                use_bias=self.use_bias,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"decoder_conv_{depth}"
             )(x)
 
             if self.use_batch_norm:
-                x = keras.layers.BatchNormalization()(x)
+                x = keras.layers.BatchNormalization(center=self.use_bias)(x)
             x = keras.layers.Activation(self.activation)(x)
 
             # Additional layers at this depth
@@ -335,17 +363,31 @@ class VAE(keras.Model):
                     kernel_size=3,
                     strides=1,
                     padding="same",
+                    use_bias=self.use_bias,
                     kernel_initializer=self.kernel_initializer,
                     kernel_regularizer=self.kernel_regularizer,
-                    name=f"decoder_conv_{depth}_{step}"
+                    name=f"decoder_conv_{depth}_{step}_0"
                 )(x)
 
                 if self.use_batch_norm:
-                    x = keras.layers.BatchNormalization()(x)
+                    x = keras.layers.BatchNormalization(center=self.use_bias)(x)
                 x = keras.layers.Activation(self.activation)(x)
 
                 if self.dropout_rate > 0:
                     x = keras.layers.Dropout(self.dropout_rate)(x)
+
+                x = keras.layers.Conv2D(
+                    filters=self.filters[depth],
+                    kernel_size=1,
+                    strides=1,
+                    padding="same",
+                    use_bias=self.use_bias,
+                    kernel_initializer=self.kernel_initializer,
+                    kernel_regularizer=self.kernel_regularizer,
+                    name=f"decoder_conv_{depth}_{step}_1"
+                )(x)
+
+                x = keras.layers.Activation(self.activation)(x)
 
                 # Residual connection
                 x = keras.layers.Add()([x, residual])
@@ -353,10 +395,12 @@ class VAE(keras.Model):
         # Final output layer
         x = keras.layers.Conv2D(
             filters=self._input_shape[-1],
-            kernel_size=3,
+            kernel_size=1,
             strides=1,
             padding="same",
             activation="sigmoid",
+            use_bias=self.use_bias,
+            kernel_regularizer=keras.regularizers.L1(1e-6),
             kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.01),
             bias_initializer='zeros',
             name="decoder_output"
@@ -594,10 +638,11 @@ class VAE(keras.Model):
         """Get model configuration."""
         config = super().get_config()
         config.update({
-            "latent_dim": self.latent_dim,
             "depths": self.depths,
-            "steps_per_depth": self.steps_per_depth,
             "filters": self.filters,
+            "use_bias": self.use_bias,
+            "latent_dim": self.latent_dim,
+            "steps_per_depth": self.steps_per_depth,
             "kl_loss_weight": self.kl_loss_weight,
             "input_shape": self._input_shape,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
@@ -633,7 +678,7 @@ def create_vae(
     """Create and compile a ResNet VAE model."""
     # Default parameters for stability
     default_kwargs = {
-        'kl_loss_weight': 0.001,  # Lower KL weight for stability
+        'kl_loss_weight': 0.01,  # Lower KL weight for stability
         'depths': 2,  # Reduced complexity
         'steps_per_depth': 1,  # Reduced complexity
         'filters': [32, 64],  # Reduced filters
