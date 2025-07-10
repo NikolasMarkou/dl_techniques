@@ -178,21 +178,11 @@ class Sampling(keras.layers.Layer):
 
         z_mean, z_log_var = inputs
 
-        # Get batch size and remaining dimensions
-        batch_size = ops.shape(z_mean)[0]
-        remaining_shape = ops.shape(z_mean)[1:]
-
-        # Calculate total number of elements per sample
-        total_elements = ops.cast(ops.prod(remaining_shape), dtype="int32")
-
         # Sample epsilon from standard normal distribution
         epsilon = keras.random.normal(
-            shape=(batch_size, total_elements),
+            shape=ops.shape(z_mean),
             seed=self.seed
         )
-
-        # Reshape epsilon to match input shape
-        epsilon = ops.reshape(epsilon, ops.shape(z_mean))
 
         # Apply reparameterization trick: z = mean + std * epsilon
         # Note: std = exp(0.5 * log_var)
