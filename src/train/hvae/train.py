@@ -115,13 +115,21 @@ def plot_reconstruction_comparison(
         dataset: str = 'mnist'
 ) -> None:
     """Plot original vs reconstructed images comparison."""
+    # Convert to numpy arrays if needed
+    if hasattr(reconstructed_images, 'numpy'):
+        reconstructed_images = reconstructed_images.numpy()
+    if hasattr(original_images, 'numpy'):
+        original_images = original_images.numpy()
+
     n_samples = min(10, len(original_images))
     fig, axes = plt.subplots(2, n_samples, figsize=(n_samples * 1.5, 3.5))
     cmap = 'gray' if dataset.lower() == 'mnist' else None
 
     for i in range(n_samples):
-        img_orig = original_images[i].squeeze()
-        img_recon = reconstructed_images[i].squeeze()
+        # Use numpy squeeze
+        img_orig = np.squeeze(original_images[i])
+        img_recon = np.squeeze(reconstructed_images[i])
+
         axes[0, i].imshow(img_orig, cmap=cmap)
         axes[0, i].set_title('Original', fontsize=8)
         axes[0, i].axis('off')
@@ -228,6 +236,9 @@ def plot_latent_space(
     # Use model's encode method directly
     try:
         z_means, z_log_vars = model.encode(data)
+        # Convert to numpy arrays
+        z_means = [np.array(z_mean) for z_mean in z_means]
+        z_log_vars = [np.array(z_log_var) for z_log_var in z_log_vars]
         z_mean_level = z_means[level]
     except Exception as e:
         logger.warning(f"Failed to encode data for latent space visualization: {e}")
@@ -285,6 +296,11 @@ def plot_interpolation(
         try:
             z_means1, z_log_vars1 = model.encode(img1_batch)
             z_means2, z_log_vars2 = model.encode(img2_batch)
+
+            # Convert to numpy arrays
+            z_means1 = [np.array(z_mean) for z_mean in z_means1]
+            z_means2 = [np.array(z_mean) for z_mean in z_means2]
+
         except Exception as e:
             logger.warning(f"Failed to encode images for interpolation: {e}")
             continue
@@ -302,6 +318,7 @@ def plot_interpolation(
             # Decode interpolated latent vectors
             try:
                 reconstructed = model.decode(z_interp)
+                reconstructed = np.array(reconstructed)
             except Exception as e:
                 logger.warning(f"Failed to decode interpolated latent vectors: {e}")
                 continue
@@ -314,8 +331,7 @@ def plot_interpolation(
 
             # Plot interpolated image
             try:
-                img_to_plot = keras.ops.squeeze(reconstructed[0])
-                img_to_plot = np.array(img_to_plot)
+                img_to_plot = np.squeeze(reconstructed[0])
                 ax.imshow(np.clip(img_to_plot, 0, 1), cmap=cmap)
                 ax.axis('off')
 
@@ -376,9 +392,22 @@ class HVAEVisualizationCallback(keras.callbacks.Callback):
             if isinstance(outputs, dict):
                 reconstructions = outputs["reconstruction"]
                 logger.info(f"Available output keys: {list(outputs.keys())}")
+
+                # Convert TensorFlow tensors to numpy arrays
+                reconstructions = np.array(reconstructions)
+
+                # Convert all outputs to numpy arrays
+                numpy_outputs = {}
+                for key, value in outputs.items():
+                    if isinstance(value, list):
+                        numpy_outputs[key] = [np.array(item) for item in value]
+                    else:
+                        numpy_outputs[key] = np.array(value)
+                outputs = numpy_outputs
+
             else:
                 # If outputs is just a tensor, assume it's the reconstruction
-                reconstructions = outputs
+                reconstructions = np.array(outputs)
                 logger.warning("Model output is not a dictionary, creating minimal outputs")
                 outputs = {"reconstruction": reconstructions}
 
@@ -386,17 +415,28 @@ class HVAEVisualizationCallback(keras.callbacks.Callback):
             recon_path = os.path.join(self.recon_dir, f'epoch_{epoch + 1:03d}.png')
             plot_reconstruction_comparison(self.sample_images, reconstructions, recon_path, epoch + 1, self.dataset)
 
-            # Pyramid visualization - only if we have the required keys
-            if all(key in outputs for key in ["gaussian_pyramid", "laplacian_pyramid", "intermediate_reconstructions"]):
+            # Pyramid visualization - check for both possible key names
+            intermediate_key = None
+            if "intermediate_reconstructions" in outputs:
+                intermediate_key = "intermediate_reconstructions"
+            elif "level_reconstructions" in outputs:
+                intermediate_key = "level_reconstructions"
+
+            if intermediate_key and all(key in outputs for key in ["gaussian_pyramid", "laplacian_pyramid", intermediate_key]):
                 pyramid_path = os.path.join(self.pyramid_dir, f'epoch_{epoch + 1:03d}.png')
-                plot_pyramid_visualization(
-                    outputs["gaussian_pyramid"],
-                    outputs["laplacian_pyramid"],
-                    outputs["intermediate_reconstructions"],
-                    pyramid_path, epoch + 1, self.dataset
-                )
+                try:
+                    plot_pyramid_visualization(
+                        outputs["gaussian_pyramid"],
+                        outputs["laplacian_pyramid"],
+                        outputs[intermediate_key],
+                        pyramid_path, epoch + 1, self.dataset
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to generate pyramid visualization: {e}")
             else:
                 logger.warning("Pyramid visualization keys not found in outputs, skipping pyramid visualization")
+                logger.warning(f"Looking for: gaussian_pyramid, laplacian_pyramid, intermediate_reconstructions")
+                logger.warning(f"Available keys: {list(outputs.keys())}")
 
             # Latent space visualization for each level with 2D latent space
             for level in range(self.model.num_levels):
@@ -595,13 +635,23 @@ def train_model(args: argparse.Namespace):
     # Use model call directly to get full dictionary
     outputs = best_model(sample_images, training=False)
 
-    # Check if outputs is a dictionary
+    # Check if outputs is a dictionary and convert to numpy
     if isinstance(outputs, dict):
-        reconstructions = outputs["reconstruction"]
+        reconstructions = np.array(outputs["reconstruction"])
         logger.info(f"Available output keys: {list(outputs.keys())}")
+
+        # Convert all outputs to numpy arrays
+        numpy_outputs = {}
+        for key, value in outputs.items():
+            if isinstance(value, list):
+                numpy_outputs[key] = [np.array(item) for item in value]
+            else:
+                numpy_outputs[key] = np.array(value)
+        outputs = numpy_outputs
+
     else:
         # If outputs is just a tensor, assume it's the reconstruction
-        reconstructions = outputs
+        reconstructions = np.array(outputs)
         logger.warning("Model output is not a dictionary, creating minimal outputs")
         outputs = {"reconstruction": reconstructions}
 
@@ -609,17 +659,27 @@ def train_model(args: argparse.Namespace):
     final_recon_path = os.path.join(results_dir, 'final_reconstructions.png')
     plot_reconstruction_comparison(sample_images, reconstructions, final_recon_path, dataset=args.dataset)
 
-    # Final pyramid visualization - only if we have the required keys
-    if all(key in outputs for key in ["gaussian_pyramid", "laplacian_pyramid", "intermediate_reconstructions"]):
-        final_pyramid_path = os.path.join(results_dir, 'final_pyramid.png')
-        plot_pyramid_visualization(
-            outputs["gaussian_pyramid"],
-            outputs["laplacian_pyramid"],
-            outputs["intermediate_reconstructions"],
-            final_pyramid_path, dataset=args.dataset
-        )
+    # Final pyramid visualization - check for both possible key names
+    intermediate_key = None
+    if "intermediate_reconstructions" in outputs:
+        intermediate_key = "intermediate_reconstructions"
+    elif "level_reconstructions" in outputs:
+        intermediate_key = "level_reconstructions"
+
+    if intermediate_key and all(key in outputs for key in ["gaussian_pyramid", "laplacian_pyramid", intermediate_key]):
+        try:
+            final_pyramid_path = os.path.join(results_dir, 'final_pyramid.png')
+            plot_pyramid_visualization(
+                outputs["gaussian_pyramid"],
+                outputs["laplacian_pyramid"],
+                outputs[intermediate_key],
+                final_pyramid_path, dataset=args.dataset
+            )
+        except Exception as e:
+            logger.warning(f"Failed to generate final pyramid visualization: {e}")
     else:
         logger.warning("Pyramid visualization keys not found in outputs, skipping final pyramid visualization")
+        logger.warning(f"Available keys: {list(outputs.keys())}")
 
     # Final latent space visualizations for 2D levels
     for level in range(best_model.num_levels):
