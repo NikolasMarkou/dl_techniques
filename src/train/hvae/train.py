@@ -29,6 +29,7 @@ import matplotlib.pyplot as plt
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.hvae import HVAE, create_hvae
+from dl_techniques.layers.sampling import Sampling
 
 # ---------------------------------------------------------------------
 
@@ -146,45 +147,67 @@ def plot_pyramid_visualization(
         sample_idx: int = 0
 ) -> None:
     """Plot pyramid decomposition and reconstruction at each level."""
-    num_levels = len(gaussian_pyramid)
-    fig, axes = plt.subplots(3, num_levels, figsize=(num_levels * 2, 6))
-    cmap = 'gray' if dataset.lower() == 'mnist' else None
+    try:
+        # Convert to numpy arrays if needed
+        if not isinstance(gaussian_pyramid, list):
+            gaussian_pyramid = [np.array(gaussian_pyramid)]
+        if not isinstance(laplacian_pyramid, list):
+            laplacian_pyramid = [np.array(laplacian_pyramid)]
+        if not isinstance(intermediate_reconstructions, list):
+            intermediate_reconstructions = [np.array(intermediate_reconstructions)]
 
-    # Handle single level case
-    if num_levels == 1:
-        axes = axes.reshape(3, 1)
+        # Convert individual elements to numpy arrays
+        gaussian_pyramid = [np.array(x) for x in gaussian_pyramid]
+        laplacian_pyramid = [np.array(x) for x in laplacian_pyramid]
+        intermediate_reconstructions = [np.array(x) for x in intermediate_reconstructions]
 
-    for i in range(num_levels):
-        # Gaussian pyramid
-        gaussian_img = gaussian_pyramid[i][sample_idx].squeeze()
-        axes[0, i].imshow(gaussian_img, cmap=cmap)
-        axes[0, i].set_title(f'Gaussian L{i}', fontsize=8)
-        axes[0, i].axis('off')
+        num_levels = len(gaussian_pyramid)
+        fig, axes = plt.subplots(3, num_levels, figsize=(num_levels * 2, 6))
+        cmap = 'gray' if dataset.lower() == 'mnist' else None
 
-        # Laplacian pyramid
-        laplacian_img = laplacian_pyramid[i][sample_idx].squeeze()
-        # Normalize Laplacian for visualization
-        laplacian_normalized = (laplacian_img - laplacian_img.min()) / (laplacian_img.max() - laplacian_img.min() + 1e-8)
-        axes[1, i].imshow(laplacian_normalized, cmap=cmap)
-        axes[1, i].set_title(f'Laplacian L{i}', fontsize=8)
-        axes[1, i].axis('off')
+        # Handle single level case
+        if num_levels == 1:
+            axes = axes.reshape(3, 1)
 
-        # Intermediate reconstructions
-        recon_img = intermediate_reconstructions[i][sample_idx].squeeze()
-        axes[2, i].imshow(np.clip(recon_img, 0, 1), cmap=cmap)
-        axes[2, i].set_title(f'Recon L{i}', fontsize=8)
-        axes[2, i].axis('off')
+        for i in range(num_levels):
+            # Gaussian pyramid
+            gaussian_img = gaussian_pyramid[i][sample_idx].squeeze()
+            axes[0, i].imshow(gaussian_img, cmap=cmap)
+            axes[0, i].set_title(f'Gaussian L{i}', fontsize=8)
+            axes[0, i].axis('off')
 
-    # Add row labels
-    axes[0, 0].set_ylabel('Gaussian\nPyramid', fontsize=10, rotation=0, labelpad=40)
-    axes[1, 0].set_ylabel('Laplacian\nPyramid', fontsize=10, rotation=0, labelpad=40)
-    axes[2, 0].set_ylabel('Hierarchical\nReconstruction', fontsize=10, rotation=0, labelpad=40)
+            # Laplacian pyramid
+            laplacian_img = laplacian_pyramid[i][sample_idx].squeeze()
+            # Normalize Laplacian for visualization
+            laplacian_min = laplacian_img.min()
+            laplacian_max = laplacian_img.max()
+            if laplacian_max > laplacian_min:
+                laplacian_normalized = (laplacian_img - laplacian_min) / (laplacian_max - laplacian_min)
+            else:
+                laplacian_normalized = laplacian_img
+            axes[1, i].imshow(laplacian_normalized, cmap=cmap)
+            axes[1, i].set_title(f'Laplacian L{i}', fontsize=8)
+            axes[1, i].axis('off')
 
-    title = f'Pyramid Visualization - Epoch {epoch}' if epoch is not None else 'Final Pyramid Visualization'
-    fig.suptitle(title, fontsize=14, fontweight='bold')
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.close()
+            # Intermediate reconstructions
+            recon_img = intermediate_reconstructions[i][sample_idx].squeeze()
+            axes[2, i].imshow(np.clip(recon_img, 0, 1), cmap=cmap)
+            axes[2, i].set_title(f'Recon L{i}', fontsize=8)
+            axes[2, i].axis('off')
+
+        # Add row labels
+        axes[0, 0].set_ylabel('Gaussian\nPyramid', fontsize=10, rotation=0, labelpad=40)
+        axes[1, 0].set_ylabel('Laplacian\nPyramid', fontsize=10, rotation=0, labelpad=40)
+        axes[2, 0].set_ylabel('Hierarchical\nReconstruction', fontsize=10, rotation=0, labelpad=40)
+
+        title = f'Pyramid Visualization - Epoch {epoch}' if epoch is not None else 'Final Pyramid Visualization'
+        fig.suptitle(title, fontsize=14, fontweight='bold')
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+    except Exception as e:
+        logger.error(f"Error in pyramid visualization: {e}")
+        plt.close()
 
 # ---------------------------------------------------------------------
 
@@ -202,8 +225,13 @@ def plot_latent_space(
         logger.warning(f"Latent space plotting is only available for latent_dim=2, level {level} has dim={model.latent_dims[level]}, skipping visualization.")
         return
 
-    z_means, z_log_vars = model.encode(data)
-    z_mean_level = z_means[level]
+    # Use model's encode method directly
+    try:
+        z_means, z_log_vars = model.encode(data)
+        z_mean_level = z_means[level]
+    except Exception as e:
+        logger.warning(f"Failed to encode data for latent space visualization: {e}")
+        return
 
     plt.figure(figsize=(12, 10))
 
@@ -254,8 +282,12 @@ def plot_interpolation(
         img1_batch = np.expand_dims(img1, axis=0)
         img2_batch = np.expand_dims(img2, axis=0)
 
-        z_means1, z_log_vars1 = model.encode(img1_batch)
-        z_means2, z_log_vars2 = model.encode(img2_batch)
+        try:
+            z_means1, z_log_vars1 = model.encode(img1_batch)
+            z_means2, z_log_vars2 = model.encode(img2_batch)
+        except Exception as e:
+            logger.warning(f"Failed to encode images for interpolation: {e}")
+            continue
 
         # Create interpolation steps
         alphas = np.linspace(0, 1, n_steps)
@@ -268,7 +300,11 @@ def plot_interpolation(
                 z_interp.append(z_level_interp)
 
             # Decode interpolated latent vectors
-            reconstructed = model.decode(z_interp)
+            try:
+                reconstructed = model.decode(z_interp)
+            except Exception as e:
+                logger.warning(f"Failed to decode interpolated latent vectors: {e}")
+                continue
 
             # Handle single vs multiple interpolations
             if n_interpolations == 1:
@@ -277,14 +313,18 @@ def plot_interpolation(
                 ax = axes[i, j]
 
             # Plot interpolated image
-            img_to_plot = keras.ops.squeeze(reconstructed[0])
-            img_to_plot = np.array(img_to_plot)
-            ax.imshow(np.clip(img_to_plot, 0, 1), cmap=cmap)
-            ax.axis('off')
+            try:
+                img_to_plot = keras.ops.squeeze(reconstructed[0])
+                img_to_plot = np.array(img_to_plot)
+                ax.imshow(np.clip(img_to_plot, 0, 1), cmap=cmap)
+                ax.axis('off')
 
-            # Add alpha value as title for the first row
-            if i == 0:
-                ax.set_title(f'α={alpha:.1f}', fontsize=8)
+                # Add alpha value as title for the first row
+                if i == 0:
+                    ax.set_title(f'α={alpha:.1f}', fontsize=8)
+            except Exception as e:
+                logger.warning(f"Failed to plot interpolated image: {e}")
+                ax.axis('off')
 
     title = f'Hierarchical Latent Space Interpolation - Epoch {epoch}' if epoch is not None else 'Final Hierarchical Latent Space Interpolation'
     fig.suptitle(title, fontsize=14, fontweight='bold')
@@ -329,34 +369,52 @@ class HVAEVisualizationCallback(keras.callbacks.Callback):
         if (epoch + 1) % self.frequency == 0 or epoch == 0:
             logger.info(f"Generating HVAE visualizations for epoch {epoch + 1}...")
 
-            # Get model outputs
-            outputs = self.model.predict(self.sample_images, verbose=0)
-            reconstructions = outputs["reconstruction"]
+            # Get model outputs - use the model's call method directly to get full dictionary
+            outputs = self.model(self.sample_images, training=False)
+
+            # Check if outputs is a dictionary or just the reconstruction tensor
+            if isinstance(outputs, dict):
+                reconstructions = outputs["reconstruction"]
+                logger.info(f"Available output keys: {list(outputs.keys())}")
+            else:
+                # If outputs is just a tensor, assume it's the reconstruction
+                reconstructions = outputs
+                logger.warning("Model output is not a dictionary, creating minimal outputs")
+                outputs = {"reconstruction": reconstructions}
 
             # Reconstruction comparison
             recon_path = os.path.join(self.recon_dir, f'epoch_{epoch + 1:03d}.png')
             plot_reconstruction_comparison(self.sample_images, reconstructions, recon_path, epoch + 1, self.dataset)
 
-            # Pyramid visualization
-            pyramid_path = os.path.join(self.pyramid_dir, f'epoch_{epoch + 1:03d}.png')
-            plot_pyramid_visualization(
-                outputs["gaussian_pyramid"],
-                outputs["laplacian_pyramid"],
-                outputs["intermediate_reconstructions"],
-                pyramid_path, epoch + 1, self.dataset
-            )
+            # Pyramid visualization - only if we have the required keys
+            if all(key in outputs for key in ["gaussian_pyramid", "laplacian_pyramid", "intermediate_reconstructions"]):
+                pyramid_path = os.path.join(self.pyramid_dir, f'epoch_{epoch + 1:03d}.png')
+                plot_pyramid_visualization(
+                    outputs["gaussian_pyramid"],
+                    outputs["laplacian_pyramid"],
+                    outputs["intermediate_reconstructions"],
+                    pyramid_path, epoch + 1, self.dataset
+                )
+            else:
+                logger.warning("Pyramid visualization keys not found in outputs, skipping pyramid visualization")
 
             # Latent space visualization for each level with 2D latent space
             for level in range(self.model.num_levels):
                 if self.model.latent_dims[level] == 2:
-                    latent_path = os.path.join(self.latent_dir, f'epoch_{epoch + 1:03d}_level_{level}.png')
-                    plot_latent_space(self.model, self.x_val[:5000], self.y_val[:5000],
-                                    latent_path, epoch + 1, self.batch_size, level)
+                    try:
+                        latent_path = os.path.join(self.latent_dir, f'epoch_{epoch + 1:03d}_level_{level}.png')
+                        plot_latent_space(self.model, self.x_val[:5000], self.y_val[:5000],
+                                        latent_path, epoch + 1, self.batch_size, level)
+                    except Exception as e:
+                        logger.warning(f"Failed to generate latent space visualization for level {level}: {e}")
 
             # Interpolation visualization
-            interp_path = os.path.join(self.interp_dir, f'epoch_{epoch + 1:03d}.png')
-            plot_interpolation(self.model, self.x_val[:100], interp_path, n_interpolations=5,
-                               n_steps=10, epoch=epoch + 1, dataset=self.dataset)
+            try:
+                interp_path = os.path.join(self.interp_dir, f'epoch_{epoch + 1:03d}.png')
+                plot_interpolation(self.model, self.x_val[:100], interp_path, n_interpolations=5,
+                                   n_steps=10, epoch=epoch + 1, dataset=self.dataset)
+            except Exception as e:
+                logger.warning(f"Failed to generate interpolation visualization: {e}")
 
 # ---------------------------------------------------------------------
 
@@ -457,11 +515,14 @@ def train_model(args: argparse.Namespace):
         raise ValueError(f"Unsupported dataset: {args.dataset}")
 
     model_config = create_model_config(args.dataset, args.num_levels, args.latent_dims)
+    logger.info(f"Model config: {model_config}")
+
     model = create_hvae(
         optimizer=args.optimizer,
         kl_loss_weight=args.kl_loss_weight,
         **model_config
     )
+    logger.info(f"Created HVAE model with {model.count_params():,} parameters")
     model.summary(print_fn=logger.info)
 
     callbacks, results_dir = create_callbacks(
@@ -475,6 +536,24 @@ def train_model(args: argparse.Namespace):
     )
 
     logger.info("Starting model training...")
+
+    # Test the model to see what it outputs
+    test_batch = x_train[:2]  # Small test batch
+    logger.info(f"Testing model with batch shape: {test_batch.shape}")
+    test_output = model(test_batch, training=False)
+    logger.info(f"Model output type: {type(test_output)}")
+    if isinstance(test_output, dict):
+        logger.info(f"Model output keys: {list(test_output.keys())}")
+        for key, value in test_output.items():
+            if isinstance(value, list):
+                logger.info(f"  {key}: list with {len(value)} elements")
+                for i, item in enumerate(value):
+                    logger.info(f"    [{i}]: shape {getattr(item, 'shape', 'no shape')}")
+            else:
+                logger.info(f"  {key}: shape {getattr(value, 'shape', 'no shape')}")
+    else:
+        logger.info(f"Model output shape: {test_output.shape}")
+
     history = model.fit(
         x_train,
         validation_data=(x_test, None),
@@ -512,31 +591,52 @@ def train_model(args: argparse.Namespace):
     # Final visualizations
     sample_indices = np.random.choice(len(x_test), size=10, replace=False)
     sample_images = x_test[sample_indices]
-    outputs = best_model.predict(sample_images, verbose=0)
+
+    # Use model call directly to get full dictionary
+    outputs = best_model(sample_images, training=False)
+
+    # Check if outputs is a dictionary
+    if isinstance(outputs, dict):
+        reconstructions = outputs["reconstruction"]
+        logger.info(f"Available output keys: {list(outputs.keys())}")
+    else:
+        # If outputs is just a tensor, assume it's the reconstruction
+        reconstructions = outputs
+        logger.warning("Model output is not a dictionary, creating minimal outputs")
+        outputs = {"reconstruction": reconstructions}
 
     # Final reconstruction comparison
     final_recon_path = os.path.join(results_dir, 'final_reconstructions.png')
-    plot_reconstruction_comparison(sample_images, outputs['reconstruction'], final_recon_path, dataset=args.dataset)
+    plot_reconstruction_comparison(sample_images, reconstructions, final_recon_path, dataset=args.dataset)
 
-    # Final pyramid visualization
-    final_pyramid_path = os.path.join(results_dir, 'final_pyramid.png')
-    plot_pyramid_visualization(
-        outputs["gaussian_pyramid"],
-        outputs["laplacian_pyramid"],
-        outputs["intermediate_reconstructions"],
-        final_pyramid_path, dataset=args.dataset
-    )
+    # Final pyramid visualization - only if we have the required keys
+    if all(key in outputs for key in ["gaussian_pyramid", "laplacian_pyramid", "intermediate_reconstructions"]):
+        final_pyramid_path = os.path.join(results_dir, 'final_pyramid.png')
+        plot_pyramid_visualization(
+            outputs["gaussian_pyramid"],
+            outputs["laplacian_pyramid"],
+            outputs["intermediate_reconstructions"],
+            final_pyramid_path, dataset=args.dataset
+        )
+    else:
+        logger.warning("Pyramid visualization keys not found in outputs, skipping final pyramid visualization")
 
     # Final latent space visualizations for 2D levels
     for level in range(best_model.num_levels):
         if best_model.latent_dims[level] == 2:
-            final_latent_path = os.path.join(results_dir, f'final_latent_space_level_{level}.png')
-            plot_latent_space(best_model, x_test[:5000], y_test[:5000],
-                            final_latent_path, batch_size=args.batch_size, level=level)
+            try:
+                final_latent_path = os.path.join(results_dir, f'final_latent_space_level_{level}.png')
+                plot_latent_space(best_model, x_test[:5000], y_test[:5000],
+                                final_latent_path, batch_size=args.batch_size, level=level)
+            except Exception as e:
+                logger.warning(f"Failed to generate final latent space visualization for level {level}: {e}")
 
     # Final interpolation
-    final_interp_path = os.path.join(results_dir, 'final_interpolations.png')
-    plot_interpolation(best_model, x_test[:100], final_interp_path, n_interpolations=5, n_steps=10, dataset=args.dataset)
+    try:
+        final_interp_path = os.path.join(results_dir, 'final_interpolations.png')
+        plot_interpolation(best_model, x_test[:100], final_interp_path, n_interpolations=5, n_steps=10, dataset=args.dataset)
+    except Exception as e:
+        logger.warning(f"Failed to generate final interpolation visualization: {e}")
 
     # Save final model
     final_model_path = os.path.join(results_dir, f"hvae_{args.dataset}_final.keras")
