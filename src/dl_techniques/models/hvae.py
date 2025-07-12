@@ -398,15 +398,16 @@ class HVAE(keras.Model):
 
             # Get outputs for deep supervision
             intermediate_reconstructions = outputs['intermediate_reconstructions']
-            gaussian_pyramid = outputs['gaussian_pyramid']
+            #gaussian_pyramid = outputs['gaussian_pyramid']
+            laplacian_pyramid = outputs['laplacian_pyramid']
             z_means = outputs['z_means']
             z_log_vars = outputs['z_log_vars']
 
             # Deep supervision: compute reconstruction loss at each level
             reconstruction_loss = 0.0
             for i in range(self.num_levels):
-                # Target is the i-th level of the Gaussian pyramid
-                level_target = gaussian_pyramid[i]
+                # Target is the i-th level of the laplacian pyramid
+                level_target = laplacian_pyramid[i]
                 # Prediction is the i-th intermediate reconstruction
                 level_prediction = intermediate_reconstructions[i]
 
