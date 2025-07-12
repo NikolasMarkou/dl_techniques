@@ -1,125 +1,3 @@
-"""
-Hierarchical Variational Autoencoder (HVAE) Implementation
-=========================================================
-
-This module implements a Hierarchical Variational Autoencoder using Keras 3.8.0,
-designed for multi-scale image processing with Laplacian pyramid decomposition.
-The implementation processes images at multiple resolutions and learns hierarchical
-representations that can be combined to reconstruct the original image.
-
-Key Features:
-    - **Multi-Scale Processing**: Processes images at multiple resolution levels
-    - **Laplacian Pyramid**: Uses Laplacian decomposition for scale separation
-    - **Hierarchical Reconstruction**: Combines reconstructions from multiple scales
-    - **Gaussian Downsampling**: Non-learnable Gaussian filtering for downsampling
-    - **Bilinear Upsampling**: Non-learnable bilinear interpolation for upsampling
-    - **Configurable Levels**: Adjustable number of hierarchy levels
-    - **ResNet-based VAE**: Uses existing VAE architecture for encoders/decoders
-    - **Proper Serialization**: Full get_config/from_config implementation
-
-Architecture Overview:
-    ```
-    Input Image (Level 0)
-        ↓ (Gaussian downsample)
-    Level 1 Image
-        ↓ (Gaussian downsample)
-    Level 2 Image
-        ↓ (Gaussian downsample)
-    ...
-    Bottom Level (Level N-1)
-
-    Laplacian[0] = Level 0 - Upsample(Level 1)
-    Laplacian[1] = Level 1 - Upsample(Level 2)
-    ...
-    Laplacian[N-2] = Level N-2 - Upsample(Level N-1)
-    Bottom = Level N-1 (no Laplacian)
-
-    Each Laplacian[i] → VAE_Encoder[i] → z[i] → VAE_Decoder[i] → Decoder_Output[i]
-    Bottom → VAE_Encoder[N-1] → z[N-1] → VAE_Decoder[N-1] → Decoder_Output[N-1]
-
-    Deep Supervision with Hierarchical Reconstruction:
-    Intermediate_Rec[N-1] = Decoder_Output[N-1]
-    Intermediate_Rec[N-2] = Decoder_Output[N-2] + Upsample(Intermediate_Rec[N-1])
-    ...
-    Intermediate_Rec[0] = Decoder_Output[0] + Upsample(Intermediate_Rec[1])
-
-    Loss[i] = ReconstructionLoss(Intermediate_Rec[i], Gaussian_Pyramid[i])
-    Total_Loss = Sum(Loss[i]) + KL_Loss
-    ```
-
-Mathematical Foundation:
-    - **Laplacian Pyramid**: L[i] = G[i] - Upsample(G[i+1])
-    - **Gaussian Pyramid**: G[i+1] = Downsample(G[i])
-    - **Hierarchical VAE**: Each level has its own latent space z[i] ~ N(μ[i], σ[i])
-    - **Deep Supervision**: Loss[i] = ReconstructionLoss(Intermediate_Rec[i], G[i])
-    - **Hierarchical Reconstruction**: Intermediate_Rec[i] = Decoder_Output[i] + Upsample(Intermediate_Rec[i+1])
-    - **Total Loss**: Sum(Loss[i]) + β * Sum(KL(q(z[i]|L[i])||p(z[i])))
-
-Classes:
-    GaussianDownsample: Non-learnable Gaussian filtering and downsampling layer
-    HVAE: Main Hierarchical Variational Autoencoder model
-
-Functions:
-    create_hvae: Factory function for creating and compiling HVAE models
-
-Dependencies:
-    - keras>=3.8.0
-    - tensorflow>=2.18.0 (backend)
-    - dl_techniques.utils.logger
-    - dl_techniques.layers.sampling.Sampling
-    - Existing VAE architecture (provided)
-
-Usage Example:
-    ```python
-    # Create HVAE for 128x128 RGB images with 3 levels
-    hvae = create_hvae(
-        input_shape=(128, 128, 3),
-        num_levels=3,
-        latent_dims=[64, 32, 16],  # Different latent dims per level
-        kl_loss_weight=0.01,
-        optimizer='adam'
-    )
-
-    # Train the model
-    hvae.fit(train_data, epochs=50, validation_data=val_data)
-
-    # Generate samples
-    samples = hvae.sample(num_samples=10)
-
-    # Encode to hierarchical latent space
-    z_means, z_log_vars = hvae.encode(images)
-
-    # Decode from hierarchical latent space
-    reconstructions = hvae.decode(z_samples)
-    ```
-
-Technical Details:
-    - **Gaussian Downsampling**: 5x5 Gaussian kernel with σ=1.0
-    - **Bilinear Upsampling**: 2x2 upsampling with bilinear interpolation
-    - **Power of 2 Constraint**: Input dimensions must be divisible by 2^num_levels
-    - **Laplacian Computation**: Difference between adjacent pyramid levels
-    - **Deep Supervision**: Multi-level loss supervision at each pyramid level
-    - **Hierarchical Loss**: Sum of reconstruction losses at all pyramid levels plus KL losses
-
-Performance Considerations:
-    - Memory efficient with separate VAE models per level
-    - Supports different latent dimensions per level
-    - Configurable VAE parameters per level
-    - Proper gradient flow through hierarchical structure
-
-Model Persistence:
-    - Fully serializable using Keras .keras format
-    - Proper config serialization for all hierarchical parameters
-    - Custom object registration for loading saved models
-
-Notes:
-    - Input image dimensions must be powers of 2 for proper pyramid construction
-    - Each level can have different VAE configurations
-    - Gaussian downsampling is fixed (non-learnable)
-    - Upsampling uses bilinear interpolation (non-learnable)
-    - Bottom level processes the lowest resolution without Laplacian
-"""
-
 import keras
 import numpy as np
 from keras import ops
@@ -233,11 +111,11 @@ class GaussianDownsample(keras.layers.Layer):
 @keras.saving.register_keras_serializable()
 class HVAE(keras.Model):
     """
-    Hierarchical Variational Autoencoder (HVAE) model.
+    Hierarchical Variational Autoencoder (HVAE) model with deep supervision.
 
     This model processes images at multiple scales using Laplacian pyramid decomposition.
-    Each level has its own VAE encoder and decoder, and the final reconstruction is
-    formed by hierarchically combining the outputs.
+    Each level has its own VAE encoder and decoder, and uses deep supervision by
+    comparing intermediate reconstructions to their corresponding Gaussian pyramid levels.
 
     Args:
         num_levels: Number of hierarchy levels (pyramid levels).
@@ -385,27 +263,6 @@ class HVAE(keras.Model):
 
         return reconstructions
 
-    def _reconstruct_hierarchically(self, level_reconstructions: List[keras.KerasTensor]) -> keras.KerasTensor:
-        """Reconstruct final image by combining level reconstructions."""
-        # Start from the bottom level (finest scale)
-        reconstruction = level_reconstructions[-1]
-
-        # Work backwards through levels
-        for i in range(self.num_levels - 2, -1, -1):
-            # Upsample current reconstruction
-            target_height = ops.shape(level_reconstructions[i])[1]
-            target_width = ops.shape(level_reconstructions[i])[2]
-            upsampled = ops.image.resize(
-                reconstruction,
-                (target_height, target_width),
-                interpolation="bilinear"
-            )
-
-            # Add current level reconstruction
-            reconstruction = level_reconstructions[i] + upsampled
-
-        return reconstruction
-
     @property
     def metrics(self) -> List[keras.metrics.Metric]:
         """Return metrics tracked by the model."""
@@ -420,12 +277,12 @@ class HVAE(keras.Model):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> Dict[str, Union[keras.KerasTensor, List[keras.KerasTensor]]]:
-        """Forward pass through the HVAE."""
+        """Forward pass through the HVAE with deep supervision."""
         # Create pyramids
         gaussian_pyramid = self._create_gaussian_pyramid(inputs)
         laplacian_pyramid = self._create_laplacian_pyramid(gaussian_pyramid)
 
-        # Encode each level
+        # Encode each level using Laplacians
         z_means, z_log_vars = self._encode_levels(laplacian_pyramid, training=training)
 
         # Sample from latent distributions
@@ -435,17 +292,40 @@ class HVAE(keras.Model):
             z = sampling_layer([z_means[i], z_log_vars[i]], training=training)
             z_samples.append(z)
 
-        # Decode each level
-        level_reconstructions = self._decode_levels(z_samples, training=training)
+        # Decode each level to get the decoder outputs
+        level_decoder_outputs = self._decode_levels(z_samples, training=training)
 
-        # Hierarchical reconstruction
-        final_reconstruction = self._reconstruct_hierarchically(level_reconstructions)
+        # Create intermediate reconstructions for deep supervision
+        intermediate_reconstructions = []
+
+        # Start from the bottom level (N-1)
+        current_reconstruction = level_decoder_outputs[-1]
+        intermediate_reconstructions.append(current_reconstruction)
+
+        # Work backwards from the second to last level up to the top
+        for i in range(self.num_levels - 2, -1, -1):
+            # Upsample the reconstruction from the level below
+            target_height = ops.shape(level_decoder_outputs[i])[1]
+            target_width = ops.shape(level_decoder_outputs[i])[2]
+            upsampled = ops.image.resize(
+                current_reconstruction,
+                (target_height, target_width),
+                interpolation="bilinear"
+            )
+
+            # Add the decoder output of the current level
+            current_reconstruction = level_decoder_outputs[i] + upsampled
+            intermediate_reconstructions.insert(0, current_reconstruction)
+
+        # The final reconstruction is the one from the top level
+        final_reconstruction = intermediate_reconstructions[0]
 
         return {
             'z_means': z_means,
             'z_log_vars': z_log_vars,
             'z_samples': z_samples,
-            'level_reconstructions': level_reconstructions,
+            'level_decoder_outputs': level_decoder_outputs,
+            'intermediate_reconstructions': intermediate_reconstructions,
             'reconstruction': final_reconstruction,
             'gaussian_pyramid': gaussian_pyramid,
             'laplacian_pyramid': laplacian_pyramid
@@ -466,17 +346,30 @@ class HVAE(keras.Model):
         return z_means, z_log_vars
 
     def decode(self, z_samples: List[keras.KerasTensor]) -> keras.KerasTensor:
-        """Decode hierarchical latent samples to reconstruction."""
+        """Decode hierarchical latent samples to final reconstruction."""
         if not self.built:
             raise ValueError("Model must be built before decoding.")
 
-        # Decode each level
-        level_reconstructions = self._decode_levels(z_samples, training=False)
+        # Decode each level to get the decoder outputs
+        level_decoder_outputs = self._decode_levels(z_samples, training=False)
 
-        # Hierarchical reconstruction
-        final_reconstruction = self._reconstruct_hierarchically(level_reconstructions)
+        # Perform hierarchical reconstruction
+        reconstruction = level_decoder_outputs[-1]
 
-        return final_reconstruction
+        # Work backwards through levels
+        for i in range(self.num_levels - 2, -1, -1):
+            # Upsample current reconstruction
+            target_height = ops.shape(level_decoder_outputs[i])[1]
+            target_width = ops.shape(level_decoder_outputs[i])[2]
+            upsampled = ops.image.resize(
+                reconstruction,
+                (target_height, target_width),
+                interpolation="bilinear"
+            )
+            # Add current level's decoder output
+            reconstruction = level_decoder_outputs[i] + upsampled
+
+        return reconstruction
 
     def sample(self, num_samples: int) -> keras.KerasTensor:
         """Generate samples from the hierarchical latent space."""
@@ -492,7 +385,7 @@ class HVAE(keras.Model):
         return self.decode(z_samples)
 
     def train_step(self, data) -> Dict[str, keras.KerasTensor]:
-        """Custom training step for hierarchical VAE."""
+        """Custom training step with deep supervision."""
         # Handle different data formats
         if isinstance(data, tuple):
             x = data[0]
@@ -502,12 +395,27 @@ class HVAE(keras.Model):
         with tf.GradientTape() as tape:
             # Forward pass
             outputs = self(x, training=True)
-            reconstruction = outputs['reconstruction']
+
+            # Get outputs for deep supervision
+            intermediate_reconstructions = outputs['intermediate_reconstructions']
+            gaussian_pyramid = outputs['gaussian_pyramid']
             z_means = outputs['z_means']
             z_log_vars = outputs['z_log_vars']
 
-            # Compute reconstruction loss
-            reconstruction_loss = self._compute_reconstruction_loss(x, reconstruction)
+            # Deep supervision: compute reconstruction loss at each level
+            reconstruction_loss = 0.0
+            for i in range(self.num_levels):
+                # Target is the i-th level of the Gaussian pyramid
+                level_target = gaussian_pyramid[i]
+                # Prediction is the i-th intermediate reconstruction
+                level_prediction = intermediate_reconstructions[i]
+
+                # Compute reconstruction loss for this level
+                level_loss = self._compute_reconstruction_loss(level_target, level_prediction)
+                reconstruction_loss += level_loss
+
+            # Average the loss over the number of levels
+            reconstruction_loss /= self.num_levels
 
             # Compute KL loss for each level
             kl_loss = 0.0
@@ -543,7 +451,7 @@ class HVAE(keras.Model):
         }
 
     def test_step(self, data) -> Dict[str, keras.KerasTensor]:
-        """Custom test step for hierarchical VAE."""
+        """Custom test step with deep supervision."""
         # Handle different data formats
         if isinstance(data, tuple):
             x = data[0]
@@ -552,12 +460,27 @@ class HVAE(keras.Model):
 
         # Forward pass
         outputs = self(x, training=False)
-        reconstruction = outputs['reconstruction']
+
+        # Get outputs for deep supervision
+        intermediate_reconstructions = outputs['intermediate_reconstructions']
+        gaussian_pyramid = outputs['gaussian_pyramid']
         z_means = outputs['z_means']
         z_log_vars = outputs['z_log_vars']
 
-        # Compute reconstruction loss
-        reconstruction_loss = self._compute_reconstruction_loss(x, reconstruction)
+        # Deep supervision: compute reconstruction loss at each level
+        reconstruction_loss = 0.0
+        for i in range(self.num_levels):
+            # Target is the i-th level of the Gaussian pyramid
+            level_target = gaussian_pyramid[i]
+            # Prediction is the i-th intermediate reconstruction
+            level_prediction = intermediate_reconstructions[i]
+
+            # Compute reconstruction loss for this level
+            level_loss = self._compute_reconstruction_loss(level_target, level_prediction)
+            reconstruction_loss += level_loss
+
+        # Average the loss over the number of levels
+        reconstruction_loss /= self.num_levels
 
         # Compute KL loss for each level
         kl_loss = 0.0
@@ -703,6 +626,8 @@ def create_hvae(
     assert test_output['reconstruction'].shape == test_input.shape, "Reconstruction shape mismatch"
     assert len(test_output['z_means']) == num_levels, "Number of z_means mismatch"
     assert len(test_output['z_log_vars']) == num_levels, "Number of z_log_vars mismatch"
+    assert 'intermediate_reconstructions' in test_output, "Missing intermediate_reconstructions"
+    assert len(test_output['intermediate_reconstructions']) == num_levels, "Wrong number of intermediate_reconstructions"
 
     logger.info(f"Created HVAE for input shape {input_shape}")
     logger.info(f"Levels: {num_levels}, Latent dims: {latent_dims}")
