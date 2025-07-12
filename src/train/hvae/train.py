@@ -610,12 +610,14 @@ def train_model(args: argparse.Namespace):
         # Load with custom objects to handle the HVAE class
         from dl_techniques.layers.sampling import Sampling
         from dl_techniques.models.hvae import GaussianDownsample
+        from dl_techniques.models.vae import VAE
         best_model = keras.models.load_model(
             best_model_path,
             custom_objects={
                 "HVAE": HVAE,
                 "Sampling": Sampling,
-                "GaussianDownsample": GaussianDownsample
+                "GaussianDownsample": GaussianDownsample,
+                "VAE": VAE
             }
         )
     else:

@@ -24,10 +24,10 @@ class GaussianDownsample(keras.layers.Layer):
     """
 
     def __init__(
-        self,
-        sigma: float = 1.0,
-        kernel_size: int = 5,
-        **kwargs: Any
+            self,
+            sigma: float = 1.0,
+            kernel_size: int = 5,
+            **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
         self.sigma = sigma
@@ -49,7 +49,7 @@ class GaussianDownsample(keras.layers.Layer):
 
         for i in range(self.kernel_size):
             x = i - center
-            kernel_1d[i] = np.exp(-(x**2) / (2 * self.sigma**2))
+            kernel_1d[i] = np.exp(-(x ** 2) / (2 * self.sigma ** 2))
 
         # Normalize
         kernel_1d = kernel_1d / np.sum(kernel_1d)
@@ -128,14 +128,14 @@ class HVAE(keras.Model):
     """
 
     def __init__(
-        self,
-        num_levels: int,
-        latent_dims: List[int],
-        input_shape: Tuple[int, int, int],
-        kl_loss_weight: float = 0.01,
-        vae_config: Optional[Dict[str, Any]] = None,
-        gaussian_sigma: float = 1.0,
-        **kwargs: Any
+            self,
+            num_levels: int,
+            latent_dims: List[int],
+            input_shape: Tuple[int, int, int],
+            kl_loss_weight: float = 0.01,
+            vae_config: Optional[Dict[str, Any]] = None,
+            gaussian_sigma: float = 1.0,
+            **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
@@ -149,12 +149,13 @@ class HVAE(keras.Model):
 
         # Validation
         if len(latent_dims) != num_levels:
-            raise ValueError(f"Number of latent dimensions ({len(latent_dims)}) must match number of levels ({num_levels})")
+            raise ValueError(
+                f"Number of latent dimensions ({len(latent_dims)}) must match number of levels ({num_levels})")
 
         # Check power of 2 constraint
         height, width, channels = input_shape
         if height % (2 ** (num_levels - 1)) != 0 or width % (2 ** (num_levels - 1)) != 0:
-            raise ValueError(f"Input dimensions must be divisible by 2^{num_levels-1} for {num_levels} levels")
+            raise ValueError(f"Input dimensions must be divisible by 2^{num_levels - 1} for {num_levels} levels")
 
         # Components to be built
         self.gaussian_downsample = GaussianDownsample(sigma=gaussian_sigma)
@@ -246,8 +247,14 @@ class HVAE(keras.Model):
 
         return laplacian_pyramid
 
-    def _encode_levels(self, laplacian_pyramid: List[keras.KerasTensor], training: Optional[bool] = None) -> Tuple[List[keras.KerasTensor], List[keras.KerasTensor]]:
+    def _encode_levels(self, laplacian_pyramid: List[keras.KerasTensor], training: Optional[bool] = None) -> Tuple[
+        List[keras.KerasTensor], List[keras.KerasTensor]]:
         """Encode each level of the Laplacian pyramid."""
+        # Ensure VAEs are built
+        if not self.vaes or len(self.vaes) != self.num_levels:
+            raise ValueError(
+                f"VAE models not properly initialized. Expected {self.num_levels} VAEs, got {len(self.vaes) if self.vaes else 0}")
+
         z_means = []
         z_log_vars = []
 
@@ -259,8 +266,14 @@ class HVAE(keras.Model):
 
         return z_means, z_log_vars
 
-    def _decode_levels(self, z_samples: List[keras.KerasTensor], training: Optional[bool] = None) -> List[keras.KerasTensor]:
+    def _decode_levels(self, z_samples: List[keras.KerasTensor], training: Optional[bool] = None) -> List[
+        keras.KerasTensor]:
         """Decode each level latent sample."""
+        # Ensure VAEs are built
+        if not self.vaes or len(self.vaes) != self.num_levels:
+            raise ValueError(
+                f"VAE models not properly initialized. Expected {self.num_levels} VAEs, got {len(self.vaes) if self.vaes else 0}")
+
         reconstructions = []
 
         for i, z in enumerate(z_samples):
@@ -280,11 +293,23 @@ class HVAE(keras.Model):
         ]
 
     def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
     ) -> Dict[str, Union[keras.KerasTensor, List[keras.KerasTensor]]]:
         """Forward pass through the HVAE with deep supervision."""
+        # Ensure model is built
+        if not self.built or not self.vaes or len(self.vaes) != self.num_levels:
+            logger.warning("Model not properly built, rebuilding...")
+            # Get the input shape for building
+            input_shape = inputs.shape
+            if input_shape[0] is None:
+                # If batch dimension is None, use the remaining dimensions
+                build_shape = (None,) + tuple(input_shape[1:])
+            else:
+                build_shape = input_shape
+            self.build(build_shape)
+
         # Create pyramids
         gaussian_pyramid = self._create_gaussian_pyramid(inputs)
         laplacian_pyramid = self._create_laplacian_pyramid(gaussian_pyramid)
@@ -405,16 +430,15 @@ class HVAE(keras.Model):
 
             # Get outputs for deep supervision
             intermediate_reconstructions = outputs['intermediate_reconstructions']
-            #gaussian_pyramid = outputs['gaussian_pyramid']
-            laplacian_pyramid = outputs['laplacian_pyramid']
+            gaussian_pyramid = outputs['gaussian_pyramid']
             z_means = outputs['z_means']
             z_log_vars = outputs['z_log_vars']
 
             # Deep supervision: compute reconstruction loss at each level
             reconstruction_loss = 0.0
             for i in range(self.num_levels):
-                # Target is the i-th level of the laplacian pyramid
-                level_target = laplacian_pyramid[i]
+                # Target is the i-th level of the Gaussian pyramid
+                level_target = gaussian_pyramid[i]
                 # Prediction is the i-th intermediate reconstruction
                 level_prediction = intermediate_reconstructions[i]
 
@@ -515,9 +539,9 @@ class HVAE(keras.Model):
         }
 
     def _compute_reconstruction_loss(
-        self,
-        y_true: keras.KerasTensor,
-        y_pred: keras.KerasTensor
+            self,
+            y_true: keras.KerasTensor,
+            y_pred: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Compute reconstruction loss with numerical stability."""
         # Flatten for loss computation
@@ -535,9 +559,9 @@ class HVAE(keras.Model):
         return reconstruction_loss
 
     def _compute_kl_loss(
-        self,
-        z_mean: keras.KerasTensor,
-        z_log_var: keras.KerasTensor
+            self,
+            z_mean: keras.KerasTensor,
+            z_log_var: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Compute KL divergence loss with numerical stability."""
         # Clip log variance to prevent numerical issues
@@ -567,6 +591,17 @@ class HVAE(keras.Model):
         })
         return config
 
+    def get_build_config(self) -> Dict[str, Any]:
+        """Get build configuration."""
+        return {
+            "input_shape": (None,) + self._input_shape,
+        }
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Build from configuration."""
+        if config.get("input_shape") is not None:
+            self.build(config["input_shape"])
+
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "HVAE":
         """Create HVAE from configuration."""
@@ -574,13 +609,13 @@ class HVAE(keras.Model):
 
 
 def create_hvae(
-    input_shape: Tuple[int, int, int],
-    num_levels: int,
-    latent_dims: List[int],
-    optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
-    kl_loss_weight: float = 0.01,
-    vae_config: Optional[Dict[str, Any]] = None,
-    **kwargs
+        input_shape: Tuple[int, int, int],
+        num_levels: int,
+        latent_dims: List[int],
+        optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
+        kl_loss_weight: float = 0.01,
+        vae_config: Optional[Dict[str, Any]] = None,
+        **kwargs
 ) -> HVAE:
     """
     Create and compile a Hierarchical VAE model.
@@ -635,7 +670,8 @@ def create_hvae(
     assert len(test_output['z_means']) == num_levels, "Number of z_means mismatch"
     assert len(test_output['z_log_vars']) == num_levels, "Number of z_log_vars mismatch"
     assert 'intermediate_reconstructions' in test_output, "Missing intermediate_reconstructions"
-    assert len(test_output['intermediate_reconstructions']) == num_levels, "Wrong number of intermediate_reconstructions"
+    assert len(
+        test_output['intermediate_reconstructions']) == num_levels, "Wrong number of intermediate_reconstructions"
 
     logger.info(f"Created HVAE for input shape {input_shape}")
     logger.info(f"Levels: {num_levels}, Latent dims: {latent_dims}")
