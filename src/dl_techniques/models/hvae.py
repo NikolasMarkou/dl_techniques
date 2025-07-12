@@ -140,12 +140,14 @@ class HVAE(keras.Model):
         super().__init__(**kwargs)
 
         # Store configuration
+        self.sampling_layers = []
         self.num_levels = num_levels
         self.latent_dims = latent_dims
         self._input_shape = input_shape
         self.kl_loss_weight = kl_loss_weight
         self.vae_config = vae_config or {}
         self.gaussian_sigma = gaussian_sigma
+
 
         # Validation
         if len(latent_dims) != num_levels:
@@ -185,7 +187,7 @@ class HVAE(keras.Model):
 
             # Create VAE configuration for this level
             vae_config = self.vae_config.copy()
-            vae_activation = "linear"
+
             if i == 0:
                 vae_activation = "sigmoid"
             else:
@@ -202,6 +204,7 @@ class HVAE(keras.Model):
             vae = VAE(**vae_config)
             vae.build(input_shape=(None,) + level_shape)
             self.vaes.append(vae)
+            self.sampling_layers.append(Sampling())
 
         super().build(input_shape)
         logger.info("HVAE built successfully")
@@ -320,8 +323,7 @@ class HVAE(keras.Model):
         # Sample from latent distributions
         z_samples = []
         for i in range(self.num_levels):
-            sampling_layer = Sampling(seed=42 + i)
-            z = sampling_layer([z_means[i], z_log_vars[i]], training=training)
+            z = self.sampling_layers[i]([z_means[i], z_log_vars[i]], training=training)
             z_samples.append(z)
 
         # Decode each level to get the decoder outputs

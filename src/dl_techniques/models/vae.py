@@ -449,9 +449,9 @@ class VAE(keras.Model):
         reconstruction = self.decoder(z, training=training)
 
         return {
+            "z": z,
             "z_mean": z_mean,
             "z_log_var": z_log_var,
-            "z": z,
             "reconstruction": reconstruction
         }
 
