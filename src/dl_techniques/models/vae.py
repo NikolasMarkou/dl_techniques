@@ -143,6 +143,7 @@ class VAE(keras.Model):
         use_bias: bool = True,
         dropout_rate: float = 0.0,
         activation: Union[str, callable] = "leaky_relu",
+        final_activation: str = "sigmoid",
         name: Optional[str] = "resnet_vae",
         **kwargs: Any
     ) -> None:
@@ -155,12 +156,14 @@ class VAE(keras.Model):
         self.filters = filters or [32, 64, 128]
         self.kl_loss_weight = kl_loss_weight
         self._input_shape = input_shape
+        self.final_activation = final_activation
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.use_batch_norm = use_batch_norm
         self.dropout_rate = dropout_rate
         self.activation = activation
         self.use_bias = use_bias
+
 
         # Components to be built
         self.encoder = None
@@ -398,7 +401,7 @@ class VAE(keras.Model):
             kernel_size=1,
             strides=1,
             padding="same",
-            activation="sigmoid",
+            activation=self.final_activation,
             use_bias=self.use_bias,
             kernel_regularizer=keras.regularizers.L1(1e-6),
             kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.01),
@@ -650,6 +653,7 @@ class VAE(keras.Model):
             "use_batch_norm": self.use_batch_norm,
             "dropout_rate": self.dropout_rate,
             "activation": self.activation,
+            "final_activation": self.final_activation,
         })
         return config
 

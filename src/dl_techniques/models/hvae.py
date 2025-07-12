@@ -184,10 +184,17 @@ class HVAE(keras.Model):
 
             # Create VAE configuration for this level
             vae_config = self.vae_config.copy()
+            vae_activation = "linear"
+            if i == 0:
+                vae_activation = "sigmoid"
+            else:
+                vae_activation = "tanh"
+
             vae_config.update({
                 'input_shape': level_shape,
                 'latent_dim': latent_dim,
-                'name': f'vae_level_{i}'
+                'name': f'vae_level_{i}',
+                "final_activation": vae_activation,
             })
 
             # Create VAE model
