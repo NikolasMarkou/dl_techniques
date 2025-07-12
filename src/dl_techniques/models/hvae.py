@@ -188,16 +188,11 @@ class HVAE(keras.Model):
             # Create VAE configuration for this level
             vae_config = self.vae_config.copy()
 
-            if i == 0:
-                vae_activation = "sigmoid"
-            else:
-                vae_activation = "tanh"
-
             vae_config.update({
                 'input_shape': level_shape,
                 'latent_dim': latent_dim,
                 'name': f'vae_level_{i}',
-                "final_activation": vae_activation,
+                "final_activation": "sigmoid",
             })
 
             # Create VAE model
@@ -212,11 +207,10 @@ class HVAE(keras.Model):
     def _create_gaussian_pyramid(self, image: keras.KerasTensor) -> List[keras.KerasTensor]:
         """Create Gaussian pyramid by iterative downsampling."""
         pyramid = [image]
-        current = image
 
         for i in range(self.num_levels - 1):
             # Downsample using Gaussian filter
-            current = self.gaussian_downsample(current)
+            current = self.gaussian_downsample(pyramid[-1])
             pyramid.append(current)
 
         return pyramid
@@ -349,20 +343,22 @@ class HVAE(keras.Model):
 
             # Add the decoder output of the current level
             current_reconstruction = level_decoder_outputs[i] + upsampled
-            intermediate_reconstructions.insert(0, current_reconstruction)
+            intermediate_reconstructions.append(current_reconstruction)
 
-        # The final reconstruction is the one from the top level
+        # flip the order
+        intermediate_reconstructions = intermediate_reconstructions[::-1]
+        # The final reconstruction is the one from the top level]
         final_reconstruction = intermediate_reconstructions[0]
 
         return {
             'z_means': z_means,
             'z_log_vars': z_log_vars,
             'z_samples': z_samples,
-            'level_decoder_outputs': level_decoder_outputs,
-            'intermediate_reconstructions': intermediate_reconstructions,
             'reconstruction': final_reconstruction,
             'gaussian_pyramid': gaussian_pyramid,
-            'laplacian_pyramid': laplacian_pyramid
+            'laplacian_pyramid': laplacian_pyramid,
+            'level_decoder_outputs': level_decoder_outputs,
+            'intermediate_reconstructions': intermediate_reconstructions,
         }
 
     def encode(self, inputs: keras.KerasTensor) -> Tuple[List[keras.KerasTensor], List[keras.KerasTensor]]:
@@ -431,25 +427,26 @@ class HVAE(keras.Model):
             outputs = self(x, training=True)
 
             # Get outputs for deep supervision
-            intermediate_reconstructions = outputs['intermediate_reconstructions']
-            gaussian_pyramid = outputs['gaussian_pyramid']
             z_means = outputs['z_means']
             z_log_vars = outputs['z_log_vars']
+            gaussian_pyramid = outputs['gaussian_pyramid']
+            intermediate_reconstructions = outputs['intermediate_reconstructions']
 
             # Deep supervision: compute reconstruction loss at each level
             reconstruction_loss = 0.0
-            for i in range(self.num_levels):
-                # Target is the i-th level of the Gaussian pyramid
-                level_target = gaussian_pyramid[i]
-                # Prediction is the i-th intermediate reconstruction
-                level_prediction = intermediate_reconstructions[i]
-
-                # Compute reconstruction loss for this level
-                level_loss = self._compute_reconstruction_loss(level_target, level_prediction)
-                reconstruction_loss += level_loss
-
-            # Average the loss over the number of levels
-            reconstruction_loss /= self.num_levels
+            # for i in range(self.num_levels):
+            #     # Target is the i-th level of the Gaussian pyramid
+            #     level_target = gaussian_pyramid[i]
+            #     # Prediction is the i-th intermediate reconstruction
+            #     level_prediction = intermediate_reconstructions[i]
+            #
+            #     # Compute reconstruction loss for this level
+            #     level_loss = self._compute_reconstruction_loss(level_target, level_prediction)
+            #     reconstruction_loss += level_loss
+            #
+            # # Average the loss over the number of levels
+            # reconstruction_loss /= self.num_levels
+            reconstruction_loss = self._compute_reconstruction_loss(data, intermediate_reconstructions[0])
 
             # Compute KL loss for each level
             kl_loss = 0.0
@@ -546,6 +543,7 @@ class HVAE(keras.Model):
             y_pred: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Compute reconstruction loss with numerical stability."""
+
         # Flatten for loss computation
         y_true_flat = ops.reshape(y_true, (ops.shape(y_true)[0], -1))
         y_pred_flat = ops.reshape(y_pred, (ops.shape(y_pred)[0], -1))
