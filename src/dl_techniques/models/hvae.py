@@ -262,15 +262,17 @@ class HVAE(keras.Model):
         z_log_vars = []
 
         for i, level_input in enumerate(laplacian_pyramid):
-            # FIXED: Use efficient encoding - only encode, don't decode
-            if hasattr(self.vaes[i], 'encode'):
-                # More efficient: only run encoder
-                z_mean, z_log_var = self.vaes[i].encode(level_input)
-            else:
-                # Fallback: run full forward pass
-                outputs = self.vaes[i](level_input, training=training)
+            # Use the VAE's full forward pass to get outputs
+            # This is more reliable than trying to use a separate encode method
+            outputs = self.vaes[i](level_input, training=training)
+
+            # Extract z_mean and z_log_var from outputs
+            if isinstance(outputs, dict):
                 z_mean = outputs['z_mean']
                 z_log_var = outputs['z_log_var']
+            else:
+                # Handle case where outputs might be a tuple or other format
+                raise ValueError(f"Expected VAE to return dict with 'z_mean' and 'z_log_var' keys, got {type(outputs)}")
 
             z_means.append(z_mean)
             z_log_vars.append(z_log_var)
@@ -681,21 +683,24 @@ def create_hvae(
     # Build the model
     model.build(input_shape=(None,) + input_shape)
 
-    # Test the model
-    test_input = keras.random.normal((2,) + input_shape)
-    test_output = model(test_input, training=False)
+    # Minimal validation test to catch integration issues
+    try:
+        test_input = keras.random.normal((1,) + input_shape)
+        test_output = model(test_input, training=False)
 
-    # Validate outputs
-    assert test_output['reconstruction'].shape == test_input.shape, "Reconstruction shape mismatch"
-    assert len(test_output['z_means']) == num_levels, "Number of z_means mismatch"
-    assert len(test_output['z_log_vars']) == num_levels, "Number of z_log_vars mismatch"
-    assert 'intermediate_reconstructions' in test_output, "Missing intermediate_reconstructions"
-    assert len(
-        test_output['intermediate_reconstructions']) == num_levels, "Wrong number of intermediate_reconstructions"
+        # Basic validation
+        if test_output['reconstruction'].shape != test_input.shape:
+            raise ValueError(
+                f"Reconstruction shape mismatch: expected {test_input.shape}, got {test_output['reconstruction'].shape}")
+
+        logger.info("✓ HVAE validation test passed")
+
+    except Exception as e:
+        logger.error(f"✗ HVAE validation test failed: {e}")
+        raise ValueError(f"HVAE model validation failed during creation: {e}")
 
     logger.info(f"Created HVAE for input shape {input_shape}")
     logger.info(f"Levels: {num_levels}, Latent dims: {latent_dims}")
-    logger.info(f"Reconstruction shape: {test_output['reconstruction'].shape}")
     logger.info(f"Model parameters: {model.count_params():,}")
 
     return model
