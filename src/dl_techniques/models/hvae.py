@@ -91,9 +91,14 @@ class GaussianDownsample(keras.layers.Layer):
 
         return downsampled
 
-    def compute_output_shape(self, input_shape: Tuple) -> Tuple:
+    def compute_output_shape(self, input_shape: Union[Tuple, List]) -> Tuple:
         """Compute output shape after downsampling."""
-        input_shape_list = list(input_shape)
+        # Handle both tuple and list input shapes
+        if isinstance(input_shape, (tuple, list)):
+            input_shape_list = list(input_shape)
+        else:
+            raise ValueError(f"Input shape must be tuple or list, got {type(input_shape)}")
+
         input_shape_list[1] = input_shape_list[1] // 2  # Height
         input_shape_list[2] = input_shape_list[2] // 2  # Width
         return tuple(input_shape_list)
@@ -171,11 +176,14 @@ class HVAE(keras.Model):
 
         # Build input shape for each level
         self.level_shapes = []
-        current_shape = input_shape
+        current_shape = tuple(input_shape)  # Ensure it's a tuple
         for i in range(num_levels):
             self.level_shapes.append(current_shape)
             if i < num_levels - 1:  # Don't downsample the last level
                 current_shape = (current_shape[0] // 2, current_shape[1] // 2, current_shape[2])
+
+        # Validate and normalize all shapes
+        self._validate_and_normalize_shapes()
 
         # Metrics
         self.total_loss_tracker = keras.metrics.Mean(name="total_loss")
@@ -184,12 +192,33 @@ class HVAE(keras.Model):
 
         logger.info(f"Initialized HVAE with {num_levels} levels")
 
+    def _ensure_tuple_shape(self, shape: Union[Tuple, List]) -> Tuple:
+        """Ensure shape is a tuple for consistent handling."""
+        if isinstance(shape, (tuple, list)):
+            return tuple(shape)
+        else:
+            raise ValueError(f"Shape must be tuple or list, got {type(shape)}: {shape}")
+
+    def _validate_and_normalize_shapes(self) -> None:
+        """Validate and normalize all stored shapes to tuples."""
+        # Normalize input shape
+        self._input_shape = self._ensure_tuple_shape(self._input_shape)
+
+        # Normalize level shapes
+        self.level_shapes = [self._ensure_tuple_shape(shape) for shape in self.level_shapes]
+
     def build(self, input_shape: Tuple) -> None:
         """Build the HVAE architecture."""
         # Create VAE models for each level
         for i in range(self.num_levels):
             level_shape = self.level_shapes[i]
             latent_dim = self.latent_dims[i]
+
+            # Ensure level_shape is a tuple for consistent handling
+            if isinstance(level_shape, (list, tuple)):
+                level_shape = tuple(level_shape)
+            else:
+                raise ValueError(f"Invalid level_shape type: {type(level_shape)}")
 
             # Create VAE configuration for this level
             vae_config = self.vae_config.copy()
@@ -203,7 +232,9 @@ class HVAE(keras.Model):
 
             # Create VAE model
             vae = VAE(**vae_config)
-            vae.build(input_shape=(None,) + level_shape)
+            # Ensure input_shape is a tuple for VAE building
+            vae_input_shape = (None,) + level_shape
+            vae.build(input_shape=vae_input_shape)
             self.vaes.append(vae)
             self.sampling_layers.append(Sampling())
 
@@ -602,7 +633,7 @@ class HVAE(keras.Model):
         config.update({
             "num_levels": self.num_levels,
             "latent_dims": self.latent_dims,
-            "input_shape": self._input_shape,
+            "input_shape": list(self._input_shape),  # Convert to list for JSON serialization
             "kl_loss_weight": self.kl_loss_weight,
             "vae_config": self.vae_config,
             "gaussian_sigma": self.gaussian_sigma,
@@ -613,18 +644,31 @@ class HVAE(keras.Model):
     def get_build_config(self) -> Dict[str, Any]:
         """Get build configuration."""
         return {
-            "input_shape": (None,) + self._input_shape,
+            "input_shape": (None,) + tuple(self._input_shape),  # Ensure tuple format
         }
 
     def build_from_config(self, config: Dict[str, Any]) -> None:
         """Build from configuration."""
         if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
+            input_shape = config["input_shape"]
+            # Handle both tuple and list input shapes
+            if isinstance(input_shape, (list, tuple)):
+                input_shape = tuple(input_shape)
+            # Validate shapes before building
+            self._validate_and_normalize_shapes()
+            self.build(input_shape)
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "HVAE":
         """Create HVAE from configuration."""
-        return cls(**config)
+        # Ensure input_shape is a tuple when creating from config
+        if "input_shape" in config and isinstance(config["input_shape"], list):
+            config["input_shape"] = tuple(config["input_shape"])
+
+        instance = cls(**config)
+        # Ensure shapes are normalized after creation from config
+        instance._validate_and_normalize_shapes()
+        return instance
 
 
 def create_hvae(
