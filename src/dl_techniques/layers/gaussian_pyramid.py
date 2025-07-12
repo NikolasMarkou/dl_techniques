@@ -1,7 +1,7 @@
 import keras
 import numpy as np
 from keras import ops
-from typing import Tuple, Union, List, Optional, Sequence
+from typing import Tuple, Union, Optional, Sequence
 
 # ---------------------------------------------------------------------
 # local imports

@@ -124,6 +124,7 @@ class HVAE(keras.Model):
         kl_loss_weight: Weight for KL divergence loss.
         vae_config: Configuration for VAE models at each level.
         gaussian_sigma: Standard deviation for Gaussian downsampling.
+        level_loss_weights: Optional weights for each level's reconstruction loss.
         **kwargs: Additional keyword arguments for the Model base class.
     """
 
@@ -135,6 +136,7 @@ class HVAE(keras.Model):
             kl_loss_weight: float = 0.01,
             vae_config: Optional[Dict[str, Any]] = None,
             gaussian_sigma: float = 1.0,
+            level_loss_weights: Optional[List[float]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -147,12 +149,16 @@ class HVAE(keras.Model):
         self.kl_loss_weight = kl_loss_weight
         self.vae_config = vae_config or {}
         self.gaussian_sigma = gaussian_sigma
-
+        self.level_loss_weights = level_loss_weights or [1.0] * num_levels
 
         # Validation
         if len(latent_dims) != num_levels:
             raise ValueError(
                 f"Number of latent dimensions ({len(latent_dims)}) must match number of levels ({num_levels})")
+
+        if len(self.level_loss_weights) != num_levels:
+            raise ValueError(
+                f"Number of level loss weights ({len(self.level_loss_weights)}) must match number of levels ({num_levels})")
 
         # Check power of 2 constraint
         height, width, channels = input_shape
@@ -192,7 +198,7 @@ class HVAE(keras.Model):
                 'input_shape': level_shape,
                 'latent_dim': latent_dim,
                 'name': f'vae_level_{i}',
-                "final_activation": "sigmoid",
+                "final_activation": None,  # FIXED: Use linear activation for Laplacian data
             })
 
             # Create VAE model
@@ -256,10 +262,18 @@ class HVAE(keras.Model):
         z_log_vars = []
 
         for i, level_input in enumerate(laplacian_pyramid):
-            # Encode with level-specific VAE
-            outputs = self.vaes[i](level_input, training=training)
-            z_means.append(outputs['z_mean'])
-            z_log_vars.append(outputs['z_log_var'])
+            # FIXED: Use efficient encoding - only encode, don't decode
+            if hasattr(self.vaes[i], 'encode'):
+                # More efficient: only run encoder
+                z_mean, z_log_var = self.vaes[i].encode(level_input)
+            else:
+                # Fallback: run full forward pass
+                outputs = self.vaes[i](level_input, training=training)
+                z_mean = outputs['z_mean']
+                z_log_var = outputs['z_log_var']
+
+            z_means.append(z_mean)
+            z_log_vars.append(z_log_var)
 
         return z_means, z_log_vars
 
@@ -432,21 +446,22 @@ class HVAE(keras.Model):
             gaussian_pyramid = outputs['gaussian_pyramid']
             intermediate_reconstructions = outputs['intermediate_reconstructions']
 
-            # Deep supervision: compute reconstruction loss at each level
+            # FIXED: Weighted deep supervision instead of simple averaging
             reconstruction_loss = 0.0
-            # for i in range(self.num_levels):
-            #     # Target is the i-th level of the Gaussian pyramid
-            #     level_target = gaussian_pyramid[i]
-            #     # Prediction is the i-th intermediate reconstruction
-            #     level_prediction = intermediate_reconstructions[i]
-            #
-            #     # Compute reconstruction loss for this level
-            #     level_loss = self._compute_reconstruction_loss(level_target, level_prediction)
-            #     reconstruction_loss += level_loss
-            #
-            # # Average the loss over the number of levels
-            # reconstruction_loss /= self.num_levels
-            reconstruction_loss = self._compute_reconstruction_loss(data, intermediate_reconstructions[0])
+            for i in range(self.num_levels):
+                # Target is the i-th level of the Gaussian pyramid
+                level_target = gaussian_pyramid[i]
+                # Prediction is the i-th intermediate reconstruction
+                level_prediction = intermediate_reconstructions[i]
+
+                # Compute reconstruction loss for this level
+                level_loss = self._compute_reconstruction_loss(level_target, level_prediction)
+                # Apply level-specific weight
+                weighted_level_loss = self.level_loss_weights[i] * level_loss
+                reconstruction_loss += weighted_level_loss
+
+            # FIXED: Don't average the loss - sum preserves relative importance of levels
+            # reconstruction_loss /= self.num_levels  # REMOVED
 
             # Compute KL loss for each level
             kl_loss = 0.0
@@ -464,8 +479,9 @@ class HVAE(keras.Model):
         # Compute gradients
         gradients = tape.gradient(total_loss, self.trainable_weights)
 
-        # Clip gradients
-        gradients = [ops.clip(grad, -1.0, 1.0) if grad is not None else None for grad in gradients]
+        # FIXED: Use global norm clipping instead of value clipping
+        if gradients:
+            gradients, _ = tf.clip_by_global_norm(gradients, 1.0)
 
         # Apply gradients
         self.optimizer.apply_gradients(zip(gradients, self.trainable_weights))
@@ -498,7 +514,7 @@ class HVAE(keras.Model):
         z_means = outputs['z_means']
         z_log_vars = outputs['z_log_vars']
 
-        # Deep supervision: compute reconstruction loss at each level
+        # FIXED: Weighted deep supervision instead of simple averaging
         reconstruction_loss = 0.0
         for i in range(self.num_levels):
             # Target is the i-th level of the Gaussian pyramid
@@ -508,10 +524,12 @@ class HVAE(keras.Model):
 
             # Compute reconstruction loss for this level
             level_loss = self._compute_reconstruction_loss(level_target, level_prediction)
-            reconstruction_loss += level_loss
+            # Apply level-specific weight
+            weighted_level_loss = self.level_loss_weights[i] * level_loss
+            reconstruction_loss += weighted_level_loss
 
-        # Average the loss over the number of levels
-        reconstruction_loss /= self.num_levels
+        # FIXED: Don't average the loss - sum preserves relative importance of levels
+        # reconstruction_loss /= self.num_levels  # REMOVED
 
         # Compute KL loss for each level
         kl_loss = 0.0
@@ -542,18 +560,16 @@ class HVAE(keras.Model):
             y_true: keras.KerasTensor,
             y_pred: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """Compute reconstruction loss with numerical stability."""
+        """Compute reconstruction loss using Mean Squared Error."""
+        # FIXED: Use MSE instead of binary crossentropy for Laplacian data
 
         # Flatten for loss computation
         y_true_flat = ops.reshape(y_true, (ops.shape(y_true)[0], -1))
         y_pred_flat = ops.reshape(y_pred, (ops.shape(y_pred)[0], -1))
 
-        # Clip predictions to avoid log(0)
-        y_pred_clipped = ops.clip(y_pred_flat, 1e-7, 1.0 - 1e-7)
-
-        # Binary crossentropy loss
+        # Mean Squared Error loss - suitable for continuous data with negative values
         reconstruction_loss = ops.mean(
-            keras.losses.binary_crossentropy(y_true_flat, y_pred_clipped)
+            keras.losses.mean_squared_error(y_true_flat, y_pred_flat)
         )
 
         return reconstruction_loss
@@ -588,6 +604,7 @@ class HVAE(keras.Model):
             "kl_loss_weight": self.kl_loss_weight,
             "vae_config": self.vae_config,
             "gaussian_sigma": self.gaussian_sigma,
+            "level_loss_weights": self.level_loss_weights,
         })
         return config
 
@@ -615,6 +632,7 @@ def create_hvae(
         optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
         kl_loss_weight: float = 0.01,
         vae_config: Optional[Dict[str, Any]] = None,
+        level_loss_weights: Optional[List[float]] = None,
         **kwargs
 ) -> HVAE:
     """
@@ -627,6 +645,7 @@ def create_hvae(
         optimizer: Optimizer for training.
         kl_loss_weight: Weight for KL divergence loss.
         vae_config: Configuration for VAE models at each level.
+        level_loss_weights: Optional weights for each level's reconstruction loss.
         **kwargs: Additional arguments for HVAE.
 
     Returns:
@@ -652,6 +671,7 @@ def create_hvae(
         input_shape=input_shape,
         kl_loss_weight=kl_loss_weight,
         vae_config=default_vae_config,
+        level_loss_weights=level_loss_weights,
         **kwargs
     )
 
