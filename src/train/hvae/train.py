@@ -725,7 +725,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--batch-size', type=int, default=128, help='Training batch size')
     parser.add_argument('--num-levels', type=int, default=3, help='Number of hierarchy levels')
-    parser.add_argument('--latent-dims', type=int, nargs='+', default=[64, 32, 16],
+    parser.add_argument('--latent-dims', type=int, nargs='+', default=[4, 4, 4],
                         help='Latent dimensions for each level (use 2 for a level to enable latent space visualization)')
     parser.add_argument('--kl-loss-weight', type=float, default=0.01, help='Weight for KL divergence loss')
     parser.add_argument('--optimizer', type=str, default='adam', help='Optimizer to use')
