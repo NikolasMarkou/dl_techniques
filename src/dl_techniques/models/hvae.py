@@ -121,14 +121,15 @@ Notes:
 """
 
 import keras
+import numpy as np
 from keras import ops
 import tensorflow as tf
 from typing import Optional, Tuple, Union, Dict, Any, List
-import numpy as np
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.sampling import Sampling
 from .vae import VAE
+
 
 @keras.saving.register_keras_serializable()
 class GaussianDownsample(keras.layers.Layer):
