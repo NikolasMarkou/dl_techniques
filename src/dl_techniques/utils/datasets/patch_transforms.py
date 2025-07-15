@@ -12,7 +12,6 @@ Key Features:
     - Segmentation patch stitching
     - Classification result aggregation
 
-File: src/dl_techniques/utils/datasets/patch_transforms.py
 """
 
 import numpy as np
