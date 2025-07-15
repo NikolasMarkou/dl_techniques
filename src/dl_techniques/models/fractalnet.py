@@ -42,12 +42,15 @@ Typical Usage:
 import keras
 from typing import Optional, Tuple, Union, Dict, Any, List, Callable
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.convblock import ConvBlock
 from dl_techniques.layers.fractal_block import FractalBlock
 
-
-
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class FractalNet(keras.Model):
@@ -302,6 +305,7 @@ class FractalNet(keras.Model):
             )
         return cls(**config)
 
+# ---------------------------------------------------------------------
 
 def create_fractal_net(
         input_shape: Tuple[int, int, int],
@@ -391,3 +395,5 @@ def create_fractal_net(
                 f"num_classes={num_classes}, depths={depths}, filters={filters}")
 
     return model
+
+# ---------------------------------------------------------------------

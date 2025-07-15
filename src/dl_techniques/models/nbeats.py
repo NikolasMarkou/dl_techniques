@@ -598,7 +598,7 @@ class NBeatsConfig:
         }
 
 
-def create_compiled_nbeats_model(
+def create_nbeats_model(
         config: Optional[Dict[str, Any]] = None,
         optimizer: Union[str, keras.optimizers.Optimizer] = 'adam',
         loss: Union[str, keras.losses.Loss] = None,
