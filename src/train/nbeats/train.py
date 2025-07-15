@@ -1,35 +1,24 @@
 """
-Multi-Task Time Series Forecasting with N-BEATS (Corrected)
+Multi-Task Time Series Forecasting with N-BEATS
 
 This implementation demonstrates a comprehensive multi-task learning approach using N-BEATS
-models trained on diverse time series patterns. Key corrections include:
-
-- [CRITICAL FIX] Consistent data scaling across all tasks to ensure stable multi-task training.
-- [CRITICAL FIX] Correct, non-leaky calculation of the MASE metric.
-- [CRITICAL FIX] Statistically sound logic for bootstrap prediction intervals and coverage.
-- [BUG FIX] Resolved AttributeError by correctly initializing random_state in the trainer.
-- [FINAL CONFIG FIX] Corrected model configuration mismatch for the 'generic' model type.
+models trained on diverse time series patterns with enhanced documentation and type safety.
 """
 
 import os
-import json
 import keras
 import matplotlib
 import dataclasses
 import numpy as np
 import pandas as pd
-from scipy import stats
 import tensorflow as tf
 from datetime import datetime
 from dataclasses import dataclass, field
+from typing import Dict, List, Tuple, Any, Optional, Union, Callable
 
-
-
-
-
-matplotlib.use('Agg')  # Use non-interactive backend
+# Use a non-interactive backend for saving plots to files
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from typing import Dict, List, Optional, Tuple, Any, Union
 
 # ---------------------------------------------------------------------
 # Local imports
@@ -37,7 +26,7 @@ from typing import Dict, List, Optional, Tuple, Any, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.nbeats import NBeatsNet
-from dl_techniques.losses.smape_loss import SMAPELoss, MASELoss
+from dl_techniques.losses.smape_loss import SMAPELoss
 from dl_techniques.utils.datasets.nbeats import TimeSeriesNormalizer
 
 # ---------------------------------------------------------------------
@@ -48,26 +37,64 @@ np.random.seed(42)
 tf.random.set_seed(42)
 keras.utils.set_random_seed(42)
 
-
 # ---------------------------------------------------------------------
-# Configuration
+# Configuration Classes
 # ---------------------------------------------------------------------
 
 @dataclass
 class NBeatsConfig:
-    """Configuration for large-scale multi-task N-BEATS forecasting."""
-    # General experiment config
+    """Configuration class for large-scale multi-task N-BEATS forecasting experiments.
+
+    This configuration class contains all hyperparameters and settings needed for
+    running comprehensive N-BEATS multi-task forecasting experiments.
+
+    Attributes:
+        result_dir: Base directory for saving experiment results.
+        save_results: Whether to save models and visualizations.
+        experiment_name: Name identifier for the experiment.
+
+        n_samples: Number of time series samples to generate per task.
+        train_ratio: Proportion of data used for training.
+        val_ratio: Proportion of data used for validation.
+        test_ratio: Proportion of data used for testing.
+
+        backcast_length: Length of input sequence (lookback window).
+        forecast_length: Length of forecast horizon.
+        forecast_horizons: List of forecast horizons to evaluate.
+
+        model_types: List of N-BEATS model architectures to test.
+        stack_types: Dictionary mapping model types to their stack configurations.
+        nb_blocks_per_stack: Number of blocks per stack in N-BEATS.
+        thetas_dim: Theta dimensions for each model type.
+        hidden_layer_units: Number of hidden units in each layer.
+        share_weights_in_stack: Whether to share weights within stacks.
+
+        epochs: Maximum number of training epochs.
+        batch_size: Training batch size.
+        early_stopping_patience: Early stopping patience in epochs.
+        learning_rate: Initial learning rate for optimizer.
+        optimizer: Optimizer type to use.
+        primary_loss: Primary loss function for training.
+
+        confidence_levels: Confidence levels for prediction intervals.
+        num_bootstrap_samples: Number of bootstrap samples for uncertainty estimation.
+
+        plot_samples: Number of samples to plot in visualizations.
+        epoch_plot_freq: Frequency of epoch plotting for visualization callback.
+    """
+
+    # General experiment configuration
     result_dir: str = "results"
     save_results: bool = True
-    experiment_name: str = "nbeats_multitask_final"
+    experiment_name: str = "nbeats_multitask"
 
-    # Data config
+    # Data configuration
     n_samples: int = 8000
     train_ratio: float = 0.7
     val_ratio: float = 0.15
     test_ratio: float = 0.15
 
-    # N-BEATS specific config
+    # N-BEATS specific configuration
     backcast_length: int = 96
     forecast_length: int = 24
     forecast_horizons: List[int] = field(default_factory=lambda: [6, 12, 24])
@@ -75,11 +102,9 @@ class NBeatsConfig:
     # Model architectures to test
     model_types: List[str] = field(default_factory=lambda: ["interpretable", "generic", "hybrid"])
 
-    # Model config
+    # Model configuration
     stack_types: Dict[str, List[str]] = field(default_factory=lambda: {
         "interpretable": ["trend", "seasonality"],
-        # [FINAL CONFIG FIX] The length of this list now matches the corresponding thetas_dim list.
-        # It was ["generic", "generic"] (length 2), now it's correctly length 3.
         "generic": ["generic", "generic", "generic"],
         "hybrid": ["trend", "seasonality", "generic"]
     })
@@ -92,25 +117,48 @@ class NBeatsConfig:
     hidden_layer_units: int = 512
     share_weights_in_stack: bool = False
 
-    # Training config
+    # Training configuration
     epochs: int = 150
     batch_size: int = 128
-    early_stopping_patience: int = 20
+    early_stopping_patience: int = 50
     learning_rate: float = 1e-4
     optimizer: str = 'adamw'
     primary_loss: str = "mae"
 
-    # Evaluation config
+    # Evaluation configuration
     confidence_levels: List[float] = field(default_factory=lambda: [0.90])
     num_bootstrap_samples: int = 500
 
-    # Visualization config
+    # Visualization configuration
     plot_samples: int = 3
+    epoch_plot_freq: int = 10  # Plot every 10 epochs to avoid clutter
 
 
 @dataclass
 class ForecastMetrics:
-    """Comprehensive forecasting metrics."""
+    """Comprehensive forecasting metrics container.
+
+    This dataclass stores all relevant metrics for evaluating time series
+    forecasting performance across different tasks and models.
+
+    Attributes:
+        task_name: Name of the forecasting task.
+        task_category: Category of the task (e.g., 'trend', 'seasonal').
+        model_type: Type of N-BEATS model used.
+        horizon: Forecast horizon length.
+        mse: Mean Squared Error.
+        rmse: Root Mean Squared Error.
+        mae: Mean Absolute Error.
+        mape: Mean Absolute Percentage Error.
+        smape: Symmetric Mean Absolute Percentage Error.
+        mase: Mean Absolute Scaled Error.
+        directional_accuracy: Directional accuracy of forecasts.
+        coverage_90: Coverage of 90% prediction intervals.
+        interval_width_90: Width of 90% prediction intervals.
+        forecast_bias: Bias in forecasts.
+        samples_count: Number of samples used for evaluation.
+    """
+
     task_name: str
     task_category: str
     model_type: str
@@ -129,233 +177,1067 @@ class ForecastMetrics:
 
 
 # ---------------------------------------------------------------------
-# Enhanced Time Series Generator
+# Visualization Callback
+# ---------------------------------------------------------------------
+
+class EpochVisualizationCallback(keras.callbacks.Callback):
+    """Keras callback for visualizing model forecasts during training.
+
+    This callback creates forecast visualizations at specified epoch intervals
+    to monitor model learning progress across different time series tasks.
+
+    Args:
+        val_data_dict: Dictionary containing validation data for each task.
+        processor: Data processor instance for transformations.
+        config: Configuration object containing experiment settings.
+        model_type: Type of N-BEATS model being trained.
+        horizon: Forecast horizon length.
+        save_dir: Directory to save visualization plots.
+    """
+
+    def __init__(
+        self,
+        val_data_dict: Dict[str, Tuple[np.ndarray, np.ndarray]],
+        processor: 'NBeatsDataProcessor',
+        config: NBeatsConfig,
+        model_type: str,
+        horizon: int,
+        save_dir: str
+    ) -> None:
+        super().__init__()
+        self.val_data = val_data_dict
+        self.processor = processor
+        self.config = config
+        self.model_type = model_type
+        self.horizon = horizon
+        self.save_dir = save_dir
+        self.plot_tasks: List[str] = []
+        self.plot_indices: Dict[str, int] = {}
+        self.random_state = np.random.RandomState(42)
+
+    def on_train_begin(self, logs: Optional[Dict[str, Any]] = None) -> None:
+        """Initialize callback at the beginning of training.
+
+        Selects diverse tasks for visualization and creates save directory.
+
+        Args:
+            logs: Dictionary containing training logs (unused).
+        """
+        os.makedirs(self.save_dir, exist_ok=True)
+
+        # Select diverse tasks to visualize throughout training
+        diverse_tasks = {
+            'trend': 'linear_trend_strong',
+            'seasonal': 'multi_seasonal',
+            'composite': 'trend_daily_seasonal',
+            'stochastic': 'arma_process'
+        }
+
+        # Filter tasks that exist in validation data
+        self.plot_tasks = [
+            name for name in diverse_tasks.values()
+            if name in self.val_data
+        ]
+
+        # Fallback if specific tasks aren't present
+        if not self.plot_tasks:
+            available_tasks = list(self.val_data.keys())
+            num_tasks = min(4, len(available_tasks))
+            self.plot_tasks = self.random_state.choice(
+                available_tasks, size=num_tasks, replace=False
+            ).tolist()
+
+        # Select one fixed sample index per task for consistency across epochs
+        for task in self.plot_tasks:
+            num_samples = len(self.val_data[task][0])
+            if num_samples > 0:
+                self.plot_indices[task] = self.random_state.randint(0, num_samples)
+
+        logger.info(
+            f"Callback initialized. Visualizing forecasts for tasks: "
+            f"{list(self.plot_indices.keys())}"
+        )
+
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        """Create forecast visualizations at specified epoch intervals.
+
+        Args:
+            epoch: Current epoch number.
+            logs: Dictionary containing training logs (unused).
+        """
+        # Only plot at specified intervals
+        if (epoch + 1) % self.config.epoch_plot_freq != 0:
+            return
+
+        # Create subplot grid for visualizations
+        fig, axes = plt.subplots(2, 2, figsize=(20, 12), squeeze=False)
+        axes = axes.flatten()
+        fig.suptitle(
+            f'Epoch {epoch + 1:03d}: Forecasts for {self.model_type.title()} '
+            f'Model (H={self.horizon})',
+            fontsize=16
+        )
+
+        # Plot forecasts for each selected task
+        for i, task_name in enumerate(self.plot_indices.keys()):
+            ax = axes[i]
+            sample_idx = self.plot_indices[task_name]
+            X_val, y_val = self.val_data[task_name]
+
+            # Get the specific sample for visualization
+            x_sample = X_val[np.newaxis, sample_idx]
+            y_sample_true = y_val[sample_idx]
+
+            # Generate prediction and inverse transform to original scale
+            y_sample_pred_scaled = self.model.predict(x_sample, verbose=0)
+            y_sample_pred_orig = self.processor.inverse_transform_data(
+                task_name, y_sample_pred_scaled
+            )
+            y_sample_true_orig = self.processor.inverse_transform_data(
+                task_name, y_sample_true
+            )
+            x_sample_orig = self.processor.inverse_transform_data(
+                task_name, x_sample[0]
+            )
+
+            # Create time axes for plotting
+            backcast_time = np.arange(-self.config.backcast_length, 0)
+            forecast_time = np.arange(0, self.horizon)
+
+            # Plot historical data, true future, and forecast
+            ax.plot(
+                backcast_time, x_sample_orig.flatten(),
+                color='gray', label='Backcast (Input)'
+            )
+            ax.plot(
+                forecast_time, y_sample_true_orig.flatten(),
+                'o-', color='blue', label='True Future'
+            )
+            ax.plot(
+                forecast_time, y_sample_pred_orig.flatten(),
+                'x--', color='red', label='Forecast'
+            )
+
+            # Format subplot
+            ax.set_title(f'Task: {task_name.replace("_", " ").title()}')
+            ax.legend()
+            ax.grid(True, linestyle='--', alpha=0.5)
+
+        # Hide unused subplots
+        for j in range(len(self.plot_indices), len(axes)):
+            axes[j].set_visible(False)
+
+        # Save visualization
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        save_path = os.path.join(self.save_dir, f"epoch_{epoch + 1:03d}.png")
+        plt.savefig(save_path, dpi=100)
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------
+# Time Series Generator
 # ---------------------------------------------------------------------
 
 class NBeatsTimeSeriesGenerator:
-    """Generator for diverse time series patterns optimized for N-BEATS."""
+    """Generator for diverse time series patterns optimized for N-BEATS.
 
-    def __init__(self, config: NBeatsConfig):
+    This class generates a comprehensive set of time series patterns including
+    trend, seasonal, stochastic, and composite patterns for multi-task learning.
+
+    Args:
+        config: Configuration object containing experiment settings.
+
+    Attributes:
+        config: Configuration object.
+        task_definitions: Dictionary defining all available time series tasks.
+        random_state: Random state for reproducible generation.
+    """
+
+    def __init__(self, config: NBeatsConfig) -> None:
         self.config = config
         self.task_definitions = self._define_tasks()
         self.random_state = np.random.RandomState(42)
-        logger.info(f"Initialized N-BEATS generator with {len(self.task_definitions)} tasks")
+        logger.info(
+            f"Initialized N-BEATS generator with {len(self.task_definitions)} tasks"
+        )
 
     def _define_tasks(self) -> Dict[str, Dict[str, Any]]:
-        """Define comprehensive set of time series tasks for N-BEATS."""
+        """Define comprehensive set of time series tasks for N-BEATS.
+
+        Returns:
+            Dictionary mapping task names to their definitions including
+            category, generator function, and parameters.
+        """
         tasks = {}
+
         # === TREND PATTERNS ===
-        tasks["linear_trend_strong"] = {"category": "trend", "generator": self._generate_trend_series, "params": {"trend_type": "linear", "strength": 0.002, "noise_level": 0.05}}
-        tasks["linear_trend_weak"] = {"category": "trend", "generator": self._generate_trend_series, "params": {"trend_type": "linear", "strength": 0.0005, "noise_level": 0.1}}
-        tasks["exponential_growth"] = {"category": "trend", "generator": self._generate_trend_series, "params": {"trend_type": "exponential", "strength": 0.0001, "noise_level": 0.08}}
-        tasks["polynomial_trend"] = {"category": "trend", "generator": self._generate_trend_series, "params": {"trend_type": "polynomial", "coefficients": [0, 0.001, -2e-7], "noise_level": 0.06}}
-        tasks["logistic_growth"] = {"category": "trend", "generator": self._generate_logistic_growth, "params": {"carrying_capacity": 10, "growth_rate": 0.01, "noise_level": 0.1}}
+        tasks["linear_trend_strong"] = {
+            "category": "trend",
+            "generator": self._generate_trend_series,
+            "params": {
+                "trend_type": "linear",
+                "strength": 0.002,
+                "noise_level": 0.05
+            }
+        }
+        tasks["linear_trend_weak"] = {
+            "category": "trend",
+            "generator": self._generate_trend_series,
+            "params": {
+                "trend_type": "linear",
+                "strength": 0.0005,
+                "noise_level": 0.1
+            }
+        }
+        tasks["exponential_growth"] = {
+            "category": "trend",
+            "generator": self._generate_trend_series,
+            "params": {
+                "trend_type": "exponential",
+                "strength": 0.0001,
+                "noise_level": 0.08
+            }
+        }
+        tasks["polynomial_trend"] = {
+            "category": "trend",
+            "generator": self._generate_trend_series,
+            "params": {
+                "trend_type": "polynomial",
+                "coefficients": [0, 0.001, -2e-7],
+                "noise_level": 0.06
+            }
+        }
+        tasks["logistic_growth"] = {
+            "category": "trend",
+            "generator": self._generate_logistic_growth,
+            "params": {
+                "carrying_capacity": 10,
+                "growth_rate": 0.01,
+                "noise_level": 0.1
+            }
+        }
+
         # === SEASONAL PATTERNS ===
-        tasks["daily_seasonality"] = {"category": "seasonal", "generator": self._generate_seasonal_series, "params": {"periods": [24], "amplitudes": [1.0], "noise_level": 0.08}}
-        tasks["weekly_seasonality"] = {"category": "seasonal", "generator": self._generate_seasonal_series, "params": {"periods": [168], "amplitudes": [1.2], "noise_level": 0.06}}
-        tasks["multi_seasonal"] = {"category": "seasonal", "generator": self._generate_seasonal_series, "params": {"periods": [24, 168], "amplitudes": [1.0, 0.8], "noise_level": 0.1}}
-        tasks["complex_seasonal"] = {"category": "seasonal", "generator": self._generate_seasonal_series, "params": {"periods": [12, 24, 168], "amplitudes": [0.6, 1.0, 0.7], "noise_level": 0.12}}
+        tasks["daily_seasonality"] = {
+            "category": "seasonal",
+            "generator": self._generate_seasonal_series,
+            "params": {
+                "periods": [24],
+                "amplitudes": [1.0],
+                "noise_level": 0.08
+            }
+        }
+        tasks["weekly_seasonality"] = {
+            "category": "seasonal",
+            "generator": self._generate_seasonal_series,
+            "params": {
+                "periods": [168],
+                "amplitudes": [1.2],
+                "noise_level": 0.06
+            }
+        }
+        tasks["multi_seasonal"] = {
+            "category": "seasonal",
+            "generator": self._generate_seasonal_series,
+            "params": {
+                "periods": [24, 168],
+                "amplitudes": [1.0, 0.8],
+                "noise_level": 0.1
+            }
+        }
+        tasks["complex_seasonal"] = {
+            "category": "seasonal",
+            "generator": self._generate_seasonal_series,
+            "params": {
+                "periods": [12, 24, 168],
+                "amplitudes": [0.6, 1.0, 0.7],
+                "noise_level": 0.12
+            }
+        }
+
         # === TREND + SEASONAL COMBINATIONS ===
-        tasks["trend_daily_seasonal"] = {"category": "composite", "generator": self._generate_trend_seasonal, "params": {"trend_type": "linear", "trend_strength": 0.001, "periods": [24], "seasonal_amplitudes": [1.0], "noise_level": 0.08}}
-        tasks["trend_weekly_seasonal"] = {"category": "composite", "generator": self._generate_trend_seasonal, "params": {"trend_type": "linear", "trend_strength": 0.0008, "periods": [168], "seasonal_amplitudes": [1.2], "noise_level": 0.1}}
-        tasks["exp_trend_multi_seasonal"] = {"category": "composite", "generator": self._generate_trend_seasonal, "params": {"trend_type": "exponential", "trend_strength": 0.0001, "periods": [24, 168], "seasonal_amplitudes": [1.0, 0.6], "noise_level": 0.12}}
+        tasks["trend_daily_seasonal"] = {
+            "category": "composite",
+            "generator": self._generate_trend_seasonal,
+            "params": {
+                "trend_type": "linear",
+                "trend_strength": 0.001,
+                "periods": [24],
+                "seasonal_amplitudes": [1.0],
+                "noise_level": 0.08
+            }
+        }
+        tasks["trend_weekly_seasonal"] = {
+            "category": "composite",
+            "generator": self._generate_trend_seasonal,
+            "params": {
+                "trend_type": "linear",
+                "trend_strength": 0.0008,
+                "periods": [168],
+                "seasonal_amplitudes": [1.2],
+                "noise_level": 0.1
+            }
+        }
+        tasks["exp_trend_multi_seasonal"] = {
+            "category": "composite",
+            "generator": self._generate_trend_seasonal,
+            "params": {
+                "trend_type": "exponential",
+                "trend_strength": 0.0001,
+                "periods": [24, 168],
+                "seasonal_amplitudes": [1.0, 0.6],
+                "noise_level": 0.12
+            }
+        }
+
         # === STOCHASTIC PROCESSES ===
-        tasks["random_walk"] = {"category": "stochastic", "generator": self._generate_stochastic_series, "params": {"process_type": "random_walk", "drift": 0.001, "volatility": 0.05}}
-        tasks["ar_process"] = {"category": "stochastic", "generator": self._generate_stochastic_series, "params": {"process_type": "ar", "ar_coeffs": [0.7, -0.2], "noise_std": 0.1}}
-        tasks["ma_process"] = {"category": "stochastic", "generator": self._generate_stochastic_series, "params": {"process_type": "ma", "ma_coeffs": [0.8, 0.3], "noise_std": 0.1}}
-        tasks["arma_process"] = {"category": "stochastic", "generator": self._generate_stochastic_series, "params": {"process_type": "arma", "ar_coeffs": [0.6], "ma_coeffs": [0.4], "noise_std": 0.08}}
-        tasks["mean_reverting"] = {"category": "stochastic", "generator": self._generate_mean_reverting, "params": {"theta": 0.05, "mu": 0, "sigma": 0.2}}
+        tasks["random_walk"] = {
+            "category": "stochastic",
+            "generator": self._generate_stochastic_series,
+            "params": {
+                "process_type": "random_walk",
+                "drift": 0.001,
+                "volatility": 0.05
+            }
+        }
+        tasks["ar_process"] = {
+            "category": "stochastic",
+            "generator": self._generate_stochastic_series,
+            "params": {
+                "process_type": "ar",
+                "ar_coeffs": [0.7, -0.2],
+                "noise_std": 0.1
+            }
+        }
+        tasks["ma_process"] = {
+            "category": "stochastic",
+            "generator": self._generate_stochastic_series,
+            "params": {
+                "process_type": "ma",
+                "ma_coeffs": [0.8, 0.3],
+                "noise_std": 0.1
+            }
+        }
+        tasks["arma_process"] = {
+            "category": "stochastic",
+            "generator": self._generate_stochastic_series,
+            "params": {
+                "process_type": "arma",
+                "ar_coeffs": [0.6],
+                "ma_coeffs": [0.4],
+                "noise_std": 0.08
+            }
+        }
+        tasks["mean_reverting"] = {
+            "category": "stochastic",
+            "generator": self._generate_mean_reverting,
+            "params": {
+                "theta": 0.05,
+                "mu": 0,
+                "sigma": 0.2
+            }
+        }
+
         # === INTERMITTENT PATTERNS ===
-        tasks["intermittent_demand"] = {"category": "intermittent", "generator": self._generate_intermittent_series, "params": {"demand_prob": 0.3, "demand_mean": 2.0, "demand_std": 0.5}}
-        tasks["lumpy_demand"] = {"category": "intermittent", "generator": self._generate_intermittent_series, "params": {"demand_prob": 0.1, "demand_mean": 5.0, "demand_std": 1.0}}
+        tasks["intermittent_demand"] = {
+            "category": "intermittent",
+            "generator": self._generate_intermittent_series,
+            "params": {
+                "demand_prob": 0.3,
+                "demand_mean": 2.0,
+                "demand_std": 0.5
+            }
+        }
+        tasks["lumpy_demand"] = {
+            "category": "intermittent",
+            "generator": self._generate_intermittent_series,
+            "params": {
+                "demand_prob": 0.1,
+                "demand_mean": 5.0,
+                "demand_std": 1.0
+            }
+        }
+
         # === VOLATILITY CLUSTERING ===
-        tasks["garch_low_vol"] = {"category": "volatility", "generator": self._generate_garch_series, "params": {"alpha": 0.1, "beta": 0.8, "omega": 0.01}}
-        tasks["garch_high_vol"] = {"category": "volatility", "generator": self._generate_garch_series, "params": {"alpha": 0.2, "beta": 0.7, "omega": 0.05}}
+        tasks["garch_low_vol"] = {
+            "category": "volatility",
+            "generator": self._generate_garch_series,
+            "params": {
+                "alpha": 0.1,
+                "beta": 0.8,
+                "omega": 0.01
+            }
+        }
+        tasks["garch_high_vol"] = {
+            "category": "volatility",
+            "generator": self._generate_garch_series,
+            "params": {
+                "alpha": 0.2,
+                "beta": 0.7,
+                "omega": 0.05
+            }
+        }
+
         # === REGIME SWITCHING ===
-        tasks["regime_switching"] = {"category": "regime", "generator": self._generate_regime_switching, "params": {"regimes": 2, "switch_prob": 0.02, "regime_params": [(0.001, 0.05), (0.005, 0.15)]}}
+        tasks["regime_switching"] = {
+            "category": "regime",
+            "generator": self._generate_regime_switching,
+            "params": {
+                "regimes": 2,
+                "switch_prob": 0.02,
+                "regime_params": [(0.001, 0.05), (0.005, 0.15)]
+            }
+        }
+
         # === STRUCTURAL BREAKS ===
-        tasks["level_shift"] = {"category": "structural", "generator": self._generate_structural_break, "params": {"break_type": "level", "break_magnitude": 2.0, "break_points": [0.5]}}
-        tasks["trend_change"] = {"category": "structural", "generator": self._generate_structural_break, "params": {"break_type": "trend", "break_magnitude": 0.001, "break_points": [0.4, 0.7]}}
+        tasks["level_shift"] = {
+            "category": "structural",
+            "generator": self._generate_structural_break,
+            "params": {
+                "break_type": "level",
+                "break_magnitude": 2.0,
+                "break_points": [0.5]
+            }
+        }
+        tasks["trend_change"] = {
+            "category": "structural",
+            "generator": self._generate_structural_break,
+            "params": {
+                "break_type": "trend",
+                "break_magnitude": 0.001,
+                "break_points": [0.4, 0.7]
+            }
+        }
+
         # === OUTLIER PATTERNS ===
-        tasks["additive_outliers"] = {"category": "outliers", "generator": self._generate_outlier_series, "params": {"outlier_type": "additive", "outlier_prob": 0.05, "outlier_magnitude": 3.0}}
-        tasks["innovation_outliers"] = {"category": "outliers", "generator": self._generate_outlier_series, "params": {"outlier_type": "innovation", "outlier_prob": 0.03, "outlier_magnitude": 2.0}}
+        tasks["additive_outliers"] = {
+            "category": "outliers",
+            "generator": self._generate_outlier_series,
+            "params": {
+                "outlier_type": "additive",
+                "outlier_prob": 0.05,
+                "outlier_magnitude": 3.0
+            }
+        }
+        tasks["innovation_outliers"] = {
+            "category": "outliers",
+            "generator": self._generate_outlier_series,
+            "params": {
+                "outlier_type": "innovation",
+                "outlier_prob": 0.03,
+                "outlier_magnitude": 2.0
+            }
+        }
+
         # === CHAOTIC PATTERNS ===
-        tasks["henon_map"] = {"category": "chaotic", "generator": self._generate_chaotic_series, "params": {"system": "henon", "a": 1.4, "b": 0.3}}
-        tasks["lorenz_x"] = {"category": "chaotic", "generator": self._generate_chaotic_series, "params": {"system": "lorenz", "component": "x", "sigma": 10, "rho": 28, "beta": 8 / 3}}
+        tasks["henon_map"] = {
+            "category": "chaotic",
+            "generator": self._generate_chaotic_series,
+            "params": {
+                "system": "henon",
+                "a": 1.4,
+                "b": 0.3
+            }
+        }
+        tasks["lorenz_x"] = {
+            "category": "chaotic",
+            "generator": self._generate_chaotic_series,
+            "params": {
+                "system": "lorenz",
+                "component": "x",
+                "sigma": 10,
+                "rho": 28,
+                "beta": 8 / 3
+            }
+        }
+
         return tasks
 
     def get_task_names(self) -> List[str]:
+        """Get list of all available task names.
+
+        Returns:
+            List of task names.
+        """
         return list(self.task_definitions.keys())
 
     def get_task_categories(self) -> List[str]:
+        """Get list of all task categories.
+
+        Returns:
+            List of unique task categories.
+        """
         return list(set(task["category"] for task in self.task_definitions.values()))
 
     def generate_task_data(self, task_name: str) -> np.ndarray:
+        """Generate time series data for a specific task.
+
+        Args:
+            task_name: Name of the task to generate data for.
+
+        Returns:
+            Generated time series data as numpy array.
+
+        Raises:
+            ValueError: If task name is not recognized.
+        """
         if task_name not in self.task_definitions:
             raise ValueError(f"Unknown task: {task_name}")
+
         task_def = self.task_definitions[task_name]
         return task_def["generator"](**task_def.get("params", {}))
 
-    def _generate_trend_series(self, trend_type: str, noise_level: float, **kwargs) -> np.ndarray:
-        t = np.arange(self.config.n_samples)
-        if trend_type == "linear": y = kwargs.get("strength", 0.001) * t
-        elif trend_type == "exponential": y = np.exp(kwargs.get("strength", 0.0001) * t) - 1
-        elif trend_type == "polynomial": y = np.polyval(kwargs.get("coefficients", [0, 0.001, -1e-7])[::-1], t)
-        else: raise ValueError(f"Unknown trend type: {trend_type}")
-        return (y + self.random_state.normal(0, noise_level, len(y))).reshape(-1, 1)
+    def _generate_trend_series(
+        self,
+        trend_type: str,
+        noise_level: float,
+        **kwargs: Any
+    ) -> np.ndarray:
+        """Generate time series with trend patterns.
 
-    def _generate_seasonal_series(self, periods: List[int], amplitudes: List[float], noise_level: float) -> np.ndarray:
+        Args:
+            trend_type: Type of trend ('linear', 'exponential', 'polynomial').
+            noise_level: Standard deviation of additive noise.
+            **kwargs: Additional parameters specific to trend type.
+
+        Returns:
+            Generated time series with trend pattern.
+
+        Raises:
+            ValueError: If trend type is not recognized.
+        """
+        t = np.arange(self.config.n_samples)
+
+        if trend_type == "linear":
+            y = kwargs.get("strength", 0.001) * t
+        elif trend_type == "exponential":
+            y = np.exp(kwargs.get("strength", 0.0001) * t) - 1
+        elif trend_type == "polynomial":
+            coeffs = kwargs.get("coefficients", [0, 0.001, -1e-7])
+            y = np.polyval(coeffs[::-1], t)
+        else:
+            raise ValueError(f"Unknown trend type: {trend_type}")
+
+        # Add noise to the trend
+        noise = self.random_state.normal(0, noise_level, len(y))
+        return (y + noise).reshape(-1, 1)
+
+    def _generate_seasonal_series(
+        self,
+        periods: List[int],
+        amplitudes: List[float],
+        noise_level: float
+    ) -> np.ndarray:
+        """Generate time series with seasonal patterns.
+
+        Args:
+            periods: List of seasonal periods.
+            amplitudes: List of seasonal amplitudes.
+            noise_level: Standard deviation of additive noise.
+
+        Returns:
+            Generated time series with seasonal patterns.
+        """
         t = np.arange(self.config.n_samples)
         y = np.zeros_like(t, dtype=float)
+
+        # Add multiple seasonal components
         for period, amplitude in zip(periods, amplitudes):
             y += amplitude * np.sin(2 * np.pi * t / period)
-        return (y + self.random_state.normal(0, noise_level, len(y))).reshape(-1, 1)
 
-    def _generate_trend_seasonal(self, trend_type: str, trend_strength: float, periods: List[int], seasonal_amplitudes: List[float], noise_level: float, **kwargs) -> np.ndarray:
+        # Add noise
+        noise = self.random_state.normal(0, noise_level, len(y))
+        return (y + noise).reshape(-1, 1)
+
+    def _generate_trend_seasonal(
+        self,
+        trend_type: str,
+        trend_strength: float,
+        periods: List[int],
+        seasonal_amplitudes: List[float],
+        noise_level: float,
+        **kwargs: Any
+    ) -> np.ndarray:
+        """Generate time series combining trend and seasonal patterns.
+
+        Args:
+            trend_type: Type of trend component.
+            trend_strength: Strength of trend component.
+            periods: List of seasonal periods.
+            seasonal_amplitudes: List of seasonal amplitudes.
+            noise_level: Standard deviation of additive noise.
+            **kwargs: Additional parameters for trend generation.
+
+        Returns:
+            Generated time series with combined trend and seasonal patterns.
+        """
         t = np.arange(self.config.n_samples)
-        if trend_type == "linear": trend = trend_strength * t
-        elif trend_type == "exponential": trend = np.exp(trend_strength * t) - 1
-        else: trend = np.zeros_like(t)
-        seasonal = sum(amp * np.sin(2 * np.pi * t / p) for p, amp in zip(periods, seasonal_amplitudes))
-        return (trend + seasonal + self.random_state.normal(0, noise_level, len(t))).reshape(-1, 1)
 
-    def _generate_stochastic_series(self, process_type: str, **kwargs) -> np.ndarray:
+        # Generate trend component
+        if trend_type == "linear":
+            trend = trend_strength * t
+        elif trend_type == "exponential":
+            trend = np.exp(trend_strength * t) - 1
+        else:
+            trend = np.zeros_like(t)
+
+        # Generate seasonal component
+        seasonal = sum(
+            amp * np.sin(2 * np.pi * t / p)
+            for p, amp in zip(periods, seasonal_amplitudes)
+        )
+
+        # Combine components and add noise
+        noise = self.random_state.normal(0, noise_level, len(t))
+        return (trend + seasonal + noise).reshape(-1, 1)
+
+    def _generate_stochastic_series(
+        self,
+        process_type: str,
+        **kwargs: Any
+    ) -> np.ndarray:
+        """Generate stochastic time series (AR, MA, ARMA, random walk).
+
+        Args:
+            process_type: Type of stochastic process.
+            **kwargs: Parameters specific to the process type.
+
+        Returns:
+            Generated stochastic time series.
+        """
         n = self.config.n_samples
+
         if process_type == "random_walk":
-            drift, volatility = kwargs.get("drift", 0), kwargs.get("volatility", 0.02)
-            y = np.cumsum(self.random_state.normal(drift, volatility, n))
+            drift = kwargs.get("drift", 0)
+            volatility = kwargs.get("volatility", 0.02)
+            # Generate random walk with drift
+            increments = self.random_state.normal(drift, volatility, n)
+            y = np.cumsum(increments)
+
         elif process_type == "ar":
-            ar_coeffs, noise_std = kwargs.get("ar_coeffs", [0.7]), kwargs.get("noise_std", 0.1)
+            ar_coeffs = kwargs.get("ar_coeffs", [0.7])
+            noise_std = kwargs.get("noise_std", 0.1)
             p = len(ar_coeffs)
+
+            # Generate AR(p) process
             y = np.zeros(n)
-            for t in range(p, n): y[t] = sum(ar_coeffs[i] * y[t - 1 - i] for i in range(p)) + self.random_state.normal(0, noise_std)
+            for t in range(p, n):
+                ar_sum = sum(ar_coeffs[i] * y[t - 1 - i] for i in range(p))
+                y[t] = ar_sum + self.random_state.normal(0, noise_std)
+
         elif process_type == "ma":
-            ma_coeffs, noise_std = kwargs.get("ma_coeffs", [0.8]), kwargs.get("noise_std", 0.1)
+            ma_coeffs = kwargs.get("ma_coeffs", [0.8])
+            noise_std = kwargs.get("noise_std", 0.1)
             q = len(ma_coeffs)
+
+            # Generate MA(q) process
             noise = self.random_state.normal(0, noise_std, n + q)
             y = np.zeros(n)
-            for t in range(n): y[t] = noise[t + q] + sum(ma_coeffs[i] * noise[t + q - 1 - i] for i in range(q))
+            for t in range(n):
+                ma_sum = sum(ma_coeffs[i] * noise[t + q - 1 - i] for i in range(q))
+                y[t] = noise[t + q] + ma_sum
+
         elif process_type == "arma":
-            ar, ma, std = kwargs.get("ar_coeffs", [0.6]), kwargs.get("ma_coeffs", [0.4]), kwargs.get("noise_std", 0.1)
-            p, q = len(ar), len(ma)
+            ar_coeffs = kwargs.get("ar_coeffs", [0.6])
+            ma_coeffs = kwargs.get("ma_coeffs", [0.4])
+            noise_std = kwargs.get("noise_std", 0.1)
+            p, q = len(ar_coeffs), len(ma_coeffs)
+
+            # Generate ARMA(p,q) process
             y = np.zeros(n)
-            noise = self.random_state.normal(0, std, n)
+            noise = self.random_state.normal(0, noise_std, n)
+
             for t in range(max(p, q), n):
-                ar_sum = sum(ar[i] * y[t - 1 - i] for i in range(p))
-                ma_sum = sum(ma[i] * noise[t - 1 - i] for i in range(q))
+                ar_sum = sum(ar_coeffs[i] * y[t - 1 - i] for i in range(p))
+                ma_sum = sum(ma_coeffs[i] * noise[t - 1 - i] for i in range(q))
                 y[t] = ar_sum + ma_sum + noise[t]
+
         return y.reshape(-1, 1)
 
-    def _generate_mean_reverting(self, theta: float, mu: float, sigma: float) -> np.ndarray:
-        dt = 0.01
+    def _generate_mean_reverting(
+        self,
+        theta: float,
+        mu: float,
+        sigma: float
+    ) -> np.ndarray:
+        """Generate mean-reverting time series (Ornstein-Uhlenbeck process).
+
+        Args:
+            theta: Speed of mean reversion.
+            mu: Long-term mean.
+            sigma: Volatility parameter.
+
+        Returns:
+            Generated mean-reverting time series.
+        """
+        dt = 0.01  # Time step
         y = np.zeros(self.config.n_samples)
-        for t in range(1, self.config.n_samples): y[t] = y[t-1] + theta * (mu - y[t-1]) * dt + sigma * self.random_state.normal(0, np.sqrt(dt))
+
+        # Generate Ornstein-Uhlenbeck process
+        for t in range(1, self.config.n_samples):
+            drift = theta * (mu - y[t-1]) * dt
+            diffusion = sigma * self.random_state.normal(0, np.sqrt(dt))
+            y[t] = y[t-1] + drift + diffusion
+
         return y.reshape(-1, 1)
 
-    def _generate_intermittent_series(self, demand_prob: float, demand_mean: float, demand_std: float) -> np.ndarray:
+    def _generate_intermittent_series(
+        self,
+        demand_prob: float,
+        demand_mean: float,
+        demand_std: float
+    ) -> np.ndarray:
+        """Generate intermittent demand time series.
+
+        Args:
+            demand_prob: Probability of demand occurrence.
+            demand_mean: Mean demand size when demand occurs.
+            demand_std: Standard deviation of demand size.
+
+        Returns:
+            Generated intermittent demand time series.
+        """
+        # Generate binary demand occurrence
         demand_occurs = self.random_state.binomial(1, demand_prob, self.config.n_samples)
-        demand_sizes = self.random_state.normal(demand_mean, demand_std, self.config.n_samples)
-        return (demand_occurs * np.maximum(demand_sizes, 0)).reshape(-1, 1)
 
-    def _generate_garch_series(self, alpha: float, beta: float, omega: float) -> np.ndarray:
+        # Generate demand sizes
+        demand_sizes = self.random_state.normal(demand_mean, demand_std, self.config.n_samples)
+
+        # Combine occurrence and size (ensure non-negative)
+        demand = demand_occurs * np.maximum(demand_sizes, 0)
+        return demand.reshape(-1, 1)
+
+    def _generate_garch_series(
+        self,
+        alpha: float,
+        beta: float,
+        omega: float
+    ) -> np.ndarray:
+        """Generate GARCH time series with volatility clustering.
+
+        Args:
+            alpha: ARCH coefficient.
+            beta: GARCH coefficient.
+            omega: Constant term in variance equation.
+
+        Returns:
+            Generated GARCH time series.
+        """
         n = self.config.n_samples
-        y, sigma2 = np.zeros(n), np.zeros(n)
-        sigma2[0] = omega / (1 - alpha - beta) if (1-alpha-beta) > 0 else omega
+        y = np.zeros(n)
+        sigma2 = np.zeros(n)
+
+        # Initialize variance
+        if (1 - alpha - beta) > 0:
+            sigma2[0] = omega / (1 - alpha - beta)
+        else:
+            sigma2[0] = omega
+
+        # Generate GARCH(1,1) process
         for t in range(1, n):
+            # Update conditional variance
             sigma2[t] = omega + alpha * y[t - 1]**2 + beta * sigma2[t - 1]
+
+            # Generate return
             y[t] = self.random_state.normal(0, np.sqrt(sigma2[t]))
+
         return y.reshape(-1, 1)
 
-    def _generate_regime_switching(self, regimes: int, switch_prob: float, regime_params: List[Tuple[float, float]]) -> np.ndarray:
-        n, y, regime = self.config.n_samples, np.zeros(self.config.n_samples), 0
+    def _generate_regime_switching(
+        self,
+        regimes: int,
+        switch_prob: float,
+        regime_params: List[Tuple[float, float]]
+    ) -> np.ndarray:
+        """Generate regime-switching time series.
+
+        Args:
+            regimes: Number of regimes.
+            switch_prob: Probability of regime switch at each time step.
+            regime_params: List of (drift, volatility) tuples for each regime.
+
+        Returns:
+            Generated regime-switching time series.
+        """
+        n = self.config.n_samples
+        y = np.zeros(n)
+        regime = 0
+
         for t in range(1, n):
-            if self.random_state.rand() < switch_prob: regime = (regime + 1) % regimes
+            # Check for regime switch
+            if self.random_state.rand() < switch_prob:
+                regime = (regime + 1) % regimes
+
+            # Generate observation based on current regime
             drift, vol = regime_params[regime]
             y[t] = y[t-1] + drift + self.random_state.normal(0, vol)
+
         return y.reshape(-1, 1)
 
-    def _generate_structural_break(self, break_type: str, break_magnitude: float, break_points: List[float]) -> np.ndarray:
+    def _generate_structural_break(
+        self,
+        break_type: str,
+        break_magnitude: float,
+        break_points: List[float]
+    ) -> np.ndarray:
+        """Generate time series with structural breaks.
+
+        Args:
+            break_type: Type of structural break ('level' or 'trend').
+            break_magnitude: Magnitude of the structural break.
+            break_points: List of break points as fractions of series length.
+
+        Returns:
+            Generated time series with structural breaks.
+        """
         n = self.config.n_samples
+
+        # Start with basic trend and noise
         y = 0.0005 * np.arange(n) + self.random_state.normal(0, 0.1, n)
+
+        # Apply structural breaks
         for bp in break_points:
             idx = int(bp * n)
-            if break_type == "level": y[idx:] += break_magnitude
-            elif break_type == "trend": y[idx:] += break_magnitude * np.arange(n - idx)
+            if break_type == "level":
+                # Level shift
+                y[idx:] += break_magnitude
+            elif break_type == "trend":
+                # Trend change
+                y[idx:] += break_magnitude * np.arange(n - idx)
+
         return y.reshape(-1, 1)
 
-    def _generate_outlier_series(self, outlier_type: str, outlier_prob: float, outlier_magnitude: float) -> np.ndarray:
+    def _generate_outlier_series(
+        self,
+        outlier_type: str,
+        outlier_prob: float,
+        outlier_magnitude: float
+    ) -> np.ndarray:
+        """Generate time series with outliers.
+
+        Args:
+            outlier_type: Type of outliers ('additive' or 'innovation').
+            outlier_prob: Probability of outlier occurrence.
+            outlier_magnitude: Magnitude of outliers.
+
+        Returns:
+            Generated time series with outliers.
+        """
         n = self.config.n_samples
         t = np.arange(n)
+
+        # Generate base series with trend and seasonality
         y = 0.001 * t + np.sin(2 * np.pi * t / 24) + self.random_state.normal(0, 0.1, n)
-        locations = self.random_state.binomial(1, outlier_prob, n).astype(bool)
-        magnitudes = self.random_state.normal(0, outlier_magnitude, n)
-        if outlier_type == "additive": y[locations] += magnitudes[locations]
+
+        # Add outliers
+        outlier_locations = self.random_state.binomial(1, outlier_prob, n).astype(bool)
+        outlier_magnitudes = self.random_state.normal(0, outlier_magnitude, n)
+
+        if outlier_type == "additive":
+            y[outlier_locations] += outlier_magnitudes[outlier_locations]
+
         return y.reshape(-1, 1)
 
-    def _generate_chaotic_series(self, system: str, **kwargs) -> np.ndarray:
-        n = self.config.n_samples
-        if system == "henon":
-            a, b, x, y, traj = kwargs.get("a", 1.4), kwargs.get("b", 0.3), 0.1, 0.1, []
-            for _ in range(n + 100):
-                x_new, y_new = 1 - a * x**2 + y, b * x
-                x, y = x_new, y_new
-                if _ >= 100: traj.append(x)
-            data = np.array(traj)
-        elif system == "lorenz":
-            s, r, b, dt = kwargs.get("sigma", 10), kwargs.get("rho", 28), kwargs.get("beta", 8/3), 0.01
-            x, y, z, traj = 1.0, 1.0, 1.0, []
-            for _ in range(n * 10 + 1000):
-                dx, dy, dz = s*(y-x), x*(r-z)-y, x*y-b*z
-                x, y, z = x+dx*dt, y+dy*dt, z+dz*dt
-                if _ >= 1000 and _ % 10 == 0: traj.append(x)
-            data = np.array(traj)
-        return (data + self.random_state.normal(0, 0.01, len(data))).reshape(-1, 1)
+    def _generate_chaotic_series(
+        self,
+        system: str,
+        **kwargs: Any
+    ) -> np.ndarray:
+        """Generate chaotic time series (Henon map, Lorenz system).
 
-    def _generate_logistic_growth(self, carrying_capacity: float, growth_rate: float, noise_level: float) -> np.ndarray:
+        Args:
+            system: Type of chaotic system ('henon' or 'lorenz').
+            **kwargs: Parameters specific to the chaotic system.
+
+        Returns:
+            Generated chaotic time series.
+        """
+        n = self.config.n_samples
+
+        if system == "henon":
+            # Henon map parameters
+            a = kwargs.get("a", 1.4)
+            b = kwargs.get("b", 0.3)
+
+            # Initialize
+            x, y = 0.1, 0.1
+            trajectory = []
+
+            # Generate trajectory (with burn-in period)
+            for i in range(n + 100):
+                x_new = 1 - a * x**2 + y
+                y_new = b * x
+                x, y = x_new, y_new
+
+                # Skip burn-in period
+                if i >= 100:
+                    trajectory.append(x)
+
+            data = np.array(trajectory)
+
+        elif system == "lorenz":
+            # Lorenz system parameters
+            sigma = kwargs.get("sigma", 10)
+            rho = kwargs.get("rho", 28)
+            beta = kwargs.get("beta", 8/3)
+            dt = 0.01
+
+            # Initialize
+            x, y, z = 1.0, 1.0, 1.0
+            trajectory = []
+
+            # Generate trajectory (with burn-in and subsampling)
+            for i in range(n * 10 + 1000):
+                # Lorenz equations
+                dx = sigma * (y - x)
+                dy = x * (rho - z) - y
+                dz = x * y - beta * z
+
+                # Update state
+                x += dx * dt
+                y += dy * dt
+                z += dz * dt
+
+                # Skip burn-in and subsample
+                if i >= 1000 and i % 10 == 0:
+                    trajectory.append(x)
+
+            data = np.array(trajectory)
+
+        # Add small amount of noise to make it more realistic
+        noise = self.random_state.normal(0, 0.01, len(data))
+        return (data + noise).reshape(-1, 1)
+
+    def _generate_logistic_growth(
+        self,
+        carrying_capacity: float,
+        growth_rate: float,
+        noise_level: float
+    ) -> np.ndarray:
+        """Generate logistic growth time series.
+
+        Args:
+            carrying_capacity: Maximum value (K parameter).
+            growth_rate: Growth rate parameter.
+            noise_level: Standard deviation of additive noise.
+
+        Returns:
+            Generated logistic growth time series.
+        """
         t = np.arange(self.config.n_samples)
+
+        # Logistic growth equation
         y = carrying_capacity / (1 + np.exp(-growth_rate * (t - self.config.n_samples / 2)))
-        return (y + self.random_state.normal(0, noise_level, len(y))).reshape(-1, 1)
+
+        # Add noise
+        noise = self.random_state.normal(0, noise_level, len(y))
+        return (y + noise).reshape(-1, 1)
 
 
 # ---------------------------------------------------------------------
-# CORRECTED Data Processing
+# Data Processing
 # ---------------------------------------------------------------------
 
 class NBeatsDataProcessor:
-    """Corrected data processor for N-BEATS with consistent scaling."""
+    """Data processor for N-BEATS with consistent scaling across tasks.
 
-    def __init__(self, config: NBeatsConfig):
+    This class handles data preprocessing including normalization and
+    sequence creation for N-BEATS training.
+
+    Args:
+        config: Configuration object containing experiment settings.
+
+    Attributes:
+        config: Configuration object.
+        scalers: Dictionary mapping task names to their fitted scalers.
+    """
+
+    def __init__(self, config: NBeatsConfig) -> None:
         self.config = config
         self.scalers: Dict[str, TimeSeriesNormalizer] = {}
 
-    def create_sequences(self, data: np.ndarray, backcast_length: int, forecast_length: int) -> Tuple[np.ndarray, np.ndarray]:
-        """Create N-BEATS sequences (backcast, forecast)."""
+    def create_sequences(
+        self,
+        data: np.ndarray,
+        backcast_length: int,
+        forecast_length: int
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Create N-BEATS sequences (backcast, forecast) from time series data.
+
+        Args:
+            data: Time series data.
+            backcast_length: Length of input sequence.
+            forecast_length: Length of forecast sequence.
+
+        Returns:
+            Tuple of (backcast_sequences, forecast_sequences).
+        """
         X, y = [], []
+
+        # Create sliding window sequences
         for i in range(len(data) - backcast_length - forecast_length + 1):
-            X.append(data[i : i + backcast_length])
-            y.append(data[i + backcast_length : i + backcast_length + forecast_length])
+            # Extract backcast (input) and forecast (target) windows
+            backcast = data[i : i + backcast_length]
+            forecast = data[i + backcast_length : i + backcast_length + forecast_length]
+
+            X.append(backcast)
+            y.append(forecast)
+
         return np.array(X), np.array(y)
 
-    def fit_scalers(self, task_data: Dict[str, np.ndarray]):
-        """Fit scalers using a consistent 'minmax' strategy for stable multi-task training."""
+    def fit_scalers(self, task_data: Dict[str, np.ndarray]) -> None:
+        """Fit normalizers using consistent 'minmax' strategy for stable multi-task training.
+
+        Args:
+            task_data: Dictionary mapping task names to their time series data.
+        """
         for task_name, data in task_data.items():
+            # Use minmax normalization for stability across diverse tasks
             scaler = TimeSeriesNormalizer(method='minmax', feature_range=(0, 1))
+
+            # Fit on training portion only
             train_size = int(self.config.train_ratio * len(data))
             train_data = data[:train_size]
+
             scaler.fit(train_data)
             self.scalers[task_name] = scaler
+
             logger.info(f"Fitted minmax scaler for {task_name}")
 
     def transform_data(self, task_name: str, data: np.ndarray) -> np.ndarray:
-        """Transform data using the fitted scaler for a specific task."""
+        """Transform data using the fitted scaler for a specific task.
+
+        Args:
+            task_name: Name of the task.
+            data: Data to transform.
+
+        Returns:
+            Transformed data.
+
+        Raises:
+            ValueError: If scaler not fitted for the task.
+        """
         if task_name not in self.scalers:
             raise ValueError(f"Scaler not fitted for task: {task_name}")
+
         return self.scalers[task_name].transform(data)
 
     def inverse_transform_data(self, task_name: str, scaled_data: np.ndarray) -> np.ndarray:
-        """Inverse transform data using the fitted scaler."""
+        """Inverse transform data using the fitted scaler.
+
+        Args:
+            task_name: Name of the task.
+            scaled_data: Scaled data to inverse transform.
+
+        Returns:
+            Data in original scale.
+
+        Raises:
+            ValueError: If scaler not fitted for the task.
+        """
         if task_name not in self.scalers:
             raise ValueError(f"Scaler not fitted for task: {task_name}")
+
         return self.scalers[task_name].inverse_transform(scaled_data)
 
 
@@ -364,285 +1246,843 @@ class NBeatsDataProcessor:
 # ---------------------------------------------------------------------
 
 class NBeatsTrainer:
-    """Comprehensive trainer for N-BEATS multi-task forecasting."""
+    """Comprehensive trainer for N-BEATS multi-task forecasting.
 
-    def __init__(self, config: NBeatsConfig):
+    This class orchestrates the entire N-BEATS training process including
+    data preparation, model training, evaluation, and visualization.
+
+    Args:
+        config: Configuration object containing experiment settings.
+
+    Attributes:
+        config: Configuration object.
+        generator: Time series generator instance.
+        processor: Data processor instance.
+        task_names: List of all available task names.
+        task_categories: List of all task categories.
+        raw_train_data: Dictionary storing raw training data for each task.
+        random_state: Random state for reproducible experiments.
+    """
+
+    def __init__(self, config: NBeatsConfig) -> None:
         self.config = config
         self.generator = NBeatsTimeSeriesGenerator(config)
         self.processor = NBeatsDataProcessor(config)
         self.task_names = self.generator.get_task_names()
         self.task_categories = self.generator.get_task_categories()
-        self.raw_train_data = {}
+        self.raw_train_data: Dict[str, np.ndarray] = {}
         self.random_state = np.random.RandomState(42)
 
-        logger.info(f"Initialized N-BEATS trainer with {len(self.task_names)} tasks across {len(self.task_categories)} categories")
+        logger.info(
+            f"Initialized N-BEATS trainer with {len(self.task_names)} tasks "
+            f"across {len(self.task_categories)} categories"
+        )
 
     def prepare_data(self) -> Dict[int, Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]]]:
-        """Prepare multi-task data for all horizons."""
-        logger.info("Preparing N-BEATS multi-task data...")
-        raw_data = {name: self.generator.generate_task_data(name) for name in self.task_names}
+        """Prepare multi-task data for all forecast horizons.
 
+        Returns:
+            Nested dictionary with structure:
+            {horizon: {task_name: {split: (X, y)}}}
+        """
+        logger.info("Preparing N-BEATS multi-task data...")
+
+        # Generate raw data for all tasks
+        raw_data = {
+            name: self.generator.generate_task_data(name)
+            for name in self.task_names
+        }
+
+        # Store raw training data for MASE calculation
         for name, data in raw_data.items():
             train_size = int(self.config.train_ratio * len(data))
             self.raw_train_data[name] = data[:train_size]
 
+        # Fit scalers on raw data
         self.processor.fit_scalers(raw_data)
 
+        # Prepare data for all horizons
         prepared_data = {}
         for horizon in self.config.forecast_horizons:
             prepared_data[horizon] = {}
+
             for task_name, data in raw_data.items():
+                # Split data into train/validation/test
                 train_size = int(self.config.train_ratio * len(data))
                 val_size = int(self.config.val_ratio * len(data))
 
-                train_data, val_data, test_data = np.split(data, [train_size, train_size + val_size])
+                train_data, val_data, test_data = np.split(
+                    data, [train_size, train_size + val_size]
+                )
 
+                # Transform data using fitted scalers
                 train_scaled = self.processor.transform_data(task_name, train_data)
                 val_scaled = self.processor.transform_data(task_name, val_data)
                 test_scaled = self.processor.transform_data(task_name, test_data)
 
-                train_X, train_y = self.processor.create_sequences(train_scaled, self.config.backcast_length, horizon)
-                val_X, val_y = self.processor.create_sequences(val_scaled, self.config.backcast_length, horizon)
-                test_X, test_y = self.processor.create_sequences(test_scaled, self.config.backcast_length, horizon)
+                # Create sequences for current horizon
+                train_X, train_y = self.processor.create_sequences(
+                    train_scaled, self.config.backcast_length, horizon
+                )
+                val_X, val_y = self.processor.create_sequences(
+                    val_scaled, self.config.backcast_length, horizon
+                )
+                test_X, test_y = self.processor.create_sequences(
+                    test_scaled, self.config.backcast_length, horizon
+                )
 
+                # Store prepared data
                 prepared_data[horizon][task_name] = {
-                    "train": (train_X, train_y), "val": (val_X, val_y), "test": (test_X, test_y)
+                    "train": (train_X, train_y),
+                    "val": (val_X, val_y),
+                    "test": (test_X, test_y)
                 }
+
         return prepared_data
 
     def create_model(self, model_type: str, forecast_length: int) -> NBeatsNet:
-        """Create N-BEATS model based on type."""
+        """Create N-BEATS model based on specified type.
+
+        Args:
+            model_type: Type of N-BEATS model ('interpretable', 'generic', 'hybrid').
+            forecast_length: Length of forecast horizon.
+
+        Returns:
+            Configured N-BEATS model instance.
+        """
         model = NBeatsNet(
-            backcast_length=self.config.backcast_length, forecast_length=forecast_length,
+            backcast_length=self.config.backcast_length,
+            forecast_length=forecast_length,
             stack_types=self.config.stack_types[model_type],
             nb_blocks_per_stack=self.config.nb_blocks_per_stack,
             thetas_dim=self.config.thetas_dim[model_type],
             hidden_layer_units=self.config.hidden_layer_units,
             share_weights_in_stack=self.config.share_weights_in_stack,
-            input_dim=1, output_dim=1
+            input_dim=1,
+            output_dim=1
         )
         return model
 
-    def train_model(self, model: NBeatsNet, train_data: Dict[str, Tuple[np.ndarray, np.ndarray]], val_data: Dict[str, Tuple[np.ndarray, np.ndarray]], horizon: int, model_type: str) -> Dict[str, Any]:
-        """Train N-BEATS model on combined multi-task data."""
-        X_train = np.concatenate([d[0] for d in train_data.values() if len(d[0]) > 0], axis=0)
-        y_train = np.concatenate([d[1] for d in train_data.values() if len(d[1]) > 0], axis=0)
-        X_val = np.concatenate([d[0] for d in val_data.values() if len(d[0]) > 0], axis=0)
-        y_val = np.concatenate([d[1] for d in val_data.values() if len(d[1]) > 0], axis=0)
+    def train_model(
+        self,
+        model: NBeatsNet,
+        train_data: Dict[str, Tuple[np.ndarray, np.ndarray]],
+        val_data: Dict[str, Tuple[np.ndarray, np.ndarray]],
+        horizon: int,
+        model_type: str,
+        exp_dir: str
+    ) -> Dict[str, Any]:
+        """Train N-BEATS model on combined multi-task data.
 
+        Args:
+            model: N-BEATS model instance to train.
+            train_data: Training data for all tasks.
+            val_data: Validation data for all tasks.
+            horizon: Forecast horizon length.
+            model_type: Type of N-BEATS model.
+            exp_dir: Experiment directory for saving results.
+
+        Returns:
+            Dictionary containing training history and trained model.
+        """
+        # Combine data from all tasks
+        X_train = np.concatenate([
+            d[0] for d in train_data.values() if len(d[0]) > 0
+        ], axis=0)
+        y_train = np.concatenate([
+            d[1] for d in train_data.values() if len(d[1]) > 0
+        ], axis=0)
+        X_val = np.concatenate([
+            d[0] for d in val_data.values() if len(d[0]) > 0
+        ], axis=0)
+        y_val = np.concatenate([
+            d[1] for d in val_data.values() if len(d[1]) > 0
+        ], axis=0)
+
+        # Shuffle training data for better learning
         p_train = self.random_state.permutation(len(X_train))
         X_train, y_train = X_train[p_train], y_train[p_train]
 
-        logger.info(f"Combined training data: {X_train.shape}, validation: {X_val.shape}")
+        logger.info(
+            f"Combined training data: {X_train.shape}, "
+            f"validation: {X_val.shape}"
+        )
 
-        if self.config.primary_loss == "smape": loss_fn = SMAPELoss()
-        else: loss_fn = self.config.primary_loss
+        # Configure loss function
+        if self.config.primary_loss == "smape":
+            loss_fn = SMAPELoss()
+        else:
+            loss_fn = self.config.primary_loss
 
+        # Configure optimizer
         optimizer = keras.optimizers.get({
             "class_name": self.config.optimizer,
-            "config": {"learning_rate": self.config.learning_rate, "clipnorm": 1.0}
+            "config": {
+                "learning_rate": self.config.learning_rate,
+                "clipnorm": 1.0  # Gradient clipping for stability
+            }
         })
 
-        model.compile(optimizer=optimizer, loss=loss_fn, metrics=['mae', 'mse'])
+        # Compile model
+        model.compile(
+            optimizer=optimizer,
+            loss=loss_fn,
+            metrics=['mae', 'mse']
+        )
+
+        # Set up callbacks
+        epoch_plot_dir = os.path.join(
+            exp_dir, 'visuals', 'epoch_plots', f'{model_type}_h{horizon}'
+        )
 
         callbacks = [
-            keras.callbacks.EarlyStopping(monitor='val_loss', patience=self.config.early_stopping_patience, restore_best_weights=True),
-            keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=10, min_lr=1e-7),
-            keras.callbacks.TerminateOnNaN()
+            keras.callbacks.EarlyStopping(
+                monitor='val_loss',
+                patience=self.config.early_stopping_patience,
+                restore_best_weights=True
+            ),
+            keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.5,
+                patience=10,
+                min_lr=1e-7
+            ),
+            keras.callbacks.TerminateOnNaN(),
+            EpochVisualizationCallback(
+                val_data, self.processor, self.config,
+                model_type, horizon, epoch_plot_dir
+            )
         ]
 
+        # Train model
         history = model.fit(
-            X_train, y_train, validation_data=(X_val, y_val),
-            epochs=self.config.epochs, batch_size=self.config.batch_size,
-            callbacks=callbacks, verbose=2
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            epochs=self.config.epochs,
+            batch_size=self.config.batch_size,
+            callbacks=callbacks,
+            verbose=2
         )
+
         return {"history": history.history, "model": model}
 
-    def evaluate_model(self, model: NBeatsNet, test_data: Dict[str, Tuple[np.ndarray, np.ndarray]], horizon: int, model_type: str) -> Dict[str, ForecastMetrics]:
-        """Comprehensive evaluation of N-BEATS model."""
-        task_metrics = {}
-        for task_name, (X_test, y_test) in test_data.items():
-            if len(X_test) == 0: continue
+    def evaluate_model(
+        self,
+        model: NBeatsNet,
+        test_data: Dict[str, Tuple[np.ndarray, np.ndarray]],
+        horizon: int,
+        model_type: str
+    ) -> Dict[str, ForecastMetrics]:
+        """Comprehensive evaluation of N-BEATS model.
 
+        Args:
+            model: Trained N-BEATS model.
+            test_data: Test data for all tasks.
+            horizon: Forecast horizon length.
+            model_type: Type of N-BEATS model.
+
+        Returns:
+            Dictionary mapping task names to their forecast metrics.
+        """
+        task_metrics = {}
+
+        for task_name, (X_test, y_test) in test_data.items():
+            if len(X_test) == 0:
+                continue
+
+            # Generate predictions
             predictions = model.predict(X_test, verbose=0)
+
+            # Transform back to original scale
             pred_orig = self.processor.inverse_transform_data(task_name, predictions)
             y_test_orig = self.processor.inverse_transform_data(task_name, y_test)
 
+            # Get training series for MASE calculation
             raw_train_series = self.raw_train_data[task_name]
 
+            # Calculate comprehensive metrics
             metrics = self._calculate_forecast_metrics(
-                y_test_orig, pred_orig, raw_train_series, task_name, model_type, horizon
+                y_test_orig, pred_orig, raw_train_series,
+                task_name, model_type, horizon
             )
+
             task_metrics[task_name] = metrics
-            logger.info(f"Task {task_name}: RMSE={metrics.rmse:.4f}, MASE={metrics.mase:.4f}, Coverage_90={metrics.coverage_90:.4f}")
+
+            logger.info(
+                f"Task {task_name}: RMSE={metrics.rmse:.4f}, "
+                f"MASE={metrics.mase:.4f}, Coverage_90={metrics.coverage_90:.4f}"
+            )
+
         return task_metrics
 
-    def _calculate_forecast_metrics(self, y_true: np.ndarray, y_pred: np.ndarray, train_series: np.ndarray, task_name: str, model_type: str, horizon: int) -> ForecastMetrics:
-        """Calculate comprehensive forecasting metrics with corrected MASE and intervals."""
-        y_true_flat, y_pred_flat = y_true.flatten(), y_pred.flatten()
+    def _calculate_forecast_metrics(
+        self,
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        train_series: np.ndarray,
+        task_name: str,
+        model_type: str,
+        horizon: int
+    ) -> ForecastMetrics:
+        """Calculate comprehensive forecasting metrics.
+
+        Args:
+            y_true: True values.
+            y_pred: Predicted values.
+            train_series: Training series for MASE calculation.
+            task_name: Name of the task.
+            model_type: Type of model.
+            horizon: Forecast horizon.
+
+        Returns:
+            ForecastMetrics object containing all calculated metrics.
+        """
+        # Flatten arrays for metric calculation
+        y_true_flat = y_true.flatten()
+        y_pred_flat = y_pred.flatten()
         errors = y_true_flat - y_pred_flat
 
+        # Basic metrics
         mse = np.mean(errors**2)
         mae = np.mean(np.abs(errors))
 
+        # MAPE (avoiding division by zero)
         non_zero_mask = np.abs(y_true_flat) > 1e-8
-        mape = np.mean(np.abs(errors[non_zero_mask] / y_true_flat[non_zero_mask])) * 100 if np.any(non_zero_mask) else 0.0
+        if np.any(non_zero_mask):
+            mape = np.mean(np.abs(errors[non_zero_mask] / y_true_flat[non_zero_mask])) * 100
+        else:
+            mape = 0.0
 
+        # SMAPE
         smape_denom = (np.abs(y_true_flat) + np.abs(y_pred_flat))
         smape = np.mean(2 * np.abs(errors) / (smape_denom + 1e-8)) * 100
 
+        # MASE (Mean Absolute Scaled Error)
         if len(train_series) > 1:
             mae_naive_train = np.mean(np.abs(np.diff(train_series.flatten())))
             mase = mae / (mae_naive_train + 1e-8)
         else:
             mase = np.inf
 
-        y_true_diff = np.diff(y_true.reshape(-1, horizon), axis=1)
-        y_pred_diff = np.diff(y_pred.reshape(-1, horizon), axis=1)
-        directional_accuracy = np.mean(np.sign(y_true_diff) == np.sign(y_pred_diff)) if y_true_diff.size > 0 else 0.0
+        # Directional accuracy
+        y_true_reshaped = y_true.reshape(-1, horizon)
+        y_pred_reshaped = y_pred.reshape(-1, horizon)
 
+        if y_true_reshaped.shape[1] > 1:
+            y_true_diff = np.diff(y_true_reshaped, axis=1)
+            y_pred_diff = np.diff(y_pred_reshaped, axis=1)
+            directional_accuracy = np.mean(np.sign(y_true_diff) == np.sign(y_pred_diff))
+        else:
+            directional_accuracy = 0.0
+
+        # Prediction intervals using empirical residuals
         forecast_residuals = (y_pred - y_true).flatten()
-
         q_lower = np.quantile(forecast_residuals, q=0.05)
         q_upper = np.quantile(forecast_residuals, q=0.95)
+
+        # Interval width
         interval_width_90 = np.abs(q_upper - q_lower)
 
+        # Coverage calculation
         lower_bound = y_pred_flat + q_lower
         upper_bound = y_pred_flat + q_upper
-        coverage_90 = np.mean((y_true_flat >= lower_bound) & (y_true_flat <= upper_bound))
-
-        return ForecastMetrics(
-            task_name=task_name, task_category=self.generator.task_definitions[task_name]["category"],
-            model_type=model_type, horizon=horizon, mse=mse, rmse=np.sqrt(mse), mae=mae, mape=mape,
-            smape=smape, mase=mase, directional_accuracy=directional_accuracy,
-            coverage_90=coverage_90, interval_width_90=interval_width_90,
-            forecast_bias=np.mean(errors), samples_count=len(y_true_flat)
+        coverage_90 = np.mean(
+            (y_true_flat >= lower_bound) & (y_true_flat <= upper_bound)
         )
 
-    def create_visualizations(self, models, test_data, save_dir):
-        """Create visualizations of forecast vs. actuals."""
-        logger.info("Creating N-BEATS visualizations...")
-        os.makedirs(save_dir, exist_ok=True)
+        return ForecastMetrics(
+            task_name=task_name,
+            task_category=self.generator.task_definitions[task_name]["category"],
+            model_type=model_type,
+            horizon=horizon,
+            mse=mse,
+            rmse=np.sqrt(mse),
+            mae=mae,
+            mape=mape,
+            smape=smape,
+            mase=mase,
+            directional_accuracy=directional_accuracy,
+            coverage_90=coverage_90,
+            interval_width_90=interval_width_90,
+            forecast_bias=np.mean(errors),
+            samples_count=len(y_true_flat)
+        )
+
+    def plot_final_forecasts(
+        self,
+        models: Dict[int, Dict[str, NBeatsNet]],
+        test_data: Dict[int, Dict[str, Tuple[np.ndarray, np.ndarray]]],
+        save_dir: str
+    ) -> None:
+        """Create visualizations of forecast vs. actuals with prediction intervals.
+
+        Args:
+            models: Dictionary of trained models for each horizon and type.
+            test_data: Test data for all tasks and horizons.
+            save_dir: Directory to save visualizations.
+        """
+        logger.info("Creating final N-BEATS forecast visualizations with prediction intervals...")
+
+        plot_dir = os.path.join(save_dir, 'final_forecasts')
+        os.makedirs(plot_dir, exist_ok=True)
 
         for category in self.task_categories:
-            category_tasks = [name for name in self.task_names if self.generator.task_definitions[name]["category"] == category]
+            # Get tasks for this category
+            category_tasks = [
+                name for name in self.task_names
+                if self.generator.task_definitions[name]["category"] == category
+            ]
 
             for horizon in self.config.forecast_horizons:
-                plot_tasks = self.random_state.choice(category_tasks, size=min(4, len(category_tasks)), replace=False)
-                if not plot_tasks.any(): continue
+                # Select tasks to plot
+                num_tasks = min(4, len(category_tasks))
+                if num_tasks == 0:
+                    continue
 
+                plot_tasks = self.random_state.choice(
+                    category_tasks, size=num_tasks, replace=False
+                )
+
+                # Create subplot grid
                 fig, axes = plt.subplots(2, 2, figsize=(20, 12), squeeze=False)
                 axes = axes.flatten()
-                fig.suptitle(f'N-BEATS Forecasting - {category.title()} (Horizon {horizon})', fontsize=16)
+                fig.suptitle(
+                    f'Final Forecasts - {category.title()} (Horizon {horizon})',
+                    fontsize=16
+                )
 
                 for i, task_name in enumerate(plot_tasks):
                     ax = axes[i]
+
+                    # Check if test data exists for this task
+                    if task_name not in test_data[horizon]:
+                        ax.set_title(f'{task_name.replace("_", " ").title()} (No test data)')
+                        continue
+
                     X_test, y_test = test_data[horizon][task_name]
                     if len(X_test) == 0:
                         ax.set_title(f'{task_name.replace("_", " ").title()} (No test data)')
                         continue
 
+                    # Transform test data back to original scale
                     y_test_orig = self.processor.inverse_transform_data(task_name, y_test)
 
+                    # Select random sample for visualization
                     sample_idx = self.random_state.choice(len(X_test))
 
-                    time_forecast = np.arange(self.config.backcast_length, self.config.backcast_length + horizon)
-                    ax.plot(time_forecast, y_test_orig[sample_idx].flatten(), 'o-', color='blue', label='True')
+                    # Create time axes
+                    time_backcast = np.arange(-self.config.backcast_length, 0)
+                    time_forecast = np.arange(
+                        self.config.backcast_length,
+                        self.config.backcast_length + horizon
+                    )
 
+                    # Plot true values
+                    ax.plot(
+                        time_forecast, y_test_orig[sample_idx].flatten(),
+                        'o-', color='blue', label='True'
+                    )
+
+                    # Plot predictions for each model type
                     colors = {'interpretable': 'red', 'generic': 'green', 'hybrid': 'purple'}
-                    for model_type, model in models[horizon].items():
-                        pred = model.predict(X_test[np.newaxis, sample_idx], verbose=0)
-                        pred_orig = self.processor.inverse_transform_data(task_name, pred)
-                        ax.plot(time_forecast, pred_orig.flatten(), '--', color=colors.get(model_type, 'gray'), label=f'{model_type.title()}')
 
+                    for model_type, model in models[horizon].items():
+                        # Get prediction intervals based on all test residuals
+                        all_preds_scaled = model.predict(X_test, verbose=0)
+                        residuals = y_test - all_preds_scaled
+                        q_lower = np.quantile(residuals.flatten(), q=0.05)
+                        q_upper = np.quantile(residuals.flatten(), q=0.95)
+
+                        # Get prediction for selected sample
+                        pred_sample_scaled = all_preds_scaled[sample_idx]
+                        pred_sample_orig = self.processor.inverse_transform_data(
+                            task_name, pred_sample_scaled
+                        )
+
+                        # Calculate prediction intervals
+                        lower_bound = self.processor.inverse_transform_data(
+                            task_name, pred_sample_scaled + q_lower
+                        )
+                        upper_bound = self.processor.inverse_transform_data(
+                            task_name, pred_sample_scaled + q_upper
+                        )
+
+                        # Plot forecast and prediction intervals
+                        color = colors.get(model_type, 'gray')
+                        ax.plot(
+                            time_forecast, pred_sample_orig.flatten(),
+                            '--', color=color,
+                            label=f'{model_type.title()} Forecast'
+                        )
+                        ax.fill_between(
+                            time_forecast, lower_bound.flatten(), upper_bound.flatten(),
+                            color=color, alpha=0.2,
+                            label=f'{model_type.title()} 90% PI'
+                        )
+
+                    # Format subplot
                     ax.set_title(f'{task_name.replace("_", " ").title()}')
                     ax.legend()
                     ax.grid(True, alpha=0.3)
 
-                for j in range(len(plot_tasks), 4): axes[j].set_visible(False)
+                # Hide unused subplots
+                for j in range(len(plot_tasks), 4):
+                    axes[j].set_visible(False)
+
+                # Save plot
                 plt.tight_layout(rect=[0, 0, 1, 0.96])
-                plt.savefig(os.path.join(save_dir, f'{category}_h{horizon}.png'), dpi=150)
+                plt.savefig(
+                    os.path.join(plot_dir, f'forecast_{category}_h{horizon}.png'),
+                    dpi=150
+                )
                 plt.close(fig)
 
-    def run_experiment(self):
-        """Run the complete N-BEATS experiment."""
-        exp_dir = os.path.join(self.config.result_dir, f"{self.config.experiment_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    def plot_training_history(
+        self,
+        history: Dict[str, List[float]],
+        model_type: str,
+        horizon: int,
+        save_dir: str
+    ) -> None:
+        """Plot and save training and validation loss/metrics.
+
+        Args:
+            history: Training history dictionary.
+            model_type: Type of model.
+            horizon: Forecast horizon.
+            save_dir: Directory to save plots.
+        """
+        plot_dir = os.path.join(save_dir, 'training_history')
+        os.makedirs(plot_dir, exist_ok=True)
+
+        # Create subplots
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6))
+        fig.suptitle(
+            f'Training History for {model_type.title()} Model (Horizon {horizon})',
+            fontsize=16
+        )
+
+        # Plot loss
+        ax1.plot(history['loss'], label='Training Loss')
+        ax1.plot(history['val_loss'], label='Validation Loss')
+        ax1.set_title('Model Loss')
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Loss')
+        ax1.legend()
+        ax1.grid(True)
+
+        # Plot MAE if available
+        if 'mae' in history and 'val_mae' in history:
+            ax2.plot(history['mae'], label='Training MAE')
+            ax2.plot(history['val_mae'], label='Validation MAE')
+            ax2.set_title('Model MAE')
+            ax2.set_xlabel('Epoch')
+            ax2.set_ylabel('Mean Absolute Error')
+            ax2.legend()
+            ax2.grid(True)
+
+        # Save plot
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        plt.savefig(
+            os.path.join(plot_dir, f'history_{model_type}_h{horizon}.png')
+        )
+        plt.close(fig)
+
+    def plot_error_analysis(
+        self,
+        models: Dict[int, Dict[str, NBeatsNet]],
+        test_data: Dict[int, Dict[str, Tuple[np.ndarray, np.ndarray]]],
+        save_dir: str
+    ) -> None:
+        """Create and save detailed error analysis plots.
+
+        Args:
+            models: Dictionary of trained models.
+            test_data: Test data for all tasks and horizons.
+            save_dir: Directory to save plots.
+        """
+        logger.info("Creating error analysis visualizations...")
+
+        plot_dir = os.path.join(save_dir, 'error_analysis')
+        os.makedirs(plot_dir, exist_ok=True)
+
+        # Select representative tasks for analysis
+        tasks_to_plot = [
+            'linear_trend_strong', 'multi_seasonal',
+            'arma_process', 'level_shift'
+        ]
+
+        for model_type in self.config.model_types:
+            for horizon in self.config.forecast_horizons:
+                model = models[horizon][model_type]
+
+                for task_name in tasks_to_plot:
+                    # Check if task data exists
+                    if task_name not in test_data[horizon]:
+                        continue
+
+                    X_test, y_test = test_data[horizon][task_name]
+                    if len(X_test) == 0:
+                        continue
+
+                    # Generate predictions and transform to original scale
+                    preds_scaled = model.predict(X_test, verbose=0)
+                    preds_orig = self.processor.inverse_transform_data(
+                        task_name, preds_scaled
+                    )
+                    y_test_orig = self.processor.inverse_transform_data(
+                        task_name, y_test
+                    )
+
+                    # Calculate errors
+                    errors = y_test_orig - preds_orig
+
+                    # Create error analysis plots
+                    fig, axes = plt.subplots(2, 2, figsize=(20, 12))
+                    fig.suptitle(
+                        f'Error Analysis: {model_type.title()} H={horizon} '
+                        f'on {task_name.replace("_", " ").title()}',
+                        fontsize=16
+                    )
+
+                    # 1. Residuals histogram
+                    axes[0, 0].hist(errors.flatten(), bins=50, density=True)
+                    axes[0, 0].set_title('Distribution of Forecast Errors (Residuals)')
+                    axes[0, 0].set_xlabel('Error')
+                    axes[0, 0].set_ylabel('Density')
+                    axes[0, 0].grid(True, alpha=0.5)
+
+                    # 2. Residuals vs. predictions
+                    axes[0, 1].scatter(preds_orig.flatten(), errors.flatten(), alpha=0.3)
+                    axes[0, 1].axhline(0, color='red', linestyle='--')
+                    axes[0, 1].set_title('Residuals vs. Predicted Values')
+                    axes[0, 1].set_xlabel('Predicted Value')
+                    axes[0, 1].set_ylabel('Error')
+                    axes[0, 1].grid(True, alpha=0.5)
+
+                    # 3. MAE per forecast step
+                    mae_per_step = np.mean(np.abs(errors), axis=0).flatten()
+                    axes[1, 0].bar(range(1, horizon + 1), mae_per_step)
+                    axes[1, 0].set_title('MAE per Forecast Step')
+                    axes[1, 0].set_xlabel('Forecast Horizon Step')
+                    axes[1, 0].set_ylabel('Mean Absolute Error')
+                    axes[1, 0].grid(True, axis='y', alpha=0.5)
+                    axes[1, 0].set_xticks(range(1, horizon + 1))
+
+                    # 4. Actual vs. predicted scatter
+                    axes[1, 1].scatter(
+                        y_test_orig.flatten(), preds_orig.flatten(), alpha=0.3
+                    )
+
+                    # Add diagonal reference line
+                    lims = [
+                        np.min([axes[1,1].get_xlim(), axes[1,1].get_ylim()]),
+                        np.max([axes[1,1].get_xlim(), axes[1,1].get_ylim()])
+                    ]
+                    axes[1, 1].plot(lims, lims, 'r--', alpha=0.75, zorder=0, label='y=x')
+                    axes[1, 1].set_title('Actual vs. Predicted Values')
+                    axes[1, 1].set_xlabel('Actual Value')
+                    axes[1, 1].set_ylabel('Predicted Value')
+                    axes[1, 1].grid(True, alpha=0.5)
+                    axes[1, 1].legend()
+
+                    # Save plot
+                    plt.tight_layout(rect=[0, 0, 1, 0.95])
+                    plt.savefig(
+                        os.path.join(
+                            plot_dir,
+                            f'errors_{model_type}_h{horizon}_{task_name}.png'
+                        )
+                    )
+                    plt.close(fig)
+
+    def run_experiment(self) -> Dict[str, Any]:
+        """Run the complete N-BEATS experiment.
+
+        Returns:
+            Dictionary containing experiment results and metrics.
+        """
+        # Create experiment directory
+        exp_dir = os.path.join(
+            self.config.result_dir,
+            f"{self.config.experiment_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
         os.makedirs(exp_dir, exist_ok=True)
+
         logger.info(f"Starting N-BEATS experiment: {exp_dir}")
 
+        # Prepare data
         prepared_data = self.prepare_data()
-        trained_models, all_metrics = {}, {}
 
+        # Initialize storage for results
+        trained_models: Dict[int, Dict[str, NBeatsNet]] = {}
+        all_metrics: Dict[int, Dict[str, Dict[str, ForecastMetrics]]] = {}
+        all_histories: Dict[int, Dict[str, Dict[str, List[float]]]] = {}
+
+        # Train models for each horizon and type
         for horizon in self.config.forecast_horizons:
-            trained_models[horizon], all_metrics[horizon] = {}, {}
+            trained_models[horizon] = {}
+            all_metrics[horizon] = {}
+            all_histories[horizon] = {}
+
             for model_type in self.config.model_types:
-                logger.info(f"\n{'='*60}\nTraining {model_type} model for horizon {horizon}\n{'='*60}")
+                logger.info(
+                    f"\n{'='*60}\n"
+                    f"Training {model_type} model for horizon {horizon}\n"
+                    f"{'='*60}"
+                )
+
+                # Create model
                 model = self.create_model(model_type, horizon)
 
-                train_data = {name: data["train"] for name, data in prepared_data[horizon].items()}
-                val_data = {name: data["val"] for name, data in prepared_data[horizon].items()}
-                test_data = {name: data["test"] for name, data in prepared_data[horizon].items()}
+                # Extract data for current horizon
+                train_data = {
+                    name: data["train"]
+                    for name, data in prepared_data[horizon].items()
+                }
+                val_data = {
+                    name: data["val"]
+                    for name, data in prepared_data[horizon].items()
+                }
+                test_data = {
+                    name: data["test"]
+                    for name, data in prepared_data[horizon].items()
+                }
 
-                training_results = self.train_model(model, train_data, val_data, horizon, model_type)
+                # Train model
+                training_results = self.train_model(
+                    model, train_data, val_data, horizon, model_type, exp_dir
+                )
+
                 trained_model = training_results["model"]
-                trained_models[horizon][model_type] = trained_model
+                history = training_results["history"]
 
-                task_metrics = self.evaluate_model(trained_model, test_data, horizon, model_type)
+                # Store results
+                trained_models[horizon][model_type] = trained_model
+                all_histories[horizon][model_type] = history
+
+                # Evaluate model
+                task_metrics = self.evaluate_model(
+                    trained_model, test_data, horizon, model_type
+                )
                 all_metrics[horizon][model_type] = task_metrics
 
+                # Save model if requested
                 if self.config.save_results:
-                    trained_model.save(os.path.join(exp_dir, f"{model_type}_h{horizon}.keras"))
+                    model_path = os.path.join(exp_dir, f"{model_type}_h{horizon}.keras")
+                    trained_model.save(model_path)
 
+        # Generate visualizations and summaries
         if self.config.save_results:
-            self.create_visualizations(trained_models, prepared_data, os.path.join(exp_dir, 'visuals'))
+            visuals_dir = os.path.join(exp_dir, 'visuals')
+
+            # Plot training histories
+            for horizon, histories in all_histories.items():
+                for model_type, history in histories.items():
+                    self.plot_training_history(
+                        history, model_type, horizon, visuals_dir
+                    )
+
+            # Plot final forecasts
+            self.plot_final_forecasts(trained_models, prepared_data, visuals_dir)
+
+            # Plot error analysis
+            self.plot_error_analysis(trained_models, prepared_data, visuals_dir)
+
+            # Generate results summary
             self._generate_results_summary(all_metrics, exp_dir)
 
         logger.info(f"Experiment completed. Results saved to: {exp_dir}")
+
         return {"results_dir": exp_dir, "metrics": all_metrics}
 
-    def _generate_results_summary(self, all_metrics: Dict, exp_dir: str):
-        """Generate and save summary dataframes from the metrics."""
-        results_data = [dataclasses.asdict(metrics)
-                        for h_metrics in all_metrics.values()
-                        for m_metrics in h_metrics.values()
-                        for metrics in m_metrics.values()]
+    def _generate_results_summary(
+        self,
+        all_metrics: Dict[int, Dict[str, Dict[str, ForecastMetrics]]],
+        exp_dir: str
+    ) -> None:
+        """Generate and save summary dataframes from the metrics.
+
+        Args:
+            all_metrics: Dictionary containing all calculated metrics.
+            exp_dir: Experiment directory for saving results.
+        """
+        # Convert metrics to list of dictionaries
+        results_data = [
+            dataclasses.asdict(metrics)
+            for h_metrics in all_metrics.values()
+            for m_metrics in h_metrics.values()
+            for metrics in m_metrics.values()
+        ]
 
         if not results_data:
             logger.warning("No results were generated to summarize.")
             return
 
+        # Create results dataframe
         results_df = pd.DataFrame(results_data)
 
-        logger.info("=" * 120 + "\nN-BEATS MULTI-TASK FORECASTING RESULTS\n" + "=" * 120)
-        logger.info("Detailed Results (Sample):\n", results_df.head().to_string())
+        # Log summary information
+        logger.info(
+            "=" * 120 + "\n"
+            "N-BEATS MULTI-TASK FORECASTING RESULTS\n" +
+            "=" * 120
+        )
+        logger.info(f"Detailed Results (Sample):\n{results_df.head().to_string()}")
 
+        # Summary by model type and horizon
         summary_cols = ['rmse', 'mae', 'smape', 'mase', 'coverage_90']
         summary_by_model = results_df.groupby(['model_type', 'horizon'])[summary_cols].mean().round(4)
-        logger.info("=" * 80 + "\nSUMMARY BY MODEL TYPE AND HORIZON\n" + "=" * 80 + "\n", summary_by_model)
 
+        logger.info(
+            "=" * 80 + "\n"
+            "SUMMARY BY MODEL TYPE AND HORIZON\n" +
+            "=" * 80 + f"\n{summary_by_model}"
+        )
+
+        # Summary by task category
         summary_by_category = results_df.groupby(['task_category'])[summary_cols].mean().round(4)
-        logger.info("=" * 80 + "\nSUMMARY BY CATEGORY\n" + "=" * 80 + "\n", summary_by_category)
 
+        logger.info(
+            "=" * 80 + "\n"
+            "SUMMARY BY CATEGORY\n" +
+            "=" * 80 + f"\n{summary_by_category}"
+        )
+
+        # Save results to CSV files
         results_df.to_csv(os.path.join(exp_dir, 'detailed_results.csv'), index=False)
         summary_by_model.to_csv(os.path.join(exp_dir, 'summary_by_model.csv'))
         summary_by_category.to_csv(os.path.join(exp_dir, 'summary_by_category.csv'))
+
         logger.info(f"Results summaries saved to {exp_dir}")
+
 
 # ---------------------------------------------------------------------
 # Main Experiment
 # ---------------------------------------------------------------------
 
-def main():
-    """Main function to run the N-BEATS multi-task experiment."""
+def main() -> None:
+    """Main function to run the N-BEATS multi-task experiment.
+
+    Raises:
+        Exception: If experiment fails with detailed error information.
+    """
     config = NBeatsConfig()
-    logger.info("Starting N-BEATS multi-task forecasting experiment with final corrected settings")
+
+    logger.info(
+        "Starting N-BEATS multi-task forecasting experiment with "
+        "refined implementation and enhanced visualizations"
+    )
+
     try:
         trainer = NBeatsTrainer(config)
         trainer.run_experiment()
         logger.info("Experiment finished successfully!")
+
     except Exception as e:
         logger.error(f"Experiment failed: {e}", exc_info=True)
         raise
+
 
 if __name__ == "__main__":
     main()
