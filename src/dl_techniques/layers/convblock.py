@@ -8,8 +8,13 @@ Conv2D → BatchNorm → ReLU → Dropout → Conv2D → BatchNorm → ReLU → 
 import keras
 from typing import Union, Tuple, Optional, Any, Dict
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class ConvBlock(keras.layers.Layer):
@@ -270,3 +275,5 @@ class ConvBlock(keras.layers.Layer):
         """
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
+
+# ---------------------------------------------------------------------

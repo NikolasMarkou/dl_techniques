@@ -28,8 +28,8 @@ from typing import Tuple, Dict, Any, Optional
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.models.capsnet import create_capsnet
 from dl_techniques.utils.logger import logger
+from dl_techniques.models.capsnet import create_capsnet
 
 # ---------------------------------------------------------------------
 
