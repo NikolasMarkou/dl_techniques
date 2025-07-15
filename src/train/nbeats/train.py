@@ -613,15 +613,15 @@ class NBeatsTrainer:
 
         results_df = pd.DataFrame(results_data)
 
-        print("\n" + "=" * 120 + "\nN-BEATS MULTI-TASK FORECASTING RESULTS\n" + "=" * 120)
-        print("\nDetailed Results (Sample):\n", results_df.head().to_string())
+        logger.info("=" * 120 + "\nN-BEATS MULTI-TASK FORECASTING RESULTS\n" + "=" * 120)
+        logger.info("Detailed Results (Sample):\n", results_df.head().to_string())
 
         summary_cols = ['rmse', 'mae', 'smape', 'mase', 'coverage_90']
         summary_by_model = results_df.groupby(['model_type', 'horizon'])[summary_cols].mean().round(4)
-        print("\n" + "=" * 80 + "\nSUMMARY BY MODEL TYPE AND HORIZON\n" + "=" * 80 + "\n", summary_by_model)
+        logger.info("=" * 80 + "\nSUMMARY BY MODEL TYPE AND HORIZON\n" + "=" * 80 + "\n", summary_by_model)
 
         summary_by_category = results_df.groupby(['task_category'])[summary_cols].mean().round(4)
-        print("\n" + "=" * 80 + "\nSUMMARY BY CATEGORY\n" + "=" * 80 + "\n", summary_by_category)
+        logger.info("=" * 80 + "\nSUMMARY BY CATEGORY\n" + "=" * 80 + "\n", summary_by_category)
 
         results_df.to_csv(os.path.join(exp_dir, 'detailed_results.csv'), index=False)
         summary_by_model.to_csv(os.path.join(exp_dir, 'summary_by_model.csv'))
