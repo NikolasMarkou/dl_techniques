@@ -1,384 +1,239 @@
 """
-Minimal Working N-BEATS Implementation.
-
-This is a simplified version that focuses on getting the basic architecture working
-before adding complexity. Uses only generic blocks initially.
+Simple N-BEATS debugging script to isolate training issues.
 """
 
-import os
 import numpy as np
 import tensorflow as tf
 import keras
-from keras import ops
-from datetime import datetime
-import matplotlib.pyplot as plt
-from typing import Tuple, Dict, Any, Optional
-
+from dl_techniques.models.nbeats import NBeatsNet
 from dl_techniques.utils.logger import logger
 
-
-@keras.saving.register_keras_serializable()
-class SimpleNBeatsBlock(keras.layers.Layer):
-    """Simplified N-BEATS block that should definitely work."""
-
-    def __init__(
-        self,
-        units: int = 128,
-        backcast_length: int = 48,
-        forecast_length: int = 12,
-        **kwargs
-    ):
-        super().__init__(**kwargs)
-        self.units = units
-        self.backcast_length = backcast_length
-        self.forecast_length = forecast_length
-
-    def build(self, input_shape):
-        # Four fully connected layers
-        self.fc1 = keras.layers.Dense(self.units, activation='relu', name='fc1')
-        self.fc2 = keras.layers.Dense(self.units, activation='relu', name='fc2')
-        self.fc3 = keras.layers.Dense(self.units, activation='relu', name='fc3')
-        self.fc4 = keras.layers.Dense(self.units, activation='relu', name='fc4')
-
-        # Direct output layers - no fancy basis functions
-        self.backcast_linear = keras.layers.Dense(self.backcast_length, activation='linear', name='backcast_out')
-        self.forecast_linear = keras.layers.Dense(self.forecast_length, activation='linear', name='forecast_out')
-
-        super().build(input_shape)
-
-    def call(self, inputs, training=None):
-        # Forward pass through FC layers
-        x = self.fc1(inputs, training=training)
-        x = self.fc2(x, training=training)
-        x = self.fc3(x, training=training)
-        x = self.fc4(x, training=training)
-
-        # Direct outputs
-        backcast = self.backcast_linear(x, training=training)
-        forecast = self.forecast_linear(x, training=training)
-
-        return backcast, forecast
+# Set random seeds
+np.random.seed(42)
+tf.random.set_seed(42)
+keras.utils.set_random_seed(42)
 
 
-@keras.saving.register_keras_serializable()
-class SimpleNBeatsModel(keras.Model):
-    """Simplified N-BEATS model."""
+def create_simple_data(n_samples=1000, backcast_length=96, forecast_length=24):
+    """Create simple synthetic data for debugging."""
+    logger.info("Creating simple test data...")
 
-    def __init__(
-        self,
-        backcast_length: int = 48,
-        forecast_length: int = 12,
-        num_blocks: int = 4,
-        units: int = 128,
-        **kwargs
-    ):
-        super().__init__(**kwargs)
-        self.backcast_length = backcast_length
-        self.forecast_length = forecast_length
-        self.num_blocks = num_blocks
-        self.units = units
+    # Create simple sine wave with trend
+    t = np.arange(n_samples + backcast_length + forecast_length)
+    y = np.sin(t * 0.1) + 0.001 * t + np.random.normal(0, 0.1, len(t))
 
-        # Create blocks
-        self.blocks = []
-        for i in range(num_blocks):
-            block = SimpleNBeatsBlock(
-                units=units,
-                backcast_length=backcast_length,
-                forecast_length=forecast_length,
-                name=f'block_{i}'
-            )
-            self.blocks.append(block)
-
-    def call(self, inputs, training=None):
-        # Ensure 2D input
-        if len(inputs.shape) == 3:
-            inputs = ops.squeeze(inputs, axis=-1)
-
-        # Initialize
-        residual = inputs
-        forecast_sum = ops.zeros((ops.shape(inputs)[0], self.forecast_length))
-
-        # Process each block
-        for block in self.blocks:
-            backcast, forecast = block(residual, training=training)
-
-            # Update residual and forecast
-            residual = residual - backcast
-            forecast_sum = forecast_sum + forecast
-
-        return forecast_sum
-
-
-def create_synthetic_data(
-    n_samples: int = 2000,
-    backcast_length: int = 48,
-    forecast_length: int = 12,
-    noise_std: float = 0.05  # Reduced noise
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float]:
-    """Create simple synthetic data."""
-
-    logger.info(f"Creating synthetic data with {n_samples} samples...")
-
-    # Generate simple time series
-    t = np.arange(n_samples, dtype=np.float32)
-
-    # Simple components
-    trend = 0.002 * t  # Very small trend
-    seasonal = 0.5 * np.sin(2 * np.pi * t / 24)  # Daily pattern
-    noise = np.random.normal(0, noise_std, n_samples)
-
-    # Combine
-    data = trend + seasonal + noise
-
-    # Light normalization
-    data_mean = np.mean(data)
-    data_std = np.std(data)
-    data = (data - data_mean) / data_std
-
-    logger.info(f"Data range: [{data.min():.3f}, {data.max():.3f}]")
+    # Normalize to reasonable range
+    y = (y - y.mean()) / y.std()
 
     # Create sequences
-    X, y = [], []
-    for i in range(len(data) - backcast_length - forecast_length + 1):
-        X.append(data[i:i + backcast_length])
-        y.append(data[i + backcast_length:i + backcast_length + forecast_length])
+    X, y_target = [], []
+    for i in range(n_samples):
+        X.append(y[i:i + backcast_length])
+        y_target.append(y[i + backcast_length:i + backcast_length + forecast_length])
 
-    X = np.array(X, dtype=np.float32)
-    y = np.array(y, dtype=np.float32)
+    X = np.array(X).reshape(-1, backcast_length, 1)
+    y_target = np.array(y_target).reshape(-1, forecast_length, 1)
 
-    # Split
-    n_train = int(0.8 * len(X))
-    X_train, X_val = X[:n_train], X[n_train:]
-    y_train, y_val = y[:n_train], y[n_train:]
+    logger.info(f"Data shapes: X={X.shape}, y={y_target.shape}")
+    logger.info(f"Data ranges: X=[{X.min():.4f}, {X.max():.4f}], y=[{y_target.min():.4f}, {y_target.max():.4f}]")
 
-    logger.info(f"Shapes: X_train={X_train.shape}, y_train={y_train.shape}")
-    logger.info(f"        X_val={X_val.shape}, y_val={y_val.shape}")
-
-    return X_train, y_train, X_val, y_val, data_mean, data_std
+    return X, y_target
 
 
-def test_model_components():
-    """Test individual model components."""
+def test_nbeats_training():
+    """Test N-BEATS training with simple data."""
+    logger.info("Testing N-BEATS training...")
 
-    logger.info("Testing model components...")
+    # Create simple data
+    X, y = create_simple_data(n_samples=1000)
 
-    # Create test data
-    batch_size = 4
-    backcast_length = 48
-    forecast_length = 12
+    # Split data
+    train_size = int(0.8 * len(X))
+    X_train, X_val = X[:train_size], X[train_size:]
+    y_train, y_val = y[:train_size], y[train_size:]
 
-    test_input = np.random.normal(0, 1, (batch_size, backcast_length)).astype(np.float32)
+    logger.info(f"Training samples: {len(X_train)}, Validation samples: {len(X_val)}")
 
-    # Test single block
-    logger.info("Testing single block...")
-    block = SimpleNBeatsBlock(
-        units=64,
-        backcast_length=backcast_length,
-        forecast_length=forecast_length
+    # Create simple N-BEATS model
+    model = NBeatsNet(
+        backcast_length=96,
+        forecast_length=24,
+        stack_types=['trend', 'seasonality'],
+        nb_blocks_per_stack=2,
+        thetas_dim=[3, 6],
+        hidden_layer_units=128,
+        share_weights_in_stack=False,
+        input_dim=1,
+        output_dim=1
     )
 
-    backcast, forecast = block(test_input)
-    logger.info(f"Block output: backcast={backcast.shape}, forecast={forecast.shape}")
+    logger.info("Created N-BEATS model")
 
-    # Test gradients
-    with tf.GradientTape() as tape:
-        backcast, forecast = block(test_input, training=True)
-        loss = tf.reduce_mean(tf.square(forecast))
-
-    gradients = tape.gradient(loss, block.trainable_variables)
-    logger.info(f"Gradients: {len(gradients)} variables")
-
-    for i, grad in enumerate(gradients):
-        if grad is not None:
-            logger.info(f"  Grad {i}: shape={grad.shape}, mean={tf.reduce_mean(tf.abs(grad)):.6f}")
-        else:
-            logger.warning(f"  Grad {i}: None!")
-
-    # Test full model
-    logger.info("Testing full model...")
-    model = SimpleNBeatsModel(
-        backcast_length=backcast_length,
-        forecast_length=forecast_length,
-        num_blocks=2,
-        units=64
-    )
-
-    output = model(test_input)
-    logger.info(f"Model output: {output.shape}")
-
-    # Test model gradients
-    with tf.GradientTape() as tape:
-        output = model(test_input, training=True)
-        loss = tf.reduce_mean(tf.square(output))
-
-    gradients = tape.gradient(loss, model.trainable_variables)
-    logger.info(f"Model gradients: {len(gradients)} variables")
-
-    grad_stats = []
-    for i, grad in enumerate(gradients):
-        if grad is not None:
-            grad_mean = tf.reduce_mean(tf.abs(grad)).numpy()
-            grad_stats.append(grad_mean)
-        else:
-            grad_stats.append(0.0)
-
-    logger.info(f"Gradient stats: mean={np.mean(grad_stats):.6f}, std={np.std(grad_stats):.6f}")
-
-    return True
-
-
-def train_simple_model():
-    """Train the simplified model."""
-
-    logger.info("Starting simplified N-BEATS training...")
-
-    # Test components first
-    test_model_components()
-
-    # Create data
-    X_train, y_train, X_val, y_val, data_mean, data_std = create_synthetic_data(
-        n_samples=2000,
-        backcast_length=48,
-        forecast_length=12,
-        noise_std=0.05
-    )
-
-    # Create model
-    model = SimpleNBeatsModel(
-        backcast_length=48,
-        forecast_length=12,
-        num_blocks=3,  # Start with fewer blocks
-        units=64       # Start with fewer units
-    )
-
-    # Compile with simple settings
+    # Compile with simple loss
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=0.001),
-        loss='mse',  # Start with MSE
+        loss='mse',  # Use simple MSE loss
         metrics=['mae']
     )
 
-    # Test single prediction
-    logger.info("Testing single prediction...")
-    pred = model.predict(X_train[:1], verbose=0)
-    logger.info(f"Single prediction shape: {pred.shape}")
+    logger.info("Compiled model with MSE loss")
 
-    # Build model explicitly
-    model.build((None, 48))
-    model.summary()
+    # Test a single forward pass
+    logger.info("Testing forward pass...")
+    test_pred = model(X_train[:2], training=False)
+    logger.info(f"Forward pass successful. Output shape: {test_pred.shape}")
+    logger.info(f"Output range: [{test_pred.numpy().min():.4f}, {test_pred.numpy().max():.4f}]")
 
-    # Train with verbose output
-    logger.info("Starting training...")
+    # Test a single training step
+    logger.info("Testing single training step...")
+    with tf.GradientTape() as tape:
+        pred = model(X_train[:32], training=True)
+        loss = keras.losses.mean_squared_error(y_train[:32], pred)
+        loss_value = tf.reduce_mean(loss)
+
+    gradients = tape.gradient(loss_value, model.trainable_variables)
+
+    logger.info(f"Single step loss: {loss_value.numpy():.6f}")
+    logger.info(f"Gradients computed: {len([g for g in gradients if g is not None])}/{len(gradients)}")
+
+    # Check for gradient issues
+    grad_norms = []
+    for i, grad in enumerate(gradients):
+        if grad is not None:
+            grad_norm = tf.norm(grad).numpy()
+            grad_norms.append(grad_norm)
+            if grad_norm > 1000 or grad_norm < 1e-10:
+                logger.warning(f"Unusual gradient norm for variable {i}: {grad_norm}")
+
+    logger.info(f"Gradient norm range: [{min(grad_norms):.6f}, {max(grad_norms):.6f}]")
+
+    # Try a few training epochs
+    logger.info("Starting training test...")
 
     callbacks = [
-        keras.callbacks.EarlyStopping(
-            monitor='val_loss',
-            patience=15,
-            restore_best_weights=True,
-            verbose=1
-        ),
-        keras.callbacks.ReduceLROnPlateau(
-            monitor='val_loss',
-            factor=0.5,
-            patience=8,
-            min_lr=1e-6,
-            verbose=1
-        )
+        keras.callbacks.EarlyStopping(patience=5, restore_best_weights=True),
+        keras.callbacks.TerminateOnNaN()
     ]
 
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
-        epochs=100,
+        epochs=10,
         batch_size=32,
         callbacks=callbacks,
         verbose=1
     )
 
-    # Evaluate
-    logger.info("Evaluating model...")
+    # Check if training worked
+    train_losses = history.history['loss']
+    val_losses = history.history['val_loss']
 
-    # Make predictions
-    train_pred = model.predict(X_train, verbose=0)
-    val_pred = model.predict(X_val, verbose=0)
+    logger.info(f"Training losses: {train_losses}")
+    logger.info(f"Validation losses: {val_losses}")
 
-    # Calculate metrics
-    train_mse = np.mean((train_pred - y_train) ** 2)
-    val_mse = np.mean((val_pred - y_val) ** 2)
+    if len(set(train_losses)) == 1:
+        logger.error("Training loss is stuck - no learning happening")
+        return False
+    else:
+        logger.info("Training loss is changing - model is learning")
 
-    logger.info(f"Training MSE: {train_mse:.6f}")
-    logger.info(f"Validation MSE: {val_mse:.6f}")
+    # Test prediction
+    test_pred = model.predict(X_val[:5], verbose=0)
+    logger.info(f"Final prediction shape: {test_pred.shape}")
+    logger.info(f"Final prediction range: [{test_pred.min():.4f}, {test_pred.max():.4f}]")
 
-    # Plot some results
-    plt.figure(figsize=(15, 10))
+    return True
 
-    # Plot training history
-    plt.subplot(2, 2, 1)
-    plt.plot(history.history['loss'], label='Training Loss')
-    plt.plot(history.history['val_loss'], label='Validation Loss')
-    plt.title('Training History')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.grid(True)
 
-    # Plot predictions
-    n_samples = 3
-    for i in range(n_samples):
-        plt.subplot(2, 2, i + 2)
+def test_with_smape_loss():
+    """Test with SMAPE loss to see if that's the issue."""
+    logger.info("Testing with SMAPE loss...")
 
-        # Plot input
-        plt.plot(range(48), X_val[i], 'b-', label='Input', alpha=0.7)
+    try:
+        from dl_techniques.losses.smape_loss import SMAPELoss
 
-        # Plot true forecast
-        plt.plot(range(48, 60), y_val[i], 'g-', label='True', linewidth=2)
+        # Create simple data
+        X, y = create_simple_data(n_samples=500)
 
-        # Plot predicted forecast
-        plt.plot(range(48, 60), val_pred[i], 'r--', label='Predicted', linewidth=2)
+        # Make sure data is positive for SMAPE
+        y = np.abs(y) + 0.1  # Ensure positive values
 
-        plt.title(f'Sample {i+1}')
-        plt.xlabel('Time')
-        plt.ylabel('Value')
-        plt.legend()
-        plt.grid(True)
+        train_size = int(0.8 * len(X))
+        X_train, y_train = X[:train_size], y[:train_size]
 
-    plt.tight_layout()
-    plt.savefig('nbeats_simple_results.png', dpi=150, bbox_inches='tight')
-    plt.show()
+        # Create model
+        model = NBeatsNet(
+            backcast_length=96,
+            forecast_length=24,
+            stack_types=['generic'],
+            nb_blocks_per_stack=2,
+            thetas_dim=[8],
+            hidden_layer_units=64,
+            share_weights_in_stack=False
+        )
 
-    # Save model
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    model_path = f"simple_nbeats_{timestamp}.keras"
-    model.save(model_path)
+        # Test SMAPE loss
+        smape_loss = SMAPELoss()
 
-    print("\n" + "="*60)
-    print("SIMPLIFIED N-BEATS TRAINING COMPLETED")
-    print("="*60)
-    print(f"Final training loss: {history.history['loss'][-1]:.6f}")
-    print(f"Final validation loss: {history.history['val_loss'][-1]:.6f}")
-    print(f"Training MSE: {train_mse:.6f}")
-    print(f"Validation MSE: {val_mse:.6f}")
-    print(f"Model saved to: {model_path}")
-    print("="*60)
+        # Test a single loss computation
+        test_pred = model(X_train[:2], training=False)
+        test_pred = np.abs(test_pred) + 0.1  # Ensure positive
 
-    return {
-        'model': model,
-        'history': history.history,
-        'train_mse': train_mse,
-        'val_mse': val_mse
-    }
+        loss_value = smape_loss(y_train[:2], test_pred)
+        logger.info(f"SMAPE loss value: {loss_value.numpy():.6f}")
+
+        if tf.math.is_nan(loss_value) or tf.math.is_inf(loss_value):
+            logger.error("SMAPE loss returns NaN/Inf")
+            return False
+        elif loss_value.numpy() > 1000:
+            logger.error(f"SMAPE loss is too large: {loss_value.numpy()}")
+            return False
+        else:
+            logger.info("SMAPE loss seems reasonable")
+            return True
+
+    except Exception as e:
+        logger.error(f"Error testing SMAPE loss: {e}")
+        return False
+
+
+def main():
+    """Run debugging tests."""
+    logger.info("Starting N-BEATS debugging tests...")
+
+    # Test 1: Basic training with MSE
+    logger.info("\n" + "="*50)
+    logger.info("TEST 1: Basic N-BEATS training with MSE loss")
+    logger.info("="*50)
+
+    success1 = test_nbeats_training()
+
+    # Test 2: SMAPE loss
+    logger.info("\n" + "="*50)
+    logger.info("TEST 2: SMAPE loss testing")
+    logger.info("="*50)
+
+    success2 = test_with_smape_loss()
+
+    # Summary
+    logger.info("\n" + "="*50)
+    logger.info("DEBUGGING SUMMARY")
+    logger.info("="*50)
+    logger.info(f"Basic MSE training: {'PASS' if success1 else 'FAIL'}")
+    logger.info(f"SMAPE loss test: {'PASS' if success2 else 'FAIL'}")
+
+    if success1:
+        logger.info("✓ N-BEATS model implementation is working correctly")
+        logger.info("✗ Issue is likely in your data preprocessing or loss function")
+        logger.info("\nRecommendations:")
+        logger.info("1. Check your data scaling - values might be too large")
+        logger.info("2. Try using 'mse' or 'mae' loss instead of SMAPE initially")
+        logger.info("3. Check the TimeSeriesNormalizer implementation")
+        logger.info("4. Verify data ranges after scaling")
+    else:
+        logger.error("✗ N-BEATS model has fundamental issues")
+        logger.error("The problem is in the model implementation")
 
 
 if __name__ == "__main__":
-    # Set seeds
-    np.random.seed(42)
-    tf.random.set_seed(42)
-    keras.utils.set_random_seed(42)
-
-    try:
-        results = train_simple_model()
-        logger.info("Training completed successfully!")
-    except Exception as e:
-        logger.error(f"Training failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
+    main()

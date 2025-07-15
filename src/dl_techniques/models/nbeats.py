@@ -198,16 +198,11 @@ class NBeatsNet(keras.Model):
                 # Get backcast and forecast from the block
                 backcast, forecast = block(residual, training=training)
 
-                # Always subtract backcast from residual
+                # Always subtract backcast from residual (standard N-BEATS behavior)
                 residual = residual - backcast
 
                 # Add forecast to accumulator
                 forecast_sum = forecast_sum + forecast
-
-        # GRADIENT FIX: Ensure final residual is connected to computation graph
-        # Add tiny residual contribution to maintain gradient flow for all parameters
-        residual_contribution = ops.mean(residual) * 1e-12
-        forecast_sum = forecast_sum + residual_contribution
 
         # BUG FIX 1: Reshape to 3D to match expected output shape
         forecast = ops.expand_dims(forecast_sum, axis=-1)

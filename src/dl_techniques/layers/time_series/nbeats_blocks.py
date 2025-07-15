@@ -291,23 +291,19 @@ class TrendBlock(NBeatsBlock):
             backcast_basis[i] = np.power(backcast_grid, i)
             forecast_basis[i] = np.power(forecast_grid, i)
 
-        # Store as non-trainable weights
+        # Store as non-trainable weights and set values immediately
         self.backcast_basis_matrix = self.add_weight(
             name='backcast_basis_matrix',
             shape=(self.thetas_dim, self.backcast_length),
-            initializer='zeros',
+            initializer=lambda shape, dtype: backcast_basis,
             trainable=False
         )
         self.forecast_basis_matrix = self.add_weight(
             name='forecast_basis_matrix',
             shape=(self.thetas_dim, self.forecast_length),
-            initializer='zeros',
+            initializer=lambda shape, dtype: forecast_basis,
             trainable=False
         )
-
-        # Set the values
-        self.backcast_basis_matrix.assign(backcast_basis)
-        self.forecast_basis_matrix.assign(forecast_basis)
 
     def _generate_backcast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """Generate backcast using polynomial basis functions.
@@ -384,23 +380,19 @@ class SeasonalityBlock(NBeatsBlock):
             backcast_basis[-1] = 1.0
             forecast_basis[-1] = 1.0
 
-        # Store as non-trainable weights
+        # Store as non-trainable weights and set values immediately
         self.backcast_basis_matrix = self.add_weight(
             name='backcast_basis_matrix',
             shape=(self.thetas_dim, self.backcast_length),
-            initializer='zeros',
+            initializer=lambda shape, dtype: backcast_basis,
             trainable=False
         )
         self.forecast_basis_matrix = self.add_weight(
             name='forecast_basis_matrix',
             shape=(self.thetas_dim, self.forecast_length),
-            initializer='zeros',
+            initializer=lambda shape, dtype: forecast_basis,
             trainable=False
         )
-
-        # Set the values
-        self.backcast_basis_matrix.assign(backcast_basis)
-        self.forecast_basis_matrix.assign(forecast_basis)
 
     def _generate_backcast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """Generate backcast using Fourier basis functions.
