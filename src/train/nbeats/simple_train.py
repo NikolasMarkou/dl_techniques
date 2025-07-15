@@ -71,9 +71,9 @@ def test_nbeats_training():
 
     # Compile with simple loss
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=0.001),
+        optimizer=keras.optimizers.Adam(learning_rate=0.001, clipnorm=1.0),
         loss='mse',  # Use simple MSE loss
-        metrics=['mae']
+        metrics=['mae'],
     )
 
     logger.info("Compiled model with MSE loss")

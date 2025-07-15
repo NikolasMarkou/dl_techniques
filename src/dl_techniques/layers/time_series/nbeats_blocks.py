@@ -10,8 +10,13 @@ import numpy as np
 from keras import ops
 from typing import Optional, Any, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class NBeatsBlock(keras.layers.Layer):
@@ -207,6 +212,8 @@ class NBeatsBlock(keras.layers.Layer):
         if config.get('input_shape') is not None:
             self.build(config['input_shape'])
 
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class GenericBlock(NBeatsBlock):
@@ -258,6 +265,8 @@ class GenericBlock(NBeatsBlock):
             Forecast tensor of shape (batch_size, forecast_length).
         """
         return self.forecast_basis(theta)
+
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -327,6 +336,7 @@ class TrendBlock(NBeatsBlock):
         """
         return ops.matmul(theta, self.forecast_basis_matrix)
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class SeasonalityBlock(NBeatsBlock):
@@ -346,41 +356,55 @@ class SeasonalityBlock(NBeatsBlock):
 
     def _create_fourier_basis(self) -> None:
         """Create Fourier basis matrices for seasonality modeling."""
-        # Time grids (normalized to [0, 1] for backcast and continuation for forecast)
-        backcast_grid = np.linspace(0, 1, self.backcast_length, dtype=np.float32)
-        forecast_grid = np.linspace(
-            1, 1 + self.forecast_length / self.backcast_length,
-            self.forecast_length, dtype=np.float32
+        # Create a continuous set of integer time steps for both backcast and forecast.
+        # This ensures that the frequency of the seasonal patterns is consistent
+        # when extrapolated from the backcast to the forecast period.
+        time_steps = np.arange(
+            self.backcast_length + self.forecast_length, dtype=np.float32
         )
 
-        # Create Fourier basis matrices
+        # Split the time steps into separate grids for backcast and forecast
+        backcast_grid = time_steps[:self.backcast_length]
+        forecast_grid = time_steps[self.backcast_length:]
+
+        # Create empty placeholder matrices for the basis functions
         backcast_basis = np.zeros((self.thetas_dim, self.backcast_length), dtype=np.float32)
         forecast_basis = np.zeros((self.thetas_dim, self.forecast_length), dtype=np.float32)
 
-        # Number of harmonics (each harmonic has cos and sin components)
+        # Each harmonic requires a sine and cosine component, so we have half as many
+        # harmonics as the dimension of the theta parameters.
         num_harmonics = self.thetas_dim // 2
 
+        # Define the fundamental period for the Fourier series. We assume the
+        # most dominant seasonal patterns are related to the length of the lookback window.
+        period = self.backcast_length
+
         for i in range(num_harmonics):
+            # The harmonic number (e.g., 1, 2, 3, ...)
             harmonic = i + 1
+
+            # Calculate the frequency for this harmonic
+            frequency = 2 * np.pi * harmonic / period
 
             # Cosine terms
             cos_idx = 2 * i
             if cos_idx < self.thetas_dim:
-                backcast_basis[cos_idx] = np.cos(2 * np.pi * harmonic * backcast_grid)
-                forecast_basis[cos_idx] = np.cos(2 * np.pi * harmonic * forecast_grid)
+                backcast_basis[cos_idx] = np.cos(frequency * backcast_grid)
+                forecast_basis[cos_idx] = np.cos(frequency * forecast_grid)
 
             # Sine terms
             sin_idx = 2 * i + 1
             if sin_idx < self.thetas_dim:
-                backcast_basis[sin_idx] = np.sin(2 * np.pi * harmonic * backcast_grid)
-                forecast_basis[sin_idx] = np.sin(2 * np.pi * harmonic * forecast_grid)
+                backcast_basis[sin_idx] = np.sin(frequency * backcast_grid)
+                forecast_basis[sin_idx] = np.sin(frequency * forecast_grid)
 
-        # Handle odd thetas_dim by adding a constant term
+        # If thetas_dim is an odd number, we use the last available dimension
+        # to model a constant DC component (a simple offset).
         if self.thetas_dim % 2 == 1:
             backcast_basis[-1] = 1.0
             forecast_basis[-1] = 1.0
 
-        # Store as non-trainable weights and set values immediately
+        # Store the generated basis matrices as non-trainable weights within the layer
         self.backcast_basis_matrix = self.add_weight(
             name='backcast_basis_matrix',
             shape=(self.thetas_dim, self.backcast_length),
@@ -415,3 +439,5 @@ class SeasonalityBlock(NBeatsBlock):
             Forecast tensor of shape (batch_size, forecast_length).
         """
         return ops.matmul(theta, self.forecast_basis_matrix)
+
+# ---------------------------------------------------------------------
