@@ -9,8 +9,16 @@ import keras
 from keras import ops
 from typing import List, Tuple, Optional, Union, Any, Dict
 
-from dl_techniques.utils.logger import logger
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
+from dl_techniques.layers.time_series.nbeats_blocks import (
+    GenericBlock, TrendBlock, SeasonalityBlock
+)
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class NBeatsNet(keras.Model):
@@ -103,10 +111,6 @@ class NBeatsNet(keras.Model):
 
     def _build_network(self) -> None:
         """Build the N-BEATS network architecture."""
-        # Import here to avoid circular imports
-        from dl_techniques.layers.time_series.nbeats_blocks import (
-            GenericBlock, TrendBlock, SeasonalityBlock
-        )
 
         logger.info(f"Building N-BEATS network with {len(self.stack_types)} stacks")
 
@@ -286,6 +290,7 @@ class NBeatsNet(keras.Model):
         # Call parent summary if needed
         super().summary(**kwargs)
 
+# ---------------------------------------------------------------------
 
 def create_nbeats_model(
         config: Optional[Dict[str, Any]] = None,
@@ -424,51 +429,5 @@ def create_interpretable_nbeats_model(
 
     return create_nbeats_model(config=config, **kwargs)
 
+# ---------------------------------------------------------------------
 
-def create_generic_nbeats_model(
-        backcast_length: int = 48,
-        forecast_length: int = 12,
-        nb_stacks: int = 3,
-        nb_blocks_per_stack: int = 3,
-        thetas_dim: int = 8,
-        hidden_units: int = 256,
-        **kwargs: Any
-) -> NBeatsNet:
-    """Create a generic N-BEATS model with only generic blocks.
-
-    This configuration uses only generic blocks, which are more flexible
-    but less interpretable than trend/seasonality blocks.
-
-    Args:
-        backcast_length: Length of input sequence.
-        forecast_length: Length of forecast sequence.
-        nb_stacks: Number of stacks.
-        nb_blocks_per_stack: Number of blocks per stack.
-        thetas_dim: Dimensionality of theta parameters.
-        hidden_units: Number of hidden units in each layer.
-        **kwargs: Additional arguments for model creation.
-
-    Returns:
-        Compiled generic N-BEATS model.
-
-    Example:
-        >>> model = create_generic_nbeats_model(
-        ...     backcast_length=96,
-        ...     forecast_length=24,
-        ...     nb_stacks=4,
-        ...     hidden_units=512
-        ... )
-    """
-    config = {
-        'backcast_length': backcast_length,
-        'forecast_length': forecast_length,
-        'stack_types': ['generic'] * nb_stacks,
-        'nb_blocks_per_stack': nb_blocks_per_stack,
-        'thetas_dim': [thetas_dim] * nb_stacks,
-        'hidden_layer_units': hidden_units,
-        'share_weights_in_stack': False,
-        'input_dim': 1,
-        'output_dim': 1,
-    }
-
-    return create_nbeats_model(config=config, **kwargs)
