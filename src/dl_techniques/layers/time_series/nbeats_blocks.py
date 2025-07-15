@@ -1,7 +1,7 @@
 """
-Corrected N-BEATS Block Layers for Time Series Forecasting.
+N-BEATS Block Layers for Time Series Forecasting.
 
-This module implements corrected building blocks for the N-BEATS architecture
+This module implements the building blocks for the N-BEATS architecture
 with proper gradient flow and shape handling.
 """
 
@@ -16,6 +16,11 @@ from dl_techniques.utils.logger import logger
 @keras.saving.register_keras_serializable()
 class NBeatsBlock(keras.layers.Layer):
     """Base N-BEATS block layer with proper gradient flow.
+
+    This is the base class for all N-BEATS blocks. It implements the common
+    architecture of four fully connected layers followed by theta parameter
+    generation. Subclasses must implement the basis functions for generating
+    backcast and forecast from theta parameters.
 
     Args:
         units: Integer, number of hidden units in the fully connected layers.
@@ -52,7 +57,7 @@ class NBeatsBlock(keras.layers.Layer):
         self._build_input_shape = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer."""
+        """Build the layer weights."""
         self._build_input_shape = input_shape
 
         # Four fully connected layers with proper initialization
@@ -127,23 +132,54 @@ class NBeatsBlock(keras.layers.Layer):
         return backcast, forecast
 
     def _generate_backcast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
-        """Generate backcast from theta parameters."""
+        """Generate backcast from theta parameters.
+
+        Args:
+            theta: Theta parameters tensor.
+
+        Returns:
+            Backcast tensor.
+
+        Raises:
+            NotImplementedError: If not implemented by subclass.
+        """
         raise NotImplementedError("Subclasses must implement _generate_backcast")
 
     def _generate_forecast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
-        """Generate forecast from theta parameters."""
+        """Generate forecast from theta parameters.
+
+        Args:
+            theta: Theta parameters tensor.
+
+        Returns:
+            Forecast tensor.
+
+        Raises:
+            NotImplementedError: If not implemented by subclass.
+        """
         raise NotImplementedError("Subclasses must implement _generate_forecast")
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[
         Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
-        """Compute the output shape of the layer."""
+        """Compute the output shape of the layer.
+
+        Args:
+            input_shape: Shape of the input tensor.
+
+        Returns:
+            Tuple containing (backcast_shape, forecast_shape).
+        """
         batch_size = input_shape[0]
         backcast_shape = (batch_size, self.backcast_length)
         forecast_shape = (batch_size, self.forecast_length)
         return backcast_shape, forecast_shape
 
     def get_config(self) -> dict:
-        """Get layer configuration."""
+        """Get layer configuration for serialization.
+
+        Returns:
+            Configuration dictionary.
+        """
         config = super().get_config()
         config.update({
             'units': self.units,
@@ -155,18 +191,31 @@ class NBeatsBlock(keras.layers.Layer):
         return config
 
     def get_build_config(self) -> dict:
-        """Get build configuration."""
+        """Get build configuration for serialization.
+
+        Returns:
+            Build configuration dictionary.
+        """
         return {'input_shape': self._build_input_shape}
 
     def build_from_config(self, config: dict) -> None:
-        """Build from configuration."""
+        """Build layer from configuration.
+
+        Args:
+            config: Build configuration dictionary.
+        """
         if config.get('input_shape') is not None:
             self.build(config['input_shape'])
 
 
 @keras.saving.register_keras_serializable()
 class GenericBlock(NBeatsBlock):
-    """Generic N-BEATS block with learnable linear transformations."""
+    """Generic N-BEATS block with learnable linear transformations.
+
+    This block uses learnable linear transformations to map theta parameters
+    to backcast and forecast sequences. It's the most flexible block type
+    but requires more parameters to learn.
+    """
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the generic block."""
@@ -189,17 +238,36 @@ class GenericBlock(NBeatsBlock):
         )
 
     def _generate_backcast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
-        """Generate backcast using learnable basis functions."""
+        """Generate backcast using learnable basis functions.
+
+        Args:
+            theta: Theta parameters tensor of shape (batch_size, thetas_dim).
+
+        Returns:
+            Backcast tensor of shape (batch_size, backcast_length).
+        """
         return self.backcast_basis(theta)
 
     def _generate_forecast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
-        """Generate forecast using learnable basis functions."""
+        """Generate forecast using learnable basis functions.
+
+        Args:
+            theta: Theta parameters tensor of shape (batch_size, thetas_dim).
+
+        Returns:
+            Forecast tensor of shape (batch_size, forecast_length).
+        """
         return self.forecast_basis(theta)
 
 
 @keras.saving.register_keras_serializable()
 class TrendBlock(NBeatsBlock):
-    """Trend N-BEATS block with polynomial basis functions."""
+    """Trend N-BEATS block with polynomial basis functions.
+
+    This block uses polynomial basis functions to capture trend patterns
+    in the time series. It's particularly effective for data with clear
+    polynomial trends.
+    """
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the trend block."""
@@ -209,8 +277,8 @@ class TrendBlock(NBeatsBlock):
         self._create_polynomial_basis()
 
     def _create_polynomial_basis(self) -> None:
-        """Create polynomial basis matrices."""
-        # Create time grids
+        """Create polynomial basis matrices for trend modeling."""
+        # Create time grids - backcast uses past (negative) time, forecast uses future (positive) time
         backcast_grid = np.linspace(-1, 0, self.backcast_length, dtype=np.float32)
         forecast_grid = np.linspace(0, 1, self.forecast_length, dtype=np.float32)
 
@@ -218,6 +286,7 @@ class TrendBlock(NBeatsBlock):
         backcast_basis = np.zeros((self.thetas_dim, self.backcast_length), dtype=np.float32)
         forecast_basis = np.zeros((self.thetas_dim, self.forecast_length), dtype=np.float32)
 
+        # Generate polynomial terms (1, t, t^2, t^3, ...)
         for i in range(self.thetas_dim):
             backcast_basis[i] = np.power(backcast_grid, i)
             forecast_basis[i] = np.power(forecast_grid, i)
@@ -241,17 +310,36 @@ class TrendBlock(NBeatsBlock):
         self.forecast_basis_matrix.assign(forecast_basis)
 
     def _generate_backcast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
-        """Generate backcast using polynomial basis functions."""
+        """Generate backcast using polynomial basis functions.
+
+        Args:
+            theta: Theta parameters tensor of shape (batch_size, thetas_dim).
+
+        Returns:
+            Backcast tensor of shape (batch_size, backcast_length).
+        """
         return ops.matmul(theta, self.backcast_basis_matrix)
 
     def _generate_forecast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
-        """Generate forecast using polynomial basis functions."""
+        """Generate forecast using polynomial basis functions.
+
+        Args:
+            theta: Theta parameters tensor of shape (batch_size, thetas_dim).
+
+        Returns:
+            Forecast tensor of shape (batch_size, forecast_length).
+        """
         return ops.matmul(theta, self.forecast_basis_matrix)
 
 
 @keras.saving.register_keras_serializable()
 class SeasonalityBlock(NBeatsBlock):
-    """Seasonality N-BEATS block with Fourier basis functions."""
+    """Seasonality N-BEATS block with Fourier basis functions.
+
+    This block uses Fourier (sine and cosine) basis functions to capture
+    seasonal patterns in the time series. It's particularly effective for
+    data with periodic behavior.
+    """
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the seasonality block."""
@@ -261,8 +349,8 @@ class SeasonalityBlock(NBeatsBlock):
         self._create_fourier_basis()
 
     def _create_fourier_basis(self) -> None:
-        """Create Fourier basis matrices."""
-        # Time grids (normalized)
+        """Create Fourier basis matrices for seasonality modeling."""
+        # Time grids (normalized to [0, 1] for backcast and continuation for forecast)
         backcast_grid = np.linspace(0, 1, self.backcast_length, dtype=np.float32)
         forecast_grid = np.linspace(
             1, 1 + self.forecast_length / self.backcast_length,
@@ -273,7 +361,7 @@ class SeasonalityBlock(NBeatsBlock):
         backcast_basis = np.zeros((self.thetas_dim, self.backcast_length), dtype=np.float32)
         forecast_basis = np.zeros((self.thetas_dim, self.forecast_length), dtype=np.float32)
 
-        # Number of harmonics
+        # Number of harmonics (each harmonic has cos and sin components)
         num_harmonics = self.thetas_dim // 2
 
         for i in range(num_harmonics):
@@ -291,9 +379,8 @@ class SeasonalityBlock(NBeatsBlock):
                 backcast_basis[sin_idx] = np.sin(2 * np.pi * harmonic * backcast_grid)
                 forecast_basis[sin_idx] = np.sin(2 * np.pi * harmonic * forecast_grid)
 
-        # Handle odd thetas_dim
+        # Handle odd thetas_dim by adding a constant term
         if self.thetas_dim % 2 == 1:
-            # Add constant term
             backcast_basis[-1] = 1.0
             forecast_basis[-1] = 1.0
 
@@ -316,9 +403,23 @@ class SeasonalityBlock(NBeatsBlock):
         self.forecast_basis_matrix.assign(forecast_basis)
 
     def _generate_backcast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
-        """Generate backcast using Fourier basis functions."""
+        """Generate backcast using Fourier basis functions.
+
+        Args:
+            theta: Theta parameters tensor of shape (batch_size, thetas_dim).
+
+        Returns:
+            Backcast tensor of shape (batch_size, backcast_length).
+        """
         return ops.matmul(theta, self.backcast_basis_matrix)
 
     def _generate_forecast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
-        """Generate forecast using Fourier basis functions."""
+        """Generate forecast using Fourier basis functions.
+
+        Args:
+            theta: Theta parameters tensor of shape (batch_size, thetas_dim).
+
+        Returns:
+            Forecast tensor of shape (batch_size, forecast_length).
+        """
         return ops.matmul(theta, self.forecast_basis_matrix)
