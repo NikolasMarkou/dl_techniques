@@ -578,7 +578,7 @@ class ProbabilisticNBeatsDataProcessor:
             train_data = data[:train_size]
 
             # Create and fit scaler (using minmax normalization)
-            scaler = TimeSeriesNormalizer(method='minmax')
+            scaler = TimeSeriesNormalizer(method='standard')
             scaler.fit(train_data)
             self.scalers[task_name] = scaler
 
