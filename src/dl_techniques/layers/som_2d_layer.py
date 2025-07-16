@@ -1,6 +1,8 @@
 """
 Self-Organizing Map (SOM) layer implementation for Keras.
 
+This file should be saved as: dl_techniques/layers/som_2d_layer.py
+
 A Self-Organizing Map is an unsupervised neural network that performs dimensionality
 reduction through competitive learning and topological organization. The layer maps
 high-dimensional input data onto a lower-dimensional grid of neurons, preserving
@@ -55,23 +57,6 @@ Neighborhood Functions:
 2. Bubble neighborhood:
    h_ij = 1 if d <= sigma, 0 otherwise
    where d = distance from neuron (i,j) to the BMU
-
-The neighborhood function creates a "bubble" of activation around the BMU:
-
-         Gaussian             |              Bubble
-                              |
-    ●●●●●●●●●●●●●●●           |            ●●●●●●●●
-    ●●●●●●●●●●●●●●●           |            ●●●●●●●●
-    ●●●●●●●●●●●●●●●           |            ●●●●●●●●
-    ●●●●●●●○●●●●●●●           |            ●●●○○●●●
-    ●●●●●○○○○○●●●●●           |            ●●●○○●●●
-    ●●●●○○○○○○○●●●●           |            ●●●●●●●●
-    ●●●○○○○X○○○○●●●           |            ●●●●●●●●
-    ●●●●○○○○○○○●●●●           |            ●●●●●●●●
-    ●●●●●○○○○○●●●●●           |
-    ●●●●●●●○●●●●●●●           |     X = BMU, ○ = Activated neighbors
-    ●●●●●●●●●●●●●●●           |     ● = Non-activated neurons
-    ●●●●●●●●●●●●●●●           |
 
 Weight Update:
 ------------
@@ -141,10 +126,18 @@ References
 """
 
 import keras
-import tensorflow as tf
+from keras import ops
 from typing import Tuple, Optional, Union, Dict, Any, Callable
 
-@keras.utils.register_keras_serializable()
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable()
 class SOM2dLayer(keras.layers.Layer):
     """
     Self-Organizing Map layer implementation for Keras.
@@ -170,38 +163,51 @@ class SOM2dLayer(keras.layers.Layer):
         Type of neighborhood function to use ('gaussian' or 'bubble').
         Defaults to 'gaussian'.
     weights_initializer : str or keras.initializers.Initializer, optional
-        Initialization method for weights. Defaults to 'random'.
+        Initialization method for weights. Defaults to 'random_uniform'.
     regularizer : keras.regularizers.Regularizer, optional
         Regularizer function applied to the weights. Defaults to None.
     name : str, optional
         Name of the layer. Defaults to None.
+    **kwargs : Any
+        Additional keyword arguments for the base layer.
     """
 
     def __init__(
-            self,
-            map_size: Tuple[int, int],
-            input_dim: int,
-            initial_learning_rate: float = 0.1,
-            decay_function: Optional[Callable] = None,
-            sigma: float = 1.0,
-            neighborhood_function: str = 'gaussian',
-            weights_initializer: Union[str, keras.initializers.Initializer] = 'random',
-            regularizer: Optional[keras.regularizers.Regularizer] = None,
-            name: Optional[str] = None,
-            **kwargs
-    ):
+        self,
+        map_size: Tuple[int, int],
+        input_dim: int,
+        initial_learning_rate: float = 0.1,
+        decay_function: Optional[Callable] = None,
+        sigma: float = 1.0,
+        neighborhood_function: str = 'gaussian',
+        weights_initializer: Union[str, keras.initializers.Initializer] = 'random_uniform',
+        regularizer: Optional[keras.regularizers.Regularizer] = None,
+        name: Optional[str] = None,
+        **kwargs: Any
+    ) -> None:
         """Initialize the SOM layer."""
-        super(SOM2dLayer, self).__init__(name=name, **kwargs)
+        super().__init__(name=name, **kwargs)
 
         self.map_size = map_size
         self.grid_height, self.grid_width = map_size
         self.input_dim = input_dim
         self.initial_learning_rate = initial_learning_rate
-        self.learning_rate = initial_learning_rate
         self.sigma = sigma
         self.neighborhood_function = neighborhood_function
-        self.weights_initializer = weights_initializer
-        self.regularizer = regularizer
+        self.weights_initializer = keras.initializers.get(weights_initializer)
+        self.regularizer = keras.regularizers.get(regularizer)
+
+        # Validate inputs
+        if self.grid_height <= 0 or self.grid_width <= 0:
+            raise ValueError(f"Map size must be positive, got {map_size}")
+        if self.input_dim <= 0:
+            raise ValueError(f"Input dimension must be positive, got {input_dim}")
+        if self.initial_learning_rate <= 0:
+            raise ValueError(f"Learning rate must be positive, got {initial_learning_rate}")
+        if self.sigma <= 0:
+            raise ValueError(f"Sigma must be positive, got {sigma}")
+        if self.neighborhood_function not in ['gaussian', 'bubble']:
+            raise ValueError(f"Neighborhood function must be 'gaussian' or 'bubble', got {neighborhood_function}")
 
         # Define custom decay function if none provided
         if decay_function is None:
@@ -209,25 +215,14 @@ class SOM2dLayer(keras.layers.Layer):
         else:
             self.decay_function = decay_function
 
-        # Training iterations counter
-        self.iterations = self.add_weight(
-            name="iterations",
-            shape=(),
-            dtype=tf.float32,
-            initializer=tf.zeros_initializer(),
-            trainable=False
-        )
+        # Initialize weights to None (will be created in build)
+        self.weights_map = None
+        self.iterations = None
+        self.max_iterations = None
+        self.grid_positions = None
 
-        self.max_iterations = self.add_weight(
-            name="max_iterations",
-            shape=(),
-            dtype=tf.float32,
-            initializer=lambda shape, dtype: tf.constant(1000.0, dtype=dtype),
-            trainable=False
-        )
-
-        # Initialize grid positions
-        self.grid_positions = self._initialize_grid_positions()
+        # Store build input shape for serialization
+        self._build_input_shape = None
 
     def build(self, input_shape: Tuple) -> None:
         """
@@ -238,77 +233,86 @@ class SOM2dLayer(keras.layers.Layer):
         input_shape : Tuple
             Shape of the input tensor.
         """
+        # Store input shape for serialization
+        self._build_input_shape = input_shape
+
+        # Convert input_shape to list for consistent manipulation
+        input_shape_list = list(input_shape)
+
         # Verify input shape
-        if input_shape[1] != self.input_dim:
+        if input_shape_list[-1] != self.input_dim:
             raise ValueError(f"Expected input shape with dimension {self.input_dim}, "
-                             f"but got input shape with dimension {input_shape[1]}")
+                           f"but got input shape with dimension {input_shape_list[-1]}")
 
-        # Initialize weights based on the chosen initializer
-        if isinstance(self.weights_initializer, str):
-            if self.weights_initializer == 'random':
-                initial_weights = tf.random.uniform(
-                    shape=(self.grid_height, self.grid_width, self.input_dim),
-                    minval=0.0, maxval=1.0, seed=42
-                )
-            elif self.weights_initializer == 'sample':
-                # This would initialize using random samples from input data
-                # But we can't access input data here, so use random init
-                initial_weights = tf.random.uniform(
-                    shape=(self.grid_height, self.grid_width, self.input_dim),
-                    minval=0.0, maxval=1.0, seed=42
-                )
-            else:
-                raise ValueError(f"Unsupported weights_initializer: {self.weights_initializer}")
+        # Training iterations counter
+        self.iterations = self.add_weight(
+            name="iterations",
+            shape=(),
+            dtype="float32",
+            initializer="zeros",
+            trainable=False
+        )
 
-            # Create the weight variable
-            self.weights_map = self.add_weight(
-                name="som_weights",
-                shape=(self.grid_height, self.grid_width, self.input_dim),
-                initializer=lambda shape, dtype: initial_weights,
-                regularizer=self.regularizer,
-                trainable=False  # SOM weights are updated manually, not through backprop
-            )
-        else:
-            # Use the provided initializer
-            self.weights_map = self.add_weight(
-                name="som_weights",
-                shape=(self.grid_height, self.grid_width, self.input_dim),
-                initializer=self.weights_initializer,
-                regularizer=self.regularizer,
-                trainable=False
-            )
+        self.max_iterations = self.add_weight(
+            name="max_iterations",
+            shape=(),
+            dtype="float32",
+            initializer=keras.initializers.Constant(1000.0),
+            trainable=False
+        )
 
-        super(SOM2dLayer, self).build(input_shape)
+        # Initialize SOM weights
+        self.weights_map = self.add_weight(
+            name="som_weights",
+            shape=(self.grid_height, self.grid_width, self.input_dim),
+            initializer=self.weights_initializer,
+            regularizer=self.regularizer,
+            trainable=False  # SOM weights are updated manually, not through backprop
+        )
 
-    def _initialize_grid_positions(self) -> tf.Tensor:
+        # Initialize grid positions
+        self.grid_positions = self._initialize_grid_positions()
+
+        super().build(input_shape)
+
+        logger.info(f"Built SOM2dLayer with map_size={self.map_size}, input_dim={self.input_dim}")
+
+    def _initialize_grid_positions(self) -> keras.KerasTensor:
         """
         Initialize the 2D grid positions for the SOM.
 
         Returns
         -------
-        tf.Tensor
+        keras.KerasTensor
             A tensor of shape (grid_height, grid_width, 2) containing
             the (y, x) coordinates of each neuron in the grid.
         """
-        # Create a meshgrid of positions
-        x_coords = tf.range(self.grid_width, dtype=tf.float32)
-        y_coords = tf.range(self.grid_height, dtype=tf.float32)
+        # Create coordinate ranges
+        x_coords = ops.cast(ops.arange(self.grid_width), "float32")
+        y_coords = ops.cast(ops.arange(self.grid_height), "float32")
 
-        # Create a meshgrid
-        y_grid, x_grid = tf.meshgrid(y_coords, x_coords, indexing='ij')
+        # Create meshgrid using numpy-style operations
+        x_grid = ops.broadcast_to(
+            ops.reshape(x_coords, (1, self.grid_width)),
+            (self.grid_height, self.grid_width)
+        )
+        y_grid = ops.broadcast_to(
+            ops.reshape(y_coords, (self.grid_height, 1)),
+            (self.grid_height, self.grid_width)
+        )
 
         # Stack to get (y, x) coordinates for each position
-        position_grid = tf.stack([y_grid, x_grid], axis=-1)
+        position_grid = ops.stack([y_grid, x_grid], axis=-1)
 
         return position_grid
 
-    def call(self, inputs: tf.Tensor, training: bool = None) -> Tuple[tf.Tensor, tf.Tensor]:
+    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
         Forward pass for the SOM layer.
 
         Parameters
         ----------
-        inputs : tf.Tensor
+        inputs : keras.KerasTensor
             Input tensor of shape (batch_size, input_dim).
         training : bool, optional
             Boolean indicating whether the layer should behave in
@@ -316,7 +320,7 @@ class SOM2dLayer(keras.layers.Layer):
 
         Returns
         -------
-        Tuple[tf.Tensor, tf.Tensor]
+        Tuple[keras.KerasTensor, keras.KerasTensor]
             A tuple containing:
             - BMU coordinates of shape (batch_size, 2)
             - Quantization error of shape (batch_size,)
@@ -327,125 +331,158 @@ class SOM2dLayer(keras.layers.Layer):
         # If in training mode, update the weights
         if training:
             self._update_weights(inputs, bmu_indices)
+            # Update iterations counter
             self.iterations.assign_add(1.0)
+
+        # Apply regularization if specified
+        if self.regularizer is not None:
+            self.add_loss(self.regularizer(self.weights_map))
 
         return bmu_indices, quantization_errors
 
-    def _find_bmu(self, inputs: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+    def _find_bmu(self, inputs: keras.KerasTensor) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
         Find the Best Matching Unit (BMU) for each input.
 
         Parameters
         ----------
-        inputs : tf.Tensor
+        inputs : keras.KerasTensor
             Input tensor of shape (batch_size, input_dim).
 
         Returns
         -------
-        Tuple[tf.Tensor, tf.Tensor]
+        Tuple[keras.KerasTensor, keras.KerasTensor]
             A tuple containing:
             - BMU coordinates of shape (batch_size, 2)
             - Quantization error of shape (batch_size,)
         """
         # Reshape weights to [grid_height * grid_width, input_dim]
-        flat_weights = tf.reshape(self.weights_map, [-1, self.input_dim])
+        flat_weights = ops.reshape(self.weights_map, (-1, self.input_dim))
 
         # Compute distances between inputs and all neurons
         # We use squared Euclidean distance for efficiency
-        expanded_inputs = tf.expand_dims(inputs, 1)  # [batch_size, 1, input_dim]
-        expanded_weights = tf.expand_dims(flat_weights, 0)  # [1, grid_height * grid_width, input_dim]
+        expanded_inputs = ops.expand_dims(inputs, 1)  # [batch_size, 1, input_dim]
+        expanded_weights = ops.expand_dims(flat_weights, 0)  # [1, grid_height * grid_width, input_dim]
 
         # Compute squared distances
-        squared_diff = tf.square(
-            expanded_inputs - expanded_weights)  # [batch_size, grid_height * grid_width, input_dim]
-        squared_distances = tf.reduce_sum(squared_diff, axis=2)  # [batch_size, grid_height * grid_width]
+        squared_diff = ops.square(expanded_inputs - expanded_weights)
+        squared_distances = ops.sum(squared_diff, axis=2)
 
         # Find the index of the minimum distance (BMU)
-        bmu_flat_indices = tf.argmin(squared_distances, axis=1)  # [batch_size]
+        bmu_flat_indices = ops.argmin(squared_distances, axis=1)
 
         # Convert flat indices to 2D grid coordinates
-        bmu_y = tf.cast(bmu_flat_indices // self.grid_width, tf.int32)
-        bmu_x = tf.cast(bmu_flat_indices % self.grid_width, tf.int32)
-        bmu_indices = tf.stack([bmu_y, bmu_x], axis=1)  # [batch_size, 2]
+        bmu_y = ops.cast(bmu_flat_indices // self.grid_width, "int32")
+        bmu_x = ops.cast(bmu_flat_indices % self.grid_width, "int32")
+        bmu_indices = ops.stack([bmu_y, bmu_x], axis=1)
 
         # Compute the quantization error (minimum distance)
-        quantization_errors = tf.gather(
-            tf.sqrt(tf.reshape(squared_distances, [tf.shape(inputs)[0], -1])),
-            bmu_flat_indices,
-            batch_dims=1
+        batch_size = ops.shape(inputs)[0]
+        quantization_errors = ops.sqrt(
+            ops.take_along_axis(
+                squared_distances,
+                ops.expand_dims(bmu_flat_indices, axis=1),
+                axis=1
+            )
         )
+        quantization_errors = ops.squeeze(quantization_errors, axis=1)
 
         return bmu_indices, quantization_errors
 
-    def _update_weights(self, inputs: tf.Tensor, bmu_indices: tf.Tensor) -> None:
+    def _update_weights(self, inputs: keras.KerasTensor, bmu_indices: keras.KerasTensor) -> None:
         """
         Update the weights of the SOM using the Kohonen learning rule.
 
         Parameters
         ----------
-        inputs : tf.Tensor
+        inputs : keras.KerasTensor
             Input tensor of shape (batch_size, input_dim).
-        bmu_indices : tf.Tensor
+        bmu_indices : keras.KerasTensor
             BMU coordinates of shape (batch_size, 2).
         """
-        # Update learning rate and sigma based on iteration
+        # Update learning rate based on iteration
         current_learning_rate = self.decay_function(
             self.iterations, self.max_iterations
         )
 
         # Sigma also decreases with iterations
         current_sigma = self.sigma * (1.0 - self.iterations / self.max_iterations)
-        current_sigma = tf.maximum(current_sigma, 0.01)  # Don't let it go to zero
+        current_sigma = ops.maximum(current_sigma, 0.01)  # Don't let it go to zero
 
-        # Process each input in the batch
-        for i in range(tf.shape(inputs)[0]):
-            # Get the current input and its BMU
-            current_input = inputs[i]
-            bmu_coord = tf.cast(bmu_indices[i], tf.float32)
+        # For SOM, we typically process one sample at a time to maintain proper learning
+        # In batch processing, we'll use the first sample in the batch for weight updates
+        # This is a common approach in SOM implementations
 
-            # Compute neighborhood values for all neurons
-            if self.neighborhood_function == 'gaussian':
-                # Calculate squared distances from all neurons to BMU
-                squared_dist = tf.reduce_sum(
-                    tf.square(self.grid_positions - tf.reshape(bmu_coord, [1, 1, 2])),
-                    axis=2
-                )
+        current_input = inputs[0]  # Use first sample in batch
+        bmu_coord = ops.cast(bmu_indices[0], "float32")  # Use corresponding BMU
 
-                # Compute Gaussian neighborhood
-                neighborhood = tf.exp(-squared_dist / (2 * tf.square(current_sigma)))
-                neighborhood = tf.expand_dims(neighborhood, axis=-1)  # [grid_height, grid_width, 1]
+        # Compute neighborhood values for all neurons
+        if self.neighborhood_function == 'gaussian':
+            # Calculate squared distances from all neurons to BMU
+            bmu_expanded = ops.reshape(bmu_coord, (1, 1, 2))
+            squared_dist = ops.sum(
+                ops.square(self.grid_positions - bmu_expanded),
+                axis=2
+            )
 
-            elif self.neighborhood_function == 'bubble':
-                # Calculate distances from all neurons to BMU
-                dist = tf.sqrt(tf.reduce_sum(
-                    tf.square(self.grid_positions - tf.reshape(bmu_coord, [1, 1, 2])),
-                    axis=2
-                ))
+            # Compute Gaussian neighborhood
+            neighborhood = ops.exp(-squared_dist / (2 * ops.square(current_sigma)))
+            neighborhood = ops.expand_dims(neighborhood, axis=-1)
 
-                # Compute bubble neighborhood (1 within radius, 0 outside)
-                neighborhood = tf.cast(dist <= current_sigma, tf.float32)
-                neighborhood = tf.expand_dims(neighborhood, axis=-1)  # [grid_height, grid_width, 1]
+        elif self.neighborhood_function == 'bubble':
+            # Calculate distances from all neurons to BMU
+            bmu_expanded = ops.reshape(bmu_coord, (1, 1, 2))
+            dist = ops.sqrt(ops.sum(
+                ops.square(self.grid_positions - bmu_expanded),
+                axis=2
+            ))
 
-            else:
-                raise ValueError(f"Unsupported neighborhood_function: {self.neighborhood_function}")
+            # Compute bubble neighborhood (1 within radius, 0 outside)
+            neighborhood = ops.cast(dist <= current_sigma, "float32")
+            neighborhood = ops.expand_dims(neighborhood, axis=-1)
 
-            # Compute the weight update
-            weighted_input = tf.reshape(current_input, [1, 1, self.input_dim])
-            weight_update = current_learning_rate * neighborhood * (weighted_input - self.weights_map)
+        # Compute the weight update
+        weighted_input = ops.reshape(current_input, (1, 1, self.input_dim))
+        weight_update = current_learning_rate * neighborhood * (weighted_input - self.weights_map)
 
-            # Apply the update
-            self.weights_map.assign_add(weight_update)
+        # Apply the update
+        self.weights_map.assign_add(weight_update)
 
-    def get_weights_as_grid(self) -> tf.Tensor:
+    def get_weights_as_grid(self) -> keras.KerasTensor:
         """
         Get the current weights organized as a grid.
 
         Returns
         -------
-        tf.Tensor
+        keras.KerasTensor
             The SOM weights as a grid of shape (grid_height, grid_width, input_dim).
         """
         return self.weights_map
+
+    def compute_output_shape(self, input_shape: Tuple) -> Tuple[Tuple, Tuple]:
+        """
+        Compute the output shape of the layer.
+
+        Parameters
+        ----------
+        input_shape : Tuple
+            Shape of the input tensor.
+
+        Returns
+        -------
+        Tuple[Tuple, Tuple]
+            A tuple containing:
+            - BMU coordinates shape: (batch_size, 2)
+            - Quantization error shape: (batch_size,)
+        """
+        # Convert to list for consistent manipulation
+        input_shape_list = list(input_shape)
+        batch_size = input_shape_list[0]
+
+        bmu_shape = tuple([batch_size, 2])
+        error_shape = tuple([batch_size])
+
+        return bmu_shape, error_shape
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -456,13 +493,68 @@ class SOM2dLayer(keras.layers.Layer):
         Dict[str, Any]
             Configuration dictionary for the layer.
         """
-        config = super(SOM2dLayer, self).get_config()
+        config = super().get_config()
         config.update({
             'map_size': self.map_size,
             'input_dim': self.input_dim,
             'initial_learning_rate': self.initial_learning_rate,
             'sigma': self.sigma,
             'neighborhood_function': self.neighborhood_function,
-            'weights_initializer': self.weights_initializer
+            'weights_initializer': keras.initializers.serialize(self.weights_initializer),
+            'regularizer': keras.regularizers.serialize(self.regularizer),
         })
         return config
+
+    def get_build_config(self) -> Dict[str, Any]:
+        """
+        Get build configuration for the layer.
+
+        Returns
+        -------
+        Dict[str, Any]
+            Build configuration dictionary.
+        """
+        return {
+            "input_shape": self._build_input_shape,
+        }
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """
+        Build the layer from a configuration.
+
+        Parameters
+        ----------
+        config : Dict[str, Any]
+            Build configuration dictionary.
+        """
+        if config.get("input_shape") is not None:
+            self.build(config["input_shape"])
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "SOM2dLayer":
+        """
+        Create a layer from its configuration.
+
+        Parameters
+        ----------
+        config : Dict[str, Any]
+            Configuration dictionary.
+
+        Returns
+        -------
+        SOM2dLayer
+            A new SOM2dLayer instance.
+        """
+        # Deserialize complex objects
+        if 'weights_initializer' in config:
+            config['weights_initializer'] = keras.initializers.deserialize(
+                config['weights_initializer']
+            )
+        if 'regularizer' in config:
+            config['regularizer'] = keras.regularizers.deserialize(
+                config['regularizer']
+            )
+
+        return cls(**config)
+
+# ---------------------------------------------------------------------
