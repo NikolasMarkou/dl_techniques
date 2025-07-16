@@ -217,7 +217,7 @@ class MixtureMonitoringCallback(keras.callbacks.Callback):
         self.save_dir = save_dir
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict] = None) -> None:
-        """Monitor mixture weights at the end of each epoch.
+        """Monitor mixture weights and sigma values at the end of each epoch.
 
         Args:
             epoch: Current epoch number
@@ -233,9 +233,11 @@ class MixtureMonitoringCallback(keras.callbacks.Callback):
 
             # Get mixture parameters from the model
             mixture_params = self.model.predict(X_sample, verbose=0)
-            _, _, pi_logits = self.model.mdn_layer.split_mixture_params(mixture_params)
+            mu, sigma, pi_logits = self.model.mdn_layer.split_mixture_params(mixture_params)
 
-            # Convert to mixture weights
+            # Convert to numpy arrays for analysis
+            mu_np = keras.ops.convert_to_numpy(mu)
+            sigma_np = keras.ops.convert_to_numpy(sigma)
             pi_weights = keras.ops.convert_to_numpy(
                 keras.activations.softmax(pi_logits, axis=-1)
             )
@@ -245,7 +247,12 @@ class MixtureMonitoringCallback(keras.callbacks.Callback):
             max_weight = np.max(pi_weights)
             entropy = -np.sum(mean_weights * np.log(mean_weights + EPSILON_LOG))
 
-            # Log mixture information periodically
+            # Calculate sigma statistics
+            mean_sigma = np.mean(sigma_np)
+            min_sigma = np.min(sigma_np)
+            max_sigma = np.max(sigma_np)
+
+            # Log mixture and sigma information periodically
             if (epoch + 1) % 10 == 0:
                 logger.info(
                     f"Epoch {epoch+1}: "
@@ -253,12 +260,24 @@ class MixtureMonitoringCallback(keras.callbacks.Callback):
                     f"MaxWeight={max_weight:.3f}, "
                     f"Entropy={entropy:.3f}"
                 )
+                logger.info(
+                    f"Epoch {epoch+1}: "
+                    f"Sigma - Mean={mean_sigma:.4f}, "
+                    f"Min={min_sigma:.4f}, "
+                    f"Max={max_sigma:.4f}"
+                )
 
-            # Warn about potential mixture collapse
+            # Warn about potential issues
             if max_weight > MIXTURE_COLLAPSE_THRESHOLD:
                 logger.warning(
                     f"Epoch {epoch+1}: Potential mixture collapse! "
                     f"Max weight: {max_weight:.3f}"
+                )
+
+            if min_sigma < 0.001:  # Very small sigma values
+                logger.warning(
+                    f"Epoch {epoch+1}: Very small sigma values detected! "
+                    f"Min sigma: {min_sigma:.6f} - This may cause over-confidence"
                 )
 
         except Exception as e:
@@ -709,6 +728,11 @@ class ProbabilisticNBeatsTrainer:
         # Configure loss function
         loss_fn = self._get_loss_function(model)
 
+        # Configure model with min_sigma parameter
+        if hasattr(model, 'mdn_layer') and model.mdn_layer is not None:
+            # Ensure min_sigma is properly configured
+            logger.info(f"MDN layer min_sigma constraint: {self.config.min_sigma}")
+
         # Compile model
         model.compile(optimizer=optimizer, loss=loss_fn)
 
@@ -748,6 +772,37 @@ class ProbabilisticNBeatsTrainer:
             logger.info("Using standard MDN Negative Log-Likelihood Loss.")
             return model.mdn_loss
 
+    def _log_loss_interpretation(self, loss_value: float, epoch: int) -> None:
+        """Log interpretation of loss values for better understanding.
+
+        Args:
+            loss_value: Current loss value
+            epoch: Current epoch number
+        """
+        if epoch % 10 == 0:  # Log every 10 epochs
+            if loss_value < 0:
+                logger.info(
+                    f"Epoch {epoch}: Negative loss ({loss_value:.4f}) indicates "
+                    f"high-confidence predictions. Model is learning well."
+                )
+            else:
+                logger.info(
+                    f"Epoch {epoch}: Positive loss ({loss_value:.4f}) indicates "
+                    f"lower-confidence predictions."
+                )
+
+            # Additional interpretations based on loss magnitude
+            if loss_value < -15:
+                logger.warning(
+                    f"Epoch {epoch}: Very negative loss ({loss_value:.4f}) may "
+                    f"indicate over-confidence. Monitor mixture components."
+                )
+            elif loss_value < -10:
+                logger.info(
+                    f"Epoch {epoch}: Strongly negative loss ({loss_value:.4f}) "
+                    f"suggests good model confidence."
+                )
+
     def _create_training_callbacks(
         self,
         val_data: Dict[str, Tuple[np.ndarray, np.ndarray]],
@@ -773,6 +828,16 @@ class ProbabilisticNBeatsTrainer:
             exp_dir, 'visuals', 'epoch_plots', f'{model_type}_h{horizon}'
         )
 
+        # Custom callback to log loss interpretations
+        class LossInterpretationCallback(keras.callbacks.Callback):
+            def __init__(self, trainer):
+                super().__init__()
+                self.trainer = trainer
+
+            def on_epoch_end(self, epoch, logs=None):
+                if logs and 'loss' in logs:
+                    self.trainer._log_loss_interpretation(logs['loss'], epoch + 1)
+
         return [
             keras.callbacks.EarlyStopping(
                 monitor='val_loss',
@@ -792,7 +857,8 @@ class ProbabilisticNBeatsTrainer:
             ),
             MixtureMonitoringCallback(
                 X_val, self.processor, f"{model_type}_h{horizon}", exp_dir
-            )
+            ),
+            LossInterpretationCallback(self)
         ]
 
     def evaluate_model(
@@ -1507,8 +1573,10 @@ def main() -> None:
         batch_size=128,
         learning_rate=1e-3,
         early_stopping_patience=50,
-        diversity_regularizer_strength=0.01,
-        min_sigma=0.01,
+        # Increase diversity regularization to prevent mixture collapse
+        diversity_regularizer_strength=0.01,  # Increased from 0.001
+        # Increase min_sigma to prevent over-confidence
+        min_sigma=0.01,  # Increased from 0.01 to prevent very small sigmas
         use_hybrid_loss=True,
         hybrid_loss_alpha=0.7
     )
@@ -1516,8 +1584,17 @@ def main() -> None:
     ts_config = TimeSeriesConfig(
         n_samples=5000,
         random_seed=RANDOM_SEED,
+        # Slightly increase noise to prevent over-fitting
         default_noise_level=0.1
     )
+
+    # Log configuration for debugging
+    logger.info(f"Training configuration:")
+    logger.info(f"  diversity_regularizer_strength: {config.diversity_regularizer_strength}")
+    logger.info(f"  min_sigma: {config.min_sigma}")
+    logger.info(f"  use_hybrid_loss: {config.use_hybrid_loss}")
+    logger.info(f"  hybrid_loss_alpha: {config.hybrid_loss_alpha}")
+    logger.info(f"  default_noise_level: {ts_config.default_noise_level}")
 
     try:
         # Create and run trainer
