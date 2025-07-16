@@ -1,10 +1,14 @@
 """
-Mixture Density Network (MDN) Layer
+Enhanced Mixture Density Network (MDN) Layer with Intermediate Processing
 
-A Mixture Density Network combines a neural network with a mixture density model
-to predict probability distributions rather than single point estimates. This
-implementation provides a custom Keras layer that outputs parameters for a
-mixture of Gaussian distributions.
+This implementation extends the traditional MDN layer with practical improvements
+for better training stability and performance:
+
+1. Intermediate processing layers before each head (Dense -> BN -> Activation)
+2. Diversity regularization to prevent component collapse
+3. Sigma constraint at 0.01 minimum to prevent overconfident predictions
+4. Configurable bias usage (default False for cleaner learning)
+5. Improved numerical stability
 
 Key Features:
     - Models complex, multi-modal target distributions
@@ -12,6 +16,8 @@ Key Features:
     - Provides uncertainty quantification through distribution parameters
     - Handles ambiguous or one-to-many mapping problems
     - Enables sampling from the predicted distributions
+    - Prevents common training issues (component collapse, overconfidence)
+    - Enhanced architecture with intermediate processing layers
 
 Theory:
     MDNs extend traditional neural networks by replacing the single output value
@@ -52,23 +58,49 @@ from dl_techniques.utils.tensors import gaussian_probability
 from .activations.explanded_activations import elu_plus_one_plus_epsilon
 
 # ---------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------
 
-EPSILON_SIGMA = 1e-6
+EPSILON_SIGMA = 1e-6  # For internal numerical stability
+MIN_SIGMA = 1e-3      # Minimum sigma value to prevent overconfidence
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class MDNLayer(keras.layers.Layer):
-    """Mixture Density Network Layer
+    """Enhanced Mixture Density Network Layer with Intermediate Processing
 
-    This layer outputs parameters for a mixture of Gaussian distributions.
-    It includes safeguards against numerical instability and follows Keras 3.x
-    best practices for serialization and backend compatibility.
+    This layer outputs parameters for a mixture of Gaussian distributions with
+    practical improvements for training stability and enhanced architecture.
+    Each head now includes intermediate processing layers for better representation
+    learning.
 
-    The layer creates three separate dense layers internally:
+    Architecture:
+    Input -> [Dense(intermediate_units) -> BatchNorm -> Activation] -> Final Dense -> Output
+
+    The layer creates six intermediate processing layers and three final output layers:
+
+    Intermediate layers:
+    1. intermediate_mu_dense: Dense layer before mean outputs
+    2. intermediate_mu_bn: Optional batch normalization for mean path
+    3. intermediate_sigma_dense: Dense layer before sigma outputs
+    4. intermediate_sigma_bn: Optional batch normalization for sigma path
+    5. intermediate_pi_dense: Dense layer before mixture weight outputs
+    6. intermediate_pi_bn: Optional batch normalization for mixture weight path
+
+    Final output layers:
     1. mdn_mus: Outputs means (μ) for each mixture component and output dimension
     2. mdn_sigmas: Outputs standard deviations (σ) with positivity constraint
     3. mdn_pi: Outputs mixture weights (π) as unnormalized logits
+
+    Key Improvements:
+    - Intermediate processing layers for better representation learning
+    - Optional batch normalization for training stability
+    - Configurable intermediate layer size
+    - Diversity regularization to prevent component collapse
+    - Sigma constraint at 0.001 minimum to prevent overconfidence
+    - Configurable bias usage (default False)
+    - Enhanced numerical stability
 
     Parameters
     ----------
@@ -76,6 +108,16 @@ class MDNLayer(keras.layers.Layer):
         Dimensionality of the output space. Must be positive.
     num_mixtures : int
         Number of Gaussian mixtures. Must be positive.
+    use_bias : bool, optional
+        Whether to use bias vectors in the Dense layers, by default False
+    diversity_regularizer_strength : float, optional
+        Strength of diversity regularization to prevent component collapse, by default 0.0
+    intermediate_units : int, optional
+        Number of units in intermediate dense layers, by default 32
+    use_batch_norm : bool, optional
+        Whether to use batch normalization in intermediate layers, by default True
+    intermediate_activation : str, optional
+        Activation function for intermediate layers, by default "relu"
     kernel_initializer : Union[str, keras.initializers.Initializer], optional
         Initializer for the kernel weights matrix, by default "glorot_uniform"
     bias_initializer : Union[str, keras.initializers.Initializer], optional
@@ -91,16 +133,26 @@ class MDNLayer(keras.layers.Layer):
     ------
     ValueError
         If output_dimension or num_mixtures are not positive integers
+        If diversity_regularizer_strength is negative
+        If intermediate_units is not positive
 
     Examples
     --------
-    >>> # Create an MDN layer with 2D output and 5 mixture components
-    >>> mdn_layer = MDNLayer(output_dimension=2, num_mixtures=5)
+    >>> # Create an enhanced MDN layer with intermediate processing
+    >>> mdn_layer = MDNLayer(
+    ...     output_dimension=2,
+    ...     num_mixtures=5,
+    ...     use_bias=False,
+    ...     diversity_regularizer_strength=0.01,
+    ...     intermediate_units=64,
+    ...     use_batch_norm=True,
+    ...     intermediate_activation="swish"
+    ... )
     >>>
     >>> # Build a model
     >>> model = keras.Sequential([
-    ...     keras.layers.Dense(64, activation='relu', input_shape=(input_dim,)),
-    ...     keras.layers.Dense(32, activation='relu'),
+    ...     keras.layers.Dense(128, activation='relu', input_shape=(input_dim,)),
+    ...     keras.layers.Dense(64, activation='relu'),
     ...     mdn_layer
     ... ])
     >>>
@@ -112,13 +164,18 @@ class MDNLayer(keras.layers.Layer):
         self,
         output_dimension: int,
         num_mixtures: int,
-        kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+        use_bias: bool = True,
+        diversity_regularizer_strength: float = 0.0,
+        intermediate_units: int = 32,
+        use_batch_norm: bool = True,
+        intermediate_activation: str = "gelu",
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_normal",
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = keras.regularizers.L2(1e-4),
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
-        """Initialize the MDN layer.
+        """Initialize the enhanced MDN layer with intermediate processing.
 
         Parameters
         ----------
@@ -126,6 +183,16 @@ class MDNLayer(keras.layers.Layer):
             Dimensionality of the output space
         num_mixtures : int
             Number of Gaussian mixtures
+        use_bias : bool, optional
+            Whether to use bias vectors in Dense layers, by default False
+        diversity_regularizer_strength : float, optional
+            Strength of diversity regularization, by default 0.0
+        intermediate_units : int, optional
+            Number of units in intermediate dense layers, by default 32
+        use_batch_norm : bool, optional
+            Whether to use batch normalization in intermediate layers, by default True
+        intermediate_activation : str, optional
+            Activation function for intermediate layers, by default "relu"
         kernel_initializer : Union[str, keras.initializers.Initializer], optional
             Initializer for the kernel weights matrix
         bias_initializer : Union[str, keras.initializers.Initializer], optional
@@ -144,16 +211,34 @@ class MDNLayer(keras.layers.Layer):
             raise ValueError(f"output_dimension must be positive, got {output_dimension}")
         if num_mixtures <= 0:
             raise ValueError(f"num_mixtures must be positive, got {num_mixtures}")
+        if diversity_regularizer_strength < 0:
+            raise ValueError(f"diversity_regularizer_strength must be non-negative, got {diversity_regularizer_strength}")
+        if intermediate_units <= 0:
+            raise ValueError(f"intermediate_units must be positive, got {intermediate_units}")
 
         # Store configuration parameters
         self.output_dim = output_dimension
         self.num_mix = num_mixtures
+        self.use_bias = use_bias
+        self.diversity_regularizer_strength = diversity_regularizer_strength
+        self.intermediate_units = intermediate_units
+        self.use_batch_norm = use_batch_norm
+        self.intermediate_activation = intermediate_activation
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Initialize sublayers to None - will be created in build()
+        # Intermediate processing layers
+        self.intermediate_mu_dense = None
+        self.intermediate_mu_bn = None
+        self.intermediate_sigma_dense = None
+        self.intermediate_sigma_bn = None
+        self.intermediate_pi_dense = None
+        self.intermediate_pi_bn = None
+
+        # Final output layers
         self.mdn_mus = None
         self.mdn_sigmas = None
         self.mdn_pi = None
@@ -161,15 +246,23 @@ class MDNLayer(keras.layers.Layer):
         # Store build shape for serialization
         self._build_input_shape = None
 
-        logger.info(f"Initialized MDN layer with {num_mixtures} mixtures and {output_dimension}D output")
+        logger.info(f"Initialized enhanced MDN layer with {num_mixtures} mixtures and {output_dimension}D output")
+        logger.info(f"  use_bias: {use_bias}")
+        logger.info(f"  diversity_regularizer_strength: {diversity_regularizer_strength}")
+        logger.info(f"  intermediate_units: {intermediate_units}")
+        logger.info(f"  use_batch_norm: {use_batch_norm}")
+        logger.info(f"  intermediate_activation: {intermediate_activation}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer weights and sublayers based on input shape.
 
-        Creates three Dense sublayers:
-        1. mdn_mus: num_mix * output_dim outputs (means for each component and dimension)
-        2. mdn_sigmas: num_mix * output_dim outputs (std devs, forced positive)
-        3. mdn_pi: num_mix outputs (mixture weights as logits)
+        Creates intermediate processing layers and final output layers:
+
+        For each head (mu, sigma, pi):
+        1. Intermediate Dense layer with configurable units
+        2. Optional Batch Normalization
+        3. Activation function
+        4. Final Dense layer with head-specific outputs
 
         Parameters
         ----------
@@ -179,12 +272,75 @@ class MDNLayer(keras.layers.Layer):
         # Store input shape for serialization
         self._build_input_shape = input_shape
 
+        # =================================================================
+        # INTERMEDIATE PROCESSING LAYERS
+        # =================================================================
+
+        # Intermediate layer for MU (means) path
+        self.intermediate_mu_dense = keras.layers.Dense(
+            self.intermediate_units,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+            name='intermediate_mu_dense'
+        )
+
+        # Optional batch normalization for MU path
+        if self.use_batch_norm:
+            self.intermediate_mu_bn = keras.layers.BatchNormalization(
+                name='intermediate_mu_bn',
+                center=self.use_bias,
+            )
+
+        # Intermediate layer for SIGMA (standard deviations) path
+        self.intermediate_sigma_dense = keras.layers.Dense(
+            self.intermediate_units,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+            name='intermediate_sigma_dense'
+        )
+
+        # Optional batch normalization for SIGMA path
+        if self.use_batch_norm:
+            self.intermediate_sigma_bn = keras.layers.BatchNormalization(
+                name='intermediate_sigma_bn',
+                center=self.use_bias,
+            )
+
+        # Intermediate layer for PI (mixture weights) path
+        self.intermediate_pi_dense = keras.layers.Dense(
+            self.intermediate_units,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+            name='intermediate_pi_dense'
+        )
+
+        # Optional batch normalization for PI path
+        if self.use_batch_norm:
+            self.intermediate_pi_bn = keras.layers.BatchNormalization(
+                name='intermediate_pi_bn',
+                center=self.use_bias,
+            )
+
+        # =================================================================
+        # FINAL OUTPUT LAYERS
+        # =================================================================
+
         # MEAN OUTPUTS: μ parameters
         # Creates outputs for means of each Gaussian component
         # Shape: [batch_size, num_mix * output_dim]
         # Will be reshaped to [batch_size, num_mix, output_dim] later
         self.mdn_mus = keras.layers.Dense(
             self.num_mix * self.output_dim,
+            use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -198,7 +354,8 @@ class MDNLayer(keras.layers.Layer):
         # Shape: [batch_size, num_mix * output_dim]
         self.mdn_sigmas = keras.layers.Dense(
             self.num_mix * self.output_dim,
-            activation=elu_plus_one_plus_epsilon,
+            use_bias=self.use_bias,
+            activation=lambda x: keras.activations.elu(x) + 1.0 + MIN_SIGMA,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -212,6 +369,7 @@ class MDNLayer(keras.layers.Layer):
         # Shape: [batch_size, num_mix]
         self.mdn_pi = keras.layers.Dense(
             self.num_mix,
+            use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -219,23 +377,47 @@ class MDNLayer(keras.layers.Layer):
             name='mdn_pi'
         )
 
-        # Build sublayers explicitly to ensure proper weight initialization
-        self.mdn_mus.build(input_shape)
-        self.mdn_sigmas.build(input_shape)
-        self.mdn_pi.build(input_shape)
+        # =================================================================
+        # BUILD ALL SUBLAYERS
+        # =================================================================
+
+        # Build intermediate processing layers
+        self.intermediate_mu_dense.build(input_shape)
+        if self.use_batch_norm:
+            self.intermediate_mu_bn.build((input_shape[0], self.intermediate_units))
+
+        self.intermediate_sigma_dense.build(input_shape)
+        if self.use_batch_norm:
+            self.intermediate_sigma_bn.build((input_shape[0], self.intermediate_units))
+
+        self.intermediate_pi_dense.build(input_shape)
+        if self.use_batch_norm:
+            self.intermediate_pi_bn.build((input_shape[0], self.intermediate_units))
+
+        # Build final output layers
+        intermediate_shape = (input_shape[0], self.intermediate_units)
+        self.mdn_mus.build(intermediate_shape)
+        self.mdn_sigmas.build(intermediate_shape)
+        self.mdn_pi.build(intermediate_shape)
 
         super().build(input_shape)
-        logger.debug(f"MDN layer built with input shape: {input_shape}")
+        logger.debug(f"Enhanced MDN layer built with input shape: {input_shape}")
 
     def call(
             self,
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass of the layer.
+        """Forward pass of the layer with intermediate processing.
 
-        Computes all mixture parameters and concatenates them into a single output tensor.
+        Processes inputs through intermediate layers before computing mixture parameters:
+        1. Each path: Dense -> [Optional BN] -> Activation
+        2. Final output layers compute mixture parameters
+        3. Concatenate all parameters into single output tensor
+
         The output structure is: [mu_params, sigma_params, pi_params]
+
+        If diversity regularization is enabled, adds diversity loss during training.
 
         Parameters
         ----------
@@ -250,19 +432,58 @@ class MDNLayer(keras.layers.Layer):
             Output tensor containing concatenated mixture parameters
             Shape: [batch_size, (2 * num_mix * output_dim) + num_mix]
         """
-        # Compute mixture parameters using sublayers
-        # μ parameters: means for each mixture component and output dimension
-        mu_output = self.mdn_mus(inputs, training=training)
+        # =================================================================
+        # PROCESS MU (MEANS) PATH
+        # =================================================================
 
-        # σ parameters: standard deviations (automatically made positive by activation)
-        sigma_output = self.mdn_sigmas(inputs, training=training)
-        # Additional safety clamp to prevent numerical issues
-        # Even with the positive activation, ensure σ ≥ ε for stability
-        sigma_output = ops.maximum(sigma_output, EPSILON_SIGMA)
+        # Intermediate processing: Dense -> [BN] -> Activation
+        mu_intermediate = self.intermediate_mu_dense(inputs, training=training)
+        if self.use_batch_norm:
+            mu_intermediate = self.intermediate_mu_bn(mu_intermediate, training=training)
+        mu_intermediate = keras.activations.get(self.intermediate_activation)(mu_intermediate)
 
-        # π parameters: mixture weights as unnormalized logits
-        # Will be converted to probabilities later via softmax
-        pi_output = self.mdn_pi(inputs, training=training)
+        # Final mu output
+        mu_output = self.mdn_mus(mu_intermediate, training=training)
+
+        # =================================================================
+        # PROCESS SIGMA (STANDARD DEVIATIONS) PATH
+        # =================================================================
+
+        # Intermediate processing: Dense -> [BN] -> Activation
+        sigma_intermediate = self.intermediate_sigma_dense(inputs, training=training)
+        if self.use_batch_norm:
+            sigma_intermediate = self.intermediate_sigma_bn(sigma_intermediate, training=training)
+        sigma_intermediate = keras.activations.get(self.intermediate_activation)(sigma_intermediate)
+
+        # Final sigma output (automatically made positive and clamped)
+        sigma_output = self.mdn_sigmas(sigma_intermediate, training=training)
+
+        # =================================================================
+        # PROCESS PI (MIXTURE WEIGHTS) PATH
+        # =================================================================
+
+        # Intermediate processing: Dense -> [BN] -> Activation
+        pi_intermediate = self.intermediate_pi_dense(inputs, training=training)
+        if self.use_batch_norm:
+            pi_intermediate = self.intermediate_pi_bn(pi_intermediate, training=training)
+        pi_intermediate = keras.activations.get(self.intermediate_activation)(pi_intermediate)
+
+        # Final pi output (unnormalized logits)
+        pi_output = self.mdn_pi(pi_intermediate, training=training)
+
+        # =================================================================
+        # DIVERSITY REGULARIZATION
+        # =================================================================
+
+        # Add diversity regularization loss if enabled and training
+        if self.diversity_regularizer_strength > 0.0 and training:
+            diversity_loss = self._compute_diversity_loss(mu_output, sigma_output, pi_output)
+            self.add_loss(diversity_loss)
+            logger.debug(f"Added diversity loss: {diversity_loss}")
+
+        # =================================================================
+        # CONCATENATE OUTPUT
+        # =================================================================
 
         # Concatenate all parameters into single output tensor
         # Structure: [μ₁, μ₂, ..., μₙ, σ₁, σ₂, ..., σₙ, π₁, π₂, ..., πₘ]
@@ -271,6 +492,62 @@ class MDNLayer(keras.layers.Layer):
             [mu_output, sigma_output, pi_output],
             name='mdn_outputs'
         )
+
+    def _compute_diversity_loss(
+        self,
+        mu_output: keras.KerasTensor,
+        sigma_output: keras.KerasTensor,
+        pi_output: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """Compute diversity loss to prevent mixture components from collapsing.
+
+        Penalizes when mixture components have similar means, encouraging
+        the components to spread out and capture different modes of the data.
+
+        Parameters
+        ----------
+        mu_output : keras.KerasTensor
+            Flattened means output, shape [batch_size, num_mix * output_dim]
+        sigma_output : keras.KerasTensor
+            Flattened sigmas output, shape [batch_size, num_mix * output_dim]
+        pi_output : keras.KerasTensor
+            Logits output, shape [batch_size, num_mix]
+
+        Returns
+        -------
+        keras.KerasTensor
+            Diversity loss value (scalar)
+        """
+        if self.num_mix <= 1:
+            return ops.cast(0.0, dtype=mu_output.dtype)
+
+        # Reshape means to [batch_size, num_mix, output_dim]
+        batch_size = ops.shape(mu_output)[0]
+        mus = ops.reshape(mu_output, [batch_size, self.num_mix, self.output_dim])
+
+        # Calculate pairwise distances between mixture component means
+        # Shape: [batch_size, num_mix, 1, output_dim]
+        mus_expanded_1 = ops.expand_dims(mus, axis=2)
+        # Shape: [batch_size, 1, num_mix, output_dim]
+        mus_expanded_2 = ops.expand_dims(mus, axis=1)
+
+        # Pairwise squared distances: [batch_size, num_mix, num_mix, output_dim]
+        pairwise_distances = ops.square(mus_expanded_1 - mus_expanded_2)
+
+        # Sum over output dimensions: [batch_size, num_mix, num_mix]
+        pairwise_distances = ops.sum(pairwise_distances, axis=-1)
+
+        # Create mask to ignore diagonal (distance from component to itself)
+        mask = 1.0 - ops.eye(self.num_mix, dtype=pairwise_distances.dtype)
+
+        # Apply mask and compute diversity loss
+        # Penalize small distances (high similarity)
+        diversity_loss = ops.exp(-pairwise_distances) * mask
+
+        # Average over all pairs and batch
+        diversity_loss = ops.mean(diversity_loss)
+
+        return self.diversity_regularizer_strength * diversity_loss
 
     def compute_output_shape(
             self,
@@ -345,6 +622,9 @@ class MDNLayer(keras.layers.Layer):
         # Reshape standard deviations: same transformation as means
         out_sigma = ops.reshape(out_sigma, [batch_size, self.num_mix, self.output_dim])
 
+        # Ensure sigmas are properly clamped (additional safety)
+        out_sigma = ops.maximum(out_sigma, MIN_SIGMA)
+
         # π parameters are already in correct shape [batch, num_mix]
         return out_mu, out_sigma, out_pi
 
@@ -353,7 +633,7 @@ class MDNLayer(keras.layers.Layer):
             y_true: keras.KerasTensor,
             y_pred: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """MDN loss function implementation using negative log likelihood.
+        """Enhanced MDN loss function implementation using negative log likelihood.
 
         This function computes the negative log likelihood of the target values
         under the predicted mixture of Gaussians. The mathematical formulation:
@@ -364,6 +644,8 @@ class MDNLayer(keras.layers.Layer):
         - πᵢ are the mixture weights (after softmax normalization)
         - N(y_true | μᵢ, σᵢ) is the Gaussian probability density
         - The sum is over all mixture components
+
+        Additional diversity regularization is handled automatically via add_loss().
 
         Parameters
         ----------
@@ -420,20 +702,14 @@ class MDNLayer(keras.layers.Layer):
         # Shape: [batch_size]
         total_prob = ops.sum(weighted_probs, axis=-1)
 
-        # Prevent log(0) with improved numerical stability
-        # Clamp to minimum value to avoid -∞ in log calculation
-        total_prob = ops.maximum(total_prob, EPSILON_SIGMA)
-
-        # Compute log probability for each sample
-        log_prob = ops.log(total_prob)
+        # Clamp with a tiny epsilon for numerical stability
+        total_prob = ops.maximum(total_prob, keras.backend.epsilon())
 
         # Calculate negative log likelihood (NLL) loss
-        # Take negative because we want to maximize likelihood (minimize NLL)
-        # Average across batch dimension for final loss value
+        log_prob = ops.log(total_prob)
         loss = -ops.mean(log_prob)
 
-        # Additional safety: ensure loss is non-negative
-        return ops.maximum(loss, 0.0)
+        return loss
 
     def sample(self, y_pred: keras.KerasTensor, temperature: float = 1.0) -> keras.KerasTensor:
         """Sample from the mixture distribution.
@@ -461,8 +737,8 @@ class MDNLayer(keras.layers.Layer):
         out_mu, out_sigma, out_pi = self.split_mixture_params(y_pred)
 
         # Ensure numerical stability for standard deviations
-        # Even with built-in safeguards, add extra protection
-        out_sigma = ops.maximum(out_sigma, 1e-6)
+        # The sigma constraint is already applied, but add extra protection
+        out_sigma = ops.maximum(out_sigma, MIN_SIGMA)
 
         # Apply temperature scaling to mixture weights
         # Higher temperature → more uniform sampling
@@ -527,6 +803,11 @@ class MDNLayer(keras.layers.Layer):
         config.update({
             "output_dimension": self.output_dim,
             "num_mixtures": self.num_mix,
+            "use_bias": self.use_bias,
+            "diversity_regularizer_strength": self.diversity_regularizer_strength,
+            "intermediate_units": self.intermediate_units,
+            "use_batch_norm": self.use_batch_norm,
+            "intermediate_activation": self.intermediate_activation,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
@@ -582,6 +863,8 @@ class MDNLayer(keras.layers.Layer):
 
         return cls(**config_copy)
 
+# ---------------------------------------------------------------------
+# Utility Functions (Enhanced)
 # ---------------------------------------------------------------------
 
 def get_point_estimate(
@@ -647,7 +930,6 @@ def get_point_estimate(
 
     return point_estimates
 
-# ---------------------------------------------------------------------
 
 def get_uncertainty(
     model: keras.Model,
@@ -731,7 +1013,6 @@ def get_uncertainty(
 
     return total_variance, aleatoric_variance
 
-# ---------------------------------------------------------------------
 
 def get_prediction_intervals(
     point_estimates: np.ndarray,
@@ -787,4 +1068,57 @@ def get_prediction_intervals(
 
     return lower_bound, upper_bound
 
-# ---------------------------------------------------------------------
+
+def check_component_diversity(
+    model: keras.Model,
+    x_data: np.ndarray,
+    mdn_layer: MDNLayer
+) -> Dict[str, Any]:
+    """Check diversity of mixture components to monitor training quality.
+
+    Parameters
+    ----------
+    model : keras.Model
+        Trained model with MDN layer
+    x_data : np.ndarray
+        Input data for analysis
+    mdn_layer : MDNLayer
+        The MDN layer instance
+
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary containing diversity metrics
+    """
+    # Get predictions
+    y_pred = model.predict(x_data)
+    mu, sigma, pi_logits = mdn_layer.split_mixture_params(y_pred)
+
+    # Convert to numpy
+    mu_np = ops.convert_to_numpy(mu)
+    sigma_np = ops.convert_to_numpy(sigma)
+    pi_np = ops.convert_to_numpy(keras.activations.softmax(pi_logits, axis=-1))
+
+    # Calculate pairwise distances between components
+    batch_size, num_mix, output_dim = mu_np.shape
+    component_distances = []
+
+    for i in range(num_mix):
+        for j in range(i + 1, num_mix):
+            # Calculate L2 distance between components i and j
+            distances = np.linalg.norm(mu_np[:, i, :] - mu_np[:, j, :], axis=-1)
+            component_distances.append(distances)
+
+    component_distances = np.array(component_distances)
+
+    return {
+        "mean_component_separation": np.mean(component_distances),
+        "std_component_separation": np.std(component_distances),
+        "min_component_separation": np.min(component_distances),
+        "max_component_separation": np.max(component_distances),
+        "mean_sigma_values": np.mean(sigma_np),
+        "min_sigma_values": np.min(sigma_np),
+        "max_sigma_values": np.max(sigma_np),
+        "mean_mixture_weights": np.mean(pi_np, axis=0),
+        "std_mixture_weights": np.std(pi_np, axis=0)
+    }

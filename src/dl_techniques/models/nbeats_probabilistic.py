@@ -88,6 +88,7 @@ class ProbabilisticNBeatsNet(keras.Model):
             num_mixtures: int = 3,
             mdn_hidden_units: int = 128,
             aggregation_mode: str = 'concat',
+            diversity_regularizer_strength: float = 0.0,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -108,6 +109,7 @@ class ProbabilisticNBeatsNet(keras.Model):
         self.num_mixtures = num_mixtures
         self.mdn_hidden_units = mdn_hidden_units
         self.aggregation_mode = aggregation_mode
+        self.diversity_regularizer_strength = diversity_regularizer_strength
 
         # Validate inputs
         if len(self.stack_types) != len(self.thetas_dim):
@@ -204,7 +206,8 @@ class ProbabilisticNBeatsNet(keras.Model):
         self.mdn_layer = MDNLayer(
             output_dimension=self.forecast_length,
             num_mixtures=self.num_mixtures,
-            name='mdn_output'
+            name='mdn_output',
+            diversity_regularizer_strength=self.diversity_regularizer_strength
         )
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
@@ -338,6 +341,7 @@ class ProbabilisticNBeatsNet(keras.Model):
             'num_mixtures': self.num_mixtures,
             'mdn_hidden_units': self.mdn_hidden_units,
             'aggregation_mode': self.aggregation_mode,
+            'diversity_regularizer_strength': self.diversity_regularizer_strength,
         })
         # Note: 'output_dim' is intentionally omitted as it's derived from 'forecast_length'
         return config
@@ -386,3 +390,5 @@ def create_probabilistic_nbeats_model(
     logger.info(f"Aggregation mode: {default_config['aggregation_mode']}")
 
     return model
+
+# ---------------------------------------------------------------------
