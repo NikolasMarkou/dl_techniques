@@ -563,7 +563,10 @@ class ProbabilisticNBeatsTrainer:
         self.generator = TimeSeriesGenerator(ts_config)
         self.processor = ProbabilisticNBeatsDataProcessor(config)
         self.task_names = self.generator.get_task_names()
-        self.task_categories = self.generator.get_task_categories()
+        self.task_categories = {
+            category: self.generator.get_tasks_by_category(category)
+            for category in self.generator.get_task_categories()
+        }
         self.random_state = np.random.RandomState(RANDOM_SEED)
 
     def prepare_data(self) -> Dict[int, Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]]]:
@@ -913,7 +916,7 @@ class ProbabilisticNBeatsTrainer:
             widths[confidence_level] = np.mean(upper_bound - lower_bound)
 
         # Calculate CRPS
-        crps = self._calculate_crps(preds['samples'], y_true_orig, task_name)
+        crps = self._calculate_crps(model, X_test, y_true_orig, task_name)
 
         # Analyze mixture behavior
         _, _, pi_logits = model.mdn_layer.split_mixture_params(mixture_params)
@@ -979,32 +982,41 @@ class ProbabilisticNBeatsTrainer:
         Returns:
             Task category name
         """
-        for category, tasks in self.generator.get_task_categories().items():
-            if task_name in tasks:
+        # Check each category to find which one contains this task
+        for category in self.generator.get_task_categories():
+            tasks_in_category = self.generator.get_tasks_by_category(category)
+            if task_name in tasks_in_category:
                 return category
         return ""
 
     def _calculate_crps(
         self,
-        samples_scaled: np.ndarray,
+        model: ProbabilisticNBeatsNet,
+        X_test: np.ndarray,
         y_true_orig: np.ndarray,
         task_name: str
     ) -> float:
         """Calculate Continuous Ranked Probability Score (CRPS) with improved efficiency.
 
         Args:
-            samples_scaled: Prediction samples in scaled space
+            model: Trained model
+            X_test: Test input data
             y_true_orig: True values in original scale
             task_name: Name of the task
 
         Returns:
             CRPS value
         """
+        # Generate prediction samples
+        preds = model.predict_probabilistic(
+            X_test, num_samples=self.config.num_prediction_samples
+        )
+
         # Transform samples to original scale
-        samples_orig = np.zeros_like(samples_scaled)
-        for i in range(samples_scaled.shape[1]):
+        samples_orig = np.zeros_like(preds['samples'])
+        for i in range(preds['samples'].shape[1]):
             samples_orig[:, i, :] = self.processor.inverse_transform_data(
-                task_name, samples_scaled[:, i, :]
+                task_name, preds['samples'][:, i, :]
             )
 
         # Ensure consistent shapes
@@ -1058,7 +1070,8 @@ class ProbabilisticNBeatsTrainer:
         os.makedirs(plot_dir, exist_ok=True)
 
         # Create plots for each category and horizon
-        for category, tasks in self.generator.get_task_categories().items():
+        for category in self.generator.get_task_categories():
+            tasks = self.generator.get_tasks_by_category(category)
             for horizon in self.config.forecast_horizons:
                 self._plot_category_forecasts(
                     category, tasks, horizon, models[horizon],
@@ -1171,6 +1184,8 @@ class ProbabilisticNBeatsTrainer:
         """
         if scaler.method == 'standard' and scaler.std_val is not None:
             return scaler.std_val
+        elif scaler.method == 'minmax' and scaler.max_val is not None:
+            return scaler.max_val - scaler.min_val
         else:
             return 1.0
 
