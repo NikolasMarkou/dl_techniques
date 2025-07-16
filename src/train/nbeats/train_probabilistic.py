@@ -133,7 +133,7 @@ class ProbabilisticNBeatsConfig:
 
     # Hybrid loss configuration
     use_hybrid_loss: bool = True
-    hybrid_loss_alpha: float = 0.7  # 70% MDN loss, 30% Point Estimate MAE
+    hybrid_loss_alpha: float = 0.5  # 50% MDN loss, 50% Point Estimate MAE
 
 
 @dataclass
@@ -255,8 +255,8 @@ class MixtureMonitoringCallback(keras.callbacks.Callback):
             max_weight = np.max(pi_weights)
             entropy = -np.sum(mean_weights * np.log(mean_weights + EPSILON_LOG))
 
-            # Count active components (weight > 0.05)
-            active_components = np.sum(mean_weights > 0.05)
+            # Count active components (weight > 0.01)
+            active_components = np.sum(mean_weights > 0.01)
 
             # Calculate sigma statistics
             mean_sigma = np.mean(sigma_np)
@@ -1675,7 +1675,7 @@ def main() -> None:
     # Configuration with aggressive fixes for mixture collapse and overfitting
     config = ProbabilisticNBeatsConfig(
         epochs=150,
-        batch_size=64,  # Reduced from 128 for more stable gradients
+        batch_size=128,  # Reduced from 128 for more stable gradients
         learning_rate=5e-4,  # Reduced from 1e-3 for slower, more stable learning
         early_stopping_patience=25,  # Reduced from 50 for earlier stopping
         # SIGNIFICANTLY increase diversity regularization to prevent collapse
@@ -1683,32 +1683,22 @@ def main() -> None:
         # Keep min_sigma reasonable
         min_sigma=0.01,
         use_hybrid_loss=True,
-        hybrid_loss_alpha=0.6,  # Reduced from 0.7 to give more weight to point estimate
+        hybrid_loss_alpha=0.5,  # Reduced from 0.7 to give more weight to point estimate
         # Reduce model complexity
         num_mixtures=3,  # Reduced from 5 to prevent over-parameterization
         mdn_hidden_units=32,  # Reduced from 128
         hidden_layer_units=96,  # Reduced from 128
         # Increase regularization
         weight_decay=1e-3,  # Increased from 1e-4
-        gradient_clip_norm=0.5,  # Reduced from 1.0 for more conservative updates
+        gradient_clip_norm=0.9,  # Reduced from 1.0 for more conservative updates
     )
 
     ts_config = TimeSeriesConfig(
         n_samples=10000,
         random_seed=RANDOM_SEED,
         # Increase noise to prevent overfitting
-        default_noise_level=0.1  # Increased from 0.1
+        default_noise_level=0.01  # Increased from 0.1
     )
-
-    # Log configuration for debugging
-    logger.info(f"EMERGENCY FIXES APPLIED:")
-    logger.info(f"  diversity_regularizer_strength: {config.diversity_regularizer_strength} (INCREASED)")
-    logger.info(f"  learning_rate: {config.learning_rate} (DECREASED)")
-    logger.info(f"  batch_size: {config.batch_size} (DECREASED)")
-    logger.info(f"  num_mixtures: {config.num_mixtures} (DECREASED)")
-    logger.info(f"  hybrid_loss_alpha: {config.hybrid_loss_alpha} (ADJUSTED)")
-    logger.info(f"  weight_decay: {config.weight_decay} (INCREASED)")
-    logger.info(f"  default_noise_level: {ts_config.default_noise_level} (INCREASED)")
 
     try:
         # Create and run trainer
