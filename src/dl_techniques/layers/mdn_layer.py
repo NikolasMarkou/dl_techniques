@@ -164,15 +164,15 @@ class MDNLayer(keras.layers.Layer):
         self,
         output_dimension: int,
         num_mixtures: int,
-        use_bias: bool = False,
+        use_bias: bool = True,
         diversity_regularizer_strength: float = 0.0,
         intermediate_units: int = 32,
         use_batch_norm: bool = True,
-        intermediate_activation: str = "gelu",
+        intermediate_activation: str = "relu",
         kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_normal",
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = keras.regularizers.L2(1e-5),
-        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = keras.regularizers.L2(1e-5),
         min_sigma: float = MIN_SIGMA,
         **kwargs: Any
     ) -> None:
