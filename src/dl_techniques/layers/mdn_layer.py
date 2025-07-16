@@ -372,6 +372,7 @@ class MDNLayer(keras.layers.Layer):
         self.mdn_pi = keras.layers.Dense(
             self.num_mix,
             use_bias=self.use_bias,
+            activation="sigmoid",
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,

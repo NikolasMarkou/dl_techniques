@@ -1576,7 +1576,7 @@ def main() -> None:
         # Increase diversity regularization to prevent mixture collapse
         diversity_regularizer_strength=0.001,  # Increased from 0.001
         # Increase min_sigma to prevent over-confidence
-        min_sigma=0.001,  # Increased from 0.01 to prevent very small sigmas
+        min_sigma=0.01,  # Increased from 0.01 to prevent very small sigmas
         use_hybrid_loss=True,
         hybrid_loss_alpha=0.5
     )
