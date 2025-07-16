@@ -89,6 +89,7 @@ class ProbabilisticNBeatsNet(keras.Model):
             mdn_hidden_units: int = 128,
             aggregation_mode: str = 'concat',
             diversity_regularizer_strength: float = 0.0,
+            min_sigma: float = 1e-5,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -264,6 +265,59 @@ class ProbabilisticNBeatsNet(keras.Model):
     def mdn_loss(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
         """MDN loss function for training."""
         return self.mdn_layer.loss_func(y_true, y_pred)
+
+    def create_hybrid_loss(self, alpha: float = 0.7):
+        """Creates a hybrid loss function that combines MDN NLL and point estimate MAE.
+
+        This loss function encourages both accurate distribution modeling and
+        a precise point estimate (the mean of the mixture).
+
+        Args:
+            alpha (float): The weight for the MDN NLL loss. The weight for the
+                         point estimate loss will be (1 - alpha).
+
+        Returns:
+            A callable loss function.
+        """
+        if not (0 < alpha < 1):
+            raise ValueError("alpha must be between 0 and 1.")
+
+        def hybrid_loss(y_true, y_pred):
+            # 1. Calculate the standard MDN Negative Log-Likelihood loss
+            # This is the probabilistic part of the loss
+            mdn_loss_value = self.mdn_loss(y_true, y_pred)
+
+            # 2. Calculate the point estimate (expected value of the mixture)
+            mu, _, pi_logits = self.mdn_layer.split_mixture_params(y_pred)
+            pi = keras.activations.softmax(pi_logits, axis=-1)
+
+            # Ensure pi is expanded for broadcasting with mu
+            # pi shape: [batch, num_mix] -> [batch, num_mix, 1]
+            # mu shape: [batch, num_mix, output_dim]
+            pi_expanded = keras.ops.expand_dims(pi, axis=-1)
+
+            # Point estimate E[y|x] = sum(pi_i * mu_i)
+            point_estimate = keras.ops.sum(pi_expanded * mu, axis=1)
+
+            # 3. Calculate the point estimate loss (e.g., MAE)
+            # This is the deterministic part of the loss
+            # Ensure y_true has the same shape as point_estimate by squeezing the last dimension
+            if y_true.shape != point_estimate.shape and len(y_true.shape) > len(point_estimate.shape):
+                y_true_reshaped = keras.ops.squeeze(y_true, axis=-1)
+            else:
+                y_true_reshaped = y_true
+
+            point_loss_value = keras.losses.mean_absolute_error(y_true_reshaped, point_estimate)
+
+            # 4. Combine the two losses
+            # We take the mean of the point loss value to make it a scalar like mdn_loss
+            combined_loss = alpha * mdn_loss_value + (1 - alpha) * keras.ops.mean(point_loss_value)
+
+            return combined_loss
+
+        # Give the function a name for better logging in Keras
+        hybrid_loss.__name__ = f'hybrid_loss_alpha_{alpha:.2f}'
+        return hybrid_loss
 
     def predict_probabilistic(
         self,
