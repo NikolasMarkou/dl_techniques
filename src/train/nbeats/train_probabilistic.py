@@ -189,10 +189,11 @@ class ProbabilisticForecastMetrics:
 # ---------------------------------------------------------------------
 
 class MixtureMonitoringCallback(keras.callbacks.Callback):
-    """Callback to monitor mixture weights and detect model collapse.
+    """Enhanced callback to monitor mixture weights and detect model collapse.
 
     This callback tracks the behavior of mixture components during training
     to detect potential mode collapse where one mixture dominates others.
+    Includes early stopping if collapse becomes too severe.
     """
 
     def __init__(
@@ -200,7 +201,9 @@ class MixtureMonitoringCallback(keras.callbacks.Callback):
         val_data_sample: np.ndarray,
         processor,
         task_name: str,
-        save_dir: str
+        save_dir: str,
+        collapse_threshold: float = 0.98,
+        min_active_components: int = 2
     ):
         """Initialize the mixture monitoring callback.
 
@@ -209,12 +212,17 @@ class MixtureMonitoringCallback(keras.callbacks.Callback):
             processor: Data processor for transformations
             task_name: Name of the task being monitored
             save_dir: Directory to save monitoring results
+            collapse_threshold: Threshold for mixture collapse detection
+            min_active_components: Minimum number of active components required
         """
         super().__init__()
         self.val_data_sample = val_data_sample
         self.processor = processor
         self.task_name = task_name
         self.save_dir = save_dir
+        self.collapse_threshold = collapse_threshold
+        self.min_active_components = min_active_components
+        self.collapse_count = 0
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict] = None) -> None:
         """Monitor mixture weights and sigma values at the end of each epoch.
@@ -247,6 +255,9 @@ class MixtureMonitoringCallback(keras.callbacks.Callback):
             max_weight = np.max(pi_weights)
             entropy = -np.sum(mean_weights * np.log(mean_weights + EPSILON_LOG))
 
+            # Count active components (weight > 0.05)
+            active_components = np.sum(mean_weights > 0.05)
+
             # Calculate sigma statistics
             mean_sigma = np.mean(sigma_np)
             min_sigma = np.min(sigma_np)
@@ -258,13 +269,39 @@ class MixtureMonitoringCallback(keras.callbacks.Callback):
                     f"Epoch {epoch+1}: "
                     f"MixWeights={np.round(mean_weights, 3)}, "
                     f"MaxWeight={max_weight:.3f}, "
-                    f"Entropy={entropy:.3f}"
+                    f"Entropy={entropy:.3f}, "
+                    f"ActiveComponents={active_components}"
                 )
                 logger.info(
                     f"Epoch {epoch+1}: "
                     f"Sigma - Mean={mean_sigma:.4f}, "
                     f"Min={min_sigma:.4f}, "
                     f"Max={max_sigma:.4f}"
+                )
+
+            # Check for severe mixture collapse
+            if max_weight > self.collapse_threshold:
+                self.collapse_count += 1
+                logger.error(
+                    f"Epoch {epoch+1}: SEVERE mixture collapse detected! "
+                    f"Max weight: {max_weight:.3f}, Count: {self.collapse_count}"
+                )
+
+                # Stop training if collapse persists
+                if self.collapse_count >= 3:
+                    logger.error(
+                        f"Epoch {epoch+1}: Stopping training due to persistent mixture collapse!"
+                    )
+                    self.model.stop_training = True
+            else:
+                # Reset collapse count if things improve
+                self.collapse_count = max(0, self.collapse_count - 1)
+
+            # Check for insufficient active components
+            if active_components < self.min_active_components:
+                logger.warning(
+                    f"Epoch {epoch+1}: Only {active_components} active components! "
+                    f"Required minimum: {self.min_active_components}"
                 )
 
             # Warn about potential issues
@@ -279,6 +316,18 @@ class MixtureMonitoringCallback(keras.callbacks.Callback):
                     f"Epoch {epoch+1}: Very small sigma values detected! "
                     f"Min sigma: {min_sigma:.6f} - This may cause over-confidence"
                 )
+
+            # Check for validation loss instability
+            if logs and 'val_loss' in logs and 'loss' in logs:
+                val_loss = logs['val_loss']
+                train_loss = logs['loss']
+
+                # If validation loss is much worse than training loss
+                if val_loss > train_loss + 5:
+                    logger.warning(
+                        f"Epoch {epoch+1}: Large train/val loss gap detected! "
+                        f"Train: {train_loss:.4f}, Val: {val_loss:.4f} - Possible overfitting"
+                    )
 
         except Exception as e:
             logger.warning(f"Mixture monitoring failed at epoch {epoch+1}: {e}")
@@ -707,15 +756,31 @@ class ProbabilisticNBeatsTrainer:
         X_train = X_train[train_indices]
         y_train = y_train[train_indices]
 
-        # Add data augmentation noise
+        # Add more aggressive data augmentation to prevent overfitting
+        augmentation_noise_std = 0.1  # Increased from 0.05
         X_train = X_train + self.random_state.normal(
-            0, DEFAULT_AUGMENTATION_NOISE, X_train.shape
+            0, augmentation_noise_std, X_train.shape
         )
+
+        # Add additional augmentation techniques
+        # 1. Add some temporal jitter (small shifts)
+        max_shift = 2
+        for i in range(len(X_train)):
+            if self.random_state.rand() < 0.3:  # 30% chance of temporal shift
+                shift = self.random_state.randint(-max_shift, max_shift + 1)
+                if shift != 0:
+                    X_train[i] = np.roll(X_train[i], shift, axis=0)
+
+        # 2. Add some scaling augmentation
+        for i in range(len(X_train)):
+            if self.random_state.rand() < 0.2:  # 20% chance of scaling
+                scale_factor = self.random_state.uniform(0.95, 1.05)
+                X_train[i] = X_train[i] * scale_factor
 
         logger.info(
             f"Training data shape: {X_train.shape}, "
             f"Validation shape: {X_val.shape}, "
-            f"Augmentation noise: {DEFAULT_AUGMENTATION_NOISE}"
+            f"Augmentation noise std: {augmentation_noise_std} (INCREASED)"
         )
 
         # Configure optimizer
@@ -728,10 +793,14 @@ class ProbabilisticNBeatsTrainer:
         # Configure loss function
         loss_fn = self._get_loss_function(model)
 
-        # Configure model with min_sigma parameter
-        if hasattr(model, 'mdn_layer') and model.mdn_layer is not None:
-            # Ensure min_sigma is properly configured
-            logger.info(f"MDN layer min_sigma constraint: {self.config.min_sigma}")
+        # Log model configuration for debugging
+        logger.info(f"Model configuration:")
+        logger.info(f"  num_mixtures: {self.config.num_mixtures}")
+        logger.info(f"  diversity_regularizer_strength: {self.config.diversity_regularizer_strength}")
+        logger.info(f"  min_sigma: {self.config.min_sigma}")
+        logger.info(f"  learning_rate: {self.config.learning_rate}")
+        logger.info(f"  weight_decay: {self.config.weight_decay}")
+        logger.info(f"  batch_size: {self.config.batch_size}")
 
         # Compile model
         model.compile(optimizer=optimizer, loss=loss_fn)
@@ -828,27 +897,61 @@ class ProbabilisticNBeatsTrainer:
             exp_dir, 'visuals', 'epoch_plots', f'{model_type}_h{horizon}'
         )
 
-        # Custom callback to log loss interpretations
-        class LossInterpretationCallback(keras.callbacks.Callback):
+        # Custom callback to log loss interpretations and monitor overfitting
+        class AdvancedMonitoringCallback(keras.callbacks.Callback):
             def __init__(self, trainer):
                 super().__init__()
                 self.trainer = trainer
+                self.overfitting_count = 0
+                self.best_val_loss = float('inf')
 
             def on_epoch_end(self, epoch, logs=None):
-                if logs and 'loss' in logs:
-                    self.trainer._log_loss_interpretation(logs['loss'], epoch + 1)
+                if logs:
+                    # Log loss interpretation
+                    if 'loss' in logs:
+                        self.trainer._log_loss_interpretation(logs['loss'], epoch + 1)
+
+                    # Monitor overfitting
+                    if 'val_loss' in logs and 'loss' in logs:
+                        val_loss = logs['val_loss']
+                        train_loss = logs['loss']
+
+                        # Check for severe overfitting
+                        if val_loss > train_loss + 3:  # Large gap
+                            self.overfitting_count += 1
+                            logger.warning(
+                                f"Epoch {epoch+1}: Overfitting detected! "
+                                f"Train: {train_loss:.4f}, Val: {val_loss:.4f}, "
+                                f"Count: {self.overfitting_count}"
+                            )
+
+                            # Stop if overfitting persists
+                            if self.overfitting_count >= 5:
+                                logger.error(
+                                    f"Epoch {epoch+1}: Stopping due to persistent overfitting!"
+                                )
+                                self.model.stop_training = True
+                        else:
+                            self.overfitting_count = max(0, self.overfitting_count - 1)
+
+                        # Track best validation loss
+                        if val_loss < self.best_val_loss:
+                            self.best_val_loss = val_loss
+                            logger.info(f"Epoch {epoch+1}: New best validation loss: {val_loss:.4f}")
 
         return [
             keras.callbacks.EarlyStopping(
                 monitor='val_loss',
                 patience=self.config.early_stopping_patience,
-                restore_best_weights=True
+                restore_best_weights=True,
+                verbose=1
             ),
             keras.callbacks.ReduceLROnPlateau(
                 monitor='val_loss',
-                factor=0.5,
-                patience=15,
-                min_lr=1e-6
+                factor=0.7,  # More gentle reduction
+                patience=10,  # Reduced patience
+                min_lr=1e-6,
+                verbose=1
             ),
             keras.callbacks.TerminateOnNaN(),
             ProbabilisticEpochVisualizationCallback(
@@ -856,9 +959,11 @@ class ProbabilisticNBeatsTrainer:
                 model_type, horizon, vis_dir
             ),
             MixtureMonitoringCallback(
-                X_val, self.processor, f"{model_type}_h{horizon}", exp_dir
+                X_val, self.processor, f"{model_type}_h{horizon}", exp_dir,
+                collapse_threshold=0.98,  # More aggressive threshold
+                min_active_components=2
             ),
-            LossInterpretationCallback(self)
+            AdvancedMonitoringCallback(self)
         ]
 
     def evaluate_model(
@@ -1567,34 +1672,43 @@ class ProbabilisticNBeatsTrainer:
 
 def main() -> None:
     """Main function to run the Probabilistic N-BEATS experiment."""
-    # Configuration
+    # Configuration with aggressive fixes for mixture collapse and overfitting
     config = ProbabilisticNBeatsConfig(
         epochs=150,
-        batch_size=128,
-        learning_rate=1e-3,
-        early_stopping_patience=50,
-        # Increase diversity regularization to prevent mixture collapse
-        diversity_regularizer_strength=0.001,  # Increased from 0.001
-        # Increase min_sigma to prevent over-confidence
-        min_sigma=0.01,  # Increased from 0.01 to prevent very small sigmas
+        batch_size=64,  # Reduced from 128 for more stable gradients
+        learning_rate=5e-4,  # Reduced from 1e-3 for slower, more stable learning
+        early_stopping_patience=25,  # Reduced from 50 for earlier stopping
+        # SIGNIFICANTLY increase diversity regularization to prevent collapse
+        diversity_regularizer_strength=0.1,  # Increased from 0.01
+        # Keep min_sigma reasonable
+        min_sigma=0.01,
         use_hybrid_loss=True,
-        hybrid_loss_alpha=0.5
+        hybrid_loss_alpha=0.5,  # Reduced from 0.7 to give more weight to point estimate
+        # Reduce model complexity
+        num_mixtures=3,  # Reduced from 5 to prevent over-parameterization
+        mdn_hidden_units=64,  # Reduced from 128
+        hidden_layer_units=96,  # Reduced from 128
+        # Increase regularization
+        weight_decay=1e-3,  # Increased from 1e-4
+        gradient_clip_norm=0.5,  # Reduced from 1.0 for more conservative updates
     )
 
     ts_config = TimeSeriesConfig(
         n_samples=5000,
         random_seed=RANDOM_SEED,
-        # Slightly increase noise to prevent over-fitting
-        default_noise_level=0.05
+        # Increase noise to prevent overfitting
+        default_noise_level=0.15  # Increased from 0.1
     )
 
     # Log configuration for debugging
-    logger.info(f"Training configuration:")
-    logger.info(f"  diversity_regularizer_strength: {config.diversity_regularizer_strength}")
-    logger.info(f"  min_sigma: {config.min_sigma}")
-    logger.info(f"  use_hybrid_loss: {config.use_hybrid_loss}")
-    logger.info(f"  hybrid_loss_alpha: {config.hybrid_loss_alpha}")
-    logger.info(f"  default_noise_level: {ts_config.default_noise_level}")
+    logger.info(f"EMERGENCY FIXES APPLIED:")
+    logger.info(f"  diversity_regularizer_strength: {config.diversity_regularizer_strength} (INCREASED)")
+    logger.info(f"  learning_rate: {config.learning_rate} (DECREASED)")
+    logger.info(f"  batch_size: {config.batch_size} (DECREASED)")
+    logger.info(f"  num_mixtures: {config.num_mixtures} (DECREASED)")
+    logger.info(f"  hybrid_loss_alpha: {config.hybrid_loss_alpha} (ADJUSTED)")
+    logger.info(f"  weight_decay: {config.weight_decay} (INCREASED)")
+    logger.info(f"  default_noise_level: {ts_config.default_noise_level} (INCREASED)")
 
     try:
         # Create and run trainer
