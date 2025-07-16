@@ -1507,7 +1507,7 @@ def main() -> None:
         batch_size=128,
         learning_rate=1e-3,
         early_stopping_patience=50,
-        diversity_regularizer_strength=0.001,
+        diversity_regularizer_strength=0.01,
         min_sigma=0.01,
         use_hybrid_loss=True,
         hybrid_loss_alpha=0.7

@@ -62,7 +62,7 @@ from .activations.explanded_activations import elu_plus_one_plus_epsilon
 # ---------------------------------------------------------------------
 
 EPSILON_SIGMA = 1e-6  # For internal numerical stability
-MIN_SIGMA = 1e-3      # Minimum sigma value to prevent overconfidence
+MIN_SIGMA = 1e-2      # Minimum sigma value to prevent overconfidence
 
 # ---------------------------------------------------------------------
 
@@ -173,6 +173,7 @@ class MDNLayer(keras.layers.Layer):
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = keras.regularizers.L2(1e-4),
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        min_sigma: float = MIN_SIGMA,
         **kwargs: Any
     ) -> None:
         """Initialize the enhanced MDN layer with intermediate processing.
@@ -355,7 +356,7 @@ class MDNLayer(keras.layers.Layer):
         self.mdn_sigmas = keras.layers.Dense(
             self.num_mix * self.output_dim,
             use_bias=self.use_bias,
-            activation=lambda x: keras.activations.elu(x) + 1.0 + MIN_SIGMA,
+            activation=lambda x: keras.activations.elu(x) + 1.0 + self.min_sigma,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -801,6 +802,7 @@ class MDNLayer(keras.layers.Layer):
         """
         config = super().get_config()
         config.update({
+            "min_sigma": self.min_sigma,
             "output_dimension": self.output_dim,
             "num_mixtures": self.num_mix,
             "use_bias": self.use_bias,

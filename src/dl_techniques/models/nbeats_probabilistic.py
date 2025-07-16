@@ -111,6 +111,7 @@ class ProbabilisticNBeatsNet(keras.Model):
         self.mdn_hidden_units = mdn_hidden_units
         self.aggregation_mode = aggregation_mode
         self.diversity_regularizer_strength = diversity_regularizer_strength
+        self.min_sigma = min_sigma
 
         # Validate inputs
         if len(self.stack_types) != len(self.thetas_dim):
@@ -208,7 +209,8 @@ class ProbabilisticNBeatsNet(keras.Model):
             output_dimension=self.forecast_length,
             num_mixtures=self.num_mixtures,
             name='mdn_output',
-            diversity_regularizer_strength=self.diversity_regularizer_strength
+            diversity_regularizer_strength=self.diversity_regularizer_strength,
+            min_sigma=self.min_sigma,
         )
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
@@ -384,6 +386,7 @@ class ProbabilisticNBeatsNet(keras.Model):
         """Get model configuration for serialization."""
         config = super().get_config()
         config.update({
+            'min_sigma': self.min_sigma,
             'input_dim': self.input_dim,
             'backcast_length': self.backcast_length,
             'forecast_length': self.forecast_length,
@@ -426,6 +429,7 @@ def create_probabilistic_nbeats_model(
         'aggregation_mode': 'concat',
         'share_weights_in_stack': False,
         'input_dim': 1,
+        'min_sigma': 0.01
     }
 
     if config is not None:
