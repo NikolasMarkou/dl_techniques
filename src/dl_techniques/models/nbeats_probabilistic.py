@@ -330,14 +330,10 @@ class ProbabilisticNBeatsNet(keras.Model):
         """Generate probabilistic predictions with uncertainty quantification."""
         mixture_params = self.predict(x)
         mu, sigma, pi_logits = self.mdn_layer.split_mixture_params(mixture_params)
-        # TODO test clamp
-        pi_logits = ops.tanh(pi_logits)
         pi = keras.activations.softmax(pi_logits, axis=-1)
 
         mu_np = ops.convert_to_numpy(mu)
         sigma_np = ops.convert_to_numpy(sigma)
-        # TODO test clamp
-        sigma_np = ops.tanh(sigma_np)
         pi_np = ops.convert_to_numpy(pi)
 
         pi_expanded = np.expand_dims(pi_np, axis=-1)

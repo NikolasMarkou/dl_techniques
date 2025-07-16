@@ -357,7 +357,7 @@ class MDNLayer(keras.layers.Layer):
         self.mdn_sigmas = keras.layers.Dense(
             self.num_mix * self.output_dim,
             use_bias=self.use_bias,
-            activation=lambda x: keras.activations.elu(x) + 1.0 + self.min_sigma,
+            activation=lambda x: keras.activations.softplus(x),
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -372,6 +372,7 @@ class MDNLayer(keras.layers.Layer):
         self.mdn_pi = keras.layers.Dense(
             self.num_mix,
             use_bias=self.use_bias,
+            activation=lambda x: keras.activations.softplus(x),
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
