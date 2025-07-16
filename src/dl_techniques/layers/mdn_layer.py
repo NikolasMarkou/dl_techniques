@@ -357,7 +357,7 @@ class MDNLayer(keras.layers.Layer):
         self.mdn_sigmas = keras.layers.Dense(
             self.num_mix * self.output_dim,
             use_bias=self.use_bias,
-            activation=lambda x: keras.activations.softplus(x),
+            activation=lambda x: keras.activations.softplus(x) + MIN_SIGMA,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,

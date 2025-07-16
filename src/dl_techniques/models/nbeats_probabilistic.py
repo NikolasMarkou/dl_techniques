@@ -86,7 +86,7 @@ class ProbabilisticNBeatsNet(keras.Model):
             share_weights_in_stack: bool = False,
             hidden_layer_units: int = 256,
             num_mixtures: int = 3,
-            mdn_hidden_units: int = 128,
+            mdn_hidden_units: int = 32,
             aggregation_mode: str = 'concat',
             diversity_regularizer_strength: float = 0.0,
             min_sigma: float = 1e-5,

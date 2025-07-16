@@ -1683,10 +1683,10 @@ def main() -> None:
         # Keep min_sigma reasonable
         min_sigma=0.01,
         use_hybrid_loss=True,
-        hybrid_loss_alpha=0.5,  # Reduced from 0.7 to give more weight to point estimate
+        hybrid_loss_alpha=0.6,  # Reduced from 0.7 to give more weight to point estimate
         # Reduce model complexity
         num_mixtures=3,  # Reduced from 5 to prevent over-parameterization
-        mdn_hidden_units=64,  # Reduced from 128
+        mdn_hidden_units=32,  # Reduced from 128
         hidden_layer_units=96,  # Reduced from 128
         # Increase regularization
         weight_decay=1e-3,  # Increased from 1e-4
@@ -1694,10 +1694,10 @@ def main() -> None:
     )
 
     ts_config = TimeSeriesConfig(
-        n_samples=5000,
+        n_samples=10000,
         random_seed=RANDOM_SEED,
         # Increase noise to prevent overfitting
-        default_noise_level=0.15  # Increased from 0.1
+        default_noise_level=0.1  # Increased from 0.1
     )
 
     # Log configuration for debugging
