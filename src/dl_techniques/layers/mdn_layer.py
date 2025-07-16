@@ -172,7 +172,7 @@ class MDNLayer(keras.layers.Layer):
         kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_normal",
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = keras.regularizers.L2(1e-5),
-        bias_regularizer: Optional[keras.regularizers.Regularizer] = keras.regularizers.L2(1e-5),
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = keras.regularizers.L2(1e-6),
         min_sigma: float = MIN_SIGMA,
         **kwargs: Any
     ) -> None:
