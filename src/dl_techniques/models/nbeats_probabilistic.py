@@ -334,6 +334,8 @@ class ProbabilisticNBeatsNet(keras.Model):
 
         mu_np = ops.convert_to_numpy(mu)
         sigma_np = ops.convert_to_numpy(sigma)
+        # TODO test clamp
+        sigma_np = ops.sigmoid(sigma_np)
         pi_np = ops.convert_to_numpy(pi)
 
         pi_expanded = np.expand_dims(pi_np, axis=-1)

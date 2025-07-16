@@ -202,7 +202,7 @@ class MixtureMonitoringCallback(keras.callbacks.Callback):
         processor,
         task_name: str,
         save_dir: str,
-        collapse_threshold: float = 0.98,
+        collapse_threshold: float = 0.99,
         min_active_components: int = 2
     ):
         """Initialize the mixture monitoring callback.

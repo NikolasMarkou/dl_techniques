@@ -62,7 +62,7 @@ from .activations.explanded_activations import elu_plus_one_plus_epsilon
 # ---------------------------------------------------------------------
 
 EPSILON_SIGMA = 1e-6  # For internal numerical stability
-MIN_SIGMA = 1e-2      # Minimum sigma value to prevent overconfidence
+MIN_SIGMA = 1e-3      # Minimum sigma value to prevent overconfidence
 
 # ---------------------------------------------------------------------
 
@@ -625,9 +625,6 @@ class MDNLayer(keras.layers.Layer):
         # Reshape standard deviations: same transformation as means
         out_sigma = ops.reshape(out_sigma, [batch_size, self.num_mix, self.output_dim])
 
-        # Ensure sigmas are properly clamped (additional safety)
-        out_sigma = ops.maximum(out_sigma, MIN_SIGMA)
-
         # π parameters are already in correct shape [batch, num_mix]
         return out_mu, out_sigma, out_pi
 
@@ -761,7 +758,7 @@ class MDNLayer(keras.layers.Layer):
         gumbel_noise = -ops.log(-ops.log(keras.random.uniform(ops.shape(out_pi))))
 
         # Add Gumbel noise to log probabilities
-        log_mix_weights = ops.log(mix_weights + keras.backend.epsilon())
+        log_mix_weights = ops.log(mix_weights + MIN_SIGMA)
         selected_logits = log_mix_weights + gumbel_noise
 
         # Select component with highest noisy log probability
