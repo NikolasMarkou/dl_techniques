@@ -52,8 +52,8 @@ References:
 """
 
 import keras
-from keras import ops
 import numpy as np
+from keras import ops
 from typing import Tuple, Optional, Dict, Any, Union, List
 
 # ---------------------------------------------------------------------
@@ -568,4 +568,3 @@ class KAN(keras.Model):
         return cls(**config)
 
 # ---------------------------------------------------------------------
-

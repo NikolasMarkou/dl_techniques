@@ -1,8 +1,101 @@
 """
 Multi-Task Time Series Forecasting with N-BEATS
 
-This implementation demonstrates a comprehensive multi-task learning approach using N-BEATS
-models trained on diverse time series patterns with enhanced documentation and type safety.
+This module implements a comprehensive multi-task learning framework for time series forecasting
+using N-BEATS (Neural Basis Expansion Analysis for Interpretable Time Series Forecasting) models.
+The implementation supports training and evaluation across diverse synthetic time series patterns
+with extensive visualization, metrics calculation, and model comparison capabilities.
+
+Key Features:
+    - Multi-task learning across diverse time series patterns (trend, seasonal, stochastic, etc.)
+    - Multiple N-BEATS architectures (interpretable, generic, hybrid)
+    - Comprehensive evaluation with 10+ forecasting metrics
+    - Extensive visualization including training progress and error analysis
+    - Bootstrap-based uncertainty quantification with prediction intervals
+    - Scalable data processing with consistent normalization across tasks
+    - Configurable experiment setup with reproducible results
+
+Classes:
+    NBeatsConfig: Configuration dataclass for experiment hyperparameters and settings
+    ForecastMetrics: Dataclass for storing comprehensive forecasting evaluation metrics
+    EpochVisualizationCallback: Keras callback for real-time training visualization
+    NBeatsDataProcessor: Data preprocessing and transformation utilities for N-BEATS
+    NBeatsTrainer: Main orchestrator class for training, evaluation, and visualization
+
+Components:
+    - **Data Generation**: Uses TimeSeriesGenerator to create 25+ synthetic time series patterns
+    - **Model Training**: Supports interpretable, generic, and hybrid N-BEATS architectures
+    - **Evaluation**: Calculates MSE, RMSE, MAE, MAPE, SMAPE, MASE, directional accuracy, and coverage
+    - **Visualization**: Training progress, final forecasts, error analysis, and prediction intervals
+    - **Uncertainty**: Bootstrap-based prediction intervals with configurable confidence levels
+
+Usage Example:
+    ```python
+    # Basic usage
+    config = NBeatsConfig(
+        forecast_horizons=[6, 12, 24],
+        model_types=["interpretable", "generic", "hybrid"],
+        epochs=100,
+        batch_size=128
+    )
+
+    ts_config = TimeSeriesConfig(
+        n_samples=5000,
+        random_seed=42,
+        default_noise_level=0.1
+    )
+
+    trainer = NBeatsTrainer(config, ts_config)
+    results = trainer.run_experiment()
+    ```
+
+    # Custom configuration for specific use cases
+    config = NBeatsConfig(
+        backcast_length=168,  # 1 week lookback
+        forecast_horizons=[24, 48],  # 1-2 day forecasts
+        model_types=["interpretable"],  # Focus on interpretable models
+        primary_loss="smape",  # Use SMAPE loss
+        epochs=200,
+        early_stopping_patience=30
+    )
+
+Experiment Structure:
+    1. **Data Preparation**: Generate synthetic time series across multiple categories
+    2. **Model Training**: Train N-BEATS models for each horizon and architecture type
+    3. **Evaluation**: Calculate comprehensive metrics on test data
+    4. **Visualization**: Create training histories, forecast plots, and error analysis
+    5. **Results Summary**: Generate CSV reports and statistical summaries
+
+Output Structure:
+    ```
+    results/
+    ├── nbeats_multitask_YYYYMMDD_HHMMSS/
+    │   ├── detailed_results.csv
+    │   ├── summary_by_model.csv
+    │   ├── summary_by_category.csv
+    │   ├── interpretable_h24.keras
+    │   ├── generic_h24.keras
+    │   └── visuals/
+    │       ├── training_history/
+    │       ├── final_forecasts/
+    │       ├── error_analysis/
+    │       └── epoch_plots/
+    ```
+
+Technical Details:
+    - Supports multiple forecast horizons simultaneously
+    - Uses minmax normalization for stable multi-task learning
+    - Implements gradient clipping and learning rate scheduling
+    - Provides bootstrap-based uncertainty quantification
+    - Includes comprehensive error analysis and residual diagnostics
+    - Supports early stopping and model checkpointing
+    - Generates publication-ready visualizations
+
+Performance Considerations:
+    - Uses efficient data batching for large-scale experiments
+    - Implements memory-efficient sequence generation
+    - Supports configurable batch sizes and gradient accumulation
+    - Includes progress monitoring and resource usage tracking
 """
 
 import os
@@ -658,7 +751,8 @@ class NBeatsTrainer:
 
         # Train model
         history = model.fit(
-            X_train, y_train,
+            x=X_train,
+            y=y_train,
             validation_data=(X_val, y_val),
             epochs=self.config.epochs,
             batch_size=self.config.batch_size,
@@ -666,7 +760,10 @@ class NBeatsTrainer:
             verbose=2
         )
 
-        return {"history": history.history, "model": model}
+        return {
+            "history": history.history,
+            "model": model
+        }
 
     def evaluate_model(
         self,
@@ -866,7 +963,8 @@ class NBeatsTrainer:
                         ax.set_title(f'{task_name.replace("_", " ").title()} (No test data)')
                         continue
 
-                    X_test, y_test = test_data[horizon][task_name]
+                    X_test, y_test = test_data[horizon][task_name]["test"]
+
                     if len(X_test) == 0:
                         ax.set_title(f'{task_name.replace("_", " ").title()} (No test data)')
                         continue
@@ -891,7 +989,11 @@ class NBeatsTrainer:
                     )
 
                     # Plot predictions for each model type
-                    colors = {'interpretable': 'red', 'generic': 'green', 'hybrid': 'purple'}
+                    colors = {
+                        'interpretable': 'red',
+                        'generic': 'green',
+                        'hybrid': 'purple'
+                    }
 
                     for model_type, model in models[horizon].items():
                         # Get prediction intervals based on all test residuals
@@ -1297,6 +1399,7 @@ def main() -> None:
         logger.error(f"Experiment failed: {e}", exc_info=True)
         raise
 
+# ---------------------------------------------------------------------
 
 if __name__ == "__main__":
     main()

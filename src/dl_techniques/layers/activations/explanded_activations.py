@@ -360,6 +360,42 @@ class xSiLU(ExpandedActivation):
         gate = tf.sigmoid(inputs)
         return inputs * (gate * (1 + 2 * self.alpha) - self.alpha)
 
+# ---------------------------------------------------------------------
+
+def elu_plus_one_plus_epsilon(x: keras.KerasTensor) -> keras.KerasTensor:
+    """Enhanced ELU activation to ensure positive values for rate parameters.
+
+    This activation ensures that the output is always positive and greater than
+    a small epsilon value, which is important for numerical stability as the
+    rate parameter (λ) of an Exponential distribution must be positive.
+
+    Mathematical form: ELU(x) + 1 + ε
+
+    Parameters
+    ----------
+    x : keras.KerasTensor
+        Input tensor
+
+    Returns
+    -------
+    keras.KerasTensor
+        Tensor with ELU activation plus one plus a small epsilon
+    """
+    return keras.activations.elu(x) + 1.0 + keras.backend.epsilon()
+
+
+class EluPlusOne(ExpandedActivation):
+    def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
+        """
+        Enhanced ELU activation to ensure positive values for rate parameters.
+
+        This activation ensures that the output is always positive and greater than
+        a small epsilon value, which is important for numerical stability as the
+        rate parameter (λ) of an Exponential distribution must be positive.
+
+        Mathematical form: ELU(x) + 1 + ε
+        """
+        return elu_plus_one_plus_epsilon(inputs)
 
 # ---------------------------------------------------------------------
 
@@ -389,10 +425,11 @@ def get_activation(activation_name: str) -> BaseActivation:
         'silu': SiLU,
         'xatlu': xATLU,
         'xgelu': xGELU,
-        'xsilu': xSiLU
+        'xsilu': xSiLU,
+        'elu_plus_one': EluPlusOne,
     }
 
-    activation_class = activations.get(activation_name.lower())
+    activation_class = activations.get(activation_name.lower().strip())
     if activation_class is None:
         raise ValueError(
             f"Unknown activation: '{activation_name}'. "
@@ -402,3 +439,4 @@ def get_activation(activation_name: str) -> BaseActivation:
     return activation_class()
 
 # ---------------------------------------------------------------------
+

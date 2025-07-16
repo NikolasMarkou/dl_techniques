@@ -49,37 +49,11 @@ from typing import Dict, Optional, Tuple, Union, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import gaussian_probability
+from .activations.explanded_activations import elu_plus_one_plus_epsilon
 
 # ---------------------------------------------------------------------
 
 EPSILON_SIGMA = 1e-6
-
-# ---------------------------------------------------------------------
-
-
-def elu_plus_one_plus_epsilon(x: keras.KerasTensor) -> keras.KerasTensor:
-    """Enhanced ELU activation to ensure positive values for standard deviations.
-
-    This activation ensures that the output is always positive and greater than
-    a small epsilon value, which is important for numerical stability when these
-    values are used as standard deviations.
-
-    Mathematical form: ELU(x) + 1 + ε
-    - ELU(x) can be negative for x < 0, but approaches -1 asymptotically
-    - Adding 1 ensures the result is always ≥ ε > 0
-    - This prevents division by zero or log(0) in probability calculations
-
-    Parameters
-    ----------
-    x : keras.KerasTensor
-        Input tensor
-
-    Returns
-    -------
-    keras.KerasTensor
-        Tensor with ELU activation plus one plus a small epsilon
-    """
-    return keras.activations.elu(x) + 1.0 + keras.backend.epsilon()
 
 # ---------------------------------------------------------------------
 
