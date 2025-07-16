@@ -229,6 +229,7 @@ class MDNLayer(keras.layers.Layer):
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+        self.min_sigma = min_sigma
 
         # Initialize sublayers to None - will be created in build()
         # Intermediate processing layers
