@@ -1,3 +1,66 @@
+"""Multi-Head Attention Layer with Mask Support.
+
+This module implements a Multi-Head Self-Attention mechanism optimized for vision 
+and sequence modeling tasks. The implementation follows Keras 3.x best practices 
+with backend-agnostic operations and comprehensive serialization support.
+
+Key Features:
+    - Backend-agnostic implementation using keras.ops
+    - Flexible attention masking support (sequence-level, full, per-head)
+    - Proper serialization with get_config/build_from_config methods
+    - Configurable initializers and regularizers
+    - Dropout support for attention weights
+    - Type-safe implementation with comprehensive documentation
+
+Attention Mask Support:
+    The layer supports three different attention mask formats:
+
+    1. Sequence-level mask (batch_size, seq_len):
+       - Masks entire positions in the sequence (e.g., padding tokens)
+       - Applied to key positions across all attention heads
+
+    2. Full attention mask (batch_size, seq_len, seq_len):
+       - Controls which query positions can attend to which key positions
+       - Useful for causal attention, bidirectional constraints, etc.
+
+    3. Per-head mask (batch_size, num_heads, seq_len, seq_len):
+       - Different mask for each attention head
+       - Maximum flexibility for complex attention patterns
+
+Example Usage:
+    ```python
+    # Basic multi-head attention
+    attn = MultiHeadAttention(embed_dim=512, num_heads=8, dropout_rate=0.1)
+    output = attn(input_tensor)
+
+    # With sequence-level masking (padding)
+    padding_mask = tf.ones((batch_size, seq_len))
+    padding_mask[:, 100:] = 0  # Mask positions 100 and beyond
+    output = attn(input_tensor, attention_mask=padding_mask)
+
+    # With causal masking
+    seq_len = input_tensor.shape[1]
+    causal_mask = tf.linalg.band_part(tf.ones((seq_len, seq_len)), -1, 0)
+    causal_mask = tf.expand_dims(causal_mask, 0)  # Add batch dimension
+    output = attn(input_tensor, attention_mask=causal_mask)
+
+    # In a model context
+    inputs = keras.Input(shape=(seq_len, embed_dim))
+    x = MultiHeadAttention(embed_dim=256, num_heads=4)(inputs)
+    model = keras.Model(inputs=inputs, outputs=x)
+    ```
+
+Implementation Notes:
+    - Uses efficient matrix operations for Q, K, V computation
+    - Scales attention scores by 1/sqrt(head_dim) for stability
+    - Supports both training and inference modes
+    - Maintains numerical stability with proper masking values
+    - Compatible with model saving/loading through proper serialization
+
+Author: DL-Techniques Project
+Version: 1.0.0
+"""
+
 import keras
 from keras import ops
 from typing import Optional, Tuple, Union, Any, Dict
@@ -9,7 +72,7 @@ class MultiHeadAttention(keras.layers.Layer):
     """Multi-Head Self Attention mechanism optimized for vision tasks.
 
     This implementation uses keras.ops for backend compatibility and follows
-    the project's serialization patterns.
+    the project's serialization patterns. Supports optional attention masking.
 
     Args:
         embed_dim: Dimension of input embeddings.
@@ -80,21 +143,31 @@ class MultiHeadAttention(keras.layers.Layer):
         # Create dropout layer
         self.dropout = keras.layers.Dropout(self.dropout_rate)
 
-        # Build sublayers
+        # Build sublayers - handle shape conversion properly
         self.qkv.build(input_shape)
-        self.proj.build(input_shape[:-1] + (self.embed_dim,))
+
+        # Convert to list for consistent manipulation
+        input_shape_list = list(input_shape)
+        proj_shape = tuple(input_shape_list[:-1] + [self.embed_dim])
+        self.proj.build(proj_shape)
 
         super().build(input_shape)
 
     def call(
             self,
             x: keras.KerasTensor,
+            attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass of the layer.
 
         Args:
             x: Input tensor of shape (batch_size, seq_len, embed_dim).
+            attention_mask: Optional attention mask tensor. Can be:
+                - Shape (batch_size, seq_len): mask for each sequence position
+                - Shape (batch_size, seq_len, seq_len): full attention mask
+                - Shape (batch_size, num_heads, seq_len, seq_len): per-head mask
+                Values should be 1 for positions to attend to and 0 for masked positions.
             training: Whether in training mode.
 
         Returns:
@@ -112,6 +185,12 @@ class MultiHeadAttention(keras.layers.Layer):
 
         # Compute attention scores
         attn = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2))) * self.scale
+        # attn shape: (batch_size, num_heads, seq_len, seq_len)
+
+        # Apply attention mask if provided
+        if attention_mask is not None:
+            attn = self._apply_attention_mask(attn, attention_mask)
+
         attn = ops.softmax(attn, axis=-1)
         attn = self.dropout(attn, training=training)
 
@@ -122,6 +201,55 @@ class MultiHeadAttention(keras.layers.Layer):
 
         return self.proj(x)
 
+    def _apply_attention_mask(
+            self,
+            attention_scores: keras.KerasTensor,
+            attention_mask: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """Apply attention mask to attention scores.
+
+        Args:
+            attention_scores: Attention scores tensor of shape
+                (batch_size, num_heads, seq_len, seq_len).
+            attention_mask: Attention mask tensor. Supported shapes:
+                - (batch_size, seq_len): mask for each sequence position
+                - (batch_size, seq_len, seq_len): full attention mask
+                - (batch_size, num_heads, seq_len, seq_len): per-head mask
+
+        Returns:
+            Masked attention scores tensor.
+        """
+        # Convert mask to the same dtype as attention scores
+        attention_mask = ops.cast(attention_mask, attention_scores.dtype)
+
+        # Handle different mask shapes based on tensor rank
+        mask_ndim = len(attention_mask.shape)
+
+        if mask_ndim == 2:
+            # Shape: (batch_size, seq_len) -> (batch_size, 1, 1, seq_len)
+            # This masks the key positions
+            attention_mask = ops.expand_dims(attention_mask, axis=1)  # (batch_size, 1, seq_len)
+            attention_mask = ops.expand_dims(attention_mask, axis=1)  # (batch_size, 1, 1, seq_len)
+
+        elif mask_ndim == 3:
+            # Shape: (batch_size, seq_len, seq_len) -> (batch_size, 1, seq_len, seq_len)
+            attention_mask = ops.expand_dims(attention_mask, axis=1)  # (batch_size, 1, seq_len, seq_len)
+
+        elif mask_ndim == 4:
+            # Shape: (batch_size, num_heads, seq_len, seq_len) - already correct
+            pass
+        else:
+            raise ValueError(f"Unsupported attention_mask rank: {mask_ndim}. Expected 2, 3, or 4.")
+
+        # Create mask where 0 becomes -inf and 1 stays 0
+        mask_value = -1e9  # Large negative value for masking
+        mask = (1.0 - attention_mask) * mask_value
+
+        # Apply mask to attention scores
+        attention_scores = attention_scores + mask
+
+        return attention_scores
+
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
@@ -131,7 +259,9 @@ class MultiHeadAttention(keras.layers.Layer):
         Returns:
             Output shape.
         """
-        return input_shape
+        # Convert to list for consistent manipulation, then back to tuple
+        input_shape_list = list(input_shape)
+        return tuple(input_shape_list)
 
     def get_config(self) -> Dict[str, Any]:
         """Get the layer configuration.
