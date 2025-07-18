@@ -1,19 +1,48 @@
 """
-OrthoBlock Layer Implementation
+OrthoBlock: A Structured Layer for Learning Decorrelated Features.
 
-This module implements a specialized neural network layer that combines orthonormal 
-regularization with constrained feature scaling for learning decorrelated and 
-interpretable feature representations.
+This module implements a composite Keras layer designed to learn feature
+representations that are decorrelated, well-scaled, and interpretable. It
+achieves this by enforcing a specific, mathematically-motivated computational
+flow, making it a powerful alternative to a standard `Dense` layer in many
+deep learning models.
 
-The OrthoBlock follows the pattern: Dense → Orthonormal Regularization → BandRMS 
-Normalization → Constrained Scale → Activation.
+The layer is built on the principle that structured feature extraction can lead
+to better generalization, stability, and model insight.
 
-Author: DL-Techniques Project
-License: MIT
+Computational Flow:
+The `OrthoBlock` processes inputs through a four-stage pipeline:
+
+1.  **Orthogonally Regularized Dense Projection:**
+    - A standard linear transformation (`z = xW + b`) where the weight matrix `W`
+      is regularized to have approximately orthonormal columns.
+    - **Math:** The regularizer adds a penalty proportional to `||WᵀW - I||²` to
+      the loss, encouraging the columns of `W` to form an orthonormal basis.
+    - **Purpose:** This promotes feature decorrelation, as the input is projected
+      onto a set of orthogonal axes. It also improves gradient flow and
+      training stability due to the norm-preserving properties of orthogonal
+      transformations.
+
+2.  **BandRMS Normalization:**
+    - The output of the dense layer is normalized using `BandRMS`.
+    - **Purpose:** This stabilizes the activations by constraining their Root Mean
+      Square (RMS) value to a learnable range, preventing the feature magnitudes
+      from exploding or vanishing.
+
+3.  **Constrained Learnable Scaling:**
+    - The normalized activations are element-wise multiplied by a learnable vector
+      `s`, where each element `s_i` is constrained to the range `[0, 1]`.
+    - **Purpose:** This acts as a **learnable feature gate**. The model can learn
+      to "turn off" less important features by driving their corresponding scale
+      factor towards zero, or "pass through" important ones by driving the scale
+      towards one. This adds interpretability and enables automatic feature
+      selection.
+
+4.  **Final Activation:**
+    - A standard non-linear activation function is applied.
 """
 
 import keras
-from keras import ops
 from typing import Optional, Union, Any
 
 # ---------------------------------------------------------------------
@@ -31,17 +60,18 @@ from dl_techniques.utils.logger import logger
 class OrthoBlock(keras.layers.Layer):
     """Orthogonal Block layer with constrained feature scaling.
 
-    This layer implements a specialized block that learns decorrelated feature
-    representations through orthonormal regularization. The block combines a dense
-    projection with soft orthonormal constraints, followed by BandRMS normalization
-    and constrained learnable scaling for interpretable feature gating.
+    This layer combines an orthogonally regularized dense projection with
+    BandRMS normalization and a constrained learnable feature gate. It is
+    designed to improve training stability and model interpretability.
 
-    The computational flow is:
-    Input → Dense(orthonormal regularized) → BandRMS → Constrained Scale → Activation
-
-    This design encourages the dense layer to learn orthogonal weight vectors,
-    which helps with feature decorrelation and can improve model interpretability.
-    The constrained scaling acts as a learnable feature gate with values between 0 and 1.
+    Key Benefits:
+    - **Feature Decorrelation:** The orthonormal regularization on the dense
+      kernel encourages the learned features to be independent.
+    - **Training Stability:** The combination of an isometric-like projection
+      and robust activation normalization stabilizes gradient updates.
+    - **Interpretability:** The constrained scaling vector acts as a feature
+      gate, providing insight into which learned features are most impactful
+      for the model's task.
 
     Args:
         units: Integer, dimensionality of the output space (number of neurons).

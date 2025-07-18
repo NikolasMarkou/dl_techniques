@@ -1,18 +1,31 @@
 """
-BandRMS Layer: Root Mean Square Normalization with Bounded Spherical Shell Constraints
+BandRMS Layer: RMS Normalization within a Learnable Spherical Shell.
 
-This layer implements an advanced normalization approach that leverages high-dimensional
-geometry to improve deep network training dynamics. It combines RMS normalization with
-a learnable bounded scaling factor to create a "thick shell" in the feature space.
+This layer implements an advanced normalization technique that extends Root Mean
+Square Normalization (RMSNorm) by constraining feature vectors to lie within a
+learnable "thick spherical shell" in the activation space. This provides the
+stability of normalization while granting the model additional representational
+flexibility.
 
-The implementation is based on two key geometric insights:
-1. In high dimensions, the volume of a sphere concentrates near its surface
-2. Creating a bounded shell between radii (1-α) and 1 adds back a degree of freedom
-   while maintaining normalization benefits
+The layer operates in a two-step process:
 
-Core Algorithm:
-1. RMS Normalization: Projects features onto unit hypersphere (x_norm = x / sqrt(mean(x^2)))
-2. Learnable Band Scaling: Creates "thick shell" with learnable radius in [1-α, 1]
+1.  **RMS Normalization:**
+    First, it applies standard RMS Normalization. For an input vector `x` of
+    dimension `D`, this step computes `x_norm = x / sqrt(mean(x²) + ε)`.
+    This standardizes the vector such that its Root Mean Square (RMS) value is 1.
+    A key mathematical consequence is that the L2 norm of the normalized vector,
+    `||x_norm||₂`, becomes approximately `sqrt(D)`.
+
+2.  **Learnable Band Scaling:**
+    Second, instead of using a simple learnable gain like in LayerNorm or RMSNorm,
+    this layer multiplies the normalized vector by a scalar `s` that is constrained
+    to a specific band: `s ∈ [1 - max_band_width, 1]`. This scalar `s` is
+    learnable, controlled by a trainable parameter that is mapped to the target
+    range using a sigmoid function.
+
+This design forces the final output vector's RMS value to be learned within the
+`[1-α, 1]` band, effectively placing it in a high-dimensional shell, which can
+improve optimization dynamics and model performance.
 
 References:
 [1] Root Mean Square Layer Normalization (Zhang & Sennrich, 2019)
