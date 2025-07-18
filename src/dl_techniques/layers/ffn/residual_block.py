@@ -1,11 +1,45 @@
+"""Defines a custom Keras Residual Block layer.
+
+This module provides a custom Keras layer, `ResidualBlock`, which implements a
+residual connection around a two-layer feed-forward network. The block is designed
+to be a flexible and reusable component in deep learning models.
+
+The main path consists of two dense layers with a configurable activation function
+and dropout. The residual (or skip) path contains a separate dense layer to project
+the input to the same dimensionality as the output of the main path. This design
+allows the block to be used even when the input and output dimensions differ.
+
+The layer is registered as a Keras serializable object, allowing models that
+use it to be saved and loaded seamlessly using `keras.models.save_model` and
+`keras.models.load_model`.
+
+Classes:
+    ResidualBlock: A Keras layer implementing a residual block with dense layers.
+
+Example:
+    >>> import keras
+    >>> import numpy as np
+    >>>
+    >>> # Create a simple model using the ResidualBlock
+    >>> inputs = keras.Input(shape=(32,))
+    >>> x = ResidualBlock(hidden_dim=64, output_dim=16, dropout_rate=0.1)(inputs)
+    >>> x = keras.layers.LayerNormalization()(x)
+    >>> outputs = keras.layers.Dense(1, activation='sigmoid')(x)
+    >>> model = keras.Model(inputs, outputs)
+    >>>
+    >>> # Print model summary
+    >>> model.summary()
+    >>>
+    >>> # Test with dummy data
+    >>> dummy_data = np.random.rand(10, 32)
+    >>> predictions = model.predict(dummy_data)
+    >>> print(f"Output shape: {predictions.shape}")
+    Output shape: (10, 1)
+
+"""
+
 import keras
 from typing import Optional, Union, Any
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
@@ -65,7 +99,6 @@ class ResidualBlock(keras.layers.Layer):
     def build(self, input_shape):
         """Build the layer weights."""
         self._build_input_shape = input_shape
-        input_dim = input_shape[-1]
 
         # Hidden transformation
         self.hidden_layer = keras.layers.Dense(

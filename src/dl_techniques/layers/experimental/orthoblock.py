@@ -48,6 +48,7 @@ from typing import Optional, Union, Any
 # ---------------------------------------------------------------------
 # Local imports
 # ---------------------------------------------------------------------
+
 from dl_techniques.layers.norms.band_rms import BandRMS
 from dl_techniques.layers.layer_scale import LearnableMultiplier
 from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
