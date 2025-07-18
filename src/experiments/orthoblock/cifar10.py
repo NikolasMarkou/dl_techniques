@@ -1,560 +1,1220 @@
 """
-OrthoCenterBlock Experiment
+OrthoBlock Effectiveness Study on CIFAR-10
+==========================================
 
-This script conducts a comparative experiment between:
-1. A baseline CNN model with standard dense layers
-2. The same CNN architecture with OrthoCenterBlock layers on the CIFAR-10 dataset
+This experiment conducts a comprehensive evaluation of OrthoBlock layers compared to
+traditional dense layers and other normalization techniques on CIFAR-10 image
+classification. The study addresses fundamental questions about orthonormal regularization:
+Does enforcing orthogonality constraints (W^T * W ≈ I) combined with centering normalization
+and constrained scaling improve training dynamics, model calibration, and generalization
+while maintaining competitive performance?
 
-OrthoCenterBlock combines:
+The hypothesis is that OrthoBlock's orthonormal constraints create more stable feature
+representations that are less prone to overfitting and provide better calibration, at the
+potential cost of some expressiveness. The orthogonality constraint is expected to be
+particularly beneficial for deep networks by maintaining gradient flow and preventing
+feature collapse.
+
+Scientific Motivation
+--------------------
+
+Deep neural networks often suffer from:
+1. Feature collapse where neurons learn redundant representations
+2. Poor gradient flow in deep architectures
+3. Overconfident predictions (poor calibration)
+4. Sensitivity to initialization and hyperparameters
+
+OrthoBlock proposes a novel approach combining:
 - Orthonormal-regularized weights (enforcing W^T * W ≈ I)
 - Centering normalization (mean subtraction)
 - Logit normalization (projection to unit hypersphere)
 - Constrained scale parameters [0,1] for interpretable feature attention
 
-The experiment examines:
-- Classification accuracy comparison between models
-- Training/validation loss and accuracy curves
-- Orthogonality measure (||W^T W - I||_F) over training
-- Distribution of scale parameters throughout training
-- Convergence speed analysis
+Theoretical Foundation:
+- Orthogonal matrices preserve distances and angles
+- Orthonormal weights maintain gradient norms during backpropagation
+- Centering removes bias and improves conditioning
+- Bounded scaling provides natural regularization
+- Should improve calibration by preventing extreme activation values
 
-Both models share identical initialization and architecture except for
-the replaced dense layer. Results are saved as visualizations and model files
-in the experiment directory.
+Experimental Design
+-------------------
+
+**Dataset**: CIFAR-10 (32×32 RGB images, 10 classes)
+- 50,000 training images, 10,000 test images
+- Standard preprocessing with normalization
+- Balanced class distribution for fair calibration analysis
+
+**Model Architecture**: ResNet-inspired CNN with different dense layer types
+- 4 convolutional blocks with progressive filter scaling [32, 64, 128, 256]
+- Residual connections for deep network training
+- Global average pooling followed by configurable dense layer
+- Identical architecture across all variants (only dense layer changes)
+
+**OrthoBlock Variants Evaluated**:
+
+1. **OrthoBlock_Strong**: High orthogonal regularization (λ=1.0)
+2. **OrthoBlock_Medium**: Medium orthogonal regularization (λ=0.1)
+3. **OrthoBlock_Weak**: Low orthogonal regularization (λ=0.01)
+4. **OrthoBlock_Adaptive**: Scheduled orthogonal regularization
+5. **Dense_Standard**: Standard dense layer (baseline)
+6. **Dense_L2**: Dense layer with L2 regularization
+7. **Dense_Dropout**: Dense layer with higher dropout
+
+**Experimental Variables**:
+- **Primary**: Dense layer type (7 variants)
+- **Secondary**: Orthogonal regularization strength
+- **Control**: Architecture, training procedure, dataset, random seeds
+
+Comprehensive Analysis Pipeline
+------------------------------
+
+**Training Dynamics Analysis**:
+- Convergence speed and stability metrics
+- Orthogonality measure (||W^T W - I||_F) over training
+- Scale parameter distribution evolution
+- Gradient flow characteristics through the network
+
+**Model Performance Evaluation**:
+- Test accuracy and top-k accuracy
+- Statistical significance testing across multiple runs
+- Per-class performance analysis
+- Robustness to hyperparameter variations
+
+**Calibration Analysis** (via ModelAnalyzer):
+- Expected Calibration Error (ECE) with multiple bin sizes
+- Brier score for probabilistic prediction quality
+- Reliability diagrams and confidence distribution analysis
+- Temperature scaling effectiveness for post-hoc calibration
+
+**Weight and Architecture Analysis**:
+- Weight distribution evolution across layers
+- Orthogonality metrics for OrthoBlock variants
+- Scale parameter analysis and interpretability
+- Layer-wise norm analysis (L1, L2, spectral)
+
+Expected Outcomes and Hypotheses
+--------------------------------
+
+**Primary Hypotheses**:
+1. **Orthogonality**: Higher regularization should improve stability but may reduce expressiveness
+2. **Calibration**: OrthoBlock variants should show lower ECE and better reliability
+3. **Generalization**: Better test performance with controlled overfitting
+4. **Training Dynamics**: More stable training with consistent gradient flow
+
+**Scientific Contributions**:
+1. Empirical validation of orthogonal regularization benefits
+2. Optimal regularization strength selection guidelines
+3. Calibration improvements through geometric constraints
+4. Training stability analysis for orthogonal neural networks
 """
 
-import os
+# ==============================================================================
+# IMPORTS AND DEPENDENCIES
+# ==============================================================================
+
+import gc
+import json
 import keras
-import time
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from keras.api.datasets import cifar10
-from keras.api.callbacks import ModelCheckpoint, EarlyStopping, LearningRateScheduler
+import tensorflow as tf
+from pathlib import Path
+from datetime import datetime
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Tuple, Callable, Optional
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.train import TrainingConfig, train_model
+from dl_techniques.utils.datasets import load_and_preprocess_cifar10
+from dl_techniques.utils.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
+from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
+
 from dl_techniques.layers.experimental.orthoblock import OrthoBlock
 
-# ====================== CONFIGURATION ======================
+# ==============================================================================
+# EXPERIMENT CONFIGURATION
+# ==============================================================================
 
-CONFIG = {
-    # Experiment setup
-    "EXPERIMENT_DIR": "orthocenter_experiment",
-    "RANDOM_SEED": 42,
+@dataclass
+class OrthoBlockExperimentConfig:
+    """
+    Configuration for the OrthoBlock effectiveness experiment.
 
-    # Training parameters
-    "EPOCHS": 10,  # Set to lower value for quick testing
-    "BATCH_SIZE": 128,
-    "INITIAL_LR": 0.001,
-    "LR_SCHEDULE_THRESHOLDS": [50, 75],
-    "LR_VALUES": [0.001, 0.0001, 0.00001],
-    "EARLY_STOPPING_PATIENCE": 20,
+    This class encapsulates all configurable parameters for systematically
+    evaluating OrthoBlock against traditional dense layers and alternatives.
+    """
 
-    # Dataset configuration
-    "VALIDATION_SIZE": 5000,
+    # --- Dataset Configuration ---
+    dataset_name: str = "cifar10"
+    num_classes: int = 10
+    input_shape: Tuple[int, ...] = (32, 32, 3)
 
-    # Activation functions
-    "ACTIVATION": "mish",  # Default activation used throughout the network
+    # --- Model Architecture Parameters ---
+    conv_filters: List[int] = field(default_factory=lambda: [32, 64, 128, 256])
+    dense_units: int = 256
+    dropout_rates: List[float] = field(default_factory=lambda: [0.2, 0.3, 0.4, 0.5])
+    final_dropout: float = 0.5
+    kernel_size: Tuple[int, int] = (3, 3)
+    weight_decay: float = 1e-4
+    kernel_initializer: str = 'he_normal'
+    use_residual: bool = True
+    activation: str = 'mish'
+    output_activation: str = 'softmax'
 
-    # Model architecture
-    "CONV_BLOCKS": [
-        {"FILTERS": 32, "KERNEL_SIZE": 3, "DROPOUT": 0.2},
-        {"FILTERS": 64, "KERNEL_SIZE": 3, "DROPOUT": 0.3},
-        {"FILTERS": 128, "KERNEL_SIZE": 3, "DROPOUT": 0.4},
-    ],
-    "DENSE_UNITS": 256,
-    "FINAL_DROPOUT": 0.5,
-    "NUM_CLASSES": 10,
-    "OUTPUT_ACTIVATION": "softmax",
+    # --- Training Parameters ---
+    epochs: int = 10
+    batch_size: int = 128
+    learning_rate: float = 0.001
+    early_stopping_patience: int = 20
+    monitor_metric: str = 'val_accuracy'
 
-    # OrthoCenterBlock parameters
-    "ORTHO_REG_FACTOR": 0.1,
-    "SCALE_INITIAL_VALUE": 0.5,
-    "ORTHO_REG_SCHEDULER": {
-        "MAX_FACTOR": 0.1,
-        "MIN_FACTOR": 0.001
-    }
-}
+    # --- OrthoBlock Specific Parameters ---
+    ortho_reg_factors: List[float] = field(default_factory=lambda: [0.01, 0.1, 1.0])
+    scale_initial_values: List[float] = field(default_factory=lambda: [0.3, 0.5, 0.7])
+    ortho_scheduler_config: Dict[str, float] = field(default_factory=lambda: {
+        'max_factor': 0.1,
+        'min_factor': 0.001
+    })
 
-# Set random seed for reproducibility
-np.random.seed(CONFIG["RANDOM_SEED"])
-keras.utils.set_random_seed(CONFIG["RANDOM_SEED"])
+    # --- Dense Layer Variants ---
+    dense_variants: Dict[str, Callable] = field(default_factory=lambda: {
+        'OrthoBlock_Strong': lambda config: ('orthoblock', {
+            'ortho_reg_factor': 1.0,
+            'scale_initial_value': 0.5
+        }),
+        'OrthoBlock_Medium': lambda config: ('orthoblock', {
+            'ortho_reg_factor': 0.1,
+            'scale_initial_value': 0.5
+        }),
+        'OrthoBlock_Weak': lambda config: ('orthoblock', {
+            'ortho_reg_factor': 0.01,
+            'scale_initial_value': 0.5
+        }),
+        'OrthoBlock_HighScale': lambda config: ('orthoblock', {
+            'ortho_reg_factor': 0.1,
+            'scale_initial_value': 0.8
+        }),
+        'OrthoBlock_LowScale': lambda config: ('orthoblock', {
+            'ortho_reg_factor': 0.1,
+            'scale_initial_value': 0.2
+        }),
+        'Dense_Standard': lambda config: ('dense', {}),
+        'Dense_L2': lambda config: ('dense', {
+            'kernel_regularizer': keras.regularizers.L2(0.01)
+        }),
+        'Dense_Dropout': lambda config: ('dense', {
+            'dropout_rate': 0.7
+        }),
+    })
 
-# Create experiment directory
-EXPERIMENT_DIR = CONFIG["EXPERIMENT_DIR"]
-os.makedirs(EXPERIMENT_DIR, exist_ok=True)
+    # --- Experiment Configuration ---
+    output_dir: Path = Path("results")
+    experiment_name: str = "orthoblock_effectiveness_study"
+    random_seed: int = 42
+    n_runs: int = 3  # Multiple runs for statistical significance
 
-# Configure GPU memory growth if using TensorFlow backend
-try:
-    import tensorflow as tf
-    physical_devices = tf.config.list_physical_devices('GPU')
-    if len(physical_devices) > 0:
-        tf.config.experimental.set_memory_growth(physical_devices[0], True)
-        logger.info("GPU memory growth enabled")
-except:
-    logger.info("Not using TensorFlow or no GPU available")
+    # --- Analysis Configuration ---
+    analyzer_config: AnalysisConfig = field(default_factory=lambda: AnalysisConfig(
+        analyze_weights=True,
+        analyze_calibration=True,
+        analyze_information_flow=True,
+        analyze_training_dynamics=True,
+        calibration_bins=15,
+        save_plots=True,
+        plot_style='publication',
+        show_statistical_tests=True,
+        show_confidence_intervals=True,
+        verbose=True
+    ))
 
+# ==============================================================================
+# DENSE LAYER FACTORY
+# ==============================================================================
 
-class OrthoRegScheduler(keras.callbacks.Callback):
-    """Callback to schedule orthogonal regularization strength."""
+def create_dense_layer(
+    layer_type: str,
+    layer_params: Dict[str, Any],
+    units: int,
+    activation: str = 'mish',
+    name: Optional[str] = None
+) -> keras.layers.Layer:
+    """
+    Factory function to create different dense layer types.
 
-    def __init__(self, max_factor=CONFIG["ORTHO_REG_SCHEDULER"]["MAX_FACTOR"],
-                 min_factor=CONFIG["ORTHO_REG_SCHEDULER"]["MIN_FACTOR"],
-                 total_epochs=CONFIG["EPOCHS"]):
+    Args:
+        layer_type: Type of dense layer ('orthoblock', 'dense')
+        layer_params: Parameters specific to the layer type
+        units: Number of units in the layer
+        activation: Activation function
+        name: Optional layer name
+
+    Returns:
+        Configured dense layer
+    """
+    if layer_type == 'orthoblock':
+        return OrthoBlock(
+            units=units,
+            activation=activation,
+            ortho_reg_factor=layer_params.get('ortho_reg_factor', 0.1),
+            scale_initial_value=layer_params.get('scale_initial_value', 0.5),
+            use_bias=layer_params.get('use_bias', True),
+            kernel_initializer=layer_params.get('kernel_initializer', 'glorot_uniform'),
+            name=name
+        )
+    elif layer_type == 'dense':
+        return keras.layers.Dense(
+            units=units,
+            activation=activation,
+            use_bias=layer_params.get('use_bias', True),
+            kernel_initializer=layer_params.get('kernel_initializer', 'glorot_uniform'),
+            kernel_regularizer=layer_params.get('kernel_regularizer', None),
+            name=name
+        )
+    else:
+        raise ValueError(f"Unknown layer type: {layer_type}")
+
+# ==============================================================================
+# MODEL ARCHITECTURE BUILDING
+# ==============================================================================
+
+def build_conv_block(
+    inputs: keras.layers.Layer,
+    filters: int,
+    config: OrthoBlockExperimentConfig,
+    block_index: int
+) -> keras.layers.Layer:
+    """
+    Build a convolutional block with residual connections.
+
+    Args:
+        inputs: Input tensor
+        filters: Number of filters
+        config: Experiment configuration
+        block_index: Index of the current block
+
+    Returns:
+        Output tensor after convolutional block
+    """
+    shortcut = inputs
+
+    # First convolution
+    x = keras.layers.Conv2D(
+        filters=filters,
+        kernel_size=config.kernel_size,
+        padding='same',
+        kernel_initializer=config.kernel_initializer,
+        kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+        name=f'conv{block_index}_1'
+    )(inputs)
+
+    x = keras.layers.BatchNormalization(name=f'bn{block_index}_1')(x)
+    x = keras.layers.Activation(config.activation)(x)
+
+    # Second convolution
+    x = keras.layers.Conv2D(
+        filters=filters,
+        kernel_size=config.kernel_size,
+        padding='same',
+        kernel_initializer=config.kernel_initializer,
+        kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+        name=f'conv{block_index}_2'
+    )(x)
+
+    x = keras.layers.BatchNormalization(name=f'bn{block_index}_2')(x)
+
+    # Adjust shortcut if needed
+    if config.use_residual and shortcut.shape[-1] != filters:
+        shortcut = keras.layers.Conv2D(
+            filters, (1, 1), padding='same',
+            kernel_initializer=config.kernel_initializer,
+            kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+            name=f'conv{block_index}_shortcut'
+        )(shortcut)
+
+        shortcut = keras.layers.BatchNormalization(name=f'bn{block_index}_shortcut')(shortcut)
+
+    # Add and activate
+    if config.use_residual:
+        x = keras.layers.Add()([x, shortcut])
+    x = keras.layers.Activation(config.activation)(x)
+
+    # Max pooling (except last block)
+    if block_index < len(config.conv_filters) - 1:
+        x = keras.layers.MaxPooling2D((2, 2))(x)
+
+    # Dropout
+    dropout_rate = (config.dropout_rates[block_index]
+                   if block_index < len(config.dropout_rates) else 0.0)
+    if dropout_rate > 0:
+        x = keras.layers.Dropout(dropout_rate)(x)
+
+    return x
+
+def build_model(
+    config: OrthoBlockExperimentConfig,
+    layer_type: str,
+    layer_params: Dict[str, Any],
+    name: str
+) -> keras.Model:
+    """
+    Build a complete CNN model with specified dense layer type.
+
+    Args:
+        config: Experiment configuration
+        layer_type: Type of dense layer
+        layer_params: Parameters for dense layer
+        name: Model name
+
+    Returns:
+        Compiled Keras model
+    """
+    # Input layer
+    inputs = keras.layers.Input(shape=config.input_shape, name=f'{name}_input')
+    x = inputs
+
+    # Convolutional blocks
+    for i, filters in enumerate(config.conv_filters):
+        x = build_conv_block(x, filters, config, i)
+
+    # Global average pooling
+    x = keras.layers.GlobalAveragePooling2D()(x)
+
+    # Create the specified dense layer
+    x = create_dense_layer(
+        layer_type=layer_type,
+        layer_params=layer_params,
+        units=config.dense_units,
+        activation=config.activation,
+        name=f'{name}_dense'
+    )(x)
+
+    # Additional dropout for non-OrthoBlock layers
+    if layer_type != 'orthoblock':
+        dropout_rate = layer_params.get('dropout_rate', config.final_dropout)
+        if dropout_rate > 0:
+            x = keras.layers.Dropout(dropout_rate)(x)
+
+    # Output layer
+    outputs = keras.layers.Dense(
+        config.num_classes,
+        activation=config.output_activation,
+        kernel_initializer=config.kernel_initializer,
+        name='predictions'
+    )(x)
+
+    # Create and compile model
+    model = keras.Model(inputs=inputs, outputs=outputs, name=f'{name}_model')
+
+    optimizer = keras.optimizers.AdamW(learning_rate=config.learning_rate)
+
+    model.compile(
+        optimizer=optimizer,
+        loss='categorical_crossentropy',
+        metrics=[
+            keras.metrics.CategoricalAccuracy(name='accuracy'),
+            keras.metrics.TopKCategoricalAccuracy(k=5, name='top_5_accuracy')
+        ]
+    )
+
+    return model
+
+# ==============================================================================
+# ORTHOGONALITY TRACKING CALLBACK
+# ==============================================================================
+
+class OrthogonalityTracker(keras.callbacks.Callback):
+    """Callback to track orthogonality metrics during training."""
+
+    def __init__(self, model_name: str):
         super().__init__()
-        self.max_factor = max_factor
-        self.min_factor = min_factor
-        self.total_epochs = total_epochs
+        self.model_name = model_name
         self.ortho_layers = []
+        self.orthogonality_history = []
+        self.scale_history = []
 
     def on_train_begin(self, logs=None):
-        # Find all OrthoCenterBlock layers
+        # Find all OrthoBlock layers
         for layer in self.model.layers:
             if isinstance(layer, OrthoBlock):
                 self.ortho_layers.append(layer)
 
-        logger.info(f"Found {len(self.ortho_layers)} OrthoBlock layers for scheduling")
+        logger.info(f"Found {len(self.ortho_layers)} OrthoBlock layers in {self.model_name}")
 
-    def on_epoch_begin(self, epoch, logs=None):
-        # Cosine annealing schedule
-        progress = min(epoch / self.total_epochs, 1.0)
-        factor = self.max_factor * (0.5 * (1.0 + np.cos(progress * np.pi))) + self.min_factor
-
-        # Update the regularization factor for each layer
-        for layer in self.ortho_layers:
-            # Access the dense sublayer's kernel regularizer
-            if hasattr(layer.dense, 'kernel_regularizer'):
-                reg = layer.dense.kernel_regularizer
-
-                # Check if we're using the ortho regularizer directly or a combined one
-                if hasattr(reg, 'factor'):
-                    # Direct OrthonomalRegularizer
-                    reg.factor = factor
-                else:
-                    # This could be a combined regularizer - we'll need to patch it
-                    # This is more complex and implementation-dependent
-                    pass
-
-
-class MetricsTracker(keras.callbacks.Callback):
-    """Callback to track additional metrics during training."""
-
-    def __init__(self, validation_data=None, model_type="unknown"):
-        super().__init__()
-        self.validation_data = validation_data
-        self.model_type = model_type
-        self.batch_metrics = {'train_loss': [], 'train_acc': []}
-        self.epoch_metrics = {'val_loss': [], 'val_acc': [], 'epoch_times': [],
-                              'ortho_metrics': [], 'scale_histograms': []}
-        self.ortho_layers = []
-        self.start_time = None
-
-    def on_train_begin(self, logs=None):
-        # Find OrthoCenterBlock layers
-        for layer in self.model.layers:
-            if isinstance(layer, OrthoBlock):
-                self.ortho_layers.append(layer)
-
-        self.start_time = time.time()
-
-    def on_batch_end(self, batch, logs=None):
-        # Track batch-level metrics
-        if logs:
-            self.batch_metrics['train_loss'].append(logs.get('loss'))
-            self.batch_metrics['train_acc'].append(logs.get('accuracy'))
-
-    def calculate_orthogonality(self, layer):
+    def calculate_orthogonality(self, layer: OrthoBlock) -> float:
         """Calculate orthogonality measure ||W^T W - I||_F for a layer."""
-        if not hasattr(layer, 'dense'):
-            return None
+        if not hasattr(layer, 'dense') or not hasattr(layer.dense, 'kernel'):
+            return 0.0
 
         weights = layer.dense.kernel.numpy()
         wt_w = np.matmul(weights.T, weights)
         identity = np.eye(wt_w.shape[0], wt_w.shape[1])
         diff = wt_w - identity
-        return np.sqrt(np.sum(np.square(diff)))
+        return float(np.sqrt(np.sum(np.square(diff))))
 
-    def get_scale_histogram(self, layer):
-        """Get histogram data of constrained scale parameters."""
-        if not hasattr(layer, 'constrained_scale'):
-            return None
+    def get_scale_statistics(self, layer: OrthoBlock) -> Dict[str, float]:
+        """Get statistics of constrained scale parameters."""
+        if not hasattr(layer, 'constrained_scale') or not hasattr(layer.constrained_scale, 'multiplier'):
+            return {}
 
-        # Get the scales - this depends on how LearnableMultiplier is implemented
-        # Assuming it has a weight attribute we can access
-        if hasattr(layer.constrained_scale, 'multiplier'):
-            scales = layer.constrained_scale.multiplier.numpy()
-            return scales
-        return None
+        scales = layer.constrained_scale.multiplier.numpy()
+        return {
+            'mean': float(np.mean(scales)),
+            'std': float(np.std(scales)),
+            'min': float(np.min(scales)),
+            'max': float(np.max(scales))
+        }
 
     def on_epoch_end(self, epoch, logs=None):
-        # Track epoch time
-        epoch_time = time.time() - self.start_time
-        self.epoch_metrics['epoch_times'].append(epoch_time)
-        self.start_time = time.time()
+        # Track orthogonality metrics for each OrthoBlock
+        epoch_ortho = {}
+        epoch_scales = {}
 
-        # Track validation metrics
-        if logs:
-            self.epoch_metrics['val_loss'].append(logs.get('val_loss'))
-            self.epoch_metrics['val_acc'].append(logs.get('val_accuracy'))
-
-        # Track orthogonality metrics for each OrthoCenterBlock
-        ortho_values = {}
         for i, layer in enumerate(self.ortho_layers):
             ortho_value = self.calculate_orthogonality(layer)
-            if ortho_value is not None:
-                ortho_values[f'layer_{i}'] = ortho_value
+            epoch_ortho[f'layer_{i}'] = ortho_value
 
-        self.epoch_metrics['ortho_metrics'].append(ortho_values)
+            scale_stats = self.get_scale_statistics(layer)
+            if scale_stats:
+                epoch_scales[f'layer_{i}'] = scale_stats
 
-        # Track scale parameter histograms
-        scale_histograms = {}
-        for i, layer in enumerate(self.ortho_layers):
-            scales = self.get_scale_histogram(layer)
-            if scales is not None:
-                scale_histograms[f'layer_{i}'] = scales
+        self.orthogonality_history.append(epoch_ortho)
+        self.scale_history.append(epoch_scales)
 
-        self.epoch_metrics['scale_histograms'].append(scale_histograms)
+# ==============================================================================
+# STATISTICAL ANALYSIS UTILITIES
+# ==============================================================================
 
-
-def load_and_preprocess_cifar10():
-    """Load and preprocess the CIFAR-10 dataset."""
-    # Load dataset
-    (x_train, y_train), (x_test, y_test) = cifar10.load_data()
-
-    # Convert to float and normalize to [0, 1]
-    x_train = x_train.astype('float32') / 255.0
-    x_test = x_test.astype('float32') / 255.0
-
-    # Convert labels to categorical
-    y_train = keras.utils.to_categorical(y_train, CONFIG["NUM_CLASSES"])
-    y_test = keras.utils.to_categorical(y_test, CONFIG["NUM_CLASSES"])
-
-    # Create a validation split
-    val_size = CONFIG["VALIDATION_SIZE"]
-    x_val = x_train[-val_size:]
-    y_val = y_train[-val_size:]
-    x_train = x_train[:-val_size]
-    y_train = y_train[:-val_size]
-
-    logger.info(f"Training set: {x_train.shape}, {y_train.shape}")
-    logger.info(f"Validation set: {x_val.shape}, {y_val.shape}")
-    logger.info(f"Test set: {x_test.shape}, {y_test.shape}")
-
-    return (x_train, y_train), (x_val, y_val), (x_test, y_test)
-
-
-def create_model_template(input_shape=(32, 32, 3), num_classes=CONFIG["NUM_CLASSES"]):
-    """Create a template model with placeholders for the final dense layer.
-       This function will be used to ensure identical initialization for both models.
+def calculate_run_statistics(results_per_run: Dict[str, List[Dict[str, float]]]) -> Dict[str, Dict[str, float]]:
     """
-    # Store initial random state to ensure same initialization
-    random_state = np.random.get_state()
+    Calculate statistics across multiple runs for each model.
 
-    inputs = keras.Input(shape=input_shape)
+    Args:
+        results_per_run: Dictionary mapping model names to lists of results across runs
 
-    # Create convolutional blocks based on configuration
-    x = inputs
-    for i, block_config in enumerate(CONFIG["CONV_BLOCKS"]):
-        # First conv layer in block
-        x = keras.layers.Conv2D(
-            block_config["FILTERS"],
-            (block_config["KERNEL_SIZE"], block_config["KERNEL_SIZE"]),
-            padding='same'
-        )(x)
-        x = keras.layers.BatchNormalization()(x)
-        x = keras.layers.Activation(CONFIG["ACTIVATION"])(x)
+    Returns:
+        Dictionary with mean, std, min, max for each model and metric
+    """
+    statistics = {}
 
-        # Second conv layer in block
-        x = keras.layers.Conv2D(
-            block_config["FILTERS"],
-            (block_config["KERNEL_SIZE"], block_config["KERNEL_SIZE"]),
-            padding='same'
-        )(x)
-        x = keras.layers.BatchNormalization()(x)
-        x = keras.layers.Activation(CONFIG["ACTIVATION"])(x)
+    for model_name, run_results in results_per_run.items():
+        if not run_results:
+            continue
 
-        # Pooling and dropout
-        x = keras.layers.MaxPooling2D(pool_size=(2, 2))(x)
-        x = keras.layers.Dropout(block_config["DROPOUT"])(x)
+        # Initialize statistics for this model
+        statistics[model_name] = {}
 
-    # Flatten layer before final dense/orthocenter block
-    flattened = keras.layers.Flatten()(x)
+        # Get all metrics from first run
+        metrics = run_results[0].keys()
 
-    # This gives us a template that we'll use to create both models
-    template_model = keras.Model(inputs=inputs, outputs=flattened, name="template_model")
+        for metric in metrics:
+            values = [result[metric] for result in run_results if metric in result]
 
-    # Restore random state
-    np.random.set_state(random_state)
+            if values:
+                statistics[model_name][metric] = {
+                    'mean': np.mean(values),
+                    'std': np.std(values),
+                    'min': np.min(values),
+                    'max': np.max(values),
+                    'count': len(values)
+                }
 
-    return template_model
+    return statistics
 
+# ==============================================================================
+# CUSTOM TRAINING WITH ORTHOGONALITY TRACKING
+# ==============================================================================
 
-def create_models(input_shape=(32, 32, 3), num_classes=CONFIG["NUM_CLASSES"]):
-    """Create both baseline and orthocenter models with identical initialization."""
+def train_model_with_tracker(
+    model: keras.Model,
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_val: np.ndarray,
+    y_val: np.ndarray,
+    config: TrainingConfig,
+    ortho_tracker: OrthogonalityTracker
+) -> keras.callbacks.History:
+    """
+    Train model with orthogonality tracking using manual callbacks.
 
-    # Create the shared template
-    template_model = create_model_template(input_shape, num_classes)
+    Args:
+        model: Keras model to train
+        x_train: Training data
+        y_train: Training labels
+        x_val: Validation data
+        y_val: Validation labels
+        config: Training configuration
+        ortho_tracker: Orthogonality tracker callback
 
-    # Create baseline model using template
-    baseline_inputs = keras.Input(shape=input_shape)
-    x_baseline = template_model(baseline_inputs)
+    Returns:
+        Training history
+    """
+    # Create output directory
+    config.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # For baseline: Regular Dense layer -> Dropout -> Output
-    x_baseline = keras.layers.Dense(CONFIG["DENSE_UNITS"])(x_baseline)
-    x_baseline = keras.layers.BatchNormalization()(x_baseline)
-    x_baseline = keras.layers.Activation(CONFIG["ACTIVATION"])(x_baseline)
-    x_baseline = keras.layers.Dropout(CONFIG["FINAL_DROPOUT"])(x_baseline)
-    baseline_outputs = keras.layers.Dense(num_classes, activation=CONFIG["OUTPUT_ACTIVATION"])(x_baseline)
-
-    baseline_model = keras.Model(inputs=baseline_inputs, outputs=baseline_outputs, name="baseline_cnn")
-
-    # Create orthocenter model using the same template
-    orthocenter_inputs = keras.Input(shape=input_shape)
-    x_orthocenter = template_model(orthocenter_inputs)
-
-    # For orthocenter: OrthoCenterBlock -> Dropout -> Output
-    x_orthocenter = OrthoBlock(
-        units=CONFIG["DENSE_UNITS"],
-        activation=CONFIG["ACTIVATION"],
-        ortho_reg_factor=CONFIG["ORTHO_REG_FACTOR"],
-        scale_initial_value=CONFIG["SCALE_INITIAL_VALUE"]
-    )(x_orthocenter)
-    x_orthocenter = keras.layers.Dropout(CONFIG["FINAL_DROPOUT"])(x_orthocenter)
-    orthocenter_outputs = keras.layers.Dense(num_classes, activation=CONFIG["OUTPUT_ACTIVATION"])(x_orthocenter)
-
-    orthocenter_model = keras.Model(inputs=orthocenter_inputs, outputs=orthocenter_outputs, name="orthocenter_cnn")
-
-    return baseline_model, orthocenter_model
-
-
-def lr_schedule(epoch, lr):
-    """Learning rate schedule using CONFIG parameters."""
-    thresholds = CONFIG["LR_SCHEDULE_THRESHOLDS"]
-    lr_values = CONFIG["LR_VALUES"]
-
-    if epoch > thresholds[1]:
-        return lr_values[2]
-    elif epoch > thresholds[0]:
-        return lr_values[1]
-    else:
-        return lr_values[0]
-
-
-def train_and_evaluate(model, data, model_name, epochs=CONFIG["EPOCHS"], batch_size=CONFIG["BATCH_SIZE"]):
-    """Train and evaluate a model."""
-    (x_train, y_train), (x_val, y_val), (x_test, y_test) = data
-
-    # Compile model
-    model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=CONFIG["INITIAL_LR"]),
-        loss='categorical_crossentropy',
-        metrics=['accuracy']
-    )
-
-    # Create callbacks
-    checkpoint_path = os.path.join(EXPERIMENT_DIR, f"{model_name}_best.keras")
-    checkpoint = ModelCheckpoint(
-        checkpoint_path,
-        monitor='val_accuracy',
-        save_best_only=True,
-        mode='max'
-    )
-
-    early_stopping = EarlyStopping(
-        monitor='val_accuracy',
-        patience=CONFIG["EARLY_STOPPING_PATIENCE"],
-        restore_best_weights=True
-    )
-
-    lr_scheduler = LearningRateScheduler(lr_schedule)
-
-    metrics_tracker = MetricsTracker(validation_data=(x_val, y_val), model_type=model_name)
-
-    callbacks = [checkpoint, early_stopping, lr_scheduler, metrics_tracker]
-
-    # Add OrthoRegScheduler for OrthoCenterBlock model
-    if model_name == "orthocenter_cnn":
-        ortho_scheduler = OrthoRegScheduler(
-            max_factor=CONFIG["ORTHO_REG_SCHEDULER"]["MAX_FACTOR"],
-            min_factor=CONFIG["ORTHO_REG_SCHEDULER"]["MIN_FACTOR"],
-            total_epochs=epochs
-        )
-        callbacks.append(ortho_scheduler)
+    # Setup callbacks
+    callbacks = [
+        keras.callbacks.EarlyStopping(
+            monitor=config.monitor_metric,
+            patience=config.early_stopping_patience,
+            restore_best_weights=True,
+            verbose=1
+        ),
+        keras.callbacks.ModelCheckpoint(
+            filepath=config.output_dir / f"{config.model_name}_best.keras",
+            monitor=config.monitor_metric,
+            save_best_only=True,
+            verbose=1
+        ),
+        keras.callbacks.ReduceLROnPlateau(
+            monitor=config.monitor_metric,
+            factor=0.5,
+            patience=5,
+            min_lr=1e-7,
+            verbose=1
+        ),
+        ortho_tracker  # Add the orthogonality tracker
+    ]
 
     # Train model
-    logger.info(f"Training {model_name}...")
     history = model.fit(
         x_train, y_train,
-        batch_size=batch_size,
-        epochs=epochs,
+        batch_size=config.batch_size,
+        epochs=config.epochs,
         validation_data=(x_val, y_val),
         callbacks=callbacks,
-        verbose=1,
+        verbose=1
     )
 
-    # Evaluate on test set
-    logger.info(f"Evaluating {model_name} on test set...")
-    test_results = model.evaluate(x_test, y_test, verbose=1)
-    logger.info(f"{model_name} Test Loss: {test_results[0]:.4f}")
-    logger.info(f"{model_name} Test Accuracy: {test_results[1]:.4f}")
-
     # Save final model
-    final_path = os.path.join(EXPERIMENT_DIR, f"{model_name}_final.keras")
-    model.save(final_path)
+    model.save(config.output_dir / f"{config.model_name}_final.keras")
 
-    # Save training history
-    history_df = pd.DataFrame({
-        'train_loss': history.history['loss'],
-        'train_accuracy': history.history['accuracy'],
-        'val_loss': history.history['val_loss'],
-        'val_accuracy': history.history['val_accuracy']
-    })
-    history_df.to_csv(os.path.join(EXPERIMENT_DIR, f"{model_name}_history.csv"), index=False)
+    return history
 
-    # Return results dictionary
-    return {
-        'test_loss': test_results[0],
-        'test_accuracy': test_results[1],
-        'history': history.history,
-        'metrics_tracker': metrics_tracker,
-        'model': model
+# ==============================================================================
+# MAIN EXPERIMENT RUNNER
+# ==============================================================================
+
+def run_experiment(config: OrthoBlockExperimentConfig) -> Dict[str, Any]:
+    """
+    Run the complete OrthoBlock effectiveness experiment.
+
+    Args:
+        config: Experiment configuration
+
+    Returns:
+        Dictionary containing all experimental results
+    """
+    # Set random seed
+    keras.utils.set_random_seed(config.random_seed)
+
+    # Create experiment directory
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    experiment_dir = config.output_dir / f"{config.experiment_name}_{timestamp}"
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+
+    # Initialize visualization manager
+    vis_manager = VisualizationManager(
+        output_dir=experiment_dir / "visualizations",
+        config=VisualizationConfig(),
+        timestamp_dirs=False
+    )
+
+    logger.info("🚀 Starting OrthoBlock Effectiveness Experiment")
+    logger.info(f"📁 Results will be saved to: {experiment_dir}")
+    logger.info("=" * 80)
+
+    # ===== DATASET LOADING =====
+    logger.info("📊 Loading CIFAR-10 dataset...")
+    cifar10_data = load_and_preprocess_cifar10()
+    logger.info("✅ Dataset loaded successfully")
+
+    logger.info(f"📋 Dataset Info:")
+    logger.info(f"   Training data shape: {cifar10_data.x_train.shape}")
+    logger.info(f"   Training labels shape: {cifar10_data.y_train.shape}")
+    logger.info(f"   Test data shape: {cifar10_data.x_test.shape}")
+    logger.info(f"   Test labels shape: {cifar10_data.y_test.shape}")
+
+    # ===== MULTIPLE RUNS FOR STATISTICAL SIGNIFICANCE =====
+    logger.info(f"🔄 Running {config.n_runs} repetitions for statistical significance...")
+
+    all_trained_models = {}  # Final models from all runs
+    all_histories = {}  # Training histories from all runs
+    all_orthogonality_trackers = {}  # Orthogonality tracking data
+    results_per_run = {}  # Performance results per run
+
+    for run_idx in range(config.n_runs):
+        logger.info(f"🏃 Starting run {run_idx + 1}/{config.n_runs}")
+
+        # Set different seed for each run
+        run_seed = config.random_seed + run_idx * 1000
+        keras.utils.set_random_seed(run_seed)
+
+        run_models = {}
+        run_histories = {}
+        run_trackers = {}
+
+        # ===== TRAINING MODELS FOR THIS RUN =====
+        for variant_name, variant_factory in config.dense_variants.items():
+            logger.info(f"--- Training {variant_name} (Run {run_idx + 1}) ---")
+
+            # Get layer configuration
+            layer_type, layer_params = variant_factory(config)
+
+            # Build model
+            model = build_model(config, layer_type, layer_params, f"{variant_name}_run{run_idx}")
+
+            # Log model info
+            if run_idx == 0:  # Only log architecture details for first run
+                model.summary(print_fn=logger.info)
+                logger.info(f"Model {variant_name} parameters: {model.count_params():,}")
+
+            # Create orthogonality tracker for OrthoBlock models
+            ortho_tracker = None
+            if layer_type == 'orthoblock':
+                ortho_tracker = OrthogonalityTracker(f"{variant_name}_run{run_idx}")
+
+            # Configure training
+            training_config = TrainingConfig(
+                epochs=config.epochs,
+                batch_size=config.batch_size,
+                early_stopping_patience=config.early_stopping_patience,
+                monitor_metric=config.monitor_metric,
+                model_name=f"{variant_name}_run{run_idx}",
+                output_dir=experiment_dir / "training_plots" / f"run_{run_idx}" / variant_name
+            )
+
+            # Train model with manual training loop for orthogonality tracking
+            if ortho_tracker:
+                # Manual training with orthogonality tracking
+                history = train_model_with_tracker(
+                    model, cifar10_data.x_train, cifar10_data.y_train,
+                    cifar10_data.x_test, cifar10_data.y_test, training_config,
+                    ortho_tracker
+                )
+            else:
+                # Standard training
+                history = train_model(
+                    model, cifar10_data.x_train, cifar10_data.y_train,
+                    cifar10_data.x_test, cifar10_data.y_test, training_config
+                )
+
+            run_models[variant_name] = model
+            run_histories[variant_name] = history.history
+            if ortho_tracker:
+                run_trackers[variant_name] = ortho_tracker
+
+            logger.info(f"✅ {variant_name} (Run {run_idx + 1}) training completed!")
+
+        # ===== EVALUATE MODELS FOR THIS RUN =====
+        logger.info(f"📊 Evaluating models for run {run_idx + 1}...")
+
+        for variant_name, model in run_models.items():
+            try:
+                # Get predictions for manual accuracy calculation
+                predictions = model.predict(cifar10_data.x_test, verbose=0)
+
+                # Handle label format
+                if len(cifar10_data.y_test.shape) > 1 and cifar10_data.y_test.shape[1] > 1:
+                    y_true_classes = np.argmax(cifar10_data.y_test, axis=1)
+                else:
+                    y_true_classes = cifar10_data.y_test.astype(int)
+
+                # Calculate accuracy manually
+                y_pred_classes = np.argmax(predictions, axis=1)
+                manual_accuracy = np.mean(y_pred_classes == y_true_classes)
+
+                # Calculate top-5 accuracy
+                top_5_predictions = np.argsort(predictions, axis=1)[:, -5:]
+                manual_top5_acc = np.mean([
+                    y_true in top5_pred
+                    for y_true, top5_pred in zip(y_true_classes, top_5_predictions)
+                ])
+
+                # Calculate loss
+                try:
+                    eval_results = model.evaluate(cifar10_data.x_test, cifar10_data.y_test, verbose=0)
+                    metrics_dict = dict(zip(model.metrics_names, eval_results))
+                    loss_value = metrics_dict.get('loss', 0.0)
+                except Exception:
+                    # Calculate loss manually
+                    if len(cifar10_data.y_test.shape) == 1:
+                        y_test_onehot = keras.utils.to_categorical(cifar10_data.y_test, num_classes=10)
+                    else:
+                        y_test_onehot = cifar10_data.y_test
+
+                    loss_value = float(keras.metrics.categorical_crossentropy(y_test_onehot, predictions).numpy().mean())
+
+                # Store results
+                if variant_name not in results_per_run:
+                    results_per_run[variant_name] = []
+
+                results_per_run[variant_name].append({
+                    'accuracy': manual_accuracy,
+                    'top_5_accuracy': manual_top5_acc,
+                    'loss': loss_value,
+                    'run_idx': run_idx
+                })
+
+                logger.info(f"✅ {variant_name} (Run {run_idx + 1}): Accuracy={manual_accuracy:.4f}, Loss={loss_value:.4f}")
+
+            except Exception as e:
+                logger.error(f"❌ Error evaluating {variant_name} (Run {run_idx + 1}): {e}", exc_info=True)
+
+        # Store models and trackers from last run for analysis
+        if run_idx == config.n_runs - 1:
+            all_trained_models = run_models
+            all_histories = run_histories
+            all_orthogonality_trackers = run_trackers
+
+        # Memory cleanup
+        del run_models
+        gc.collect()
+
+    # ===== STATISTICAL ANALYSIS =====
+    logger.info("📈 Calculating statistics across runs...")
+    run_statistics = calculate_run_statistics(results_per_run)
+
+    # ===== COMPREHENSIVE MODEL ANALYSIS =====
+    logger.info("🔬 Performing comprehensive analysis with ModelAnalyzer...")
+    model_analysis_results = None
+
+    try:
+        analyzer = ModelAnalyzer(
+            models=all_trained_models,
+            config=config.analyzer_config,
+            output_dir=experiment_dir / "model_analysis",
+            training_history=all_histories
+        )
+
+        model_analysis_results = analyzer.analyze(data=DataInput.from_object(cifar10_data))
+        logger.info("✅ Model analysis completed successfully!")
+
+    except Exception as e:
+        logger.error(f"❌ Model analysis failed: {e}", exc_info=True)
+
+    # ===== VISUALIZATION GENERATION =====
+    logger.info("📊 Generating visualizations...")
+
+    # Training history comparison
+    vis_manager.plot_history(
+        histories=all_histories,
+        metrics=['accuracy', 'loss'],
+        name='orthoblock_training_comparison',
+        subdir='training_plots',
+        title='OrthoBlock vs Dense Layer Training Comparison'
+    )
+
+    # Statistical comparison visualization
+    create_statistical_comparison_plot(run_statistics, experiment_dir / "visualizations")
+
+    # Orthogonality analysis for OrthoBlock models
+    create_orthogonality_analysis_plots(all_orthogonality_trackers, experiment_dir / "visualizations")
+
+    # Confusion matrices
+    raw_predictions = {
+        name: model.predict(cifar10_data.x_test, verbose=0)
+        for name, model in all_trained_models.items()
+    }
+    class_predictions = {
+        name: np.argmax(preds, axis=1)
+        for name, preds in raw_predictions.items()
     }
 
+    y_true_classes = (np.argmax(cifar10_data.y_test, axis=1)
+                     if len(cifar10_data.y_test.shape) > 1
+                     else cifar10_data.y_test)
 
-def visualize_results(baseline_results, orthocenter_results):
-    """Visualize and compare results between the two models."""
+    vis_manager.plot_confusion_matrices_comparison(
+        y_true=y_true_classes,
+        model_predictions=class_predictions,
+        name='orthoblock_confusion_matrices',
+        subdir='model_comparison',
+        normalize=True,
+        class_names=[str(i) for i in range(10)]
+    )
 
-    # 1. Training and Validation Accuracy Plot
-    plt.figure(figsize=(12, 6))
-    plt.subplot(1, 2, 1)
-    plt.plot(baseline_results['history']['accuracy'], label='Baseline Train')
-    plt.plot(baseline_results['history']['val_accuracy'], label='Baseline Val')
-    plt.plot(orthocenter_results['history']['accuracy'], label='OrthoCenterBlock Train')
-    plt.plot(orthocenter_results['history']['val_accuracy'], label='OrthoCenterBlock Val')
-    plt.title('Model Accuracy')
-    plt.ylabel('Accuracy')
-    plt.xlabel('Epoch')
-    plt.legend(loc='lower right')
-    plt.grid(True, linestyle='--', alpha=0.7)
+    # ===== RESULTS COMPILATION =====
+    results = {
+        'run_statistics': run_statistics,
+        'model_analysis': model_analysis_results,
+        'histories': all_histories,
+        'orthogonality_trackers': all_orthogonality_trackers,
+        'trained_models': all_trained_models,
+        'config': config,
+        'experiment_dir': experiment_dir
+    }
 
-    # 2. Training and Validation Loss Plot
-    plt.subplot(1, 2, 2)
-    plt.plot(baseline_results['history']['loss'], label='Baseline Train')
-    plt.plot(baseline_results['history']['val_loss'], label='Baseline Val')
-    plt.plot(orthocenter_results['history']['loss'], label='OrthoCenterBlock Train')
-    plt.plot(orthocenter_results['history']['val_loss'], label='OrthoCenterBlock Val')
-    plt.title('Model Loss')
-    plt.ylabel('Loss')
-    plt.xlabel('Epoch')
-    plt.legend(loc='upper right')
-    plt.grid(True, linestyle='--', alpha=0.7)
+    # Save results
+    save_experiment_results(results, experiment_dir)
 
-    plt.tight_layout()
-    plt.savefig(os.path.join(EXPERIMENT_DIR, 'accuracy_loss_comparison.png'), dpi=300)
+    # Print comprehensive summary
+    print_experiment_summary(results)
 
-    # 3. Orthogonality Metrics Over Time (for OrthoCenterBlock model only)
-    ortho_metrics = orthocenter_results['metrics_tracker'].epoch_metrics['ortho_metrics']
-    if ortho_metrics and len(ortho_metrics) > 0 and 'layer_0' in ortho_metrics[0]:
-        plt.figure(figsize=(10, 5))
-        ortho_values = [metrics.get('layer_0', np.nan) for metrics in ortho_metrics]
-        plt.plot(ortho_values, 'o-', label='||W^T W - I||_F')
-        plt.title('Orthogonality Measure Over Training')
-        plt.ylabel('Frobenius Norm')
-        plt.xlabel('Epoch')
-        plt.grid(True, linestyle='--', alpha=0.7)
-        plt.legend()
+    return results
+
+# ==============================================================================
+# VISUALIZATION UTILITIES
+# ==============================================================================
+
+def create_statistical_comparison_plot(statistics: Dict[str, Dict[str, float]], output_dir: Path) -> None:
+    """
+    Create statistical comparison plots showing mean ± std across runs.
+
+    Args:
+        statistics: Statistical results from multiple runs
+        output_dir: Directory to save plots
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
+        # Setup plot style
+        plt.style.use('seaborn-v0_8')
+        fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+
+        # Extract data
+        models = list(statistics.keys())
+        accuracies = [statistics[model]['accuracy']['mean'] for model in models]
+        accuracy_stds = [statistics[model]['accuracy']['std'] for model in models]
+
+        # Color coding for different model types
+        colors = []
+        for model in models:
+            if 'OrthoBlock' in model:
+                colors.append('orange')
+            else:
+                colors.append('skyblue')
+
+        # Plot accuracy comparison
+        ax1 = axes[0]
+        bars = ax1.bar(models, accuracies, yerr=accuracy_stds, capsize=5, color=colors)
+        ax1.set_title('Test Accuracy Comparison (Mean ± Std)')
+        ax1.set_ylabel('Accuracy')
+        ax1.tick_params(axis='x', rotation=45)
+
+        # Add value labels on bars
+        for bar, acc, std in zip(bars, accuracies, accuracy_stds):
+            height = bar.get_height()
+            ax1.text(bar.get_x() + bar.get_width()/2., height + std + 0.005,
+                    f'{acc:.3f}±{std:.3f}', ha='center', va='bottom', fontsize=8)
+
+        # Plot loss comparison
+        ax2 = axes[1]
+        losses = [statistics[model]['loss']['mean'] for model in models]
+        loss_stds = [statistics[model]['loss']['std'] for model in models]
+        bars2 = ax2.bar(models, losses, yerr=loss_stds, capsize=5, color=colors)
+        ax2.set_title('Test Loss Comparison (Mean ± Std)')
+        ax2.set_ylabel('Loss')
+        ax2.tick_params(axis='x', rotation=45)
+
+        # Add value labels on bars
+        for bar, loss, std in zip(bars2, losses, loss_stds):
+            height = bar.get_height()
+            ax2.text(bar.get_x() + bar.get_width()/2., height + std + 0.01,
+                    f'{loss:.3f}±{std:.3f}', ha='center', va='bottom', fontsize=8)
+
         plt.tight_layout()
-        plt.savefig(os.path.join(EXPERIMENT_DIR, 'orthogonality_metric.png'), dpi=300)
+        plt.savefig(output_dir / 'statistical_comparison.png', dpi=300, bbox_inches='tight')
+        plt.close()
 
-    # 4. Scale Parameter Distributions
-    scale_histograms = orthocenter_results['metrics_tracker'].epoch_metrics['scale_histograms']
-    if scale_histograms and len(scale_histograms) > 0:
-        epochs_to_plot = [0, len(scale_histograms) // 3, 2 * len(scale_histograms) // 3, -1]
-        epochs_to_plot = [ep if ep >= 0 else len(scale_histograms) + ep for ep in epochs_to_plot]
+        logger.info("✅ Statistical comparison plot saved")
 
-        plt.figure(figsize=(12, 8))
-        for i, epoch in enumerate(epochs_to_plot):
-            if epoch < len(scale_histograms) and 'layer_0' in scale_histograms[epoch]:
-                plt.subplot(2, 2, i + 1)
-                scales = scale_histograms[epoch]['layer_0']
-                plt.hist(scales, bins=20, alpha=0.7)
-                plt.title(f'Scale Distribution (Epoch {epoch})')
-                plt.xlabel('Scale Value')
-                plt.ylabel('Count')
-                plt.grid(True, linestyle='--', alpha=0.5)
+    except Exception as e:
+        logger.error(f"❌ Failed to create statistical comparison plot: {e}")
+
+def create_orthogonality_analysis_plots(trackers: Dict[str, OrthogonalityTracker], output_dir: Path) -> None:
+    """
+    Create orthogonality analysis plots for OrthoBlock models.
+
+    Args:
+        trackers: Dictionary of orthogonality trackers
+        output_dir: Directory to save plots
+    """
+    try:
+        import matplotlib.pyplot as plt
+
+        if not trackers:
+            logger.info("No orthogonality trackers found, skipping orthogonality plots")
+            return
+
+        # Orthogonality evolution plot
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+
+        # Plot 1: Orthogonality measure over training
+        ax1 = axes[0, 0]
+        for model_name, tracker in trackers.items():
+            if tracker.orthogonality_history:
+                epochs = range(len(tracker.orthogonality_history))
+                ortho_values = [metrics.get('layer_0', 0) for metrics in tracker.orthogonality_history]
+                ax1.plot(epochs, ortho_values, label=model_name, marker='o', markersize=2)
+
+        ax1.set_title('Orthogonality Measure Over Training')
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('||W^T W - I||_F')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # Plot 2: Scale parameter evolution (mean)
+        ax2 = axes[0, 1]
+        for model_name, tracker in trackers.items():
+            if tracker.scale_history:
+                epochs = range(len(tracker.scale_history))
+                scale_means = [metrics.get('layer_0', {}).get('mean', 0) for metrics in tracker.scale_history]
+                if any(scale_means):
+                    ax2.plot(epochs, scale_means, label=model_name, marker='o', markersize=2)
+
+        ax2.set_title('Scale Parameter Mean Over Training')
+        ax2.set_xlabel('Epoch')
+        ax2.set_ylabel('Mean Scale Value')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+
+        # Plot 3: Scale parameter standard deviation
+        ax3 = axes[1, 0]
+        for model_name, tracker in trackers.items():
+            if tracker.scale_history:
+                epochs = range(len(tracker.scale_history))
+                scale_stds = [metrics.get('layer_0', {}).get('std', 0) for metrics in tracker.scale_history]
+                if any(scale_stds):
+                    ax3.plot(epochs, scale_stds, label=model_name, marker='o', markersize=2)
+
+        ax3.set_title('Scale Parameter Std Over Training')
+        ax3.set_xlabel('Epoch')
+        ax3.set_ylabel('Scale Std')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+
+        # Plot 4: Final scale distributions
+        ax4 = axes[1, 1]
+        for i, (model_name, tracker) in enumerate(trackers.items()):
+            if tracker.scale_history and tracker.scale_history[-1]:
+                final_scales = tracker.scale_history[-1].get('layer_0', {})
+                if final_scales:
+                    # Create a simple bar plot showing final scale statistics
+                    stats = ['mean', 'min', 'max']
+                    values = [final_scales.get(stat, 0) for stat in stats]
+                    x_pos = np.arange(len(stats)) + i * 0.2
+                    ax4.bar(x_pos, values, width=0.15, label=model_name, alpha=0.7)
+
+        ax4.set_title('Final Scale Parameter Statistics')
+        ax4.set_xlabel('Statistic')
+        ax4.set_ylabel('Value')
+        ax4.set_xticks(np.arange(len(stats)))
+        ax4.set_xticklabels(stats)
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(os.path.join(EXPERIMENT_DIR, 'scale_distributions.png'), dpi=300)
+        plt.savefig(output_dir / 'orthogonality_analysis.png', dpi=300, bbox_inches='tight')
+        plt.close()
 
-    # 5. Test Performance Comparison
-    plt.figure(figsize=(10, 6))
-    plt.bar(['Baseline', 'OrthoCenterBlock'],
-            [baseline_results['test_accuracy'], orthocenter_results['test_accuracy']],
-            color=['skyblue', 'orange'])
-    plt.title('Test Accuracy Comparison')
-    plt.ylabel('Accuracy')
-    plt.grid(True, axis='y', linestyle='--', alpha=0.7)
-    plt.savefig(os.path.join(EXPERIMENT_DIR, 'test_accuracy_comparison.png'), dpi=300)
+        logger.info("✅ Orthogonality analysis plots saved")
 
-    # 6. Summarize results in text file
-    with open(os.path.join(EXPERIMENT_DIR, 'experiment_summary.txt'), 'w') as f:
-        f.write("EXPERIMENT SUMMARY\n")
-        f.write("=================\n\n")
+    except Exception as e:
+        logger.error(f"❌ Failed to create orthogonality analysis plots: {e}")
 
-        f.write("Baseline Model:\n")
-        f.write(f"  - Test Loss: {baseline_results['test_loss']:.4f}\n")
-        f.write(f"  - Test Accuracy: {baseline_results['test_accuracy']:.4f}\n\n")
+# ==============================================================================
+# RESULTS SAVING AND REPORTING
+# ==============================================================================
 
-        f.write("OrthoCenterBlock Model:\n")
-        f.write(f"  - Test Loss: {orthocenter_results['test_loss']:.4f}\n")
-        f.write(f"  - Test Accuracy: {orthocenter_results['test_accuracy']:.4f}\n\n")
+def save_experiment_results(results: Dict[str, Any], experiment_dir: Path) -> None:
+    """
+    Save experiment results in multiple formats.
 
-        improvement = (orthocenter_results['test_accuracy'] - baseline_results['test_accuracy']) * 100
-        f.write(f"Improvement: {improvement:.2f}% accuracy\n\n")
+    Args:
+        results: Experiment results dictionary
+        experiment_dir: Directory to save results
+    """
+    try:
+        def convert_numpy_to_python(obj):
+            """Recursively convert numpy types to Python native types."""
+            if isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {key: convert_numpy_to_python(value) for key, value in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy_to_python(item) for item in obj]
+            elif isinstance(obj, tuple):
+                return tuple(convert_numpy_to_python(item) for item in obj)
+            else:
+                return obj
 
-        # Calculate convergence speed (epochs to 90% of max val accuracy)
-        baseline_val_acc = baseline_results['history']['val_accuracy']
-        ortho_val_acc = orthocenter_results['history']['val_accuracy']
+        # Save configuration
+        config_dict = {
+            'experiment_name': results['config'].experiment_name,
+            'dense_variants': list(results['config'].dense_variants.keys()),
+            'epochs': results['config'].epochs,
+            'batch_size': results['config'].batch_size,
+            'learning_rate': results['config'].learning_rate,
+            'n_runs': results['config'].n_runs,
+            'random_seed': results['config'].random_seed,
+            'architecture': {
+                'conv_filters': results['config'].conv_filters,
+                'dense_units': results['config'].dense_units,
+                'use_residual': results['config'].use_residual
+            }
+        }
 
-        baseline_max = max(baseline_val_acc)
-        ortho_max = max(ortho_val_acc)
+        with open(experiment_dir / "experiment_config.json", 'w') as f:
+            json.dump(config_dict, f, indent=2)
 
-        baseline_epochs_to_90 = next((i for i, x in enumerate(baseline_val_acc) if x >= 0.9 * baseline_max),
-                                     len(baseline_val_acc))
-        ortho_epochs_to_90 = next((i for i, x in enumerate(ortho_val_acc) if x >= 0.9 * ortho_max), len(ortho_val_acc))
+        # Convert and save statistical results
+        statistical_results_converted = convert_numpy_to_python(results['run_statistics'])
+        with open(experiment_dir / "statistical_results.json", 'w') as f:
+            json.dump(statistical_results_converted, f, indent=2)
 
-        f.write(f"Convergence Speed:\n")
-        f.write(f"  - Baseline: {baseline_epochs_to_90} epochs to reach 90% of max val accuracy\n")
-        f.write(f"  - OrthoCenterBlock: {ortho_epochs_to_90} epochs to reach 90% of max val accuracy\n")
+        # Save orthogonality data
+        if results['orthogonality_trackers']:
+            ortho_data = {}
+            for model_name, tracker in results['orthogonality_trackers'].items():
+                ortho_data[model_name] = {
+                    'orthogonality_history': convert_numpy_to_python(tracker.orthogonality_history),
+                    'scale_history': convert_numpy_to_python(tracker.scale_history)
+                }
 
+            with open(experiment_dir / "orthogonality_data.json", 'w') as f:
+                json.dump(ortho_data, f, indent=2)
 
-def main():
-    """Main function to run the experiment."""
-    logger.info("Loading CIFAR-10 dataset...")
-    data = load_and_preprocess_cifar10()
+        # Save models
+        models_dir = experiment_dir / "models"
+        models_dir.mkdir(exist_ok=True)
 
-    # Create both models with identical initialization
-    logger.info("Creating models with identical initialization...")
-    baseline_model, orthocenter_model = create_models()
+        for name, model in results['trained_models'].items():
+            model_path = models_dir / f"{name}.keras"
+            model.save(model_path)
 
-    # Print model summaries to verify structures
-    logger.info("Baseline Model Summary:")
-    baseline_model.summary(print_fn=logger.info)
+        logger.info("✅ Experiment results saved successfully")
 
-    logger.info("OrthoCenterBlock Model Summary:")
-    orthocenter_model.summary(print_fn=logger.info)
+    except Exception as e:
+        logger.error(f"❌ Failed to save experiment results: {e}", exc_info=True)
 
-    # Train and evaluate both models
-    test_epochs = 10  # For quick testing. Set to CONFIG["EPOCHS"] for full run
-    baseline_results = train_and_evaluate(baseline_model, data, "baseline_cnn", epochs=test_epochs)
-    orthocenter_results = train_and_evaluate(orthocenter_model, data, "orthocenter_cnn", epochs=test_epochs)
+def print_experiment_summary(results: Dict[str, Any]) -> None:
+    """
+    Print comprehensive experiment summary.
 
-    # Visualize and compare results
-    logger.info("Generating visualizations and comparison...")
-    visualize_results(baseline_results, orthocenter_results)
+    Args:
+        results: Experiment results dictionary
+    """
+    logger.info("=" * 80)
+    logger.info("📋 ORTHOBLOCK EFFECTIVENESS EXPERIMENT SUMMARY")
+    logger.info("=" * 80)
 
-    logger.info(f"Experiment completed. Results saved to: {EXPERIMENT_DIR}")
+    # ===== STATISTICAL RESULTS =====
+    if 'run_statistics' in results:
+        logger.info("📊 STATISTICAL RESULTS (Mean ± Std across runs):")
+        logger.info(f"{'Model':<20} {'Accuracy':<15} {'Loss':<15} {'Runs':<8}")
+        logger.info("-" * 65)
 
+        for model_name, stats in results['run_statistics'].items():
+            acc_mean = stats['accuracy']['mean']
+            acc_std = stats['accuracy']['std']
+            loss_mean = stats['loss']['mean']
+            loss_std = stats['loss']['std']
+            n_runs = stats['accuracy']['count']
+
+            logger.info(f"{model_name:<20} {acc_mean:.3f}±{acc_std:.3f}    "
+                       f"{loss_mean:.3f}±{loss_std:.3f}    {n_runs:<8}")
+
+    # ===== CALIBRATION RESULTS =====
+    if results.get('model_analysis') and results['model_analysis'].calibration_metrics:
+        logger.info("🎯 CALIBRATION ANALYSIS:")
+        logger.info(f"{'Model':<20} {'ECE':<12} {'Brier':<12} {'Entropy':<12}")
+        logger.info("-" * 60)
+
+        for model_name, cal_metrics in results['model_analysis'].calibration_metrics.items():
+            ece = cal_metrics['ece']
+            brier = cal_metrics['brier_score']
+            entropy = cal_metrics['mean_entropy']
+
+            logger.info(f"{model_name:<20} {ece:<12.4f} {brier:<12.4f} {entropy:<12.4f}")
+
+    # ===== KEY INSIGHTS =====
+    logger.info("🔍 KEY INSIGHTS:")
+
+    if 'run_statistics' in results:
+        # Find best performing model
+        best_model = max(results['run_statistics'].items(),
+                        key=lambda x: x[1]['accuracy']['mean'])
+        logger.info(f"   🏆 Best Accuracy: {best_model[0]} ({best_model[1]['accuracy']['mean']:.4f})")
+
+        # Find most stable model (lowest std)
+        most_stable = min(results['run_statistics'].items(),
+                         key=lambda x: x[1]['accuracy']['std'])
+        logger.info(f"   🎯 Most Stable: {most_stable[0]} (std: {most_stable[1]['accuracy']['std']:.4f})")
+
+        # Compare OrthoBlock variants
+        ortho_models = {k: v for k, v in results['run_statistics'].items() if k.startswith('OrthoBlock')}
+        dense_models = {k: v for k, v in results['run_statistics'].items() if k.startswith('Dense')}
+
+        if ortho_models:
+            logger.info("   🔗 OrthoBlock Analysis:")
+            for model_name, stats in ortho_models.items():
+                logger.info(f"      {model_name}: {stats['accuracy']['mean']:.4f} ± {stats['accuracy']['std']:.4f}")
+
+        if dense_models:
+            logger.info("   📊 Dense Layer Analysis:")
+            for model_name, stats in dense_models.items():
+                logger.info(f"      {model_name}: {stats['accuracy']['mean']:.4f} ± {stats['accuracy']['std']:.4f}")
+
+        # Orthogonality insights
+        if results.get('orthogonality_trackers'):
+            logger.info("   📐 Orthogonality Insights:")
+            for model_name, tracker in results['orthogonality_trackers'].items():
+                if tracker.orthogonality_history:
+                    final_ortho = tracker.orthogonality_history[-1].get('layer_0', 0)
+                    initial_ortho = tracker.orthogonality_history[0].get('layer_0', 0)
+                    logger.info(f"      {model_name}: {initial_ortho:.3f} → {final_ortho:.3f}")
+
+    logger.info("=" * 80)
+
+# ==============================================================================
+# MAIN EXECUTION
+# ==============================================================================
+
+def main() -> None:
+    """
+    Main execution function for the OrthoBlock effectiveness experiment.
+    """
+    logger.info("🚀 OrthoBlock Effectiveness Experiment")
+    logger.info("=" * 80)
+
+    # Configure GPU memory growth
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+        except RuntimeError as e:
+            logger.info(f"GPU configuration: {e}")
+
+    # Initialize configuration
+    config = OrthoBlockExperimentConfig()
+
+    # Log configuration
+    logger.info("⚙️ EXPERIMENT CONFIGURATION:")
+    logger.info(f"   Dense layer variants: {list(config.dense_variants.keys())}")
+    logger.info(f"   Epochs: {config.epochs}, Batch size: {config.batch_size}")
+    logger.info(f"   Number of runs: {config.n_runs}")
+    logger.info(f"   Architecture: {len(config.conv_filters)} conv blocks, {config.dense_units} dense units")
+    logger.info(f"   Orthogonal regularization factors: {config.ortho_reg_factors}")
+    logger.info("")
+
+    try:
+        # Run experiment
+        results = run_experiment(config)
+        logger.info("✅ OrthoBlock effectiveness experiment completed successfully!")
+
+    except Exception as e:
+        logger.error(f"❌ Experiment failed: {e}", exc_info=True)
+        raise
+
+# ==============================================================================
+# SCRIPT ENTRY POINT
+# ==============================================================================
 
 if __name__ == "__main__":
     main()
