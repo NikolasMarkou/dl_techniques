@@ -205,13 +205,15 @@ class SoftOrthogonalConstraintRegularizer(keras.regularizers.Regularizer):
             f"l2={l2_coefficient}, scaling={use_matrix_scaling}"
         )
 
-    def __call__(self, x: Union[keras.KerasTensor, Any]) -> Union[keras.KerasTensor, Any]:
+    def __call__(self, x: Union[keras.KerasTensor, Any], **kwargs) -> Union[keras.KerasTensor, Any]:
         """Compute regularization loss for given weights.
 
         Parameters
         ----------
         x : Union[keras.KerasTensor, Any]
             Weight tensor to regularize
+        **kwargs : Any
+            Additional keyword arguments (e.g., dtype) that Keras may pass
 
         Returns
         -------
@@ -388,13 +390,15 @@ class SoftOrthonormalConstraintRegularizer(keras.regularizers.Regularizer):
             f"l2={l2_coefficient}, scaling={use_matrix_scaling}"
         )
 
-    def __call__(self, x: Union[keras.KerasTensor, Any]) -> Union[keras.KerasTensor, Any]:
+    def __call__(self, x: Union[keras.KerasTensor, Any], **kwargs) -> Union[keras.KerasTensor, Any]:
         """Compute regularization loss for given weights.
 
         Parameters
         ----------
         x : Union[keras.KerasTensor, Any]
             Weight tensor to regularize
+        **kwargs : Any
+            Additional keyword arguments (e.g., dtype) that Keras may pass
 
         Returns
         -------

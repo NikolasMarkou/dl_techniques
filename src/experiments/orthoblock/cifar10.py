@@ -27,14 +27,13 @@ import os
 import keras
 import time
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from keras.api.datasets import cifar10
 from keras.api.callbacks import ModelCheckpoint, EarlyStopping, LearningRateScheduler
-import pandas as pd
 
-# Import the OrthoCenterBlock
-from dl_techniques.layers.orthoblock import OrthoCenterBlock
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.experimental.orthoblock import OrthoBlock
 
 # ====================== CONFIGURATION ======================
 
@@ -111,10 +110,10 @@ class OrthoRegScheduler(keras.callbacks.Callback):
     def on_train_begin(self, logs=None):
         # Find all OrthoCenterBlock layers
         for layer in self.model.layers:
-            if isinstance(layer, OrthoCenterBlock):
+            if isinstance(layer, OrthoBlock):
                 self.ortho_layers.append(layer)
 
-        logger.info(f"Found {len(self.ortho_layers)} OrthoCenterBlock layers for scheduling")
+        logger.info(f"Found {len(self.ortho_layers)} OrthoBlock layers for scheduling")
 
     def on_epoch_begin(self, epoch, logs=None):
         # Cosine annealing schedule
@@ -153,7 +152,7 @@ class MetricsTracker(keras.callbacks.Callback):
     def on_train_begin(self, logs=None):
         # Find OrthoCenterBlock layers
         for layer in self.model.layers:
-            if isinstance(layer, OrthoCenterBlock):
+            if isinstance(layer, OrthoBlock):
                 self.ortho_layers.append(layer)
 
         self.start_time = time.time()
@@ -314,7 +313,7 @@ def create_models(input_shape=(32, 32, 3), num_classes=CONFIG["NUM_CLASSES"]):
     x_orthocenter = template_model(orthocenter_inputs)
 
     # For orthocenter: OrthoCenterBlock -> Dropout -> Output
-    x_orthocenter = OrthoCenterBlock(
+    x_orthocenter = OrthoBlock(
         units=CONFIG["DENSE_UNITS"],
         activation=CONFIG["ACTIVATION"],
         ortho_reg_factor=CONFIG["ORTHO_REG_FACTOR"],
