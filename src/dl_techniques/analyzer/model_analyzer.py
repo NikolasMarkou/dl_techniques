@@ -8,11 +8,14 @@ import json
 import keras
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Union, Any, Set
+
+import matplotlib
+matplotlib.use('Agg')  # Use the 'Agg' backend for non-GUI rendering
+import matplotlib.pyplot as plt
 
 # Local imports
 from .config import AnalysisConfig
@@ -471,7 +474,6 @@ class ModelAnalyzer:
 
     def create_pareto_analysis(self, save_plot: bool = True) -> Optional[plt.Figure]:
         """Create Pareto front analysis for hyperparameter sweep scenarios."""
-        import matplotlib.pyplot as plt
 
         if not self.results.training_metrics or not self.results.training_metrics.peak_performance:
             logger.warning("No training metrics available for Pareto analysis")

@@ -117,18 +117,22 @@ import gc
 import json
 import keras
 import numpy as np
+import seaborn as sns
 import tensorflow as tf
 from pathlib import Path
 from datetime import datetime
+import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Callable, Optional
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
+from dl_techniques.layers.experimental.orthoblock import OrthoBlock
 from dl_techniques.utils.datasets import load_and_preprocess_cifar10
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
+from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 
-from dl_techniques.layers.experimental.orthoblock import OrthoBlock
+
 
 # ==============================================================================
 # EXPERIMENT CONFIGURATION
@@ -739,7 +743,6 @@ def run_experiment(config: OrthoBlockExperimentConfig) -> Dict[str, Any]:
     create_orthogonality_analysis_plots(all_orthogonality_trackers, experiment_dir / "visualizations")
 
     try:
-        from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
         vis_manager = VisualizationManager(output_dir=experiment_dir / "visualizations", config=VisualizationConfig(),
                                            timestamp_dirs=False)
         raw_predictions = {name: model.predict(cifar10_data.x_test, verbose=0) for name, model in
@@ -780,8 +783,14 @@ def create_statistical_comparison_plot(statistics: Dict[str, Dict[str, float]], 
         output_dir: Directory to save plots
     """
     try:
-        import matplotlib.pyplot as plt
-        import seaborn as sns
+
+
+        # ==============================================================================
+        # FIXED: The function was receiving a path to a directory that might not exist
+        # and was not creating it, leading to a FileNotFoundError.
+        # This line ensures the directory exists before trying to save the plot.
+        # ==============================================================================
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         # Setup plot style
         plt.style.use('seaborn-v0_8')
@@ -846,7 +855,11 @@ def create_orthogonality_analysis_plots(trackers: Dict[str, OrthogonalityTracker
         output_dir: Directory to save plots
     """
     try:
-        import matplotlib.pyplot as plt
+        # ==============================================================================
+        # FIXED: Similar to the other plotting function, this one also needs to ensure
+        # its output directory exists before proceeding.
+        # ==============================================================================
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         if not trackers:
             logger.info("No orthogonality trackers found, skipping orthogonality plots")
@@ -901,12 +914,18 @@ def create_orthogonality_analysis_plots(trackers: Dict[str, OrthogonalityTracker
 
         # Plot 4: Final scale distributions
         ax4 = axes[1, 1]
+
+        # ==============================================================================
+        # FIXED: The variable 'stats' was defined inside a conditional block in the loop,
+        # causing an UnboundLocalError if the condition was false for the last item.
+        # It is now defined *before* the loop to guarantee it always exists.
+        # ==============================================================================
+        stats = ['mean', 'min', 'max']
+
         for i, (model_name, tracker) in enumerate(trackers.items()):
             if tracker.scale_history and tracker.scale_history[-1]:
                 final_scales = tracker.scale_history[-1].get('layer_0', {})
                 if final_scales:
-                    # Create a simple bar plot showing final scale statistics
-                    stats = ['mean', 'min', 'max']
                     values = [final_scales.get(stat, 0) for stat in stats]
                     x_pos = np.arange(len(stats)) + i * 0.2
                     ax4.bar(x_pos, values, width=0.15, label=model_name, alpha=0.7)
@@ -1038,7 +1057,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     # ===== CALIBRATION & CONFIDENCE RESULTS =====
     analysis_res = results.get('model_analysis')
     if analysis_res and analysis_res.calibration_metrics:
-        logger.info("🎯 CALIBRATION & CONFIDENCE ANALYSIS (from last run):")
+        logger.info("\n🎯 CALIBRATION & CONFIDENCE ANALYSIS (from last run):")
         logger.info(f"{'Model':<22} {'ECE':<12} {'Brier':<12} {'Mean Entropy':<15}")
         logger.info("-" * 65)
 
@@ -1055,7 +1074,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             logger.info(f"{model_name:<22} {ece:<12.4f} {brier:<12.4f} {entropy:<15.4f}")
 
     # ===== KEY INSIGHTS =====
-    logger.info("🔍 KEY INSIGHTS:")
+    logger.info("\n🔍 KEY INSIGHTS:")
 
     if 'run_statistics' in results and results['run_statistics']:
         best_model = max(results['run_statistics'].items(),
