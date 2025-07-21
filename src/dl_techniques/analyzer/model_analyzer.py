@@ -9,10 +9,10 @@ import json
 import keras
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 from pathlib import Path
 from datetime import datetime
+import matplotlib.pyplot as plt
 from typing import Dict, List, Optional, Union, Any, Set
 
 # Local imports
@@ -28,10 +28,10 @@ from .analyzers.training_dynamics_analyzer import TrainingDynamicsAnalyzer
 
 # Visualizers
 from .visualizers.weight_visualizer import WeightVisualizer
+from .visualizers.summary_visualizer import SummaryVisualizer
 from .visualizers.calibration_visualizer import CalibrationVisualizer
 from .visualizers.information_flow_visualizer import InformationFlowVisualizer
 from .visualizers.training_dynamics_visualizer import TrainingDynamicsVisualizer
-from .visualizers.summary_visualizer import SummaryVisualizer
 
 from dl_techniques.utils.logger import logger
 
