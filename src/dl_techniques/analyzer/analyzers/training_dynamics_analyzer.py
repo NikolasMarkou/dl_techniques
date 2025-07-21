@@ -1,8 +1,9 @@
 """
-Training Dynamics Analysis Module
+Training Dynamics Analysis Module - FIXED
 ============================================================================
 
 Analyzes training history to understand how models learned.
+FIXED: Safe indexing for overfitting analysis when train/val losses have different lengths.
 """
 
 import numpy as np
@@ -50,7 +51,7 @@ class TrainingDynamicsAnalyzer(BaseAnalyzer):
 
     def _compute_training_metrics(self, model_name: str, history: Dict[str, List[float]],
                                   metrics: TrainingMetrics) -> None:
-        """Compute quantitative metrics from training history."""
+        """Compute quantitative metrics from training history with robust length handling."""
         # Extract metrics using flexible pattern matching
         train_loss = find_metric_in_history(history, LOSS_PATTERNS)
         val_loss = find_metric_in_history(history, VAL_LOSS_PATTERNS)
@@ -70,26 +71,53 @@ class TrainingDynamicsAnalyzer(BaseAnalyzer):
             stability_score = np.std(recent_losses)
             metrics.training_stability_score[model_name] = stability_score
 
-        # Overfitting index
+        # FIXED: Overfitting index with robust length handling
         if train_loss and val_loss:
-            n_epochs = len(train_loss)
-            final_third_start = int(n_epochs * (1 - OVERFITTING_ANALYSIS_FRACTION))
+            # Use the minimum length to ensure we're comparing the same epochs
+            min_length = min(len(train_loss), len(val_loss))
 
-            train_final = np.mean(train_loss[final_third_start:])
-            val_final = np.mean(val_loss[final_third_start:])
-            overfitting_index = val_final - train_final
+            if min_length < 3:  # Need at least 3 epochs for meaningful analysis
+                logger.warning(f"Insufficient epochs ({min_length}) for overfitting analysis of {model_name}")
+                metrics.overfitting_index[model_name] = 0.0
+                metrics.final_gap[model_name] = 0.0
+            else:
+                # Truncate both to same length
+                train_loss_aligned = train_loss[:min_length]
+                val_loss_aligned = val_loss[:min_length]
 
-            metrics.overfitting_index[model_name] = overfitting_index
-            metrics.final_gap[model_name] = val_loss[-1] - train_loss[-1]
+                # Calculate final third based on aligned length
+                final_third_start = int(min_length * (1 - OVERFITTING_ANALYSIS_FRACTION))
+                final_third_start = max(final_third_start, 1)  # Ensure at least 1 epoch in final third
+
+                train_final = np.mean(train_loss_aligned[final_third_start:])
+                val_final = np.mean(val_loss_aligned[final_third_start:])
+                overfitting_index = val_final - train_final
+
+                metrics.overfitting_index[model_name] = overfitting_index
+
+                # Final gap using aligned losses
+                metrics.final_gap[model_name] = val_loss_aligned[-1] - train_loss_aligned[-1]
+
+                # Log if we had to truncate
+                if len(train_loss) != len(val_loss):
+                    logger.info(f"Aligned train/val losses for {model_name}: "
+                              f"train={len(train_loss)} val={len(val_loss)} → {min_length} epochs")
 
         # Peak performance
         if val_acc is not None and len(val_acc) > 0:
             best_epoch = np.argmax(val_acc)
-            metrics.peak_performance[model_name] = {
+            peak_performance = {
                 'epoch': best_epoch,
-                'val_accuracy': val_acc[best_epoch],
-                'val_loss': val_loss[best_epoch] if val_loss and best_epoch < len(val_loss) else None
+                'val_accuracy': val_acc[best_epoch]
             }
+
+            # Add validation loss at best epoch if available and aligned
+            if val_loss and best_epoch < len(val_loss):
+                peak_performance['val_loss'] = val_loss[best_epoch]
+            else:
+                peak_performance['val_loss'] = None
+
+            metrics.peak_performance[model_name] = peak_performance
 
         # Log warning if no metrics found
         if not any([train_loss, val_loss, train_acc, val_acc]):

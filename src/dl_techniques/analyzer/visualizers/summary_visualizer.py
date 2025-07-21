@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from .base import BaseVisualizer
-from ..utils import find_model_metric  # Import the new helper function
+from ..utils import find_model_metric
 from dl_techniques.utils.logger import logger
 
 
@@ -30,7 +30,7 @@ class SummaryVisualizer(BaseVisualizer):
         ax2 = fig.add_subplot(gs[0, 1])
         self._plot_model_similarity(ax2)
 
-        # 3. Confidence Distribution Profiles (unchanged)
+        # 3. Confidence Distribution Profiles (FIXED)
         ax3 = fig.add_subplot(gs[1, 0])
         self._plot_confidence_profile_summary(ax3)
 
@@ -64,8 +64,6 @@ class SummaryVisualizer(BaseVisualizer):
 
             if self.results.training_metrics and self.results.training_metrics.peak_performance:
                 # Include training insights
-
-                # Final accuracy - using the new helper function to reduce duplication
                 accuracy_keys = ['accuracy', 'compile_metrics', 'val_accuracy', 'categorical_accuracy',
                                'sparse_categorical_accuracy']
                 final_acc = find_model_metric(model_metrics, accuracy_keys, 0.0)
@@ -98,8 +96,6 @@ class SummaryVisualizer(BaseVisualizer):
 
             else:
                 # Original table without training data
-
-                # Accuracy - using helper function
                 accuracy_keys = ['accuracy', 'compile_metrics', 'val_accuracy', 'categorical_accuracy',
                                'sparse_categorical_accuracy']
                 acc = find_model_metric(model_metrics, accuracy_keys, 0.0)
@@ -225,11 +221,7 @@ class SummaryVisualizer(BaseVisualizer):
         ax.set_ylim(bottom=0)
 
     def _plot_model_similarity(self, ax) -> None:
-        """Plot model similarity based on weight PCA.
-
-        Note: PCA is performed on concatenated weight statistics from all layers
-        to ensure fair comparison between models with identical layer structures.
-        """
+        """Plot model similarity based on weight PCA."""
         if not self.results.weight_pca:
             ax.text(0.5, 0.5, 'No weight PCA data available',
                    ha='center', va='center', transform=ax.transAxes)
@@ -269,7 +261,12 @@ class SummaryVisualizer(BaseVisualizer):
         ax.set_aspect('equal', adjustable='box')
 
     def _plot_confidence_profile_summary(self, ax) -> None:
-        """Plot confidence distribution summary."""
+        """
+        Plot confidence distribution summary.
+
+        FIXED: Added proper legend to identify which violin corresponds to which model.
+        The original version had colored violins but no way to identify which was which.
+        """
         confidence_data = []
 
         for model_name, metrics in self.results.confidence_metrics.items():
@@ -294,14 +291,51 @@ class SummaryVisualizer(BaseVisualizer):
                                  positions=range(len(model_order)),
                                  showmeans=True, showmedians=True)
 
-            # Customize colors using consistent palette
+            # FIXED: Create legend elements while customizing colors
+            legend_elements = []
             for i, model in enumerate(model_order):
                 color = self.model_colors.get(model, '#333333')
                 parts['bodies'][i].set_facecolor(color)
                 parts['bodies'][i].set_alpha(0.6)
 
+                # Create legend entry using a patch for better visibility
+                legend_elements.append(
+                    plt.Rectangle((0, 0), 1, 1, facecolor=color, alpha=0.6,
+                                edgecolor='black', linewidth=1, label=model)
+                )
+
+            # Customize other violin parts
+            for partname in ['cmeans', 'cmaxes', 'cmins', 'cbars', 'cmedians']:
+                if partname in parts:
+                    parts[partname].set_color('black')
+                    parts[partname].set_alpha(0.8)
+
+            # FIXED: Set meaningful x-axis labels instead of removing them
             ax.set_xticks(range(len(model_order)))
-            ax.set_xticklabels([])  # Remove model names from x-axis
+            ax.set_xticklabels([f'M{i+1}' for i in range(len(model_order))], fontsize=9)
+
+            # Add summary statistics as text annotations
+            for i, model in enumerate(model_order):
+                model_data = df[df['Model'] == model]['Confidence']
+                mean_conf = model_data.mean()
+                ax.text(i, mean_conf, f'{mean_conf:.3f}',
+                        ha='center', va='bottom', fontsize=8,
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8))
+
             ax.set_ylabel('Confidence (Max Probability)')
+            ax.set_xlabel('Models')
             ax.set_title('Confidence Distribution Profiles')
             ax.grid(True, alpha=0.3, axis='y')
+
+            # FIXED: Add the legend that was missing
+            ax.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+
+            # Add explanatory note
+            ax.text(0.02, 0.02, 'M1, M2, etc. correspond to models in legend',
+                   transform=ax.transAxes, ha='left', va='bottom', fontsize=7,
+                   style='italic', alpha=0.7)
+        else:
+            ax.text(0.5, 0.5, 'No confidence data available',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Confidence Distribution Profiles')
+            ax.axis('off')

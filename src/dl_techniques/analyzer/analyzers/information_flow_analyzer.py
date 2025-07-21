@@ -11,14 +11,14 @@ from typing import Dict, Any, Optional, List
 
 from .base import BaseAnalyzer
 from ..data_types import AnalysisResults, DataInput
-from ..config import AnalysisConfig  # Added import for proper type hint
+from ..config import AnalysisConfig
 from dl_techniques.utils.logger import logger
 
 
 class InformationFlowAnalyzer(BaseAnalyzer):
     """Analyzes information flow through network layers."""
 
-    def __init__(self, models: Dict[str, keras.Model], config: AnalysisConfig):  # FIXED: changed Any to AnalysisConfig
+    def __init__(self, models: Dict[str, keras.Model], config: AnalysisConfig):
         """Initialize analyzer and setup extraction models."""
         super().__init__(models, config)
         self.layer_extraction_models = {}
@@ -41,7 +41,6 @@ class InformationFlowAnalyzer(BaseAnalyzer):
 
         for model_name, extraction_data in self.layer_extraction_models.items():
             if extraction_data is None:
-                # This check now correctly handles unsupported models that were skipped
                 logger.warning(f"Skipping information flow for {model_name} as no extraction model could be built.")
                 continue
 
@@ -73,8 +72,6 @@ class InformationFlowAnalyzer(BaseAnalyzer):
     def _setup_activation_models(self) -> None:
         """Set up models for extracting intermediate activations."""
         for model_name, model in self.models.items():
-            # First, check if the model is a Functional model with a defined graph.
-            # Subclassed models will not have a valid `.input` attribute before being called.
             if not hasattr(model, 'input') or not hasattr(model, 'layers'):
                 logger.warning(
                     f"Model '{model_name}' is likely a subclassed model or not a standard Keras Functional model. "
@@ -84,7 +81,6 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                 continue
 
             try:
-                # Get suitable layers for extraction.
                 extraction_layers = self._get_extraction_layers(model)
 
                 if not extraction_layers:
@@ -92,8 +88,6 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                     self.layer_extraction_models[model_name] = None
                     continue
 
-                # Create a new Keras model for efficient multi-layer activation extraction.
-                # This is the robust, recommended approach for Functional models.
                 layer_outputs = [layer.output for layer in extraction_layers]
                 layer_info = [{'name': layer.name, 'type': layer.__class__.__name__} for layer in extraction_layers]
 
@@ -115,53 +109,109 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                 self.layer_extraction_models[model_name] = None
 
     def _get_extraction_layers(self, model: keras.Model) -> List[keras.layers.Layer]:
-        """
-        Get a list of layer objects suitable for information flow analysis.
-        Returns layer objects themselves, not dictionaries.
-        """
+        """Get a list of layer objects suitable for information flow analysis."""
         extraction_layers = []
         for layer in model.layers:
-            # Skip input layers and other non-op layers
             if isinstance(layer, keras.layers.InputLayer):
                 continue
 
-            # Check for common layer types that are suitable for analysis.
-            # This ensures we only analyze layers with meaningful activations.
             if isinstance(layer, (keras.layers.Conv2D, keras.layers.Dense,
                                   keras.layers.BatchNormalization, keras.layers.LayerNormalization,
                                   keras.layers.ReLU, keras.layers.PReLU, keras.layers.ELU,
                                   keras.layers.GlobalAveragePooling2D, keras.layers.GlobalMaxPooling2D)):
-                # Ensure the layer has a valid output tensor in the model's graph
                 if hasattr(layer, 'output'):
                     extraction_layers.append(layer)
 
         return extraction_layers
 
-    def _analyze_layer_information(self, output: np.ndarray, layer_info: Dict) -> Dict[str, Any]:
-        """Analysis of layer information content."""
-        # This method remains largely the same, but is now more reliable due to
-        # the robust activation extraction.
+    def _safely_flatten_activations(self, output: np.ndarray) -> tuple:
+        """
+        Safely flatten activation tensors without assuming batch dimension structure.
 
-        # Add a check for empty or invalid outputs
+        FIXED: This addresses the fragile tensor reshaping identified in the code review.
+        Instead of assuming output.shape[0] is the batch dimension, we detect the
+        tensor structure more carefully.
+
+        Args:
+            output: Activation tensor from model prediction
+
+        Returns:
+            Tuple of (flattened_output, spatial_output_if_applicable)
+        """
         if output is None or output.size == 0:
+            return None, None
+
+        original_shape = output.shape
+
+        # Case 1: Already 2D (batch, features) - most common for dense layers
+        if len(original_shape) == 2:
+            return output, None
+
+        # Case 2: 1D tensor (single sample, single feature)
+        elif len(original_shape) == 1:
+            # Reshape to (1, features) to ensure batch dimension
+            return output.reshape(1, -1), None
+
+        # Case 3: Higher dimensional tensors (conv layers, etc.)
+        elif len(original_shape) >= 3:
+            # Try to detect if this has a batch dimension or not
+            # Heuristic: if the tensor came from a batch prediction and first dim matches
+            # the expected batch size, treat first dim as batch
+
+            # Most conservative approach: compute statistics along appropriate axes
+            # without assuming batch structure
+            if len(original_shape) == 3:
+                # Could be (batch, seq, features) or (H, W, C) for single sample
+                # Check if first dimension is reasonable as batch size
+                if original_shape[0] <= 512:  # Reasonable batch size
+                    # Likely (batch, H*W, C) or (batch, seq, features)
+                    flattened = output.reshape(original_shape[0], -1)
+                    spatial_output = output if len(original_shape) == 3 else None
+                else:
+                    # Likely (H, W, C) for single sample
+                    # Flatten spatial dimensions, add batch dim
+                    flattened = output.reshape(1, -1)
+                    spatial_output = output.reshape(1, *original_shape)
+
+            elif len(original_shape) == 4:
+                # Most likely (batch, H, W, C) or (batch, C, H, W)
+                # Flatten spatial dimensions for each sample in batch
+                flattened = output.reshape(original_shape[0], -1)
+                spatial_output = output
+
+            elif len(original_shape) == 5:
+                # Could be (batch, D, H, W, C) for 3D conv or video
+                # Flatten all spatial/temporal dimensions
+                flattened = output.reshape(original_shape[0], -1)
+                spatial_output = output
+
+            else:
+                # Very high dimensional - flatten everything except assume first is batch
+                logger.debug(f"High-dimensional tensor with shape {original_shape}, "
+                           f"assuming first dimension is batch")
+                if original_shape[0] <= 1024:  # Reasonable batch size limit
+                    flattened = output.reshape(original_shape[0], -1)
+                else:
+                    # Treat as single sample with no batch dimension
+                    flattened = output.reshape(1, -1)
+                spatial_output = None
+
+            return flattened, spatial_output
+
+        else:
+            # 0D tensor (scalar) - shouldn't happen but handle gracefully
+            return output.reshape(1, 1), None
+
+    def _analyze_layer_information(self, output: np.ndarray, layer_info: Dict) -> Dict[str, Any]:
+        """Analysis of layer information content with safe tensor handling."""
+
+        # FIXED: Use safe flattening instead of fragile reshape
+        output_flat, spatial_output = self._safely_flatten_activations(output)
+
+        if output_flat is None:
             return {'error': 'Invalid or empty activation output'}
 
-        # Flatten spatial dimensions if needed
-        if len(output.shape) > 2:  # Conv layer or other spatial layer
-            # Handle cases with no batch dimension from predict
-            if len(output.shape) == 4: # (batch, H, W, C)
-                output_flat = np.mean(output, axis=(1, 2))
-            elif len(output.shape) == 3: # (H, W, C) - single sample prediction
-                output_flat = np.mean(output, axis=(0, 1))
-                output_flat = np.expand_dims(output_flat, axis=0) # re-add batch dim
-            else: # Fallback
-                output_flat = output.reshape(output.shape[0], -1)
-            spatial_output = output
-        else:
-            output_flat = output
-            spatial_output = None
-
-        # Compute statistics
+        # Compute statistics on safely flattened output
         analysis = {
             'layer_type': layer_info['type'],
             'output_shape': output.shape,
@@ -171,14 +221,18 @@ class InformationFlowAnalyzer(BaseAnalyzer):
             'positive_ratio': float(np.mean(output_flat > 0)),
         }
 
-        # Add spatial statistics for conv layers
-        if spatial_output is not None and len(spatial_output.shape) == 4:
+        # Add spatial statistics for conv layers if we have spatial structure
+        if spatial_output is not None and len(spatial_output.shape) >= 4:
             analysis['spatial_mean'] = float(np.mean(spatial_output))
             analysis['spatial_std'] = float(np.std(spatial_output))
-            analysis['channel_variance'] = float(np.var(np.mean(spatial_output, axis=(0, 1, 2))))
+            # Compute variance across channels (last dimension typically)
+            if len(spatial_output.shape) == 4:  # (batch, H, W, C)
+                channel_means = np.mean(spatial_output, axis=(0, 1, 2))
+                analysis['channel_variance'] = float(np.var(channel_means))
 
-        # Compute effective rank
-        if output_flat.ndim == 2 and output_flat.shape[0] > 1 and output_flat.shape[1] > 1:
+        # Compute effective rank for 2D flattened output
+        if (output_flat.ndim == 2 and output_flat.shape[0] > 1 and
+            output_flat.shape[1] > 1 and output_flat.shape[0] <= output_flat.shape[1]):
             try:
                 # Ensure matrix is centered for SVD
                 centered_output = output_flat - np.mean(output_flat, axis=0)
@@ -188,13 +242,16 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                 s_sum = np.sum(s)
                 if s_sum > 1e-9:
                     s_normalized = s / s_sum
-                    # Add epsilon to prevent log(0) for zero-valued singular values
+                    # Add epsilon to prevent log(0)
                     effective_rank = np.exp(-np.sum(s_normalized * np.log(s_normalized + 1e-9)))
                     analysis['effective_rank'] = float(effective_rank)
                 else:
                     analysis['effective_rank'] = 0.0
             except np.linalg.LinAlgError:
                 analysis['effective_rank'] = 0.0
+        else:
+            # Skip effective rank for inappropriate tensor shapes
+            analysis['effective_rank'] = 0.0
 
         return analysis
 
@@ -209,35 +266,38 @@ class InformationFlowAnalyzer(BaseAnalyzer):
         if conv_indices:
             key_indices.append(conv_indices[-1])  # Last conv layer
         if dense_indices:
-            # Take the one before the final output layer if available, else the first one
             key_indices.append(dense_indices[-2] if len(dense_indices) > 1 else dense_indices[-1])
 
         results.activation_stats[model_name] = {}
 
-        for idx in set(key_indices): # Use set to avoid duplicates
+        for idx in set(key_indices):
             if idx < len(layer_outputs):
                 layer_name = layer_info[idx]['name']
                 activations = layer_outputs[idx]
 
-                # Ensure activations is a numpy array
                 if not isinstance(activations, np.ndarray):
                     continue
 
-                flat_acts = activations.flatten()
-                if flat_acts.size == 0:
+                # Use safe flattening
+                flat_acts, spatial_acts = self._safely_flatten_activations(activations)
+                if flat_acts is None or flat_acts.size == 0:
                     continue
+
+                flat_acts_1d = flat_acts.flatten()
 
                 results.activation_stats[model_name][layer_name] = {
                     'shape': activations.shape,
-                    'mean': float(np.mean(flat_acts)),
-                    'std': float(np.std(flat_acts)),
-                    'sparsity': float(np.mean(np.abs(flat_acts) < 1e-5)),
-                    'positive_ratio': float(np.mean(flat_acts > 0)),
+                    'mean': float(np.mean(flat_acts_1d)),
+                    'std': float(np.std(flat_acts_1d)),
+                    'sparsity': float(np.mean(np.abs(flat_acts_1d) < 1e-5)),
+                    'positive_ratio': float(np.mean(flat_acts_1d > 0)),
                     'percentiles': {
-                        'p25': float(np.percentile(flat_acts, 25)),
-                        'p50': float(np.percentile(flat_acts, 50)),
-                        'p75': float(np.percentile(flat_acts, 75))
+                        'p25': float(np.percentile(flat_acts_1d, 25)),
+                        'p50': float(np.percentile(flat_acts_1d, 50)),
+                        'p75': float(np.percentile(flat_acts_1d, 75))
                     },
-                    # Only store samples for conv layers to save space
-                    'sample_activations': activations[:min(10, activations.shape[0])] if len(activations.shape) == 4 else None
+                    # Only store samples for conv layers with spatial structure
+                    'sample_activations': (spatial_acts[:min(10, spatial_acts.shape[0])]
+                                         if spatial_acts is not None and len(spatial_acts.shape) >= 4
+                                         else None)
                 }
