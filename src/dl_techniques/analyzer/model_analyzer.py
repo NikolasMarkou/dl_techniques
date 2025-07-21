@@ -45,11 +45,11 @@ class ModelAnalyzer:
     """
 
     def __init__(
-            self,
-            models: Dict[str, keras.Model],
-            config: Optional[AnalysisConfig] = None,
-            output_dir: Optional[Union[str, Path]] = None,
-            training_history: Optional[Dict[str, Dict[str, List[float]]]] = None
+        self,
+        models: Dict[str, keras.Model],
+        config: Optional[AnalysisConfig] = None,
+        output_dir: Optional[Union[str, Path]] = None,
+        training_history: Optional[Dict[str, Dict[str, List[float]]]] = None
     ):
         """
         Initialize the analyzer.
@@ -107,9 +107,9 @@ class ModelAnalyzer:
         }
 
     def analyze(
-            self,
-            data: Optional[Union[DataInput, tuple, Any]] = None,
-            analysis_types: Optional[Set[str]] = None
+        self,
+        data: Optional[Union[DataInput, tuple, Any]] = None,
+        analysis_types: Optional[Set[str]] = None
     ) -> AnalysisResults:
         """
         Run comprehensive or selected analyses on models.
@@ -259,8 +259,10 @@ class ModelAnalyzer:
             elif isinstance(obj, pd.DataFrame):
                 return obj.to_dict()
             elif isinstance(obj, dict):
+                # Use non-serializable fields from results
+                skip_fields = getattr(self.results, '_non_serializable_fields', set())
                 return {k: convert_numpy(v) for k, v in obj.items()
-                        if k not in ['raw_activations', 'sample_activations']}
+                       if k not in skip_fields}
             elif isinstance(obj, list):
                 return [convert_numpy(item) for item in obj]
             else:
@@ -384,8 +386,8 @@ class ModelAnalyzer:
 
         # Plot 1: Peak Accuracy vs Overfitting Index
         scatter = ax1.scatter(overfitting_indices, peak_accuracies,
-                              c=convergence_speeds, s=100, alpha=0.7,
-                              cmap='viridis', edgecolors='black', linewidth=1)
+                             c=convergence_speeds, s=100, alpha=0.7,
+                             cmap='viridis', edgecolors='black', linewidth=1)
 
         # Find Pareto front
         pareto_indices = find_pareto_front(
@@ -398,13 +400,13 @@ class ModelAnalyzer:
         pareto_y = [peak_accuracies[i] for i in pareto_indices]
         ax1.plot(pareto_x, pareto_y, 'r--', alpha=0.5, linewidth=2)
         ax1.scatter(pareto_x, pareto_y, color='red', s=200, marker='*',
-                    edgecolors='black', linewidth=2, zorder=5, label='Pareto Optimal')
+                   edgecolors='black', linewidth=2, zorder=5, label='Pareto Optimal')
 
         # Add labels for Pareto optimal models
         for idx in pareto_indices:
             ax1.annotate(models[idx], (overfitting_indices[idx], peak_accuracies[idx]),
-                         xytext=(5, 5), textcoords='offset points', fontsize=8,
-                         bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+                        xytext=(5, 5), textcoords='offset points', fontsize=8,
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
 
         ax1.set_xlabel('Overfitting Index (lower is better)')
         ax1.set_ylabel('Peak Validation Accuracy')
@@ -435,7 +437,7 @@ class ModelAnalyzer:
         for i in range(3):
             for j in range(len(models)):
                 text = ax2.text(j, i, f'{metrics_matrix[i, j]:.2f}',
-                                ha='center', va='center', color='black', fontsize=8)
+                               ha='center', va='center', color='black', fontsize=8)
 
         # Add colorbar
         cbar2 = plt.colorbar(im, ax=ax2)
@@ -445,8 +447,16 @@ class ModelAnalyzer:
         plt.tight_layout()
 
         if save_plot and self.config.save_plots:
-            from .visualizers.base import BaseVisualizer
-            visualizer = BaseVisualizer(self.results, self.config, self.output_dir, self.model_colors)
-            visualizer._save_figure(fig, 'pareto_analysis')
+            self._save_figure(fig, 'pareto_analysis')
 
         return fig
+
+    def _save_figure(self, fig: plt.Figure, name: str) -> None:
+        """Save figure with configured settings."""
+        try:
+            filepath = self.output_dir / f"{name}.{self.config.save_format}"
+            fig.savefig(filepath, dpi=self.config.dpi, bbox_inches='tight',
+                       facecolor='white', edgecolor='none', pad_inches=0.1)
+            logger.info(f"Saved plot: {filepath}")
+        except Exception as e:
+            logger.error(f"Could not save figure {name}: {e}")

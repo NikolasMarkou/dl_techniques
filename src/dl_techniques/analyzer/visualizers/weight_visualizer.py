@@ -47,13 +47,25 @@ class WeightVisualizer(BaseVisualizer):
             l2_norms = []
             mean_abs_weights = []
 
-            # Sort layers by name to get consistent ordering
-            sorted_layers = sorted(weight_stats.items(), key=lambda x: x[0])
+            # Get the actual model to determine layer order
+            model = next((m for name, m in self.model_colors.items() if name == model_name), None)
+            if model_name in self.results.weight_stats:
+                # Sort layers by their position in the model
+                model_weight_stats = self.results.weight_stats[model_name]
 
-            for idx, (layer_name, stats) in enumerate(sorted_layers):
-                layer_indices.append(idx)
-                l2_norms.append(stats['norms']['l2'])
-                mean_abs_weights.append(abs(stats['basic']['mean']))
+                # Create a mapping of layer names to their positions
+                # This assumes layer names in weight_stats contain the original layer name
+                sorted_layers = []
+                for layer_name, stats in model_weight_stats.items():
+                    # Extract the base layer name (before _w suffix)
+                    base_name = layer_name.rsplit('_w', 1)[0]
+                    sorted_layers.append((layer_name, stats))
+
+                # Sort by the order they appear in weight_stats (which preserves model order)
+                for idx, (layer_name, stats) in enumerate(sorted_layers):
+                    layer_indices.append(idx)
+                    l2_norms.append(stats['norms']['l2'])
+                    mean_abs_weights.append(abs(stats['basic']['mean']))
 
             evolution_data[model_name] = {
                 'indices': layer_indices,
@@ -66,7 +78,7 @@ class WeightVisualizer(BaseVisualizer):
             for model_name, data in evolution_data.items():
                 color = self.model_colors.get(model_name, '#333333')
                 ax.plot(data['indices'], data['l2_norms'], 'o-',
-                        label=f'{model_name}', color=color, linewidth=2, markersize=6)
+                       label=f'{model_name}', color=color, linewidth=2, markersize=6)
 
             ax.set_xlabel('Layer Index')
             ax.set_ylabel('L2 Norm')
@@ -75,13 +87,12 @@ class WeightVisualizer(BaseVisualizer):
             ax.grid(True, alpha=0.3)
 
             # Add insight text
-            ax.text(0.02, 0.98,
-                    'Higher values indicate larger weight magnitudes\nSteep changes suggest learning transitions',
-                    transform=ax.transAxes, ha='left', va='top', fontsize=9,
-                    bbox=dict(boxstyle='round,pad=0.3', facecolor='lightblue', alpha=0.3))
+            ax.text(0.02, 0.98, 'Higher values indicate larger weight magnitudes\nSteep changes suggest learning transitions',
+                   transform=ax.transAxes, ha='left', va='top', fontsize=9,
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='lightblue', alpha=0.3))
         else:
             ax.text(0.5, 0.5, 'No weight evolution data available',
-                    ha='center', va='center', transform=ax.transAxes)
+                   ha='center', va='center', transform=ax.transAxes)
             ax.set_title('Weight Magnitude Evolution')
             ax.axis('off')
 
@@ -89,7 +100,7 @@ class WeightVisualizer(BaseVisualizer):
         """Create a comprehensive weight health heatmap."""
         if not self.results.weight_stats:
             ax.text(0.5, 0.5, 'No weight statistics available',
-                    ha='center', va='center', transform=ax.transAxes)
+                   ha='center', va='center', transform=ax.transAxes)
             ax.set_title('Weight Health Heatmap')
             ax.axis('off')
             return
@@ -139,7 +150,7 @@ class WeightVisualizer(BaseVisualizer):
             health_array = np.array(health_metrics)
 
             im = ax.imshow(health_array, cmap='RdYlGn', aspect='auto',
-                           vmin=0, vmax=1, interpolation='nearest')
+                          vmin=0, vmax=1, interpolation='nearest')
 
             # Set labels
             ax.set_title('Weight Health Across Layers', fontsize=12, fontweight='bold')
@@ -163,9 +174,9 @@ class WeightVisualizer(BaseVisualizer):
                     value = health_array[i, j]
                     text_color = 'white' if value < 0.5 else 'black'
                     ax.text(j, i, f'{value:.2f}', ha='center', va='center',
-                            color=text_color, fontsize=8, fontweight='bold')
+                           color=text_color, fontsize=8, fontweight='bold')
         else:
             ax.text(0.5, 0.5, 'Insufficient data for health heatmap',
-                    ha='center', va='center', transform=ax.transAxes)
+                   ha='center', va='center', transform=ax.transAxes)
             ax.set_title('Weight Health Heatmap')
             ax.axis('off')

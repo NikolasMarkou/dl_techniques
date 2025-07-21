@@ -33,7 +33,7 @@ class WeightAnalyzer(BaseAnalyzer):
 
             for layer in model.layers:
                 if (self.config.weight_layer_types and
-                        layer.__class__.__name__ not in self.config.weight_layer_types):
+                    layer.__class__.__name__ not in self.config.weight_layer_types):
                     continue
 
                 weights = layer.get_weights()
@@ -83,54 +83,71 @@ class WeightAnalyzer(BaseAnalyzer):
         if len(weights.shape) == 2:
             try:
                 stats['norms']['spectral'] = float(np.linalg.norm(weights, 2))
-            except:
+            except np.linalg.LinAlgError:
                 stats['norms']['spectral'] = 0.0
 
         return stats
 
     def _compute_weight_pca(self, results: AnalysisResults) -> None:
-        """Perform PCA analysis specifically on final layer weights."""
-        final_layer_features = []
+        """Perform PCA analysis on weight statistics across all layers."""
+        model_features = []
         labels = []
 
-        for model_name, model in self.models.items():
-            # Find the final dense layer
-            final_dense = None
-            for layer in reversed(model.layers):
-                if isinstance(layer, keras.layers.Dense):
-                    final_dense = layer
-                    break
+        for model_name, weight_stats in results.weight_stats.items():
+            if not weight_stats:
+                continue
 
-            if final_dense:
-                weights_list = final_dense.get_weights()
-                if weights_list and len(weights_list) > 0:
-                    weights = weights_list[0]  # Get kernel weights
+            # Extract statistical features from all layers
+            features = []
 
-                    # Validate weight shape
-                    if len(weights.shape) >= 2:
-                        # Flatten and take a subset if too large
-                        flat_weights = weights.flatten()
-                        if len(flat_weights) > 1000:
-                            flat_weights = flat_weights[::len(flat_weights) // 1000]
+            # Sort layers by their appearance order in the model
+            model = self.models[model_name]
+            layer_order = {layer.name: i for i, layer in enumerate(model.layers)}
+            sorted_stats = sorted(weight_stats.items(),
+                                key=lambda x: layer_order.get(x[0].split('_w')[0], float('inf')))
 
-                        # Check for finite values
-                        if np.all(np.isfinite(flat_weights)):
-                            final_layer_features.append(flat_weights)
-                            labels.append(model_name)
-                        else:
-                            logger.warning(f"Skipping {model_name} in PCA due to non-finite weights")
-                    else:
-                        logger.warning(f"Skipping {model_name} in PCA due to invalid weight shape")
+            for layer_name, stats in sorted_stats:
+                # Create a fixed-size feature vector from statistics
+                layer_features = [
+                    stats['basic']['mean'],
+                    stats['basic']['std'],
+                    stats['basic']['median'],
+                    stats['basic']['skewness'],
+                    stats['basic']['kurtosis'],
+                    stats['norms']['l1'],
+                    stats['norms']['l2'],
+                    stats['norms']['rms'],
+                    stats['distribution']['zero_fraction'],
+                    stats['distribution']['positive_fraction'],
+                    stats['distribution']['negative_fraction']
+                ]
 
-        if len(final_layer_features) >= 2:
-            # Ensure all features have same length
-            min_len = min(len(f) for f in final_layer_features)
-            aligned_features = [f[:min_len] for f in final_layer_features]
+                # Add spectral norm if available
+                if 'spectral' in stats['norms']:
+                    layer_features.append(stats['norms']['spectral'])
+                else:
+                    layer_features.append(0.0)
+
+                features.extend(layer_features)
+
+            # Ensure all models have the same feature length by padding with zeros
+            if features:
+                model_features.append(features)
+                labels.append(model_name)
+
+        if len(model_features) >= 2:
+            # Pad features to same length
+            max_len = max(len(f) for f in model_features)
+            padded_features = []
+            for features in model_features:
+                if len(features) < max_len:
+                    features.extend([0.0] * (max_len - len(features)))
+                padded_features.append(features)
 
             try:
                 # Standardize features
                 scaler = StandardScaler()
-                features_scaled = scaler.fit_transform(aligned_features)
+                features_scaled = scaler.fit_transform(padded_features)
 
                 # Perform PCA
                 pca = PCA(n_components=min(3, len(features_scaled)))
@@ -139,7 +156,11 @@ class WeightAnalyzer(BaseAnalyzer):
                 results.weight_pca = {
                     'components': pca_result,
                     'explained_variance': pca.explained_variance_ratio_,
-                    'labels': labels
+                    'labels': labels,
+                    'feature_type': 'weight_statistics'
                 }
-            except Exception as e:
-                logger.warning(f"Could not perform PCA on final layer weights: {e}")
+
+                logger.info(f"PCA performed on weight statistics: {len(padded_features[0])} features per model")
+
+            except np.linalg.LinAlgError as e:
+                logger.warning(f"Could not perform PCA on weight statistics: {e}")

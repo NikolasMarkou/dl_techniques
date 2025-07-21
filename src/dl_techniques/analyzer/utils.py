@@ -19,8 +19,7 @@ def safe_set_xticklabels(ax, labels, rotation=0, max_labels=10):
             step = len(labels) // max_labels
             indices = range(0, len(labels), step)
             ax.set_xticks([i for i in indices])
-            ax.set_xticklabels([labels[i] for i in indices], rotation=rotation,
-                               ha='right' if rotation > 0 else 'center')
+            ax.set_xticklabels([labels[i] for i in indices], rotation=rotation, ha='right' if rotation > 0 else 'center')
         else:
             ax.set_xticks(range(len(labels)))
             ax.set_xticklabels(labels, rotation=rotation, ha='right' if rotation > 0 else 'center')
@@ -46,32 +45,47 @@ def smooth_curve(values: np.ndarray, window_size: int = 5) -> np.ndarray:
         return values
 
     # Pad the array to handle edges
-    padded = np.pad(values, (window_size // 2, window_size // 2), mode='edge')
+    padded = np.pad(values, (window_size//2, window_size//2), mode='edge')
 
     # Apply moving average
-    smoothed = np.convolve(padded, np.ones(window_size) / window_size, mode='valid')
+    smoothed = np.convolve(padded, np.ones(window_size)/window_size, mode='valid')
 
     return smoothed
 
 
-def find_metric_in_history(history: Dict[str, List[float]], patterns: List[str]) -> Optional[List[float]]:
+def find_metric_in_history(history: Dict[str, List[float]], patterns: List[str],
+                          exclude_prefixes: Optional[List[str]] = None) -> Optional[List[float]]:
     """Flexibly find a metric in training history by checking multiple possible names.
 
     Args:
         history: Training history dictionary
         patterns: List of possible metric names to check
+        exclude_prefixes: List of prefixes to exclude (e.g., ['val_'] when looking for training metrics)
 
     Returns:
         The metric values if found, None otherwise
     """
+    # First try exact matches
     for pattern in patterns:
         if pattern in history:
             return history[pattern]
 
-    # Also check for partial matches (e.g., 'sparse_categorical_accuracy' matches 'accuracy' pattern)
+    # If no exact match and we need more flexible matching (only for special cases)
+    # Be very careful with substring matching to avoid ambiguity
+    if exclude_prefixes is None:
+        exclude_prefixes = []
+
+    # Try more specific patterns that won't cause ambiguity
     for key in history:
+        # Skip if key starts with excluded prefix
+        if any(key.startswith(prefix) for prefix in exclude_prefixes):
+            continue
+
         for pattern in patterns:
-            if pattern in key:
+            # Only match if pattern is a complete word/component in the key
+            # This prevents 'acc' from matching 'val_acc'
+            key_parts = key.replace('_', ' ').split()
+            if pattern in key_parts:
                 return history[key]
 
     return None

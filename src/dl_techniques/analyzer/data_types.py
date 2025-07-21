@@ -63,7 +63,7 @@ class AnalysisResults:
     weight_pca: Optional[Dict[str, Any]] = None
 
     # Calibration analysis
-    calibration_metrics: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    calibration_metrics: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     reliability_data: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
     confidence_metrics: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
 

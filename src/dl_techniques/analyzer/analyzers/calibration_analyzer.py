@@ -67,7 +67,7 @@ class CalibrationAnalyzer(BaseAnalyzer):
                 class_mask = y_true_idx == c
                 if np.any(class_mask):
                     class_ece = compute_ece(y_true_idx[class_mask], y_pred_proba[class_mask],
-                                            per_class_bins)
+                                          per_class_bins)
                     per_class_ece.append(class_ece)
                 else:
                     per_class_ece.append(0.0)
@@ -89,9 +89,15 @@ class CalibrationAnalyzer(BaseAnalyzer):
         max_prob = np.max(probabilities, axis=1)
         entropy = -np.sum(probabilities * np.log(probabilities + 1e-8), axis=1)
 
-        sorted_probs = np.sort(probabilities, axis=1)
-        margin = sorted_probs[:, -1] - sorted_probs[:, -2]
-        gini = 1 - np.sum(sorted_probs ** 2, axis=1)
+        # Handle single-class case
+        if probabilities.shape[1] > 1:
+            sorted_probs = np.sort(probabilities, axis=1)
+            margin = sorted_probs[:, -1] - sorted_probs[:, -2]
+            gini = 1 - np.sum(sorted_probs**2, axis=1)
+        else:
+            # Margin and Gini are not well-defined for single class
+            margin = np.full(probabilities.shape[0], np.nan)
+            gini = np.zeros(probabilities.shape[0])
 
         return {
             'max_probability': max_prob,
