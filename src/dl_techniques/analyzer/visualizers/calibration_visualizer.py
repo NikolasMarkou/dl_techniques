@@ -1,8 +1,9 @@
 """
-Calibration Visualization Module
+Calibration Visualization Module - UPDATED
 ============================================================================
 
 Creates visualizations for calibration analysis results.
+UPDATED: Fixed metric access to handle consolidated confidence metrics.
 """
 
 import numpy as np
@@ -72,7 +73,7 @@ class CalibrationVisualizer(BaseVisualizer):
         ax.set_xlabel('Mean Predicted Probability')
         ax.set_ylabel('Fraction of Positives')
         ax.set_title('Reliability Diagrams with 95% CI')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')  # Enable legend
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(True, alpha=0.3)
         ax.set_xlim([0, 1])
         ax.set_ylim([0, 1])
@@ -81,6 +82,7 @@ class CalibrationVisualizer(BaseVisualizer):
         """Plot confidence distributions as raincloud plot."""
         confidence_data = []
 
+        # UPDATED: Access confidence metrics from the correct location
         for model_name, metrics in self.results.confidence_metrics.items():
             # Safety check for required keys
             if 'max_probability' not in metrics:
@@ -133,7 +135,7 @@ class CalibrationVisualizer(BaseVisualizer):
                         ha='center', va='bottom', fontsize=9)
 
             ax.set_xlabel('Confidence (Max Probability)')
-            ax.set_ylabel('')  # Remove the y-axis label
+            ax.set_ylabel('')
             ax.set_title('Confidence Score Distributions')
             ax.grid(True, alpha=0.3, axis='x')
             # Add legend
@@ -174,7 +176,7 @@ class CalibrationVisualizer(BaseVisualizer):
             ax.set_title('Per-Class Calibration Error')
             ax.set_xticks(x + width * (n_models - 1) / 2)
             ax.set_xticklabels([str(i) for i in range(n_classes)])
-            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')  # Enable legend
+            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
             ax.grid(True, alpha=0.3, axis='y')
 
     def _plot_uncertainty_landscape(self, ax) -> None:
@@ -185,6 +187,7 @@ class CalibrationVisualizer(BaseVisualizer):
         # Plot contours for each model
         legend_elements = []
         for model_name in model_order:
+            # UPDATED: Access metrics from confidence_metrics
             metrics = self.results.confidence_metrics[model_name]
 
             # Safety checks for required keys

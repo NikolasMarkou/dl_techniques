@@ -1,8 +1,9 @@
 """
-Model Analyzer Main Module
+Model Analyzer Main Module - UPDATED
 ============================================================================
 
 Main coordinator class that orchestrates all analysis and visualization components.
+UPDATED: Fixed summary statistics to handle consolidated confidence metrics.
 """
 
 import json
@@ -261,7 +262,6 @@ class ModelAnalyzer:
                 try:
                     metrics = model.evaluate(x_data, y_data, verbose=0)
                 except (ValueError, TypeError) as eval_error:
-                    # Handle evaluation errors more specifically
                     logger.warning(f"Model evaluation failed for {model_name}: {eval_error}")
                     self.results.model_metrics[model_name] = {
                         'loss': 0.0,
@@ -332,10 +332,11 @@ class ModelAnalyzer:
             'weight_stats': self.results.weight_stats,
             'weight_pca': self.results.weight_pca,
             'calibration_metrics': self.results.calibration_metrics,
+            'confidence_metrics': self.results.confidence_metrics,  # Now consolidated
             'information_flow': self.results.information_flow,
             'activation_stats': self.results.activation_stats,
             'training_metrics': self._serialize_training_metrics() if self.results.training_metrics else None,
-            'multi_input_models': list(self._multi_input_models),  # Include multi-input model info
+            'multi_input_models': list(self._multi_input_models),
         }
 
         # Convert numpy arrays to lists for JSON serialization
@@ -349,7 +350,6 @@ class ModelAnalyzer:
             elif isinstance(obj, pd.DataFrame):
                 return obj.to_dict()
             elif isinstance(obj, dict):
-                # Use non-serializable fields from results
                 skip_fields = getattr(self.results, '_non_serializable_fields', set())
                 return {k: convert_numpy(v) for k, v in obj.items()
                        if k not in skip_fields}
@@ -380,7 +380,11 @@ class ModelAnalyzer:
         }
 
     def get_summary_statistics(self) -> Dict[str, Any]:
-        """Get summary statistics of the analysis."""
+        """
+        Get summary statistics of the analysis.
+
+        UPDATED: Fixed to access entropy from confidence_metrics instead of calibration_metrics.
+        """
         summary = {
             'n_models': len(self.models),
             'n_multi_input_models': len(self._multi_input_models),
@@ -388,6 +392,7 @@ class ModelAnalyzer:
             'analyses_performed': [],
             'model_performance': {},
             'calibration_summary': {},
+            'confidence_summary': {},  # UPDATED: Added separate confidence summary
             'weight_summary': {},
             'training_summary': {}
         }
@@ -396,7 +401,9 @@ class ModelAnalyzer:
         if any(self.results.weight_stats.values()):
             summary['analyses_performed'].append('weight_analysis')
         if self.results.calibration_metrics:
-            summary['analyses_performed'].append('confidence_calibration_analysis')
+            summary['analyses_performed'].append('calibration_analysis')
+        if self.results.confidence_metrics:  # UPDATED: Check confidence_metrics
+            summary['analyses_performed'].append('confidence_analysis')
         if self.results.information_flow:
             summary['analyses_performed'].append('information_flow_analysis')
         if self.results.training_metrics:
@@ -410,11 +417,19 @@ class ModelAnalyzer:
                 'status': metrics.get('status', 'unknown')
             }
 
+        # UPDATED: Split calibration and confidence summaries
         for model_name, metrics in self.results.calibration_metrics.items():
             summary['calibration_summary'][model_name] = {
                 'ece': metrics.get('ece', 0),
                 'brier_score': metrics.get('brier_score', 0),
-                'mean_entropy': metrics.get('mean_entropy', 0)
+            }
+
+        # UPDATED: Get confidence metrics from the correct location
+        for model_name, metrics in self.results.confidence_metrics.items():
+            summary['confidence_summary'][model_name] = {
+                'mean_entropy': metrics.get('mean_entropy', 0),
+                'mean_confidence': float(np.mean(metrics.get('max_probability', [0]))),
+                'entropy_std': metrics.get('entropy_std', 0)
             }
 
         for model_name, weight_stats in self.results.weight_stats.items():
@@ -437,17 +452,7 @@ class ModelAnalyzer:
         return summary
 
     def create_pareto_analysis(self, save_plot: bool = True) -> Optional[plt.Figure]:
-        """Create Pareto front analysis for hyperparameter sweep scenarios.
-
-        This is particularly useful when analyzing many models to identify
-        the Pareto-optimal ones that balance performance vs overfitting.
-
-        Time Complexity: O(N²) where N is the number of models.
-        Suitable for small-to-medium numbers of models (<100).
-
-        Returns:
-            Figure object if successful, None otherwise
-        """
+        """Create Pareto front analysis for hyperparameter sweep scenarios."""
         import matplotlib.pyplot as plt
 
         if not self.results.training_metrics or not self.results.training_metrics.peak_performance:
@@ -473,7 +478,6 @@ class ModelAnalyzer:
                     self.results.training_metrics.epochs_to_convergence.get(model_name, 0)
                 )
 
-        # FIXED: Use config threshold instead of hardcoded value
         if len(models) < self.config.pareto_analysis_threshold:
             logger.warning(f"Need at least {self.config.pareto_analysis_threshold} models for Pareto analysis")
             return None
@@ -544,8 +548,6 @@ class ModelAnalyzer:
         plt.tight_layout()
 
         if save_plot and self.config.save_plots:
-            # Use the base visualizer's save method to avoid code duplication
-            # Create a temporary summary visualizer just to save this plot
             summary_visualizer = SummaryVisualizer(
                 self.results, self.config, self.output_dir, self.model_colors
             )

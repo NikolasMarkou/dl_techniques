@@ -1,8 +1,9 @@
 """
-Calibration Analysis Module
+Calibration Analysis Module - FIXED
 ============================================================================
 
 Analyzes model calibration and confidence metrics.
+FIXED: Consolidated confidence-related metrics to eliminate redundancy.
 """
 
 import numpy as np
@@ -27,7 +28,13 @@ class CalibrationAnalyzer(BaseAnalyzer):
 
     def analyze(self, results: AnalysisResults, data: Optional[DataInput] = None,
                 cache: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
-        """Analyze model confidence and calibration in a unified way."""
+        """
+        Analyze model confidence and calibration with consolidated metric storage.
+
+        FIXED: Eliminates redundancy by storing all confidence-related metrics
+        (including entropy) in results.confidence_metrics, while keeping only
+        calibration-specific metrics in results.calibration_metrics.
+        """
         logger.info("Analyzing confidence and calibration...")
 
         if cache is None:
@@ -38,17 +45,16 @@ class CalibrationAnalyzer(BaseAnalyzer):
                 continue
 
             model_cache = cache[model_name]
-            y_pred_proba = model_cache.get('predictions') # Use .get() for safety
+            y_pred_proba = model_cache.get('predictions')
 
-            # This check prevents the crash
             if y_pred_proba is None:
                 logger.warning(f"Skipping calibration analysis for {model_name}: No predictions available.")
                 continue
 
             y_true = model_cache['y_data']
 
-            # Convert to class indices if needed - handle different data types
-            y_true = np.asarray(y_true)  # Ensure numpy array
+            # Convert to class indices if needed
+            y_true = np.asarray(y_true)
             try:
                 if len(y_true.shape) > 1 and y_true.shape[1] > 1:
                     y_true_idx = np.argmax(y_true, axis=1)
@@ -58,16 +64,15 @@ class CalibrationAnalyzer(BaseAnalyzer):
                 logger.error(f"Cannot convert y_true to integer indices for {model_name}: {e}")
                 continue
 
-            # Compute calibration metrics
+            # Compute calibration-specific metrics
             ece = compute_ece(y_true_idx, y_pred_proba, self.config.calibration_bins)
             reliability_data = compute_reliability_data(y_true_idx, y_pred_proba, self.config.calibration_bins)
             brier_score = compute_brier_score(model_cache['y_data'], y_pred_proba)
-            entropy_stats = compute_prediction_entropy_stats(y_pred_proba)
 
-            # Compute per-class ECE with validated bins
+            # Compute per-class ECE
             n_classes = y_pred_proba.shape[1]
             per_class_ece = []
-            per_class_bins = max(2, self.config.calibration_bins // 2)  # Ensure minimum 2 bins
+            per_class_bins = max(2, self.config.calibration_bins // 2)
 
             for c in range(n_classes):
                 class_mask = y_true_idx == c
@@ -78,24 +83,29 @@ class CalibrationAnalyzer(BaseAnalyzer):
                 else:
                     per_class_ece.append(0.0)
 
+            # FIXED: Store only calibration-specific metrics (no entropy here)
             results.calibration_metrics[model_name] = {
                 'ece': ece,
                 'brier_score': brier_score,
                 'per_class_ece': per_class_ece,
-                **entropy_stats
             }
 
+            # Store reliability data separately (for plotting)
             results.reliability_data[model_name] = reliability_data
 
-            # Compute confidence metrics
-            results.confidence_metrics[model_name] = self._compute_confidence_metrics(y_pred_proba)
+            # FIXED: Consolidate ALL confidence-related metrics including entropy
+            confidence_metrics = self._compute_confidence_metrics(y_pred_proba)
+            entropy_stats = compute_prediction_entropy_stats(y_pred_proba)
+
+            # Combine all confidence-related metrics into one place
+            all_confidence_metrics = {**confidence_metrics, **entropy_stats}
+            results.confidence_metrics[model_name] = all_confidence_metrics
 
     def _compute_confidence_metrics(self, probabilities: np.ndarray) -> Dict[str, np.ndarray]:
-        """Compute various confidence metrics."""
+        """Compute various confidence metrics (excluding entropy which comes from entropy_stats)."""
         max_prob = np.max(probabilities, axis=1)
-        entropy = -np.sum(probabilities * np.log(probabilities + 1e-8), axis=1)
 
-        # Handle single-class case
+        # Handle single-class case for margin and gini
         if probabilities.shape[1] > 1:
             sorted_probs = np.sort(probabilities, axis=1)
             margin = sorted_probs[:, -1] - sorted_probs[:, -2]
@@ -107,7 +117,6 @@ class CalibrationAnalyzer(BaseAnalyzer):
 
         return {
             'max_probability': max_prob,
-            'entropy': entropy,
             'margin': margin,
             'gini_coefficient': gini
         }

@@ -1,8 +1,9 @@
 """
-Summary Dashboard Visualization Module
+Summary Dashboard Visualization Module - UPDATED
 ============================================================================
 
 Creates summary dashboard with key insights across all analyses.
+UPDATED: Fixed metric access to handle consolidated confidence metrics.
 """
 
 import numpy as np
@@ -92,7 +93,7 @@ class SummaryVisualizer(BaseVisualizer):
 
                 # Overfitting index
                 overfit = self.results.training_metrics.overfitting_index.get(model_name, 0.0)
-                row_data.append(f'{overfit:+.3f}')  # Show sign
+                row_data.append(f'{overfit:+.3f}')
 
             else:
                 # Original table without training data
@@ -113,13 +114,14 @@ class SummaryVisualizer(BaseVisualizer):
                 brier = self.results.calibration_metrics.get(model_name, {}).get('brier_score', 0.0)
                 row_data.append(f'{brier:.3f}')
 
-                # Mean Entropy
-                entropy = self.results.calibration_metrics.get(model_name, {}).get('mean_entropy', 0.0)
+                # UPDATED: Get entropy from confidence_metrics instead of calibration_metrics
+                confidence_metrics = self.results.confidence_metrics.get(model_name, {})
+                entropy = confidence_metrics.get('mean_entropy', 0.0)
                 row_data.append(f'{entropy:.3f}')
 
             table_data.append(row_data)
 
-        # Create table
+        # Create table (rest of the method unchanged)
         table = ax.table(cellText=table_data,
                         colLabels=headers,
                         cellLoc='center',
@@ -261,12 +263,7 @@ class SummaryVisualizer(BaseVisualizer):
         ax.set_aspect('equal', adjustable='box')
 
     def _plot_confidence_profile_summary(self, ax) -> None:
-        """
-        Plot confidence distribution summary.
-
-        FIXED: Added proper legend to identify which violin corresponds to which model.
-        The original version had colored violins but no way to identify which was which.
-        """
+        """Plot confidence distribution summary with proper legend."""
         confidence_data = []
 
         for model_name, metrics in self.results.confidence_metrics.items():
@@ -291,7 +288,7 @@ class SummaryVisualizer(BaseVisualizer):
                                  positions=range(len(model_order)),
                                  showmeans=True, showmedians=True)
 
-            # FIXED: Create legend elements while customizing colors
+            # Create legend elements while customizing colors
             legend_elements = []
             for i, model in enumerate(model_order):
                 color = self.model_colors.get(model, '#333333')
@@ -310,7 +307,7 @@ class SummaryVisualizer(BaseVisualizer):
                     parts[partname].set_color('black')
                     parts[partname].set_alpha(0.8)
 
-            # FIXED: Set meaningful x-axis labels instead of removing them
+            # Set meaningful x-axis labels
             ax.set_xticks(range(len(model_order)))
             ax.set_xticklabels([f'M{i+1}' for i in range(len(model_order))], fontsize=9)
 
@@ -327,7 +324,7 @@ class SummaryVisualizer(BaseVisualizer):
             ax.set_title('Confidence Distribution Profiles')
             ax.grid(True, alpha=0.3, axis='y')
 
-            # FIXED: Add the legend that was missing
+            # Add the legend
             ax.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
 
             # Add explanatory note
