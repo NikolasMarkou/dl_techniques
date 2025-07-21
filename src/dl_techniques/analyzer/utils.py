@@ -6,7 +6,6 @@ Common utility functions used throughout the analyzer module.
 """
 
 import numpy as np
-import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from typing import List, Optional, Dict, Tuple, Any
 from dl_techniques.utils.logger import logger
@@ -55,19 +54,20 @@ def smooth_curve(values: np.ndarray, window_size: int = 5) -> np.ndarray:
 
 def find_metric_in_history(history: Dict[str, List[float]], patterns: List[str],
                           exclude_prefixes: Optional[List[str]] = None) -> Optional[List[float]]:
-    """Flexibly find a metric in training history by checking multiple possible names.
+    """
+    Robustly find a metric in training history by checking multiple possible names.
 
-    This function uses a two-pass approach:
+    ENHANCED VERSION: This addresses the potential ambiguity identified in the code review
+    by implementing a more systematic approach to metric matching with better fallback logic.
+
+    This function uses a three-pass approach:
     1. First, try exact string matches for efficiency and clarity
-    2. If no exact match, try substring matching with word boundaries to avoid ambiguity
-
-    The logic handles common Keras metric naming patterns but may not work with
-    highly unusual metric names. For example, metrics with spaces or complex
-    punctuation may not be matched correctly.
+    2. If no exact match, try pattern matching with word boundaries
+    3. If still no match, try fuzzy matching with common variations
 
     Args:
         history: Training history dictionary
-        patterns: List of possible metric names to check
+        patterns: List of possible metric names to check (in order of preference)
         exclude_prefixes: List of prefixes to exclude (e.g., ['val_'] when looking for training metrics)
 
     Returns:
@@ -77,34 +77,138 @@ def find_metric_in_history(history: Dict[str, List[float]], patterns: List[str],
         >>> history = {'loss': [0.5, 0.3], 'val_loss': [0.6, 0.4], 'accuracy': [0.8, 0.9]}
         >>> find_metric_in_history(history, ['loss'], exclude_prefixes=['val_'])
         [0.5, 0.3]
-        >>> find_metric_in_history(history, ['loss'])  # Without exclusion
-        [0.5, 0.3]  # Returns first match (training loss)
+        >>> find_metric_in_history(history, ['accuracy', 'acc'])
+        [0.8, 0.9]
     """
-    # First try exact matches
-    for pattern in patterns:
-        if pattern in history:
-            return history[pattern]
-
-    # If no exact match and we need more flexible matching (only for special cases)
-    # Be very careful with substring matching to avoid ambiguity
     if exclude_prefixes is None:
         exclude_prefixes = []
 
-    # Try more specific patterns that won't cause ambiguity
+    # Pass 1: Try exact matches (most reliable)
+    for pattern in patterns:
+        if pattern in history:
+            # Check if this key should be excluded
+            if not any(pattern.startswith(prefix) for prefix in exclude_prefixes):
+                return history[pattern]
+
+    # Pass 2: Try word-boundary pattern matching (safe substring matching)
+    for key in history:
+        # Skip if key starts with excluded prefix
+        if any(key.startswith(prefix) for prefix in exclude_prefixes):
+            continue
+
+        # Split key into components (handle underscores, spaces, camelCase)
+        key_components = _split_metric_name(key)
+
+        for pattern in patterns:
+            pattern_components = _split_metric_name(pattern)
+
+            # Check if all pattern components are present in key components
+            if all(p_comp in key_components for p_comp in pattern_components):
+                logger.debug(f"Found metric '{key}' matching pattern '{pattern}' via component matching")
+                return history[key]
+
+    # Pass 3: Try fuzzy matching with common variations
     for key in history:
         # Skip if key starts with excluded prefix
         if any(key.startswith(prefix) for prefix in exclude_prefixes):
             continue
 
         for pattern in patterns:
-            # Only match if pattern is a complete word/component in the key
-            # This prevents 'acc' from matching 'val_acc'
-            # Split by underscores and spaces to get word components
-            key_parts = key.replace('_', ' ').split()
-            if pattern in key_parts:
+            if _fuzzy_metric_match(key, pattern):
+                logger.debug(f"Found metric '{key}' matching pattern '{pattern}' via fuzzy matching")
                 return history[key]
 
+    # Log available keys for debugging if no match found
+    available_keys = [k for k in history.keys()
+                     if not any(k.startswith(prefix) for prefix in exclude_prefixes)]
+    logger.debug(f"No match found for patterns {patterns}. Available keys: {available_keys}")
     return None
+
+
+def _split_metric_name(name: str) -> List[str]:
+    """
+    Split a metric name into its component parts for robust matching.
+
+    Handles common naming conventions:
+    - underscore_separated
+    - camelCase
+    - Mixed_camelCase
+
+    Args:
+        name: Metric name to split
+
+    Returns:
+        List of lowercase components
+    """
+    import re
+
+    # First split on underscores and spaces
+    parts = name.replace('_', ' ').replace('-', ' ').split()
+
+    # Then split camelCase within each part
+    expanded_parts = []
+    for part in parts:
+        # Split camelCase (e.g., "valAccuracy" -> ["val", "Accuracy"])
+        camel_split = re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\b)', part)
+        if camel_split:
+            expanded_parts.extend(camel_split)
+        else:
+            expanded_parts.append(part)
+
+    # Convert to lowercase and remove empty strings
+    return [p.lower() for p in expanded_parts if p]
+
+
+def _fuzzy_metric_match(key: str, pattern: str) -> bool:
+    """
+    Perform fuzzy matching for common metric name variations.
+
+    This handles common abbreviations and variations:
+    - acc/accuracy
+    - val/validation
+    - cat/categorical
+    - etc.
+
+    Args:
+        key: The metric key from history
+        pattern: The pattern we're looking for
+
+    Returns:
+        True if they likely refer to the same metric
+    """
+    # Define common equivalences
+    equivalences = {
+        'acc': ['accuracy', 'acc'],
+        'accuracy': ['accuracy', 'acc'],
+        'val': ['validation', 'val'],
+        'validation': ['validation', 'val'],
+        'cat': ['categorical', 'cat'],
+        'categorical': ['categorical', 'cat'],
+        'sparse': ['sparse_categorical', 'sparse'],
+        'binary': ['binary_accuracy', 'binary'],
+        'loss': ['loss', 'cost', 'error'],
+        'lr': ['learning_rate', 'lr'],
+        'learning_rate': ['learning_rate', 'lr'],
+    }
+
+    # Normalize both strings
+    key_parts = _split_metric_name(key)
+    pattern_parts = _split_metric_name(pattern)
+
+    # Check if pattern parts can be found in key using equivalences
+    for p_part in pattern_parts:
+        found = False
+        equivalent_terms = equivalences.get(p_part, [p_part])
+
+        for k_part in key_parts:
+            if k_part in equivalent_terms or p_part in equivalences.get(k_part, [k_part]):
+                found = True
+                break
+
+        if not found:
+            return False
+
+    return True
 
 
 def find_model_metric(model_metrics: Dict[str, Any],
@@ -130,7 +234,11 @@ def find_model_metric(model_metrics: Dict[str, Any],
     """
     for key in metric_keys:
         if key in model_metrics and model_metrics[key] is not None:
-            return float(model_metrics[key])
+            try:
+                return float(model_metrics[key])
+            except (ValueError, TypeError):
+                logger.warning(f"Could not convert metric '{key}' to float: {model_metrics[key]}")
+                continue
     return default
 
 
@@ -220,3 +328,51 @@ def normalize_metric(values: List[float], higher_better: bool = True) -> np.ndar
         normalized = 1 - normalized
 
     return normalized
+
+
+def validate_training_history(history: Dict[str, List[float]]) -> Dict[str, List[str]]:
+    """
+    Validate training history and return a report of potential issues.
+
+    This helps identify common problems with training history data that could
+    cause analysis issues.
+
+    Args:
+        history: Training history dictionary
+
+    Returns:
+        Dictionary with 'warnings' and 'errors' keys containing lists of issues
+    """
+    report = {'warnings': [], 'errors': []}
+
+    if not history:
+        report['errors'].append("Training history is empty")
+        return report
+
+    # Check for empty metrics
+    for key, values in history.items():
+        if not values:
+            report['warnings'].append(f"Metric '{key}' has no values")
+        elif not isinstance(values, (list, np.ndarray)):
+            report['errors'].append(f"Metric '{key}' is not a list or array")
+        elif any(not isinstance(v, (int, float, np.number)) for v in values):
+            report['warnings'].append(f"Metric '{key}' contains non-numeric values")
+
+    # Check for length mismatches
+    lengths = {key: len(values) for key, values in history.items() if values}
+    if lengths:
+        min_length = min(lengths.values())
+        max_length = max(lengths.values())
+        if min_length != max_length:
+            report['warnings'].append(f"Metrics have different lengths: {lengths}")
+
+    # Check for common metric patterns
+    has_train_loss = any(find_metric_in_history(history, ['loss'], exclude_prefixes=['val_']))
+    has_val_loss = any(find_metric_in_history(history, ['val_loss']))
+
+    if not has_train_loss:
+        report['warnings'].append("No training loss found - training analysis may be limited")
+    if not has_val_loss:
+        report['warnings'].append("No validation loss found - overfitting analysis not possible")
+
+    return report

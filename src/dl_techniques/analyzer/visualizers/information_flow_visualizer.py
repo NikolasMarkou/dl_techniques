@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpecFromSubplotSpec
 from .base import BaseVisualizer
 from ..constants import ACTIVATION_MAGNITUDE_NORMALIZER, LAYER_SPECIALIZATION_MAX_RANK
+from dl_techniques.utils.logger import logger
 
 
 class InformationFlowVisualizer(BaseVisualizer):
@@ -45,30 +46,58 @@ class InformationFlowVisualizer(BaseVisualizer):
             self._save_figure(fig, 'information_flow_analysis')
         plt.close(fig)
 
+    def _get_ordered_layer_analysis(self, model_name: str) -> list:
+        """
+        Get layer analysis in consistent order for reliable visualization.
+
+        Since information flow analysis preserves the order from the extraction model
+        which is built from model.layers in order, we can rely on the iteration order.
+        However, we make this explicit for robustness.
+
+        Args:
+            model_name: Name of the model
+
+        Returns:
+            List of (layer_name, analysis) tuples in network order
+        """
+        if model_name not in self.results.information_flow:
+            return []
+
+        layer_analysis = self.results.information_flow[model_name]
+
+        # The information flow analyzer creates layers in the order they appear in the model
+        # We can rely on this order, but we make it explicit here for clarity
+        return list(layer_analysis.items())
+
     def _plot_activation_flow_overview(self, ax) -> None:
         """Plot activation statistics evolution through layers."""
         for model_name in sorted(self.results.information_flow.keys()):
-            layer_analysis = self.results.information_flow[model_name]
+            ordered_layers = self._get_ordered_layer_analysis(model_name)
+
+            if not ordered_layers:
+                continue
+
             means = []
             stds = []
             layer_positions = []
 
-            for i, (layer_name, analysis) in enumerate(layer_analysis.items()):
+            for i, (layer_name, analysis) in enumerate(ordered_layers):
                 means.append(analysis['mean_activation'])
                 stds.append(analysis['std_activation'])
                 layer_positions.append(i)
 
-            # Plot mean with std as shaded region
-            means = np.array(means)
-            stds = np.array(stds)
+            if means:  # Check if we have data
+                # Plot mean with std as shaded region
+                means = np.array(means)
+                stds = np.array(stds)
 
-            color = self.model_colors.get(model_name, '#333333')
-            line = ax.plot(layer_positions, means, 'o-', label=f'{model_name}',
-                           linewidth=2, markersize=6, color=color)
-            ax.fill_between(layer_positions, means - stds, means + stds,
-                            alpha=0.2, color=color)
+                color = self.model_colors.get(model_name, '#333333')
+                line = ax.plot(layer_positions, means, 'o-', label=f'{model_name}',
+                               linewidth=2, markersize=6, color=color)
+                ax.fill_between(layer_positions, means - stds, means + stds,
+                                alpha=0.2, color=color)
 
-        ax.set_xlabel('Layer Depth')
+        ax.set_xlabel('Layer Depth (Network Order)')
         ax.set_ylabel('Activation Statistics')
         ax.set_title('Activation Mean ± Std Evolution')
         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -77,11 +106,15 @@ class InformationFlowVisualizer(BaseVisualizer):
     def _plot_effective_rank_evolution(self, ax) -> None:
         """Plot effective rank evolution through network."""
         for model_name in sorted(self.results.information_flow.keys()):
-            layer_analysis = self.results.information_flow[model_name]
+            ordered_layers = self._get_ordered_layer_analysis(model_name)
+
+            if not ordered_layers:
+                continue
+
             ranks = []
             positions = []
 
-            for i, (layer_name, analysis) in enumerate(layer_analysis.items()):
+            for i, (layer_name, analysis) in enumerate(ordered_layers):
                 if 'effective_rank' in analysis and analysis['effective_rank'] > 0:
                     ranks.append(analysis['effective_rank'])
                     positions.append(i)
@@ -91,7 +124,7 @@ class InformationFlowVisualizer(BaseVisualizer):
                 ax.plot(positions, ranks, 'o-', label=model_name,
                         linewidth=2, markersize=8, color=color)
 
-        ax.set_xlabel('Layer Depth')
+        ax.set_xlabel('Layer Depth (Network Order)')
         ax.set_ylabel('Effective Rank')
         ax.set_title('Information Dimensionality Evolution')
         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -106,13 +139,13 @@ class InformationFlowVisualizer(BaseVisualizer):
             ax.axis('off')
             return
 
-        # Prepare health metrics data
+        # Prepare health metrics data with consistent ordering
         health_data = []
 
         for model_name in sorted(self.results.information_flow.keys()):
-            layer_analysis = self.results.information_flow[model_name]
+            ordered_layers = self._get_ordered_layer_analysis(model_name)
 
-            for layer_name, analysis in layer_analysis.items():
+            for i, (layer_name, analysis) in enumerate(ordered_layers):
                 # Calculate health metrics
                 sparsity = analysis.get('sparsity', 0.0)
                 positive_ratio = analysis.get('positive_ratio', 0.5)
@@ -120,13 +153,17 @@ class InformationFlowVisualizer(BaseVisualizer):
 
                 # Health indicators
                 dead_neurons = sparsity  # High sparsity indicates dead neurons
-                saturation = 1.0 - positive_ratio if positive_ratio > 0.9 else 0.0  # Very high positive ratio suggests saturation
+                saturation = 1.0 - positive_ratio if positive_ratio > 0.9 else 0.0
                 activation_magnitude = min(mean_activation,
                                            ACTIVATION_MAGNITUDE_NORMALIZER) / ACTIVATION_MAGNITUDE_NORMALIZER
 
+                # Use layer index for consistent ordering instead of truncated layer name
+                layer_label = f"L{i}"  # This ensures consistent ordering
+
                 health_data.append({
                     'Model': model_name,
-                    'Layer': layer_name.split('_')[0] if '_' in layer_name else layer_name[:8],
+                    'Layer': layer_label,
+                    'Layer_Index': i,  # Keep index for sorting
                     'Dead Neurons': dead_neurons,
                     'Saturation': saturation,
                     'Activation Level': activation_magnitude
@@ -135,11 +172,16 @@ class InformationFlowVisualizer(BaseVisualizer):
         if health_data:
             df = pd.DataFrame(health_data)
 
+            # Sort by layer index to ensure correct order
+            df = df.sort_values(['Model', 'Layer_Index'])
+
             # Create heatmap data
             models = sorted(df['Model'].unique())
-            # Use configurable parameter instead of hardcoded value
             max_layers = getattr(self.config, 'max_layers_info_flow', 8)
-            layers = df['Layer'].unique()[:max_layers]  # Limit based on config
+
+            # Get unique layers and limit based on config, maintaining order
+            unique_layers = sorted(df['Layer_Index'].unique())[:max_layers]
+            layer_labels = [f"L{i}" for i in unique_layers]
 
             # Create separate heatmaps for each metric
             metrics = ['Dead Neurons', 'Saturation', 'Activation Level']
@@ -151,22 +193,32 @@ class InformationFlowVisualizer(BaseVisualizer):
             for idx, metric in enumerate(metrics):
                 ax_sub = plt.subplot(gs_sub[0, idx])
 
-                # Create pivot table for heatmap
-                df_filtered = df[df['Layer'].isin(layers)]
-                heatmap_data = df_filtered.pivot_table(values=metric, index='Model', columns='Layer', fill_value=0)
+                # Filter data for layers within our limit
+                df_filtered = df[df['Layer_Index'].isin(unique_layers)]
+
+                # Create pivot table for heatmap using layer index for proper ordering
+                heatmap_data = df_filtered.pivot_table(
+                    values=metric,
+                    index='Model',
+                    columns='Layer_Index',
+                    fill_value=0
+                )
 
                 # Ensure we have the right models in the right order
                 heatmap_data = heatmap_data.reindex(models, fill_value=0)
 
+                # Ensure columns are in the right order
+                heatmap_data = heatmap_data.reindex(columns=unique_layers, fill_value=0)
+
                 # Choose colormap based on metric
                 if metric == 'Dead Neurons':
-                    cmap = 'Reds'  # Red = bad (more dead neurons)
+                    cmap = 'Reds'
                     vmax = 1.0
                 elif metric == 'Saturation':
-                    cmap = 'Oranges'  # Orange = bad (more saturation)
+                    cmap = 'Oranges'
                     vmax = 1.0
                 else:  # Activation Level
-                    cmap = 'Greens'  # Green = good (healthy activation)
+                    cmap = 'Greens'
                     vmax = 1.0
 
                 # Create heatmap
@@ -175,8 +227,8 @@ class InformationFlowVisualizer(BaseVisualizer):
 
                 # Set labels
                 ax_sub.set_title(metric, fontsize=10, fontweight='bold')
-                ax_sub.set_xticks(range(len(heatmap_data.columns)))
-                ax_sub.set_xticklabels(heatmap_data.columns, rotation=45, ha='right', fontsize=8)
+                ax_sub.set_xticks(range(len(unique_layers)))
+                ax_sub.set_xticklabels(layer_labels, rotation=45, ha='right', fontsize=8)
                 ax_sub.set_yticks(range(len(heatmap_data.index)))
 
                 # Only show model names on the leftmost heatmap
@@ -190,7 +242,7 @@ class InformationFlowVisualizer(BaseVisualizer):
                 cbar.ax.tick_params(labelsize=7)
 
             ax.axis('off')  # Hide the parent axis
-            ax.set_title('Activation Health Dashboard', fontsize=12, fontweight='bold', pad=20)
+            ax.set_title('Activation Health Dashboard (Network Order)', fontsize=12, fontweight='bold', pad=20)
         else:
             ax.text(0.5, 0.5, 'Insufficient data for health analysis',
                     ha='center', va='center', transform=ax.transAxes)
@@ -206,19 +258,21 @@ class InformationFlowVisualizer(BaseVisualizer):
             ax.axis('off')
             return
 
-        # Calculate specialization metrics for each model
+        # Calculate specialization metrics for each model with consistent ordering
         specialization_data = []
 
         for model_name in sorted(self.results.information_flow.keys()):
-            layer_analysis = self.results.information_flow[model_name]
+            ordered_layers = self._get_ordered_layer_analysis(model_name)
+
+            if not ordered_layers:
+                continue
 
             total_specialization = 0
             layer_count = 0
-            # Use configurable parameter instead of hardcoded value
             max_layers = getattr(self.config, 'max_layers_info_flow', 10)
             layer_specializations = []
 
-            for layer_name, analysis in layer_analysis.items():
+            for i, (layer_name, analysis) in enumerate(ordered_layers[:max_layers]):
                 # Specialization indicators:
                 # 1. Low sparsity (neurons are active)
                 # 2. Balanced positive ratio (not all saturated)
@@ -229,13 +283,8 @@ class InformationFlowVisualizer(BaseVisualizer):
                 effective_rank = analysis.get('effective_rank', 1.0)
 
                 # Calculate specialization score (0-1, higher is better)
-                # Low sparsity is good (1 - sparsity)
                 activation_health = 1.0 - sparsity
-
-                # Balanced activation is good (closer to 0.5 is better)
                 balance_score = 1.0 - abs(positive_ratio - 0.5) * 2
-
-                # Higher effective rank is good (normalize by a reasonable max)
                 rank_score = min(effective_rank / LAYER_SPECIALIZATION_MAX_RANK, 1.0) if effective_rank > 0 else 0.0
 
                 # Combined specialization score
@@ -250,7 +299,7 @@ class InformationFlowVisualizer(BaseVisualizer):
                 specialization_data.append({
                     'Model': model_name,
                     'Average Specialization': avg_specialization,
-                    'Layer Specializations': layer_specializations[:max_layers]  # Limit based on config
+                    'Layer Specializations': layer_specializations
                 })
 
         if specialization_data:
@@ -293,8 +342,9 @@ class InformationFlowVisualizer(BaseVisualizer):
                 ax_bottom.plot(x_positions, layer_specs, 'o-',
                                label=model_name, color=color, linewidth=2, markersize=6)
 
-            ax_bottom.set_title('Layer-wise Specialization Evolution', fontsize=10, fontweight='bold')
-            ax_bottom.set_xlabel('Layer Index')
+            ax_bottom.set_title('Layer-wise Specialization Evolution (Network Order)',
+                               fontsize=10, fontweight='bold')
+            ax_bottom.set_xlabel('Layer Index (Network Depth)')
             ax_bottom.set_ylabel('Specialization Score')
             ax_bottom.legend(fontsize=8, bbox_to_anchor=(1.05, 1), loc='upper left')
             ax_bottom.grid(True, alpha=0.3)

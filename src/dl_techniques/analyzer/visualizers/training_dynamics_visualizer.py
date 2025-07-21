@@ -1,8 +1,9 @@
 """
-Training Dynamics Visualization Module
+Training Dynamics Visualization Module - FIXED
 ============================================================================
 
 Creates visualizations for training dynamics analysis results.
+Addresses the ambiguity in training curve plotting logic identified in code review.
 """
 
 import numpy as np
@@ -51,83 +52,95 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
             self._save_figure(fig, 'training_dynamics')
         plt.close(fig)
 
+    def _get_metric_data(self, model_name: str, metric_patterns: list,
+                        exclude_prefixes: list = None) -> tuple:
+        """
+        Robustly get metric data from either original or smoothed curves.
+
+        This addresses the ambiguity identified in the code review by creating
+        a single, consistent method for retrieving metrics regardless of smoothing.
+
+        Args:
+            model_name: Name of the model
+            metric_patterns: List of possible metric name patterns
+            exclude_prefixes: Prefixes to exclude from matching
+
+        Returns:
+            Tuple of (metric_data, epochs) or (None, None) if not found
+        """
+        # First try smoothed curves if available and smoothing is enabled
+        if (self.config.smooth_training_curves and
+            self.results.training_metrics and
+            model_name in self.results.training_metrics.smoothed_curves):
+
+            smoothed_curves = self.results.training_metrics.smoothed_curves[model_name]
+            metric_data = find_metric_in_history(smoothed_curves, metric_patterns, exclude_prefixes)
+
+            if metric_data is not None and len(metric_data) > 0:
+                return metric_data, range(len(metric_data))
+
+        # Fallback to original history
+        if model_name in self.results.training_history:
+            original_history = self.results.training_history[model_name]
+            metric_data = find_metric_in_history(original_history, metric_patterns, exclude_prefixes)
+
+            if metric_data is not None and len(metric_data) > 0:
+                return metric_data, range(len(metric_data))
+
+        return None, None
+
     def _plot_loss_curves(self, ax) -> None:
-        """Plot training and validation loss curves."""
+        """Plot training and validation loss curves with robust metric retrieval."""
         for model_name in sorted(self.results.training_history.keys()):
-            history = self.results.training_history[model_name]
             color = self.model_colors.get(model_name, '#333333')
 
-            # Use smoothed curves if available
-            if self.config.smooth_training_curves and model_name in self.results.training_metrics.smoothed_curves:
-                curves = self.results.training_metrics.smoothed_curves[model_name]
-            else:
-                curves = history
-
-            # Plot training loss using flexible pattern matching
-            if curves is history:
-                train_loss = find_metric_in_history(curves, LOSS_PATTERNS, exclude_prefixes=['val_'])
-            else:
-                train_loss = curves.get('loss', find_metric_in_history(curves, LOSS_PATTERNS, exclude_prefixes=['val_']))
-
-            if train_loss is not None and len(train_loss) > 0:
-                epochs = range(len(train_loss))
+            # Plot training loss - using robust method
+            train_loss, epochs = self._get_metric_data(
+                model_name, LOSS_PATTERNS, exclude_prefixes=['val_']
+            )
+            if train_loss is not None:
                 ax.plot(epochs, train_loss, '-', color=color,
                        linewidth=2, label=f'{model_name} (train)', alpha=0.8)
 
-            # Plot validation loss using flexible pattern matching
-            if curves is history:
-                val_loss = find_metric_in_history(curves, VAL_LOSS_PATTERNS)
-            else:
-                val_loss = curves.get('val_loss', find_metric_in_history(curves, VAL_LOSS_PATTERNS))
-
-            if val_loss is not None and len(val_loss) > 0:
-                epochs = range(len(val_loss))
+            # Plot validation loss - using robust method
+            val_loss, epochs = self._get_metric_data(
+                model_name, VAL_LOSS_PATTERNS
+            )
+            if val_loss is not None:
                 ax.plot(epochs, val_loss, '--', color=color,
                        linewidth=2, label=f'{model_name} (val)', alpha=0.8)
 
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Loss')
         ax.set_title('Training and Validation Loss Evolution')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)  # Enable legend
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
         ax.grid(True, alpha=0.3)
         ax.set_yscale('log')  # Log scale often better for loss
 
     def _plot_accuracy_curves(self, ax) -> None:
-        """Plot training and validation accuracy curves."""
+        """Plot training and validation accuracy curves with robust metric retrieval."""
         for model_name in sorted(self.results.training_history.keys()):
-            history = self.results.training_history[model_name]
             color = self.model_colors.get(model_name, '#333333')
 
-            # Use smoothed curves if available
-            if self.config.smooth_training_curves and model_name in self.results.training_metrics.smoothed_curves:
-                curves = self.results.training_metrics.smoothed_curves[model_name]
-            else:
-                curves = history
-
-            # Plot training accuracy using flexible pattern matching
-            if curves is history:
-                train_acc = find_metric_in_history(curves, ACC_PATTERNS, exclude_prefixes=['val_'])
-            else:
-                train_acc = curves.get('accuracy', find_metric_in_history(curves, ACC_PATTERNS, exclude_prefixes=['val_']))
-
-            if train_acc is not None and len(train_acc) > 0:
-                epochs = range(len(train_acc))
+            # Plot training accuracy - using robust method
+            train_acc, epochs = self._get_metric_data(
+                model_name, ACC_PATTERNS, exclude_prefixes=['val_']
+            )
+            if train_acc is not None:
                 ax.plot(epochs, train_acc, '-', color=color,
                        linewidth=2, label=f'{model_name} (train)', alpha=0.8)
 
-            # Plot validation accuracy using flexible pattern matching
-            if curves is history:
-                val_acc = find_metric_in_history(curves, VAL_ACC_PATTERNS)
-            else:
-                val_acc = curves.get('val_accuracy', find_metric_in_history(curves, VAL_ACC_PATTERNS))
-
-            if val_acc is not None and len(val_acc) > 0:
-                epochs = range(len(val_acc))
+            # Plot validation accuracy - using robust method
+            val_acc, epochs = self._get_metric_data(
+                model_name, VAL_ACC_PATTERNS
+            )
+            if val_acc is not None:
                 ax.plot(epochs, val_acc, '--', color=color,
                        linewidth=2, label=f'{model_name} (val)', alpha=0.8)
 
                 # Mark best epoch
-                if model_name in self.results.training_metrics.peak_performance:
+                if (self.results.training_metrics and
+                    model_name in self.results.training_metrics.peak_performance):
                     best_epoch = self.results.training_metrics.peak_performance[model_name]['epoch']
                     best_acc = self.results.training_metrics.peak_performance[model_name]['val_accuracy']
                     ax.scatter(best_epoch, best_acc, color=color, s=100,
@@ -141,24 +154,25 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
         ax.set_ylim(0, 1.05)
 
     def _plot_overfitting_analysis(self, ax) -> None:
-        """Plot dedicated overfitting analysis."""
-        overfitting_data = []
-
+        """Plot dedicated overfitting analysis with robust metric retrieval."""
         for model_name in sorted(self.results.training_history.keys()):
-            history = self.results.training_history[model_name]
+            color = self.model_colors.get(model_name, '#333333')
 
-            train_loss = find_metric_in_history(history, LOSS_PATTERNS, exclude_prefixes=['val_'])
-            val_loss = find_metric_in_history(history, VAL_LOSS_PATTERNS)
+            # Get training and validation loss using robust method
+            train_loss, _ = self._get_metric_data(
+                model_name, LOSS_PATTERNS, exclude_prefixes=['val_']
+            )
+            val_loss, epochs = self._get_metric_data(
+                model_name, VAL_LOSS_PATTERNS
+            )
 
             if (train_loss is not None and val_loss is not None and
-                    len(train_loss) > 0 and 0 < len(val_loss) == len(train_loss)):
+                    len(train_loss) > 0 and len(val_loss) == len(train_loss)):
+
                 # Calculate gap over time
                 gap = np.array(val_loss) - np.array(train_loss)
 
-                color = self.model_colors.get(model_name, '#333333')
-                epochs = range(len(gap))
-
-                # Apply smoothing to gap if requested
+                # Apply additional smoothing to gap if requested
                 if self.config.smooth_training_curves:
                     gap_smooth = smooth_curve(gap, self.config.smoothing_window)
                     ax.plot(epochs, gap_smooth, '-', color=color,
@@ -177,7 +191,7 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Validation Loss - Training Loss')
         ax.set_title('Overfitting Analysis (Gap Evolution)')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')  # Enable legend
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(True, alpha=0.3)
 
         # Add annotation
@@ -188,6 +202,13 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
 
     def _plot_best_epoch_performance(self, ax) -> None:
         """Plot best epoch performance comparison."""
+        if not self.results.training_metrics:
+            ax.text(0.5, 0.5, 'No training metrics available',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Best Epoch Performance')
+            ax.axis('off')
+            return
+
         peak_data = self.results.training_metrics.peak_performance
 
         if not peak_data:
@@ -232,6 +253,13 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
 
     def _plot_training_summary_table(self, ax) -> None:
         """Create comprehensive training summary table."""
+        if not self.results.training_metrics:
+            ax.text(0.5, 0.5, 'No training metrics available',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Training Metrics Summary')
+            ax.axis('off')
+            return
+
         # Prepare data
         table_data = []
         headers = ['Model', 'Final Acc', 'Best Acc', 'Best Epoch', 'Conv. Speed',
@@ -240,9 +268,8 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
         for model_name in sorted(self.results.training_history.keys()):
             row = [model_name]
 
-            # Final accuracy
-            history = self.results.training_history.get(model_name, {})
-            val_acc = find_metric_in_history(history, VAL_ACC_PATTERNS)
+            # Final accuracy - using robust method
+            val_acc, _ = self._get_metric_data(model_name, VAL_ACC_PATTERNS)
             final_acc = val_acc[-1] if val_acc and len(val_acc) > 0 else 0.0
             row.append(f'{final_acc:.3f}')
 

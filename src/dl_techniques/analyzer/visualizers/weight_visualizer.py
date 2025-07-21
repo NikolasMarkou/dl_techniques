@@ -7,9 +7,10 @@ Creates visualizations for weight analysis results.
 
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import Dict, Any
+from typing import Dict, Any, List
 from .base import BaseVisualizer
 from ..constants import WEIGHT_HEALTH_L2_NORMALIZER, WEIGHT_HEALTH_SPARSITY_THRESHOLD
+from dl_techniques.utils.logger import logger
 
 
 class WeightVisualizer(BaseVisualizer):
@@ -38,6 +39,33 @@ class WeightVisualizer(BaseVisualizer):
             self._save_figure(fig, 'weight_learning_journey')
         plt.close(fig)
 
+    def _get_layer_order(self, model_name: str) -> List[str]:
+        """
+        Get the correct layer order for a model, using explicit ordering when available.
+
+        This addresses the implicit dependency on dictionary order identified in the review
+        by prioritizing the explicit layer ordering stored by WeightAnalyzer.
+
+        Args:
+            model_name: Name of the model
+
+        Returns:
+            List of layer names in correct network order
+        """
+        # First try to use explicit layer ordering if available
+        if (hasattr(self.results, 'weight_stats_layer_order') and
+            self.results.weight_stats_layer_order and
+            model_name in self.results.weight_stats_layer_order):
+            return self.results.weight_stats_layer_order[model_name]
+
+        # Fallback to insertion order (which should be correct for Python 3.7+)
+        if model_name in self.results.weight_stats:
+            logger.warning(f"Using insertion order for {model_name} weights - "
+                          "explicit ordering not available")
+            return list(self.results.weight_stats[model_name].keys())
+
+        return []
+
     def _plot_weight_learning_evolution(self, ax) -> None:
         """Plot how weight magnitudes evolve through network layers."""
         evolution_data = {}
@@ -47,12 +75,12 @@ class WeightVisualizer(BaseVisualizer):
             l2_norms = []
             mean_abs_weights = []
 
-            if model_name in self.results.weight_stats:
-                model_weight_stats = self.results.weight_stats[model_name]
+            # Use explicit layer ordering to ensure correct network depth representation
+            layer_order = self._get_layer_order(model_name)
 
-                # Use insertion order (preserved from WeightAnalyzer iteration over model.layers)
-                # This maintains the correct network layer order
-                for idx, (layer_name, stats) in enumerate(model_weight_stats.items()):
+            for idx, layer_name in enumerate(layer_order):
+                if layer_name in weight_stats:
+                    stats = weight_stats[layer_name]
                     layer_indices.append(idx)
                     l2_norms.append(stats['norms']['l2'])
                     mean_abs_weights.append(abs(stats['basic']['mean']))
@@ -66,11 +94,12 @@ class WeightVisualizer(BaseVisualizer):
         if evolution_data:
             # Plot L2 norm evolution
             for model_name, data in evolution_data.items():
-                color = self.model_colors.get(model_name, '#333333')
-                ax.plot(data['indices'], data['l2_norms'], 'o-',
-                       label=f'{model_name}', color=color, linewidth=2, markersize=6)
+                if data['indices']:  # Check if we have data
+                    color = self.model_colors.get(model_name, '#333333')
+                    ax.plot(data['indices'], data['l2_norms'], 'o-',
+                           label=f'{model_name}', color=color, linewidth=2, markersize=6)
 
-            ax.set_xlabel('Layer Index')
+            ax.set_xlabel('Layer Index (Network Depth)')
             ax.set_ylabel('L2 Norm')
             ax.set_title('Weight Magnitude Evolution Through Network Depth', fontsize=12, fontweight='bold')
             ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -87,7 +116,7 @@ class WeightVisualizer(BaseVisualizer):
             ax.axis('off')
 
     def _plot_weight_health_heatmap(self, ax) -> None:
-        """Create a comprehensive weight health heatmap."""
+        """Create a comprehensive weight health heatmap using explicit layer ordering."""
         if not self.results.weight_stats:
             ax.text(0.5, 0.5, 'No weight statistics available',
                    ha='center', va='center', transform=ax.transAxes)
@@ -95,49 +124,66 @@ class WeightVisualizer(BaseVisualizer):
             ax.axis('off')
             return
 
-        # Prepare health metrics - each model uses its own layer sequence
+        # Prepare health metrics - each model uses its explicit layer sequence
         health_metrics = []
         models = sorted(self.results.weight_stats.keys())
-        max_layers = getattr(self.config, 'max_layers_heatmap', 12)  # Use config parameter
+        max_layers = getattr(self.config, 'max_layers_heatmap', 12)
+
+        # Determine the maximum number of layers across all models for consistent visualization
+        actual_max_layers = 0
+        for model_name in models:
+            layer_order = self._get_layer_order(model_name)
+            actual_max_layers = max(actual_max_layers, len(layer_order))
+
+        # Use the smaller of configured max or actual max
+        display_layers = min(max_layers, actual_max_layers)
+        if actual_max_layers == 0:
+            ax.text(0.5, 0.5, 'No layer ordering information available',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Weight Health Heatmap')
+            ax.axis('off')
+            return
 
         for model_name in models:
             weight_stats = self.results.weight_stats[model_name]
             model_health = []
 
-            # CRITICAL FIX: Use insertion order (network order) instead of alphabetical sorting
-            # The WeightAnalyzer iterates model.layers in order, so the dictionary preserves
-            # the correct network layer sequence. Sorting alphabetically breaks this!
-            model_layers = list(weight_stats.keys())[:max_layers]  # FIXED: removed sorted()
+            # Use explicit layer ordering instead of relying on dictionary order
+            layer_order = self._get_layer_order(model_name)
 
-            for layer_idx in range(max_layers):
-                if layer_idx < len(model_layers):
-                    layer_name = model_layers[layer_idx]
-                    stats = weight_stats[layer_name]
+            for layer_idx in range(display_layers):
+                if layer_idx < len(layer_order):
+                    layer_name = layer_order[layer_idx]
+                    if layer_name in weight_stats:
+                        stats = weight_stats[layer_name]
 
-                    # Calculate health score (0-1, higher is better)
-                    # Normalize L2 norm (smaller is often better, but not too small)
-                    l2_norm = stats['norms']['l2']
-                    norm_health = 1.0 / (1.0 + l2_norm / WEIGHT_HEALTH_L2_NORMALIZER)
+                        # Calculate health score (0-1, higher is better)
+                        # Normalize L2 norm (smaller is often better, but not too small)
+                        l2_norm = stats['norms']['l2']
+                        norm_health = 1.0 / (1.0 + l2_norm / WEIGHT_HEALTH_L2_NORMALIZER)
 
-                    # Sparsity (moderate sparsity is ok, too much is bad)
-                    sparsity = stats['distribution']['zero_fraction']
-                    sparsity_health = 1.0 - min(sparsity, WEIGHT_HEALTH_SPARSITY_THRESHOLD)
+                        # Sparsity (moderate sparsity is ok, too much is bad)
+                        sparsity = stats['distribution']['zero_fraction']
+                        sparsity_health = 1.0 - min(sparsity, WEIGHT_HEALTH_SPARSITY_THRESHOLD)
 
-                    # Weight distribution (closer to normal is better)
-                    weight_std = stats['basic']['std']
-                    weight_mean = abs(stats['basic']['mean'])
-                    dist_health = min(weight_std / (weight_mean + 1e-6), 1.0)  # Ratio of std to mean
+                        # Weight distribution (closer to normal is better)
+                        weight_std = stats['basic']['std']
+                        weight_mean = abs(stats['basic']['mean'])
+                        dist_health = min(weight_std / (weight_mean + 1e-6), 1.0)
 
-                    # Combined health score
-                    health_score = (norm_health + sparsity_health + dist_health) / 3.0
-                    model_health.append(health_score)
+                        # Combined health score
+                        health_score = (norm_health + sparsity_health + dist_health) / 3.0
+                        model_health.append(health_score)
+                    else:
+                        # Layer name in order but not in stats (shouldn't happen)
+                        model_health.append(0.0)
                 else:
-                    # Model has fewer layers than max_layers
+                    # Model has fewer layers than display_layers
                     model_health.append(0.0)
 
             health_metrics.append(model_health)
 
-        if health_metrics:
+        if health_metrics and display_layers > 0:
             # Create heatmap
             health_array = np.array(health_metrics)
 
@@ -145,13 +191,14 @@ class WeightVisualizer(BaseVisualizer):
                           vmin=0, vmax=1, interpolation='nearest')
 
             # Set labels
-            ax.set_title('Weight Health Across Layers', fontsize=12, fontweight='bold')
-            ax.set_xlabel('Layer Position')
+            ax.set_title('Weight Health Across Layers (Ordered by Network Depth)',
+                        fontsize=12, fontweight='bold')
+            ax.set_xlabel('Layer Position in Network')
             ax.set_ylabel('Model')
 
             # Set ticks
-            ax.set_xticks(range(max_layers))
-            ax.set_xticklabels([f'L{i}' for i in range(max_layers)], fontsize=9)
+            ax.set_xticks(range(display_layers))
+            ax.set_xticklabels([f'L{i}' for i in range(display_layers)], fontsize=9)
             ax.set_yticks(range(len(models)))
             ax.set_yticklabels(models, fontsize=9)
 
@@ -162,11 +209,18 @@ class WeightVisualizer(BaseVisualizer):
 
             # Add value annotations for better readability
             for i in range(len(models)):
-                for j in range(max_layers):
-                    value = health_array[i, j]
-                    text_color = 'white' if value < 0.5 else 'black'
-                    ax.text(j, i, f'{value:.2f}', ha='center', va='center',
-                           color=text_color, fontsize=8, fontweight='bold')
+                for j in range(display_layers):
+                    if j < len(health_array[i]):  # Safety check
+                        value = health_array[i, j]
+                        text_color = 'white' if value < 0.5 else 'black'
+                        ax.text(j, i, f'{value:.2f}', ha='center', va='center',
+                               color=text_color, fontsize=8, fontweight='bold')
+
+            # Add note about layer ordering
+            ax.text(0.02, -0.15,
+                   'Note: Layers ordered by network depth (input → output)',
+                   transform=ax.transAxes, ha='left', va='top', fontsize=9,
+                   style='italic', alpha=0.7)
         else:
             ax.text(0.5, 0.5, 'Insufficient data for health heatmap',
                    ha='center', va='center', transform=ax.transAxes)
