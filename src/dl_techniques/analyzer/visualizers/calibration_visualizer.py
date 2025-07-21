@@ -70,7 +70,8 @@ class CalibrationVisualizer(BaseVisualizer):
         ax.set_xlabel('Mean Predicted Probability')
         ax.set_ylabel('Fraction of Positives')
         ax.set_title('Reliability Diagrams with 95% CI')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        # DONT SHOW LEGEND HERE
+        #ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(True, alpha=0.3)
         ax.set_xlim([0, 1])
         ax.set_ylim([0, 1])
@@ -173,7 +174,8 @@ class CalibrationVisualizer(BaseVisualizer):
             ax.set_title('Per-Class Calibration Error')
             ax.set_xticks(x + width * (n_models - 1) / 2)
             ax.set_xticklabels([str(i) for i in range(n_classes)])
-            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            # DONT SHOW LEGEND HERE
+            # ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
             ax.grid(True, alpha=0.3, axis='y')
 
     def _plot_uncertainty_landscape(self, ax) -> None:

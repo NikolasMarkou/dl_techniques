@@ -1,13 +1,13 @@
 """
-Weight Visualization Module - FIXED
+Weight Visualization Module
 
 Creates visualizations for weight analysis results.
 """
 
 import numpy as np
+from typing import List
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
-from typing import Dict, Any, List
+
 from .base import BaseVisualizer
 from ..constants import WEIGHT_HEALTH_L2_NORMALIZER, WEIGHT_HEALTH_SPARSITY_THRESHOLD
 from dl_techniques.utils.logger import logger

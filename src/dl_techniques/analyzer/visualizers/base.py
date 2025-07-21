@@ -4,8 +4,6 @@ Base Visualizer Interface
 Abstract base class for all visualizers to ensure consistent interface.
 """
 
-
-
 from typing import Dict
 from pathlib import Path
 import matplotlib.pyplot as plt

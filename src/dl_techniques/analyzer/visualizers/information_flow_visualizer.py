@@ -99,7 +99,8 @@ class InformationFlowVisualizer(BaseVisualizer):
         ax.set_xlabel('Layer Depth (Network Order)')
         ax.set_ylabel('Activation Statistics')
         ax.set_title('Activation Mean ± Std Evolution')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        # DONT SHOE LEGEND HERE
+        # ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(True, alpha=0.3)
 
     def _plot_effective_rank_evolution(self, ax) -> None:
@@ -318,7 +319,8 @@ class InformationFlowVisualizer(BaseVisualizer):
                 color = self.model_colors.get(model, '#333333')
                 bars[i].set_facecolor(color)
 
-            ax_top.set_title('Overall Model Specialization', fontsize=10, fontweight='bold')
+            # DONT SHOW THIS
+            # ax_top.set_title('Overall Model Specialization', fontsize=10, fontweight='bold')
             ax_top.set_ylabel('Specialization Score')
             ax_top.set_xticks(range(len(models)))
             ax_top.set_xticklabels([])  # Remove model names from x-axis
@@ -345,7 +347,8 @@ class InformationFlowVisualizer(BaseVisualizer):
                                fontsize=10, fontweight='bold')
             ax_bottom.set_xlabel('Layer Index (Network Depth)')
             ax_bottom.set_ylabel('Specialization Score')
-            ax_bottom.legend(fontsize=8, bbox_to_anchor=(1.05, 1), loc='upper left')
+            # DONT SHOW LEGEND
+            # ax_bottom.legend(fontsize=8, bbox_to_anchor=(1.05, 1), loc='upper left')
             ax_bottom.grid(True, alpha=0.3)
             ax_bottom.set_ylim(0, 1)
 
