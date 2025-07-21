@@ -67,8 +67,8 @@ This library is a comprehensive suite of tools organized into four key pillars:
 <details>
 <summary><b>4. Deep Model Introspection & Analysis</b></summary>
 
--   **Weight & Activation Analysis**: Integrated `WeightWatcher` for SVD-based generalization analysis and an `ActivationAnalyzer` to inspect layer-by-layer statistics, sparsity, and effective rank.
--   **Comprehensive Model Comparison**: A powerful `ModelAnalyzer` to compare performance, confidence distributions, calibration curves, and feature representations across multiple models.
+-   **Comprehensive Model Analyzer**: A unified `ModelAnalyzer` toolkit for comparing multiple models across performance, weight health, calibration quality, information flow, and training dynamics with publication-ready visualizations and automated insights.
+-   **Weight & Activation Analysis**: Integrated `WeightWatcher` for SVD-based generalization analysis and detailed layer-by-layer inspection of statistics, sparsity, and effective rank.
 -   **Advanced Calibration Tools**: Built-in functions to compute and visualize `Expected Calibration Error (ECE)`, `Brier Score`, and reliability diagrams to ensure your model's confidence scores are trustworthy.
 -   **Robust Logging & Visualization**: A `VisualizationManager` and structured logging to consistently monitor training pipelines and generate publication-quality plots for analysis and reporting.
 </details>
@@ -114,7 +114,7 @@ This library is a comprehensive suite of tools organized into four key pillars:
 
 ### 1. Build a Model with Custom Layers
 
-Here’s how to integrate advanced components like our novel `OrthoBlock` and `GlobalResponseNorm` into a simple model:
+Here's how to integrate advanced components like our novel `OrthoBlock` and `GlobalResponseNorm` into a simple model:
 
 ```python
 import tensorflow as tf
@@ -165,6 +165,23 @@ model = ConvNextV1Tiny(
 model.summary()
 ```
 
+### 4. Analyze and Compare Models
+
+Get deep insights into your models with comprehensive analysis covering training dynamics, calibration, and weight health:
+
+```python
+from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
+
+# Compare multiple models
+models = {'ResNet': resnet_model, 'ConvNext': convnext_model}
+config = AnalysisConfig(analyze_training_dynamics=True, analyze_calibration=True)
+
+analyzer = ModelAnalyzer(models, config=config, training_history=histories)
+results = analyzer.analyze(DataInput(x_test, y_test))
+
+# Generates publication-ready visualizations and detailed insights
+```
+
 ---
 
 ## In-Depth Documentation
@@ -202,6 +219,7 @@ The repository is organized to separate the core library code, documentation, ex
     -   `models/`: Full implementations of architectures like `ConvNeXt`, `Depth Anything`, etc.
     -   `utils/`: Core utilities for training, visualization, and data handling.
     -   `weightwatcher/`: Tools for deep model analysis, including SVD-based metrics.
+    -   `analyzer/`: Comprehensive model analysis and comparison toolkit.
 -   **`docs/`**: In-depth documentation, theoretical guides, and papers.
 -   **`experiments/`**: Standalone scripts demonstrating library components on real tasks.
 -   **`tests/`**: A comprehensive test suite using `pytest` to ensure reliability and correctness.
