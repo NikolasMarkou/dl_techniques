@@ -19,7 +19,7 @@ class SummaryVisualizer(BaseVisualizer):
         """Create a summary dashboard with training insights."""
         fig = plt.figure(figsize=(16, 10))
         gs = plt.GridSpec(2, 2, figure=fig, hspace=0.35, wspace=0.25,
-                          height_ratios=[1, 1], width_ratios=[1.2, 1])
+                         height_ratios=[1, 1], width_ratios=[1.2, 1])
 
         # 1. Performance Table (with training metrics)
         ax1 = fig.add_subplot(gs[0, 0])
@@ -64,9 +64,13 @@ class SummaryVisualizer(BaseVisualizer):
             if self.results.training_metrics and self.results.training_metrics.peak_performance:
                 # Include training insights
                 # Final accuracy
-                acc = (model_metrics.get('accuracy', 0.0) or
-                       model_metrics.get('compile_metrics', 0.0) or
-                       model_metrics.get('val_accuracy', 0.0) or 0.0)
+                acc = model_metrics.get('accuracy')
+                if acc is None:
+                    acc = model_metrics.get('compile_metrics')
+                if acc is None:
+                    acc = model_metrics.get('val_accuracy')
+                if acc is None:
+                    acc = 0.0
                 row_data.append(f'{acc:.3f}')
 
                 # Best accuracy from training
@@ -97,9 +101,13 @@ class SummaryVisualizer(BaseVisualizer):
             else:
                 # Original table without training data
                 # Accuracy
-                acc = (model_metrics.get('accuracy', 0.0) or
-                       model_metrics.get('compile_metrics', 0.0) or
-                       model_metrics.get('val_accuracy', 0.0) or 0.0)
+                acc = model_metrics.get('accuracy')
+                if acc is None:
+                    acc = model_metrics.get('compile_metrics')
+                if acc is None:
+                    acc = model_metrics.get('val_accuracy')
+                if acc is None:
+                    acc = 0.0
                 row_data.append(f'{acc:.3f}')
 
                 # Loss
@@ -122,10 +130,10 @@ class SummaryVisualizer(BaseVisualizer):
 
         # Create table
         table = ax.table(cellText=table_data,
-                         colLabels=headers,
-                         cellLoc='center',
-                         loc='center',
-                         bbox=[0, 0, 1, 1])
+                        colLabels=headers,
+                        cellLoc='center',
+                        loc='center',
+                        bbox=[0, 0, 1, 1])
 
         # Style the table
         table.auto_set_font_size(False)
@@ -163,7 +171,7 @@ class SummaryVisualizer(BaseVisualizer):
         """Plot calibration performance comparison."""
         if not self.results.calibration_metrics:
             ax.text(0.5, 0.5, 'No calibration data available',
-                    ha='center', va='center', transform=ax.transAxes, fontsize=12)
+                   ha='center', va='center', transform=ax.transAxes, fontsize=12)
             ax.set_title('Calibration Performance')
             ax.axis('off')
             return
@@ -182,16 +190,16 @@ class SummaryVisualizer(BaseVisualizer):
         for i, model_name in enumerate(models):
             color = self.model_colors.get(model_name, '#333333')
             ax.scatter(ece_values[i], brier_values[i],
-                       s=200, color=color, alpha=0.8,
-                       edgecolors='black', linewidth=2,
-                       label=model_name)
+                      s=200, color=color, alpha=0.8,
+                      edgecolors='black', linewidth=2,
+                      label=model_name)
 
         # Add reference lines
         if ece_values and brier_values:
             # Perfect calibration line (diagonal)
             max_val = max(max(ece_values), max(brier_values))
             ax.plot([0, max_val], [0, max_val], 'k--', alpha=0.5,
-                    label='Perfect Correlation')
+                   label='Perfect Correlation')
 
             # Add quadrants for interpretation
             mean_ece = np.mean(ece_values)
@@ -202,14 +210,14 @@ class SummaryVisualizer(BaseVisualizer):
 
             # Add quadrant labels
             ax.text(0.02, 0.98, 'Well Calibrated\nLow Uncertainty',
-                    transform=ax.transAxes, ha='left', va='top',
-                    bbox=dict(boxstyle='round,pad=0.3', facecolor='lightgreen', alpha=0.7),
-                    fontsize=8)
+                   transform=ax.transAxes, ha='left', va='top',
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='lightgreen', alpha=0.7),
+                   fontsize=8)
 
             ax.text(0.98, 0.02, 'Poorly Calibrated\nHigh Uncertainty',
-                    transform=ax.transAxes, ha='right', va='bottom',
-                    bbox=dict(boxstyle='round,pad=0.3', facecolor='lightcoral', alpha=0.7),
-                    fontsize=8)
+                   transform=ax.transAxes, ha='right', va='bottom',
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='lightcoral', alpha=0.7),
+                   fontsize=8)
 
         ax.set_xlabel('Expected Calibration Error (ECE)')
         ax.set_ylabel('Brier Score')
@@ -221,10 +229,14 @@ class SummaryVisualizer(BaseVisualizer):
         ax.set_ylim(bottom=0)
 
     def _plot_model_similarity(self, ax) -> None:
-        """Plot model similarity based on weight PCA."""
+        """Plot model similarity based on weight PCA.
+
+        Note: PCA is performed on aggregated weight statistics across all layers
+        to ensure fair comparison between models with different architectures.
+        """
         if not self.results.weight_pca:
             ax.text(0.5, 0.5, 'No weight PCA data available',
-                    ha='center', va='center', transform=ax.transAxes)
+                   ha='center', va='center', transform=ax.transAxes)
             ax.set_title('Model Similarity (Weight Space)')
             ax.axis('off')
             return
@@ -236,7 +248,7 @@ class SummaryVisualizer(BaseVisualizer):
         # Validate PCA components
         if len(components) == 0 or len(components[0]) < 2:
             ax.text(0.5, 0.5, 'Insufficient PCA components for visualization',
-                    ha='center', va='center', transform=ax.transAxes)
+                   ha='center', va='center', transform=ax.transAxes)
             ax.set_title('Model Similarity (Weight Space)')
             ax.axis('off')
             return
@@ -245,7 +257,7 @@ class SummaryVisualizer(BaseVisualizer):
         for i, (label, comp) in enumerate(zip(labels, components)):
             color = self.model_colors.get(label, '#333333')
             ax.scatter(comp[0], comp[1], c=[color], label=label,
-                       s=200, alpha=0.8, edgecolors='black', linewidth=2)
+                      s=200, alpha=0.8, edgecolors='black', linewidth=2)
 
             # Add connecting lines to origin
             ax.plot([0, comp[0]], [0, comp[1]], '--', color=color, alpha=0.3)
@@ -255,7 +267,7 @@ class SummaryVisualizer(BaseVisualizer):
 
         ax.set_xlabel(f'PC1 ({explained_var[0]:.1%})')
         ax.set_ylabel(f'PC2 ({explained_var[1]:.1%})' if len(explained_var) > 1 else 'PC2')
-        ax.set_title('Model Similarity (Weight Space)')
+        ax.set_title('Model Similarity (Aggregated Weight Statistics)')
         ax.legend()
         ax.grid(True, alpha=0.3)
         ax.set_aspect('equal', adjustable='box')
@@ -282,9 +294,9 @@ class SummaryVisualizer(BaseVisualizer):
 
             # Create violin plot
             parts = ax.violinplot([df[df['Model'] == m]['Confidence'].values
-                                   for m in model_order],
-                                  positions=range(len(model_order)),
-                                  showmeans=True, showmedians=True)
+                                  for m in model_order],
+                                 positions=range(len(model_order)),
+                                 showmeans=True, showmedians=True)
 
             # Customize colors using consistent palette
             for i, model in enumerate(model_order):

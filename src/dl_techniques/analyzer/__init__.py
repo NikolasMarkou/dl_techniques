@@ -35,6 +35,17 @@ Example Usage:
     # Run comprehensive analysis
     results = analyzer.analyze(test_data)
     ```
+
+Multi-Input Model Support:
+    The analyzer has limited support for multi-input models. For simple cases:
+    ```python
+    from dl_techniques.utils.analyzer import DataInput
+
+    # Concatenate multiple inputs
+    data = DataInput.from_multi_input([input1, input2], targets)
+    ```
+
+    For complex multi-input architectures, extend the analyzer classes.
 """
 
 # Public API exports

@@ -156,8 +156,8 @@ The analyzer creates:
 ## Known Limitations
 
 - Information flow analysis requires models with standard Keras layers
-- PCA analysis limited to final dense layer weights
 - Training dynamics require compatible history format
+- **Multi-input models**: Currently have limited support. Calibration analysis is skipped for multi-input models. Information flow analysis attempts simple input splitting but may not work for complex multi-input architectures. Users should extend the analyzer for proper multi-input handling.
 
 ## Contributing
 

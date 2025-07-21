@@ -9,10 +9,10 @@ import json
 import keras
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 from pathlib import Path
 from datetime import datetime
-import matplotlib.pyplot as plt
 from typing import Dict, List, Optional, Union, Any, Set
 
 # Local imports
@@ -28,10 +28,10 @@ from .analyzers.training_dynamics_analyzer import TrainingDynamicsAnalyzer
 
 # Visualizers
 from .visualizers.weight_visualizer import WeightVisualizer
-from .visualizers.summary_visualizer import SummaryVisualizer
 from .visualizers.calibration_visualizer import CalibrationVisualizer
 from .visualizers.information_flow_visualizer import InformationFlowVisualizer
 from .visualizers.training_dynamics_visualizer import TrainingDynamicsVisualizer
+from .visualizers.summary_visualizer import SummaryVisualizer
 
 from dl_techniques.utils.logger import logger
 
@@ -184,16 +184,46 @@ class ModelAnalyzer:
 
         logger.info("Caching model predictions...")
         for model_name, model in tqdm(self.models.items(), desc="Computing predictions"):
-            predictions = model.predict(x_data, verbose=0)
-            self._prediction_cache[model_name] = {
-                'predictions': predictions,
-                'x_data': x_data,
-                'y_data': y_data
-            }
+            try:
+                # Handle both single-input and multi-input models
+                if hasattr(model, 'inputs') and len(model.inputs) > 1:
+                    # Multi-input model - this is a simplified handling
+                    # In practice, users should provide properly structured multi-input data
+                    logger.warning(f"Model {model_name} has multiple inputs. Using simplified input handling.")
+                    # For now, we'll skip multi-input models in prediction caching
+                    # Users should override this method for proper multi-input handling
+                    self._prediction_cache[model_name] = {
+                        'predictions': None,
+                        'x_data': x_data,
+                        'y_data': y_data,
+                        'multi_input': True
+                    }
+                    continue
+
+                predictions = model.predict(x_data, verbose=0)
+                self._prediction_cache[model_name] = {
+                    'predictions': predictions,
+                    'x_data': x_data,
+                    'y_data': y_data
+                }
+            except Exception as e:
+                logger.error(f"Failed to cache predictions for {model_name}: {e}")
+                self._prediction_cache[model_name] = {
+                    'predictions': None,
+                    'x_data': x_data,
+                    'y_data': y_data,
+                    'error': str(e)
+                }
 
         # Also evaluate models with better metric handling
         for model_name, model in self.models.items():
             try:
+                # Skip multi-input models for now in evaluation
+                if hasattr(model, 'inputs') and len(model.inputs) > 1:
+                    logger.warning(f"Skipping evaluation for multi-input model {model_name}")
+                    self.results.model_metrics[model_name] = {'loss': 0.0, 'accuracy': 0.0}
+                    continue
+
                 metrics = model.evaluate(x_data, y_data, verbose=0)
                 metric_names = getattr(model, 'metrics_names', ['loss'])
 
