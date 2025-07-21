@@ -1,6 +1,5 @@
 """
 Information Flow Visualization Module
-============================================================================
 
 Creates visualizations for information flow analysis results.
 """

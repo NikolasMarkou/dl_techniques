@@ -1,16 +1,15 @@
 """
 Weight Analysis Module
-============================================================================
 
 Analyzes weight distributions, statistics, and health metrics.
 """
 
 import numpy as np
 import scipy.stats
-import keras
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from typing import Dict, Any, Optional
+
 from .base import BaseAnalyzer
 from ..data_types import AnalysisResults, DataInput
 from dl_techniques.utils.logger import logger

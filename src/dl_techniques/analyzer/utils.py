@@ -1,6 +1,5 @@
 """
 Utility Functions for Model Analyzer
-============================================================================
 
 Common utility functions used throughout the analyzer module.
 """

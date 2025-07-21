@@ -1,9 +1,7 @@
 """
 Summary Dashboard Visualization Module - UPDATED
-============================================================================
 
 Creates summary dashboard with key insights across all analyses.
-UPDATED: Fixed metric access to handle consolidated confidence metrics.
 """
 
 import numpy as np

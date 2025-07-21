@@ -1,9 +1,7 @@
 """
-Calibration Analysis Module - FIXED
-============================================================================
+Calibration Analysis Module
 
 Analyzes model calibration and confidence metrics.
-FIXED: Consolidated confidence-related metrics to eliminate redundancy.
 """
 
 import numpy as np

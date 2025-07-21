@@ -1,9 +1,7 @@
 """
-Training Dynamics Analysis Module - FIXED
-============================================================================
+Training Dynamics Analysis Module
 
 Analyzes training history to understand how models learned.
-FIXED: Safe indexing for overfitting analysis when train/val losses have different lengths.
 """
 
 import numpy as np

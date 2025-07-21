@@ -1,8 +1,5 @@
 """
 Analyzer Components
-============================================================================
-
-Individual analyzer modules for different aspects of model analysis.
 """
 
 from .base import BaseAnalyzer

@@ -1,14 +1,16 @@
 """
 Base Visualizer Interface
-============================================================================
 
 Abstract base class for all visualizers to ensure consistent interface.
 """
 
-from abc import ABC, abstractmethod
+
+
+from typing import Dict
 from pathlib import Path
-from typing import Dict, Optional
 import matplotlib.pyplot as plt
+from abc import ABC, abstractmethod
+
 from ..data_types import AnalysisResults
 from ..config import AnalysisConfig
 from ..utils import lighten_color

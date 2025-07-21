@@ -1,9 +1,7 @@
 """
-Training Dynamics Visualization Module - FIXED
-============================================================================
+Training Dynamics Visualization Module
 
 Creates visualizations for training dynamics analysis results.
-Addresses the ambiguity in training curve plotting logic identified in code review.
 """
 
 import numpy as np

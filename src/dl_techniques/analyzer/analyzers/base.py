@@ -1,6 +1,5 @@
 """
 Base Analyzer Interface
-============================================================================
 
 Abstract base class for all analyzers to ensure consistent interface.
 """

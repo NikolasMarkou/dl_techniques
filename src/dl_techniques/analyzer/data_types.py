@@ -1,14 +1,11 @@
 """
 Data Type Definitions for Model Analyzer
-============================================================================
-
-All data structures used throughout the analyzer module.
 """
 
 import numpy as np
-from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Any, Tuple, NamedTuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any, Tuple, NamedTuple, Set
 
 
 class DataInput(NamedTuple):
@@ -50,7 +47,12 @@ class TrainingMetrics:
 
 @dataclass
 class AnalysisResults:
-    """Container for all analysis results."""
+    """
+    Container for all analysis results.
+
+    FIXED: All attributes are now properly declared to eliminate dynamic injection.
+    This makes the contract explicit and prevents AttributeError issues.
+    """
 
     # Model performance
     model_metrics: Dict[str, Dict[str, float]] = field(default_factory=dict)
@@ -58,11 +60,12 @@ class AnalysisResults:
     # Activation analysis (now part of information flow)
     activation_stats: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
-    # Weight analysis
+    # Weight analysis - FIXED: Properly declared all weight-related attributes
     weight_stats: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     weight_pca: Optional[Dict[str, Any]] = None
+    weight_stats_layer_order: Dict[str, List[str]] = field(default_factory=dict)  # FIXED: Properly declared
 
-    # Calibration analysis
+    # Calibration analysis - FIXED: Consolidated structure
     calibration_metrics: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     reliability_data: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
     confidence_metrics: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
@@ -77,3 +80,32 @@ class AnalysisResults:
     # Metadata
     analysis_timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     config: Optional['AnalysisConfig'] = None  # Forward reference
+
+    # FIXED: Explicitly declare fields for serialization control
+    _non_serializable_fields: Set[str] = field(
+        default_factory=lambda: {'_non_serializable_fields'},
+        init=False,
+        repr=False
+    )
+
+    def __post_init__(self):
+        """Post-initialization to set up any derived fields."""
+        # Ensure all dict fields are properly initialized
+        if not isinstance(self.weight_stats_layer_order, dict):
+            self.weight_stats_layer_order = {}
+        if not isinstance(self.activation_stats, dict):
+            self.activation_stats = {}
+        if not isinstance(self.information_flow, dict):
+            self.information_flow = {}
+
+    def add_non_serializable_field(self, field_name: str) -> None:
+        """Add a field to the non-serializable set."""
+        self._non_serializable_fields.add(field_name)
+
+    def get_serializable_dict(self) -> Dict[str, Any]:
+        """Get a dictionary representation excluding non-serializable fields."""
+        result = {}
+        for key, value in self.__dict__.items():
+            if key not in self._non_serializable_fields:
+                result[key] = value
+        return result

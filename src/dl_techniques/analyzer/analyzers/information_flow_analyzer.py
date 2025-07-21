@@ -1,6 +1,5 @@
 """
 Information Flow Analysis Module
-============================================================================
 
 Analyzes how information flows through the network layers.
 """
@@ -36,8 +35,9 @@ class InformationFlowAnalyzer(BaseAnalyzer):
         if data is None:
             raise ValueError("Data is required for information flow analysis")
 
-        # Get sample data
+        # Get sample data and store batch size for proper tensor handling
         x_sample = data.x_data[:min(200, len(data.x_data))]
+        self._batch_size = len(x_sample)  # FIXED: Store actual batch size
 
         for model_name, extraction_data in self.layer_extraction_models.items():
             if extraction_data is None:
@@ -126,11 +126,10 @@ class InformationFlowAnalyzer(BaseAnalyzer):
 
     def _safely_flatten_activations(self, output: np.ndarray) -> tuple:
         """
-        Safely flatten activation tensors without assuming batch dimension structure.
+        Safely flatten activation tensors using known batch size instead of guessing.
 
-        FIXED: This addresses the fragile tensor reshaping identified in the code review.
-        Instead of assuming output.shape[0] is the batch dimension, we detect the
-        tensor structure more carefully.
+        FIXED: Removed brittle magic number heuristics for batch dimension detection.
+        Uses the actual batch size from the prediction to make informed decisions.
 
         Args:
             output: Activation tensor from model prediction
@@ -147,54 +146,63 @@ class InformationFlowAnalyzer(BaseAnalyzer):
         if len(original_shape) == 2:
             return output, None
 
-        # Case 2: 1D tensor (single sample, single feature)
+        # Case 2: 1D tensor (single feature value or flattened)
         elif len(original_shape) == 1:
             # Reshape to (1, features) to ensure batch dimension
             return output.reshape(1, -1), None
 
         # Case 3: Higher dimensional tensors (conv layers, etc.)
         elif len(original_shape) >= 3:
-            # Try to detect if this has a batch dimension or not
-            # Heuristic: if the tensor came from a batch prediction and first dim matches
-            # the expected batch size, treat first dim as batch
+            # FIXED: Use actual batch size instead of magic number guessing
+            expected_batch_size = getattr(self, '_batch_size', None)
 
-            # Most conservative approach: compute statistics along appropriate axes
-            # without assuming batch structure
-            if len(original_shape) == 3:
-                # Could be (batch, seq, features) or (H, W, C) for single sample
-                # Check if first dimension is reasonable as batch size
-                if original_shape[0] <= 512:  # Reasonable batch size
-                    # Likely (batch, H*W, C) or (batch, seq, features)
+            if expected_batch_size is not None and original_shape[0] == expected_batch_size:
+                # First dimension matches expected batch size - likely (batch, ...)
+                if len(original_shape) == 3:
+                    # (batch, seq, features) or (batch, H*W, C)
                     flattened = output.reshape(original_shape[0], -1)
-                    spatial_output = output if len(original_shape) == 3 else None
+                    spatial_output = output
+                elif len(original_shape) == 4:
+                    # (batch, H, W, C) or (batch, C, H, W)
+                    flattened = output.reshape(original_shape[0], -1)
+                    spatial_output = output
                 else:
-                    # Likely (H, W, C) for single sample
-                    # Flatten spatial dimensions, add batch dim
+                    # Higher dimensional - flatten all non-batch dimensions
+                    flattened = output.reshape(original_shape[0], -1)
+                    spatial_output = output
+            else:
+                # FIXED: Handle case where batch dimension isn't first or is missing
+                if expected_batch_size is None:
+                    logger.debug("No batch size available for tensor shape inference")
+
+                # Conservative approach: treat as single sample if dimensions don't match expectations
+                if len(original_shape) == 3:
+                    # Could be (H, W, C) for single sample
                     flattened = output.reshape(1, -1)
                     spatial_output = output.reshape(1, *original_shape)
+                elif len(original_shape) == 4:
+                    # If first dim doesn't match batch size, might be (C, H, W, batch) or similar
+                    # Try to find which dimension matches batch size
+                    batch_dim = None
+                    if expected_batch_size is not None:
+                        for i, dim_size in enumerate(original_shape):
+                            if dim_size == expected_batch_size:
+                                batch_dim = i
+                                break
 
-            elif len(original_shape) == 4:
-                # Most likely (batch, H, W, C) or (batch, C, H, W)
-                # Flatten spatial dimensions for each sample in batch
-                flattened = output.reshape(original_shape[0], -1)
-                spatial_output = output
-
-            elif len(original_shape) == 5:
-                # Could be (batch, D, H, W, C) for 3D conv or video
-                # Flatten all spatial/temporal dimensions
-                flattened = output.reshape(original_shape[0], -1)
-                spatial_output = output
-
-            else:
-                # Very high dimensional - flatten everything except assume first is batch
-                logger.debug(f"High-dimensional tensor with shape {original_shape}, "
-                           f"assuming first dimension is batch")
-                if original_shape[0] <= 1024:  # Reasonable batch size limit
-                    flattened = output.reshape(original_shape[0], -1)
+                    if batch_dim is not None and batch_dim != 0:
+                        # Move batch dimension to front
+                        output_reordered = np.moveaxis(output, batch_dim, 0)
+                        flattened = output_reordered.reshape(expected_batch_size, -1)
+                        spatial_output = output_reordered
+                    else:
+                        # Fallback: treat as single sample
+                        flattened = output.reshape(1, -1)
+                        spatial_output = output.reshape(1, *original_shape)
                 else:
-                    # Treat as single sample with no batch dimension
+                    # Very high dimensional - flatten everything, treat as single sample
                     flattened = output.reshape(1, -1)
-                spatial_output = None
+                    spatial_output = None
 
             return flattened, spatial_output
 
@@ -203,9 +211,13 @@ class InformationFlowAnalyzer(BaseAnalyzer):
             return output.reshape(1, 1), None
 
     def _analyze_layer_information(self, output: np.ndarray, layer_info: Dict) -> Dict[str, Any]:
-        """Analysis of layer information content with safe tensor handling."""
+        """
+        Analysis of layer information content with improved effective rank calculation.
 
-        # FIXED: Use safe flattening instead of fragile reshape
+        FIXED: Removed restrictive condition for effective rank calculation.
+        """
+
+        # Use safe flattening
         output_flat, spatial_output = self._safely_flatten_activations(output)
 
         if output_flat is None:
@@ -230,9 +242,10 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                 channel_means = np.mean(spatial_output, axis=(0, 1, 2))
                 analysis['channel_variance'] = float(np.var(channel_means))
 
-        # Compute effective rank for 2D flattened output
-        if (output_flat.ndim == 2 and output_flat.shape[0] > 1 and
-            output_flat.shape[1] > 1 and output_flat.shape[0] <= output_flat.shape[1]):
+        # FIXED: Compute effective rank with relaxed conditions
+        if (output_flat.ndim == 2 and min(output_flat.shape) > 1):
+            # FIXED: Removed restrictive condition output_flat.shape[0] <= output_flat.shape[1]
+            # SVD is well-defined regardless of whether samples > features
             try:
                 # Ensure matrix is centered for SVD
                 centered_output = output_flat - np.mean(output_flat, axis=0)

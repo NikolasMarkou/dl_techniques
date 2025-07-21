@@ -1,9 +1,6 @@
 """
-Calibration Visualization Module - UPDATED
-============================================================================
-
+Calibration Visualization Module
 Creates visualizations for calibration analysis results.
-UPDATED: Fixed metric access to handle consolidated confidence metrics.
 """
 
 import numpy as np

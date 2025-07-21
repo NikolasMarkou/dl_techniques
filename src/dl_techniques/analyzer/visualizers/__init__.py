@@ -1,8 +1,5 @@
 """
 Visualizer Components
-============================================================================
-
-Individual visualizer modules for creating analysis plots.
 """
 
 from .base import BaseVisualizer

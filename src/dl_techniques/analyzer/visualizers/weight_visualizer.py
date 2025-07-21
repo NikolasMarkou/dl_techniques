@@ -1,12 +1,12 @@
 """
-Weight Visualization Module
-============================================================================
+Weight Visualization Module - FIXED
 
 Creates visualizations for weight analysis results.
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
 from typing import Dict, Any, List
 from .base import BaseVisualizer
 from ..constants import WEIGHT_HEALTH_L2_NORMALIZER, WEIGHT_HEALTH_SPARSITY_THRESHOLD
@@ -40,19 +40,8 @@ class WeightVisualizer(BaseVisualizer):
         plt.close(fig)
 
     def _get_layer_order(self, model_name: str) -> List[str]:
-        """
-        Get the correct layer order for a model, using explicit ordering when available.
-
-        This addresses the implicit dependency on dictionary order identified in the review
-        by prioritizing the explicit layer ordering stored by WeightAnalyzer.
-
-        Args:
-            model_name: Name of the model
-
-        Returns:
-            List of layer names in correct network order
-        """
-        # First try to use explicit layer ordering if available
+        """Get the correct layer order for a model, using explicit ordering when available."""
+        # Use explicit layer ordering from AnalysisResults (now properly declared)
         if (hasattr(self.results, 'weight_stats_layer_order') and
             self.results.weight_stats_layer_order and
             model_name in self.results.weight_stats_layer_order):
@@ -116,7 +105,12 @@ class WeightVisualizer(BaseVisualizer):
             ax.axis('off')
 
     def _plot_weight_health_heatmap(self, ax) -> None:
-        """Create a comprehensive weight health heatmap using explicit layer ordering."""
+        """
+        Create a comprehensive weight health heatmap with proper missing data handling.
+
+        FIXED: Missing layers are now represented as np.nan and rendered distinctly,
+        not as misleading 0.0 (worst health) scores.
+        """
         if not self.results.weight_stats:
             ax.text(0.5, 0.5, 'No weight statistics available',
                    ha='center', va='center', transform=ax.transAxes)
@@ -158,7 +152,6 @@ class WeightVisualizer(BaseVisualizer):
                         stats = weight_stats[layer_name]
 
                         # Calculate health score (0-1, higher is better)
-                        # Normalize L2 norm (smaller is often better, but not too small)
                         l2_norm = stats['norms']['l2']
                         norm_health = 1.0 / (1.0 + l2_norm / WEIGHT_HEALTH_L2_NORMALIZER)
 
@@ -176,10 +169,10 @@ class WeightVisualizer(BaseVisualizer):
                         model_health.append(health_score)
                     else:
                         # Layer name in order but not in stats (shouldn't happen)
-                        model_health.append(0.0)
+                        model_health.append(np.nan)  # FIXED: Use np.nan instead of 0.0
                 else:
-                    # Model has fewer layers than display_layers
-                    model_health.append(0.0)
+                    # FIXED: Model has fewer layers - use np.nan instead of misleading 0.0
+                    model_health.append(np.nan)
 
             health_metrics.append(model_health)
 
@@ -187,11 +180,24 @@ class WeightVisualizer(BaseVisualizer):
             # Create heatmap
             health_array = np.array(health_metrics)
 
-            im = ax.imshow(health_array, cmap='RdYlGn', aspect='auto',
+            # FIXED: Create custom colormap that handles NaN values properly
+            # Use a distinct color (light gray) for missing data
+            base_cmap = plt.cm.RdYlGn
+            colors = base_cmap(np.linspace(0, 1, 256))
+            # Set NaN color to light gray
+            colors[0] = [0.9, 0.9, 0.9, 1.0]  # Light gray for NaN
+            custom_cmap = ListedColormap(colors)
+
+            # Set NaN values to a specific value for colormap mapping
+            plot_array = health_array.copy()
+            nan_mask = np.isnan(plot_array)
+            plot_array[nan_mask] = -0.1  # Value below 0 to map to our custom NaN color
+
+            im = ax.imshow(plot_array, cmap=custom_cmap, aspect='auto',
                           vmin=0, vmax=1, interpolation='nearest')
 
             # Set labels
-            ax.set_title('Weight Health Across Layers (Ordered by Network Depth)',
+            ax.set_title('Weight Health Across Layers (Network Order)',
                         fontsize=12, fontweight='bold')
             ax.set_xlabel('Layer Position in Network')
             ax.set_ylabel('Model')
@@ -202,23 +208,28 @@ class WeightVisualizer(BaseVisualizer):
             ax.set_yticks(range(len(models)))
             ax.set_yticklabels(models, fontsize=9)
 
-            # Add colorbar
+            # Add colorbar with proper handling of NaN
             cbar = plt.colorbar(im, ax=ax, shrink=0.8)
             cbar.set_label('Health Score', rotation=270, labelpad=20)
             cbar.ax.tick_params(labelsize=9)
 
-            # Add value annotations for better readability
+            # FIXED: Add value annotations with proper NaN handling
             for i in range(len(models)):
                 for j in range(display_layers):
-                    if j < len(health_array[i]):  # Safety check
+                    if j < len(health_array[i]):
                         value = health_array[i, j]
-                        text_color = 'white' if value < 0.5 else 'black'
-                        ax.text(j, i, f'{value:.2f}', ha='center', va='center',
-                               color=text_color, fontsize=8, fontweight='bold')
+                        if np.isnan(value):
+                            # FIXED: Display "N/A" for missing layers instead of a number
+                            ax.text(j, i, 'N/A', ha='center', va='center',
+                                   color='black', fontsize=8, fontweight='bold')
+                        else:
+                            text_color = 'white' if value < 0.5 else 'black'
+                            ax.text(j, i, f'{value:.2f}', ha='center', va='center',
+                                   color=text_color, fontsize=8, fontweight='bold')
 
-            # Add note about layer ordering
-            ax.text(0.02, -0.15,
-                   'Note: Layers ordered by network depth (input → output)',
+            # FIXED: Add legend explaining the NaN representation
+            ax.text(0.02, -0.18,
+                   'Note: Layers ordered by network depth. Gray cells indicate models with fewer layers.',
                    transform=ax.transAxes, ha='left', va='top', fontsize=9,
                    style='italic', alpha=0.7)
         else:

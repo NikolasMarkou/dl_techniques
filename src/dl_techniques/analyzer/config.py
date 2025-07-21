@@ -1,6 +1,5 @@
 """
 Configuration for Model Analyzer
-============================================================================
 
 Configuration classes and plotting setup utilities.
 """

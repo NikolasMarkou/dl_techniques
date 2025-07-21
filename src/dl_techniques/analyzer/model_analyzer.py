@@ -1,9 +1,7 @@
 """
-Model Analyzer Main Module - UPDATED
-============================================================================
+Model Analyzer Main Module
 
 Main coordinator class that orchestrates all analysis and visualization components.
-UPDATED: Fixed summary statistics to handle consolidated confidence metrics.
 """
 
 import json

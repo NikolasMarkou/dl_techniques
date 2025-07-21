@@ -1,6 +1,5 @@
 """
 Constants for Model Analyzer
-============================================================================
 
 Central location for all constants used throughout the analyzer module.
 """
