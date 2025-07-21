@@ -81,7 +81,7 @@ class CalibrationAnalyzer(BaseAnalyzer):
                 else:
                     per_class_ece.append(0.0)
 
-            # FIXED: Store only calibration-specific metrics (no entropy here)
+            # Store only calibration-specific metrics (no entropy here)
             results.calibration_metrics[model_name] = {
                 'ece': ece,
                 'brier_score': brier_score,
@@ -95,17 +95,14 @@ class CalibrationAnalyzer(BaseAnalyzer):
             confidence_metrics = self._compute_confidence_metrics(y_pred_proba)
             entropy_stats = compute_prediction_entropy_stats(y_pred_proba)
 
-            # ==============================================================================
-            # BIG COMMENT: The original code assumed the `compute_prediction_entropy_stats`
-            # function would return both a per-sample array ('entropy') and a pre-computed
-            # mean ('mean_entropy'). This is a fragile dependency. Other parts of the
-            # application rely on 'mean_entropy' being present.
-            #
-            # The fix is to make this component robust by ensuring 'mean_entropy' always
-            # exists. If it's not returned by the utility function, we calculate it
-            # here from the per-sample array. This centralizes the logic and prevents
-            # silent failures in downstream visualizers.
-            # ==============================================================================
+            # Manually calculate per-sample entropy if it's missing, ensuring visualizers work.
+            if 'entropy' not in entropy_stats:
+                # Add a small epsilon to prevent log(0) for probabilities of 0.
+                epsilon = 1e-9
+                per_sample_entropy = -np.sum(y_pred_proba * np.log2(y_pred_proba + epsilon), axis=1)
+                entropy_stats['entropy'] = per_sample_entropy
+
+            # Ensure mean_entropy is present for summary tables.
             if 'entropy' in entropy_stats and 'mean_entropy' not in entropy_stats:
                 entropy_stats['mean_entropy'] = float(np.mean(entropy_stats['entropy']))
 
