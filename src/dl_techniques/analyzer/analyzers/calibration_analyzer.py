@@ -91,9 +91,23 @@ class CalibrationAnalyzer(BaseAnalyzer):
             # Store reliability data separately (for plotting)
             results.reliability_data[model_name] = reliability_data
 
-            # FIXED: Consolidate ALL confidence-related metrics including entropy
+            # Consolidate ALL confidence-related metrics including entropy
             confidence_metrics = self._compute_confidence_metrics(y_pred_proba)
             entropy_stats = compute_prediction_entropy_stats(y_pred_proba)
+
+            # ==============================================================================
+            # BIG COMMENT: The original code assumed the `compute_prediction_entropy_stats`
+            # function would return both a per-sample array ('entropy') and a pre-computed
+            # mean ('mean_entropy'). This is a fragile dependency. Other parts of the
+            # application rely on 'mean_entropy' being present.
+            #
+            # The fix is to make this component robust by ensuring 'mean_entropy' always
+            # exists. If it's not returned by the utility function, we calculate it
+            # here from the per-sample array. This centralizes the logic and prevents
+            # silent failures in downstream visualizers.
+            # ==============================================================================
+            if 'entropy' in entropy_stats and 'mean_entropy' not in entropy_stats:
+                entropy_stats['mean_entropy'] = float(np.mean(entropy_stats['entropy']))
 
             # Combine all confidence-related metrics into one place
             all_confidence_metrics = {**confidence_metrics, **entropy_stats}

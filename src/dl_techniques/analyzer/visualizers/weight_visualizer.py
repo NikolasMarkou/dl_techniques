@@ -180,21 +180,23 @@ class WeightVisualizer(BaseVisualizer):
             # Create heatmap
             health_array = np.array(health_metrics)
 
-            # FIXED: Create custom colormap that handles NaN values properly
-            # Use a distinct color (light gray) for missing data
-            base_cmap = plt.cm.RdYlGn
-            colors = base_cmap(np.linspace(0, 1, 256))
-            # Set NaN color to light gray
-            colors[0] = [0.9, 0.9, 0.9, 1.0]  # Light gray for NaN
-            custom_cmap = ListedColormap(colors)
+            # ==============================================================================
+            # The original code created a custom colormap that incorrectly
+            # mapped the worst health score (0.0) and missing data (NaN) to the same
+            # gray color, which is highly misleading.
+            #
+            # The fix is to use matplotlib's native support for NaN values. We use a
+            # standard colormap and tell it specifically what color to use for any NaN
+            # values via `set_bad()`. This correctly separates missing data from valid
+            # (but poor) health scores.
+            # ==============================================================================
+            custom_cmap = plt.cm.get_cmap('RdYlGn').copy()
+            custom_cmap.set_bad(color='lightgray')  # Use a specific color for NaN values.
 
-            # Set NaN values to a specific value for colormap mapping
-            plot_array = health_array.copy()
-            nan_mask = np.isnan(plot_array)
-            plot_array[nan_mask] = -0.1  # Value below 0 to map to our custom NaN color
-
-            im = ax.imshow(plot_array, cmap=custom_cmap, aspect='auto',
-                          vmin=0, vmax=1, interpolation='nearest')
+            # We no longer need to manipulate the data array by replacing NaNs with -0.1.
+            # We can pass the original array with NaNs directly to imshow.
+            im = ax.imshow(health_array, cmap=custom_cmap, aspect='auto',
+                           vmin=0, vmax=1, interpolation='nearest')
 
             # Set labels
             ax.set_title('Weight Health Across Layers (Network Order)',

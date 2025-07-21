@@ -277,9 +277,21 @@ class InformationFlowAnalyzer(BaseAnalyzer):
 
         key_indices = []
         if conv_indices:
-            key_indices.append(conv_indices[-1])  # Last conv layer
+            key_indices.append(conv_indices[-1])
+
         if dense_indices:
-            key_indices.append(dense_indices[-2] if len(dense_indices) > 1 else dense_indices[-1])
+            # ==============================================================================
+            # COMMENT: The original code arbitrarily chose the second-to-last dense
+            # layer (`dense_indices[-2]`), which is not a meaningful heuristic for many
+            # modern or complex architectures.
+            #
+            # The fix is to use a more stable and generally useful heuristic: selecting
+            # the *middle* dense layer. This is less likely to be a simple projection
+            # layer and more likely to contain rich feature representations, making it
+            # a better point of interest for analysis across a wider variety of models.
+            # ==============================================================================
+            middle_dense_layer_index = dense_indices[len(dense_indices) // 2]
+            key_indices.append(middle_dense_layer_index)
 
         results.activation_stats[model_name] = {}
 

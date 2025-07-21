@@ -47,8 +47,12 @@ class TrainingDynamicsAnalyzer(BaseAnalyzer):
             if self.config.smooth_training_curves:
                 self._smooth_training_curves(model_name, history, results.training_metrics)
 
-    def _compute_training_metrics(self, model_name: str, history: Dict[str, List[float]],
-                                  metrics: TrainingMetrics) -> None:
+    def _compute_training_metrics(
+            self,
+            model_name: str,
+            history: Dict[str, List[float]],
+            metrics: TrainingMetrics
+    ) -> None:
         """Compute quantitative metrics from training history with robust length handling."""
         # Extract metrics using flexible pattern matching
         train_loss = find_metric_in_history(history, LOSS_PATTERNS)
@@ -103,19 +107,35 @@ class TrainingDynamicsAnalyzer(BaseAnalyzer):
 
         # Peak performance
         if val_acc is not None and len(val_acc) > 0:
-            best_epoch = np.argmax(val_acc)
-            peak_performance = {
-                'epoch': best_epoch,
-                'val_accuracy': val_acc[best_epoch]
-            }
+            # ==============================================================================
+            # BIG COMMENT: The original code did not ensure that `val_acc` and `val_loss`
+            # had the same length before finding the best epoch. This could lead to an
+            # IndexError or looking up a loss value from a mismatched epoch.
+            #
+            # The fix is to explicitly align `val_acc` and `val_loss` to their minimum
+            # common length before performing the calculation. This guarantees that the
+            # index from the best accuracy correctly corresponds to the loss at the
+            # same epoch.
+            # ==============================================================================
+            val_loss_safe = val_loss if val_loss is not None else []
+            min_len = min(len(val_acc), len(val_loss_safe))
+            val_acc_aligned = val_acc[:min_len]
+            val_loss_aligned = val_loss_safe[:min_len]
 
-            # Add validation loss at best epoch if available and aligned
-            if val_loss and best_epoch < len(val_loss):
-                peak_performance['val_loss'] = val_loss[best_epoch]
-            else:
-                peak_performance['val_loss'] = None
+            if val_acc_aligned:
+                best_epoch = np.argmax(val_acc_aligned)
+                peak_performance = {
+                    'epoch': best_epoch,
+                    'val_accuracy': val_acc_aligned[best_epoch]
+                }
 
-            metrics.peak_performance[model_name] = peak_performance
+                # Add validation loss at best epoch if available
+                if val_loss_aligned:
+                    peak_performance['val_loss'] = val_loss_aligned[best_epoch]
+                else:
+                    peak_performance['val_loss'] = None
+
+                metrics.peak_performance[model_name] = peak_performance
 
         # Log warning if no metrics found
         if not any([train_loss, val_loss, train_acc, val_acc]):

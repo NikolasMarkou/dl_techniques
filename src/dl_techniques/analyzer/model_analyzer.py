@@ -323,9 +323,23 @@ class ModelAnalyzer:
 
     def save_results(self, filename: str = "analysis_results.json") -> None:
         """Save analysis results to JSON file."""
+        """Save analysis results to JSON file."""
+        # ==============================================================================
+        # COMMENT: The original code tried to serialize `self.config.__dict__`, which
+        # contains `_original_rcParams`—a complex, non-serializable matplotlib object.
+        # This would cause a TypeError and crash the program.
+        #
+        # The fix is to create a serializable version of the config by explicitly
+        # excluding the problematic `_original_rcParams` key. This prevents the crash
+        # while saving all relevant configuration settings.
+        # ==============================================================================
+        serializable_config = {
+            k: v for k, v in self.config.__dict__.items() if k != '_original_rcParams'
+        }
+
         results_dict = {
             'timestamp': self.results.analysis_timestamp,
-            'config': self.config.__dict__,
+            'config': serializable_config, # Use the safe, serializable version
             'model_metrics': self.results.model_metrics,
             'weight_stats': self.results.weight_stats,
             'weight_pca': self.results.weight_pca,
