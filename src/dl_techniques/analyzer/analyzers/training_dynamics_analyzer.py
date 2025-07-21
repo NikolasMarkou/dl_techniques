@@ -73,7 +73,7 @@ class TrainingDynamicsAnalyzer(BaseAnalyzer):
             stability_score = np.std(recent_losses)
             metrics.training_stability_score[model_name] = stability_score
 
-        # FIXED: Overfitting index with robust length handling
+        # Overfitting index with robust length handling
         if train_loss and val_loss:
             # Use the minimum length to ensure we're comparing the same epochs
             min_length = min(len(train_loss), len(val_loss))
@@ -107,16 +107,7 @@ class TrainingDynamicsAnalyzer(BaseAnalyzer):
 
         # Peak performance
         if val_acc is not None and len(val_acc) > 0:
-            # ==============================================================================
-            # BIG COMMENT: The original code did not ensure that `val_acc` and `val_loss`
-            # had the same length before finding the best epoch. This could lead to an
-            # IndexError or looking up a loss value from a mismatched epoch.
-            #
-            # The fix is to explicitly align `val_acc` and `val_loss` to their minimum
-            # common length before performing the calculation. This guarantees that the
-            # index from the best accuracy correctly corresponds to the loss at the
-            # same epoch.
-            # ==============================================================================
+            # Explicitly align val_acc and val_loss to prevent IndexErrors
             val_loss_safe = val_loss if val_loss is not None else []
             min_len = min(len(val_acc), len(val_loss_safe))
             val_acc_aligned = val_acc[:min_len]
