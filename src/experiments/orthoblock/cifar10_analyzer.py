@@ -1038,7 +1038,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     # ===== CALIBRATION & CONFIDENCE RESULTS =====
     analysis_res = results.get('model_analysis')
     if analysis_res and analysis_res.calibration_metrics:
-        logger.info("\n🎯 CALIBRATION & CONFIDENCE ANALYSIS (from last run):")
+        logger.info("🎯 CALIBRATION & CONFIDENCE ANALYSIS (from last run):")
         logger.info(f"{'Model':<22} {'ECE':<12} {'Brier':<12} {'Mean Entropy':<15}")
         logger.info("-" * 65)
 
@@ -1055,7 +1055,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             logger.info(f"{model_name:<22} {ece:<12.4f} {brier:<12.4f} {entropy:<15.4f}")
 
     # ===== KEY INSIGHTS =====
-    logger.info("\n🔍 KEY INSIGHTS:")
+    logger.info("🔍 KEY INSIGHTS:")
 
     if 'run_statistics' in results and results['run_statistics']:
         best_model = max(results['run_statistics'].items(),

@@ -281,10 +281,27 @@ class ModelAnalyzer:
                     # Single metric case
                     metric_dict[metric_names[0] if metric_names else 'loss'] = float(metrics)
 
-                # Add common aliases for accuracy
-                for name, value in metric_dict.items():
+                # ==============================================================================
+                # ===============================  THE FIX  ====================================
+                # ==============================================================================
+                #
+                # PROBLEM: The original code iterated over `metric_dict.items()`. Inside the
+                # loop, it attempted to add a new key (`'accuracy'`) to `metric_dict`. This
+                # is illegal in Python and raises a `RuntimeError: dictionary changed size
+                # during iteration`, causing the evaluation for every model to fail.
+                #
+                # SOLUTION: We now iterate over a *static copy* of the dictionary's keys by
+                # using `list(metric_dict.keys())`. This creates a temporary list that is not
+                # affected when we add the 'accuracy' key to the original `metric_dict`.
+                # This correctly and safely implements the intended functionality, which is
+                # to standardize the accuracy metric name. A `break` is also added for
+                # efficiency, so we stop after finding the first suitable accuracy metric.
+                #
+                # ==============================================================================
+                for name in list(metric_dict.keys()):
                     if name in ['compile_metrics', 'categorical_accuracy', 'sparse_categorical_accuracy']:
-                        metric_dict['accuracy'] = value
+                        metric_dict['accuracy'] = metric_dict[name]
+                        break # Stop after finding the first match.
 
                 self.results.model_metrics[model_name] = metric_dict
 
@@ -323,35 +340,24 @@ class ModelAnalyzer:
 
     def save_results(self, filename: str = "analysis_results.json") -> None:
         """Save analysis results to JSON file."""
-        """Save analysis results to JSON file."""
-        # ==============================================================================
-        # COMMENT: The original code tried to serialize `self.config.__dict__`, which
-        # contains `_original_rcParams`—a complex, non-serializable matplotlib object.
-        # This would cause a TypeError and crash the program.
-        #
-        # The fix is to create a serializable version of the config by explicitly
-        # excluding the problematic `_original_rcParams` key. This prevents the crash
-        # while saving all relevant configuration settings.
-        # ==============================================================================
         serializable_config = {
             k: v for k, v in self.config.__dict__.items() if k != '_original_rcParams'
         }
 
         results_dict = {
             'timestamp': self.results.analysis_timestamp,
-            'config': serializable_config, # Use the safe, serializable version
+            'config': serializable_config,
             'model_metrics': self.results.model_metrics,
             'weight_stats': self.results.weight_stats,
             'weight_pca': self.results.weight_pca,
             'calibration_metrics': self.results.calibration_metrics,
-            'confidence_metrics': self.results.confidence_metrics,  # Now consolidated
+            'confidence_metrics': self.results.confidence_metrics,
             'information_flow': self.results.information_flow,
             'activation_stats': self.results.activation_stats,
             'training_metrics': self._serialize_training_metrics() if self.results.training_metrics else None,
             'multi_input_models': list(self._multi_input_models),
         }
 
-        # Convert numpy arrays to lists for JSON serialization
         def convert_numpy(obj):
             if isinstance(obj, np.integer):
                 return int(obj)
