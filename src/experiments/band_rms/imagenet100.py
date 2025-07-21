@@ -33,9 +33,9 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.band_rms import BandRMS
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.utils.train import TrainingConfig, train_model
-from dl_techniques.utils.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 
+from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 
 # ---------------------------------------------------------------------
 # DATA LOADING AND PREPROCESSING

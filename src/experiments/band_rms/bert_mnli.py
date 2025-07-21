@@ -40,7 +40,6 @@ except ImportError:
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 
 # Import custom BERT model components
@@ -50,6 +49,7 @@ from dl_techniques.models.custom_bert import (
     create_bert_for_classification,
 )
 
+from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 
 # ---------------------------------------------------------------------
 # DATASET LOADING AND PREPROCESSING

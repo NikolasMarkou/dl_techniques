@@ -820,9 +820,7 @@ Usage Example
 # IMPORTS AND DEPENDENCIES
 # ==============================================================================
 
-import gc
 import keras
-import numpy as np
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -831,9 +829,9 @@ from typing import Dict, Any, List, Tuple, Callable
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.utils.datasets import load_and_preprocess_mnist
-from dl_techniques.utils.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 
+from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 # ==============================================================================
 # EXPERIMENT CONFIGURATION
 # ==============================================================================

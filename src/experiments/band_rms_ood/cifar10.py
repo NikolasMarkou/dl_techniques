@@ -82,12 +82,11 @@ from sklearn.metrics import roc_auc_score, roc_curve, average_precision_score
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.utils.datasets import load_and_preprocess_cifar10
-from dl_techniques.utils.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
-from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 
 from dl_techniques.layers.norms.band_rms import BandRMS
 from dl_techniques.layers.experimental.band_rms_ood import BandRMSOOD
 
+from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 
 # ==============================================================================
 # OOD DETECTION UTILITIES

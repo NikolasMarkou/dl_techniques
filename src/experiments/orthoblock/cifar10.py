@@ -117,19 +117,22 @@ import gc
 import json
 import keras
 import numpy as np
+import seaborn as sns
 import tensorflow as tf
 from pathlib import Path
 from datetime import datetime
+import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Callable, Optional
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
+from dl_techniques.layers.experimental.orthoblock import OrthoBlock
 from dl_techniques.utils.datasets import load_and_preprocess_cifar10
-from dl_techniques.utils.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
+from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 
-from dl_techniques.layers.experimental.orthoblock import OrthoBlock
+
 
 # ==============================================================================
 # EXPERIMENT CONFIGURATION
@@ -158,11 +161,11 @@ class OrthoBlockExperimentConfig:
     weight_decay: float = 1e-4
     kernel_initializer: str = 'he_normal'
     use_residual: bool = True
-    activation: str = 'mish'
+    activation: str = 'relu'
     output_activation: str = 'softmax'
 
     # --- Training Parameters ---
-    epochs: int = 100
+    epochs: int = 3
     batch_size: int = 128
     learning_rate: float = 0.001
     early_stopping_patience: int = 20
@@ -201,17 +204,14 @@ class OrthoBlockExperimentConfig:
         'Dense_Standard': lambda config: ('dense', {}),
         'Dense_L2': lambda config: ('dense', {
             'kernel_regularizer': keras.regularizers.L2(0.01)
-        }),
-        'Dense_Dropout': lambda config: ('dense', {
-            'dropout_rate': 0.7
-        }),
+        })
     })
 
     # --- Experiment Configuration ---
     output_dir: Path = Path("results")
     experiment_name: str = "orthoblock_effectiveness_study"
     random_seed: int = 42
-    n_runs: int = 3  # Multiple runs for statistical significance
+    n_runs: int = 2  # Multiple runs for statistical significance
 
     # --- Analysis Configuration ---
     analyzer_config: AnalysisConfig = field(default_factory=lambda: AnalysisConfig(
@@ -235,7 +235,7 @@ def create_dense_layer(
     layer_type: str,
     layer_params: Dict[str, Any],
     units: int,
-    activation: str = 'mish',
+    activation: str = 'relu',
     name: Optional[str] = None
 ) -> keras.layers.Layer:
     """
@@ -377,7 +377,7 @@ def build_model(
         x = build_conv_block(x, filters, config, i)
 
     # Global average pooling
-    x = keras.layers.GlobalAveragePooling2D()(x)
+    x = keras.layers.GlobalMaxPooling2D()(x)
 
     # Create the specified dense layer
     x = create_dense_layer(
@@ -612,13 +612,6 @@ def run_experiment(config: OrthoBlockExperimentConfig) -> Dict[str, Any]:
     experiment_dir = config.output_dir / f"{config.experiment_name}_{timestamp}"
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize visualization manager
-    vis_manager = VisualizationManager(
-        output_dir=experiment_dir / "visualizations",
-        config=VisualizationConfig(),
-        timestamp_dirs=False
-    )
-
     logger.info("🚀 Starting OrthoBlock Effectiveness Experiment")
     logger.info(f"📁 Results will be saved to: {experiment_dir}")
     logger.info("=" * 80)
@@ -628,156 +621,111 @@ def run_experiment(config: OrthoBlockExperimentConfig) -> Dict[str, Any]:
     cifar10_data = load_and_preprocess_cifar10()
     logger.info("✅ Dataset loaded successfully")
 
-    logger.info(f"📋 Dataset Info:")
-    logger.info(f"   Training data shape: {cifar10_data.x_train.shape}")
-    logger.info(f"   Training labels shape: {cifar10_data.y_train.shape}")
-    logger.info(f"   Test data shape: {cifar10_data.x_test.shape}")
-    logger.info(f"   Test labels shape: {cifar10_data.y_test.shape}")
-
     # ===== MULTIPLE RUNS FOR STATISTICAL SIGNIFICANCE =====
     logger.info(f"🔄 Running {config.n_runs} repetitions for statistical significance...")
 
-    all_trained_models = {}  # Final models from all runs
-    all_histories = {}  # Training histories from all runs
-    all_orthogonality_trackers = {}  # Orthogonality tracking data
-    results_per_run = {}  # Performance results per run
+    all_trained_models = {}
+    all_histories = {}
+    all_orthogonality_trackers = {}
+    results_per_run = {variant_name: [] for variant_name in config.dense_variants.keys()}
 
     for run_idx in range(config.n_runs):
         logger.info(f"🏃 Starting run {run_idx + 1}/{config.n_runs}")
-
-        # Set different seed for each run
         run_seed = config.random_seed + run_idx * 1000
         keras.utils.set_random_seed(run_seed)
 
-        run_models = {}
-        run_histories = {}
-        run_trackers = {}
+        current_run_models = {}
+        current_run_histories = {}
+        current_run_trackers = {}
 
-        # ===== TRAINING MODELS FOR THIS RUN =====
         for variant_name, variant_factory in config.dense_variants.items():
             logger.info(f"--- Training {variant_name} (Run {run_idx + 1}) ---")
-
-            # Get layer configuration
             layer_type, layer_params = variant_factory(config)
-
-            # Build model
             model = build_model(config, layer_type, layer_params, f"{variant_name}_run{run_idx}")
 
-            # Log model info
-            if run_idx == 0:  # Only log architecture details for first run
-                model.summary(print_fn=logger.info)
-                logger.info(f"Model {variant_name} parameters: {model.count_params():,}")
+            if run_idx == 0: model.summary(print_fn=logger.info)
 
-            # Create orthogonality tracker for OrthoBlock models
             ortho_tracker = None
             if layer_type == 'orthoblock':
                 ortho_tracker = OrthogonalityTracker(f"{variant_name}_run{run_idx}")
 
-            # Configure training
             training_config = TrainingConfig(
-                epochs=config.epochs,
-                batch_size=config.batch_size,
+                epochs=config.epochs, batch_size=config.batch_size,
                 early_stopping_patience=config.early_stopping_patience,
                 monitor_metric=config.monitor_metric,
                 model_name=f"{variant_name}_run{run_idx}",
                 output_dir=experiment_dir / "training_plots" / f"run_{run_idx}" / variant_name
             )
 
-            # Train model with manual training loop for orthogonality tracking
             if ortho_tracker:
-                # Manual training with orthogonality tracking
                 history = train_model_with_tracker(
                     model, cifar10_data.x_train, cifar10_data.y_train,
-                    cifar10_data.x_test, cifar10_data.y_test, training_config,
-                    ortho_tracker
-                )
+                    cifar10_data.x_test, cifar10_data.y_test, training_config, ortho_tracker)
             else:
-                # Standard training
                 history = train_model(
                     model, cifar10_data.x_train, cifar10_data.y_train,
-                    cifar10_data.x_test, cifar10_data.y_test, training_config
-                )
+                    cifar10_data.x_test, cifar10_data.y_test, training_config)
 
-            run_models[variant_name] = model
-            run_histories[variant_name] = history.history
-            if ortho_tracker:
-                run_trackers[variant_name] = ortho_tracker
-
-            logger.info(f"✅ {variant_name} (Run {run_idx + 1}) training completed!")
-
-        # ===== EVALUATE MODELS FOR THIS RUN =====
-        logger.info(f"📊 Evaluating models for run {run_idx + 1}...")
-
-        for variant_name, model in run_models.items():
             try:
-                # Get predictions for manual accuracy calculation
+                logger.info(f"📊 Evaluating {variant_name} (Run {run_idx + 1})...")
+
+                # ==============================================================================
+                # BIG COMMENT: THIS IS THE DEFINITIVE FIX.
+                # We are completely bypassing the unreliable `model.evaluate()` for accuracy.
+                # Instead, we get raw predictions and compute accuracy manually. This is
+                # foolproof and removes any dependency on Keras's inconsistent metric naming.
+                # ==============================================================================
+
+                # 1. Get model predictions
                 predictions = model.predict(cifar10_data.x_test, verbose=0)
 
-                # Handle label format
-                if len(cifar10_data.y_test.shape) > 1 and cifar10_data.y_test.shape[1] > 1:
+                # 2. Get predicted classes
+                y_pred_classes = np.argmax(predictions, axis=1)
+
+                # 3. Get true classes (handle both one-hot and integer labels)
+                if cifar10_data.y_test.ndim > 1 and cifar10_data.y_test.shape[1] > 1:
                     y_true_classes = np.argmax(cifar10_data.y_test, axis=1)
                 else:
-                    y_true_classes = cifar10_data.y_test.astype(int)
+                    y_true_classes = cifar10_data.y_test
 
-                # Calculate accuracy manually
-                y_pred_classes = np.argmax(predictions, axis=1)
+                # 4. Calculate accuracy manually
                 manual_accuracy = np.mean(y_pred_classes == y_true_classes)
 
-                # Calculate top-5 accuracy
-                top_5_predictions = np.argsort(predictions, axis=1)[:, -5:]
-                manual_top5_acc = np.mean([
-                    y_true in top5_pred
-                    for y_true, top5_pred in zip(y_true_classes, top_5_predictions)
-                ])
+                # We can still use evaluate to reliably get the loss value.
+                eval_results = model.evaluate(cifar10_data.x_test, cifar10_data.y_test, verbose=0)
+                metrics_dict = dict(zip(model.metrics_names, eval_results))
+                loss_value = metrics_dict.get('loss', 0.0)
 
-                # Calculate loss
-                try:
-                    eval_results = model.evaluate(cifar10_data.x_test, cifar10_data.y_test, verbose=0)
-                    metrics_dict = dict(zip(model.metrics_names, eval_results))
-                    loss_value = metrics_dict.get('loss', 0.0)
-                except Exception:
-                    # Calculate loss manually
-                    if len(cifar10_data.y_test.shape) == 1:
-                        y_test_onehot = keras.utils.to_categorical(cifar10_data.y_test, num_classes=10)
-                    else:
-                        y_test_onehot = cifar10_data.y_test
-
-                    loss_value = float(keras.metrics.categorical_crossentropy(y_test_onehot, predictions).numpy().mean())
-
-                # Store results
-                if variant_name not in results_per_run:
-                    results_per_run[variant_name] = []
-
+                # Store the manually calculated, correct accuracy.
                 results_per_run[variant_name].append({
                     'accuracy': manual_accuracy,
-                    'top_5_accuracy': manual_top5_acc,
-                    'loss': loss_value,
-                    'run_idx': run_idx
+                    'loss': loss_value
+                    # Add other manual metrics here if needed
                 })
 
-                logger.info(f"✅ {variant_name} (Run {run_idx + 1}): Accuracy={manual_accuracy:.4f}, Loss={loss_value:.4f}")
+                logger.info(f"✅ {variant_name} (Run {run_idx + 1}): Accuracy={manual_accuracy:.4f}")
 
             except Exception as e:
                 logger.error(f"❌ Error evaluating {variant_name} (Run {run_idx + 1}): {e}", exc_info=True)
 
-        # Store models and trackers from last run for analysis
-        if run_idx == config.n_runs - 1:
-            all_trained_models = run_models
-            all_histories = run_histories
-            all_orthogonality_trackers = run_trackers
+            current_run_models[variant_name] = model
+            current_run_histories[variant_name] = history.history
+            if ortho_tracker:
+                current_run_trackers[variant_name] = ortho_tracker
 
-        # Memory cleanup
-        del run_models
+        if run_idx == config.n_runs - 1:
+            all_trained_models = current_run_models
+            all_histories = current_run_histories
+            all_orthogonality_trackers = current_run_trackers
+
+        del current_run_models, current_run_histories, current_run_trackers
         gc.collect()
 
-    # ===== STATISTICAL ANALYSIS =====
     logger.info("📈 Calculating statistics across runs...")
     run_statistics = calculate_run_statistics(results_per_run)
 
-    # ===== COMPREHENSIVE MODEL ANALYSIS =====
     logger.info("🔬 Performing comprehensive analysis with ModelAnalyzer...")
     model_analysis_results = None
-
     try:
         analyzer = ModelAnalyzer(
             models=all_trained_models,
@@ -785,55 +733,29 @@ def run_experiment(config: OrthoBlockExperimentConfig) -> Dict[str, Any]:
             output_dir=experiment_dir / "model_analysis",
             training_history=all_histories
         )
-
         model_analysis_results = analyzer.analyze(data=DataInput.from_object(cifar10_data))
         logger.info("✅ Model analysis completed successfully!")
-
     except Exception as e:
         logger.error(f"❌ Model analysis failed: {e}", exc_info=True)
 
-    # ===== VISUALIZATION GENERATION =====
-    logger.info("📊 Generating visualizations...")
-
-    # Training history comparison
-    vis_manager.plot_history(
-        histories=all_histories,
-        metrics=['accuracy', 'loss'],
-        name='orthoblock_training_comparison',
-        subdir='training_plots',
-        title='OrthoBlock vs Dense Layer Training Comparison'
-    )
-
-    # Statistical comparison visualization
+    logger.info("📊 Generating custom and multi-run visualizations...")
     create_statistical_comparison_plot(run_statistics, experiment_dir / "visualizations")
-
-    # Orthogonality analysis for OrthoBlock models
     create_orthogonality_analysis_plots(all_orthogonality_trackers, experiment_dir / "visualizations")
 
-    # Confusion matrices
-    raw_predictions = {
-        name: model.predict(cifar10_data.x_test, verbose=0)
-        for name, model in all_trained_models.items()
-    }
-    class_predictions = {
-        name: np.argmax(preds, axis=1)
-        for name, preds in raw_predictions.items()
-    }
+    try:
+        vis_manager = VisualizationManager(output_dir=experiment_dir / "visualizations", config=VisualizationConfig(),
+                                           timestamp_dirs=False)
+        raw_predictions = {name: model.predict(cifar10_data.x_test, verbose=0) for name, model in
+                           all_trained_models.items()}
+        class_predictions = {name: np.argmax(preds, axis=1) for name, preds in raw_predictions.items()}
+        y_true_classes = (
+            np.argmax(cifar10_data.y_test, axis=1) if len(cifar10_data.y_test.shape) > 1 else cifar10_data.y_test)
+        vis_manager.plot_confusion_matrices_comparison(
+            y_true=y_true_classes, model_predictions=class_predictions, name='orthoblock_confusion_matrices',
+            subdir='model_comparison', normalize=True, class_names=[str(i) for i in range(10)])
+    except Exception as e:
+        logger.warning(f"Could not generate custom confusion matrix plot: {e}")
 
-    y_true_classes = (np.argmax(cifar10_data.y_test, axis=1)
-                     if len(cifar10_data.y_test.shape) > 1
-                     else cifar10_data.y_test)
-
-    vis_manager.plot_confusion_matrices_comparison(
-        y_true=y_true_classes,
-        model_predictions=class_predictions,
-        name='orthoblock_confusion_matrices',
-        subdir='model_comparison',
-        normalize=True,
-        class_names=[str(i) for i in range(10)]
-    )
-
-    # ===== RESULTS COMPILATION =====
     results = {
         'run_statistics': run_statistics,
         'model_analysis': model_analysis_results,
@@ -844,12 +766,8 @@ def run_experiment(config: OrthoBlockExperimentConfig) -> Dict[str, Any]:
         'experiment_dir': experiment_dir
     }
 
-    # Save results
     save_experiment_results(results, experiment_dir)
-
-    # Print comprehensive summary
     print_experiment_summary(results)
-
     return results
 
 # ==============================================================================
@@ -865,8 +783,14 @@ def create_statistical_comparison_plot(statistics: Dict[str, Dict[str, float]], 
         output_dir: Directory to save plots
     """
     try:
-        import matplotlib.pyplot as plt
-        import seaborn as sns
+
+
+        # ==============================================================================
+        # FIXED: The function was receiving a path to a directory that might not exist
+        # and was not creating it, leading to a FileNotFoundError.
+        # This line ensures the directory exists before trying to save the plot.
+        # ==============================================================================
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         # Setup plot style
         plt.style.use('seaborn-v0_8')
@@ -931,7 +855,11 @@ def create_orthogonality_analysis_plots(trackers: Dict[str, OrthogonalityTracker
         output_dir: Directory to save plots
     """
     try:
-        import matplotlib.pyplot as plt
+        # ==============================================================================
+        # FIXED: Similar to the other plotting function, this one also needs to ensure
+        # its output directory exists before proceeding.
+        # ==============================================================================
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         if not trackers:
             logger.info("No orthogonality trackers found, skipping orthogonality plots")
@@ -986,12 +914,18 @@ def create_orthogonality_analysis_plots(trackers: Dict[str, OrthogonalityTracker
 
         # Plot 4: Final scale distributions
         ax4 = axes[1, 1]
+
+        # ==============================================================================
+        # FIXED: The variable 'stats' was defined inside a conditional block in the loop,
+        # causing an UnboundLocalError if the condition was false for the last item.
+        # It is now defined *before* the loop to guarantee it always exists.
+        # ==============================================================================
+        stats = ['mean', 'min', 'max']
+
         for i, (model_name, tracker) in enumerate(trackers.items()):
             if tracker.scale_history and tracker.scale_history[-1]:
                 final_scales = tracker.scale_history[-1].get('layer_0', {})
                 if final_scales:
-                    # Create a simple bar plot showing final scale statistics
-                    stats = ['mean', 'min', 'max']
                     values = [final_scales.get(stat, 0) for stat in stats]
                     x_pos = np.arange(len(stats)) + i * 0.2
                     ax4.bar(x_pos, values, width=0.15, label=model_name, alpha=0.7)
@@ -1092,6 +1026,7 @@ def save_experiment_results(results: Dict[str, Any], experiment_dir: Path) -> No
     except Exception as e:
         logger.error(f"❌ Failed to save experiment results: {e}", exc_info=True)
 
+
 def print_experiment_summary(results: Dict[str, Any]) -> None:
     """
     Print comprehensive experiment summary.
@@ -1104,10 +1039,10 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     logger.info("=" * 80)
 
     # ===== STATISTICAL RESULTS =====
-    if 'run_statistics' in results:
+    if 'run_statistics' in results and results['run_statistics']:
         logger.info("📊 STATISTICAL RESULTS (Mean ± Std across runs):")
-        logger.info(f"{'Model':<20} {'Accuracy':<15} {'Loss':<15} {'Runs':<8}")
-        logger.info("-" * 65)
+        logger.info(f"{'Model':<22} {'Accuracy':<18} {'Loss':<18} {'Runs':<8}")
+        logger.info("-" * 70)
 
         for model_name, stats in results['run_statistics'].items():
             acc_mean = stats['accuracy']['mean']
@@ -1116,58 +1051,60 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             loss_std = stats['loss']['std']
             n_runs = stats['accuracy']['count']
 
-            logger.info(f"{model_name:<20} {acc_mean:.3f}±{acc_std:.3f}    "
-                       f"{loss_mean:.3f}±{loss_std:.3f}    {n_runs:<8}")
+            logger.info(f"{model_name:<22} {acc_mean:.4f} ± {acc_std:.4f}    "
+                        f"{loss_mean:.4f} ± {loss_std:.4f}    {n_runs:<8}")
 
-    # ===== CALIBRATION RESULTS =====
-    if results.get('model_analysis') and results['model_analysis'].calibration_metrics:
-        logger.info("🎯 CALIBRATION ANALYSIS:")
-        logger.info(f"{'Model':<20} {'ECE':<12} {'Brier':<12} {'Entropy':<12}")
-        logger.info("-" * 60)
+    # ===== CALIBRATION & CONFIDENCE RESULTS =====
+    analysis_res = results.get('model_analysis')
+    if analysis_res and analysis_res.calibration_metrics:
+        logger.info("\n🎯 CALIBRATION & CONFIDENCE ANALYSIS (from last run):")
+        logger.info(f"{'Model':<22} {'ECE':<12} {'Brier':<12} {'Mean Entropy':<15}")
+        logger.info("-" * 65)
 
-        for model_name, cal_metrics in results['model_analysis'].calibration_metrics.items():
-            ece = cal_metrics['ece']
-            brier = cal_metrics['brier_score']
-            entropy = cal_metrics['mean_entropy']
+        for model_name, cal_metrics in analysis_res.calibration_metrics.items():
+            ece = cal_metrics.get('ece', 0.0)
+            brier = cal_metrics.get('brier_score', 0.0)
 
-            logger.info(f"{model_name:<20} {ece:<12.4f} {brier:<12.4f} {entropy:<12.4f}")
+            # --- MODIFIED: Get entropy from the dedicated confidence_metrics dictionary ---
+            entropy = 0.0
+            if analysis_res.confidence_metrics and model_name in analysis_res.confidence_metrics:
+                confidence_data = analysis_res.confidence_metrics[model_name]
+                entropy = confidence_data.get('mean_entropy', 0.0)
+
+            logger.info(f"{model_name:<22} {ece:<12.4f} {brier:<12.4f} {entropy:<15.4f}")
 
     # ===== KEY INSIGHTS =====
-    logger.info("🔍 KEY INSIGHTS:")
+    logger.info("\n🔍 KEY INSIGHTS:")
 
-    if 'run_statistics' in results:
-        # Find best performing model
+    if 'run_statistics' in results and results['run_statistics']:
         best_model = max(results['run_statistics'].items(),
-                        key=lambda x: x[1]['accuracy']['mean'])
+                         key=lambda x: x[1]['accuracy']['mean'])
         logger.info(f"   🏆 Best Accuracy: {best_model[0]} ({best_model[1]['accuracy']['mean']:.4f})")
 
-        # Find most stable model (lowest std)
         most_stable = min(results['run_statistics'].items(),
-                         key=lambda x: x[1]['accuracy']['std'])
-        logger.info(f"   🎯 Most Stable: {most_stable[0]} (std: {most_stable[1]['accuracy']['std']:.4f})")
+                          key=lambda x: x[1]['accuracy']['std'])
+        logger.info(f"   🎯 Most Stable: {most_stable[0]} (Accuracy Std: {most_stable[1]['accuracy']['std']:.4f})")
 
-        # Compare OrthoBlock variants
         ortho_models = {k: v for k, v in results['run_statistics'].items() if k.startswith('OrthoBlock')}
         dense_models = {k: v for k, v in results['run_statistics'].items() if k.startswith('Dense')}
 
         if ortho_models:
             logger.info("   🔗 OrthoBlock Analysis:")
             for model_name, stats in ortho_models.items():
-                logger.info(f"      {model_name}: {stats['accuracy']['mean']:.4f} ± {stats['accuracy']['std']:.4f}")
+                logger.info(f"      {model_name:<20}: {stats['accuracy']['mean']:.4f} ± {stats['accuracy']['std']:.4f}")
 
         if dense_models:
             logger.info("   📊 Dense Layer Analysis:")
             for model_name, stats in dense_models.items():
-                logger.info(f"      {model_name}: {stats['accuracy']['mean']:.4f} ± {stats['accuracy']['std']:.4f}")
+                logger.info(f"      {model_name:<20}: {stats['accuracy']['mean']:.4f} ± {stats['accuracy']['std']:.4f}")
 
-        # Orthogonality insights
         if results.get('orthogonality_trackers'):
-            logger.info("   📐 Orthogonality Insights:")
+            logger.info("   📐 Orthogonality Insights (Initial → Final ||W^T W - I||_F):")
             for model_name, tracker in results['orthogonality_trackers'].items():
                 if tracker.orthogonality_history:
                     final_ortho = tracker.orthogonality_history[-1].get('layer_0', 0)
                     initial_ortho = tracker.orthogonality_history[0].get('layer_0', 0)
-                    logger.info(f"      {model_name}: {initial_ortho:.3f} → {final_ortho:.3f}")
+                    logger.info(f"      {model_name:<20}: {initial_ortho:.3f} → {final_ortho:.3f}")
 
     logger.info("=" * 80)
 
@@ -1205,7 +1142,7 @@ def main() -> None:
 
     try:
         # Run experiment
-        results = run_experiment(config)
+        _ = run_experiment(config)
         logger.info("✅ OrthoBlock effectiveness experiment completed successfully!")
 
     except Exception as e:

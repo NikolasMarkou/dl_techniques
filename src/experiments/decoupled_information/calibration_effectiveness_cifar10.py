@@ -12,7 +12,7 @@ from dl_techniques.utils.datasets import load_and_preprocess_cifar10
 from dl_techniques.losses.decoupled_information_loss import DecoupledInformationLoss
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 
-from dl_techniques.utils.analyzer import (
+from dl_techniques.analyzer import (
     ModelAnalyzer,
     AnalysisConfig,
     DataInput

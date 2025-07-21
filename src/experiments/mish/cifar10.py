@@ -185,7 +185,7 @@ from dl_techniques.layers.activations.mish import mish, saturated_mish
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 
 
-from dl_techniques.utils.analyzer import (
+from dl_techniques.analyzer import (
     ModelAnalyzer,
     AnalysisConfig,
     DataInput
