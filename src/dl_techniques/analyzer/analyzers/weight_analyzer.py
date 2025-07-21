@@ -28,8 +28,13 @@ class WeightAnalyzer(BaseAnalyzer):
         """Analyze weight distributions with improved visualizations."""
         logger.info("Analyzing weight distributions...")
 
+        # Initialize layer order tracking for robust visualization
+        if not hasattr(results, 'weight_stats_layer_order'):
+            results.weight_stats_layer_order = {}
+
         for model_name, model in self.models.items():
             results.weight_stats[model_name] = {}
+            layer_names_in_order = []  # Track actual layer order
 
             for layer in model.layers:
                 if (self.config.weight_layer_types and
@@ -47,6 +52,13 @@ class WeightAnalyzer(BaseAnalyzer):
                     weight_name = f"{layer.name}_w{idx}"
                     stats = self._compute_weight_statistics(w)
                     results.weight_stats[model_name][weight_name] = stats
+
+                    # Track layer order for robust visualization
+                    if weight_name not in layer_names_in_order:
+                        layer_names_in_order.append(weight_name)
+
+            # Store explicit layer order for visualizers to use
+            results.weight_stats_layer_order[model_name] = layer_names_in_order
 
         # Compute PCA if requested
         if self.config.compute_weight_pca:
@@ -102,16 +114,28 @@ class WeightAnalyzer(BaseAnalyzer):
             if not weight_stats:
                 continue
 
-            # Extract statistical features from all layers
+            # Extract statistical features from all layers using explicit ordering
             features = []
 
-            # Sort layers by their appearance order in the model
-            model = self.models[model_name]
-            layer_order = {layer.name: i for i, layer in enumerate(model.layers)}
-            sorted_stats = sorted(weight_stats.items(),
-                                key=lambda x: layer_order.get(x[0].split('_w')[0], float('inf')))
+            # Use explicit layer order from results instead of relying on dict order
+            if hasattr(results, 'weight_stats_layer_order') and model_name in results.weight_stats_layer_order:
+                layer_order = results.weight_stats_layer_order[model_name]
+            else:
+                # Fallback to model layer order if available
+                model = self.models[model_name]
+                layer_order = []
+                for layer in model.layers:
+                    for idx in range(len(layer.get_weights())):
+                        weight_name = f"{layer.name}_w{idx}"
+                        if weight_name in weight_stats:
+                            layer_order.append(weight_name)
 
-            for layer_name, stats in sorted_stats:
+            for layer_name in layer_order:
+                if layer_name not in weight_stats:
+                    continue
+
+                stats = weight_stats[layer_name]
+
                 # Create a fixed-size feature vector from statistics
                 layer_features = [
                     stats['basic']['mean'],

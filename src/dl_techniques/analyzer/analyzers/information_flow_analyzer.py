@@ -1,5 +1,3 @@
-# File: /analyzers/information_flow_analyzer.py
-
 """
 Information Flow Analysis Module
 ============================================================================
@@ -13,13 +11,14 @@ from typing import Dict, Any, Optional, List
 
 from .base import BaseAnalyzer
 from ..data_types import AnalysisResults, DataInput
+from ..config import AnalysisConfig  # Added import for proper type hint
 from dl_techniques.utils.logger import logger
 
 
 class InformationFlowAnalyzer(BaseAnalyzer):
     """Analyzes information flow through network layers."""
 
-    def __init__(self, models: Dict[str, keras.Model], config: Any):
+    def __init__(self, models: Dict[str, keras.Model], config: AnalysisConfig):  # FIXED: changed Any to AnalysisConfig
         """Initialize analyzer and setup extraction models."""
         super().__init__(models, config)
         self.layer_extraction_models = {}

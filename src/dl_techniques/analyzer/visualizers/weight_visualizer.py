@@ -47,22 +47,12 @@ class WeightVisualizer(BaseVisualizer):
             l2_norms = []
             mean_abs_weights = []
 
-            # Get the actual model to determine layer order
-            model = next((m for name, m in self.model_colors.items() if name == model_name), None)
             if model_name in self.results.weight_stats:
-                # Sort layers by their position in the model
                 model_weight_stats = self.results.weight_stats[model_name]
 
-                # Create a mapping of layer names to their positions
-                # This assumes layer names in weight_stats contain the original layer name
-                sorted_layers = []
-                for layer_name, stats in model_weight_stats.items():
-                    # Extract the base layer name (before _w suffix)
-                    base_name = layer_name.rsplit('_w', 1)[0]
-                    sorted_layers.append((layer_name, stats))
-
-                # Sort by the order they appear in weight_stats (which preserves model order)
-                for idx, (layer_name, stats) in enumerate(sorted_layers):
+                # Use insertion order (preserved from WeightAnalyzer iteration over model.layers)
+                # This maintains the correct network layer order
+                for idx, (layer_name, stats) in enumerate(model_weight_stats.items()):
                     layer_indices.append(idx)
                     l2_norms.append(stats['norms']['l2'])
                     mean_abs_weights.append(abs(stats['basic']['mean']))
@@ -108,14 +98,16 @@ class WeightVisualizer(BaseVisualizer):
         # Prepare health metrics - each model uses its own layer sequence
         health_metrics = []
         models = sorted(self.results.weight_stats.keys())
-        max_layers = 12  # Show first 12 layers for each model
+        max_layers = getattr(self.config, 'max_layers_heatmap', 12)  # Use config parameter
 
         for model_name in models:
             weight_stats = self.results.weight_stats[model_name]
             model_health = []
 
-            # Get this model's layers in order (first 12)
-            model_layers = sorted(list(weight_stats.keys()))[:max_layers]
+            # CRITICAL FIX: Use insertion order (network order) instead of alphabetical sorting
+            # The WeightAnalyzer iterates model.layers in order, so the dictionary preserves
+            # the correct network layer sequence. Sorting alphabetically breaks this!
+            model_layers = list(weight_stats.keys())[:max_layers]  # FIXED: removed sorted()
 
             for layer_idx in range(max_layers):
                 if layer_idx < len(model_layers):

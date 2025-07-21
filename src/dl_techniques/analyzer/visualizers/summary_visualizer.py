@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from .base import BaseVisualizer
+from ..utils import find_model_metric  # Import the new helper function
 from dl_techniques.utils.logger import logger
 
 
@@ -45,7 +46,7 @@ class SummaryVisualizer(BaseVisualizer):
         plt.close(fig)
 
     def _plot_performance_table(self, ax) -> None:
-        """Create performance table including training metrics."""
+        """Create performance table including training metrics with improved metric finding."""
         # Prepare data for the table
         table_data = []
 
@@ -63,23 +64,20 @@ class SummaryVisualizer(BaseVisualizer):
 
             if self.results.training_metrics and self.results.training_metrics.peak_performance:
                 # Include training insights
-                # Final accuracy
-                acc = model_metrics.get('accuracy')
-                if acc is None:
-                    acc = model_metrics.get('compile_metrics')
-                if acc is None:
-                    acc = model_metrics.get('val_accuracy')
-                if acc is None:
-                    acc = 0.0
-                row_data.append(f'{acc:.3f}')
+
+                # Final accuracy - using the new helper function to reduce duplication
+                accuracy_keys = ['accuracy', 'compile_metrics', 'val_accuracy', 'categorical_accuracy',
+                               'sparse_categorical_accuracy']
+                final_acc = find_model_metric(model_metrics, accuracy_keys, 0.0)
+                row_data.append(f'{final_acc:.3f}')
 
                 # Best accuracy from training
                 peak = self.results.training_metrics.peak_performance.get(model_name, {})
-                best_acc = peak.get('val_accuracy', acc)
+                best_acc = peak.get('val_accuracy', final_acc)
                 row_data.append(f'{best_acc:.3f}')
 
                 # Loss
-                loss = model_metrics.get('loss', 0.0)
+                loss = find_model_metric(model_metrics, ['loss'], 0.0)
                 row_data.append(f'{loss:.3f}')
 
                 # ECE
@@ -100,18 +98,15 @@ class SummaryVisualizer(BaseVisualizer):
 
             else:
                 # Original table without training data
-                # Accuracy
-                acc = model_metrics.get('accuracy')
-                if acc is None:
-                    acc = model_metrics.get('compile_metrics')
-                if acc is None:
-                    acc = model_metrics.get('val_accuracy')
-                if acc is None:
-                    acc = 0.0
+
+                # Accuracy - using helper function
+                accuracy_keys = ['accuracy', 'compile_metrics', 'val_accuracy', 'categorical_accuracy',
+                               'sparse_categorical_accuracy']
+                acc = find_model_metric(model_metrics, accuracy_keys, 0.0)
                 row_data.append(f'{acc:.3f}')
 
                 # Loss
-                loss = model_metrics.get('loss', 0.0)
+                loss = find_model_metric(model_metrics, ['loss'], 0.0)
                 row_data.append(f'{loss:.3f}')
 
                 # ECE

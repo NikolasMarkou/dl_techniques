@@ -439,7 +439,7 @@ class ModelAnalyzer:
     def create_pareto_analysis(self, save_plot: bool = True) -> Optional[plt.Figure]:
         """Create Pareto front analysis for hyperparameter sweep scenarios.
 
-        This is particularly useful when analyzing many models (>10) to identify
+        This is particularly useful when analyzing many models to identify
         the Pareto-optimal ones that balance performance vs overfitting.
 
         Time Complexity: O(N²) where N is the number of models.
@@ -473,8 +473,9 @@ class ModelAnalyzer:
                     self.results.training_metrics.epochs_to_convergence.get(model_name, 0)
                 )
 
-        if len(models) < 2:
-            logger.warning("Need at least 2 models for Pareto analysis")
+        # FIXED: Use config threshold instead of hardcoded value
+        if len(models) < self.config.pareto_analysis_threshold:
+            logger.warning(f"Need at least {self.config.pareto_analysis_threshold} models for Pareto analysis")
             return None
 
         # Create figure
@@ -543,16 +544,11 @@ class ModelAnalyzer:
         plt.tight_layout()
 
         if save_plot and self.config.save_plots:
-            self._save_figure(fig, 'pareto_analysis')
+            # Use the base visualizer's save method to avoid code duplication
+            # Create a temporary summary visualizer just to save this plot
+            summary_visualizer = SummaryVisualizer(
+                self.results, self.config, self.output_dir, self.model_colors
+            )
+            summary_visualizer._save_figure(fig, 'pareto_analysis')
 
         return fig
-
-    def _save_figure(self, fig: plt.Figure, name: str) -> None:
-        """Save figure with configured settings."""
-        try:
-            filepath = self.output_dir / f"{name}.{self.config.save_format}"
-            fig.savefig(filepath, dpi=self.config.dpi, bbox_inches='tight',
-                       facecolor='white', edgecolor='none', pad_inches=0.1)
-            logger.info(f"Saved plot: {filepath}")
-        except Exception as e:
-            logger.error(f"Could not save figure {name}: {e}")

@@ -8,7 +8,7 @@ Common utility functions used throughout the analyzer module.
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Tuple, Any
 from dl_techniques.utils.logger import logger
 
 
@@ -105,6 +105,33 @@ def find_metric_in_history(history: Dict[str, List[float]], patterns: List[str],
                 return history[key]
 
     return None
+
+
+def find_model_metric(model_metrics: Dict[str, Any],
+                     metric_keys: List[str],
+                     default: float = 0.0) -> float:
+    """Helper function to find a metric value from model metrics with fallback chain.
+
+    This reduces code duplication in summary tables where we need to check multiple
+    possible metric names in order of preference.
+
+    Args:
+        model_metrics: Dictionary of model metrics
+        metric_keys: List of metric keys to check in order of preference
+        default: Default value if no metrics found
+
+    Returns:
+        The first found metric value or default
+
+    Example:
+        >>> metrics = {'categorical_accuracy': 0.85, 'loss': 0.3}
+        >>> find_model_metric(metrics, ['accuracy', 'categorical_accuracy', 'compile_metrics'])
+        0.85
+    """
+    for key in metric_keys:
+        if key in model_metrics and model_metrics[key] is not None:
+            return float(model_metrics[key])
+    return default
 
 
 def lighten_color(color: str, factor: float) -> Tuple[float, float, float]:
