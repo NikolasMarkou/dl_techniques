@@ -71,7 +71,7 @@ class InformationFlowVisualizer(BaseVisualizer):
         ax.set_xlabel('Layer Depth')
         ax.set_ylabel('Activation Statistics')
         ax.set_title('Activation Mean ± Std Evolution')
-        ax.legend()
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(True, alpha=0.3)
 
     def _plot_effective_rank_evolution(self, ax) -> None:
@@ -94,7 +94,7 @@ class InformationFlowVisualizer(BaseVisualizer):
         ax.set_xlabel('Layer Depth')
         ax.set_ylabel('Effective Rank')
         ax.set_title('Information Dimensionality Evolution')
-        ax.legend()
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(True, alpha=0.3)
 
     def _plot_activation_health_dashboard(self, ax) -> None:
@@ -137,7 +137,9 @@ class InformationFlowVisualizer(BaseVisualizer):
 
             # Create heatmap data
             models = sorted(df['Model'].unique())
-            layers = df['Layer'].unique()[:8]  # Limit to first 8 layers for readability
+            # Use configurable parameter instead of hardcoded value
+            max_layers = getattr(self.config, 'max_layers_info_flow', 8)
+            layers = df['Layer'].unique()[:max_layers]  # Limit based on config
 
             # Create separate heatmaps for each metric
             metrics = ['Dead Neurons', 'Saturation', 'Activation Level']
@@ -212,6 +214,8 @@ class InformationFlowVisualizer(BaseVisualizer):
 
             total_specialization = 0
             layer_count = 0
+            # Use configurable parameter instead of hardcoded value
+            max_layers = getattr(self.config, 'max_layers_info_flow', 10)
             layer_specializations = []
 
             for layer_name, analysis in layer_analysis.items():
@@ -246,7 +250,7 @@ class InformationFlowVisualizer(BaseVisualizer):
                 specialization_data.append({
                     'Model': model_name,
                     'Average Specialization': avg_specialization,
-                    'Layer Specializations': layer_specializations[:10]  # Limit to first 10 layers
+                    'Layer Specializations': layer_specializations[:max_layers]  # Limit based on config
                 })
 
         if specialization_data:
@@ -292,7 +296,7 @@ class InformationFlowVisualizer(BaseVisualizer):
             ax_bottom.set_title('Layer-wise Specialization Evolution', fontsize=10, fontweight='bold')
             ax_bottom.set_xlabel('Layer Index')
             ax_bottom.set_ylabel('Specialization Score')
-            ax_bottom.legend(fontsize=8)
+            ax_bottom.legend(fontsize=8, bbox_to_anchor=(1.05, 1), loc='upper left')
             ax_bottom.grid(True, alpha=0.3)
             ax_bottom.set_ylim(0, 1)
 

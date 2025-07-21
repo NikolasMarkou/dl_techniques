@@ -57,6 +57,14 @@ def find_metric_in_history(history: Dict[str, List[float]], patterns: List[str],
                           exclude_prefixes: Optional[List[str]] = None) -> Optional[List[float]]:
     """Flexibly find a metric in training history by checking multiple possible names.
 
+    This function uses a two-pass approach:
+    1. First, try exact string matches for efficiency and clarity
+    2. If no exact match, try substring matching with word boundaries to avoid ambiguity
+
+    The logic handles common Keras metric naming patterns but may not work with
+    highly unusual metric names. For example, metrics with spaces or complex
+    punctuation may not be matched correctly.
+
     Args:
         history: Training history dictionary
         patterns: List of possible metric names to check
@@ -64,6 +72,13 @@ def find_metric_in_history(history: Dict[str, List[float]], patterns: List[str],
 
     Returns:
         The metric values if found, None otherwise
+
+    Example:
+        >>> history = {'loss': [0.5, 0.3], 'val_loss': [0.6, 0.4], 'accuracy': [0.8, 0.9]}
+        >>> find_metric_in_history(history, ['loss'], exclude_prefixes=['val_'])
+        [0.5, 0.3]
+        >>> find_metric_in_history(history, ['loss'])  # Without exclusion
+        [0.5, 0.3]  # Returns first match (training loss)
     """
     # First try exact matches
     for pattern in patterns:
@@ -84,6 +99,7 @@ def find_metric_in_history(history: Dict[str, List[float]], patterns: List[str],
         for pattern in patterns:
             # Only match if pattern is a complete word/component in the key
             # This prevents 'acc' from matching 'val_acc'
+            # Split by underscores and spaces to get word components
             key_parts = key.replace('_', ' ').split()
             if pattern in key_parts:
                 return history[key]
@@ -103,7 +119,28 @@ def lighten_color(color: str, factor: float) -> Tuple[float, float, float]:
 
 
 def find_pareto_front(costs1: np.ndarray, costs2: np.ndarray) -> List[int]:
-    """Find indices of Pareto optimal points (maximizing both objectives)."""
+    """Find indices of Pareto optimal points (maximizing both objectives).
+
+    Time Complexity: O(N²) where N is the number of points.
+    Space Complexity: O(N) for storing the result indices.
+
+    This implementation is suitable for small-to-medium datasets (<100 points).
+    For larger datasets, consider using more efficient algorithms like the
+    non-dominated sorting approach.
+
+    Args:
+        costs1: Array of first objective values (to be maximized)
+        costs2: Array of second objective values (to be maximized)
+
+    Returns:
+        List of indices of Pareto optimal points, sorted in ascending order
+
+    Example:
+        >>> costs1 = np.array([1, 2, 3])
+        >>> costs2 = np.array([3, 2, 1])
+        >>> find_pareto_front(costs1, costs2)
+        [0, 2]  # Points (1,3) and (3,1) are Pareto optimal
+    """
     population_size = len(costs1)
     pareto_indices = []
 
@@ -123,17 +160,35 @@ def find_pareto_front(costs1: np.ndarray, costs2: np.ndarray) -> List[int]:
 
 
 def normalize_metric(values: List[float], higher_better: bool = True) -> np.ndarray:
-    """Normalize metric values to 0-1 range."""
+    """Normalize metric values to 0-1 range.
+
+    Args:
+        values: List of metric values to normalize
+        higher_better: If True, higher values are considered better.
+                      If False, lower values are considered better (e.g., for loss).
+
+    Returns:
+        Normalized array where higher values are always better (0-1 range)
+
+    Example:
+        >>> normalize_metric([1, 2, 3], higher_better=True)
+        array([0. , 0.5, 1. ])
+        >>> normalize_metric([1, 2, 3], higher_better=False)
+        array([1. , 0.5, 0. ])
+    """
     arr = np.array(values)
     if len(arr) == 0:
         return arr
 
     min_val, max_val = arr.min(), arr.max()
     if max_val == min_val:
+        # All values are the same, return middle value
         return np.ones_like(arr) * 0.5
 
+    # Normalize to 0-1 range
     normalized = (arr - min_val) / (max_val - min_val)
 
+    # If lower is better, flip the normalization
     if not higher_better:
         normalized = 1 - normalized
 

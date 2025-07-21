@@ -81,6 +81,10 @@ class ModelAnalyzer:
         # Cache for model outputs
         self._prediction_cache: Dict[str, Dict[str, np.ndarray]] = {}
 
+        # Track multi-input models for better handling
+        self._multi_input_models: Set[str] = set()
+        self._identify_multi_input_models()
+
         # Initialize model colors for consistent visualization
         self.model_colors: Dict[str, str] = {}
         self._setup_model_colors()
@@ -89,6 +93,18 @@ class ModelAnalyzer:
         self._init_analyzers()
 
         logger.info(f"ModelAnalyzer initialized with {len(models)} models")
+        if self._multi_input_models:
+            logger.info(f"Detected multi-input models: {self._multi_input_models}")
+
+    def _identify_multi_input_models(self) -> None:
+        """Identify models with multiple inputs for special handling."""
+        for model_name, model in self.models.items():
+            try:
+                if hasattr(model, 'inputs') and len(model.inputs) > 1:
+                    self._multi_input_models.add(model_name)
+                    logger.debug(f"Model {model_name} identified as multi-input ({len(model.inputs)} inputs)")
+            except Exception as e:
+                logger.debug(f"Could not determine input structure for {model_name}: {e}")
 
     def _setup_model_colors(self) -> None:
         """Set up consistent colors for models across all visualizations."""
@@ -158,6 +174,14 @@ class ModelAnalyzer:
                     logger.warning(f"Skipping {analysis_type} analysis - requires data")
                     continue
 
+                # Skip data-dependent analyses for multi-input models
+                if (analyzer.requires_data() and
+                    analysis_type in ['calibration', 'information_flow'] and
+                    self._multi_input_models):
+                    affected_models = analysis_types & self._multi_input_models if hasattr(analysis_types, 'intersection') else self._multi_input_models
+                    if affected_models:
+                        logger.warning(f"Limited {analysis_type} analysis for multi-input models: {affected_models}")
+
                 # Run analysis
                 analyzer.analyze(self.results, data, self._prediction_cache)
 
@@ -185,26 +209,30 @@ class ModelAnalyzer:
         logger.info("Caching model predictions...")
         for model_name, model in tqdm(self.models.items(), desc="Computing predictions"):
             try:
-                # Handle both single-input and multi-input models
-                if hasattr(model, 'inputs') and len(model.inputs) > 1:
-                    # Multi-input model - this is a simplified handling
-                    # In practice, users should provide properly structured multi-input data
-                    logger.warning(f"Model {model_name} has multiple inputs. Using simplified input handling.")
-                    # For now, we'll skip multi-input models in prediction caching
-                    # Users should override this method for proper multi-input handling
+                # Handle multi-input models with clear logging
+                if model_name in self._multi_input_models:
+                    logger.warning(f"Model {model_name} has multiple inputs. "
+                                   "Prediction caching is limited for multi-input architectures. "
+                                   "Some analyses may be skipped or have reduced functionality.")
+
+                    # Set cache to indicate multi-input status
                     self._prediction_cache[model_name] = {
                         'predictions': None,
                         'x_data': x_data,
                         'y_data': y_data,
-                        'multi_input': True
+                        'multi_input': True,
+                        'status': 'skipped_multi_input'
                     }
                     continue
 
+                # Standard single-input model processing
                 predictions = model.predict(x_data, verbose=0)
                 self._prediction_cache[model_name] = {
                     'predictions': predictions,
                     'x_data': x_data,
-                    'y_data': y_data
+                    'y_data': y_data,
+                    'multi_input': False,
+                    'status': 'success'
                 }
             except Exception as e:
                 logger.error(f"Failed to cache predictions for {model_name}: {e}")
@@ -212,36 +240,64 @@ class ModelAnalyzer:
                     'predictions': None,
                     'x_data': x_data,
                     'y_data': y_data,
-                    'error': str(e)
+                    'error': str(e),
+                    'status': 'error'
                 }
 
-        # Also evaluate models with better metric handling
+        # Evaluate models with improved handling
         for model_name, model in self.models.items():
             try:
-                # Skip multi-input models for now in evaluation
-                if hasattr(model, 'inputs') and len(model.inputs) > 1:
-                    logger.warning(f"Skipping evaluation for multi-input model {model_name}")
-                    self.results.model_metrics[model_name] = {'loss': 0.0, 'accuracy': 0.0}
+                # Skip evaluation for multi-input models
+                if model_name in self._multi_input_models:
+                    logger.info(f"Skipping evaluation for multi-input model {model_name}")
+                    self.results.model_metrics[model_name] = {
+                        'loss': 0.0,
+                        'accuracy': 0.0,
+                        'status': 'multi_input_skipped'
+                    }
                     continue
 
-                metrics = model.evaluate(x_data, y_data, verbose=0)
+                # Standard evaluation
+                try:
+                    metrics = model.evaluate(x_data, y_data, verbose=0)
+                except (ValueError, TypeError) as eval_error:
+                    # Handle evaluation errors more specifically
+                    logger.warning(f"Model evaluation failed for {model_name}: {eval_error}")
+                    self.results.model_metrics[model_name] = {
+                        'loss': 0.0,
+                        'accuracy': 0.0,
+                        'status': 'evaluation_failed',
+                        'error': str(eval_error)
+                    }
+                    continue
+
                 metric_names = getattr(model, 'metrics_names', ['loss'])
 
                 # Handle different metric name patterns
-                metric_dict = {}
-                for i, name in enumerate(metric_names):
-                    if i < len(metrics):
-                        value = metrics[i] if isinstance(metrics, (list, tuple)) else metrics
-                        metric_dict[name] = value
+                metric_dict = {'status': 'success'}
+                if isinstance(metrics, (list, tuple)):
+                    for i, name in enumerate(metric_names):
+                        if i < len(metrics):
+                            metric_dict[name] = float(metrics[i])
+                else:
+                    # Single metric case
+                    metric_dict[metric_names[0] if metric_names else 'loss'] = float(metrics)
 
-                        # Add common aliases for accuracy
-                        if name in ['compile_metrics', 'categorical_accuracy', 'sparse_categorical_accuracy']:
-                            metric_dict['accuracy'] = value
+                # Add common aliases for accuracy
+                for name, value in metric_dict.items():
+                    if name in ['compile_metrics', 'categorical_accuracy', 'sparse_categorical_accuracy']:
+                        metric_dict['accuracy'] = value
 
                 self.results.model_metrics[model_name] = metric_dict
+
             except Exception as e:
                 logger.warning(f"Could not evaluate model {model_name}: {e}")
-                self.results.model_metrics[model_name] = {'loss': 0.0, 'accuracy': 0.0}
+                self.results.model_metrics[model_name] = {
+                    'loss': 0.0,
+                    'accuracy': 0.0,
+                    'status': 'error',
+                    'error': str(e)
+                }
 
     def _create_visualizations(self, analysis_types: Set[str]) -> None:
         """Create visualizations for completed analyses."""
@@ -279,6 +335,7 @@ class ModelAnalyzer:
             'information_flow': self.results.information_flow,
             'activation_stats': self.results.activation_stats,
             'training_metrics': self._serialize_training_metrics() if self.results.training_metrics else None,
+            'multi_input_models': list(self._multi_input_models),  # Include multi-input model info
         }
 
         # Convert numpy arrays to lists for JSON serialization
@@ -326,6 +383,8 @@ class ModelAnalyzer:
         """Get summary statistics of the analysis."""
         summary = {
             'n_models': len(self.models),
+            'n_multi_input_models': len(self._multi_input_models),
+            'multi_input_models': list(self._multi_input_models),
             'analyses_performed': [],
             'model_performance': {},
             'calibration_summary': {},
@@ -347,7 +406,8 @@ class ModelAnalyzer:
         for model_name, metrics in self.results.model_metrics.items():
             summary['model_performance'][model_name] = {
                 'accuracy': metrics.get('accuracy', 0),
-                'loss': metrics.get('loss', 0)
+                'loss': metrics.get('loss', 0),
+                'status': metrics.get('status', 'unknown')
             }
 
         for model_name, metrics in self.results.calibration_metrics.items():
@@ -381,6 +441,9 @@ class ModelAnalyzer:
 
         This is particularly useful when analyzing many models (>10) to identify
         the Pareto-optimal ones that balance performance vs overfitting.
+
+        Time Complexity: O(N²) where N is the number of models.
+        Suitable for small-to-medium numbers of models (<100).
 
         Returns:
             Figure object if successful, None otherwise

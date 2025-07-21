@@ -187,19 +187,19 @@ class SummaryVisualizer(BaseVisualizer):
             brier_values.append(metrics.get('brier_score', 0.0))
 
         # Create a scatter plot showing ECE vs Brier Score
-        for i, model_name in enumerate(models):
-            color = self.model_colors.get(model_name, '#333333')
+        for i, model in enumerate(models):
+            color = self.model_colors.get(model, '#333333')
             ax.scatter(ece_values[i], brier_values[i],
                       s=200, color=color, alpha=0.8,
                       edgecolors='black', linewidth=2,
-                      label=model_name)
+                      label=model)
 
         # Add reference lines
         if ece_values and brier_values:
-            # Perfect calibration line (diagonal)
+            # Reference line where ECE equals Brier Score
             max_val = max(max(ece_values), max(brier_values))
             ax.plot([0, max_val], [0, max_val], 'k--', alpha=0.5,
-                   label='Perfect Correlation')
+                   label='ECE = Brier Score')
 
             # Add quadrants for interpretation
             mean_ece = np.mean(ece_values)
@@ -222,6 +222,7 @@ class SummaryVisualizer(BaseVisualizer):
         ax.set_xlabel('Expected Calibration Error (ECE)')
         ax.set_ylabel('Brier Score')
         ax.set_title('Calibration Performance Landscape')
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(True, alpha=0.3)
 
         # Set axis limits to start from 0
@@ -231,8 +232,8 @@ class SummaryVisualizer(BaseVisualizer):
     def _plot_model_similarity(self, ax) -> None:
         """Plot model similarity based on weight PCA.
 
-        Note: PCA is performed on aggregated weight statistics across all layers
-        to ensure fair comparison between models with different architectures.
+        Note: PCA is performed on concatenated weight statistics from all layers
+        to ensure fair comparison between models with identical layer structures.
         """
         if not self.results.weight_pca:
             ax.text(0.5, 0.5, 'No weight PCA data available',
@@ -267,8 +268,8 @@ class SummaryVisualizer(BaseVisualizer):
 
         ax.set_xlabel(f'PC1 ({explained_var[0]:.1%})')
         ax.set_ylabel(f'PC2 ({explained_var[1]:.1%})' if len(explained_var) > 1 else 'PC2')
-        ax.set_title('Model Similarity (Aggregated Weight Statistics)')
-        ax.legend()
+        ax.set_title('Model Similarity (Concatenated Weight Statistics)')
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(True, alpha=0.3)
         ax.set_aspect('equal', adjustable='box')
 

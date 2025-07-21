@@ -15,7 +15,7 @@ from typing import Optional, List, Tuple
 class AnalysisConfig:
     """Configuration for all analysis types."""
 
-    # Analysis toggles (removed redundant flags)
+    # Analysis toggles
     analyze_weights: bool = True
     analyze_calibration: bool = True
     analyze_information_flow: bool = True
@@ -55,6 +55,18 @@ class AnalysisConfig:
     show_statistical_tests: bool = True
     show_confidence_intervals: bool = True
     verbose: bool = True
+
+    # Configurable visualization parameters (addressing hardcoded values)
+    max_layers_heatmap: int = 12  # Maximum layers to show in weight health heatmap
+    max_layers_info_flow: int = 8  # Maximum layers to show in information flow analysis
+    pareto_analysis_threshold: int = 2  # Minimum models needed for Pareto analysis
+
+    # Exception handling specificity
+    catch_specific_exceptions: bool = True  # When True, catch more specific exceptions
+
+    # Performance settings
+    enable_parallel_analysis: bool = False  # For future parallel processing
+    memory_limit_mb: Optional[int] = None  # For memory-constrained environments
 
     def get_figure_size(self, scale: float = 1.0) -> Tuple[float, float]:
         """Get figure size with optional scaling."""

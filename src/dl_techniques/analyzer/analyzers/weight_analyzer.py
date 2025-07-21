@@ -89,7 +89,12 @@ class WeightAnalyzer(BaseAnalyzer):
         return stats
 
     def _compute_weight_pca(self, results: AnalysisResults) -> None:
-        """Perform PCA analysis on weight statistics across all layers."""
+        """Perform PCA analysis on concatenated weight statistics from all layers.
+
+        Note: This analysis only works for models with the same number of analyzed layers,
+        as it creates fixed-length feature vectors by concatenating statistics from each layer.
+        Models with different architectures will be skipped.
+        """
         model_features = []
         labels = []
 
@@ -130,7 +135,7 @@ class WeightAnalyzer(BaseAnalyzer):
 
                 features.extend(layer_features)
 
-            # Ensure all models have the same feature length by padding with zeros
+            # Store features if available
             if features:
                 model_features.append(features)
                 labels.append(model_name)
@@ -140,13 +145,13 @@ class WeightAnalyzer(BaseAnalyzer):
             first_len = len(model_features[0])
             if not all(len(f) == first_len for f in model_features):
                 logger.warning(
-                    "Skipping weight PCA: Models have different architectures (layer counts), "
-                    "making a direct comparison via PCA invalid."
+                    "Skipping weight PCA: Models have different architectures (different numbers of analyzed layers), "
+                    "making direct comparison via concatenated feature vectors invalid."
                 )
                 return  # Exit the method
 
             try:
-                # Standardize features (no padding is needed or performed now)
+                # Standardize features
                 scaler = StandardScaler()
                 features_scaled = scaler.fit_transform(model_features)
 
@@ -158,10 +163,10 @@ class WeightAnalyzer(BaseAnalyzer):
                     'components': pca_result,
                     'explained_variance': pca.explained_variance_ratio_,
                     'labels': labels,
-                    'feature_type': 'weight_statistics'
+                    'feature_type': 'concatenated_weight_statistics'
                 }
 
-                logger.info(f"PCA performed on weight statistics: {len(padded_features[0])} features per model")
+                logger.info(f"PCA performed on weight statistics: {len(model_features[0])} features per model")
 
             except np.linalg.LinAlgError as e:
                 logger.warning(f"Could not perform PCA on weight statistics: {e}")

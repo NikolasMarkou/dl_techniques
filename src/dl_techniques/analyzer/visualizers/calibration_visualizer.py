@@ -72,7 +72,7 @@ class CalibrationVisualizer(BaseVisualizer):
         ax.set_xlabel('Mean Predicted Probability')
         ax.set_ylabel('Fraction of Positives')
         ax.set_title('Reliability Diagrams with 95% CI')
-        # ax.legend() # disabled legend
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')  # Enable legend
         ax.grid(True, alpha=0.3)
         ax.set_xlim([0, 1])
         ax.set_ylim([0, 1])
@@ -106,11 +106,14 @@ class CalibrationVisualizer(BaseVisualizer):
                                   vert=False, showmeans=False, showmedians=True,
                                   showextrema=True)
 
-            # Color the violin plots
+            # Color the violin plots and add to legend
+            legend_elements = []
             for i, model in enumerate(model_order):
                 color = self.model_colors.get(model, '#333333')
                 parts['bodies'][i].set_facecolor(color)
                 parts['bodies'][i].set_alpha(0.7)
+                # Create legend entry
+                legend_elements.append(plt.Line2D([0], [0], color=color, lw=4, label=model))
 
             # Color other violin parts
             for partname in ['cmeans', 'cmaxes', 'cmins', 'cbars', 'cmedians', 'cquantiles']:
@@ -133,6 +136,8 @@ class CalibrationVisualizer(BaseVisualizer):
             ax.set_ylabel('')  # Remove the y-axis label
             ax.set_title('Confidence Score Distributions')
             ax.grid(True, alpha=0.3, axis='x')
+            # Add legend
+            ax.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc='upper left')
 
     def _plot_per_class_ece(self, ax) -> None:
         """Plot per-class Expected Calibration Error."""
@@ -169,7 +174,7 @@ class CalibrationVisualizer(BaseVisualizer):
             ax.set_title('Per-Class Calibration Error')
             ax.set_xticks(x + width * (n_models - 1) / 2)
             ax.set_xticklabels([str(i) for i in range(n_classes)])
-            # ax.legend() # disabled legend
+            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')  # Enable legend
             ax.grid(True, alpha=0.3, axis='y')
 
     def _plot_uncertainty_landscape(self, ax) -> None:
@@ -178,6 +183,7 @@ class CalibrationVisualizer(BaseVisualizer):
         model_order = sorted(self.results.confidence_metrics.keys())
 
         # Plot contours for each model
+        legend_elements = []
         for model_name in model_order:
             metrics = self.results.confidence_metrics[model_name]
 
@@ -227,19 +233,20 @@ class CalibrationVisualizer(BaseVisualizer):
                 # Plot filled contours with transparency
                 ax.contourf(X, Y, Z, levels=5, colors=[color], alpha=0.2)
 
-                # Add a dummy line for the legend
-                ax.plot([], [], color=color, linewidth=3, label=model_name)
+                # Create legend element
+                legend_elements.append(plt.Line2D([0], [0], color=color, linewidth=3, label=model_name))
 
             except Exception as e:
                 logger.warning(f"Could not create density contours for {model_name}: {e}")
                 # Fallback: plot a simple scatter with low alpha
-                ax.scatter(confidence, entropy, color=color, alpha=0.3,
+                scatter = ax.scatter(confidence, entropy, color=color, alpha=0.3,
                            s=20, label=model_name)
+                legend_elements.append(scatter)
 
         ax.set_xlabel('Confidence (Max Probability)')
         ax.set_ylabel('Entropy')
         ax.set_title('Uncertainty Landscape (Density Contours)')
-        ax.legend()
+        ax.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(True, alpha=0.3)
         ax.set_xlim(0, 1)
         ax.set_ylim(0, None)
