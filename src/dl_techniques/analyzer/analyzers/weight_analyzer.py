@@ -136,18 +136,19 @@ class WeightAnalyzer(BaseAnalyzer):
                 labels.append(model_name)
 
         if len(model_features) >= 2:
-            # Pad features to same length
-            max_len = max(len(f) for f in model_features)
-            padded_features = []
-            for features in model_features:
-                if len(features) < max_len:
-                    features.extend([0.0] * (max_len - len(features)))
-                padded_features.append(features)
+            # Check if all models have the same number of features before proceeding
+            first_len = len(model_features[0])
+            if not all(len(f) == first_len for f in model_features):
+                logger.warning(
+                    "Skipping weight PCA: Models have different architectures (layer counts), "
+                    "making a direct comparison via PCA invalid."
+                )
+                return  # Exit the method
 
             try:
-                # Standardize features
+                # Standardize features (no padding is needed or performed now)
                 scaler = StandardScaler()
-                features_scaled = scaler.fit_transform(padded_features)
+                features_scaled = scaler.fit_transform(model_features)
 
                 # Perform PCA
                 pca = PCA(n_components=min(3, len(features_scaled)))

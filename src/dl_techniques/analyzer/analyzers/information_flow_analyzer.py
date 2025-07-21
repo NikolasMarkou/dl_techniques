@@ -1,3 +1,5 @@
+# File: /analyzers/information_flow_analyzer.py
+
 """
 Information Flow Analysis Module
 ============================================================================
@@ -40,16 +42,19 @@ class InformationFlowAnalyzer(BaseAnalyzer):
 
         for model_name, extraction_data in self.layer_extraction_models.items():
             if extraction_data is None:
-                logger.warning(f"No extraction data available for model {model_name}")
+                # This check now correctly handles unsupported models that were skipped
+                logger.warning(f"Skipping information flow for {model_name} as no extraction model could be built.")
                 continue
+
+            extraction_model = extraction_data['model']
+            layer_info = extraction_data['layer_info']
 
             try:
                 # Get multi-layer outputs
-                layer_outputs = extraction_data['model'].predict(x_sample, verbose=0)
-                layer_info = extraction_data['layer_info']
+                layer_outputs = extraction_model.predict(x_sample, verbose=0)
 
                 # Handle single output case
-                if not isinstance(layer_outputs, (list, tuple)):
+                if not isinstance(layer_outputs, list):
                     layer_outputs = [layer_outputs]
 
                 # Analyze each layer
@@ -69,80 +74,89 @@ class InformationFlowAnalyzer(BaseAnalyzer):
     def _setup_activation_models(self) -> None:
         """Set up models for extracting intermediate activations."""
         for model_name, model in self.models.items():
+            # First, check if the model is a Functional model with a defined graph.
+            # Subclassed models will not have a valid `.input` attribute before being called.
+            if not hasattr(model, 'input') or not hasattr(model, 'layers'):
+                logger.warning(
+                    f"Model '{model_name}' is likely a subclassed model or not a standard Keras Functional model. "
+                    "Automatic information flow analysis is not supported. Skipping."
+                )
+                self.layer_extraction_models[model_name] = None
+                continue
+
             try:
-                # Check if model has accessible input
-                if not hasattr(model, 'input') or model.input is None:
-                    logger.warning(f"Model {model_name} has no accessible input attribute")
-                    self.layer_extraction_models[model_name] = None
-                    continue
-
-                # Set up multi-layer extraction for information flow
+                # Get suitable layers for extraction.
                 extraction_layers = self._get_extraction_layers(model)
-                if extraction_layers:
-                    try:
-                        # Validate outputs
-                        valid_outputs = []
-                        valid_layer_info = []
-                        for layer_info in extraction_layers:
-                            if layer_info['output'] is not None:
-                                valid_outputs.append(layer_info['output'])
-                                valid_layer_info.append(layer_info)
-                            else:
-                                logger.warning(f"Layer {layer_info['name']} has None output")
 
-                        if valid_outputs:
-                            self.layer_extraction_models[model_name] = {
-                                'model': keras.Model(inputs=model.input, outputs=valid_outputs),
-                                'layer_info': valid_layer_info
-                            }
-                        else:
-                            logger.warning(f"No valid layer outputs found for {model_name}")
-                            self.layer_extraction_models[model_name] = None
-
-                    except Exception as e:
-                        logger.warning(f"Could not create layer extraction model for {model_name}: {e}")
-                        self.layer_extraction_models[model_name] = None
-                else:
+                if not extraction_layers:
                     logger.warning(f"No suitable layers found for extraction in {model_name}")
                     self.layer_extraction_models[model_name] = None
+                    continue
+
+                # Create a new Keras model for efficient multi-layer activation extraction.
+                # This is the robust, recommended approach for Functional models.
+                layer_outputs = [layer.output for layer in extraction_layers]
+                layer_info = [{'name': layer.name, 'type': layer.__class__.__name__} for layer in extraction_layers]
+
+                extraction_model = keras.Model(
+                    inputs=model.input,
+                    outputs=layer_outputs,
+                    name=f"{model_name}_activation_extractor"
+                )
+
+                self.layer_extraction_models[model_name] = {
+                    'model': extraction_model,
+                    'layer_info': layer_info
+                }
+                logger.info(f"Successfully created activation extraction model for '{model_name}'.")
+
             except Exception as e:
-                logger.error(f"Failed to setup activation models for {model_name}: {e}")
+                logger.error(f"Failed to create activation extraction model for '{model_name}': {e}. "
+                             f"This can happen with complex, non-standard model architectures. Skipping.")
                 self.layer_extraction_models[model_name] = None
 
-    def _get_extraction_layers(self, model: keras.Model) -> List[Dict[str, Any]]:
-        """Get layers suitable for information flow analysis."""
+    def _get_extraction_layers(self, model: keras.Model) -> List[keras.layers.Layer]:
+        """
+        Get a list of layer objects suitable for information flow analysis.
+        Returns layer objects themselves, not dictionaries.
+        """
         extraction_layers = []
+        for layer in model.layers:
+            # Skip input layers and other non-op layers
+            if isinstance(layer, keras.layers.InputLayer):
+                continue
 
-        try:
-            # Check if model has layers attribute
-            if not hasattr(model, 'layers'):
-                logger.warning(f"Model does not have 'layers' attribute")
-                return extraction_layers
-
-            for layer in model.layers:
-                try:
-                    # Check for common layer types that are suitable for analysis
-                    if isinstance(layer, (keras.layers.Conv2D, keras.layers.Dense,
-                                        keras.layers.BatchNormalization, keras.layers.LayerNormalization)):
-                        if hasattr(layer, 'output') and layer.output is not None:
-                            extraction_layers.append({
-                                'name': layer.name,
-                                'type': layer.__class__.__name__,
-                                'output': layer.output
-                            })
-                except Exception as e:
-                    logger.warning(f"Could not process layer {getattr(layer, 'name', 'unknown')}: {e}")
-                    continue
-        except Exception as e:
-            logger.error(f"Failed to extract layers from model: {e}")
+            # Check for common layer types that are suitable for analysis.
+            # This ensures we only analyze layers with meaningful activations.
+            if isinstance(layer, (keras.layers.Conv2D, keras.layers.Dense,
+                                  keras.layers.BatchNormalization, keras.layers.LayerNormalization,
+                                  keras.layers.ReLU, keras.layers.PReLU, keras.layers.ELU,
+                                  keras.layers.GlobalAveragePooling2D, keras.layers.GlobalMaxPooling2D)):
+                # Ensure the layer has a valid output tensor in the model's graph
+                if hasattr(layer, 'output'):
+                    extraction_layers.append(layer)
 
         return extraction_layers
 
     def _analyze_layer_information(self, output: np.ndarray, layer_info: Dict) -> Dict[str, Any]:
         """Analysis of layer information content."""
+        # This method remains largely the same, but is now more reliable due to
+        # the robust activation extraction.
+
+        # Add a check for empty or invalid outputs
+        if output is None or output.size == 0:
+            return {'error': 'Invalid or empty activation output'}
+
         # Flatten spatial dimensions if needed
-        if len(output.shape) == 4:  # Conv layer
-            output_flat = np.mean(output, axis=(1, 2))
+        if len(output.shape) > 2:  # Conv layer or other spatial layer
+            # Handle cases with no batch dimension from predict
+            if len(output.shape) == 4: # (batch, H, W, C)
+                output_flat = np.mean(output, axis=(1, 2))
+            elif len(output.shape) == 3: # (H, W, C) - single sample prediction
+                output_flat = np.mean(output, axis=(0, 1))
+                output_flat = np.expand_dims(output_flat, axis=0) # re-add batch dim
+            else: # Fallback
+                output_flat = output.reshape(output.shape[0], -1)
             spatial_output = output
         else:
             output_flat = output
@@ -159,19 +173,27 @@ class InformationFlowAnalyzer(BaseAnalyzer):
         }
 
         # Add spatial statistics for conv layers
-        if spatial_output is not None:
+        if spatial_output is not None and len(spatial_output.shape) == 4:
             analysis['spatial_mean'] = float(np.mean(spatial_output))
             analysis['spatial_std'] = float(np.std(spatial_output))
             analysis['channel_variance'] = float(np.var(np.mean(spatial_output, axis=(0, 1, 2))))
 
         # Compute effective rank
-        if output_flat.shape[1] > 1:
+        if output_flat.ndim == 2 and output_flat.shape[0] > 1 and output_flat.shape[1] > 1:
             try:
-                _, s, _ = np.linalg.svd(output_flat, full_matrices=False)
-                s = s + 1e-10  # Avoid log(0)
-                s_normalized = s / np.sum(s)
-                effective_rank = np.exp(-np.sum(s_normalized * np.log(s_normalized)))
-                analysis['effective_rank'] = float(effective_rank)
+                # Ensure matrix is centered for SVD
+                centered_output = output_flat - np.mean(output_flat, axis=0)
+                s = np.linalg.svd(centered_output, compute_uv=False)
+
+                # Prevent log(0) and division by zero
+                s_sum = np.sum(s)
+                if s_sum > 1e-9:
+                    s_normalized = s / s_sum
+                    # Add epsilon to prevent log(0) for zero-valued singular values
+                    effective_rank = np.exp(-np.sum(s_normalized * np.log(s_normalized + 1e-9)))
+                    analysis['effective_rank'] = float(effective_rank)
+                else:
+                    analysis['effective_rank'] = 0.0
             except np.linalg.LinAlgError:
                 analysis['effective_rank'] = 0.0
 
@@ -181,23 +203,30 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                                      layer_info: List[Dict], results: AnalysisResults) -> None:
         """Analyze activations for key layers in detail."""
         # Find key layers (last conv and middle dense)
-        conv_indices = [i for i, info in enumerate(layer_info) if info['type'] == 'Conv2D']
-        dense_indices = [i for i, info in enumerate(layer_info) if info['type'] == 'Dense']
+        conv_indices = [i for i, info in enumerate(layer_info) if 'Conv' in info['type']]
+        dense_indices = [i for i, info in enumerate(layer_info) if 'Dense' in info['type']]
 
         key_indices = []
         if conv_indices:
             key_indices.append(conv_indices[-1])  # Last conv layer
-        if dense_indices and len(dense_indices) > 1:
-            key_indices.append(dense_indices[len(dense_indices)//2])  # Middle dense layer
+        if dense_indices:
+            # Take the one before the final output layer if available, else the first one
+            key_indices.append(dense_indices[-2] if len(dense_indices) > 1 else dense_indices[-1])
 
         results.activation_stats[model_name] = {}
 
-        for idx in key_indices:
+        for idx in set(key_indices): # Use set to avoid duplicates
             if idx < len(layer_outputs):
                 layer_name = layer_info[idx]['name']
                 activations = layer_outputs[idx]
 
+                # Ensure activations is a numpy array
+                if not isinstance(activations, np.ndarray):
+                    continue
+
                 flat_acts = activations.flatten()
+                if flat_acts.size == 0:
+                    continue
 
                 results.activation_stats[model_name][layer_name] = {
                     'shape': activations.shape,
@@ -210,5 +239,6 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                         'p50': float(np.percentile(flat_acts, 50)),
                         'p75': float(np.percentile(flat_acts, 75))
                     },
-                    'sample_activations': activations[:10] if len(activations.shape) == 4 else None
+                    # Only store samples for conv layers to save space
+                    'sample_activations': activations[:min(10, activations.shape[0])] if len(activations.shape) == 4 else None
                 }

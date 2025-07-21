@@ -38,7 +38,13 @@ class CalibrationAnalyzer(BaseAnalyzer):
                 continue
 
             model_cache = cache[model_name]
-            y_pred_proba = model_cache['predictions']
+            y_pred_proba = model_cache.get('predictions') # Use .get() for safety
+
+            # This check prevents the crash
+            if y_pred_proba is None:
+                logger.warning(f"Skipping calibration analysis for {model_name}: No predictions available.")
+                continue
+
             y_true = model_cache['y_data']
 
             # Convert to class indices if needed - handle different data types

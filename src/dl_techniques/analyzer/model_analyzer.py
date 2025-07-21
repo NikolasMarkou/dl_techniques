@@ -274,7 +274,10 @@ class ModelAnalyzer:
             'config': self.config.__dict__,
             'model_metrics': self.results.model_metrics,
             'weight_stats': self.results.weight_stats,
+            'weight_pca': self.results.weight_pca,
             'calibration_metrics': self.results.calibration_metrics,
+            'information_flow': self.results.information_flow,
+            'activation_stats': self.results.activation_stats,
             'training_metrics': self._serialize_training_metrics() if self.results.training_metrics else None,
         }
 
