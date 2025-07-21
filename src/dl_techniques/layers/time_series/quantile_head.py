@@ -11,22 +11,21 @@ from typing import Union, Any
 
 # ---------------------------------------------------------------------
 
-
 @keras.saving.register_keras_serializable()
 class QuantileHead(keras.layers.Layer):
     """
     Quantile prediction head for probabilistic forecasting.
 
-    Predicts multiple quantiles simultaneously for uncertainty quantification.
+    This layer takes a feature vector and projects it to a series of quantile
+    predictions for a specified forecast horizon.
 
     Args:
         num_quantiles: Integer, number of quantiles to predict.
         output_length: Integer, length of the forecast horizon.
-        hidden_dim: Integer, hidden dimension for the prediction head.
         dropout_rate: Float, dropout rate for regularization.
-        use_bias: Boolean, whether to use bias in layers.
-        kernel_initializer: Initializer for kernel weights.
-        bias_initializer: Initializer for bias vector.
+        use_bias: Boolean, whether to use a bias in the projection layer.
+        kernel_initializer: Initializer for the projection layer's kernel weights.
+        bias_initializer: Initializer for the projection layer's bias vector.
         **kwargs: Additional keyword arguments for the Layer base class.
     """
 
@@ -34,7 +33,6 @@ class QuantileHead(keras.layers.Layer):
             self,
             num_quantiles: int,
             output_length: int,
-            hidden_dim: int = 256,
             dropout_rate: float = 0.1,
             use_bias: bool = True,
             kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
@@ -45,7 +43,6 @@ class QuantileHead(keras.layers.Layer):
 
         self.num_quantiles = num_quantiles
         self.output_length = output_length
-        self.hidden_dim = hidden_dim
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -60,52 +57,51 @@ class QuantileHead(keras.layers.Layer):
         """Build the quantile prediction head."""
         self._build_input_shape = input_shape
 
-        # Project to quantile predictions
+        # A single dense layer to project the input features to the quantile predictions.
         self.projection = keras.layers.Dense(
             self.num_quantiles * self.output_length,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             name="quantile_projection"
+            # No activation function is used, which is standard for regression outputs.
         )
 
         if self.dropout_rate > 0:
             self.dropout = keras.layers.Dropout(self.dropout_rate)
 
-        self.projection.build(input_shape)
         super().build(input_shape)
 
     def call(self, inputs, training=None):
-        """Predict quantiles."""
+        """Predict quantiles from the input feature vector."""
         x = inputs
 
         if self.dropout is not None:
             x = self.dropout(x, training=training)
 
-        # Project to quantile predictions
+        # Project the features to the flattened quantile predictions.
         quantile_preds = self.projection(x, training=training)
 
         # Reshape to [batch_size, num_quantiles, output_length]
-        batch_size = ops.shape(inputs)[0]
+        # Using -1 for the batch dimension makes the layer robust to dynamic batch sizes.
         quantiles = ops.reshape(
             quantile_preds,
-            (batch_size, self.num_quantiles, self.output_length)
+            (-1, self.num_quantiles, self.output_length)
         )
 
         return quantiles
 
     def compute_output_shape(self, input_shape):
-        """Compute output shape."""
+        """Compute the output shape of the layer."""
         batch_size = input_shape[0]
         return (batch_size, self.num_quantiles, self.output_length)
 
     def get_config(self):
-        """Get layer configuration."""
+        """Get layer configuration for serialization."""
         config = super().get_config()
         config.update({
             "num_quantiles": self.num_quantiles,
             "output_length": self.output_length,
-            "hidden_dim": self.hidden_dim,
             "dropout_rate": self.dropout_rate,
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
@@ -114,12 +110,7 @@ class QuantileHead(keras.layers.Layer):
         return config
 
     def get_build_config(self):
-        """Get build configuration."""
+        """Store the input shape for serialization."""
         return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config):
-        """Build from configuration."""
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------

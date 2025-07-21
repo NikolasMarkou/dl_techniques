@@ -16,11 +16,15 @@ from typing import Optional, Union, List, Any, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import RMSNorm
-from dl_techniques.layers.quantile_head import QuantileHead
 from dl_techniques.layers.standard_scaler import StandardScaler
 from dl_techniques.layers.patch_embedding import PatchEmbedding1D
 from dl_techniques.layers.ffn.residual_block import ResidualBlock
-from dl_techniques.layers.mixed_sequential_block import MixedSequentialBlock
+from dl_techniques.layers.time_series.quantile_head import QuantileHead
+from dl_techniques.layers.time_series.mixed_sequential_block import MixedSequentialBlock
+
+# ---------------------------------------------------------------------
+
+DEFAULT_QUANTILES : List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
 # ---------------------------------------------------------------------
 
@@ -56,7 +60,7 @@ class TiRexCore(keras.Model):
             lstm_units: Optional[int] = None,
             ff_dim: Optional[int] = None,
             block_types: Optional[List[str]] = None,
-            quantile_levels: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+            quantile_levels: List[float] = DEFAULT_QUANTILES,
             prediction_length: int = 32,
             dropout_rate: float = 0.1,
             use_layer_norm: bool = True,
@@ -85,17 +89,12 @@ class TiRexCore(keras.Model):
     def _build_model(self):
         """Build the TiRex model components."""
 
-        # Data preprocessing
         self.scaler = StandardScaler(name="scaler")
-
-        # Patch embedding
         self.patch_embedding = PatchEmbedding1D(
             patch_size=self.patch_size,
             embed_dim=self.embed_dim * 2,  # Include mask information
             name="patch_embedding"
         )
-
-        # Input projection
         self.input_projection = ResidualBlock(
             hidden_dim=self.embed_dim * 2,
             output_dim=self.embed_dim,
@@ -103,7 +102,6 @@ class TiRexCore(keras.Model):
             name="input_projection"
         )
 
-        # Mixed sequential blocks
         self.blocks = []
         for i, block_type in enumerate(self.block_types):
             block = MixedSequentialBlock(
@@ -118,17 +116,15 @@ class TiRexCore(keras.Model):
             )
             self.blocks.append(block)
 
-        # Output normalization
         if self.use_layer_norm:
             self.output_norm = RMSNorm(name="output_norm")
         else:
             self.output_norm = keras.layers.Lambda(lambda x: x, name="output_norm")
 
-        # Quantile prediction head
+        # --- FIX: Instantiate QuantileHead without the removed `hidden_dim` parameter.
         self.quantile_head = QuantileHead(
             num_quantiles=len(self.quantile_levels),
             output_length=self.prediction_length,
-            hidden_dim=self.embed_dim,
             dropout_rate=self.dropout_rate,
             name="quantile_head"
         )
@@ -136,51 +132,41 @@ class TiRexCore(keras.Model):
         logger.info(f"TiRex model initialized with {self.num_blocks} blocks, "
                     f"embed_dim={self.embed_dim}, prediction_length={self.prediction_length}")
 
-    def call(self, inputs, training=None, mask=None):
+    def call(self, inputs, training=None):
         """
-        Forward pass through TiRex model.
+        Forward pass through the TiRex model.
 
         Args:
             inputs: Input tensor of shape [batch_size, sequence_length, features].
             training: Boolean, whether in training mode.
-            mask: Optional mask tensor.
 
         Returns:
             Quantile predictions of shape [batch_size, num_quantiles, prediction_length].
         """
-        # Handle single feature case
         if len(inputs.shape) == 2:
             inputs = ops.expand_dims(inputs, axis=-1)
 
-        # Data scaling
         x = self.scaler(inputs, training=training)
 
-        # Create mask for NaN values
         nan_mask = ops.logical_not(ops.isnan(inputs))
         nan_mask = ops.cast(nan_mask, dtype=x.dtype)
 
-        # Combine input with mask information
         x_with_mask = ops.concatenate([x, nan_mask], axis=-1)
 
-        # Patch embedding
-        x_patches = self.patch_embedding(x_with_mask, training=training)
+        x_patches, attention_mask = self.patch_embedding(x_with_mask, training=training)
 
-        # Input projection
         x_embedded = self.input_projection(x_patches, training=training)
 
-        # Process through mixed sequential blocks
+        # --- FIX: Pass the correctly generated `attention_mask` to the sequential blocks.
         hidden_states = x_embedded
         for block in self.blocks:
-            hidden_states = block(hidden_states, training=training, mask=mask)
+            hidden_states = block(hidden_states, training=training, mask=attention_mask)
 
-        # Output normalization
         hidden_states = self.output_norm(hidden_states, training=training)
 
-        # Global pooling or take last timestep
-        # Use average pooling across sequence length
+        # Global average pooling across the sequence of patches.
         pooled = ops.mean(hidden_states, axis=1)  # [batch_size, embed_dim]
 
-        # Generate quantile predictions
         quantile_predictions = self.quantile_head(pooled, training=training)
 
         return quantile_predictions
@@ -207,25 +193,20 @@ class TiRexCore(keras.Model):
         if quantile_levels is None:
             quantile_levels = self.quantile_levels
 
-        # Generate predictions
         predictions = self.predict(context, batch_size=batch_size, **kwargs)
 
-        # Find indices for requested quantiles
         quantile_indices = []
         for q in quantile_levels:
             if q in self.quantile_levels:
                 quantile_indices.append(self.quantile_levels.index(q))
             else:
-                # Find closest quantile
                 closest_idx = np.argmin(np.abs(np.array(self.quantile_levels) - q))
                 quantile_indices.append(closest_idx)
                 logger.warning(
                     f"Quantile {q} not in training quantiles, using closest: {self.quantile_levels[closest_idx]}")
 
-        # Extract requested quantiles
         quantile_preds = predictions[:, quantile_indices, :]
 
-        # Extract median as mean prediction
         median_idx = self.quantile_levels.index(0.5) if 0.5 in self.quantile_levels else len(self.quantile_levels) // 2
         mean_preds = predictions[:, median_idx, :]
 
@@ -264,7 +245,7 @@ def create_tirex_model(
         embed_dim: int = 256,
         num_blocks: int = 6,
         num_heads: int = 8,
-        quantile_levels: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        quantile_levels: List[float] = DEFAULT_QUANTILES,
         block_types: Optional[List[str]] = None,
         **kwargs
 ) -> TiRexCore:
@@ -296,8 +277,8 @@ def create_tirex_model(
         **kwargs
     )
 
-    # Build the model with dummy input
-    dummy_input = keras.utils.PyInput(shape=(input_length, 1), dtype='float32')
+    # Build the model with a dummy input to initialize weights and shapes.
+    dummy_input = np.zeros((1, input_length, 1), dtype='float32')
     model(dummy_input)
 
     logger.info(f"Created TiRex model: input_length={input_length}, "
@@ -339,7 +320,7 @@ def create_tirex_by_size(
         size: str,
         input_length: int,
         prediction_length: int,
-        quantile_levels: list = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        quantile_levels: list = DEFAULT_QUANTILES,
         **override_params
 ):
     """
