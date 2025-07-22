@@ -1,3 +1,5 @@
+# visualizers/summary_visualizer.py
+
 """
 Summary Dashboard Visualization Module
 
@@ -327,7 +329,7 @@ class SummaryVisualizer(BaseVisualizer):
         ax.set_xlabel('Expected Calibration Error (ECE) - Lower is Better')
         ax.set_ylabel('Brier Score - Lower is Better')
         ax.set_title('Calibration Performance Landscape')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        # ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left') # <<< FIX: This line is removed/commented
         ax.grid(True, which='both', linestyle='--', linewidth=0.5)
 
         # Set adaptive axis limits with margin for visibility
@@ -447,7 +449,7 @@ class SummaryVisualizer(BaseVisualizer):
             f'PC2 ({explained_var[1]:.1%})' if len(explained_var) > 1 else 'PC2'
         )
         ax.set_title('Model Similarity (Concatenated Weight Statistics)')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        # ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left') # <<< FIX: This line is removed/commented
         ax.grid(True, alpha=0.3)
         ax.set_aspect('equal', adjustable='box')
 

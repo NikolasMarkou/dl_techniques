@@ -158,7 +158,7 @@ class DenseNormalizationConfig:
     dropout_rate: float = 0.1
 
     # --- Training Parameters ---
-    epochs: int = 100
+    epochs: int = 1
     batch_size: int = 256
     learning_rate: float = 0.001
     early_stopping_patience: int = 15
@@ -174,9 +174,9 @@ class DenseNormalizationConfig:
         'AdaptiveBandRMS_010': lambda: ('adaptive_band_rms', {'max_band_width': 0.1}),
         'AdaptiveBandRMS_050': lambda: ('adaptive_band_rms', {'max_band_width': 0.5}),
         'AdaptiveBandRMS_090': lambda: ('adaptive_band_rms', {'max_band_width': 0.9}),
-        'BandRMS_005': lambda: ('band_rms', {'max_band_width': 0.05}),
         'BandRMS_010': lambda: ('band_rms', {'max_band_width': 0.10}),
-        'BandRMS_020': lambda: ('band_rms', {'max_band_width': 0.20}),
+        'BandRMS_050': lambda: ('band_rms', {'max_band_width': 0.50}),
+        'BandRMS_090': lambda: ('band_rms', {'max_band_width': 0.90}),
         'RMSNorm': lambda: ('rms_norm', {}),
         'LayerNorm': lambda: ('layer_norm', {}),
         'BatchNorm': lambda: ('batch_norm', {}),

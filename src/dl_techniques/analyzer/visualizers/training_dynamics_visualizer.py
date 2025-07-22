@@ -272,19 +272,6 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
 
             # Final accuracy - using robust method
             val_acc, _ = self._get_metric_data(model_name, VAL_ACC_PATTERNS)
-            # ==============================================================================
-            # ===============================  THE FIX  ====================================
-            # ==============================================================================
-            #
-            # PROBLEM: The original code used `if val_acc`, which is an ambiguous boolean
-            # check for a NumPy array and causes a ValueError.
-            #
-            # SOLUTION: The check is changed to `if val_acc is not None`. This is an
-            # explicit, non-ambiguous check that correctly verifies whether the
-            # `_get_metric_data` function successfully returned a metric array/list or not.
-            # This works for both lists and NumPy arrays and prevents the crash.
-            #
-            # ==============================================================================
             final_acc = val_acc[-1] if val_acc is not None and len(val_acc) > 0 else 0.0
             row.append(f'{final_acc:.3f}')
 
