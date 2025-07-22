@@ -150,7 +150,7 @@ class DenseNormalizationConfig:
     input_shape: Tuple[int, ...] = (784,)  # Flattened MNIST
 
     # --- Network Architecture Parameters ---
-    hidden_units: List[int] = field(default_factory=lambda: [512, 256, 128, 64, 32])
+    hidden_units: List[int] = field(default_factory=lambda: [512, 256, 256, 256, 256, 256, 256, 256, 128, 64, 32])
     activation: str = 'gelu'  # Smooth activation for stable training
     kernel_initializer: str = 'he_normal'
     weight_decay: float = 1e-4
