@@ -233,7 +233,7 @@ class CalibrationVisualizer(BaseVisualizer):
                 ax.clabel(contours, inline=True, fontsize=8, fmt='%.2f')
 
                 # Plot filled contours with transparency
-                ax.contourf(X, Y, Z, levels=5, colors=[color], alpha=0.2)
+                ax.contourf(X, Y, Z, levels=5, colors=[color], alpha=0.1)
 
                 # Create legend element
                 legend_elements.append(plt.Line2D([0], [0], color=color, linewidth=3, label=model_name))

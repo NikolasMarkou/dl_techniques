@@ -162,7 +162,7 @@ class OrthoBlockExperimentConfig:
     output_activation: str = 'softmax'
 
     # --- Training Parameters ---
-    epochs: int = 5
+    epochs: int = 150
     batch_size: int = 128
     learning_rate: float = 0.001
     early_stopping_patience: int = 20
