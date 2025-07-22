@@ -41,7 +41,7 @@ class WeightVisualizer(BaseVisualizer):
 
     def _get_layer_order(self, model_name: str) -> List[str]:
         """Get the correct layer order for a model, using explicit ordering when available."""
-        # Use explicit layer ordering from AnalysisResults (now properly declared)
+        # Use explicit layer ordering from AnalysisResults
         if (hasattr(self.results, 'weight_stats_layer_order') and
             self.results.weight_stats_layer_order and
             model_name in self.results.weight_stats_layer_order):
@@ -106,10 +106,7 @@ class WeightVisualizer(BaseVisualizer):
 
     def _plot_weight_health_heatmap(self, ax) -> None:
         """
-        Create a comprehensive weight health heatmap with proper missing data handling.
-
-        FIXED: Missing layers are now represented as np.nan and rendered distinctly,
-        not as misleading 0.0 (worst health) scores.
+        Create a comprehensive weight health heatmap with improved readability.
         """
         if not self.results.weight_stats:
             ax.text(0.5, 0.5, 'No weight statistics available',
@@ -118,18 +115,16 @@ class WeightVisualizer(BaseVisualizer):
             ax.axis('off')
             return
 
-        # Prepare health metrics - each model uses its explicit layer sequence
+        # Prepare health metrics
         health_metrics = []
         models = sorted(self.results.weight_stats.keys())
         max_layers = getattr(self.config, 'max_layers_heatmap', 12)
 
-        # Determine the maximum number of layers across all models for consistent visualization
         actual_max_layers = 0
         for model_name in models:
             layer_order = self._get_layer_order(model_name)
             actual_max_layers = max(actual_max_layers, len(layer_order))
 
-        # Use the smaller of configured max or actual max
         display_layers = min(max_layers, actual_max_layers)
         if actual_max_layers == 0:
             ax.text(0.5, 0.5, 'No layer ordering information available',
@@ -141,8 +136,6 @@ class WeightVisualizer(BaseVisualizer):
         for model_name in models:
             weight_stats = self.results.weight_stats[model_name]
             model_health = []
-
-            # Use explicit layer ordering instead of relying on dictionary order
             layer_order = self._get_layer_order(model_name)
 
             for layer_idx in range(display_layers):
@@ -150,78 +143,49 @@ class WeightVisualizer(BaseVisualizer):
                     layer_name = layer_order[layer_idx]
                     if layer_name in weight_stats:
                         stats = weight_stats[layer_name]
-
-                        # Calculate health score (0-1, higher is better)
                         l2_norm = stats['norms']['l2']
                         norm_health = 1.0 / (1.0 + l2_norm / WEIGHT_HEALTH_L2_NORMALIZER)
-
-                        # Sparsity (moderate sparsity is ok, too much is bad)
                         sparsity = stats['distribution']['zero_fraction']
                         sparsity_health = 1.0 - min(sparsity, WEIGHT_HEALTH_SPARSITY_THRESHOLD)
-
-                        # Weight distribution (closer to normal is better)
                         weight_std = stats['basic']['std']
                         weight_mean = abs(stats['basic']['mean'])
                         dist_health = min(weight_std / (weight_mean + 1e-6), 1.0)
-
-                        # Combined health score
                         health_score = (norm_health + sparsity_health + dist_health) / 3.0
                         model_health.append(health_score)
                     else:
-                        # Layer name in order but not in stats (shouldn't happen)
-                        model_health.append(np.nan)  # FIXED: Use np.nan instead of 0.0
+                        model_health.append(np.nan)
                 else:
-                    # FIXED: Model has fewer layers - use np.nan instead of misleading 0.0
                     model_health.append(np.nan)
-
             health_metrics.append(model_health)
 
         if health_metrics and display_layers > 0:
-            # Create heatmap
             health_array = np.array(health_metrics)
-
-            # ==============================================================================
-            # The original code created a custom colormap that incorrectly
-            # mapped the worst health score (0.0) and missing data (NaN) to the same
-            # gray color, which is highly misleading.
-            #
-            # The fix is to use matplotlib's native support for NaN values. We use a
-            # standard colormap and tell it specifically what color to use for any NaN
-            # values via `set_bad()`. This correctly separates missing data from valid
-            # (but poor) health scores.
-            # ==============================================================================
             custom_cmap = plt.cm.get_cmap('RdYlGn').copy()
-            custom_cmap.set_bad(color='lightgray')  # Use a specific color for NaN values.
-
-            # We no longer need to manipulate the data array by replacing NaNs with -0.1.
-            # We can pass the original array with NaNs directly to imshow.
+            custom_cmap.set_bad(color='lightgray')
             im = ax.imshow(health_array, cmap=custom_cmap, aspect='auto',
                            vmin=0, vmax=1, interpolation='nearest')
 
-            # Set labels
             ax.set_title('Weight Health Across Layers (Network Order)',
                         fontsize=12, fontweight='bold')
             ax.set_xlabel('Layer Position in Network')
             ax.set_ylabel('Model')
 
-            # Set ticks
+            # Use abbreviated model names for y-axis readability
+            model_abbreviations = [f'M{i+1}' for i in range(len(models))]
             ax.set_xticks(range(display_layers))
             ax.set_xticklabels([f'L{i}' for i in range(display_layers)], fontsize=9)
             ax.set_yticks(range(len(models)))
-            ax.set_yticklabels(models, fontsize=9)
+            ax.set_yticklabels(model_abbreviations, fontsize=9)
 
-            # Add colorbar with proper handling of NaN
             cbar = plt.colorbar(im, ax=ax, shrink=0.8)
             cbar.set_label('Health Score', rotation=270, labelpad=20)
             cbar.ax.tick_params(labelsize=9)
 
-            # FIXED: Add value annotations with proper NaN handling
             for i in range(len(models)):
                 for j in range(display_layers):
                     if j < len(health_array[i]):
                         value = health_array[i, j]
                         if np.isnan(value):
-                            # FIXED: Display "N/A" for missing layers instead of a number
                             ax.text(j, i, 'N/A', ha='center', va='center',
                                    color='black', fontsize=8, fontweight='bold')
                         else:
@@ -229,11 +193,15 @@ class WeightVisualizer(BaseVisualizer):
                             ax.text(j, i, f'{value:.2f}', ha='center', va='center',
                                    color=text_color, fontsize=8, fontweight='bold')
 
-            # FIXED: Add legend explaining the NaN representation
-            ax.text(0.02, -0.18,
-                   'Note: Layers ordered by network depth. Gray cells indicate models with fewer layers.',
-                   transform=ax.transAxes, ha='left', va='top', fontsize=9,
-                   style='italic', alpha=0.7)
+            # Add an improved explanatory note with model mappings
+            model_mapping_str = ", ".join([f"M{i+1}={name}" for i, name in enumerate(models)])
+            full_note = (
+                f"Note: Layers ordered by network depth. Gray cells (N/A) indicate models with fewer layers.\n"
+                f"Models: {model_mapping_str}"
+            )
+            ax.text(0.0, -0.25, full_note,
+                   transform=ax.transAxes, ha='left', va='top', fontsize=8,
+                   style='italic', alpha=0.8, wrap=True)
         else:
             ax.text(0.5, 0.5, 'Insufficient data for health heatmap',
                    ha='center', va='center', transform=ax.transAxes)

@@ -56,97 +56,6 @@ Experimental Design
 4. **RMSNorm**: Standard RMS normalization (unconstrained scaling)
 5. **LayerNorm**: Layer normalization (mean-variance normalization)
 6. **BatchNorm**: Batch normalization (baseline comparison)
-
-**Experimental Variables**:
-- **Primary**: Normalization technique (6 variants)
-- **Secondary**: BandRMS α parameter (3 values: 0.1, 0.2, 0.3)
-- **Control**: Architecture, training procedure, dataset, random seeds
-
-Comprehensive Analysis Pipeline
-------------------------------
-
-**Training Dynamics Analysis**:
-- Convergence speed and stability metrics
-- Loss curve smoothness and early stopping behavior
-- Gradient flow characteristics through the network
-- Training vs validation performance gap analysis
-
-**Model Performance Evaluation**:
-- Test accuracy and top-k accuracy
-- Statistical significance testing across multiple runs
-- Per-class performance analysis
-- Robustness to hyperparameter variations
-
-**Calibration Analysis** (via ModelAnalyzer):
-- Expected Calibration Error (ECE) with multiple bin sizes
-- Brier score for probabilistic prediction quality
-- Reliability diagrams and confidence distribution analysis
-- Temperature scaling effectiveness for post-hoc calibration
-
-**Weight and Architecture Analysis**:
-- Weight distribution evolution across layers
-- Effective scaling factor analysis for BandRMS variants
-- Dead neuron detection and activation sparsity
-- Layer-wise norm analysis (L1, L2, spectral)
-
-**Information Flow Analysis**:
-- Activation pattern analysis across the network
-- Feature representation quality metrics
-- Information bottleneck characteristics
-- Gradient flow stability measures
-
-**Visualization and Reporting**:
-- Training dynamics comparison plots
-- Calibration reliability diagrams
-- Weight distribution heatmaps
-- Confusion matrices and error analysis
-- Statistical significance tests
-
-Expected Outcomes and Hypotheses
---------------------------------
-
-**Primary Hypotheses**:
-1. **Calibration**: BandRMS variants should show lower ECE and better reliability
-2. **Stability**: More stable training with less variance across runs
-3. **Robustness**: Better generalization with controlled overfitting
-4. **Trade-offs**: α parameter should show stability vs expressiveness trade-off
-
-**Scientific Contributions**:
-1. Empirical validation of constrained normalization benefits
-2. Optimal α parameter selection guidelines
-3. Calibration improvements without architectural changes
-4. Training stability analysis for deep networks
-
-Usage Example
--------------
-
-Basic usage with default configuration:
-
-    ```python
-    config = BandRMSExperimentConfig()
-    results = run_experiment(config)
-
-    # Access calibration results
-    for model_name, metrics in results['model_analysis'].calibration_metrics.items():
-        print(f"{model_name}: ECE={metrics['ece']:.4f}")
-    ```
-
-Advanced usage with custom parameters:
-
-    ```python
-    config = BandRMSExperimentConfig(
-        epochs=100,
-        batch_size=128,
-        band_alphas=[0.05, 0.1, 0.15, 0.2],  # Custom α values
-        calibration_bins=20,  # Fine-grained calibration analysis
-        output_dir=Path("bandrms_study")
-    )
-
-    results = run_experiment(config)
-
-    # Statistical analysis
-    perform_statistical_tests(results)
-    ```
 """
 
 # ==============================================================================
@@ -201,7 +110,7 @@ class BandRMSExperimentConfig:
     activation: str = 'gelu'
 
     # --- Training Parameters ---
-    epochs: int = 100
+    epochs: int = 3
     batch_size: int = 128
     learning_rate: float = 0.001
     early_stopping_patience: int = 20
@@ -946,6 +855,7 @@ def save_experiment_results(results: Dict[str, Any], experiment_dir: Path) -> No
     except Exception as e:
         logger.error(f"❌ Failed to save experiment results: {e}", exc_info=True)
 
+
 def print_experiment_summary(results: Dict[str, Any]) -> None:
     """
     Print comprehensive experiment summary.
@@ -971,18 +881,26 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             n_runs = stats['accuracy']['count']
 
             logger.info(f"{model_name:<15} {acc_mean:.3f}±{acc_std:.3f}    "
-                       f"{loss_mean:.3f}±{loss_std:.3f}    {n_runs:<8}")
+                        f"{loss_mean:.3f}±{loss_std:.3f}    {n_runs:<8}")
 
     # ===== CALIBRATION RESULTS =====
-    if results.get('model_analysis') and results['model_analysis'].calibration_metrics:
+    # FIXED: Access mean_entropy from confidence_metrics instead of calibration_metrics
+    if (results.get('model_analysis') and
+            results['model_analysis'].calibration_metrics and
+            results['model_analysis'].confidence_metrics):
         logger.info("🎯 CALIBRATION ANALYSIS:")
         logger.info(f"{'Model':<15} {'ECE':<12} {'Brier':<12} {'Entropy':<12}")
         logger.info("-" * 55)
 
-        for model_name, cal_metrics in results['model_analysis'].calibration_metrics.items():
+        for model_name in results['model_analysis'].calibration_metrics.keys():
+            # Get calibration metrics
+            cal_metrics = results['model_analysis'].calibration_metrics[model_name]
             ece = cal_metrics['ece']
             brier = cal_metrics['brier_score']
-            entropy = cal_metrics['mean_entropy']
+
+            # Get entropy from confidence_metrics (FIXED)
+            confidence_metrics = results['model_analysis'].confidence_metrics.get(model_name, {})
+            entropy = confidence_metrics.get('mean_entropy', 0.0)
 
             logger.info(f"{model_name:<15} {ece:<12.4f} {brier:<12.4f} {entropy:<12.4f}")
 
@@ -992,23 +910,24 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     if 'run_statistics' in results:
         # Find best performing model
         best_model = max(results['run_statistics'].items(),
-                        key=lambda x: x[1]['accuracy']['mean'])
+                         key=lambda x: x[1]['accuracy']['mean'])
         logger.info(f"   🏆 Best Accuracy: {best_model[0]} ({best_model[1]['accuracy']['mean']:.4f})")
 
         # Find most stable model (lowest std)
         most_stable = min(results['run_statistics'].items(),
-                         key=lambda x: x[1]['accuracy']['std'])
+                          key=lambda x: x[1]['accuracy']['std'])
         logger.info(f"   🎯 Most Stable: {most_stable[0]} (std: {most_stable[1]['accuracy']['std']:.4f})")
 
         # Compare BandRMS variants
-        band_rms_models = {k: v for k, v in results['run_statistics'].items() if k.startswith('BandRMS')}
+        band_rms_models = {k: v for k, v in results['run_statistics'].items() if k.startswith('BRMS')}
         if band_rms_models:
             logger.info("   📐 BandRMS Analysis:")
             for model_name, stats in band_rms_models.items():
-                # Extract alpha value from model name (e.g., "BandRMS_010" -> "0.1")
+                # Extract alpha value from model name (e.g., "BRMS_010" -> "0.10")
                 alpha_str = model_name.split('_')[1]  # "010"
-                alpha_value = float(alpha_str) / 100  # Convert "010" to 0.1
-                logger.info(f"      α={alpha_value:.1f}: {stats['accuracy']['mean']:.4f} ± {stats['accuracy']['std']:.4f}")
+                alpha_value = float(alpha_str) / 100  # Convert "010" to 0.10
+                logger.info(
+                    f"      α={alpha_value:.2f}: {stats['accuracy']['mean']:.4f} ± {stats['accuracy']['std']:.4f}")
 
     logger.info("=" * 80)
 

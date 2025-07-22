@@ -26,9 +26,9 @@ class CalibrationVisualizer(BaseVisualizer):
         ax1 = fig.add_subplot(gs[0, 0])
         self._plot_reliability_diagram(ax1)
 
-        # 2. Confidence Distributions (Raincloud)
+        # 2. Confidence Distributions (Violin Plot)
         ax2 = fig.add_subplot(gs[0, 1])
-        self._plot_confidence_raincloud(ax2)
+        self._plot_confidence_distribution(ax2)
 
         # 3. Per-Class ECE
         ax3 = fig.add_subplot(gs[1, 0])
@@ -76,11 +76,11 @@ class CalibrationVisualizer(BaseVisualizer):
         ax.set_xlim([0, 1])
         ax.set_ylim([0, 1])
 
-    def _plot_confidence_raincloud(self, ax) -> None:
-        """Plot confidence distributions as raincloud plot."""
+    def _plot_confidence_distribution(self, ax) -> None:
+        """Plot confidence distributions as a vertical violin plot."""
         confidence_data = []
 
-        # UPDATED: Access confidence metrics from the correct location
+        # Access confidence metrics from the correct location
         for model_name, metrics in self.results.confidence_metrics.items():
             # Safety check for required keys
             if 'max_probability' not in metrics:
@@ -93,51 +93,61 @@ class CalibrationVisualizer(BaseVisualizer):
                     'Confidence': conf
                 })
 
-        if confidence_data:
-            df = pd.DataFrame(confidence_data)
-
-            # Sort models to match color order
-            model_order = sorted(df['Model'].unique())
-
-            # Create violin plot with quartiles using matplotlib
-            parts = ax.violinplot([df[df['Model'] == m]['Confidence'].values
-                                   for m in model_order],
-                                  positions=range(len(model_order)),
-                                  vert=False, showmeans=False, showmedians=True,
-                                  showextrema=True)
-
-            # Color the violin plots and add to legend
-            legend_elements = []
-            for i, model in enumerate(model_order):
-                color = self.model_colors.get(model, '#333333')
-                parts['bodies'][i].set_facecolor(color)
-                parts['bodies'][i].set_alpha(0.7)
-                # Create legend entry
-                legend_elements.append(plt.Line2D([0], [0], color=color, lw=4, label=model))
-
-            # Color other violin parts
-            for partname in ['cmeans', 'cmaxes', 'cmins', 'cbars', 'cmedians', 'cquantiles']:
-                if partname in parts:
-                    parts[partname].set_color('black')
-                    parts[partname].set_alpha(0.8)
-
-            # Add model labels
-            ax.set_yticks(range(len(model_order)))
-            ax.set_yticklabels(model_order)
-
-            # Add summary statistics as text
-            for i, model in enumerate(model_order):
-                model_data = df[df['Model'] == model]['Confidence']
-                mean_conf = model_data.mean()
-                ax.text(mean_conf, i, f'{mean_conf:.3f}',
-                        ha='center', va='bottom', fontsize=9)
-
-            ax.set_xlabel('Confidence (Max Probability)')
-            ax.set_ylabel('')
+        if not confidence_data:
+            ax.text(0.5, 0.5, 'No confidence data available', ha='center', va='center')
             ax.set_title('Confidence Score Distributions')
-            ax.grid(True, alpha=0.3, axis='x')
-            # Add legend
-            ax.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc='upper left')
+            ax.axis('off')
+            return
+
+        df = pd.DataFrame(confidence_data)
+        model_order = sorted(df['Model'].unique())
+
+        # Create vertical violin plot to better show distributions
+        parts = ax.violinplot(
+            [df[df['Model'] == m]['Confidence'].values for m in model_order],
+            positions=range(len(model_order)),
+            showmeans=True,
+            showmedians=True
+        )
+
+        # Style the violin plots with model-specific colors
+        for i, model in enumerate(model_order):
+            color = self.model_colors.get(model, '#333333')
+            parts['bodies'][i].set_facecolor(color)
+            parts['bodies'][i].set_edgecolor('black')
+            parts['bodies'][i].set_alpha(0.7)
+
+        # Style the internal components of the violin plot
+        for partname in ['cmeans', 'cmedians', 'cmins', 'cmaxes', 'cbars']:
+            if partname in parts:
+                parts[partname].set_color('black')
+                parts[partname].set_linewidth(1.5)
+                parts[partname].set_alpha(0.8)
+
+        # Configure axis labels and annotations
+        ax.set_xticks(range(len(model_order)))
+        ax.set_xticklabels([f'M{i+1}' for i in range(len(model_order))])
+        ax.set_xlabel('Models')
+        ax.set_ylabel('Confidence (Max Probability)')
+        ax.set_title('Confidence Score Distributions')
+        ax.grid(True, alpha=0.3, axis='y')
+
+        # Add mean confidence annotations for quick reference
+        for i, model in enumerate(model_order):
+            mean_conf = df[df['Model'] == model]['Confidence'].mean()
+            # Position text annotation within the plot area for better visibility
+            ax.text(i, ax.get_ylim()[1] * 0.98, f'{mean_conf:.3f}',
+                    ha='center', va='top', fontsize=8,
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
+
+        # Add explanatory note for model abbreviations
+        # (This would be more useful if a legend was present, but provides context)
+        ax.text(
+            0.02, 0.02,
+            'M1, M2, etc. correspond to models in alphabetical order.',
+            transform=ax.transAxes, ha='left', va='bottom', fontsize=7,
+            style='italic', alpha=0.7
+        )
 
     def _plot_per_class_ece(self, ax) -> None:
         """Plot per-class Expected Calibration Error."""
