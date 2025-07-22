@@ -38,77 +38,6 @@ Experimental Design
 3. **GELU**: Gaussian Error Linear Unit - smooth approximation of ReLU
 4. **Mish**: Self-regularized non-monotonic activation function
 
-Comprehensive Analysis Pipeline
-------------------------------
-
-The experiment employs a multi-faceted analysis approach:
-
-**Training Analysis**:
-- Training and validation curves for all activation functions
-- Convergence behavior and stability metrics
-- Early stopping based on validation accuracy
-- Learning dynamics comparison
-
-**Model Performance Evaluation**:
-- Test set accuracy and top-k accuracy
-- Loss values and convergence characteristics
-- Statistical significance testing across runs
-- Per-class performance analysis
-
-**Calibration Analysis** (via ModelAnalyzer):
-- Expected Calibration Error (ECE) with configurable binning
-- Brier score for probabilistic prediction quality
-- Reliability diagrams and calibration plots
-- Confidence histogram analysis
-
-**Weight and Activation Analysis**:
-- Layer-wise weight distribution statistics
-- Weight norm analysis (L1, L2, spectral norms)
-- Activation pattern analysis across the network
-- Dead neuron detection and sparsity metrics
-- Gradient flow characteristics
-
-**Information Flow Analysis**:
-- Feature representation quality metrics
-- Layer-wise information bottleneck analysis
-- Activation entropy and mutual information
-- Receptive field analysis
-
-**Visual Analysis**:
-- Training history comparison plots
-- Confusion matrices for each activation function
-- Weight distribution visualizations
-- Activation heatmaps and statistics
-- Gradient flow diagrams
-
-Configuration and Customization
--------------------------------
-
-The experiment is highly configurable through the ``ExperimentConfig`` class:
-
-**Architecture Parameters**:
-- ``conv_filters``: Filter counts for convolutional layers
-- ``dense_units``: Hidden unit counts for dense layers
-- ``dropout_rates``: Dropout probabilities per layer
-- ``weight_decay``: L2 regularization strength
-- ``use_residual``: Enable residual connections
-
-**Training Parameters**:
-- ``epochs``: Number of training epochs
-- ``batch_size``: Training batch size
-- ``learning_rate``: Adam optimizer learning rate
-- ``early_stopping_patience``: Patience for early stopping
-
-**Activation Function Parameters**:
-- Easily extensible activation function dictionary
-- Support for custom activation implementations
-- Configurable parameters for parameterized activations
-
-**Analysis Parameters**:
-- ``calibration_bins``: Number of bins for calibration analysis
-- Output directory structure and naming
-- Visualization and plotting options
-
 Expected Outcomes and Insights
 ------------------------------
 
@@ -125,44 +54,6 @@ This experiment is designed to reveal:
 
 4. **Feature Quality**: The impact of activation functions on learned feature
    representations and their discriminative power
-
-Usage Example
--------------
-
-Basic usage with default configuration:
-
-    ```python
-    from pathlib import Path
-
-    # Run with default settings
-    config = ExperimentConfig()
-    results = run_experiment(config)
-
-    # Access results
-    performance = results['performance_analysis']
-    calibration = results['model_analysis'].calibration_metrics
-    ```
-
-Advanced usage with custom configuration:
-
-    ```python
-    # Custom configuration
-    config = ExperimentConfig(
-        epochs=30,
-        batch_size=256,
-        learning_rate=0.0005,
-        output_dir=Path("custom_results"),
-        calibration_bins=20,
-        use_residual=True,
-        # Add custom activation functions
-        activations={
-            'relu': keras.activations.relu,
-            'custom_mish': lambda x: mish(x, beta=0.5)
-        }
-    )
-
-    results = run_experiment(config)
-    ```
 """
 
 # ==============================================================================

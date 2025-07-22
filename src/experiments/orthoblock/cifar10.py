@@ -5,37 +5,13 @@ OrthoBlock Effectiveness Study on CIFAR-10
 This experiment conducts a comprehensive evaluation of OrthoBlock layers compared to
 traditional dense layers and other normalization techniques on CIFAR-10 image
 classification. The study addresses fundamental questions about orthonormal regularization:
-Does enforcing orthogonality constraints (W^T * W ≈ I) combined with centering normalization
+Does enforcing orthogonality constraints (W^T * W ≈ I) combined with a band rms variant normalization
 and constrained scaling improve training dynamics, model calibration, and generalization
 while maintaining competitive performance?
 
 The hypothesis is that OrthoBlock's orthonormal constraints create more stable feature
 representations that are less prone to overfitting and provide better calibration, at the
-potential cost of some expressiveness. The orthogonality constraint is expected to be
-particularly beneficial for deep networks by maintaining gradient flow and preventing
-feature collapse.
-
-Scientific Motivation
---------------------
-
-Deep neural networks often suffer from:
-1. Feature collapse where neurons learn redundant representations
-2. Poor gradient flow in deep architectures
-3. Overconfident predictions (poor calibration)
-4. Sensitivity to initialization and hyperparameters
-
-OrthoBlock proposes a novel approach combining:
-- Orthonormal-regularized weights (enforcing W^T * W ≈ I)
-- Centering normalization (mean subtraction)
-- Logit normalization (projection to unit hypersphere)
-- Constrained scale parameters [0,1] for interpretable feature attention
-
-Theoretical Foundation:
-- Orthogonal matrices preserve distances and angles
-- Orthonormal weights maintain gradient norms during backpropagation
-- Centering removes bias and improves conditioning
-- Bounded scaling provides natural regularization
-- Should improve calibration by preventing extreme activation values
+potential cost of some expressiveness.
 
 Experimental Design
 -------------------
@@ -60,53 +36,6 @@ Experimental Design
 5. **Dense_Standard**: Standard dense layer (baseline)
 6. **Dense_L2**: Dense layer with L2 regularization
 7. **Dense_Dropout**: Dense layer with higher dropout
-
-**Experimental Variables**:
-- **Primary**: Dense layer type (7 variants)
-- **Secondary**: Orthogonal regularization strength
-- **Control**: Architecture, training procedure, dataset, random seeds
-
-Comprehensive Analysis Pipeline
-------------------------------
-
-**Training Dynamics Analysis**:
-- Convergence speed and stability metrics
-- Orthogonality measure (||W^T W - I||_F) over training
-- Scale parameter distribution evolution
-- Gradient flow characteristics through the network
-
-**Model Performance Evaluation**:
-- Test accuracy and top-k accuracy
-- Statistical significance testing across multiple runs
-- Per-class performance analysis
-- Robustness to hyperparameter variations
-
-**Calibration Analysis** (via ModelAnalyzer):
-- Expected Calibration Error (ECE) with multiple bin sizes
-- Brier score for probabilistic prediction quality
-- Reliability diagrams and confidence distribution analysis
-- Temperature scaling effectiveness for post-hoc calibration
-
-**Weight and Architecture Analysis**:
-- Weight distribution evolution across layers
-- Orthogonality metrics for OrthoBlock variants
-- Scale parameter analysis and interpretability
-- Layer-wise norm analysis (L1, L2, spectral)
-
-Expected Outcomes and Hypotheses
---------------------------------
-
-**Primary Hypotheses**:
-1. **Orthogonality**: Higher regularization should improve stability but may reduce expressiveness
-2. **Calibration**: OrthoBlock variants should show lower ECE and better reliability
-3. **Generalization**: Better test performance with controlled overfitting
-4. **Training Dynamics**: More stable training with consistent gradient flow
-
-**Scientific Contributions**:
-1. Empirical validation of orthogonal regularization benefits
-2. Optimal regularization strength selection guidelines
-3. Calibration improvements through geometric constraints
-4. Training stability analysis for orthogonal neural networks
 """
 
 # ==============================================================================

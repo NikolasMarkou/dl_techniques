@@ -375,3 +375,17 @@ def validate_training_history(history: Dict[str, List[float]]) -> Dict[str, List
         report['warnings'].append("No validation loss found - overfitting analysis not possible")
 
     return report
+
+def truncate_model_name(name: str, max_len: int = 12, filler: str = "...") -> str:
+    """Truncates a string by replacing middle characters with a filler."""
+    if len(name) <= max_len:
+        return name
+
+    chars_to_keep = max_len - len(filler)
+    if chars_to_keep < 2:
+        return name[:max_len]
+
+    start_len = (chars_to_keep + 1) // 2
+    end_len = chars_to_keep // 2
+
+    return f"{name[:start_len]}{filler}{name[-end_len:]}"

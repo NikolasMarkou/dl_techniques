@@ -14,7 +14,7 @@ from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 
 from .base import BaseVisualizer
-from ..utils import find_model_metric
+from ..utils import find_model_metric, truncate_model_name
 from dl_techniques.utils.logger import logger
 
 
@@ -80,7 +80,7 @@ class SummaryVisualizer(BaseVisualizer):
 
     def _plot_performance_table(self, ax: Axes) -> None:
         """
-        Create comprehensive performance table including training metrics.
+        Create a comprehensive performance table including training metrics.
 
         Args:
             ax: Matplotlib axes object for the table visualization.
@@ -108,7 +108,8 @@ class SummaryVisualizer(BaseVisualizer):
 
         # Process each model's metrics
         for model_name in sorted(self.results.model_metrics.keys()):
-            row_data: List[str] = [model_name]
+            # truncate model name to never overflow from the table
+            row_data: List[str] = [truncate_model_name(model_name)]
             model_metrics: Dict[str, Any] = self.results.model_metrics.get(
                 model_name, {}
             )

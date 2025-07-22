@@ -66,7 +66,7 @@ import numpy as np
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.utils.datasets import load_and_preprocess_[dataset]
-from dl_techniques.utils.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
+from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 
 # Experiment-specific imports
