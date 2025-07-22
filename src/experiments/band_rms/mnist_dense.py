@@ -158,7 +158,7 @@ class DenseNormalizationConfig:
     dropout_rate: float = 0.1
 
     # --- Training Parameters ---
-    epochs: int = 1
+    epochs: int = 100
     batch_size: int = 256
     learning_rate: float = 0.001
     early_stopping_patience: int = 15
