@@ -1,41 +1,41 @@
 """
-BandRMS Layer: RMS Normalization within a Learnable Spherical Shell.
+Adaptive BandRMS Layer: RMS Normalization with Log-Transformed RMS-Statistics-Based Scaling.
 
 This layer implements an advanced normalization technique that extends Root Mean
-Square Normalization (RMSNorm) by constraining feature vectors to lie within a
-learnable "thick spherical shell" in the activation space. This provides the
-stability of normalization while granting the model additional representational
-flexibility.
+Square Normalization (RMSNorm) by using logarithmically transformed RMS statistics
+to dynamically compute scaling factors. This creates adaptive "thick spherical shell"
+constraints based on the magnitude characteristics of the input data.
 
-The layer operates in a two-step process:
+The layer operates in a four-step process:
 
 1.  **RMS Normalization:**
     First, it applies standard RMS Normalization. For an input vector `x` of
-    dimension `D`, this step computes `x_norm = x / sqrt(mean(x²) + ε)`.
+    dimension `D`, this step computes `x_norm = x / sqrt(mean(x²) + ε)` and
+    retains the RMS statistics for further processing.
 
-    **Why mean instead of sum?** RMSNorm uses mean(x²) rather than sum(x²) to achieve
-    dimension-independent normalization. This means:
-    - The RMS value becomes 1 regardless of vector dimension
-    - A 64-dim and 512-dim layer have similar normalization behavior
-    - The L2 norm becomes approximately `sqrt(D)`, scaling predictably with dimension
-    - Gradients don't explode with layer width due to the 1/D factor in derivatives
-    - Better optimization stability across different model architectures
+2.  **Logarithmic Transformation:**
+    The computed RMS statistics undergo a logarithmic transformation to stabilize
+    variance and handle the long-tailed nature of magnitude distributions. This
+    makes the statistics more numerically stable and symmetric for processing.
 
-    This is fundamentally different from L2 normalization, which would place vectors
-    on the unit hypersphere but create dimension-dependent scaling issues.
+3.  **Dense Projection:**
+    The log-transformed RMS statistics are passed through a dense layer to compute
+    adaptive scaling parameters that depend on the input's magnitude characteristics.
 
-2.  **Learnable Band Scaling:**
-    Second, instead of using a simple learnable gain like in LayerNorm or RMSNorm,
-    this layer multiplies the normalized vector by a single scalar `s` that is constrained
-    to a specific band: `s ∈ [1 - max_band_width, 1]`. This scalar `s` is
-    learnable, controlled by a single trainable parameter that is mapped to the target
-    range using a sigmoid function.
+4.  **Adaptive Band Scaling:**
+    The scaling parameters are constrained to [1 - max_band_width, 1] using sigmoid
+    activation and applied to the RMS-normalized features. This creates input-dependent
+    spherical shell constraints where the "thickness" adapts based on RMS statistics.
 
-This design forces the final output vector's RMS value to be learned within the
-`[1-α, 1]` band, effectively placing it in a high-dimensional shell. The dimension-
-independent nature of RMS normalization ensures this band constraint works consistently
-across layers of different widths, which can improve optimization dynamics and model
-performance.
+This approach leverages the mathematical properties of logarithmic transformation:
+- **Variance Stabilization**: Compresses dynamic range of RMS values
+- **Symmetry**: Transforms log-normal-like RMS distributions to more Gaussian-like
+- **Batch Independence**: No dependence on batch statistics, unlike BatchNorm
+- **Numerical Stability**: Better handling of extreme RMS values
+
+The key insight is using log-transformed RMS statistics (capturing input "energy"
+in a stable numerical space) as conditioning information to determine appropriate
+normalization strength for each specific input pattern.
 
 References:
 [1] Root Mean Square Layer Normalization (Zhang & Sennrich, 2019)
@@ -49,32 +49,38 @@ from typing import Any, Dict, Optional, Union
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class BandRMS(keras.layers.Layer):
-    """Root Mean Square Normalization layer with bounded RMS constraints.
+class AdaptiveBandRMS(keras.layers.Layer):
+    """Adaptive Root Mean Square Normalization layer with log-transformed RMS scaling.
 
-    This layer implements root mean square normalization that guarantees the output
-    RMS value will be between [1-α, 1], where α is the max_band_width parameter.
-    Unlike L2 normalization which constrains the actual vector length, this approach
-    constrains the Root Mean Square value, making it dimension-independent.
+    This layer implements root mean square normalization with scaling factors computed
+    from logarithmically transformed RMS statistics. The log transformation stabilizes
+    the variance of RMS values and creates a more symmetric distribution for the
+    dense layer to process.
 
-    The normalization is computed in two steps:
-    1. RMS normalization: sets RMS=1, L2_norm≈sqrt(D) (dimension-independent scaling)
-    2. Learnable scaling within the [1-α, 1] band using a single global parameter
+    The key innovation is using log-transformed magnitude characteristics (RMS statistics)
+    to determine appropriate normalization strength, creating input-adaptive "thick shells"
+    in the RMS space with improved numerical stability.
 
-    The layer creates a "thick shell" in the RMS space rather than geometric space,
-    allowing features to exist within a bounded range while maintaining dimension-
-    independent behavior across different layer widths.
+    The normalization pipeline:
+    1. RMS normalization: sets RMS=1, L2_norm≈sqrt(D) + extract RMS statistics
+    2. Log transformation: log(RMS) for variance stabilization and symmetry
+    3. Dense projection: compute scaling parameters from log-transformed RMS
+    4. Adaptive scaling: apply RMS-conditioned scaling within [1-α, 1] band
+
+    This allows the layer to learn different normalization behaviors based on input
+    magnitude patterns with better handling of extreme values and improved numerical
+    stability compared to batch-dependent normalization approaches.
 
     Args:
         max_band_width: Maximum allowed deviation from unit normalization (0 < α < 1).
-            Controls the thickness of the spherical shell.
+            Controls the maximum thickness of the adaptive spherical shell.
         axis: int or tuple of ints, default=-1
             Axis or axes along which to compute RMS statistics. The default (-1)
             computes RMS over the last dimension.
         epsilon: Small constant added to denominator for numerical stability.
         band_initializer: str or initializer, default="zeros"
-            Initializer for the single band parameter.
-        band_regularizer: Regularizer for the band parameter. Default is L2(1e-5).
+            Initializer for the dense layer computing band parameters.
+        band_regularizer: Regularizer for the dense layer weights.
         **kwargs: Additional layer arguments.
 
     Input shape:
@@ -87,16 +93,16 @@ class BandRMS(keras.layers.Layer):
 
     Example:
     ```python
-    # Apply BandRMS normalization to the output of a dense layer
+    # Apply Adaptive BandRMS normalization to the output of a dense layer
     x = keras.layers.Dense(64)(inputs)
-    x = BandRMS(max_band_width=0.2)(x)
+    x = AdaptiveBandRMS(max_band_width=0.2)(x)
 
     # Apply to a specific axis in a CNN
     conv = keras.layers.Conv2D(32, 3)(inputs)
-    norm = BandRMS(axis=3, max_band_width=0.1)(conv)
+    norm = AdaptiveBandRMS(axis=3, max_band_width=0.1)(conv)
 
-    # With custom regularization
-    norm_layer = BandRMS(
+    # With custom regularization and dense units
+    norm_layer = AdaptiveBandRMS(
         max_band_width=0.3,
         band_regularizer=keras.regularizers.L2(1e-4)
     )
@@ -112,16 +118,16 @@ class BandRMS(keras.layers.Layer):
             band_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ):
-        """Initialize the BandRMS layer.
+        """Initialize the Adaptive BandRMS layer.
 
         Args:
             max_band_width: Maximum allowed deviation from unit normalization (0 < α < 1).
-                Controls the thickness of the spherical shell.
+                Controls the maximum thickness of the adaptive spherical shell.
             axis: int or tuple of ints, default=-1
                 Axis or axes along which to compute RMS statistics.
             epsilon: Small constant added to denominator for numerical stability.
-            band_initializer: Initializer for the single band parameter.
-            band_regularizer: Regularizer for the band parameter. Default is L2(1e-5).
+            band_initializer: Initializer for the dense layer computing band parameters.
+            band_regularizer: Regularizer for the dense layer weights.
             **kwargs: Additional layer arguments.
 
         Raises:
@@ -137,12 +143,10 @@ class BandRMS(keras.layers.Layer):
         self.axis = axis
         self.epsilon = epsilon
         self.band_initializer = keras.initializers.get(band_initializer)
+        self.band_regularizer = band_regularizer
 
-        # Default regularizer if none provided
-        self.band_regularizer = band_regularizer or keras.regularizers.L2(1e-5)
-
-        # Will be set in build()
-        self.band_param = None
+        # Sublayers - will be initialized in build()
+        self.dense_layer = None
         self._build_input_shape = None
 
     def _validate_inputs(self, max_band_width: float, epsilon: float) -> None:
@@ -163,21 +167,29 @@ class BandRMS(keras.layers.Layer):
             raise ValueError(f"epsilon must be positive, got {epsilon}")
 
     def build(self, input_shape):
-        """Create the layer's trainable weights.
+        """Create the layer's sublayers and weights.
 
         Args:
             input_shape: Shape of input tensor.
         """
         self._build_input_shape = input_shape
 
-        # Create a single scalar band parameter
-        self.band_param = self.add_weight(
-            name="band_param",
-            shape=(),  # Scalar shape
-            initializer=self.band_initializer,
-            trainable=True,
-            regularizer=self.band_regularizer
+        # Get the feature dimension
+        feature_dim = input_shape[-1]
+
+        # Create dense layer to process log-transformed RMS statistics
+        self.dense_layer = keras.layers.Dense(
+            units=feature_dim,  # Output per-feature scaling factors
+            kernel_initializer=self.band_initializer,
+            kernel_regularizer=self.band_regularizer,
+            use_bias=True,
+            name="band_dense"
         )
+
+        # Build dense layer with appropriate shape
+        # Log-transformed RMS statistics will have shape [batch, 1] after reshaping
+        log_rms_shape = [None, 1]
+        self.dense_layer.build(log_rms_shape)
 
         super().build(input_shape)
 
@@ -186,15 +198,15 @@ class BandRMS(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply constrained RMS normalization.
+        """Apply adaptive constrained RMS normalization with log-transformed statistics.
 
         Args:
             inputs: Input tensor.
             training: Boolean indicating whether in training mode.
 
         Returns:
-            Normalized tensor with RMS value in [1-max_band_width, 1] and
-            L2 norm approximately in [(1-max_band_width)×sqrt(D), sqrt(D)].
+            Normalized tensor with adaptive RMS constraints based on log-transformed
+            input magnitude characteristics.
         """
         # Cast to float32 for numerical stability in mixed precision training
         inputs_fp32 = ops.cast(inputs, "float32")
@@ -209,7 +221,7 @@ class BandRMS(keras.layers.Layer):
             keepdims=True
         )
 
-        # clamp it for stability, protection for division by zero and sqrt(negative)
+        # Clamp for stability, protection for division by zero and sqrt(negative)
         rms = ops.maximum(
             ops.sqrt(mean_square + self.epsilon),
             self.epsilon
@@ -219,18 +231,32 @@ class BandRMS(keras.layers.Layer):
         # This scaling is dimension-independent, unlike L2 normalization
         normalized = inputs_fp32 / rms
 
-        # Step 2: Apply learnable scaling within [1-α, 1] band
-        # Use sigmoid to map the band_param to [0, 1]
-        # with 5x multiplier, sigmoid(-5) ~ 0, sigmoid(+5) ~ 1
-        band_activation = ops.sigmoid(5.0 * self.band_param)
+        # Step 2: Logarithmic transformation of RMS statistics
+        # This stabilizes variance and handles the long-tailed nature of RMS distributions
+        # log(RMS) transforms log-normal-like distributions to more Gaussian-like
+        # and compresses the dynamic range for better numerical stability
+        rms_reshaped = ops.reshape(rms, [-1, 1])  # Shape: [batch, 1]
+
+        # Apply log transformation with additional epsilon for numerical safety
+        # Since RMS >= epsilon > 0, log(RMS) is always well-defined
+        log_rms = ops.log(rms_reshaped)
+
+        # Step 3: Dense projection to compute adaptive band parameters
+        # The dense layer processes the log-transformed RMS statistics
+        band_logits = self.dense_layer(log_rms, training=training)
+
+        # Step 4: Apply adaptive scaling within [1-α, 1] band
+        # Use sigmoid to map the band logits to [0, 1]
+        # with 5x multiplier for steeper gradients
+        band_activation = ops.sigmoid(5.0 * band_logits)
 
         # Scale the activation to be within [1-max_band_width, 1]
         # When band_activation = 0: scale = 1 - max_band_width
         # When band_activation = 1: scale = 1
         scale = (1.0 - self.max_band_width) + (self.max_band_width * band_activation)
 
-        # Apply scaling to the normalized tensor
-        # The single scalar scale is automatically broadcast to all elements
+        # Apply adaptive scaling to the RMS-normalized tensor
+        # The scale has shape [batch, feature_dim] for per-feature scaling
         output = normalized * scale
 
         # Cast back to original dtype
