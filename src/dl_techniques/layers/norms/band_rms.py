@@ -225,7 +225,7 @@ class BandRMS(keras.layers.Layer):
 
         # Step 2: Apply learnable scaling within [1-α, 1] band
         # Use sigmoid to map band_param to [0, 1]
-        # with 5x multipler, sigmoid(-5) ~ 0, sigmoid(+5) ~ 1
+        # with 5x multiplier, sigmoid(-5) ~ 0, sigmoid(+5) ~ 1
         band_activation = ops.sigmoid(5.0 * self.band_param)
 
         # Scale the activation to be within [1-max_band_width, 1]

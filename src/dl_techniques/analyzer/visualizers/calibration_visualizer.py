@@ -47,14 +47,14 @@ class CalibrationVisualizer(BaseVisualizer):
 
     def _plot_reliability_diagram(self, ax) -> None:
         """Plot reliability diagram with confidence intervals."""
-        ax.plot([0, 1], [0, 1], 'k--', alpha=0.6, label='Perfect Calibration')
+        ax.plot([0, 1], [0, 1], 'k--', alpha=0.2, label='Perfect Calibration')
 
         for model_name, rel_data in self.results.reliability_data.items():
             color = self.model_colors.get(model_name, '#333333')
 
             # Plot main line
             ax.plot(rel_data['bin_centers'], rel_data['bin_accuracies'],
-                    'o-', color=color, label=model_name, linewidth=2, markersize=8)
+                    'o-', color=color, label=model_name, linewidth=2, markersize=5)
 
             # Add shaded confidence region if we have sample counts
             if 'bin_counts' in rel_data:
@@ -72,7 +72,7 @@ class CalibrationVisualizer(BaseVisualizer):
         ax.set_title('Reliability Diagrams with 95% CI')
         # DONT SHOW LEGEND HERE
         #ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=0.2)
         ax.set_xlim([0, 1])
         ax.set_ylim([0, 1])
 
@@ -251,7 +251,7 @@ class CalibrationVisualizer(BaseVisualizer):
             except Exception as e:
                 logger.warning(f"Could not create density contours for {model_name}: {e}")
                 # Fallback: plot a simple scatter with low alpha
-                scatter = ax.scatter(confidence, entropy, color=color, alpha=0.3,
+                scatter = ax.scatter(confidence, entropy, color=color, alpha=0.1,
                            s=20, label=model_name)
                 legend_elements.append(scatter)
 
@@ -259,6 +259,6 @@ class CalibrationVisualizer(BaseVisualizer):
         ax.set_ylabel('Entropy')
         ax.set_title('Uncertainty Landscape (Density Contours)')
         ax.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc='upper left')
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=0.1)
         ax.set_xlim(0, 1)
         ax.set_ylim(0, None)

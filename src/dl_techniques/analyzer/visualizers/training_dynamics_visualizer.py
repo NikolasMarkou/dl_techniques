@@ -113,7 +113,8 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Loss')
         ax.set_title('Training and Validation Loss Evolution')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+        # DO NOT ADD LEGEND
+        #ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
         ax.grid(True, alpha=0.3)
         ax.set_yscale('log')  # Log scale often better for loss
 
@@ -191,7 +192,8 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Validation Loss - Training Loss')
         ax.set_title('Overfitting Analysis (Gap Evolution)')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        # DO NOT ADD LEGEND
+        #ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(True, alpha=0.3)
 
         # Add annotation

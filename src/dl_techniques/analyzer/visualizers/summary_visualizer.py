@@ -555,14 +555,15 @@ class SummaryVisualizer(BaseVisualizer):
         ax.set_title('Confidence Distribution Profiles')
         ax.grid(True, alpha=0.3, axis='y')
 
-        # Add conditional legend for detailed view
-        if self.config.verbose:
-            ax.legend(
-                handles=legend_elements,
-                bbox_to_anchor=(1.05, 1),
-                loc='upper left',
-                fontsize=8
-            )
+        # DO NOT ADD LEGEND
+        # # Add conditional legend for detailed view
+        # if self.config.verbose:
+        #     ax.legend(
+        #         handles=legend_elements,
+        #         bbox_to_anchor=(1.05, 1),
+        #         loc='upper left',
+        #         fontsize=8
+        #     )
 
         # Add explanatory note for model abbreviations
         ax.text(
