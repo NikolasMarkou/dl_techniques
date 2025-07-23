@@ -1,7 +1,7 @@
 """
-Weight Visualization Module
+Enhanced Weight Visualization Module
 
-Creates visualizations for weight analysis results.
+Creates visualizations for weight analysis results with centralized legend management.
 """
 
 import numpy as np
@@ -9,15 +9,14 @@ from typing import List
 import matplotlib.pyplot as plt
 
 from .base import BaseVisualizer
-from ..constants import WEIGHT_HEALTH_L2_NORMALIZER, WEIGHT_HEALTH_SPARSITY_THRESHOLD
 from dl_techniques.utils.logger import logger
-
+from ..constants import WEIGHT_HEALTH_L2_NORMALIZER, WEIGHT_HEALTH_SPARSITY_THRESHOLD
 
 class WeightVisualizer(BaseVisualizer):
-    """Creates weight analysis visualizations."""
+    """Creates weight analysis visualizations with centralized legend."""
 
     def create_visualizations(self) -> None:
-        """Create unified Weight Learning Journey visualization."""
+        """Create unified Weight Learning Journey visualization with single legend."""
         if not self.results.weight_stats:
             return
 
@@ -32,12 +31,25 @@ class WeightVisualizer(BaseVisualizer):
         ax2 = fig.add_subplot(gs[1, 0])
         self._plot_weight_health_heatmap(ax2)
 
+        # Add single figure-level legend
+        models_with_data = self._get_models_with_data()
+        if models_with_data:
+            self._create_figure_legend(fig, title="Models", specific_models=models_with_data)
+
         plt.suptitle('Weight Learning Journey', fontsize=16, fontweight='bold')
-        fig.subplots_adjust(top=0.93, bottom=0.1, left=0.1, right=0.95)
+        fig.subplots_adjust(top=0.93, bottom=0.1, left=0.1, right=0.85)  # Adjusted right margin for legend
 
         if self.config.save_plots:
             self._save_figure(fig, 'weight_learning_journey')
         plt.close(fig)
+
+    def _get_models_with_data(self) -> List[str]:
+        """Get models that have weight statistics data."""
+        models_with_data = []
+        for model_name in self.model_order:
+            if model_name in self.results.weight_stats and self.results.weight_stats[model_name]:
+                models_with_data.append(model_name)
+        return models_with_data
 
     def _get_layer_order(self, model_name: str) -> List[str]:
         """Get the correct layer order for a model, using explicit ordering when available."""
@@ -59,7 +71,9 @@ class WeightVisualizer(BaseVisualizer):
         """Plot how weight magnitudes evolve through network layers."""
         evolution_data = {}
 
-        for model_name, weight_stats in self.results.weight_stats.items():
+        # Use consistent model ordering
+        for model_name in self._sort_models_consistently(list(self.results.weight_stats.keys())):
+            weight_stats = self.results.weight_stats[model_name]
             layer_indices = []
             l2_norms = []
             mean_abs_weights = []
@@ -81,17 +95,18 @@ class WeightVisualizer(BaseVisualizer):
             }
 
         if evolution_data:
-            # Plot L2 norm evolution
-            for model_name, data in evolution_data.items():
+            # Plot L2 norm evolution with consistent colors and ordering
+            for model_name in self._sort_models_consistently(list(evolution_data.keys())):
+                data = evolution_data[model_name]
                 if data['indices']:  # Check if we have data
-                    color = self.model_colors.get(model_name, '#333333')
+                    color = self._get_model_color(model_name)
                     ax.plot(data['indices'], data['l2_norms'], 'o-',
-                           label=f'{model_name}', color=color, linewidth=2, markersize=6)
+                           color=color, linewidth=2, markersize=6)
 
             ax.set_xlabel('Layer Index (Network Depth)')
             ax.set_ylabel('L2 Norm')
             ax.set_title('Weight Magnitude Evolution Through Network Depth', fontsize=12, fontweight='bold')
-            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            # REMOVED: Individual legend - will use figure-level legend
             ax.grid(True, alpha=0.3)
 
             # Add insight text
@@ -115,9 +130,9 @@ class WeightVisualizer(BaseVisualizer):
             ax.axis('off')
             return
 
-        # Prepare health metrics
+        # Prepare health metrics with consistent model ordering
         health_metrics = []
-        models = sorted(self.results.weight_stats.keys())
+        models = self._sort_models_consistently(list(self.results.weight_stats.keys()))
         max_layers = getattr(self.config, 'max_layers_heatmap', 12)
 
         actual_max_layers = 0
@@ -170,7 +185,7 @@ class WeightVisualizer(BaseVisualizer):
             ax.set_xlabel('Layer Position in Network')
             ax.set_ylabel('Model')
 
-            # Use abbreviated model names for y-axis readability
+            # Use model abbreviations for y-axis readability with consistent ordering
             model_abbreviations = [f'M{i+1}' for i in range(len(models))]
             ax.set_xticks(range(display_layers))
             ax.set_xticklabels([f'L{i}' for i in range(display_layers)], fontsize=9)
@@ -193,7 +208,7 @@ class WeightVisualizer(BaseVisualizer):
                             ax.text(j, i, f'{value:.2f}', ha='center', va='center',
                                    color=text_color, fontsize=8, fontweight='bold')
 
-            # Add an improved explanatory note with model mappings
+            # Add an improved explanatory note with model mappings using consistent ordering
             model_mapping_str = ", ".join([f"M{i+1}={name}" for i, name in enumerate(models)])
             full_note = (
                 f"Note: Layers ordered by network depth. Gray cells (N/A) indicate models with fewer layers.\n"

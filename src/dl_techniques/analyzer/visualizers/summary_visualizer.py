@@ -1,19 +1,17 @@
-# visualizers/summary_visualizer.py
-
 """
-Summary Dashboard Visualization Module
+Enhanced Summary Dashboard Visualization Module
 
 Creates comprehensive summary dashboard with key insights across all analyses.
 Provides an integrated view of model performance, training dynamics, calibration,
-and confidence metrics in a single dashboard layout.
+and confidence metrics in a single dashboard layout with centralized legend management.
 """
 
 import pandas as pd
 import matplotlib.pyplot as plt
-from typing import List, Dict, Any
-import matplotlib.patches as patches
-from matplotlib.figure import Figure
 from matplotlib.axes import Axes
+from typing import List, Dict, Any
+from matplotlib.figure import Figure
+
 
 # ---------------------------------------------------------------------
 # local imports
@@ -36,7 +34,7 @@ GRID_WIDTH_RATIOS = [1.2, 1]
 SUBPLOT_TOP = 0.93
 SUBPLOT_BOTTOM = 0.07
 SUBPLOT_LEFT = 0.08
-SUBPLOT_RIGHT = 0.96
+SUBPLOT_RIGHT = 0.88  # Adjusted for legend space
 
 # Text Styling Constants
 TITLE_FONT_SIZE = 18
@@ -84,11 +82,12 @@ ANNOTATION_Y_TOP = 0.98
 VIOLIN_ALPHA = 0.6
 VIOLIN_EDGE_ALPHA = 0.8
 
+
 # ---------------------------------------------------------------------
 
 class SummaryVisualizer(BaseVisualizer):
     """
-    Creates comprehensive summary dashboard visualization.
+    Creates comprehensive summary dashboard visualization with centralized legend.
 
     This visualizer generates a 2x2 grid dashboard containing:
     1. Performance metrics table with training insights
@@ -101,7 +100,7 @@ class SummaryVisualizer(BaseVisualizer):
 
     def create_visualizations(self) -> None:
         """
-        Create a comprehensive summary dashboard with training insights.
+        Create a comprehensive summary dashboard with training insights and single legend.
 
         Generates a 2x2 subplot layout containing key model analysis results.
         The layout dynamically adapts based on available analysis data.
@@ -133,6 +132,11 @@ class SummaryVisualizer(BaseVisualizer):
         ax4: Axes = fig.add_subplot(gs[1, 1])
         self._plot_calibration_performance_summary(ax4)
 
+        # Add single figure-level legend
+        models_with_data = self._get_models_with_data()
+        if models_with_data:
+            self._create_figure_legend(fig, title="Models", specific_models=models_with_data)
+
         # Configure overall dashboard styling
         plt.suptitle(
             'Model Analysis Summary Dashboard',
@@ -140,12 +144,30 @@ class SummaryVisualizer(BaseVisualizer):
             fontweight='bold'
         )
         fig.subplots_adjust(top=SUBPLOT_TOP, bottom=SUBPLOT_BOTTOM,
-                           left=SUBPLOT_LEFT, right=SUBPLOT_RIGHT)
+                            left=SUBPLOT_LEFT, right=SUBPLOT_RIGHT)
 
         # Save and cleanup
         if self.config.save_plots:
             self._save_figure(fig, 'summary_dashboard')
         plt.close(fig)
+
+    def _get_models_with_data(self) -> List[str]:
+        """Get models that have data in any of the analysis results."""
+        models_with_data = set()
+
+        # Collect models from various analysis results
+        if hasattr(self.results, 'model_metrics') and self.results.model_metrics:
+            models_with_data.update(self.results.model_metrics.keys())
+        if hasattr(self.results, 'calibration_metrics') and self.results.calibration_metrics:
+            models_with_data.update(self.results.calibration_metrics.keys())
+        if hasattr(self.results, 'confidence_metrics') and self.results.confidence_metrics:
+            models_with_data.update(self.results.confidence_metrics.keys())
+        if hasattr(self.results, 'weight_pca') and self.results.weight_pca:
+            if 'labels' in self.results.weight_pca:
+                models_with_data.update(self.results.weight_pca['labels'])
+
+        # Return sorted list for consistency
+        return self._sort_models_consistently(list(models_with_data))
 
     def _plot_performance_table(self, ax: Axes) -> None:
         """
@@ -159,12 +181,12 @@ class SummaryVisualizer(BaseVisualizer):
             - With training data: Final Acc, Best Acc, Loss, ECE, Brier, Conv Speed, Overfit
             - Without training data: Accuracy, Loss, ECE, Brier Score, Mean Entropy
         """
-        # Prepare table data structure
+        # Prepare table data structure with consistent model ordering
         table_data: List[List[str]] = []
 
         # Determine table headers based on available training metrics
         if (self.results.training_metrics and
-            self.results.training_metrics.peak_performance):
+                self.results.training_metrics.peak_performance):
             headers = [
                 'Model', 'Final Acc', 'Best Acc', 'Loss',
                 'ECE', 'Brier', 'Conv Speed', 'Overfit'
@@ -175,8 +197,8 @@ class SummaryVisualizer(BaseVisualizer):
                 'Brier Score', 'Mean Entropy'
             ]
 
-        # Process each model's metrics
-        for model_name in sorted(self.results.model_metrics.keys()):
+        # Process each model's metrics using consistent ordering
+        for model_name in self._sort_models_consistently(list(self.results.model_metrics.keys())):
             # truncate model name to never overflow from the table
             row_data: List[str] = [truncate_model_name(model_name)]
             model_metrics: Dict[str, Any] = self.results.model_metrics.get(
@@ -184,7 +206,7 @@ class SummaryVisualizer(BaseVisualizer):
             )
 
             if (self.results.training_metrics and
-                self.results.training_metrics.peak_performance):
+                    self.results.training_metrics.peak_performance):
                 # Enhanced table with training insights
                 self._add_training_metrics_to_row(
                     row_data, model_name, model_metrics
@@ -201,10 +223,10 @@ class SummaryVisualizer(BaseVisualizer):
         self._create_styled_table(ax, table_data, headers)
 
     def _add_training_metrics_to_row(
-        self,
-        row_data: List[str],
-        model_name: str,
-        model_metrics: Dict[str, Any]
+            self,
+            row_data: List[str],
+            model_name: str,
+            model_metrics: Dict[str, Any]
     ) -> None:
         """
         Add training-specific metrics to table row.
@@ -251,10 +273,10 @@ class SummaryVisualizer(BaseVisualizer):
         row_data.extend([f'{conv_speed}', f'{overfit:+.3f}'])
 
     def _add_standard_metrics_to_row(
-        self,
-        row_data: List[str],
-        model_name: str,
-        model_metrics: Dict[str, Any]
+            self,
+            row_data: List[str],
+            model_name: str,
+            model_metrics: Dict[str, Any]
     ) -> None:
         """
         Add standard metrics to table row (without training data).
@@ -292,10 +314,10 @@ class SummaryVisualizer(BaseVisualizer):
         row_data.append(f'{entropy:.3f}')
 
     def _create_styled_table(
-        self,
-        ax: Axes,
-        table_data: List[List[str]],
-        headers: List[str]
+            self,
+            ax: Axes,
+            table_data: List[List[str]],
+            headers: List[str]
     ) -> None:
         """
         Create and style the performance metrics table.
@@ -326,10 +348,10 @@ class SummaryVisualizer(BaseVisualizer):
             header_cell.set_text_props(weight='bold')
             header_cell.set_height(TABLE_CELL_HEIGHT)
 
-        # Style data rows with model-specific colors
+        # Style data rows with model-specific colors using consistent ordering
         for i, row_data in enumerate(table_data, 1):
             model_name = row_data[0]
-            model_color = self.model_colors.get(model_name, TABLE_DEFAULT_COLOR)
+            model_color = self._get_model_color(model_name)
             light_color = self._lighten_color(model_color, COLOR_LIGHTEN_FACTOR)
 
             # Apply styling to each cell in the row
@@ -367,8 +389,8 @@ class SummaryVisualizer(BaseVisualizer):
             )
             return
 
-        # Extract calibration metrics for all models
-        models = sorted(self.results.calibration_metrics.keys())
+        # Extract calibration metrics for all models using consistent ordering
+        models = self._sort_models_consistently(list(self.results.calibration_metrics.keys()))
         ece_values: List[float] = []
         brier_values: List[float] = []
 
@@ -379,12 +401,11 @@ class SummaryVisualizer(BaseVisualizer):
 
         # Create scatter plot for ECE vs Brier Score comparison
         for i, model in enumerate(models):
-            color = self.model_colors.get(model, '#333333')
+            color = self._get_model_color(model)
             ax.scatter(
                 ece_values[i], brier_values[i],
                 s=SCATTER_SIZE_SMALL, color=color, alpha=ALPHA_HIGH,
-                edgecolors='black', linewidth=LINE_WIDTH_MEDIUM,
-                label=model
+                edgecolors='black', linewidth=LINE_WIDTH_MEDIUM
             )
 
         # Add reference lines for calibration quality assessment
@@ -396,8 +417,7 @@ class SummaryVisualizer(BaseVisualizer):
         ax.set_xlabel('Expected Calibration Error (ECE) - Lower is Better')
         ax.set_ylabel('Brier Score - Lower is Better')
         ax.set_title('Calibration Performance Landscape')
-        # DO NOT ADD LEGEND
-        # ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        # REMOVED: Individual legend - using figure-level legend
         ax.grid(True, which='both', linestyle='--', linewidth=GRID_LINE_WIDTH)
 
         # Set adaptive axis limits with margin for visibility
@@ -479,11 +499,15 @@ class SummaryVisualizer(BaseVisualizer):
             )
             return
 
-        # Create scatter plot with model-specific colors
-        for i, (label, comp) in enumerate(zip(labels, components)):
-            color = self.model_colors.get(label, '#333333')
+        # Create scatter plot with model-specific colors using consistent ordering
+        sorted_indices = [labels.index(model) for model in self._sort_models_consistently(labels) if model in labels]
+
+        for idx in sorted_indices:
+            label = labels[idx]
+            comp = components[idx]
+            color = self._get_model_color(label)
             ax.scatter(
-                comp[0], comp[1], c=[color], label=label,
+                comp[0], comp[1], c=[color],
                 s=SCATTER_SIZE_MEDIUM, alpha=ALPHA_HIGH,
                 edgecolors='black', linewidth=LINE_WIDTH_THICK
             )
@@ -503,7 +527,7 @@ class SummaryVisualizer(BaseVisualizer):
             f'PC2 ({explained_var[1]:.1%})' if len(explained_var) > 1 else 'PC2'
         )
         ax.set_title('Model Similarity (Concatenated Weight Statistics)')
-        # ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left') # <<< FIX: This line is removed/commented
+        # REMOVED: Individual legend - using figure-level legend
         ax.grid(True, alpha=ALPHA_LOW)
         ax.set_aspect('equal', adjustable='box')
 
@@ -518,10 +542,11 @@ class SummaryVisualizer(BaseVisualizer):
             Uses violin plots to show confidence distribution shapes.
             Includes mean annotations for quick comparison.
         """
-        # Prepare confidence data for visualization
+        # Prepare confidence data for visualization using consistent ordering
         confidence_data: List[Dict[str, Any]] = []
 
-        for model_name, metrics in self.results.confidence_metrics.items():
+        for model_name in self._sort_models_consistently(list(self.results.confidence_metrics.keys())):
+            metrics = self.results.confidence_metrics[model_name]
             # Validate presence of required confidence metrics
             if 'max_probability' not in metrics:
                 logger.warning(
@@ -546,9 +571,9 @@ class SummaryVisualizer(BaseVisualizer):
             )
 
     def _create_confidence_violin_plot(
-        self,
-        ax: Axes,
-        confidence_data: List[Dict[str, Any]]
+            self,
+            ax: Axes,
+            confidence_data: List[Dict[str, Any]]
     ) -> None:
         """
         Create violin plot for confidence distributions.
@@ -558,7 +583,7 @@ class SummaryVisualizer(BaseVisualizer):
             confidence_data: List of dictionaries containing model confidence data.
         """
         df = pd.DataFrame(confidence_data)
-        model_order = sorted(df['Model'].unique())
+        model_order = self._sort_models_consistently(list(df['Model'].unique()))
 
         # Create violin plot with distribution statistics
         parts = ax.violinplot(
@@ -569,21 +594,10 @@ class SummaryVisualizer(BaseVisualizer):
         )
 
         # Style violin plots with model-specific colors
-        legend_elements: List[patches.Rectangle] = []
         for i, model in enumerate(model_order):
-            color = self.model_colors.get(model, '#333333')
+            color = self._get_model_color(model)
             parts['bodies'][i].set_facecolor(color)
             parts['bodies'][i].set_alpha(VIOLIN_ALPHA)
-
-            # Create legend entries for better visualization
-            legend_elements.append(
-                patches.Rectangle(
-                    (0, 0), 1, 1,
-                    facecolor=color, alpha=VIOLIN_ALPHA,
-                    edgecolor='black', linewidth=LINE_WIDTH_THIN,
-                    label=model
-                )
-            )
 
         # Style violin plot components
         for partname in ['cmeans', 'cmaxes', 'cmins', 'cbars', 'cmedians']:
@@ -593,8 +607,8 @@ class SummaryVisualizer(BaseVisualizer):
 
         # Configure axis labels and annotations
         ax.set_xticks(range(len(model_order)))
-        ax.set_xticklabels([f'M{i+1}' for i in range(len(model_order))],
-                          fontsize=TABLE_FONT_SIZE)
+        ax.set_xticklabels([f'M{i + 1}' for i in range(len(model_order))],
+                           fontsize=TABLE_FONT_SIZE)
 
         # Add mean confidence annotations for quick reference
         for i, model in enumerate(model_order):
@@ -612,30 +626,21 @@ class SummaryVisualizer(BaseVisualizer):
         ax.set_title('Confidence Distribution Profiles')
         ax.grid(True, alpha=ALPHA_LOW, axis='y')
 
-        # DO NOT ADD LEGEND
-        # # Add conditional legend for detailed view
-        # if self.config.verbose:
-        #     ax.legend(
-        #         handles=legend_elements,
-        #         bbox_to_anchor=(1.05, 1),
-        #         loc='upper left',
-        #         fontsize=ANNOTATION_FONT_SIZE
-        #     )
-
         # Add explanatory note for model abbreviations
+        model_mapping_str = ", ".join([f"M{i + 1}={name}" for i, name in enumerate(model_order)])
         ax.text(
             ANNOTATION_X_LEFT, ANNOTATION_Y_BOTTOM,
-            'M1, M2, etc. correspond to models in legend',
+            f'Model mapping: {model_mapping_str}',
             transform=ax.transAxes, ha='left', va='bottom',
             fontsize=EXPLANATORY_NOTE_FONT_SIZE,
             style='italic', alpha=ALPHA_REFERENCE
         )
 
     def _plot_no_data_message(
-        self,
-        ax: Axes,
-        message: str,
-        title: str
+            self,
+            ax: Axes,
+            message: str,
+            title: str
     ) -> None:
         """
         Display a standardized no-data message on an axes.

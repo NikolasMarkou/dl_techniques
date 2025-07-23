@@ -1,21 +1,20 @@
-# visualizers/training_dynamics_visualizer.py
-
 """
-Training Dynamics Visualization Module
+Enhanced Training Dynamics Visualization Module
 
-Creates visualizations for training dynamics analysis results.
+Creates visualizations for training dynamics analysis results with centralized legend management.
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
+from typing import List
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
 from .base import BaseVisualizer
-from ..constants import LOSS_PATTERNS, VAL_LOSS_PATTERNS, ACC_PATTERNS, VAL_ACC_PATTERNS
 from ..utils import find_metric_in_history, smooth_curve
+from ..constants import LOSS_PATTERNS, VAL_LOSS_PATTERNS, ACC_PATTERNS, VAL_ACC_PATTERNS
 
 # ---------------------------------------------------------------------
 # constants
@@ -29,7 +28,7 @@ GRID_HEIGHT_RATIOS = [1, 1, 0.8]
 SUBPLOT_TOP = 0.94
 SUBPLOT_BOTTOM = 0.05
 SUBPLOT_LEFT = 0.08
-SUBPLOT_RIGHT = 0.96
+SUBPLOT_RIGHT = 0.88  # Adjusted for legend space
 
 # Plot Styling Constants
 LINE_WIDTH_STANDARD = 2
@@ -69,10 +68,10 @@ ANNOTATION_TEXT_Y = 0.98
 # ---------------------------------------------------------------------
 
 class TrainingDynamicsVisualizer(BaseVisualizer):
-    """Creates training dynamics visualizations."""
+    """Creates training dynamics visualizations with centralized legend."""
 
     def create_visualizations(self) -> None:
-        """Create comprehensive training dynamics visualizations."""
+        """Create comprehensive training dynamics visualizations with single legend."""
         if not self.results.training_history:
             return
 
@@ -100,6 +99,11 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
         ax5 = fig.add_subplot(gs[2, :])
         self._plot_training_summary_table(ax5)
 
+        # Add single figure-level legend
+        models_with_data = self._get_models_with_data()
+        if models_with_data:
+            self._create_figure_legend(fig, title="Models", specific_models=models_with_data)
+
         plt.suptitle('Training Dynamics Analysis', fontsize=TITLE_FONT_SIZE, fontweight='bold')
         fig.subplots_adjust(top=SUBPLOT_TOP, bottom=SUBPLOT_BOTTOM,
                            left=SUBPLOT_LEFT, right=SUBPLOT_RIGHT)
@@ -107,6 +111,14 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
         if self.config.save_plots:
             self._save_figure(fig, 'training_dynamics')
         plt.close(fig)
+
+    def _get_models_with_data(self) -> List[str]:
+        """Get models that have training history data."""
+        models_with_data = []
+        for model_name in self.model_order:
+            if model_name in self.results.training_history and self.results.training_history[model_name]:
+                models_with_data.append(model_name)
+        return models_with_data
 
     def _get_metric_data(self, model_name: str, metric_patterns: list,
                         exclude_prefixes: list = None) -> tuple:
@@ -147,8 +159,9 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
 
     def _plot_loss_curves(self, ax) -> None:
         """Plot training and validation loss curves with robust metric retrieval."""
-        for model_name in sorted(self.results.training_history.keys()):
-            color = self.model_colors.get(model_name, '#333333')
+        # Use consistent model ordering
+        for model_name in self._sort_models_consistently(list(self.results.training_history.keys())):
+            color = self._get_model_color(model_name)
 
             # Plot training loss - using robust method
             train_loss, epochs = self._get_metric_data(
@@ -156,7 +169,7 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
             )
             if train_loss is not None:
                 ax.plot(epochs, train_loss, '-', color=color,
-                       linewidth=LINE_WIDTH_STANDARD, label=f'{model_name} (train)',
+                       linewidth=LINE_WIDTH_STANDARD,
                        alpha=LINE_ALPHA_STANDARD)
 
             # Plot validation loss - using robust method
@@ -165,21 +178,21 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
             )
             if val_loss is not None:
                 ax.plot(epochs, val_loss, '--', color=color,
-                       linewidth=LINE_WIDTH_STANDARD, label=f'{model_name} (val)',
+                       linewidth=LINE_WIDTH_STANDARD,
                        alpha=LINE_ALPHA_STANDARD)
 
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Loss')
         ax.set_title('Training and Validation Loss Evolution')
-        # DO NOT ADD LEGEND
-        #ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=LEGEND_FONT_SIZE)
+        # REMOVED: Individual legend - will use figure-level legend
         ax.grid(True, alpha=GRID_ALPHA)
         ax.set_yscale('log')  # Log scale often better for loss
 
     def _plot_accuracy_curves(self, ax) -> None:
         """Plot training and validation accuracy curves with robust metric retrieval."""
-        for model_name in sorted(self.results.training_history.keys()):
-            color = self.model_colors.get(model_name, '#333333')
+        # Use consistent model ordering
+        for model_name in self._sort_models_consistently(list(self.results.training_history.keys())):
+            color = self._get_model_color(model_name)
 
             # Plot training accuracy - using robust method
             train_acc, epochs = self._get_metric_data(
@@ -187,7 +200,7 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
             )
             if train_acc is not None:
                 ax.plot(epochs, train_acc, '-', color=color,
-                       linewidth=LINE_WIDTH_STANDARD, label=f'{model_name} (train)',
+                       linewidth=LINE_WIDTH_STANDARD,
                        alpha=LINE_ALPHA_STANDARD)
 
             # Plot validation accuracy - using robust method
@@ -196,7 +209,7 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
             )
             if val_acc is not None:
                 ax.plot(epochs, val_acc, '--', color=color,
-                       linewidth=LINE_WIDTH_STANDARD, label=f'{model_name} (val)',
+                       linewidth=LINE_WIDTH_STANDARD,
                        alpha=LINE_ALPHA_STANDARD)
 
                 # Mark best epoch
@@ -210,14 +223,20 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Accuracy')
         ax.set_title('Training and Validation Accuracy Evolution')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=LEGEND_FONT_SIZE)
+        # REMOVED: Individual legend - will use figure-level legend
         ax.grid(True, alpha=GRID_ALPHA)
         ax.set_ylim(0, Y_AXIS_LIMIT_MAX)
 
+        # Add line style legend annotation
+        ax.text(0.02, 0.98, 'Solid: Training\nDashed: Validation\n★: Best Epoch',
+               transform=ax.transAxes, ha='left', va='top', fontsize=ANNOTATION_FONT_SIZE,
+               bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow', alpha=0.8))
+
     def _plot_overfitting_analysis(self, ax) -> None:
         """Plot dedicated overfitting analysis with robust metric retrieval."""
-        for model_name in sorted(self.results.training_history.keys()):
-            color = self.model_colors.get(model_name, '#333333')
+        # Use consistent model ordering
+        for model_name in self._sort_models_consistently(list(self.results.training_history.keys())):
+            color = self._get_model_color(model_name)
 
             # Get training and validation loss using robust method
             train_loss, _ = self._get_metric_data(
@@ -237,10 +256,10 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
                 if self.config.smooth_training_curves:
                     gap_smooth = smooth_curve(gap, self.config.smoothing_window)
                     ax.plot(epochs, gap_smooth, '-', color=color,
-                           linewidth=LINE_WIDTH_THICK, label=model_name)
+                           linewidth=LINE_WIDTH_THICK)
                 else:
                     ax.plot(epochs, gap, '-', color=color,
-                           linewidth=LINE_WIDTH_STANDARD, label=model_name,
+                           linewidth=LINE_WIDTH_STANDARD,
                            alpha=LINE_ALPHA_STANDARD)
 
                 # Add shaded region for positive gap (overfitting)
@@ -254,8 +273,7 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Validation Loss - Training Loss')
         ax.set_title('Overfitting Analysis (Gap Evolution)')
-        # DO NOT ADD LEGEND
-        #ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        # REMOVED: Individual legend - will use figure-level legend
         ax.grid(True, alpha=GRID_ALPHA)
 
         # Add annotation
@@ -282,33 +300,22 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
             ax.axis('off')
             return
 
-        models = sorted(peak_data.keys())
+        # Use consistent model ordering
+        models = self._sort_models_consistently(list(peak_data.keys()))
         best_accs = [peak_data[m]['val_accuracy'] for m in models]
         best_epochs = [peak_data[m]['epoch'] for m in models]
 
         # Create scatter plot instead of confusing bar chart
         for i, model in enumerate(models):
-            color = self.model_colors.get(model, '#333333')
+            color = self._get_model_color(model)
             ax.scatter(best_epochs[i], best_accs[i],
                       s=MARKER_SIZE, color=color, alpha=LINE_ALPHA_STANDARD,
-                      edgecolors='black', linewidth=MARKER_EDGE_WIDTH,
-                      label=model)
-
-            # NO NEED FOR ANNOTATION
-            # # Add model name as annotation
-            # ax.annotate(model,
-            #            (best_epochs[i], best_accs[i]),
-            #            xytext=(ANNOTATION_OFFSET_X, ANNOTATION_OFFSET_Y),
-            #            textcoords='offset points',
-            #            fontsize=ANNOTATION_FONT_SIZE,
-            #            bbox=dict(boxstyle='round,pad=0.3',
-            #                    facecolor=color,
-            #                    alpha=0.3))
+                      edgecolors='black', linewidth=MARKER_EDGE_WIDTH)
 
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Best Validation Accuracy')
         ax.set_title('Peak Performance: Accuracy vs Convergence Speed')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        # REMOVED: Individual legend - will use figure-level legend
         ax.grid(True, alpha=GRID_ALPHA)
 
         # Set reasonable axis limits
@@ -325,12 +332,12 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
             ax.axis('off')
             return
 
-        # Prepare data
+        # Prepare data with consistent model ordering
         table_data = []
         headers = ['Model', 'Final Acc', 'Best Acc', 'Best Epoch', 'Conv. Speed',
                   'Stability', 'Overfit Index', 'Final Gap']
 
-        for model_name in sorted(self.results.training_history.keys()):
+        for model_name in self._sort_models_consistently(list(self.results.training_history.keys())):
             row = [model_name]
 
             # Final accuracy - using robust method
@@ -381,10 +388,10 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
             table[(0, i)].set_text_props(weight='bold')
             table[(0, i)].set_height(TABLE_CELL_HEIGHT)
 
-        # Color model rows
+        # Color model rows with consistent colors
         for i, row_data in enumerate(table_data, 1):
             model_name = row_data[0]
-            color = self.model_colors.get(model_name, TABLE_DEFAULT_COLOR)
+            color = self._get_model_color(model_name)
             light_color = self._lighten_color(color, COLOR_LIGHTEN_FACTOR)
 
             for j in range(len(headers)):

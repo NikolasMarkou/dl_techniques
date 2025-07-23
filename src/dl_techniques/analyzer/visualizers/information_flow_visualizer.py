@@ -1,13 +1,14 @@
 """
-Information Flow Visualization Module
+Enhanced Information Flow Visualization Module
 
-Creates visualizations for information flow analysis results.
+Creates visualizations for information flow analysis results with centralized legend management.
 """
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpecFromSubplotSpec
+from typing import List
 
 # ---------------------------------------------------------------------
 # local imports
@@ -28,7 +29,7 @@ GRID_WSPACE = 0.3
 SUBPLOT_TOP = 0.93
 SUBPLOT_BOTTOM = 0.1
 SUBPLOT_LEFT = 0.1
-SUBPLOT_RIGHT = 0.95
+SUBPLOT_RIGHT = 0.85  # Adjusted for legend space
 
 # Text Styling Constants
 TITLE_FONT_SIZE = 16
@@ -75,10 +76,10 @@ TITLE_PAD = 20
 # ---------------------------------------------------------------------
 
 class InformationFlowVisualizer(BaseVisualizer):
-    """Creates information flow visualizations."""
+    """Creates information flow visualizations with centralized legend."""
 
     def create_visualizations(self) -> None:
-        """Create information flow visualizations."""
+        """Create information flow visualizations with single legend."""
         if not self.results.information_flow:
             return
 
@@ -99,6 +100,11 @@ class InformationFlowVisualizer(BaseVisualizer):
         ax4 = fig.add_subplot(gs[1, 1])
         self._plot_layer_specialization_analysis(ax4)
 
+        # Add single figure-level legend
+        models_with_data = self._get_models_with_data()
+        if models_with_data:
+            self._create_figure_legend(fig, title="Models", specific_models=models_with_data)
+
         plt.suptitle('Information Flow and Activation Analysis',
                     fontsize=TITLE_FONT_SIZE, fontweight='bold')
         fig.subplots_adjust(top=SUBPLOT_TOP, bottom=SUBPLOT_BOTTOM,
@@ -107,6 +113,14 @@ class InformationFlowVisualizer(BaseVisualizer):
         if self.config.save_plots:
             self._save_figure(fig, 'information_flow_analysis')
         plt.close(fig)
+
+    def _get_models_with_data(self) -> List[str]:
+        """Get models that have information flow data."""
+        models_with_data = []
+        for model_name in self.model_order:
+            if model_name in self.results.information_flow and self.results.information_flow[model_name]:
+                models_with_data.append(model_name)
+        return models_with_data
 
     def _get_ordered_layer_analysis(self, model_name: str) -> list:
         """
@@ -133,7 +147,8 @@ class InformationFlowVisualizer(BaseVisualizer):
 
     def _plot_activation_flow_overview(self, ax) -> None:
         """Plot activation statistics evolution through layers."""
-        for model_name in sorted(self.results.information_flow.keys()):
+        # Use consistent model ordering
+        for model_name in self._sort_models_consistently(list(self.results.information_flow.keys())):
             ordered_layers = self._get_ordered_layer_analysis(model_name)
 
             if not ordered_layers:
@@ -153,8 +168,8 @@ class InformationFlowVisualizer(BaseVisualizer):
                 means = np.array(means)
                 stds = np.array(stds)
 
-                color = self.model_colors.get(model_name, '#333333')
-                line = ax.plot(layer_positions, means, 'o-', label=f'{model_name}',
+                color = self._get_model_color(model_name)
+                line = ax.plot(layer_positions, means, 'o-',
                                linewidth=LINE_WIDTH_STANDARD, markersize=MARKER_SIZE_SMALL,
                                color=color)
                 ax.fill_between(layer_positions, means - stds, means + stds,
@@ -163,13 +178,13 @@ class InformationFlowVisualizer(BaseVisualizer):
         ax.set_xlabel('Layer Depth (Network Order)')
         ax.set_ylabel('Activation Statistics')
         ax.set_title('Activation Mean ± Std Evolution')
-        # DONT SHOE LEGEND HERE
-        # ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        # REMOVED: Individual legend - will use figure-level legend
         ax.grid(True, alpha=ALPHA_GRID)
 
     def _plot_effective_rank_evolution(self, ax) -> None:
         """Plot effective rank evolution through network."""
-        for model_name in sorted(self.results.information_flow.keys()):
+        # Use consistent model ordering
+        for model_name in self._sort_models_consistently(list(self.results.information_flow.keys())):
             ordered_layers = self._get_ordered_layer_analysis(model_name)
 
             if not ordered_layers:
@@ -184,15 +199,15 @@ class InformationFlowVisualizer(BaseVisualizer):
                     positions.append(i)
 
             if ranks:
-                color = self.model_colors.get(model_name, '#333333')
-                ax.plot(positions, ranks, 'o-', label=model_name,
+                color = self._get_model_color(model_name)
+                ax.plot(positions, ranks, 'o-',
                         linewidth=LINE_WIDTH_STANDARD, markersize=MARKER_SIZE_LARGE,
                         color=color)
 
         ax.set_xlabel('Layer Depth (Network Order)')
         ax.set_ylabel('Effective Rank')
         ax.set_title('Information Dimensionality Evolution')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        # REMOVED: Individual legend - will use figure-level legend
         ax.grid(True, alpha=ALPHA_GRID)
 
     def _plot_activation_health_dashboard(self, ax) -> None:
@@ -207,7 +222,7 @@ class InformationFlowVisualizer(BaseVisualizer):
         # Prepare health metrics data with consistent ordering
         health_data = []
 
-        for model_name in sorted(self.results.information_flow.keys()):
+        for model_name in self._sort_models_consistently(list(self.results.information_flow.keys())):
             ordered_layers = self._get_ordered_layer_analysis(model_name)
 
             for i, (layer_name, analysis) in enumerate(ordered_layers):
@@ -240,8 +255,8 @@ class InformationFlowVisualizer(BaseVisualizer):
             # Sort by layer index to ensure correct order
             df = df.sort_values(['Model', 'Layer_Index'])
 
-            # Create heatmap data
-            models = sorted(df['Model'].unique())
+            # Create heatmap data with consistent model ordering
+            models = self._sort_models_consistently(list(df['Model'].unique()))
             max_layers = getattr(self.config, 'max_layers_info_flow', 8)
 
             # Get unique layers and limit based on config, maintaining order
@@ -330,7 +345,7 @@ class InformationFlowVisualizer(BaseVisualizer):
         # Calculate specialization metrics for each model with consistent ordering
         specialization_data = []
 
-        for model_name in sorted(self.results.information_flow.keys()):
+        for model_name in self._sort_models_consistently(list(self.results.information_flow.keys())):
             ordered_layers = self._get_ordered_layer_analysis(model_name)
 
             if not ordered_layers:
@@ -384,13 +399,11 @@ class InformationFlowVisualizer(BaseVisualizer):
 
             bars = ax_top.bar(range(len(models)), avg_specs, alpha=ALPHA_STANDARD)
 
-            # Color bars with model colors
+            # Color bars with model colors using consistent ordering
             for i, model in enumerate(models):
-                color = self.model_colors.get(model, '#333333')
+                color = self._get_model_color(model)
                 bars[i].set_facecolor(color)
 
-            # DONT SHOW THIS
-            # ax_top.set_title('Overall Model Specialization', fontsize=SMALL_TITLE_FONT_SIZE, fontweight='bold')
             ax_top.set_ylabel('Specialization Score')
             ax_top.set_xticks(range(len(models)))
             ax_top.set_xticklabels([])  # Remove model names from x-axis
@@ -408,19 +421,18 @@ class InformationFlowVisualizer(BaseVisualizer):
             for data in specialization_data:
                 model_name = data['Model']
                 layer_specs = data['Layer Specializations']
-                color = self.model_colors.get(model_name, '#333333')
+                color = self._get_model_color(model_name)
 
                 x_positions = range(len(layer_specs))
                 ax_bottom.plot(x_positions, layer_specs, 'o-',
-                               label=model_name, color=color,
+                               color=color,
                                linewidth=LINE_WIDTH_STANDARD, markersize=MARKER_SIZE_SMALL)
 
             ax_bottom.set_title('Layer-wise Specialization Evolution (Network Order)',
                                fontsize=SMALL_TITLE_FONT_SIZE, fontweight='bold')
             ax_bottom.set_xlabel('Layer Index (Network Depth)')
             ax_bottom.set_ylabel('Specialization Score')
-            # DONT SHOW LEGEND
-            # ax_bottom.legend(fontsize=LABEL_FONT_SIZE, bbox_to_anchor=(1.05, 1), loc='upper left')
+            # REMOVED: Individual legend - will use figure-level legend
             ax_bottom.grid(True, alpha=ALPHA_GRID)
             ax_bottom.set_ylim(AXIS_LIMIT_MIN, AXIS_LIMIT_MAX)
 
