@@ -22,14 +22,18 @@ import seaborn as sns
 from datetime import datetime
 from typing import Tuple, Dict, Any, Optional
 
-
-from dl_techniques.models.spatial_vae import SpatialVAE, create_spatial_vae, SpatialSampling
-from dl_techniques.utils.logger import logger
-
 # Set style for better plots
 plt.style.use('seaborn-v0_8-darkgrid')
 sns.set_palette("viridis")
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+from dl_techniques.models.spatial_vae import SpatialVAE, create_spatial_vae, SpatialSampling
+
+# ---------------------------------------------------------------------
 
 def setup_gpu():
     """Configure GPU settings for optimal training."""
@@ -44,6 +48,7 @@ def setup_gpu():
     else:
         logger.info("No GPUs found, using CPU")
 
+# ---------------------------------------------------------------------
 
 def load_mnist_data() -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
     """Load and preprocess MNIST dataset for Spatial VAE."""
@@ -55,6 +60,7 @@ def load_mnist_data() -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, 
     logger.info(f"Test data shape: {x_test.shape}")
     return (x_train, y_train), (x_test, y_test)
 
+# ---------------------------------------------------------------------
 
 def load_cifar10_data() -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
     """Load and preprocess CIFAR-10 dataset for Spatial VAE."""
@@ -66,6 +72,7 @@ def load_cifar10_data() -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray
     logger.info(f"Test data shape: {x_test.shape}")
     return (x_train, y_train), (x_test, y_test)
 
+# ---------------------------------------------------------------------
 
 def create_model_config(dataset: str, latent_dim: int) -> Dict[str, Any]:
     """Create Spatial VAE model configuration based on dataset."""
@@ -92,6 +99,7 @@ def create_model_config(dataset: str, latent_dim: int) -> Dict[str, Any]:
     else:
         raise ValueError(f"Unsupported dataset: {dataset}")
 
+# ---------------------------------------------------------------------
 
 def plot_reconstruction_comparison(
         original_images: np.ndarray,
@@ -121,6 +129,7 @@ def plot_reconstruction_comparison(
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
 
+# ---------------------------------------------------------------------
 
 def plot_spatial_latent_maps(
         model: SpatialVAE,
@@ -165,6 +174,7 @@ def plot_spatial_latent_maps(
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
 
+# ---------------------------------------------------------------------
 
 def plot_spatial_interpolation(
         model: SpatialVAE,
@@ -210,6 +220,7 @@ def plot_spatial_interpolation(
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
 
+# ---------------------------------------------------------------------
 
 def plot_latent_statistics(
         model: SpatialVAE,
@@ -262,6 +273,7 @@ def plot_latent_statistics(
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
 
+# ---------------------------------------------------------------------
 
 class SpatialVisualizationCallback(keras.callbacks.Callback):
     """Callback to generate Spatial VAE visualizations during training."""
@@ -316,6 +328,7 @@ class SpatialVisualizationCallback(keras.callbacks.Callback):
             stats_path = os.path.join(self.stats_dir, f'epoch_{epoch + 1:03d}.png')
             plot_latent_statistics(self.model, self.x_val[:500], stats_path, epoch + 1, self.batch_size)
 
+# ---------------------------------------------------------------------
 
 def create_callbacks(
         model_name: str,
@@ -345,6 +358,7 @@ def create_callbacks(
     logger.info(f"Results will be saved to: {results_dir}")
     return callbacks, results_dir
 
+# ---------------------------------------------------------------------
 
 def plot_training_history(history: keras.callbacks.History, save_dir: str):
     """Plot training history curves for Spatial VAE."""
@@ -398,6 +412,7 @@ def plot_training_history(history: keras.callbacks.History, save_dir: str):
     plt.savefig(os.path.join(save_dir, 'training_history.png'), dpi=150)
     plt.close()
 
+# ---------------------------------------------------------------------
 
 def train_model(args: argparse.Namespace):
     """Main training function for Spatial VAE."""
@@ -507,6 +522,7 @@ def train_model(args: argparse.Namespace):
         for key, val in test_results.items():
             f.write(f"  {key.replace('_', ' ').title()}: {val:.4f}\n")
 
+# ---------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description='Train a Spatial Variational Autoencoder on image data.')
@@ -529,6 +545,7 @@ def main():
         logger.error(f"An unexpected error occurred: {e}", exc_info=True)
         raise
 
+# ---------------------------------------------------------------------
 
 if __name__ == '__main__':
     main()

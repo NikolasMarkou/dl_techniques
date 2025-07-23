@@ -8,7 +8,8 @@ test:
 clean:
 	@echo "Cleaning artifacts..."
 	rm -rf build/ dist/ *.egg-info/ logs/
-	find . -name "__pycache__" -type d -delete
+	find ./src/ -name "__pycache__" -type d -type d -exec rm -rf {} +
+	find ./tests/ -name "__pycache__" -type d -type d -exec rm -rf {} +
 
 structure:
 	tree -L 4 --noreport src/dl_techniques/ | sed 's/^/ /'

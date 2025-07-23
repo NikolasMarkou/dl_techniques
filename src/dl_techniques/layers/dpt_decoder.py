@@ -1,7 +1,7 @@
 import keras
-from keras import ops
 from typing import Dict, Tuple, Optional, Any, List, Union
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class DPTDecoder(keras.layers.Layer):
@@ -213,3 +213,5 @@ class DPTDecoder(keras.layers.Layer):
         """
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
+
+# ---------------------------------------------------------------------

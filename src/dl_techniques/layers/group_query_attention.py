@@ -44,26 +44,6 @@ References:
 
     - Su, J., et al. (2021). "RoFormer: Enhanced Transformer with Rotary Position 
       Embedding." https://arxiv.org/abs/2104.09864 (RoPE integration)
-
-Usage Examples:
-    Basic usage:
-    >>> gqa = GroupedQueryAttention(
-    ...     d_model=512,
-    ...     n_head=8,
-    ...     n_kv_head=2,  # 4 query heads per key/value head
-    ...     max_seq_len=2048
-    ... )
-    >>> output = gqa(inputs)
-
-    In a transformer decoder:
-    >>> def decoder_layer(x):
-    ...     # Self-attention with GQA
-    ...     attn_out = GroupedQueryAttention(...)(x)
-    ...     x = x + attn_out
-    ...     
-    ...     # Feed-forward network
-    ...     ffn_out = FeedForward(...)(LayerNorm()(x))
-    ...     return x + ffn_out
 """
 
 import keras
@@ -74,8 +54,8 @@ from typing import Optional, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 from .rope import RotaryPositionEmbedding
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
@@ -115,6 +95,26 @@ class GroupedQueryAttention(layers.Layer):
     Raises:
         ValueError: If d_model is not divisible by n_head, or if n_head is not 
                    divisible by n_kv_head.
+
+    Usage Examples:
+        Basic usage:
+        >>> gqa = GroupedQueryAttention(
+        ...     d_model=512,
+        ...     n_head=8,
+        ...     n_kv_head=2,  # 4 query heads per key/value head
+        ...     max_seq_len=2048
+        ... )
+        >>> output = gqa(inputs)
+
+        In a transformer decoder:
+        >>> def decoder_layer(x):
+        ...     # Self-attention with GQA
+        ...     attn_out = GroupedQueryAttention(...)(x)
+        ...     x = x + attn_out
+        ...
+        ...     # Feed-forward network
+        ...     ffn_out = FeedForward(...)(LayerNorm()(x))
+        ...     return x + ffn_out
     """
 
     def __init__(
