@@ -3,13 +3,6 @@ from keras import ops
 from typing import Tuple, Optional, Any, Dict, Union
 
 # ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.logger import logger
-
-
-# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class MobileMQA(keras.layers.Layer):
@@ -181,3 +174,5 @@ class MobileMQA(keras.layers.Layer):
         """
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
+
+# ---------------------------------------------------------------------
