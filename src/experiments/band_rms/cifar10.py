@@ -155,14 +155,14 @@ class AdvancedBandRMSExperimentConfig:
     # --- Normalization Techniques ---
     normalization_variants: Dict[str, Callable] = field(default_factory=lambda: {
         # Adaptive BandRMS variants
-        'AdaptiveBandRMS_01': lambda: ('adaptive_band_rms', {'max_band_width': 0.1}),
-        'AdaptiveBandRMS_05': lambda: ('adaptive_band_rms', {'max_band_width': 0.5}),
-        'AdaptiveBandRMS_09': lambda: ('adaptive_band_rms', {'max_band_width': 0.9}),
+        'ABRMS_01': lambda: ('adaptive_band_rms', {'max_band_width': 0.1}),
+        'ABRMS_05': lambda: ('adaptive_band_rms', {'max_band_width': 0.5}),
+        'ABRMS_09': lambda: ('adaptive_band_rms', {'max_band_width': 0.9}),
 
         # Static BandRMS variants
-        'StaticBandRMS_01': lambda: ('static_band_rms', {'max_band_width': 0.1}),
-        'StaticBandRMS_02': lambda: ('static_band_rms', {'max_band_width': 0.2}),
-        'StaticBandRMS_03': lambda: ('static_band_rms', {'max_band_width': 0.3}),
+        'BRMS_01': lambda: ('static_band_rms', {'max_band_width': 0.1}),
+        'BRMS_02': lambda: ('static_band_rms', {'max_band_width': 0.2}),
+        'BRMS_03': lambda: ('static_band_rms', {'max_band_width': 0.3}),
 
         # Baseline normalization methods
         'RMSNorm': lambda: ('rms_norm', {}),
@@ -448,7 +448,7 @@ def build_model(
         x = build_conv_block(x, filters, norm_type, norm_params, config, i)
 
     # Global average pooling
-    x = keras.layers.GlobalAveragePooling2D(name='global_avg_pool')(x)
+    x = keras.layers.Flatten(name="flatten")(x)
 
     # Dense classification layers with normalization
     for j, units in enumerate(config.dense_units):
