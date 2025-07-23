@@ -148,7 +148,7 @@ class AdvancedBandRMSExperimentConfig:
     adaptive_regularizer_strength: float = 1e-5
 
     # --- Static BandRMS Specific Parameters ---
-    static_band_alphas: List[float] = field(default_factory=lambda: [0.1, 0.2, 0.3])
+    static_band_alphas: List[float] = field(default_factory=lambda: [0.1, 0.5, 0.9])
     static_epsilon: float = 1e-7
     static_regularizer_strength: float = 1e-5
 
@@ -161,8 +161,8 @@ class AdvancedBandRMSExperimentConfig:
 
         # Static BandRMS variants
         'BRMS_01': lambda: ('static_band_rms', {'max_band_width': 0.1}),
-        'BRMS_02': lambda: ('static_band_rms', {'max_band_width': 0.2}),
-        'BRMS_03': lambda: ('static_band_rms', {'max_band_width': 0.3}),
+        'BRMS_02': lambda: ('static_band_rms', {'max_band_width': 0.5}),
+        'BRMS_03': lambda: ('static_band_rms', {'max_band_width': 0.9}),
 
         # Baseline normalization methods
         'RMSNorm': lambda: ('rms_norm', {}),
