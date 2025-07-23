@@ -327,21 +327,22 @@ def analyze_model_performance(
 
 # ---------------------------------------------------------------------
 
+def main():
+    model, history, test_data, predictions = train_tirex_model()
+    X_test, y_test = test_data
+    quantile_preds, mean_preds = predictions
+
+    # Analyze performance
+    analyze_model_performance(model, X_test, y_test, quantile_preds, mean_preds)
+
+    # Plot sample predictions
+    plot_predictions(model, X_test, y_test, quantile_preds, mean_preds, sample_idx=0)
+
+    logger.info("TiRex training example completed successfully!")
+
+# ---------------------------------------------------------------------
+
 if __name__ == "__main__":
-    # Run training example
-    try:
-        model, history, test_data, predictions = train_tirex_model()
-        X_test, y_test = test_data
-        quantile_preds, mean_preds = predictions
+    main()
 
-        # Analyze performance
-        analyze_model_performance(model, X_test, y_test, quantile_preds, mean_preds)
-
-        # Plot sample predictions
-        plot_predictions(model, X_test, y_test, quantile_preds, mean_preds, sample_idx=0)
-
-        logger.info("TiRex training example completed successfully!")
-
-    except Exception as e:
-        logger.error(f"Error in TiRex training example: {str(e)}")
-        raise
+# ---------------------------------------------------------------------

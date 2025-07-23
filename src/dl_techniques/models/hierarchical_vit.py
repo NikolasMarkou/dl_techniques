@@ -54,7 +54,86 @@ import keras
 import tensorflow as tf
 from typing import Tuple, Optional
 
-from .hierarchical_mlp_stem import HierarchicalMLPStem
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+from dl_techniques.layers.ffn.mlp import MLPBlock
+from dl_techniques.layers.multi_head_attention import MultiHeadAttention
+from dl_techniques.layers.hierarchical_mlp_stem import HierarchicalMLPStem
+
+# ---------------------------------------------------------------------
+
+
+class TransformerBlock(keras.layers.Layer):
+    """
+    Standard Transformer block with multi-head self-attention and MLP.
+    """
+
+    def __init__(
+            self,
+            dim: int,
+            num_heads: int,
+            mlp_ratio: int = 4,
+            qkv_bias: bool = False,
+            drop: float = 0.0,
+            attn_drop: float = 0.0,
+            norm_layer: str = "layer",
+            name: Optional[str] = None,
+    ):
+        """
+        Initialize a Transformer block.
+
+        Args:
+            dim: Input dimension
+            num_heads: Number of attention heads
+            mlp_ratio: MLP hidden dimension ratio
+            qkv_bias: Whether to use bias in qkv projections
+            drop: Dropout rate
+            attn_drop: Attention dropout rate
+            norm_layer: Normalization layer type
+            name: Layer name
+        """
+        super().__init__(name=name)
+        self.norm1 = keras.layers.LayerNormalization(epsilon=1e-6, name=f"{name}_norm1" if name else None)
+        self.attn = MultiHeadAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            use_bias=qkv_bias,
+            dropout_rate=attn_drop,
+            name=f"{name}_attn" if name else None,
+        )
+        self.norm2 = keras.layers.LayerNormalization(epsilon=1e-6, name=f"{name}_norm2" if name else None)
+        self.mlp = MLPBlock(
+            hidden_dim=dim * mlp_ratio,
+            output_dim=dim,
+            drop=drop,
+            name=f"{name}_mlp" if name else None,
+        )
+
+    def call(self, x: tf.Tensor, training: bool = False) -> tf.Tensor:
+        """
+        Apply the transformer block to the input.
+
+        Args:
+            x: Input tensor
+            training: Whether in training mode
+
+        Returns:
+            Processed tensor
+        """
+        # Attention block with residual connection
+        attn_output = self.attn(self.norm1(x), training=training)
+        x = x + attn_output
+
+        # MLP block with residual connection
+        mlp_output = self.mlp(self.norm2(x), training=training)
+        x = x + mlp_output
+
+        return x
+
+# ---------------------------------------------------------------------
 
 class ViTWithHMLPStem(keras.Model):
     """
@@ -183,192 +262,7 @@ class ViTWithHMLPStem(keras.Model):
 
         return x
 
-
-class TransformerBlock(keras.layers.Layer):
-    """
-    Standard Transformer block with multi-head self-attention and MLP.
-    """
-
-    def __init__(
-            self,
-            dim: int,
-            num_heads: int,
-            mlp_ratio: int = 4,
-            qkv_bias: bool = False,
-            drop: float = 0.0,
-            attn_drop: float = 0.0,
-            norm_layer: str = "layer",
-            name: Optional[str] = None,
-    ):
-        """
-        Initialize a Transformer block.
-
-        Args:
-            dim: Input dimension
-            num_heads: Number of attention heads
-            mlp_ratio: MLP hidden dimension ratio
-            qkv_bias: Whether to use bias in qkv projections
-            drop: Dropout rate
-            attn_drop: Attention dropout rate
-            norm_layer: Normalization layer type
-            name: Layer name
-        """
-        super().__init__(name=name)
-        self.norm1 = keras.layers.LayerNormalization(epsilon=1e-6, name=f"{name}_norm1" if name else None)
-        self.attn = MultiHeadSelfAttention(
-            dim=dim,
-            num_heads=num_heads,
-            qkv_bias=qkv_bias,
-            attn_drop=attn_drop,
-            proj_drop=drop,
-            name=f"{name}_attn" if name else None,
-        )
-        self.norm2 = keras.layers.LayerNormalization(epsilon=1e-6, name=f"{name}_norm2" if name else None)
-        self.mlp = MLPBlock(
-            hidden_dim=dim * mlp_ratio,
-            output_dim=dim,
-            drop=drop,
-            name=f"{name}_mlp" if name else None,
-        )
-
-    def call(self, x: tf.Tensor, training: bool = False) -> tf.Tensor:
-        """
-        Apply the transformer block to the input.
-
-        Args:
-            x: Input tensor
-            training: Whether in training mode
-
-        Returns:
-            Processed tensor
-        """
-        # Attention block with residual connection
-        attn_output = self.attn(self.norm1(x), training=training)
-        x = x + attn_output
-
-        # MLP block with residual connection
-        mlp_output = self.mlp(self.norm2(x), training=training)
-        x = x + mlp_output
-
-        return x
-
-
-class MultiHeadSelfAttention(keras.layers.Layer):
-    """
-    Multi-Head Self-Attention module.
-    """
-
-    def __init__(
-            self,
-            dim: int,
-            num_heads: int = 8,
-            qkv_bias: bool = False,
-            attn_drop: float = 0.0,
-            proj_drop: float = 0.0,
-            name: Optional[str] = None,
-    ):
-        """
-        Initialize Multi-Head Self-Attention.
-
-        Args:
-            dim: Input dimension
-            num_heads: Number of attention heads
-            qkv_bias: Whether to use bias in qkv projections
-            attn_drop: Attention dropout rate
-            proj_drop: Output projection dropout rate
-            name: Layer name
-        """
-        super().__init__(name=name)
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = head_dim ** -0.5
-
-        self.qkv = keras.layers.Dense(dim * 3, use_bias=qkv_bias, name=f"{name}_qkv" if name else None)
-        self.attn_drop = keras.layers.Dropout(attn_drop)
-        self.proj = keras.layers.Dense(dim, name=f"{name}_proj" if name else None)
-        self.proj_drop = keras.layers.Dropout(proj_drop)
-
-    def call(self, x: tf.Tensor, training: bool = False) -> tf.Tensor:
-        """
-        Apply Multi-Head Self-Attention.
-
-        Args:
-            x: Input tensor of shape [batch_size, seq_len, dim]
-            training: Whether in training mode
-
-        Returns:
-            Attention output of shape [batch_size, seq_len, dim]
-        """
-        batch_size, seq_len, dim = tf.shape(x)[0], tf.shape(x)[1], x.shape[2]
-
-        # Compute qkv
-        qkv = self.qkv(x)
-        qkv = tf.reshape(qkv, [batch_size, seq_len, 3, self.num_heads, dim // self.num_heads])
-        qkv = tf.transpose(qkv, [2, 0, 3, 1, 4])
-        q, k, v = qkv[0], qkv[1], qkv[2]
-
-        # Compute attention
-        attn = tf.matmul(q, k, transpose_b=True) * self.scale
-        attn = tf.nn.softmax(attn, axis=-1)
-        attn = self.attn_drop(attn, training=training)
-
-        # Apply attention to values
-        x = tf.matmul(attn, v)
-        x = tf.transpose(x, [0, 2, 1, 3])
-        x = tf.reshape(x, [batch_size, seq_len, dim])
-
-        # Output projection
-        x = self.proj(x)
-        x = self.proj_drop(x, training=training)
-
-        return x
-
-
-class MLPBlock(keras.layers.Layer):
-    """
-    MLP block used in Vision Transformers.
-    """
-
-    def __init__(
-            self,
-            hidden_dim: int,
-            output_dim: int,
-            drop: float = 0.0,
-            name: Optional[str] = None,
-    ):
-        """
-        Initialize MLP block.
-
-        Args:
-            hidden_dim: Hidden dimension
-            output_dim: Output dimension
-            drop: Dropout rate
-            name: Layer name
-        """
-        super().__init__(name=name)
-        self.fc1 = keras.layers.Dense(hidden_dim, name=f"{name}_fc1" if name else None)
-        self.act = keras.activations.gelu
-        self.fc2 = keras.layers.Dense(output_dim, name=f"{name}_fc2" if name else None)
-        self.drop = keras.layers.Dropout(drop)
-
-    def call(self, x: tf.Tensor, training: bool = False) -> tf.Tensor:
-        """
-        Apply MLP block.
-
-        Args:
-            x: Input tensor
-            training: Whether in training mode
-
-        Returns:
-            Output tensor
-        """
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.drop(x, training=training)
-        x = self.fc2(x)
-        x = self.drop(x, training=training)
-        return x
-
+# ---------------------------------------------------------------------
 
 # Example usage
 def create_vit_model(
@@ -416,6 +310,7 @@ def create_vit_model(
         norm_layer="batch",
     )
 
+# ---------------------------------------------------------------------
 
 # Example demonstrating how to use the hMLP stem with masked self-supervised learning like BeiT
 def create_inputs_with_masking(
@@ -461,6 +356,7 @@ def create_inputs_with_masking(
 
     return images, mask
 
+# ---------------------------------------------------------------------
 
 def apply_mask_after_stem(
         stem: HierarchicalMLPStem,
@@ -495,6 +391,7 @@ def apply_mask_after_stem(
 
     return masked_patches, mask
 
+# ---------------------------------------------------------------------
 
 if __name__ == "__main__":
     # Create a model
@@ -506,12 +403,15 @@ if __name__ == "__main__":
     # Test forward pass
     output = model(x, training=True)
 
-    print(f"Model output shape: {output.shape}")
-    print(f"Number of parameters: {model.count_params()}")
+    logger.info(f"Model output shape: {output.shape}")
+    logger.info(f"Number of parameters: {model.count_params()}")
 
     # Test with masking
     images, mask = create_inputs_with_masking(batch_size=2)
     stem = HierarchicalMLPStem(embed_dim=384)
     masked_patches, _ = apply_mask_after_stem(stem, images, mask)
 
-    print(f"Masked patches shape: {masked_patches.shape}")
+    logger.info(f"Masked patches shape: {masked_patches.shape}")
+
+# ---------------------------------------------------------------------
+

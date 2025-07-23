@@ -69,8 +69,14 @@ Notes
 import keras
 from keras import ops
 from typing import Tuple, Optional, Union, Any, Dict
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class KANvolution(keras.layers.Layer):
@@ -472,3 +478,5 @@ class KANvolution(keras.layers.Layer):
         """
         if config.get('input_shape') is not None:
             self.build(config['input_shape'])
+
+# ---------------------------------------------------------------------
