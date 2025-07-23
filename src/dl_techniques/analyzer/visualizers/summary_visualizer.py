@@ -40,7 +40,7 @@ SUBPLOT_RIGHT = 0.96
 
 # Text Styling Constants
 TITLE_FONT_SIZE = 18
-TABLE_FONT_SIZE = 9
+TABLE_FONT_SIZE = 5
 TABLE_HEADER_FONT_SIZE = 9
 NO_DATA_MESSAGE_FONT_SIZE = 12
 ANNOTATION_FONT_SIZE = 8
@@ -382,7 +382,7 @@ class SummaryVisualizer(BaseVisualizer):
             color = self.model_colors.get(model, '#333333')
             ax.scatter(
                 ece_values[i], brier_values[i],
-                s=SCATTER_SIZE_MEDIUM, color=color, alpha=ALPHA_HIGH,
+                s=SCATTER_SIZE_SMALL, color=color, alpha=ALPHA_HIGH,
                 edgecolors='black', linewidth=LINE_WIDTH_MEDIUM,
                 label=model
             )
@@ -396,7 +396,8 @@ class SummaryVisualizer(BaseVisualizer):
         ax.set_xlabel('Expected Calibration Error (ECE) - Lower is Better')
         ax.set_ylabel('Brier Score - Lower is Better')
         ax.set_title('Calibration Performance Landscape')
-        # ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left') # <<< FIX: This line is removed/commented
+        # DO NOT ADD LEGEND
+        # ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(True, which='both', linestyle='--', linewidth=GRID_LINE_WIDTH)
 
         # Set adaptive axis limits with margin for visibility
@@ -483,7 +484,7 @@ class SummaryVisualizer(BaseVisualizer):
             color = self.model_colors.get(label, '#333333')
             ax.scatter(
                 comp[0], comp[1], c=[color], label=label,
-                s=SCATTER_SIZE_LARGE, alpha=ALPHA_HIGH,
+                s=SCATTER_SIZE_MEDIUM, alpha=ALPHA_HIGH,
                 edgecolors='black', linewidth=LINE_WIDTH_THICK
             )
 
