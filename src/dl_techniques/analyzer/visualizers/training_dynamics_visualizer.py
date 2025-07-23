@@ -21,14 +21,14 @@ from ..constants import LOSS_PATTERNS, VAL_LOSS_PATTERNS, ACC_PATTERNS, VAL_ACC_
 # ---------------------------------------------------------------------
 
 # Figure Layout Constants
-FIGURE_SIZE = (16, 12)
+FIGURE_SIZE = (14, 10)
 GRID_HSPACE = 0.35
 GRID_WSPACE = 0.3
 GRID_HEIGHT_RATIOS = [1, 1, 0.8]
 SUBPLOT_TOP = 0.94
 SUBPLOT_BOTTOM = 0.05
 SUBPLOT_LEFT = 0.08
-SUBPLOT_RIGHT = 0.88  # Adjusted for legend space
+SUBPLOT_RIGHT = 0.92  # Increased from 0.88 to bring plots closer to legend
 
 # Plot Styling Constants
 LINE_WIDTH_STANDARD = 2
@@ -338,7 +338,7 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
                   'Stability', 'Overfit Index', 'Final Gap']
 
         for model_name in self._sort_models_consistently(list(self.results.training_history.keys())):
-            row = [model_name]
+            row = [model_name[:12] + '...' if len(model_name) > 12 else model_name]  # Truncate long names
 
             # Final accuracy - using robust method
             val_acc, _ = self._get_metric_data(model_name, VAL_ACC_PATTERNS)

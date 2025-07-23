@@ -32,8 +32,8 @@ LEGEND_ALPHA = 0.9
 LEGEND_FRAME_ALPHA = 0.95
 LEGEND_BORDER_WIDTH = 1
 
-# Legend positioning constants
-LEGEND_BBOX_X = 1.02
+# Legend positioning constants - Reduced distance from plots
+LEGEND_BBOX_X = 1.005  # Reduced from 1.02 to bring legend closer
 LEGEND_BBOX_Y = 1.0
 LEGEND_ANCHOR = 'upper left'
 

@@ -12,6 +12,60 @@ from .base import BaseVisualizer
 from dl_techniques.utils.logger import logger
 from ..constants import WEIGHT_HEALTH_L2_NORMALIZER, WEIGHT_HEALTH_SPARSITY_THRESHOLD
 
+# Figure Layout Constants
+FIGURE_SIZE = (14, 10)
+GRID_HSPACE = 0.4
+GRID_HEIGHT_RATIOS = [1, 1]
+SUBPLOT_TOP = 0.93
+SUBPLOT_BOTTOM = 0.1
+SUBPLOT_LEFT = 0.1
+SUBPLOT_RIGHT = 0.92
+
+# Text Styling Constants
+TITLE_FONT_SIZE = 16
+SUBTITLE_FONT_SIZE = 12
+LABEL_FONT_SIZE = 9
+ANNOTATION_FONT_SIZE = 8
+CELL_TEXT_FONT_SIZE = 8
+
+# Plot Styling Constants
+LINE_WIDTH_STANDARD = 2
+MARKER_SIZE_STANDARD = 6
+GRID_ALPHA = 0.3
+BBOX_ALPHA_LIGHT = 0.3
+BBOX_ALPHA_STANDARD = 0.8
+
+# Heatmap Constants
+DEFAULT_MAX_LAYERS = 12
+HEATMAP_VMIN = 0
+HEATMAP_VMAX = 1
+HEATMAP_INTERPOLATION = 'nearest'
+HEATMAP_ASPECT = 'auto'
+COLORBAR_SHRINK = 0.8
+COLORBAR_ROTATION = 270
+COLORBAR_LABELPAD = 20
+
+# Health Analysis Constants
+HEALTH_SCORE_COMPONENTS = 3.0
+EPSILON_SMALL = 1e-6
+TEXT_COLOR_THRESHOLD = 0.5
+
+# Text and Layout Constants
+MODEL_NAME_TRUNCATE_LENGTH = 8
+MODEL_NAME_ELLIPSIS = '...'
+ANNOTATION_X_LEFT = 0.02
+ANNOTATION_Y_TOP = 0.98
+ANNOTATION_X_CENTER = 0.5
+ANNOTATION_Y_CENTER = 0.5
+EXPLANATORY_NOTE_Y_OFFSET = -0.25
+
+# Color Constants
+BBOX_COLOR_LIGHT = 'lightblue'
+BBOX_COLOR_GRAY = 'lightgray'
+TEXT_COLOR_WHITE = 'white'
+TEXT_COLOR_BLACK = 'black'
+
+
 class WeightVisualizer(BaseVisualizer):
     """Creates weight analysis visualizations with centralized legend."""
 
@@ -20,8 +74,9 @@ class WeightVisualizer(BaseVisualizer):
         if not self.results.weight_stats:
             return
 
-        fig = plt.figure(figsize=(14, 10))
-        gs = plt.GridSpec(2, 1, figure=fig, hspace=0.4, height_ratios=[1, 1])
+        fig = plt.figure(figsize=FIGURE_SIZE)
+        gs = plt.GridSpec(2, 1, figure=fig, hspace=GRID_HSPACE,
+                         height_ratios=GRID_HEIGHT_RATIOS)
 
         # Top: Weight magnitude evolution through layers
         ax1 = fig.add_subplot(gs[0, 0])
@@ -36,8 +91,9 @@ class WeightVisualizer(BaseVisualizer):
         if models_with_data:
             self._create_figure_legend(fig, title="Models", specific_models=models_with_data)
 
-        plt.suptitle('Weight Learning Journey', fontsize=16, fontweight='bold')
-        fig.subplots_adjust(top=0.93, bottom=0.1, left=0.1, right=0.85)  # Adjusted right margin for legend
+        plt.suptitle('Weight Learning Journey', fontsize=TITLE_FONT_SIZE, fontweight='bold')
+        fig.subplots_adjust(top=SUBPLOT_TOP, bottom=SUBPLOT_BOTTOM,
+                           left=SUBPLOT_LEFT, right=SUBPLOT_RIGHT)
 
         if self.config.save_plots:
             self._save_figure(fig, 'weight_learning_journey')
@@ -101,20 +157,26 @@ class WeightVisualizer(BaseVisualizer):
                 if data['indices']:  # Check if we have data
                     color = self._get_model_color(model_name)
                     ax.plot(data['indices'], data['l2_norms'], 'o-',
-                           color=color, linewidth=2, markersize=6)
+                           color=color, linewidth=LINE_WIDTH_STANDARD,
+                           markersize=MARKER_SIZE_STANDARD)
 
             ax.set_xlabel('Layer Index (Network Depth)')
             ax.set_ylabel('L2 Norm')
-            ax.set_title('Weight Magnitude Evolution Through Network Depth', fontsize=12, fontweight='bold')
+            ax.set_title('Weight Magnitude Evolution Through Network Depth',
+                        fontsize=SUBTITLE_FONT_SIZE, fontweight='bold')
             # REMOVED: Individual legend - will use figure-level legend
-            ax.grid(True, alpha=0.3)
+            ax.grid(True, alpha=GRID_ALPHA)
 
             # Add insight text
-            ax.text(0.02, 0.98, 'Higher values indicate larger weight magnitudes\nSteep changes suggest learning transitions',
-                   transform=ax.transAxes, ha='left', va='top', fontsize=9,
-                   bbox=dict(boxstyle='round,pad=0.3', facecolor='lightblue', alpha=0.3))
+            ax.text(ANNOTATION_X_LEFT, ANNOTATION_Y_TOP,
+                   'Higher values indicate larger weight magnitudes\nSteep changes suggest learning transitions',
+                   transform=ax.transAxes, ha='left', va='top',
+                   fontsize=LABEL_FONT_SIZE,
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor=BBOX_COLOR_LIGHT,
+                            alpha=BBOX_ALPHA_LIGHT))
         else:
-            ax.text(0.5, 0.5, 'No weight evolution data available',
+            ax.text(ANNOTATION_X_CENTER, ANNOTATION_Y_CENTER,
+                   'No weight evolution data available',
                    ha='center', va='center', transform=ax.transAxes)
             ax.set_title('Weight Magnitude Evolution')
             ax.axis('off')
@@ -124,7 +186,8 @@ class WeightVisualizer(BaseVisualizer):
         Create a comprehensive weight health heatmap with improved readability.
         """
         if not self.results.weight_stats:
-            ax.text(0.5, 0.5, 'No weight statistics available',
+            ax.text(ANNOTATION_X_CENTER, ANNOTATION_Y_CENTER,
+                   'No weight statistics available',
                    ha='center', va='center', transform=ax.transAxes)
             ax.set_title('Weight Health Heatmap')
             ax.axis('off')
@@ -133,7 +196,7 @@ class WeightVisualizer(BaseVisualizer):
         # Prepare health metrics with consistent model ordering
         health_metrics = []
         models = self._sort_models_consistently(list(self.results.weight_stats.keys()))
-        max_layers = getattr(self.config, 'max_layers_heatmap', 12)
+        max_layers = getattr(self.config, 'max_layers_heatmap', DEFAULT_MAX_LAYERS)
 
         actual_max_layers = 0
         for model_name in models:
@@ -142,7 +205,8 @@ class WeightVisualizer(BaseVisualizer):
 
         display_layers = min(max_layers, actual_max_layers)
         if actual_max_layers == 0:
-            ax.text(0.5, 0.5, 'No layer ordering information available',
+            ax.text(ANNOTATION_X_CENTER, ANNOTATION_Y_CENTER,
+                   'No layer ordering information available',
                    ha='center', va='center', transform=ax.transAxes)
             ax.set_title('Weight Health Heatmap')
             ax.axis('off')
@@ -164,8 +228,8 @@ class WeightVisualizer(BaseVisualizer):
                         sparsity_health = 1.0 - min(sparsity, WEIGHT_HEALTH_SPARSITY_THRESHOLD)
                         weight_std = stats['basic']['std']
                         weight_mean = abs(stats['basic']['mean'])
-                        dist_health = min(weight_std / (weight_mean + 1e-6), 1.0)
-                        health_score = (norm_health + sparsity_health + dist_health) / 3.0
+                        dist_health = min(weight_std / (weight_mean + EPSILON_SMALL), 1.0)
+                        health_score = (norm_health + sparsity_health + dist_health) / HEALTH_SCORE_COMPONENTS
                         model_health.append(health_score)
                     else:
                         model_health.append(np.nan)
@@ -176,25 +240,32 @@ class WeightVisualizer(BaseVisualizer):
         if health_metrics and display_layers > 0:
             health_array = np.array(health_metrics)
             custom_cmap = plt.cm.get_cmap('RdYlGn').copy()
-            custom_cmap.set_bad(color='lightgray')
-            im = ax.imshow(health_array, cmap=custom_cmap, aspect='auto',
-                           vmin=0, vmax=1, interpolation='nearest')
+            custom_cmap.set_bad(color=BBOX_COLOR_GRAY)
+            im = ax.imshow(health_array, cmap=custom_cmap, aspect=HEATMAP_ASPECT,
+                           vmin=HEATMAP_VMIN, vmax=HEATMAP_VMAX,
+                           interpolation=HEATMAP_INTERPOLATION)
 
             ax.set_title('Weight Health Across Layers (Network Order)',
-                        fontsize=12, fontweight='bold')
+                        fontsize=SUBTITLE_FONT_SIZE, fontweight='bold')
             ax.set_xlabel('Layer Position in Network')
             ax.set_ylabel('Model')
 
-            # Use model abbreviations for y-axis readability with consistent ordering
-            model_abbreviations = [f'M{i+1}' for i in range(len(models))]
+            # Use truncated model names for y-axis readability with consistent ordering
+            truncated_names = [
+                name[:MODEL_NAME_TRUNCATE_LENGTH] + MODEL_NAME_ELLIPSIS
+                if len(name) > MODEL_NAME_TRUNCATE_LENGTH else name
+                for name in models
+            ]
             ax.set_xticks(range(display_layers))
-            ax.set_xticklabels([f'L{i}' for i in range(display_layers)], fontsize=9)
+            ax.set_xticklabels([f'L{i}' for i in range(display_layers)],
+                              fontsize=LABEL_FONT_SIZE)
             ax.set_yticks(range(len(models)))
-            ax.set_yticklabels(model_abbreviations, fontsize=9)
+            ax.set_yticklabels(truncated_names, fontsize=LABEL_FONT_SIZE)
 
-            cbar = plt.colorbar(im, ax=ax, shrink=0.8)
-            cbar.set_label('Health Score', rotation=270, labelpad=20)
-            cbar.ax.tick_params(labelsize=9)
+            cbar = plt.colorbar(im, ax=ax, shrink=COLORBAR_SHRINK)
+            cbar.set_label('Health Score', rotation=COLORBAR_ROTATION,
+                          labelpad=COLORBAR_LABELPAD)
+            cbar.ax.tick_params(labelsize=LABEL_FONT_SIZE)
 
             for i in range(len(models)):
                 for j in range(display_layers):
@@ -202,23 +273,27 @@ class WeightVisualizer(BaseVisualizer):
                         value = health_array[i, j]
                         if np.isnan(value):
                             ax.text(j, i, 'N/A', ha='center', va='center',
-                                   color='black', fontsize=8, fontweight='bold')
+                                   color=TEXT_COLOR_BLACK, fontsize=CELL_TEXT_FONT_SIZE,
+                                   fontweight='bold')
                         else:
-                            text_color = 'white' if value < 0.5 else 'black'
+                            text_color = (TEXT_COLOR_WHITE if value < TEXT_COLOR_THRESHOLD
+                                        else TEXT_COLOR_BLACK)
                             ax.text(j, i, f'{value:.2f}', ha='center', va='center',
-                                   color=text_color, fontsize=8, fontweight='bold')
+                                   color=text_color, fontsize=CELL_TEXT_FONT_SIZE,
+                                   fontweight='bold')
 
-            # Add an improved explanatory note with model mappings using consistent ordering
-            model_mapping_str = ", ".join([f"M{i+1}={name}" for i, name in enumerate(models)])
+            # Add an improved explanatory note without model mappings
             full_note = (
-                f"Note: Layers ordered by network depth. Gray cells (N/A) indicate models with fewer layers.\n"
-                f"Models: {model_mapping_str}"
+                "Note: Layers ordered by network depth. Gray cells (N/A) indicate models with fewer layers.\n"
+                "Model names are truncated for display purposes."
             )
-            ax.text(0.0, -0.25, full_note,
-                   transform=ax.transAxes, ha='left', va='top', fontsize=8,
-                   style='italic', alpha=0.8, wrap=True)
+            ax.text(0.0, EXPLANATORY_NOTE_Y_OFFSET, full_note,
+                   transform=ax.transAxes, ha='left', va='top',
+                   fontsize=ANNOTATION_FONT_SIZE,
+                   style='italic', alpha=BBOX_ALPHA_STANDARD, wrap=True)
         else:
-            ax.text(0.5, 0.5, 'Insufficient data for health heatmap',
+            ax.text(ANNOTATION_X_CENTER, ANNOTATION_Y_CENTER,
+                   'Insufficient data for health heatmap',
                    ha='center', va='center', transform=ax.transAxes)
             ax.set_title('Weight Health Heatmap')
             ax.axis('off')

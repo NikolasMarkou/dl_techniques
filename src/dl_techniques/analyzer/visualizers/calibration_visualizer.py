@@ -16,6 +16,62 @@ from typing import List
 from .base import BaseVisualizer
 from dl_techniques.utils.logger import logger
 
+# Figure Layout Constants
+FIGURE_SIZE = (14, 10)
+GRID_HSPACE = 0.3
+GRID_WSPACE = 0.3
+SUBPLOT_TOP = 0.93
+SUBPLOT_BOTTOM = 0.1
+SUBPLOT_LEFT = 0.1
+SUBPLOT_RIGHT = 0.92
+
+# Text Styling Constants
+TITLE_FONT_SIZE = 16
+ANNOTATION_FONT_SIZE = 8
+CONTOUR_LABEL_FONT_SIZE = 8
+
+# Plot Styling Constants
+LINE_WIDTH_STANDARD = 2
+LINE_WIDTH_MEDIUM = 1.5
+MARKER_SIZE_STANDARD = 5
+SCATTER_SIZE_FALLBACK = 20
+
+# Alpha Constants
+ALPHA_PERFECT_CALIBRATION = 0.2
+ALPHA_CONFIDENCE_FILL = 0.2
+ALPHA_GRID_LIGHT = 0.2
+ALPHA_GRID_STANDARD = 0.3
+ALPHA_GRID_MINIMAL = 0.1
+ALPHA_VIOLIN_BODY = 0.7
+ALPHA_VIOLIN_INTERNAL = 0.8
+ALPHA_BAR_STANDARD = 0.8
+ALPHA_CONTOUR_LINE = 0.8
+ALPHA_CONTOUR_FILL = 0.1
+ALPHA_SCATTER_FALLBACK = 0.1
+ALPHA_ANNOTATION_BOX = 0.7
+
+# Reliability Diagram Constants
+CONFIDENCE_INTERVAL_MULTIPLIER = 1.96
+AXIS_LIMIT_MIN = 0
+AXIS_LIMIT_MAX = 1
+BINOMIAL_EPSILON = 1
+
+# Text Positioning Constants
+MODEL_NAME_TRUNCATE_LENGTH = 8
+MODEL_NAME_ELLIPSIS = '...'
+ANNOTATION_Y_POSITION_FACTOR = 0.98
+ANNOTATION_X_CENTER = 0.5
+ANNOTATION_Y_CENTER = 0.5
+
+# Bar Chart Constants
+BAR_WIDTH_FACTOR = 0.8
+
+# Uncertainty Landscape Constants
+KDE_GRID_RESOLUTION = 100
+DENSITY_CONTOUR_LEVELS = 5
+PADDING_FACTOR = 0.05
+MIN_POINTS_FOR_KDE = 10
+
 # ---------------------------------------------------------------------
 
 class CalibrationVisualizer(BaseVisualizer):
@@ -26,8 +82,8 @@ class CalibrationVisualizer(BaseVisualizer):
         if not self.results.calibration_metrics:
             return
 
-        fig = plt.figure(figsize=(14, 10))
-        gs = plt.GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.3)
+        fig = plt.figure(figsize=FIGURE_SIZE)
+        gs = plt.GridSpec(2, 2, figure=fig, hspace=GRID_HSPACE, wspace=GRID_WSPACE)
 
         # 1. Reliability Diagram
         ax1 = fig.add_subplot(gs[0, 0])
@@ -50,8 +106,10 @@ class CalibrationVisualizer(BaseVisualizer):
         if models_with_data:
             self._create_figure_legend(fig, title="Models", specific_models=models_with_data)
 
-        plt.suptitle('Confidence and Calibration Analysis', fontsize=16, fontweight='bold')
-        fig.subplots_adjust(top=0.93, bottom=0.1, left=0.1, right=0.85)  # Adjusted for legend
+        plt.suptitle('Confidence and Calibration Analysis',
+                    fontsize=TITLE_FONT_SIZE, fontweight='bold')
+        fig.subplots_adjust(top=SUBPLOT_TOP, bottom=SUBPLOT_BOTTOM,
+                           left=SUBPLOT_LEFT, right=SUBPLOT_RIGHT)
 
         if self.config.save_plots:
             self._save_figure(fig, 'confidence_calibration_analysis')
@@ -71,7 +129,8 @@ class CalibrationVisualizer(BaseVisualizer):
 
     def _plot_reliability_diagram(self, ax) -> None:
         """Plot reliability diagram with confidence intervals."""
-        ax.plot([0, 1], [0, 1], 'k--', alpha=0.2, label='Perfect Calibration')
+        ax.plot([AXIS_LIMIT_MIN, AXIS_LIMIT_MAX], [AXIS_LIMIT_MIN, AXIS_LIMIT_MAX],
+               'k--', alpha=ALPHA_PERFECT_CALIBRATION, label='Perfect Calibration')
 
         # Use consistent model ordering
         for model_name in self._sort_models_consistently(list(self.results.reliability_data.keys())):
@@ -80,26 +139,28 @@ class CalibrationVisualizer(BaseVisualizer):
 
             # Plot main line
             ax.plot(rel_data['bin_centers'], rel_data['bin_accuracies'],
-                    'o-', color=color, linewidth=2, markersize=5)
+                    'o-', color=color, linewidth=LINE_WIDTH_STANDARD,
+                    markersize=MARKER_SIZE_STANDARD)
 
             # Add shaded confidence region if we have sample counts
             if 'bin_counts' in rel_data:
                 # Simple confidence interval based on binomial proportion
                 counts = rel_data['bin_counts']
                 props = rel_data['bin_accuracies']
-                se = np.sqrt(props * (1 - props) / (counts + 1))
+                se = np.sqrt(props * (1 - props) / (counts + BINOMIAL_EPSILON))
 
                 ax.fill_between(rel_data['bin_centers'],
-                                props - 1.96 * se, props + 1.96 * se,
-                                alpha=0.2, color=color)
+                                props - CONFIDENCE_INTERVAL_MULTIPLIER * se,
+                                props + CONFIDENCE_INTERVAL_MULTIPLIER * se,
+                                alpha=ALPHA_CONFIDENCE_FILL, color=color)
 
         ax.set_xlabel('Mean Predicted Probability')
         ax.set_ylabel('Fraction of Positives')
         ax.set_title('Reliability Diagrams with 95% CI')
         # REMOVED: Individual legend - will use figure-level legend
-        ax.grid(True, alpha=0.2)
-        ax.set_xlim([0, 1])
-        ax.set_ylim([0, 1])
+        ax.grid(True, alpha=ALPHA_GRID_LIGHT)
+        ax.set_xlim([AXIS_LIMIT_MIN, AXIS_LIMIT_MAX])
+        ax.set_ylim([AXIS_LIMIT_MIN, AXIS_LIMIT_MAX])
 
     def _plot_confidence_distribution(self, ax) -> None:
         """Plot confidence distributions as a vertical violin plot."""
@@ -120,7 +181,8 @@ class CalibrationVisualizer(BaseVisualizer):
                 })
 
         if not confidence_data:
-            ax.text(0.5, 0.5, 'No confidence data available', ha='center', va='center')
+            ax.text(ANNOTATION_X_CENTER, ANNOTATION_Y_CENTER,
+                   'No confidence data available', ha='center', va='center')
             ax.set_title('Confidence Score Distributions')
             ax.axis('off')
             return
@@ -141,39 +203,39 @@ class CalibrationVisualizer(BaseVisualizer):
             color = self._get_model_color(model)
             parts['bodies'][i].set_facecolor(color)
             parts['bodies'][i].set_edgecolor('black')
-            parts['bodies'][i].set_alpha(0.7)
+            parts['bodies'][i].set_alpha(ALPHA_VIOLIN_BODY)
 
         # Style the internal components of the violin plot
         for partname in ['cmeans', 'cmedians', 'cmins', 'cmaxes', 'cbars']:
             if partname in parts:
                 parts[partname].set_color('black')
-                parts[partname].set_linewidth(1.5)
-                parts[partname].set_alpha(0.8)
+                parts[partname].set_linewidth(LINE_WIDTH_MEDIUM)
+                parts[partname].set_alpha(ALPHA_VIOLIN_INTERNAL)
 
         # Configure axis labels and annotations
         ax.set_xticks(range(len(model_order)))
-        ax.set_xticklabels([f'M{i+1}' for i in range(len(model_order))])
+        # Use truncated model names directly instead of M1, M2 abbreviations
+        truncated_names = [
+            name[:MODEL_NAME_TRUNCATE_LENGTH] + MODEL_NAME_ELLIPSIS
+            if len(name) > MODEL_NAME_TRUNCATE_LENGTH else name
+            for name in model_order
+        ]
+        ax.set_xticklabels(truncated_names, rotation=45, ha='right')
         ax.set_xlabel('Models')
         ax.set_ylabel('Confidence (Max Probability)')
         ax.set_title('Confidence Score Distributions')
-        ax.grid(True, alpha=0.3, axis='y')
+        ax.grid(True, alpha=ALPHA_GRID_STANDARD, axis='y')
 
         # Add mean confidence annotations for quick reference
         for i, model in enumerate(model_order):
             mean_conf = df[df['Model'] == model]['Confidence'].mean()
             # Position text annotation within the plot area for better visibility
-            ax.text(i, ax.get_ylim()[1] * 0.98, f'{mean_conf:.3f}',
-                    ha='center', va='top', fontsize=8,
-                    bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
+            ax.text(i, ax.get_ylim()[1] * ANNOTATION_Y_POSITION_FACTOR, f'{mean_conf:.3f}',
+                    ha='center', va='top', fontsize=ANNOTATION_FONT_SIZE,
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                             alpha=ALPHA_ANNOTATION_BOX))
 
-        # Add explanatory note for model abbreviations
-        model_mapping_str = ", ".join([f"M{i+1}={name}" for i, name in enumerate(model_order)])
-        ax.text(
-            0.02, 0.02,
-            f'Model mapping: {model_mapping_str}',
-            transform=ax.transAxes, ha='left', va='bottom', fontsize=7,
-            style='italic', alpha=0.7
-        )
+        # Removed model mapping annotation
 
     def _plot_per_class_ece(self, ax) -> None:
         """Plot per-class Expected Calibration Error."""
@@ -199,13 +261,13 @@ class CalibrationVisualizer(BaseVisualizer):
             n_classes = len(df['Class'].unique())
 
             x = np.arange(n_classes)
-            width = 0.8 / n_models
+            width = BAR_WIDTH_FACTOR / n_models
 
             for i, model in enumerate(model_order):
                 model_data = df[df['Model'] == model]
                 color = self._get_model_color(model)
                 ax.bar(x + i * width, model_data['ECE'], width,
-                       alpha=0.8, color=color)
+                       alpha=ALPHA_BAR_STANDARD, color=color)
 
             ax.set_xlabel('Class')
             ax.set_ylabel('Expected Calibration Error')
@@ -213,7 +275,7 @@ class CalibrationVisualizer(BaseVisualizer):
             ax.set_xticks(x + width * (n_models - 1) / 2)
             ax.set_xticklabels([str(i) for i in range(n_classes)])
             # REMOVED: Individual legend - will use figure-level legend
-            ax.grid(True, alpha=0.3, axis='y')
+            ax.grid(True, alpha=ALPHA_GRID_STANDARD, axis='y')
 
     def _plot_uncertainty_landscape(self, ax) -> None:
         """Plot uncertainty landscape with density contours for each model."""
@@ -237,7 +299,7 @@ class CalibrationVisualizer(BaseVisualizer):
             entropy = metrics['entropy']
             color = self._get_model_color(model_name)
 
-            if len(confidence) < 10:  # Skip if too few points
+            if len(confidence) < MIN_POINTS_FOR_KDE:  # Skip if too few points
                 continue
 
             try:
@@ -252,14 +314,14 @@ class CalibrationVisualizer(BaseVisualizer):
                 # Add some padding
                 conf_range = conf_max - conf_min
                 ent_range = ent_max - ent_min
-                conf_min -= 0.05 * conf_range
-                conf_max += 0.05 * conf_range
-                ent_min -= 0.05 * ent_range
-                ent_max += 0.05 * ent_range
+                conf_min -= PADDING_FACTOR * conf_range
+                conf_max += PADDING_FACTOR * conf_range
+                ent_min -= PADDING_FACTOR * ent_range
+                ent_max += PADDING_FACTOR * ent_range
 
                 # Create meshgrid
-                xx = np.linspace(conf_min, conf_max, 100)
-                yy = np.linspace(ent_min, ent_max, 100)
+                xx = np.linspace(conf_min, conf_max, KDE_GRID_RESOLUTION)
+                yy = np.linspace(ent_min, ent_max, KDE_GRID_RESOLUTION)
                 X, Y = np.meshgrid(xx, yy)
 
                 # Evaluate KDE on grid
@@ -267,25 +329,26 @@ class CalibrationVisualizer(BaseVisualizer):
                 Z = kde(positions).reshape(X.shape)
 
                 # Plot contours
-                contours = ax.contour(X, Y, Z, levels=5, colors=[color],
-                                      alpha=0.8, linewidths=2)
-                ax.clabel(contours, inline=True, fontsize=8, fmt='%.2f')
+                contours = ax.contour(X, Y, Z, levels=DENSITY_CONTOUR_LEVELS, colors=[color],
+                                      alpha=ALPHA_CONTOUR_LINE, linewidths=LINE_WIDTH_STANDARD)
+                ax.clabel(contours, inline=True, fontsize=CONTOUR_LABEL_FONT_SIZE, fmt='%.2f')
 
                 # Plot filled contours with transparency
-                ax.contourf(X, Y, Z, levels=5, colors=[color], alpha=0.1)
+                ax.contourf(X, Y, Z, levels=DENSITY_CONTOUR_LEVELS, colors=[color],
+                           alpha=ALPHA_CONTOUR_FILL)
 
                 successful_models.append(model_name)
 
             except Exception as e:
                 logger.warning(f"Could not create density contours for {model_name}: {e}")
                 # Fallback: plot a simple scatter with low alpha
-                ax.scatter(confidence, entropy, color=color, alpha=0.1,
-                           s=20)
+                ax.scatter(confidence, entropy, color=color, alpha=ALPHA_SCATTER_FALLBACK,
+                           s=SCATTER_SIZE_FALLBACK)
 
         ax.set_xlabel('Confidence (Max Probability)')
         ax.set_ylabel('Entropy')
         ax.set_title('Uncertainty Landscape (Density Contours)')
         # REMOVED: Individual legend - will use figure-level legend
-        ax.grid(True, alpha=0.1)
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, None)
+        ax.grid(True, alpha=ALPHA_GRID_MINIMAL)
+        ax.set_xlim(AXIS_LIMIT_MIN, AXIS_LIMIT_MAX)
+        ax.set_ylim(AXIS_LIMIT_MIN, None)

@@ -26,7 +26,7 @@ from dl_techniques.utils.logger import logger
 # ---------------------------------------------------------------------
 
 # Figure Layout Constants
-FIGURE_SIZE = (16, 10)
+FIGURE_SIZE = (14, 10)
 GRID_HSPACE = 0.35
 GRID_WSPACE = 0.25
 GRID_HEIGHT_RATIOS = [1, 1]
@@ -34,7 +34,7 @@ GRID_WIDTH_RATIOS = [1.2, 1]
 SUBPLOT_TOP = 0.93
 SUBPLOT_BOTTOM = 0.07
 SUBPLOT_LEFT = 0.08
-SUBPLOT_RIGHT = 0.88  # Adjusted for legend space
+SUBPLOT_RIGHT = 0.92  # Increased from 0.88 to bring plots closer to legend
 
 # Text Styling Constants
 TITLE_FONT_SIZE = 18
@@ -607,8 +607,9 @@ class SummaryVisualizer(BaseVisualizer):
 
         # Configure axis labels and annotations
         ax.set_xticks(range(len(model_order)))
-        ax.set_xticklabels([f'M{i + 1}' for i in range(len(model_order))],
-                           fontsize=TABLE_FONT_SIZE)
+        # Use full model names directly instead of M1, M2 abbreviations
+        ax.set_xticklabels([name[:8] + '...' if len(name) > 8 else name for name in model_order],
+                           fontsize=TABLE_FONT_SIZE, rotation=45, ha='right')
 
         # Add mean confidence annotations for quick reference
         for i, model in enumerate(model_order):
@@ -626,15 +627,7 @@ class SummaryVisualizer(BaseVisualizer):
         ax.set_title('Confidence Distribution Profiles')
         ax.grid(True, alpha=ALPHA_LOW, axis='y')
 
-        # Add explanatory note for model abbreviations
-        model_mapping_str = ", ".join([f"M{i + 1}={name}" for i, name in enumerate(model_order)])
-        ax.text(
-            ANNOTATION_X_LEFT, ANNOTATION_Y_BOTTOM,
-            f'Model mapping: {model_mapping_str}',
-            transform=ax.transAxes, ha='left', va='bottom',
-            fontsize=EXPLANATORY_NOTE_FONT_SIZE,
-            style='italic', alpha=ALPHA_REFERENCE
-        )
+        # Removed model mapping annotation
 
     def _plot_no_data_message(
             self,

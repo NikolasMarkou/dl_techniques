@@ -49,14 +49,28 @@ from dl_techniques.utils.logger import logger
 # Time formatting
 TIMESTAMP_FORMAT: str = '%Y%m%d_%H%M%S'
 
-# Color palette for consistent model visualization (avoiding yellow for readability)
+# Expanded color palette for consistent model visualization with 20 distinct colors
 MODEL_COLOR_PALETTE: List[str] = [
     '#1f77b4',  # Blue
     '#ff7f0e',  # Orange
     '#2ca02c',  # Green
     '#d62728',  # Red
     '#9467bd',  # Purple
-    '#8c564b'   # Brown
+    '#8c564b',  # Brown
+    '#e377c2',  # Pink
+    '#bcbd22',  # Olive
+    '#17becf',  # Cyan
+    '#000000',  # Black
+    '#7f7f7f',  # Gray
+    '#ff1493',  # Deep Pink
+    '#00ced1',  # Dark Turquoise
+    '#ffd700',  # Gold
+    '#dc143c',  # Crimson
+    '#4682b4',  # Steel Blue
+    '#32cd32',  # Lime Green
+    '#ff4500',  # Orange Red
+    '#da70d6',  # Orchid
+    '#20b2aa'   # Light Sea Green
 ]
 
 # Analysis type identifiers

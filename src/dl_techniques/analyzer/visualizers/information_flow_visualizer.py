@@ -16,7 +16,6 @@ from typing import List
 
 from .base import BaseVisualizer
 from ..constants import ACTIVATION_MAGNITUDE_NORMALIZER, LAYER_SPECIALIZATION_MAX_RANK
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 # constants
@@ -29,7 +28,7 @@ GRID_WSPACE = 0.3
 SUBPLOT_TOP = 0.93
 SUBPLOT_BOTTOM = 0.1
 SUBPLOT_LEFT = 0.1
-SUBPLOT_RIGHT = 0.85  # Adjusted for legend space
+SUBPLOT_RIGHT = 0.92  # Increased from 0.85 to bring plots closer to legend
 
 # Text Styling Constants
 TITLE_FONT_SIZE = 16
@@ -313,9 +312,10 @@ class InformationFlowVisualizer(BaseVisualizer):
                                       fontsize=LABEL_FONT_SIZE)
                 ax_sub.set_yticks(range(len(heatmap_data.index)))
 
-                # Only show model names on the leftmost heatmap
+                # Only show model names on the leftmost heatmap (truncated for space)
                 if idx == 0:
-                    ax_sub.set_yticklabels(heatmap_data.index, fontsize=LABEL_FONT_SIZE)
+                    truncated_names = [name[:8] + '...' if len(name) > 8 else name for name in heatmap_data.index]
+                    ax_sub.set_yticklabels(truncated_names, fontsize=LABEL_FONT_SIZE)
                 else:
                     ax_sub.set_yticklabels([])
 
@@ -351,8 +351,6 @@ class InformationFlowVisualizer(BaseVisualizer):
             if not ordered_layers:
                 continue
 
-            total_specialization = 0
-            layer_count = 0
             max_layers = getattr(self.config, 'max_layers_info_flow', 10)
             layer_specializations = []
 
@@ -375,70 +373,30 @@ class InformationFlowVisualizer(BaseVisualizer):
                 layer_spec = (activation_health + balance_score + rank_score) / SPECIALIZATION_SCORE_COMPONENTS
                 layer_specializations.append(layer_spec)
 
-                total_specialization += layer_spec
-                layer_count += 1
-
-            if layer_count > 0:
-                avg_specialization = total_specialization / layer_count
+            if layer_specializations:
                 specialization_data.append({
                     'Model': model_name,
-                    'Average Specialization': avg_specialization,
                     'Layer Specializations': layer_specializations
                 })
 
         if specialization_data:
-            # Create two sub-visualizations
-            gs_sub = GridSpecFromSubplotSpec(2, 1, subplot_spec=ax.get_subplotspec(),
-                                             hspace=SUB_HSPACE_STANDARD,
-                                             height_ratios=HEIGHT_RATIOS_BOTTOM_HEAVY)
-
-            # Top: Overall specialization comparison
-            ax_top = plt.subplot(gs_sub[0, 0])
-            models = [d['Model'] for d in specialization_data]
-            avg_specs = [d['Average Specialization'] for d in specialization_data]
-
-            bars = ax_top.bar(range(len(models)), avg_specs, alpha=ALPHA_STANDARD)
-
-            # Color bars with model colors using consistent ordering
-            for i, model in enumerate(models):
-                color = self._get_model_color(model)
-                bars[i].set_facecolor(color)
-
-            ax_top.set_ylabel('Specialization Score')
-            ax_top.set_xticks(range(len(models)))
-            ax_top.set_xticklabels([])  # Remove model names from x-axis
-            ax_top.grid(True, alpha=ALPHA_GRID, axis='y')
-            ax_top.set_ylim(AXIS_LIMIT_MIN, AXIS_LIMIT_MAX)
-
-            # Add value labels on bars
-            for i, v in enumerate(avg_specs):
-                ax_top.text(i, v + BAR_LABEL_OFFSET, f'{v:.2f}', ha='center', va='bottom',
-                           fontsize=LABEL_FONT_SIZE)
-
-            # Bottom: Layer-by-layer specialization evolution
-            ax_bottom = plt.subplot(gs_sub[1, 0])
-
+            # Plot layer-by-layer specialization evolution
             for data in specialization_data:
                 model_name = data['Model']
                 layer_specs = data['Layer Specializations']
                 color = self._get_model_color(model_name)
 
                 x_positions = range(len(layer_specs))
-                ax_bottom.plot(x_positions, layer_specs, 'o-',
-                               color=color,
-                               linewidth=LINE_WIDTH_STANDARD, markersize=MARKER_SIZE_SMALL)
+                ax.plot(x_positions, layer_specs, 'o-',
+                        color=color,
+                        linewidth=LINE_WIDTH_STANDARD, markersize=MARKER_SIZE_SMALL)
 
-            ax_bottom.set_title('Layer-wise Specialization Evolution (Network Order)',
-                               fontsize=SMALL_TITLE_FONT_SIZE, fontweight='bold')
-            ax_bottom.set_xlabel('Layer Index (Network Depth)')
-            ax_bottom.set_ylabel('Specialization Score')
-            # REMOVED: Individual legend - will use figure-level legend
-            ax_bottom.grid(True, alpha=ALPHA_GRID)
-            ax_bottom.set_ylim(AXIS_LIMIT_MIN, AXIS_LIMIT_MAX)
-
-            ax.axis('off')  # Hide parent axis
-            ax.set_title('Layer Specialization Analysis', fontsize=SUBTITLE_FONT_SIZE,
-                        fontweight='bold', pad=TITLE_PAD)
+            ax.set_title('Layer Specialization Evolution (Network Order)',
+                        fontsize=SUBTITLE_FONT_SIZE, fontweight='bold')
+            ax.set_xlabel('Layer Index (Network Depth)')
+            ax.set_ylabel('Specialization Score')
+            ax.grid(True, alpha=ALPHA_GRID)
+            ax.set_ylim(AXIS_LIMIT_MIN, AXIS_LIMIT_MAX)
         else:
             ax.text(ANNOTATION_X_CENTER, ANNOTATION_Y_CENTER,
                    'Insufficient data for specialization analysis',
