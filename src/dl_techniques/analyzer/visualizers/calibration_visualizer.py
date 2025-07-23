@@ -7,9 +7,15 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.stats import gaussian_kde
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .base import BaseVisualizer
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 class CalibrationVisualizer(BaseVisualizer):
     """Creates calibration analysis visualizations."""

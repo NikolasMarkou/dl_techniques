@@ -15,10 +15,76 @@ import matplotlib.patches as patches
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .base import BaseVisualizer
 from ..utils import find_model_metric, truncate_model_name
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
+# constants
+# ---------------------------------------------------------------------
+
+# Figure Layout Constants
+FIGURE_SIZE = (16, 10)
+GRID_HSPACE = 0.35
+GRID_WSPACE = 0.25
+GRID_HEIGHT_RATIOS = [1, 1]
+GRID_WIDTH_RATIOS = [1.2, 1]
+SUBPLOT_TOP = 0.93
+SUBPLOT_BOTTOM = 0.07
+SUBPLOT_LEFT = 0.08
+SUBPLOT_RIGHT = 0.96
+
+# Text Styling Constants
+TITLE_FONT_SIZE = 18
+TABLE_FONT_SIZE = 9
+TABLE_HEADER_FONT_SIZE = 9
+NO_DATA_MESSAGE_FONT_SIZE = 12
+ANNOTATION_FONT_SIZE = 8
+EXPLANATORY_NOTE_FONT_SIZE = 7
+
+# Table Styling Constants
+TABLE_SCALE_X = 1
+TABLE_SCALE_Y = 1.8
+TABLE_CELL_HEIGHT = 0.08
+TABLE_HEADER_COLOR = '#E8E8E8'
+TABLE_DEFAULT_COLOR = '#F5F5F5'
+COLOR_LIGHTEN_FACTOR = 0.8
+
+# Plot Styling Constants
+SCATTER_SIZE_LARGE = 200
+SCATTER_SIZE_MEDIUM = 150
+SCATTER_SIZE_SMALL = 50
+ALPHA_HIGH = 0.8
+ALPHA_MEDIUM = 0.6
+ALPHA_LOW = 0.3
+ALPHA_REFERENCE = 0.7
+LINE_WIDTH_THICK = 2
+LINE_WIDTH_MEDIUM = 1.5
+LINE_WIDTH_THIN = 1
+GRID_LINE_WIDTH = 0.5
+
+# Calibration Performance Constants
+GOOD_ECE_THRESHOLD = 0.05
+GOOD_BRIER_THRESHOLD = 0.15
+CALIBRATION_AXIS_MIN = 0.0
+CALIBRATION_AXIS_MAX = 1.0
+
+# Annotation Position Constants
+ANNOTATION_X_CENTER = 0.5
+ANNOTATION_Y_CENTER = 0.5
+ANNOTATION_X_LEFT = 0.02
+ANNOTATION_Y_BOTTOM = 0.02
+ANNOTATION_Y_TOP = 0.98
+
+# Violin Plot Constants
+VIOLIN_ALPHA = 0.6
+VIOLIN_EDGE_ALPHA = 0.8
+
+# ---------------------------------------------------------------------
 
 class SummaryVisualizer(BaseVisualizer):
     """
@@ -41,14 +107,14 @@ class SummaryVisualizer(BaseVisualizer):
         The layout dynamically adapts based on available analysis data.
         """
         # Create figure with optimized layout for dashboard presentation
-        fig: Figure = plt.figure(figsize=(16, 10))
+        fig: Figure = plt.figure(figsize=FIGURE_SIZE)
         gs = plt.GridSpec(
             2, 2,
             figure=fig,
-            hspace=0.35,
-            wspace=0.25,
-            height_ratios=[1, 1],
-            width_ratios=[1.2, 1]
+            hspace=GRID_HSPACE,
+            wspace=GRID_WSPACE,
+            height_ratios=GRID_HEIGHT_RATIOS,
+            width_ratios=GRID_WIDTH_RATIOS
         )
 
         # Performance metrics table (top-left, wider for readability)
@@ -70,10 +136,11 @@ class SummaryVisualizer(BaseVisualizer):
         # Configure overall dashboard styling
         plt.suptitle(
             'Model Analysis Summary Dashboard',
-            fontsize=18,
+            fontsize=TITLE_FONT_SIZE,
             fontweight='bold'
         )
-        fig.subplots_adjust(top=0.93, bottom=0.07, left=0.08, right=0.96)
+        fig.subplots_adjust(top=SUBPLOT_TOP, bottom=SUBPLOT_BOTTOM,
+                           left=SUBPLOT_LEFT, right=SUBPLOT_RIGHT)
 
         # Save and cleanup
         if self.config.save_plots:
@@ -249,33 +316,33 @@ class SummaryVisualizer(BaseVisualizer):
 
         # Configure table typography
         table.auto_set_font_size(False)
-        table.set_fontsize(9)
-        table.scale(1, 1.8)
+        table.set_fontsize(TABLE_FONT_SIZE)
+        table.scale(TABLE_SCALE_X, TABLE_SCALE_Y)
 
         # Style header row with consistent formatting
         for i in range(len(headers)):
             header_cell = table[(0, i)]
-            header_cell.set_facecolor('#E8E8E8')
+            header_cell.set_facecolor(TABLE_HEADER_COLOR)
             header_cell.set_text_props(weight='bold')
-            header_cell.set_height(0.08)
+            header_cell.set_height(TABLE_CELL_HEIGHT)
 
         # Style data rows with model-specific colors
         for i, row_data in enumerate(table_data, 1):
             model_name = row_data[0]
-            model_color = self.model_colors.get(model_name, '#F5F5F5')
-            light_color = self._lighten_color(model_color, 0.8)
+            model_color = self.model_colors.get(model_name, TABLE_DEFAULT_COLOR)
+            light_color = self._lighten_color(model_color, COLOR_LIGHTEN_FACTOR)
 
             # Apply styling to each cell in the row
             for j in range(len(headers)):
                 cell = table[(i, j)]
                 cell.set_facecolor(light_color)
-                cell.set_height(0.08)
+                cell.set_height(TABLE_CELL_HEIGHT)
 
                 # Configure text properties based on column type
                 if j == 0:  # Model name column
-                    cell.set_text_props(weight='bold', fontsize=9)
+                    cell.set_text_props(weight='bold', fontsize=TABLE_HEADER_FONT_SIZE)
                 else:  # Metric columns
-                    cell.set_text_props(fontsize=9)
+                    cell.set_text_props(fontsize=TABLE_FONT_SIZE)
 
         # Remove axes for clean table presentation
         ax.axis('off')
@@ -315,8 +382,8 @@ class SummaryVisualizer(BaseVisualizer):
             color = self.model_colors.get(model, '#333333')
             ax.scatter(
                 ece_values[i], brier_values[i],
-                s=150, color=color, alpha=0.8,
-                edgecolors='black', linewidth=1.5,
+                s=SCATTER_SIZE_MEDIUM, color=color, alpha=ALPHA_HIGH,
+                edgecolors='black', linewidth=LINE_WIDTH_MEDIUM,
                 label=model
             )
 
@@ -330,12 +397,12 @@ class SummaryVisualizer(BaseVisualizer):
         ax.set_ylabel('Brier Score - Lower is Better')
         ax.set_title('Calibration Performance Landscape')
         # ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left') # <<< FIX: This line is removed/commented
-        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+        ax.grid(True, which='both', linestyle='--', linewidth=GRID_LINE_WIDTH)
 
         # Set adaptive axis limits with margin for visibility
         if ece_values and brier_values:
-            ax.set_xlim(left=0, right=max(ece_values) * 1.1)
-            ax.set_ylim(bottom=0, top=max(brier_values) * 1.1)
+            ax.set_xlim(left=CALIBRATION_AXIS_MIN, right=CALIBRATION_AXIS_MAX)
+            ax.set_ylim(bottom=CALIBRATION_AXIS_MIN, top=CALIBRATION_AXIS_MAX)
         else:
             ax.set_xlim(left=0)
             ax.set_ylim(bottom=0)
@@ -347,23 +414,19 @@ class SummaryVisualizer(BaseVisualizer):
         Args:
             ax: Matplotlib axes object to add reference lines to.
         """
-        # Established thresholds for good calibration performance
-        GOOD_ECE_THRESHOLD = 0.05  # 5% ECE threshold
-        GOOD_BRIER_THRESHOLD = 0.15  # Reasonable Brier score threshold
-
         # Add visual reference lines for performance benchmarks
         ax.axvline(
             GOOD_ECE_THRESHOLD,
             color='darkgreen',
             linestyle='--',
-            alpha=0.7,
+            alpha=ALPHA_REFERENCE,
             label=f'Good ECE (<{GOOD_ECE_THRESHOLD})'
         )
         ax.axhline(
             GOOD_BRIER_THRESHOLD,
             color='darkgreen',
             linestyle='--',
-            alpha=0.7,
+            alpha=ALPHA_REFERENCE,
             label=f'Good Brier (<{GOOD_BRIER_THRESHOLD})'
         )
 
@@ -374,23 +437,12 @@ class SummaryVisualizer(BaseVisualizer):
         Args:
             ax: Matplotlib axes object to add quadrant labels to.
         """
-        GOOD_ECE_THRESHOLD = 0.05
-        GOOD_BRIER_THRESHOLD = 0.15
-
         # Good calibration and certainty quadrant
         ax.text(
             GOOD_ECE_THRESHOLD / 2, GOOD_BRIER_THRESHOLD / 2,
             'Good Calibration\nGood Certainty',
             ha='center', va='center', color='darkgreen',
-            alpha=0.8, fontsize=9, weight='bold'
-        )
-
-        # Poor calibration and certainty quadrant
-        ax.text(
-            GOOD_ECE_THRESHOLD * 2, GOOD_BRIER_THRESHOLD * 2,
-            'Poor Calibration\nPoor Certainty',
-            ha='center', va='center', color='darkred',
-            alpha=0.8, fontsize=9, weight='bold'
+            alpha=ALPHA_HIGH, fontsize=TABLE_FONT_SIZE, weight='bold'
         )
 
     def _plot_model_similarity(self, ax: Axes) -> None:
@@ -431,17 +483,18 @@ class SummaryVisualizer(BaseVisualizer):
             color = self.model_colors.get(label, '#333333')
             ax.scatter(
                 comp[0], comp[1], c=[color], label=label,
-                s=200, alpha=0.8, edgecolors='black', linewidth=2
+                s=SCATTER_SIZE_LARGE, alpha=ALPHA_HIGH,
+                edgecolors='black', linewidth=LINE_WIDTH_THICK
             )
 
             # Add connecting lines to origin for reference
             ax.plot(
                 [0, comp[0]], [0, comp[1]],
-                '--', color=color, alpha=0.3
+                '--', color=color, alpha=ALPHA_LOW
             )
 
         # Mark origin point
-        ax.scatter(0, 0, c='black', s=50, marker='x')
+        ax.scatter(0, 0, c='black', s=SCATTER_SIZE_SMALL, marker='x')
 
         # Configure plot labels and styling
         ax.set_xlabel(f'PC1 ({explained_var[0]:.1%})')
@@ -450,7 +503,7 @@ class SummaryVisualizer(BaseVisualizer):
         )
         ax.set_title('Model Similarity (Concatenated Weight Statistics)')
         # ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left') # <<< FIX: This line is removed/commented
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=ALPHA_LOW)
         ax.set_aspect('equal', adjustable='box')
 
     def _plot_confidence_profile_summary(self, ax: Axes) -> None:
@@ -519,14 +572,14 @@ class SummaryVisualizer(BaseVisualizer):
         for i, model in enumerate(model_order):
             color = self.model_colors.get(model, '#333333')
             parts['bodies'][i].set_facecolor(color)
-            parts['bodies'][i].set_alpha(0.6)
+            parts['bodies'][i].set_alpha(VIOLIN_ALPHA)
 
             # Create legend entries for better visualization
             legend_elements.append(
                 patches.Rectangle(
                     (0, 0), 1, 1,
-                    facecolor=color, alpha=0.6,
-                    edgecolor='black', linewidth=1,
+                    facecolor=color, alpha=VIOLIN_ALPHA,
+                    edgecolor='black', linewidth=LINE_WIDTH_THIN,
                     label=model
                 )
             )
@@ -535,11 +588,12 @@ class SummaryVisualizer(BaseVisualizer):
         for partname in ['cmeans', 'cmaxes', 'cmins', 'cbars', 'cmedians']:
             if partname in parts:
                 parts[partname].set_color('black')
-                parts[partname].set_alpha(0.8)
+                parts[partname].set_alpha(VIOLIN_EDGE_ALPHA)
 
         # Configure axis labels and annotations
         ax.set_xticks(range(len(model_order)))
-        ax.set_xticklabels([f'M{i+1}' for i in range(len(model_order))], fontsize=9)
+        ax.set_xticklabels([f'M{i+1}' for i in range(len(model_order))],
+                          fontsize=TABLE_FONT_SIZE)
 
         # Add mean confidence annotations for quick reference
         for i, model in enumerate(model_order):
@@ -547,15 +601,15 @@ class SummaryVisualizer(BaseVisualizer):
             mean_conf = model_data.mean()
             ax.text(
                 i, mean_conf, f'{mean_conf:.3f}',
-                ha='center', va='bottom', fontsize=8,
-                bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8)
+                ha='center', va='bottom', fontsize=ANNOTATION_FONT_SIZE,
+                bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=ALPHA_HIGH)
             )
 
         # Configure plot styling and labels
         ax.set_ylabel('Confidence (Max Probability)')
         ax.set_xlabel('Models')
         ax.set_title('Confidence Distribution Profiles')
-        ax.grid(True, alpha=0.3, axis='y')
+        ax.grid(True, alpha=ALPHA_LOW, axis='y')
 
         # DO NOT ADD LEGEND
         # # Add conditional legend for detailed view
@@ -564,15 +618,16 @@ class SummaryVisualizer(BaseVisualizer):
         #         handles=legend_elements,
         #         bbox_to_anchor=(1.05, 1),
         #         loc='upper left',
-        #         fontsize=8
+        #         fontsize=ANNOTATION_FONT_SIZE
         #     )
 
         # Add explanatory note for model abbreviations
         ax.text(
-            0.02, 0.02,
+            ANNOTATION_X_LEFT, ANNOTATION_Y_BOTTOM,
             'M1, M2, etc. correspond to models in legend',
-            transform=ax.transAxes, ha='left', va='bottom', fontsize=7,
-            style='italic', alpha=0.7
+            transform=ax.transAxes, ha='left', va='bottom',
+            fontsize=EXPLANATORY_NOTE_FONT_SIZE,
+            style='italic', alpha=ALPHA_REFERENCE
         )
 
     def _plot_no_data_message(
@@ -590,9 +645,9 @@ class SummaryVisualizer(BaseVisualizer):
             title: Title for the subplot.
         """
         ax.text(
-            0.5, 0.5, message,
+            ANNOTATION_X_CENTER, ANNOTATION_Y_CENTER, message,
             ha='center', va='center',
-            transform=ax.transAxes, fontsize=12
+            transform=ax.transAxes, fontsize=NO_DATA_MESSAGE_FONT_SIZE
         )
         ax.set_title(title)
         ax.axis('off')

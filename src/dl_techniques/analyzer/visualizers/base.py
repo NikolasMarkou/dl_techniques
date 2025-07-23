@@ -9,11 +9,16 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from abc import ABC, abstractmethod
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from ..data_types import AnalysisResults
 from ..config import AnalysisConfig
 from ..utils import lighten_color
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 class BaseVisualizer(ABC):
     """Abstract base class for all visualizers."""

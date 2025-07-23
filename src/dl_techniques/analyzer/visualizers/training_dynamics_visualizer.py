@@ -8,10 +8,65 @@ Creates visualizations for training dynamics analysis results.
 
 import numpy as np
 import matplotlib.pyplot as plt
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .base import BaseVisualizer
 from ..constants import LOSS_PATTERNS, VAL_LOSS_PATTERNS, ACC_PATTERNS, VAL_ACC_PATTERNS
 from ..utils import find_metric_in_history, smooth_curve
 
+# ---------------------------------------------------------------------
+# constants
+# ---------------------------------------------------------------------
+
+# Figure Layout Constants
+FIGURE_SIZE = (16, 12)
+GRID_HSPACE = 0.35
+GRID_WSPACE = 0.3
+GRID_HEIGHT_RATIOS = [1, 1, 0.8]
+SUBPLOT_TOP = 0.94
+SUBPLOT_BOTTOM = 0.05
+SUBPLOT_LEFT = 0.08
+SUBPLOT_RIGHT = 0.96
+
+# Plot Styling Constants
+LINE_WIDTH_STANDARD = 2
+LINE_WIDTH_THICK = 2.5
+LINE_ALPHA_STANDARD = 0.8
+GRID_ALPHA = 0.3
+FILL_ALPHA = 0.1
+REFERENCE_LINE_ALPHA = 0.5
+REFERENCE_LINE_WIDTH = 1
+MARKER_SIZE = 100
+MARKER_EDGE_WIDTH = 1
+Y_AXIS_LIMIT_MAX = 1.05
+XLIM_PADDING = 1
+
+# Text Styling Constants
+TITLE_FONT_SIZE = 18
+LEGEND_FONT_SIZE = 8
+ANNOTATION_FONT_SIZE = 9
+TABLE_FONT_SIZE = 9
+TABLE_HEADER_FONT_SIZE = 9
+SUBTITLE_FONT_SIZE = 12
+
+# Table Styling Constants
+TABLE_SCALE_X = 1
+TABLE_SCALE_Y = 1.5
+TABLE_CELL_HEIGHT = 0.08
+TABLE_HEADER_COLOR = '#E8E8E8'
+TABLE_DEFAULT_COLOR = '#F5F5F5'
+COLOR_LIGHTEN_FACTOR = 0.8
+
+# Annotation Constants
+ANNOTATION_OFFSET_X = 5
+ANNOTATION_OFFSET_Y = 5
+ANNOTATION_TEXT_X = 0.02
+ANNOTATION_TEXT_Y = 0.98
+
+# ---------------------------------------------------------------------
 
 class TrainingDynamicsVisualizer(BaseVisualizer):
     """Creates training dynamics visualizations."""
@@ -21,9 +76,9 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
         if not self.results.training_history:
             return
 
-        fig = plt.figure(figsize=(16, 12))
-        gs = plt.GridSpec(3, 2, figure=fig, hspace=0.35, wspace=0.3,
-                         height_ratios=[1, 1, 0.8])
+        fig = plt.figure(figsize=FIGURE_SIZE)
+        gs = plt.GridSpec(3, 2, figure=fig, hspace=GRID_HSPACE, wspace=GRID_WSPACE,
+                         height_ratios=GRID_HEIGHT_RATIOS)
 
         # 1. Loss curves (train and validation)
         ax1 = fig.add_subplot(gs[0, 0])
@@ -45,8 +100,9 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
         ax5 = fig.add_subplot(gs[2, :])
         self._plot_training_summary_table(ax5)
 
-        plt.suptitle('Training Dynamics Analysis', fontsize=18, fontweight='bold')
-        fig.subplots_adjust(top=0.94, bottom=0.05, left=0.08, right=0.96)
+        plt.suptitle('Training Dynamics Analysis', fontsize=TITLE_FONT_SIZE, fontweight='bold')
+        fig.subplots_adjust(top=SUBPLOT_TOP, bottom=SUBPLOT_BOTTOM,
+                           left=SUBPLOT_LEFT, right=SUBPLOT_RIGHT)
 
         if self.config.save_plots:
             self._save_figure(fig, 'training_dynamics')
@@ -100,7 +156,8 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
             )
             if train_loss is not None:
                 ax.plot(epochs, train_loss, '-', color=color,
-                       linewidth=2, label=f'{model_name} (train)', alpha=0.8)
+                       linewidth=LINE_WIDTH_STANDARD, label=f'{model_name} (train)',
+                       alpha=LINE_ALPHA_STANDARD)
 
             # Plot validation loss - using robust method
             val_loss, epochs = self._get_metric_data(
@@ -108,14 +165,15 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
             )
             if val_loss is not None:
                 ax.plot(epochs, val_loss, '--', color=color,
-                       linewidth=2, label=f'{model_name} (val)', alpha=0.8)
+                       linewidth=LINE_WIDTH_STANDARD, label=f'{model_name} (val)',
+                       alpha=LINE_ALPHA_STANDARD)
 
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Loss')
         ax.set_title('Training and Validation Loss Evolution')
         # DO NOT ADD LEGEND
-        #ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
-        ax.grid(True, alpha=0.3)
+        #ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=LEGEND_FONT_SIZE)
+        ax.grid(True, alpha=GRID_ALPHA)
         ax.set_yscale('log')  # Log scale often better for loss
 
     def _plot_accuracy_curves(self, ax) -> None:
@@ -129,7 +187,8 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
             )
             if train_acc is not None:
                 ax.plot(epochs, train_acc, '-', color=color,
-                       linewidth=2, label=f'{model_name} (train)', alpha=0.8)
+                       linewidth=LINE_WIDTH_STANDARD, label=f'{model_name} (train)',
+                       alpha=LINE_ALPHA_STANDARD)
 
             # Plot validation accuracy - using robust method
             val_acc, epochs = self._get_metric_data(
@@ -137,22 +196,23 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
             )
             if val_acc is not None:
                 ax.plot(epochs, val_acc, '--', color=color,
-                       linewidth=2, label=f'{model_name} (val)', alpha=0.8)
+                       linewidth=LINE_WIDTH_STANDARD, label=f'{model_name} (val)',
+                       alpha=LINE_ALPHA_STANDARD)
 
                 # Mark best epoch
                 if (self.results.training_metrics and
                     model_name in self.results.training_metrics.peak_performance):
                     best_epoch = self.results.training_metrics.peak_performance[model_name]['epoch']
                     best_acc = self.results.training_metrics.peak_performance[model_name]['val_accuracy']
-                    ax.scatter(best_epoch, best_acc, color=color, s=100,
-                             marker='*', edgecolor='black', linewidth=1, zorder=5)
+                    ax.scatter(best_epoch, best_acc, color=color, s=MARKER_SIZE,
+                             marker='*', edgecolor='black', linewidth=MARKER_EDGE_WIDTH, zorder=5)
 
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Accuracy')
         ax.set_title('Training and Validation Accuracy Evolution')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
-        ax.grid(True, alpha=0.3)
-        ax.set_ylim(0, 1.05)
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=LEGEND_FONT_SIZE)
+        ax.grid(True, alpha=GRID_ALPHA)
+        ax.set_ylim(0, Y_AXIS_LIMIT_MAX)
 
     def _plot_overfitting_analysis(self, ax) -> None:
         """Plot dedicated overfitting analysis with robust metric retrieval."""
@@ -177,30 +237,32 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
                 if self.config.smooth_training_curves:
                     gap_smooth = smooth_curve(gap, self.config.smoothing_window)
                     ax.plot(epochs, gap_smooth, '-', color=color,
-                           linewidth=2.5, label=model_name)
+                           linewidth=LINE_WIDTH_THICK, label=model_name)
                 else:
                     ax.plot(epochs, gap, '-', color=color,
-                           linewidth=2, label=model_name, alpha=0.8)
+                           linewidth=LINE_WIDTH_STANDARD, label=model_name,
+                           alpha=LINE_ALPHA_STANDARD)
 
                 # Add shaded region for positive gap (overfitting)
                 ax.fill_between(epochs, 0, gap, where=(gap > 0),
-                               color=color, alpha=0.1)
+                               color=color, alpha=FILL_ALPHA)
 
         # Add reference line at 0
-        ax.axhline(y=0, color='black', linestyle='-', alpha=0.5, linewidth=1)
+        ax.axhline(y=0, color='black', linestyle='-', alpha=REFERENCE_LINE_ALPHA,
+                  linewidth=REFERENCE_LINE_WIDTH)
 
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Validation Loss - Training Loss')
         ax.set_title('Overfitting Analysis (Gap Evolution)')
         # DO NOT ADD LEGEND
         #ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=GRID_ALPHA)
 
         # Add annotation
-        ax.text(0.02, 0.98, 'Above 0 = Overfitting\nBelow 0 = Underfitting',
+        ax.text(ANNOTATION_TEXT_X, ANNOTATION_TEXT_Y, 'Above 0 = Overfitting\nBelow 0 = Underfitting',
                transform=ax.transAxes, ha='left', va='top',
-               bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow', alpha=0.8),
-               fontsize=9)
+               bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow', alpha=LINE_ALPHA_STANDARD),
+               fontsize=ANNOTATION_FONT_SIZE)
 
     def _plot_best_epoch_performance(self, ax) -> None:
         """Plot best epoch performance comparison."""
@@ -228,30 +290,31 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
         for i, model in enumerate(models):
             color = self.model_colors.get(model, '#333333')
             ax.scatter(best_epochs[i], best_accs[i],
-                      s=200, color=color, alpha=0.8,
-                      edgecolors='black', linewidth=2,
+                      s=MARKER_SIZE, color=color, alpha=LINE_ALPHA_STANDARD,
+                      edgecolors='black', linewidth=MARKER_EDGE_WIDTH,
                       label=model)
 
-            # Add model name as annotation
-            ax.annotate(model,
-                       (best_epochs[i], best_accs[i]),
-                       xytext=(5, 5),
-                       textcoords='offset points',
-                       fontsize=8,
-                       bbox=dict(boxstyle='round,pad=0.3',
-                               facecolor=color,
-                               alpha=0.3))
+            # NO NEED FOR ANNOTATION
+            # # Add model name as annotation
+            # ax.annotate(model,
+            #            (best_epochs[i], best_accs[i]),
+            #            xytext=(ANNOTATION_OFFSET_X, ANNOTATION_OFFSET_Y),
+            #            textcoords='offset points',
+            #            fontsize=ANNOTATION_FONT_SIZE,
+            #            bbox=dict(boxstyle='round,pad=0.3',
+            #                    facecolor=color,
+            #                    alpha=0.3))
 
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Best Validation Accuracy')
         ax.set_title('Peak Performance: Accuracy vs Convergence Speed')
         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=GRID_ALPHA)
 
         # Set reasonable axis limits
         if best_epochs:
-            ax.set_xlim(-1, max(best_epochs) + 1)
-        ax.set_ylim(0, 1.05)
+            ax.set_xlim(-XLIM_PADDING, max(best_epochs) + XLIM_PADDING)
+        ax.set_ylim(0, Y_AXIS_LIMIT_MAX)
 
     def _plot_training_summary_table(self, ax) -> None:
         """Create comprehensive training summary table."""
@@ -309,30 +372,31 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
 
         # Style the table
         table.auto_set_font_size(False)
-        table.set_fontsize(9)
-        table.scale(1, 1.5)
+        table.set_fontsize(TABLE_FONT_SIZE)
+        table.scale(TABLE_SCALE_X, TABLE_SCALE_Y)
 
         # Color header
         for i in range(len(headers)):
-            table[(0, i)].set_facecolor('#E8E8E8')
+            table[(0, i)].set_facecolor(TABLE_HEADER_COLOR)
             table[(0, i)].set_text_props(weight='bold')
-            table[(0, i)].set_height(0.08)
+            table[(0, i)].set_height(TABLE_CELL_HEIGHT)
 
         # Color model rows
         for i, row_data in enumerate(table_data, 1):
             model_name = row_data[0]
-            color = self.model_colors.get(model_name, '#F5F5F5')
-            light_color = self._lighten_color(color, 0.8)
+            color = self.model_colors.get(model_name, TABLE_DEFAULT_COLOR)
+            light_color = self._lighten_color(color, COLOR_LIGHTEN_FACTOR)
 
             for j in range(len(headers)):
                 cell = table[(i, j)]
                 cell.set_facecolor(light_color)
-                cell.set_height(0.08)
+                cell.set_height(TABLE_CELL_HEIGHT)
 
                 if j == 0:  # Model name
-                    cell.set_text_props(weight='bold', fontsize=9)
+                    cell.set_text_props(weight='bold', fontsize=TABLE_HEADER_FONT_SIZE)
                 else:
-                    cell.set_text_props(fontsize=9)
+                    cell.set_text_props(fontsize=TABLE_FONT_SIZE)
 
         ax.axis('off')
-        ax.set_title('Training Metrics Summary', fontsize=12, fontweight='bold', pad=10)
+        ax.set_title('Training Metrics Summary', fontsize=SUBTITLE_FONT_SIZE,
+                    fontweight='bold', pad=10)

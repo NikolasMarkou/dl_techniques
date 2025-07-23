@@ -8,10 +8,71 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpecFromSubplotSpec
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .base import BaseVisualizer
 from ..constants import ACTIVATION_MAGNITUDE_NORMALIZER, LAYER_SPECIALIZATION_MAX_RANK
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
+# constants
+# ---------------------------------------------------------------------
+
+# Figure Layout Constants
+FIGURE_SIZE = (14, 10)
+GRID_HSPACE = 0.3
+GRID_WSPACE = 0.3
+SUBPLOT_TOP = 0.93
+SUBPLOT_BOTTOM = 0.1
+SUBPLOT_LEFT = 0.1
+SUBPLOT_RIGHT = 0.95
+
+# Text Styling Constants
+TITLE_FONT_SIZE = 16
+SUBTITLE_FONT_SIZE = 12
+SMALL_TITLE_FONT_SIZE = 10
+LABEL_FONT_SIZE = 8
+COLORBAR_FONT_SIZE = 7
+
+# Plot Styling Constants
+LINE_WIDTH_STANDARD = 2
+MARKER_SIZE_SMALL = 6
+MARKER_SIZE_LARGE = 8
+ALPHA_FILL = 0.2
+ALPHA_STANDARD = 0.8
+ALPHA_GRID = 0.3
+
+# Subplot Layout Constants
+SUB_WSPACE_WIDE = 0.4
+SUB_WSPACE_NARROW = 0.1
+SUB_HSPACE_STANDARD = 0.4
+SUB_HSPACE_NARROW = 0.1
+HEIGHT_RATIOS_EQUAL = [1, 1]
+HEIGHT_RATIOS_BOTTOM_HEAVY = [1, 1.5]
+
+# Heatmap Constants
+HEATMAP_VMIN = 0
+HEATMAP_VMAX = 1.0
+COLORBAR_SHRINK = 0.6
+INTERPOLATION_METHOD = 'nearest'
+
+# Specialization Analysis Constants
+BAR_LABEL_OFFSET = 0.02
+AXIS_LIMIT_MIN = 0
+AXIS_LIMIT_MAX = 1
+SATURATION_THRESHOLD = 0.9
+BALANCE_SCORE_MULTIPLIER = 2
+SPECIALIZATION_SCORE_COMPONENTS = 3.0
+
+# Health Metrics Constants
+ANNOTATION_X_CENTER = 0.5
+ANNOTATION_Y_CENTER = 0.5
+TITLE_PAD = 20
+
+# ---------------------------------------------------------------------
 
 class InformationFlowVisualizer(BaseVisualizer):
     """Creates information flow visualizations."""
@@ -21,8 +82,8 @@ class InformationFlowVisualizer(BaseVisualizer):
         if not self.results.information_flow:
             return
 
-        fig = plt.figure(figsize=(14, 10))
-        gs = plt.GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.3)
+        fig = plt.figure(figsize=FIGURE_SIZE)
+        gs = plt.GridSpec(2, 2, figure=fig, hspace=GRID_HSPACE, wspace=GRID_WSPACE)
 
         # Top row: Flow overview
         ax1 = fig.add_subplot(gs[0, 0])
@@ -38,8 +99,10 @@ class InformationFlowVisualizer(BaseVisualizer):
         ax4 = fig.add_subplot(gs[1, 1])
         self._plot_layer_specialization_analysis(ax4)
 
-        plt.suptitle('Information Flow and Activation Analysis', fontsize=16, fontweight='bold')
-        fig.subplots_adjust(top=0.93, bottom=0.1, left=0.1, right=0.95)
+        plt.suptitle('Information Flow and Activation Analysis',
+                    fontsize=TITLE_FONT_SIZE, fontweight='bold')
+        fig.subplots_adjust(top=SUBPLOT_TOP, bottom=SUBPLOT_BOTTOM,
+                           left=SUBPLOT_LEFT, right=SUBPLOT_RIGHT)
 
         if self.config.save_plots:
             self._save_figure(fig, 'information_flow_analysis')
@@ -92,16 +155,17 @@ class InformationFlowVisualizer(BaseVisualizer):
 
                 color = self.model_colors.get(model_name, '#333333')
                 line = ax.plot(layer_positions, means, 'o-', label=f'{model_name}',
-                               linewidth=2, markersize=6, color=color)
+                               linewidth=LINE_WIDTH_STANDARD, markersize=MARKER_SIZE_SMALL,
+                               color=color)
                 ax.fill_between(layer_positions, means - stds, means + stds,
-                                alpha=0.2, color=color)
+                                alpha=ALPHA_FILL, color=color)
 
         ax.set_xlabel('Layer Depth (Network Order)')
         ax.set_ylabel('Activation Statistics')
         ax.set_title('Activation Mean ± Std Evolution')
         # DONT SHOE LEGEND HERE
         # ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=ALPHA_GRID)
 
     def _plot_effective_rank_evolution(self, ax) -> None:
         """Plot effective rank evolution through network."""
@@ -122,18 +186,19 @@ class InformationFlowVisualizer(BaseVisualizer):
             if ranks:
                 color = self.model_colors.get(model_name, '#333333')
                 ax.plot(positions, ranks, 'o-', label=model_name,
-                        linewidth=2, markersize=8, color=color)
+                        linewidth=LINE_WIDTH_STANDARD, markersize=MARKER_SIZE_LARGE,
+                        color=color)
 
         ax.set_xlabel('Layer Depth (Network Order)')
         ax.set_ylabel('Effective Rank')
         ax.set_title('Information Dimensionality Evolution')
         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=ALPHA_GRID)
 
     def _plot_activation_health_dashboard(self, ax) -> None:
         """Create an activation health dashboard showing model health metrics."""
         if not self.results.information_flow:
-            ax.text(0.5, 0.5, 'No activation data available',
+            ax.text(ANNOTATION_X_CENTER, ANNOTATION_Y_CENTER, 'No activation data available',
                     ha='center', va='center', transform=ax.transAxes)
             ax.set_title('Activation Health Dashboard')
             ax.axis('off')
@@ -153,7 +218,7 @@ class InformationFlowVisualizer(BaseVisualizer):
 
                 # Health indicators
                 dead_neurons = sparsity  # High sparsity indicates dead neurons
-                saturation = 1.0 - positive_ratio if positive_ratio > 0.9 else 0.0
+                saturation = 1.0 - positive_ratio if positive_ratio > SATURATION_THRESHOLD else 0.0
                 activation_magnitude = min(mean_activation,
                                            ACTIVATION_MAGNITUDE_NORMALIZER) / ACTIVATION_MAGNITUDE_NORMALIZER
 
@@ -188,7 +253,7 @@ class InformationFlowVisualizer(BaseVisualizer):
 
             # Create subplots within the main axis
             gs_sub = GridSpecFromSubplotSpec(1, 3, subplot_spec=ax.get_subplotspec(),
-                                             wspace=0.4, hspace=0.1)
+                                             wspace=SUB_WSPACE_WIDE, hspace=SUB_HSPACE_NARROW)
 
             for idx, metric in enumerate(metrics):
                 ax_sub = plt.subplot(gs_sub[0, idx])
@@ -213,46 +278,50 @@ class InformationFlowVisualizer(BaseVisualizer):
                 # Choose colormap based on metric
                 if metric == 'Dead Neurons':
                     cmap = 'Reds'
-                    vmax = 1.0
+                    vmax = HEATMAP_VMAX
                 elif metric == 'Saturation':
                     cmap = 'Oranges'
-                    vmax = 1.0
+                    vmax = HEATMAP_VMAX
                 else:  # Activation Level
                     cmap = 'Greens'
-                    vmax = 1.0
+                    vmax = HEATMAP_VMAX
 
                 # Create heatmap
                 im = ax_sub.imshow(heatmap_data.values, cmap=cmap, aspect='auto',
-                                   vmin=0, vmax=vmax, interpolation='nearest')
+                                   vmin=HEATMAP_VMIN, vmax=vmax,
+                                   interpolation=INTERPOLATION_METHOD)
 
                 # Set labels
-                ax_sub.set_title(metric, fontsize=10, fontweight='bold')
+                ax_sub.set_title(metric, fontsize=SMALL_TITLE_FONT_SIZE, fontweight='bold')
                 ax_sub.set_xticks(range(len(unique_layers)))
-                ax_sub.set_xticklabels(layer_labels, rotation=45, ha='right', fontsize=8)
+                ax_sub.set_xticklabels(layer_labels, rotation=45, ha='right',
+                                      fontsize=LABEL_FONT_SIZE)
                 ax_sub.set_yticks(range(len(heatmap_data.index)))
 
                 # Only show model names on the leftmost heatmap
                 if idx == 0:
-                    ax_sub.set_yticklabels(heatmap_data.index, fontsize=8)
+                    ax_sub.set_yticklabels(heatmap_data.index, fontsize=LABEL_FONT_SIZE)
                 else:
                     ax_sub.set_yticklabels([])
 
                 # Add colorbar
-                cbar = plt.colorbar(im, ax=ax_sub, shrink=0.6)
-                cbar.ax.tick_params(labelsize=7)
+                cbar = plt.colorbar(im, ax=ax_sub, shrink=COLORBAR_SHRINK)
+                cbar.ax.tick_params(labelsize=COLORBAR_FONT_SIZE)
 
             ax.axis('off')  # Hide the parent axis
-            ax.set_title('Activation Health Dashboard (Network Order)', fontsize=12, fontweight='bold', pad=20)
+            ax.set_title('Activation Health Dashboard (Network Order)',
+                        fontsize=SUBTITLE_FONT_SIZE, fontweight='bold', pad=TITLE_PAD)
         else:
-            ax.text(0.5, 0.5, 'Insufficient data for health analysis',
-                    ha='center', va='center', transform=ax.transAxes)
+            ax.text(ANNOTATION_X_CENTER, ANNOTATION_Y_CENTER,
+                   'Insufficient data for health analysis',
+                   ha='center', va='center', transform=ax.transAxes)
             ax.set_title('Activation Health Dashboard')
             ax.axis('off')
 
     def _plot_layer_specialization_analysis(self, ax) -> None:
         """Analyze how specialized each model's layers have become."""
         if not self.results.information_flow:
-            ax.text(0.5, 0.5, 'No activation data available',
+            ax.text(ANNOTATION_X_CENTER, ANNOTATION_Y_CENTER, 'No activation data available',
                     ha='center', va='center', transform=ax.transAxes)
             ax.set_title('Layer Specialization Analysis')
             ax.axis('off')
@@ -284,11 +353,11 @@ class InformationFlowVisualizer(BaseVisualizer):
 
                 # Calculate specialization score (0-1, higher is better)
                 activation_health = 1.0 - sparsity
-                balance_score = 1.0 - abs(positive_ratio - 0.5) * 2
+                balance_score = 1.0 - abs(positive_ratio - 0.5) * BALANCE_SCORE_MULTIPLIER
                 rank_score = min(effective_rank / LAYER_SPECIALIZATION_MAX_RANK, 1.0) if effective_rank > 0 else 0.0
 
                 # Combined specialization score
-                layer_spec = (activation_health + balance_score + rank_score) / 3.0
+                layer_spec = (activation_health + balance_score + rank_score) / SPECIALIZATION_SCORE_COMPONENTS
                 layer_specializations.append(layer_spec)
 
                 total_specialization += layer_spec
@@ -305,14 +374,15 @@ class InformationFlowVisualizer(BaseVisualizer):
         if specialization_data:
             # Create two sub-visualizations
             gs_sub = GridSpecFromSubplotSpec(2, 1, subplot_spec=ax.get_subplotspec(),
-                                             hspace=0.4, height_ratios=[1, 1.5])
+                                             hspace=SUB_HSPACE_STANDARD,
+                                             height_ratios=HEIGHT_RATIOS_BOTTOM_HEAVY)
 
             # Top: Overall specialization comparison
             ax_top = plt.subplot(gs_sub[0, 0])
             models = [d['Model'] for d in specialization_data]
             avg_specs = [d['Average Specialization'] for d in specialization_data]
 
-            bars = ax_top.bar(range(len(models)), avg_specs, alpha=0.8)
+            bars = ax_top.bar(range(len(models)), avg_specs, alpha=ALPHA_STANDARD)
 
             # Color bars with model colors
             for i, model in enumerate(models):
@@ -320,16 +390,17 @@ class InformationFlowVisualizer(BaseVisualizer):
                 bars[i].set_facecolor(color)
 
             # DONT SHOW THIS
-            # ax_top.set_title('Overall Model Specialization', fontsize=10, fontweight='bold')
+            # ax_top.set_title('Overall Model Specialization', fontsize=SMALL_TITLE_FONT_SIZE, fontweight='bold')
             ax_top.set_ylabel('Specialization Score')
             ax_top.set_xticks(range(len(models)))
             ax_top.set_xticklabels([])  # Remove model names from x-axis
-            ax_top.grid(True, alpha=0.3, axis='y')
-            ax_top.set_ylim(0, 1)
+            ax_top.grid(True, alpha=ALPHA_GRID, axis='y')
+            ax_top.set_ylim(AXIS_LIMIT_MIN, AXIS_LIMIT_MAX)
 
             # Add value labels on bars
             for i, v in enumerate(avg_specs):
-                ax_top.text(i, v + 0.02, f'{v:.2f}', ha='center', va='bottom', fontsize=8)
+                ax_top.text(i, v + BAR_LABEL_OFFSET, f'{v:.2f}', ha='center', va='bottom',
+                           fontsize=LABEL_FONT_SIZE)
 
             # Bottom: Layer-by-layer specialization evolution
             ax_bottom = plt.subplot(gs_sub[1, 0])
@@ -341,21 +412,26 @@ class InformationFlowVisualizer(BaseVisualizer):
 
                 x_positions = range(len(layer_specs))
                 ax_bottom.plot(x_positions, layer_specs, 'o-',
-                               label=model_name, color=color, linewidth=2, markersize=6)
+                               label=model_name, color=color,
+                               linewidth=LINE_WIDTH_STANDARD, markersize=MARKER_SIZE_SMALL)
 
             ax_bottom.set_title('Layer-wise Specialization Evolution (Network Order)',
-                               fontsize=10, fontweight='bold')
+                               fontsize=SMALL_TITLE_FONT_SIZE, fontweight='bold')
             ax_bottom.set_xlabel('Layer Index (Network Depth)')
             ax_bottom.set_ylabel('Specialization Score')
             # DONT SHOW LEGEND
-            # ax_bottom.legend(fontsize=8, bbox_to_anchor=(1.05, 1), loc='upper left')
-            ax_bottom.grid(True, alpha=0.3)
-            ax_bottom.set_ylim(0, 1)
+            # ax_bottom.legend(fontsize=LABEL_FONT_SIZE, bbox_to_anchor=(1.05, 1), loc='upper left')
+            ax_bottom.grid(True, alpha=ALPHA_GRID)
+            ax_bottom.set_ylim(AXIS_LIMIT_MIN, AXIS_LIMIT_MAX)
 
             ax.axis('off')  # Hide parent axis
-            ax.set_title('Layer Specialization Analysis', fontsize=12, fontweight='bold', pad=20)
+            ax.set_title('Layer Specialization Analysis', fontsize=SUBTITLE_FONT_SIZE,
+                        fontweight='bold', pad=TITLE_PAD)
         else:
-            ax.text(0.5, 0.5, 'Insufficient data for specialization analysis',
-                    ha='center', va='center', transform=ax.transAxes)
+            ax.text(ANNOTATION_X_CENTER, ANNOTATION_Y_CENTER,
+                   'Insufficient data for specialization analysis',
+                   ha='center', va='center', transform=ax.transAxes)
             ax.set_title('Layer Specialization Analysis')
             ax.axis('off')
+
+# ---------------------------------------------------------------------
