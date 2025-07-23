@@ -1,4 +1,4 @@
-.PHONY: test clean structure
+.PHONY: test clean structure docs
 
 # Run tests
 test:
@@ -13,3 +13,6 @@ clean:
 
 structure:
 	tree -L 4 --noreport src/dl_techniques/ | sed 's/^/ /'
+
+docs:
+	python generate_docs.py
