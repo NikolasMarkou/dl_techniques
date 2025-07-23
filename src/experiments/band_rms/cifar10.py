@@ -1143,7 +1143,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     # ===== COMPARATIVE ANALYSIS INSIGHTS =====
     if 'comparative_analysis' in results:
         analysis = results['comparative_analysis']
-        logger.info("\n🔍 COMPARATIVE ANALYSIS:")
+        logger.info("🔍 COMPARATIVE ANALYSIS:")
 
         # Best performers
         if 'best_performers' in analysis:
@@ -1160,7 +1160,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
         static_models = analysis.get('static_performance', {})
 
         if adaptive_models and static_models:
-            logger.info("\n   📐 BandRMS APPROACH COMPARISON:")
+            logger.info("   📐 BandRMS APPROACH COMPARISON:")
 
             # Calculate average performance for each approach
             adaptive_avg = np.mean([
@@ -1179,7 +1179,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
                 logger.info("      → Static approach shows competitive performance")
 
             # Band width analysis
-            logger.info("\n   📊 BAND WIDTH ANALYSIS:")
+            logger.info("   📊 BAND WIDTH ANALYSIS:")
             logger.info("      Adaptive BandRMS:")
             for model_name, stats in adaptive_models.items():
                 band_width = float(model_name.split('_')[-1]) / 10
@@ -1195,7 +1195,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
         results['model_analysis'].calibration_metrics and
         results['model_analysis'].confidence_metrics):
 
-        logger.info("\n🎯 CALIBRATION ANALYSIS:")
+        logger.info("🎯 CALIBRATION ANALYSIS:")
         logger.info(f"{'Model':<20} {'ECE':<12} {'Brier':<12} {'Entropy':<12}")
         logger.info("-" * 60)
 
@@ -1210,7 +1210,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             logger.info(f"{model_name:<20} {ece:<12.4f} {brier:<12.4f} {entropy:<12.4f}")
 
     # ===== KEY INSIGHTS AND RECOMMENDATIONS =====
-    logger.info("\n💡 KEY INSIGHTS AND RECOMMENDATIONS:")
+    logger.info("💡 KEY INSIGHTS AND RECOMMENDATIONS:")
 
     if 'run_statistics' in results and 'comparative_analysis' in results:
         adaptive_models = results['comparative_analysis'].get('adaptive_performance', {})
@@ -1233,13 +1233,6 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             best_baseline = max(baseline_models.items(),
                               key=lambda x: x[1]['accuracy']['mean'])
             logger.info(f"   3. Best Baseline: {best_baseline[0]} serves as the comparative reference")
-
-        # Provide specific recommendations based on results
-        logger.info("\n📈 RECOMMENDATIONS:")
-        logger.info("   • For maximum performance: Consider AdaptiveBandRMS with moderate band widths")
-        logger.info("   • For stability and simplicity: StaticBandRMS provides consistent results")
-        logger.info("   • For production deployment: Evaluate calibration metrics alongside accuracy")
-        logger.info("   • For further research: Investigate band width selection strategies")
 
     logger.info("=" * 80)
 
