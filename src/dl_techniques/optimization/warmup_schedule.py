@@ -27,6 +27,7 @@ Mathematical Behavior:
         lr = primary_schedule(step)
 
 Usage Example:
+    >>> # Direct usage
     >>> primary_schedule = keras.optimizers.schedules.CosineDecay(
     ...     initial_learning_rate=0.001,
     ...     decay_steps=10000
@@ -37,6 +38,17 @@ Usage Example:
     ...     primary_schedule=primary_schedule
     ... )
     >>> optimizer = keras.optimizers.Adam(learning_rate=warmup_lr_schedule)
+    >>>
+    >>> # Via schedule_builder (recommended)
+    >>> config = {
+    ...     "type": "cosine_decay",
+    ...     "warmup_steps": 1000,
+    ...     "warmup_start_lr": 1e-6,
+    ...     "learning_rate": 0.001,
+    ...     "decay_steps": 10000,
+    ...     "alpha": 0.0001
+    ... }
+    >>> lr_schedule = schedule_builder(config)
 """
 
 import keras

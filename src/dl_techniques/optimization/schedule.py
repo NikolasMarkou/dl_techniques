@@ -10,6 +10,7 @@ The schedule builder supports:
 - Linear warmup periods for training stability
 - Default parameter fallbacks from constants module
 - Integration with Keras optimizers
+- Flattened configuration structure for simplicity
 
 All schedules are automatically wrapped with a warmup schedule that linearly
 increases the learning rate from a small initial value to the target rate
@@ -20,11 +21,9 @@ Usage Example:
     ...     "type": "cosine_decay",
     ...     "warmup_steps": 1000,
     ...     "warmup_start_lr": 1e-8,
-    ...     "config": {
-    ...         "learning_rate": 0.001,
-    ...         "decay_steps": 10000,
-    ...         "alpha": 0.0001
-    ...     }
+    ...     "learning_rate": 0.001,
+    ...     "decay_steps": 10000,
+    ...     "alpha": 0.0001
     ... }
     >>> lr_schedule = schedule_builder(config)
 """
@@ -42,7 +41,6 @@ from keras.api.optimizers.schedules import LearningRateSchedule
 from .constants import *
 from .warmup_schedule import WarmupSchedule
 from dl_techniques.utils.logger import logger
-
 
 # ---------------------------------------------------------------------
 # enums
@@ -62,7 +60,7 @@ class ScheduleType(str, Enum):
 
 
 def schedule_builder(
-        config: Dict[str, Union[str, Dict, int, float]]
+        config: Dict[str, Union[str, int, float]]
 ) -> LearningRateSchedule:
     """Build a learning rate schedule with optional warmup from configuration.
 
@@ -72,15 +70,20 @@ def schedule_builder(
     value to the target rate over the specified number of steps.
 
     Args:
-        config: Configuration dictionary containing schedule parameters.
+        config: Flattened configuration dictionary containing all parameters.
             Required keys:
-                - type: Schedule type ('cosine_decay', 'exponential_decay', 
+                - type: Schedule type ('cosine_decay', 'exponential_decay',
                        'cosine_decay_restarts')
-                - config: Dictionary with schedule-specific parameters
+                - learning_rate: Initial learning rate for the schedule
+            Schedule-specific required keys:
+                - decay_steps: Number of steps for decay (all schedules)
+                - decay_rate: Decay rate (exponential_decay only)
             Optional keys:
                 - warmup_steps: Number of warmup steps (default: 0)
-                - warmup_start_lr: Starting learning rate for warmup 
-                                 (default: 1e-8)
+                - warmup_start_lr: Starting learning rate for warmup (default: 1e-8)
+                - alpha: Minimum learning rate fraction (cosine schedules)
+                - t_mul: Period multiplier (cosine_decay_restarts)
+                - m_mul: LR multiplier (cosine_decay_restarts)
 
     Returns:
         A WarmupSchedule instance wrapping the configured base schedule.
@@ -93,11 +96,10 @@ def schedule_builder(
         >>> config = {
         ...     "type": "cosine_decay",
         ...     "warmup_steps": 1000,
-        ...     "config": {
-        ...         "learning_rate": 0.001,
-        ...         "decay_steps": 10000,
-        ...         "alpha": 0.0001
-        ...     }
+        ...     "warmup_start_lr": 1e-8,
+        ...     "learning_rate": 0.001,
+        ...     "decay_steps": 10000,
+        ...     "alpha": 0.0001
         ... }
         >>> lr_schedule = schedule_builder(config)
     """
@@ -120,22 +122,21 @@ def schedule_builder(
         raise ValueError("warmup_steps must be specified in config")
     warmup_start_lr = config.get('warmup_start_lr', DEFAULT_WARMUP_START_LR)
 
-    # Get schedule-specific parameters
-    params = config.get("config", {})
-    if not isinstance(params, dict):
-        raise ValueError("'config' must be a dictionary containing schedule parameters")
+    # Filter out warmup parameters for schedule-specific parameters
+    schedule_params = {k: v for k, v in config.items()
+                      if k not in ['type', 'warmup_steps', 'warmup_start_lr']}
 
-    logger.info(f"Building schedule: [{schedule_type}] with warmup_steps: [{warmup_steps}], params: [{params}]")
+    logger.info(f"Building schedule: [{schedule_type}] with warmup_steps: [{warmup_steps}], schedule_params: [{schedule_params}]")
 
     # Create the base learning rate schedule
     if schedule_type == ScheduleType.EXPONENTIAL_DECAY:
-        base_schedule = _build_exponential_decay_schedule(params)
+        base_schedule = _build_exponential_decay_schedule(schedule_params)
 
     elif schedule_type == ScheduleType.COSINE_DECAY_RESTARTS:
-        base_schedule = _build_cosine_decay_restarts_schedule(params)
+        base_schedule = _build_cosine_decay_restarts_schedule(schedule_params)
 
     elif schedule_type == ScheduleType.COSINE_DECAY:
-        base_schedule = _build_cosine_decay_schedule(params)
+        base_schedule = _build_cosine_decay_schedule(schedule_params)
 
     else:
         raise ValueError(
@@ -160,12 +161,12 @@ def schedule_builder(
 
 
 def _build_exponential_decay_schedule(
-        params: Dict[str, Any]
+        config: Dict[str, Any]
 ) -> keras.optimizers.schedules.ExponentialDecay:
-    """Build ExponentialDecay schedule from parameters.
+    """Build ExponentialDecay schedule from flattened configuration.
 
     Args:
-        params: Dictionary containing required parameters:
+        config: Flattened configuration dictionary containing required parameters:
             - learning_rate: Initial learning rate
             - decay_steps: Number of steps between decay applications
             - decay_rate: Multiplicative factor for decay
@@ -177,22 +178,22 @@ def _build_exponential_decay_schedule(
         KeyError: If required parameters are missing.
     """
     required_params = ["learning_rate", "decay_steps", "decay_rate"]
-    _validate_required_params(params, required_params, "exponential_decay")
+    _validate_required_params(config, required_params, "exponential_decay")
 
     return keras.optimizers.schedules.ExponentialDecay(
-        initial_learning_rate=params["learning_rate"],
-        decay_steps=params["decay_steps"],
-        decay_rate=params["decay_rate"]
+        initial_learning_rate=config["learning_rate"],
+        decay_steps=config["decay_steps"],
+        decay_rate=config["decay_rate"]
     )
 
 
 def _build_cosine_decay_restarts_schedule(
-        params: Dict[str, Any]
+        config: Dict[str, Any]
 ) -> keras.optimizers.schedules.CosineDecayRestarts:
-    """Build CosineDecayRestarts schedule from parameters.
+    """Build CosineDecayRestarts schedule from flattened configuration.
 
     Args:
-        params: Dictionary containing required and optional parameters:
+        config: Flattened configuration dictionary containing required and optional parameters:
             Required:
                 - learning_rate: Initial learning rate
                 - decay_steps: Steps in first decay period
@@ -208,24 +209,24 @@ def _build_cosine_decay_restarts_schedule(
         KeyError: If required parameters are missing.
     """
     required_params = ["learning_rate", "decay_steps"]
-    _validate_required_params(params, required_params, "cosine_decay_restarts")
+    _validate_required_params(config, required_params, "cosine_decay_restarts")
 
     return keras.optimizers.schedules.CosineDecayRestarts(
-        initial_learning_rate=params["learning_rate"],
-        first_decay_steps=params["decay_steps"],
-        t_mul=params.get("t_mul", DEFAULT_COSINE_RESTARTS_T_MUL),
-        m_mul=params.get("m_mul", DEFAULT_COSINE_RESTARTS_M_MUL),
-        alpha=params.get("alpha", DEFAULT_COSINE_RESTARTS_ALPHA)
+        initial_learning_rate=config["learning_rate"],
+        first_decay_steps=config["decay_steps"],
+        t_mul=config.get("t_mul", DEFAULT_COSINE_RESTARTS_T_MUL),
+        m_mul=config.get("m_mul", DEFAULT_COSINE_RESTARTS_M_MUL),
+        alpha=config.get("alpha", DEFAULT_COSINE_RESTARTS_ALPHA)
     )
 
 
 def _build_cosine_decay_schedule(
-        params: Dict[str, Any]
+        config: Dict[str, Any]
 ) -> keras.optimizers.schedules.CosineDecay:
-    """Build CosineDecay schedule from parameters.
+    """Build CosineDecay schedule from flattened configuration.
 
     Args:
-        params: Dictionary containing required and optional parameters:
+        config: Flattened configuration dictionary containing required and optional parameters:
             Required:
                 - learning_rate: Initial learning rate
                 - decay_steps: Number of steps to decay over
@@ -239,31 +240,31 @@ def _build_cosine_decay_schedule(
         KeyError: If required parameters are missing.
     """
     required_params = ["learning_rate", "decay_steps"]
-    _validate_required_params(params, required_params, "cosine_decay")
+    _validate_required_params(config, required_params, "cosine_decay")
 
     return keras.optimizers.schedules.CosineDecay(
-        initial_learning_rate=params["learning_rate"],
-        decay_steps=params["decay_steps"],
-        alpha=params.get("alpha", DEFAULT_COSINE_ALPHA)
+        initial_learning_rate=config["learning_rate"],
+        decay_steps=config["decay_steps"],
+        alpha=config.get("alpha", DEFAULT_COSINE_ALPHA)
     )
 
 
 def _validate_required_params(
-        params: Dict[str, Any],
+        config: Dict[str, Any],
         required_params: list[str],
         schedule_name: str
 ) -> None:
-    """Validate that all required parameters are present in params dictionary.
+    """Validate that all required parameters are present in config dictionary.
 
     Args:
-        params: Dictionary to validate.
+        config: Configuration dictionary to validate.
         required_params: List of required parameter names.
         schedule_name: Name of the schedule (for error messages).
 
     Raises:
         KeyError: If any required parameter is missing.
     """
-    missing_params = [param for param in required_params if param not in params]
+    missing_params = [param for param in required_params if param not in config]
     if missing_params:
         raise KeyError(
             f"Missing required parameters for {schedule_name}: {missing_params}. "
