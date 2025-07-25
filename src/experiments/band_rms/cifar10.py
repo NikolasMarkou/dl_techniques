@@ -70,6 +70,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Callable, Optional
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.convert import convert_numpy_to_python
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.utils.datasets.cifar10 import load_and_preprocess_cifar10
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
@@ -1051,23 +1052,6 @@ def save_experiment_results(results: Dict[str, Any], experiment_dir: Path) -> No
         experiment_dir: Directory to save results
     """
     try:
-        def convert_numpy_to_python(obj):
-            """Recursively convert numpy types to Python native types for JSON serialization."""
-            if isinstance(obj, np.integer):
-                return int(obj)
-            elif isinstance(obj, np.floating):
-                return float(obj)
-            elif isinstance(obj, np.ndarray):
-                return obj.tolist()
-            elif isinstance(obj, dict):
-                return {key: convert_numpy_to_python(value) for key, value in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_numpy_to_python(item) for item in obj]
-            elif isinstance(obj, tuple):
-                return tuple(convert_numpy_to_python(item) for item in obj)
-            else:
-                return obj
-
         # Save experiment configuration
         config_dict = {
             'experiment_name': results['config'].experiment_name,
