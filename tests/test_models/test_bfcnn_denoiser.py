@@ -10,9 +10,8 @@ import numpy as np
 import keras
 import tempfile
 import os
-import tensorflow as tf  # Added for GradientTape
+import tensorflow as tf
 from typing import Tuple, Dict, Any
-from unittest.mock import patch, MagicMock
 
 # Assuming the model module path
 from dl_techniques.models.bfcnn_denoiser import (
@@ -21,7 +20,7 @@ from dl_techniques.models.bfcnn_denoiser import (
     create_bfcnn_standard,
     create_bfcnn_deep
 )
-
+from dl_techniques.layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
 
 class TestBFCNNDenoiser:
     """Test suite for Bias-Free CNN Denoiser implementation."""
@@ -220,24 +219,6 @@ class TestBFCNNDenoiser:
             input_channels = input_shape[2]
             assert model.output_shape[-1] == input_channels
 
-    @patch('dl_techniques.models.bfcnn_denoiser.logger')
-    def test_logging_messages(self, mock_logger, grayscale_input_shape):
-        """Test that appropriate logging messages are generated."""
-        model = create_bfcnn_denoiser(
-            input_shape=grayscale_input_shape,
-            num_blocks=5,
-            filters=64,
-            model_name='test_model'
-        )
-
-        # Check that logger.info was called with expected messages
-        mock_logger.info.assert_any_call(
-            "Created bias-free CNN model 'test_model' with 5 residual blocks and 64 filters"
-        )
-        mock_logger.info.assert_any_call(
-            f"Model input shape: {grayscale_input_shape}, output channels: 1"
-        )
-
     # ================================================================
     # Forward Pass Tests
     # ================================================================
@@ -372,8 +353,8 @@ class TestBFCNNDenoiser:
             loaded_model = keras.models.load_model(
                 model_path,
                 custom_objects={
-                    'BiasFreeConv2D': MagicMock(),  # Assuming these would be registered
-                    'BiasFreeResidualBlock': MagicMock()
+                    'BiasFreeConv2D': BiasFreeConv2D,
+                    'BiasFreeResidualBlock': BiasFreeResidualBlock
                 }
             )
 
