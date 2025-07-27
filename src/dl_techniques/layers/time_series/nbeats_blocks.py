@@ -172,13 +172,19 @@ References
 - Challu, C., Olivares, K. G., Oreshkin, B. N., Ramirez, F. G., Canseco, M. M., & Dubrawski, A. (2022).
   "N-HiTS: Neural Hierarchical Interpolation for Time Series Forecasting."
   AAAI Conference on Artificial Intelligence.
+
+See Also
+=========
+
+- dl_techniques.models.nbeats: Complete N-BEATS model implementation
+- dl_techniques.models.nbeats_probabilistic: Probabilistic variant with uncertainty
+- dl_techniques.utils.datasets.nbeats: Data utilities for N-BEATS training
 """
 
 import keras
 import numpy as np
-import tensorflow as tf
 from keras import ops
-from typing import Optional, Any, Tuple, Union
+from typing import Optional, Any, Tuple, Union, List
 
 # ---------------------------------------------------------------------
 # local imports
@@ -269,12 +275,21 @@ class NBeatsBlock(keras.layers.Layer):
 
         Args:
             input_shape: Shape of the input tensor.
+
+        Raises:
+            ValueError: If input shape is invalid.
         """
         self._build_input_shape = input_shape
 
         # Validate input shape
         if len(input_shape) != 2:
             raise ValueError(f"Expected 2D input shape, got {len(input_shape)}D: {input_shape}")
+
+        if input_shape[-1] is not None and input_shape[-1] != self.backcast_length:
+            logger.warning(
+                f"Input sequence length {input_shape[-1]} does not match "
+                f"expected backcast_length {self.backcast_length}"
+            )
 
         # Four fully connected layers with proper initialization
         self.dense1 = keras.layers.Dense(
@@ -361,7 +376,7 @@ class NBeatsBlock(keras.layers.Layer):
 
         return backcast, forecast
 
-    def _generate_backcast(self, theta) -> keras.KerasTensor:
+    def _generate_backcast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """Generate backcast from theta parameters.
 
         Args:
@@ -375,7 +390,7 @@ class NBeatsBlock(keras.layers.Layer):
         """
         raise NotImplementedError("Subclasses must implement _generate_backcast")
 
-    def _generate_forecast(self, theta) -> keras.KerasTensor:
+    def _generate_forecast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """Generate forecast from theta parameters.
 
         Args:
@@ -398,6 +413,9 @@ class NBeatsBlock(keras.layers.Layer):
 
         Returns:
             Tuple containing (backcast_shape, forecast_shape).
+
+        Raises:
+            ValueError: If input shape is invalid.
         """
         if len(input_shape) != 2:
             raise ValueError(f"Expected 2D input shape, got {len(input_shape)}D: {input_shape}")
@@ -502,7 +520,7 @@ class GenericBlock(NBeatsBlock):
             name='forecast_basis'
         )
 
-    def _generate_backcast(self, theta) -> keras.KerasTensor:
+    def _generate_backcast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """Generate backcast using learnable basis functions.
 
         Args:
@@ -513,7 +531,7 @@ class GenericBlock(NBeatsBlock):
         """
         return self.backcast_basis(theta)
 
-    def _generate_forecast(self, theta) -> keras.KerasTensor:
+    def _generate_forecast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """Generate forecast using learnable basis functions.
 
         Args:
@@ -550,16 +568,19 @@ class TrendBlock(NBeatsBlock):
 
     Args:
         normalize_basis: Boolean, whether to normalize polynomial basis functions.
+        random_seed: Optional integer, seed for reproducible basis generation.
         **kwargs: Arguments passed to parent NBeatsBlock.
     """
 
     def __init__(
         self,
         normalize_basis: bool = True,
+        random_seed: Optional[int] = None,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
         self.normalize_basis = normalize_basis
+        self.random_seed = random_seed
 
         # Will be initialized in build()
         self.backcast_basis_matrix = None
@@ -581,6 +602,19 @@ class TrendBlock(NBeatsBlock):
         # Create time grids - backcast uses normalized past time, forecast uses normalized future time
         backcast_grid = np.linspace(-1, 0, self.backcast_length, dtype=np.float32)
         forecast_grid = np.linspace(0, 1, self.forecast_length, dtype=np.float32)
+
+        # Add small deterministic offset for block uniqueness
+        if self.random_seed is not None:
+            rng = np.random.RandomState(self.random_seed)
+            block_offset = rng.uniform(0, 0.01)
+        else:
+            # Use a deterministic offset based on layer parameters
+            offset_seed = hash((self.units, self.thetas_dim, self.backcast_length)) % 2**31
+            rng = np.random.RandomState(offset_seed)
+            block_offset = rng.uniform(0, 0.01)
+
+        backcast_grid += block_offset
+        forecast_grid += block_offset
 
         # Create polynomial basis matrices
         backcast_basis = np.zeros((self.thetas_dim, self.backcast_length), dtype=np.float32)
@@ -606,21 +640,25 @@ class TrendBlock(NBeatsBlock):
         if np.any(np.isnan(forecast_basis)) or np.any(np.isinf(forecast_basis)):
             raise ValueError("Polynomial forecast basis contains NaN or Inf values")
 
-        # Store as non-trainable weights using proper initialization
+        # Store as non-trainable weights using proper serializable initialization
         self.backcast_basis_matrix = self.add_weight(
             name='backcast_basis_matrix',
             shape=(self.thetas_dim, self.backcast_length),
-            initializer=lambda shape, dtype: tf.constant(backcast_basis, dtype=dtype),
+            initializer='zeros',
             trainable=False
         )
         self.forecast_basis_matrix = self.add_weight(
             name='forecast_basis_matrix',
             shape=(self.thetas_dim, self.forecast_length),
-            initializer=lambda shape, dtype: tf.constant(forecast_basis, dtype=dtype),
+            initializer='zeros',
             trainable=False
         )
 
-    def _generate_backcast(self, theta) -> keras.KerasTensor:
+        # Assign the computed basis values
+        self.backcast_basis_matrix.assign(backcast_basis)
+        self.forecast_basis_matrix.assign(forecast_basis)
+
+    def _generate_backcast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """Generate backcast using polynomial basis functions.
 
         Args:
@@ -629,10 +667,9 @@ class TrendBlock(NBeatsBlock):
         Returns:
             Backcast tensor of shape (batch_size, backcast_length).
         """
-        # Use tf.linalg.matvec for better numerical stability
-        return tf.linalg.matvec(self.backcast_basis_matrix, theta, transpose_a=True)
+        return ops.matmul(theta, self.backcast_basis_matrix)
 
-    def _generate_forecast(self, theta) -> keras.KerasTensor:
+    def _generate_forecast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """Generate forecast using polynomial basis functions.
 
         Args:
@@ -641,8 +678,7 @@ class TrendBlock(NBeatsBlock):
         Returns:
             Forecast tensor of shape (batch_size, forecast_length).
         """
-        # Use tf.linalg.matvec for better numerical stability
-        return tf.linalg.matvec(self.forecast_basis_matrix, theta, transpose_a=True)
+        return ops.matmul(theta, self.forecast_basis_matrix)
 
     def get_config(self) -> dict:
         """Get layer configuration for serialization.
@@ -653,6 +689,7 @@ class TrendBlock(NBeatsBlock):
         config = super().get_config()
         config.update({
             'normalize_basis': self.normalize_basis,
+            'random_seed': self.random_seed,
         })
         return config
 
@@ -668,16 +705,20 @@ class SeasonalityBlock(NBeatsBlock):
 
     Args:
         normalize_basis: Boolean, whether to normalize Fourier basis functions.
+        seasonal_period: Optional integer, dominant seasonal period for frequency calculation.
+                       If None, uses max(backcast_length, 12).
         **kwargs: Arguments passed to parent NBeatsBlock.
     """
 
     def __init__(
         self,
         normalize_basis: bool = True,
+        seasonal_period: Optional[int] = None,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
         self.normalize_basis = normalize_basis
+        self.seasonal_period = seasonal_period
 
         # Will be initialized in build()
         self.backcast_basis_matrix = None
@@ -695,80 +736,118 @@ class SeasonalityBlock(NBeatsBlock):
         self._create_fourier_basis()
 
     def _create_fourier_basis(self) -> None:
-        """Create Fourier basis matrices for seasonality modeling."""
-        # Create a continuous set of integer time steps for both backcast and forecast.
-        # This ensures that the frequency of the seasonal patterns is consistent
-        # when extrapolated from the backcast to the forecast period.
-        time_steps = np.arange(
-            self.backcast_length + self.forecast_length, dtype=np.float32
-        )
+        """Create Fourier basis matrices for seasonality modeling.
 
-        # Split the time steps into separate grids for backcast and forecast
-        backcast_grid = time_steps[:self.backcast_length]
-        forecast_grid = time_steps[self.backcast_length:]
+        This implementation creates Fourier basis functions that:
+        1. Maintain temporal continuity between backcast and forecast
+        2. Use proper frequency spacing to avoid aliasing
+        3. Include both fundamental and harmonic frequencies
+        4. Provide orthogonal basis functions for better decomposition
+        """
+        # Determine the fundamental seasonal period
+        if self.seasonal_period is not None:
+            base_period = self.seasonal_period
+        else:
+            # Adaptive period selection based on sequence length
+            base_period = max(self.backcast_length // 2, 12)
 
-        # Create empty placeholder matrices for the basis functions
+        # Store for debugging
+        self._computed_base_period = base_period
+
+        # Create continuous normalized time grids for better numerical properties
+        # Backcast covers [-1, 0] and forecast covers [0, forecast_length/backcast_length]
+        backcast_grid = np.linspace(-1.0, 0.0, self.backcast_length, dtype=np.float32)
+
+        # Forecast grid continues seamlessly from backcast
+        forecast_ratio = self.forecast_length / self.backcast_length
+        forecast_grid = np.linspace(0.0, forecast_ratio, self.forecast_length, dtype=np.float32)
+
+        # Scale time grids by the seasonal period for proper frequency spacing
+        backcast_time = backcast_grid * base_period
+        forecast_time = forecast_grid * base_period
+
+        # Initialize basis matrices
         backcast_basis = np.zeros((self.thetas_dim, self.backcast_length), dtype=np.float32)
         forecast_basis = np.zeros((self.thetas_dim, self.forecast_length), dtype=np.float32)
 
-        # Each harmonic requires a sine and cosine component, so we have half as many
-        # harmonics as the dimension of the theta parameters.
-        num_harmonics = self.thetas_dim // 2
+        # Reserve first dimension for DC component (constant term)
+        if self.thetas_dim >= 1:
+            backcast_basis[0, :] = 1.0
+            forecast_basis[0, :] = 1.0
+            remaining_dims = self.thetas_dim - 1
+        else:
+            remaining_dims = self.thetas_dim
 
-        # Define the fundamental period for the Fourier series. We assume the
-        # most dominant seasonal patterns are related to the length of the lookback window.
-        period = max(self.backcast_length, 12)  # Ensure minimum period for seasonality
+        # Calculate number of harmonics (each harmonic needs sin and cos)
+        num_harmonics = remaining_dims // 2
 
-        for i in range(num_harmonics):
-            # The harmonic number (e.g., 1, 2, 3, ...)
-            harmonic = i + 1
+        # Generate Fourier harmonics with proper frequency spacing
+        for harmonic in range(1, num_harmonics + 1):
+            # Fundamental frequency and its harmonics
+            # Use 2π/period normalization for proper seasonal modeling
+            frequency = 2 * np.pi * harmonic / base_period
 
-            # Calculate the frequency for this harmonic
-            frequency = 2 * np.pi * harmonic / period
+            # Calculate indices for this harmonic (skip DC component at index 0)
+            cos_idx = 1 + (harmonic - 1) * 2
+            sin_idx = 1 + (harmonic - 1) * 2 + 1
 
-            # Cosine terms
-            cos_idx = 2 * i
+            # Generate cosine components
             if cos_idx < self.thetas_dim:
-                cos_backcast = np.cos(frequency * backcast_grid)
-                cos_forecast = np.cos(frequency * forecast_grid)
+                cos_backcast = np.cos(frequency * backcast_time)
+                cos_forecast = np.cos(frequency * forecast_time)
 
-                # Optional normalization
+                # Apply normalization for numerical stability
                 if self.normalize_basis:
-                    cos_backcast_norm = np.linalg.norm(cos_backcast)
-                    cos_forecast_norm = np.linalg.norm(cos_forecast)
-                    if cos_backcast_norm > 1e-8:
-                        cos_backcast /= cos_backcast_norm
-                    if cos_forecast_norm > 1e-8:
-                        cos_forecast /= cos_forecast_norm
+                    cos_backcast = self._normalize_basis_function(cos_backcast)
+                    cos_forecast = self._normalize_basis_function(cos_forecast)
 
                 backcast_basis[cos_idx] = cos_backcast
                 forecast_basis[cos_idx] = cos_forecast
 
-            # Sine terms
-            sin_idx = 2 * i + 1
+            # Generate sine components
             if sin_idx < self.thetas_dim:
-                sin_backcast = np.sin(frequency * backcast_grid)
-                sin_forecast = np.sin(frequency * forecast_grid)
+                sin_backcast = np.sin(frequency * backcast_time)
+                sin_forecast = np.sin(frequency * forecast_time)
 
-                # Optional normalization
+                # Apply normalization for numerical stability
                 if self.normalize_basis:
-                    sin_backcast_norm = np.linalg.norm(sin_backcast)
-                    sin_forecast_norm = np.linalg.norm(sin_forecast)
-                    if sin_backcast_norm > 1e-8:
-                        sin_backcast /= sin_backcast_norm
-                    if sin_forecast_norm > 1e-8:
-                        sin_forecast /= sin_forecast_norm
+                    sin_backcast = self._normalize_basis_function(sin_backcast)
+                    sin_forecast = self._normalize_basis_function(sin_forecast)
 
                 backcast_basis[sin_idx] = sin_backcast
                 forecast_basis[sin_idx] = sin_forecast
 
-        # If thetas_dim is an odd number, we use the last available dimension
-        # to model a constant DC component (a simple offset).
-        if self.thetas_dim % 2 == 1:
-            backcast_basis[-1] = 1.0
-            forecast_basis[-1] = 1.0
+        # Handle case where thetas_dim is not perfectly divisible
+        # Add additional low-frequency components if needed
+        remaining_indices = remaining_dims - (num_harmonics * 2)
+        if remaining_indices > 0:
+            # Add fractional harmonics for finer frequency resolution
+            for i in range(remaining_indices):
+                idx = 1 + num_harmonics * 2 + i
+                if idx < self.thetas_dim:
+                    # Use fractional harmonics (0.5, 1.5, 2.5, etc.)
+                    fractional_harmonic = 0.5 + i * 0.5
+                    frequency = 2 * np.pi * fractional_harmonic / base_period
 
-        # Store the generated basis matrices as non-trainable weights within the layer
+                    # Alternate between cosine and sine for fractional harmonics
+                    if i % 2 == 0:
+                        func_backcast = np.cos(frequency * backcast_time)
+                        func_forecast = np.cos(frequency * forecast_time)
+                    else:
+                        func_backcast = np.sin(frequency * backcast_time)
+                        func_forecast = np.sin(frequency * forecast_time)
+
+                    if self.normalize_basis:
+                        func_backcast = self._normalize_basis_function(func_backcast)
+                        func_forecast = self._normalize_basis_function(func_forecast)
+
+                    backcast_basis[idx] = func_backcast
+                    forecast_basis[idx] = func_forecast
+
+        # Validate basis matrices for numerical issues
+        self._validate_basis_matrices(backcast_basis, forecast_basis)
+
+        # Store the generated basis matrices as non-trainable weights
         self.backcast_basis_matrix = self.add_weight(
             name='backcast_basis_matrix',
             shape=(self.thetas_dim, self.backcast_length),
@@ -782,11 +861,60 @@ class SeasonalityBlock(NBeatsBlock):
             trainable=False
         )
 
-        # Set the values
+        # Assign the computed basis values
         self.backcast_basis_matrix.assign(backcast_basis)
         self.forecast_basis_matrix.assign(forecast_basis)
 
-    def _generate_backcast(self, theta) -> keras.KerasTensor:
+    def _normalize_basis_function(self, basis_func: np.ndarray) -> np.ndarray:
+        """Normalize a basis function for numerical stability.
+
+        Args:
+            basis_func: Basis function array to normalize.
+
+        Returns:
+            Normalized basis function.
+        """
+        norm = np.linalg.norm(basis_func)
+        if norm > 1e-8:
+            return basis_func / norm
+        else:
+            logger.warning("Basis function has very small norm, skipping normalization")
+            return basis_func
+
+    def _validate_basis_matrices(self, backcast_basis: np.ndarray, forecast_basis: np.ndarray) -> None:
+        """Validate basis matrices for numerical issues.
+
+        Args:
+            backcast_basis: Backcast basis matrix.
+            forecast_basis: Forecast basis matrix.
+
+        Raises:
+            ValueError: If basis matrices contain invalid values.
+        """
+        # Check for NaN/Inf values
+        if np.any(np.isnan(backcast_basis)) or np.any(np.isinf(backcast_basis)):
+            raise ValueError("Fourier backcast basis contains NaN or Inf values")
+        if np.any(np.isnan(forecast_basis)) or np.any(np.isinf(forecast_basis)):
+            raise ValueError("Fourier forecast basis contains NaN or Inf values")
+
+        # Check for proper range (Fourier functions should be in [-1, 1])
+        if np.any(np.abs(backcast_basis) > 2.0):  # Allow some tolerance for normalization
+            logger.warning("Some backcast basis values are outside expected range [-2, 2]")
+        if np.any(np.abs(forecast_basis) > 2.0):
+            logger.warning("Some forecast basis values are outside expected range [-2, 2]")
+
+        # Check that DC component (if present) is non-zero
+        if self.thetas_dim >= 1:
+            if np.all(backcast_basis[0] == 0) or np.all(forecast_basis[0] == 0):
+                logger.warning("DC component appears to be zero, check basis generation")
+
+        # Log basis characteristics for debugging
+        logger.debug(f"Fourier basis created: thetas_dim={self.thetas_dim}, "
+                    f"base_period={self._computed_base_period}, "
+                    f"backcast_range=[{np.min(backcast_basis):.3f}, {np.max(backcast_basis):.3f}], "
+                    f"forecast_range=[{np.min(forecast_basis):.3f}, {np.max(forecast_basis):.3f}]")
+
+    def _generate_backcast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """Generate backcast using Fourier basis functions.
 
         Args:
@@ -795,10 +923,9 @@ class SeasonalityBlock(NBeatsBlock):
         Returns:
             Backcast tensor of shape (batch_size, backcast_length).
         """
-        # Use tf.linalg.matvec for better numerical stability
-        return tf.linalg.matvec(self.backcast_basis_matrix, theta, transpose_a=True)
+        return ops.matmul(theta, self.backcast_basis_matrix)
 
-    def _generate_forecast(self, theta) -> keras.KerasTensor:
+    def _generate_forecast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """Generate forecast using Fourier basis functions.
 
         Args:
@@ -807,8 +934,7 @@ class SeasonalityBlock(NBeatsBlock):
         Returns:
             Forecast tensor of shape (batch_size, forecast_length).
         """
-        # Use tf.linalg.matvec for better numerical stability
-        return tf.linalg.matvec(self.forecast_basis_matrix, theta, transpose_a=True)
+        return ops.matmul(theta, self.forecast_basis_matrix)
 
     def get_config(self) -> dict:
         """Get layer configuration for serialization.
@@ -819,6 +945,7 @@ class SeasonalityBlock(NBeatsBlock):
         config = super().get_config()
         config.update({
             'normalize_basis': self.normalize_basis,
+            'seasonal_period': self.seasonal_period,
         })
         return config
 
