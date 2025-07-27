@@ -7,13 +7,14 @@ Based on: "Your ViT is Secretly an Image Segmentation Model" by Kerssies et al.
 import keras
 import numpy as np
 from keras import ops
-from typing import Optional, Union, Any, Dict, Tuple, List
+from typing import Optional,  Any, Dict, Tuple
 
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.eomt import MaskModule, EoMTLayer
 from dl_techniques.layers.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.positional_embedding import PositionalEmbedding
-from dl_techniques.layers.vision_transformer import VisionTransformerLayer
+from dl_techniques.layers.vision_transformer import VisionTransformerLayer as VisionTransformer
 from dl_techniques.layers.upsample import Upsample
 
 
@@ -186,7 +187,7 @@ class EoMT(keras.Model):
     def _build_from_scratch(self, input_shape, num_patches):
         """Build model from scratch."""
         # Patch embedding
-        self.patch_embedding = PatchEmbedding(
+        self.patch_embedding = PatchEmbedding2D(
             patch_size=self.patch_size,
             embed_dim=self.embed_dim,
             name="patch_embedding"
@@ -206,9 +207,8 @@ class EoMT(keras.Model):
                 embed_dim=self.embed_dim,
                 num_heads=self.num_heads,
                 mlp_ratio=self.mlp_ratio,
-                dropout=self.dropout,
-                attention_dropout=self.attention_dropout,
-                use_layer_norm=self.use_layer_norm,
+                dropout_rate=self.dropout,
+                attention_dropout_rate=self.attention_dropout,
                 activation=self.activation,
                 name=f"l1_block_{i}"
             )
@@ -347,10 +347,6 @@ class EoMT(keras.Model):
             "use_layer_norm": self.use_layer_norm,
         })
         return config
-
-
-# Import the EoMTLayer and MaskModule from the previous artifact
-from dl_techniques.layers.eomt_layer import EoMTLayer, MaskModule
 
 
 @keras.saving.register_keras_serializable()

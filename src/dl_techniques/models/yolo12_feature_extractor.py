@@ -7,8 +7,6 @@ models for object detection, segmentation, classification, etc.
 
 The feature extractor outputs multiscale feature maps that can be consumed by
 various task-specific heads.
-
-File: src/dl_techniques/models/yolo12_feature_extractor.py
 """
 
 import keras

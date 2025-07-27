@@ -22,13 +22,16 @@ References:
 
 import os
 import keras
-from keras import ops
-import tensorflow as tf
 from typing import List, Optional, Union, Dict, Any, Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.power_mlp_layer import PowerMLPLayer
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PowerMLP(keras.Model):
@@ -453,8 +456,10 @@ class PowerMLP(keras.Model):
             f"dropout_rate={self.dropout_rate}, name='{self.name}')"
         )
 
-
+# ---------------------------------------------------------------------
 # Helper function to create and compile PowerMLP model
+# ---------------------------------------------------------------------
+
 def create_power_mlp(
         hidden_units: List[int],
         k: int = 3,
@@ -517,7 +522,10 @@ def create_power_mlp(
     return model
 
 
+# ---------------------------------------------------------------------
 # Alternative factory function for regression tasks
+# ---------------------------------------------------------------------
+
 def create_power_mlp_regressor(
         hidden_units: List[int],
         k: int = 3,
@@ -548,8 +556,10 @@ def create_power_mlp_regressor(
         **kwargs
     )
 
-
+# ---------------------------------------------------------------------
 # Alternative factory function for binary classification
+# ---------------------------------------------------------------------
+
 def create_power_mlp_binary_classifier(
         hidden_units: List[int],
         k: int = 3,
@@ -586,3 +596,5 @@ def create_power_mlp_binary_classifier(
         output_activation="sigmoid",
         **kwargs
     )
+
+# ---------------------------------------------------------------------

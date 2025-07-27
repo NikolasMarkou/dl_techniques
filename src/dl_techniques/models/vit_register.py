@@ -10,11 +10,17 @@ import keras
 from keras import ops
 from typing import Optional, Tuple, Dict, Any, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.layers.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.positional_embedding import PositionalEmbedding
 from dl_techniques.layers.vision_transformer_register import RegisterEnhancedVisionTransformerLayer
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class RegisterEnhancedViT(keras.Model):
@@ -523,7 +529,10 @@ def create_register_enhanced_vit(
     return model
 
 
-# Convenience functions for different scales
+# ---------------------------------------------------------------------
+# convenience methods
+# ---------------------------------------------------------------------
+
 def create_register_vit_tiny(**kwargs: Any) -> RegisterEnhancedViT:
     """Create ViT-Tiny model with register tokens."""
     return create_register_enhanced_vit(scale="tiny", **kwargs)
@@ -547,3 +556,5 @@ def create_register_vit_large(**kwargs: Any) -> RegisterEnhancedViT:
 def create_register_vit_huge(**kwargs: Any) -> RegisterEnhancedViT:
     """Create ViT-Huge model with register tokens."""
     return create_register_enhanced_vit(scale="huge", **kwargs)
+
+# ---------------------------------------------------------------------

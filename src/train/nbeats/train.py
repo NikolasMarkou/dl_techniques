@@ -107,7 +107,7 @@ import pandas as pd
 import tensorflow as tf
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Any, Optional, Union
 
 # Use a non-interactive backend for saving plots to files
 matplotlib.use('Agg')
@@ -118,7 +118,7 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.nbeats import NBeatsNet
+from dl_techniques.models.nbeats import create_nbeats_model, create_interpretable_nbeats_model
 from dl_techniques.losses.smape_loss import SMAPELoss
 from dl_techniques.utils.datasets.nbeats import TimeSeriesNormalizer
 from dl_techniques.utils.datasets.time_series_generator import TimeSeriesGenerator, TimeSeriesConfig
@@ -169,6 +169,10 @@ class NBeatsConfig:
         optimizer: Optimizer type to use.
         primary_loss: Primary loss function for training.
 
+        kernel_regularizer_l2: L2 regularization strength for kernels.
+        theta_regularizer_l1: L1 regularization strength for theta parameters.
+        dropout_rate: Dropout rate for regularization.
+
         confidence_levels: Confidence levels for prediction intervals.
         num_bootstrap_samples: Number of bootstrap samples for uncertainty estimation.
 
@@ -217,6 +221,11 @@ class NBeatsConfig:
     optimizer: str = 'adamw'
     primary_loss: str = "mae"
 
+    # Regularization configuration
+    kernel_regularizer_l2: float = 1e-4
+    theta_regularizer_l1: float = 1e-5
+    dropout_rate: float = 0.1
+
     # Evaluation configuration
     confidence_levels: List[float] = field(default_factory=lambda: [0.90])
     num_bootstrap_samples: int = 500
@@ -224,6 +233,36 @@ class NBeatsConfig:
     # Visualization configuration
     plot_samples: int = 3
     epoch_plot_freq: int = 10  # Plot every 10 epochs to avoid clutter
+
+    def __post_init__(self) -> None:
+        """Validate configuration after initialization."""
+        # Validate data ratios
+        total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
+        if not np.isclose(total_ratio, 1.0, atol=1e-6):
+            raise ValueError(f"Data ratios must sum to 1.0, got {total_ratio}")
+
+        # Validate positive values
+        if self.backcast_length <= 0:
+            raise ValueError(f"backcast_length must be positive, got {self.backcast_length}")
+        if self.forecast_length <= 0:
+            raise ValueError(f"forecast_length must be positive, got {self.forecast_length}")
+        if self.epochs <= 0:
+            raise ValueError(f"epochs must be positive, got {self.epochs}")
+        if self.batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {self.batch_size}")
+
+        # Validate model types
+        valid_model_types = {"interpretable", "generic", "hybrid"}
+        for model_type in self.model_types:
+            if model_type not in valid_model_types:
+                raise ValueError(f"Invalid model type: {model_type}")
+
+        # Validate stack types configuration
+        for model_type in self.model_types:
+            if model_type not in self.stack_types:
+                raise ValueError(f"Missing stack_types configuration for: {model_type}")
+            if model_type not in self.thetas_dim:
+                raise ValueError(f"Missing thetas_dim configuration for: {model_type}")
 
 
 @dataclass
@@ -315,40 +354,49 @@ class EpochVisualizationCallback(keras.callbacks.Callback):
         Args:
             logs: Dictionary containing training logs (unused).
         """
-        os.makedirs(self.save_dir, exist_ok=True)
+        try:
+            os.makedirs(self.save_dir, exist_ok=True)
 
-        # Select diverse tasks to visualize throughout training
-        diverse_tasks = {
-            'trend': 'linear_trend_strong',
-            'seasonal': 'multi_seasonal',
-            'composite': 'trend_daily_seasonal',
-            'stochastic': 'arma_process'
-        }
+            # Select diverse tasks to visualize throughout training
+            diverse_tasks = {
+                'trend': 'linear_trend_strong',
+                'seasonal': 'multi_seasonal',
+                'composite': 'trend_daily_seasonal',
+                'stochastic': 'arma_process'
+            }
 
-        # Filter tasks that exist in validation data
-        self.plot_tasks = [
-            name for name in diverse_tasks.values()
-            if name in self.val_data
-        ]
+            # Filter tasks that exist in validation data
+            self.plot_tasks = [
+                name for name in diverse_tasks.values()
+                if name in self.val_data and len(self.val_data[name][0]) > 0
+            ]
 
-        # Fallback if specific tasks aren't present
-        if not self.plot_tasks:
-            available_tasks = list(self.val_data.keys())
-            num_tasks = min(4, len(available_tasks))
-            self.plot_tasks = self.random_state.choice(
-                available_tasks, size=num_tasks, replace=False
-            ).tolist()
+            # Fallback if specific tasks aren't present
+            if not self.plot_tasks:
+                available_tasks = [
+                    name for name, data in self.val_data.items()
+                    if len(data[0]) > 0
+                ]
+                num_tasks = min(4, len(available_tasks))
+                if num_tasks > 0:
+                    self.plot_tasks = self.random_state.choice(
+                        available_tasks, size=num_tasks, replace=False
+                    ).tolist()
 
-        # Select one fixed sample index per task for consistency across epochs
-        for task in self.plot_tasks:
-            num_samples = len(self.val_data[task][0])
-            if num_samples > 0:
-                self.plot_indices[task] = self.random_state.randint(0, num_samples)
+            # Select one fixed sample index per task for consistency across epochs
+            for task in self.plot_tasks:
+                num_samples = len(self.val_data[task][0])
+                if num_samples > 0:
+                    self.plot_indices[task] = self.random_state.randint(0, num_samples)
 
-        logger.info(
-            f"Callback initialized. Visualizing forecasts for tasks: "
-            f"{list(self.plot_indices.keys())}"
-        )
+            logger.info(
+                f"Visualization callback initialized for {self.model_type} H={self.horizon}. "
+                f"Tracking tasks: {list(self.plot_indices.keys())}"
+            )
+
+        except Exception as e:
+            logger.warning(f"Failed to initialize visualization callback: {e}")
+            self.plot_indices = {}
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
         """Create forecast visualizations at specified epoch intervals.
@@ -357,73 +405,88 @@ class EpochVisualizationCallback(keras.callbacks.Callback):
             epoch: Current epoch number.
             logs: Dictionary containing training logs (unused).
         """
-        # Only plot at specified intervals
-        if (epoch + 1) % self.config.epoch_plot_freq != 0:
+        # Only plot at specified intervals and if we have tasks to plot
+        if (epoch + 1) % self.config.epoch_plot_freq != 0 or not self.plot_indices:
             return
 
-        # Create subplot grid for visualizations
-        fig, axes = plt.subplots(2, 2, figsize=(20, 12), squeeze=False)
-        axes = axes.flatten()
-        fig.suptitle(
-            f'Epoch {epoch + 1:03d}: Forecasts for {self.model_type.title()} '
-            f'Model (H={self.horizon})',
-            fontsize=16
-        )
-
-        # Plot forecasts for each selected task
-        for i, task_name in enumerate(self.plot_indices.keys()):
-            ax = axes[i]
-            sample_idx = self.plot_indices[task_name]
-            X_val, y_val = self.val_data[task_name]
-
-            # Get the specific sample for visualization
-            x_sample = X_val[np.newaxis, sample_idx]
-            y_sample_true = y_val[sample_idx]
-
-            # Generate prediction and inverse transform to original scale
-            y_sample_pred_scaled = self.model.predict(x_sample, verbose=0)
-            y_sample_pred_orig = self.processor.inverse_transform_data(
-                task_name, y_sample_pred_scaled
-            )
-            y_sample_true_orig = self.processor.inverse_transform_data(
-                task_name, y_sample_true
-            )
-            x_sample_orig = self.processor.inverse_transform_data(
-                task_name, x_sample[0]
+        try:
+            # Create subplot grid for visualizations
+            fig, axes = plt.subplots(2, 2, figsize=(20, 12), squeeze=False)
+            axes = axes.flatten()
+            fig.suptitle(
+                f'Epoch {epoch + 1:03d}: Forecasts for {self.model_type.title()} '
+                f'Model (H={self.horizon})',
+                fontsize=16
             )
 
-            # Create time axes for plotting
-            backcast_time = np.arange(-self.config.backcast_length, 0)
-            forecast_time = np.arange(0, self.horizon)
+            # Plot forecasts for each selected task
+            for i, task_name in enumerate(self.plot_indices.keys()):
+                if i >= 4:  # Only 4 subplots available
+                    break
 
-            # Plot historical data, true future, and forecast
-            ax.plot(
-                backcast_time, x_sample_orig.flatten(),
-                color='gray', label='Backcast (Input)'
-            )
-            ax.plot(
-                forecast_time, y_sample_true_orig.flatten(),
-                'o-', color='blue', label='True Future'
-            )
-            ax.plot(
-                forecast_time, y_sample_pred_orig.flatten(),
-                'x--', color='red', label='Forecast'
-            )
+                ax = axes[i]
+                sample_idx = self.plot_indices[task_name]
+                X_val, y_val = self.val_data[task_name]
 
-            # Format subplot
-            ax.set_title(f'Task: {task_name.replace("_", " ").title()}')
-            ax.legend()
-            ax.grid(True, linestyle='--', alpha=0.5)
+                # Validate data availability
+                if sample_idx >= len(X_val) or len(X_val) == 0:
+                    ax.set_title(f'{task_name.replace("_", " ").title()} (No data)')
+                    ax.set_visible(False)
+                    continue
 
-        # Hide unused subplots
-        for j in range(len(self.plot_indices), len(axes)):
-            axes[j].set_visible(False)
+                # Get the specific sample for visualization
+                x_sample = X_val[np.newaxis, sample_idx]
+                y_sample_true = y_val[sample_idx]
 
-        # Save visualization
-        plt.tight_layout(rect=[0, 0, 1, 0.95])
-        save_path = os.path.join(self.save_dir, f"epoch_{epoch + 1:03d}.png")
-        plt.savefig(save_path, dpi=100)
-        plt.close(fig)
+                # Generate prediction and inverse transform to original scale
+                y_sample_pred_scaled = self.model.predict(x_sample, verbose=0)
+                y_sample_pred_orig = self.processor.inverse_transform_data(
+                    task_name, y_sample_pred_scaled
+                )
+                y_sample_true_orig = self.processor.inverse_transform_data(
+                    task_name, y_sample_true
+                )
+                x_sample_orig = self.processor.inverse_transform_data(
+                    task_name, x_sample[0]
+                )
+
+                # Create time axes for plotting
+                backcast_time = np.arange(-self.config.backcast_length, 0)
+                forecast_time = np.arange(0, self.horizon)
+
+                # Plot historical data, true future, and forecast
+                ax.plot(
+                    backcast_time, x_sample_orig.flatten(),
+                    color='gray', label='Backcast (Input)', alpha=0.7
+                )
+                ax.plot(
+                    forecast_time, y_sample_true_orig.flatten(),
+                    'o-', color='blue', label='True Future', markersize=4
+                )
+                ax.plot(
+                    forecast_time, y_sample_pred_orig.flatten(),
+                    'x--', color='red', label='Forecast', markersize=6
+                )
+
+                # Format subplot
+                ax.set_title(f'Task: {task_name.replace("_", " ").title()}')
+                ax.legend()
+                ax.grid(True, linestyle='--', alpha=0.5)
+                ax.set_xlabel('Time Step')
+                ax.set_ylabel('Value')
+
+            # Hide unused subplots
+            for j in range(len(self.plot_indices), len(axes)):
+                axes[j].set_visible(False)
+
+            # Save visualization
+            plt.tight_layout(rect=[0, 0, 1, 0.95])
+            save_path = os.path.join(self.save_dir, f"epoch_{epoch + 1:03d}.png")
+            plt.savefig(save_path, dpi=100, bbox_inches='tight')
+            plt.close(fig)
+
+        except Exception as e:
+            logger.warning(f"Failed to create epoch visualization: {e}")
 
 
 # ---------------------------------------------------------------------
@@ -463,7 +526,19 @@ class NBeatsDataProcessor:
 
         Returns:
             Tuple of (backcast_sequences, forecast_sequences).
+
+        Raises:
+            ValueError: If data is too short or parameters are invalid.
         """
+        if len(data) < backcast_length + forecast_length:
+            raise ValueError(
+                f"Data length {len(data)} too short for backcast_length "
+                f"{backcast_length} + forecast_length {forecast_length}"
+            )
+
+        if backcast_length <= 0 or forecast_length <= 0:
+            raise ValueError("backcast_length and forecast_length must be positive")
+
         X, y = [], []
 
         # Create sliding window sequences
@@ -482,19 +557,32 @@ class NBeatsDataProcessor:
 
         Args:
             task_data: Dictionary mapping task names to their time series data.
+
+        Raises:
+            ValueError: If training data is insufficient.
         """
         for task_name, data in task_data.items():
+            if len(data) == 0:
+                logger.warning(f"Skipping empty data for task: {task_name}")
+                continue
+
             # Use minmax normalization for stability across diverse tasks
             scaler = TimeSeriesNormalizer(method='minmax', feature_range=(0, 1))
 
             # Fit on training portion only
             train_size = int(self.config.train_ratio * len(data))
+            if train_size < 10:  # Minimum data requirement
+                logger.warning(f"Insufficient training data for {task_name}: {train_size} samples")
+                continue
+
             train_data = data[:train_size]
 
-            scaler.fit(train_data)
-            self.scalers[task_name] = scaler
-
-            logger.info(f"Fitted minmax scaler for {task_name}")
+            try:
+                scaler.fit(train_data)
+                self.scalers[task_name] = scaler
+                logger.info(f"Fitted minmax scaler for {task_name} (train samples: {train_size})")
+            except Exception as e:
+                logger.warning(f"Failed to fit scaler for {task_name}: {e}")
 
     def transform_data(self, task_name: str, data: np.ndarray) -> np.ndarray:
         """Transform data using the fitted scaler for a specific task.
@@ -579,63 +667,105 @@ class NBeatsTrainer:
         Returns:
             Nested dictionary with structure:
             {horizon: {task_name: {split: (X, y)}}}
+
+        Raises:
+            ValueError: If data preparation fails.
         """
         logger.info("Preparing N-BEATS multi-task data...")
 
-        # Generate raw data for all tasks
-        raw_data = {
-            name: self.generator.generate_task_data(name)
-            for name in self.task_names
-        }
+        try:
+            # Generate raw data for all tasks
+            raw_data = {}
+            failed_tasks = []
 
-        # Store raw training data for MASE calculation
-        for name, data in raw_data.items():
-            train_size = int(self.config.train_ratio * len(data))
-            self.raw_train_data[name] = data[:train_size]
+            for name in self.task_names:
+                try:
+                    data = self.generator.generate_task_data(name)
+                    if len(data) > 0:
+                        raw_data[name] = data
+                    else:
+                        failed_tasks.append(name)
+                except Exception as e:
+                    logger.warning(f"Failed to generate data for task {name}: {e}")
+                    failed_tasks.append(name)
 
-        # Fit scalers on raw data
-        self.processor.fit_scalers(raw_data)
+            if failed_tasks:
+                logger.warning(f"Failed to generate data for {len(failed_tasks)} tasks: {failed_tasks}")
 
-        # Prepare data for all horizons
-        prepared_data = {}
-        for horizon in self.config.forecast_horizons:
-            prepared_data[horizon] = {}
+            if not raw_data:
+                raise ValueError("No valid task data generated")
 
-            for task_name, data in raw_data.items():
-                # Split data into train/validation/test
+            # Store raw training data for MASE calculation
+            for name, data in raw_data.items():
                 train_size = int(self.config.train_ratio * len(data))
-                val_size = int(self.config.val_ratio * len(data))
+                self.raw_train_data[name] = data[:train_size]
 
-                train_data, val_data, test_data = np.split(
-                    data, [train_size, train_size + val_size]
-                )
+            # Fit scalers on raw data
+            self.processor.fit_scalers(raw_data)
 
-                # Transform data using fitted scalers
-                train_scaled = self.processor.transform_data(task_name, train_data)
-                val_scaled = self.processor.transform_data(task_name, val_data)
-                test_scaled = self.processor.transform_data(task_name, test_data)
+            # Prepare data for all horizons
+            prepared_data = {}
+            for horizon in self.config.forecast_horizons:
+                prepared_data[horizon] = {}
 
-                # Create sequences for current horizon
-                train_X, train_y = self.processor.create_sequences(
-                    train_scaled, self.config.backcast_length, horizon
-                )
-                val_X, val_y = self.processor.create_sequences(
-                    val_scaled, self.config.backcast_length, horizon
-                )
-                test_X, test_y = self.processor.create_sequences(
-                    test_scaled, self.config.backcast_length, horizon
-                )
+                for task_name, data in raw_data.items():
+                    try:
+                        # Check if data is sufficient for this horizon
+                        min_length = self.config.backcast_length + horizon + 20  # Buffer for splits
+                        if len(data) < min_length:
+                            logger.warning(
+                                f"Insufficient data for {task_name} at horizon {horizon}: "
+                                f"{len(data)} < {min_length}"
+                            )
+                            continue
 
-                # Store prepared data
-                prepared_data[horizon][task_name] = {
-                    "train": (train_X, train_y),
-                    "val": (val_X, val_y),
-                    "test": (test_X, test_y)
-                }
+                        # Split data into train/validation/test
+                        train_size = int(self.config.train_ratio * len(data))
+                        val_size = int(self.config.val_ratio * len(data))
 
-        return prepared_data
+                        train_data = data[:train_size]
+                        val_data = data[train_size:train_size + val_size]
+                        test_data = data[train_size + val_size:]
 
-    def create_model(self, model_type: str, forecast_length: int) -> NBeatsNet:
+                        # Transform data using fitted scalers
+                        train_scaled = self.processor.transform_data(task_name, train_data)
+                        val_scaled = self.processor.transform_data(task_name, val_data)
+                        test_scaled = self.processor.transform_data(task_name, test_data)
+
+                        # Create sequences for current horizon
+                        train_X, train_y = self.processor.create_sequences(
+                            train_scaled, self.config.backcast_length, horizon
+                        )
+                        val_X, val_y = self.processor.create_sequences(
+                            val_scaled, self.config.backcast_length, horizon
+                        )
+                        test_X, test_y = self.processor.create_sequences(
+                            test_scaled, self.config.backcast_length, horizon
+                        )
+
+                        # Store prepared data
+                        prepared_data[horizon][task_name] = {
+                            "train": (train_X, train_y),
+                            "val": (val_X, val_y),
+                            "test": (test_X, test_y)
+                        }
+
+                        logger.info(
+                            f"Prepared {task_name} H={horizon}: "
+                            f"train={train_X.shape}, val={val_X.shape}, test={test_X.shape}"
+                        )
+
+                    except Exception as e:
+                        logger.warning(f"Failed to prepare data for {task_name} H={horizon}: {e}")
+
+            logger.info(f"Data preparation completed for {len(prepared_data)} horizons")
+            return prepared_data
+
+        except Exception as e:
+            logger.error(f"Data preparation failed: {e}")
+            raise
+
+    def create_model(self, model_type: str, forecast_length: int) -> keras.Model:
         """Create N-BEATS model based on specified type.
 
         Args:
@@ -644,23 +774,59 @@ class NBeatsTrainer:
 
         Returns:
             Configured N-BEATS model instance.
+
+        Raises:
+            ValueError: If model type is invalid.
         """
-        model = NBeatsNet(
-            backcast_length=self.config.backcast_length,
-            forecast_length=forecast_length,
-            stack_types=self.config.stack_types[model_type],
-            nb_blocks_per_stack=self.config.nb_blocks_per_stack,
-            thetas_dim=self.config.thetas_dim[model_type],
-            hidden_layer_units=self.config.hidden_layer_units,
-            share_weights_in_stack=self.config.share_weights_in_stack,
-            input_dim=1,
-            output_dim=1
-        )
-        return model
+        if model_type not in self.config.model_types:
+            raise ValueError(f"Invalid model type: {model_type}")
+
+        # Configure regularizers
+        kernel_regularizer = None
+        theta_regularizer = None
+        if self.config.kernel_regularizer_l2 > 0:
+            kernel_regularizer = keras.regularizers.L2(self.config.kernel_regularizer_l2)
+        if self.config.theta_regularizer_l1 > 0:
+            theta_regularizer = keras.regularizers.L1(self.config.theta_regularizer_l1)
+
+        try:
+            if model_type == "interpretable":
+                # Use specialized function for interpretable models
+                trend_degree = self.config.thetas_dim[model_type][0] - 1
+                seasonal_harmonics = self.config.thetas_dim[model_type][1] // 2
+
+                model = create_interpretable_nbeats_model(
+                    backcast_length=self.config.backcast_length,
+                    forecast_length=forecast_length,
+                    trend_polynomial_degree=trend_degree,
+                    seasonality_harmonics=seasonal_harmonics,
+                    hidden_units=self.config.hidden_layer_units,
+                    kernel_regularizer=kernel_regularizer,
+                    dropout_rate=self.config.dropout_rate
+                )
+            else:
+                # Use general function for other models
+                model = create_nbeats_model(
+                    backcast_length=self.config.backcast_length,
+                    forecast_length=forecast_length,
+                    stack_types=self.config.stack_types[model_type],
+                    nb_blocks_per_stack=self.config.nb_blocks_per_stack,
+                    thetas_dim=self.config.thetas_dim[model_type],
+                    hidden_layer_units=self.config.hidden_layer_units,
+                    kernel_regularizer=kernel_regularizer,
+                    dropout_rate=self.config.dropout_rate
+                )
+
+            logger.info(f"Created {model_type} model for horizon {forecast_length}")
+            return model
+
+        except Exception as e:
+            logger.error(f"Failed to create {model_type} model: {e}")
+            raise
 
     def train_model(
         self,
-        model: NBeatsNet,
+        model: keras.Model,
         train_data: Dict[str, Tuple[np.ndarray, np.ndarray]],
         val_data: Dict[str, Tuple[np.ndarray, np.ndarray]],
         horizon: int,
@@ -679,95 +845,119 @@ class NBeatsTrainer:
 
         Returns:
             Dictionary containing training history and trained model.
+
+        Raises:
+            ValueError: If training data is insufficient.
         """
-        # Combine data from all tasks
-        X_train = np.concatenate([
-            d[0] for d in train_data.values() if len(d[0]) > 0
-        ], axis=0)
-        y_train = np.concatenate([
-            d[1] for d in train_data.values() if len(d[1]) > 0
-        ], axis=0)
-        X_val = np.concatenate([
-            d[0] for d in val_data.values() if len(d[0]) > 0
-        ], axis=0)
-        y_val = np.concatenate([
-            d[1] for d in val_data.values() if len(d[1]) > 0
-        ], axis=0)
+        try:
+            # Filter out empty datasets
+            valid_train_data = {k: v for k, v in train_data.items() if len(v[0]) > 0}
+            valid_val_data = {k: v for k, v in val_data.items() if len(v[0]) > 0}
 
-        # Shuffle training data for better learning
-        p_train = self.random_state.permutation(len(X_train))
-        X_train, y_train = X_train[p_train], y_train[p_train]
+            if not valid_train_data:
+                raise ValueError("No valid training data available")
 
-        logger.info(
-            f"Combined training data: {X_train.shape}, "
-            f"validation: {X_val.shape}"
-        )
+            # Combine data from all tasks
+            X_train_list = [d[0] for d in valid_train_data.values()]
+            y_train_list = [d[1] for d in valid_train_data.values()]
+            X_val_list = [d[0] for d in valid_val_data.values()]
+            y_val_list = [d[1] for d in valid_val_data.values()]
 
-        # Configure loss function
-        if self.config.primary_loss == "smape":
-            loss_fn = SMAPELoss()
-        else:
-            loss_fn = self.config.primary_loss
+            X_train = np.concatenate(X_train_list, axis=0)
+            y_train = np.concatenate(y_train_list, axis=0)
+            X_val = np.concatenate(X_val_list, axis=0) if X_val_list else np.array([])
+            y_val = np.concatenate(y_val_list, axis=0) if y_val_list else np.array([])
 
-        # Configure optimizer
-        optimizer = keras.optimizers.get({
-            "class_name": self.config.optimizer,
-            "config": {
-                "learning_rate": self.config.learning_rate,
-                "clipnorm": 1.0  # Gradient clipping for stability
-            }
-        })
+            # Shuffle training data for better learning
+            p_train = self.random_state.permutation(len(X_train))
+            X_train, y_train = X_train[p_train], y_train[p_train]
 
-        # Compile model
-        model.compile(
-            optimizer=optimizer,
-            loss=loss_fn,
-            metrics=['mae', 'mse']
-        )
-
-        # Set up callbacks
-        epoch_plot_dir = os.path.join(
-            exp_dir, 'visuals', 'epoch_plots', f'{model_type}_h{horizon}'
-        )
-
-        callbacks = [
-            keras.callbacks.EarlyStopping(
-                monitor='val_loss',
-                patience=self.config.early_stopping_patience,
-                restore_best_weights=True
-            ),
-            keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.5,
-                patience=10,
-                min_lr=1e-7
-            ),
-            keras.callbacks.TerminateOnNaN(),
-            EpochVisualizationCallback(
-                val_data, self.processor, self.config,
-                model_type, horizon, epoch_plot_dir
+            logger.info(
+                f"Combined training data: {X_train.shape}, "
+                f"validation: {X_val.shape if len(X_val) > 0 else 'None'}"
             )
-        ]
 
-        # Train model
-        history = model.fit(
-            x=X_train,
-            y=y_train,
-            validation_data=(X_val, y_val),
-            epochs=self.config.epochs,
-            batch_size=self.config.batch_size,
-            callbacks=callbacks,
-            verbose=2
-        )
+            # Configure loss function
+            if self.config.primary_loss == "smape":
+                loss_fn = SMAPELoss()
+            else:
+                loss_fn = self.config.primary_loss
 
-        return {
-            "history": history.history,
-            "model": model
-        }
+            # Configure optimizer
+            optimizer = keras.optimizers.get({
+                "class_name": self.config.optimizer,
+                "config": {
+                    "learning_rate": self.config.learning_rate,
+                    "clipnorm": 1.0  # Gradient clipping for stability
+                }
+            })
+
+            # Compile model
+            model.compile(
+                optimizer=optimizer,
+                loss=loss_fn,
+                metrics=['mae', 'mse']
+            )
+
+            # Set up callbacks
+            epoch_plot_dir = os.path.join(
+                exp_dir, 'visuals', 'epoch_plots', f'{model_type}_h{horizon}'
+            )
+
+            callbacks = [
+                keras.callbacks.EarlyStopping(
+                    monitor='val_loss' if len(X_val) > 0 else 'loss',
+                    patience=self.config.early_stopping_patience,
+                    restore_best_weights=True,
+                    verbose=1
+                ),
+                keras.callbacks.ReduceLROnPlateau(
+                    monitor='val_loss' if len(X_val) > 0 else 'loss',
+                    factor=0.5,
+                    patience=max(10, self.config.early_stopping_patience // 5),
+                    min_lr=1e-7,
+                    verbose=1
+                ),
+                keras.callbacks.TerminateOnNaN()
+            ]
+
+            # Add visualization callback if validation data is available
+            if len(X_val) > 0:
+                callbacks.append(
+                    EpochVisualizationCallback(
+                        valid_val_data, self.processor, self.config,
+                        model_type, horizon, epoch_plot_dir
+                    )
+                )
+
+            # Prepare validation data for training
+            validation_data = (X_val, y_val) if len(X_val) > 0 else None
+
+            # Train model
+            history = model.fit(
+                x=X_train,
+                y=y_train,
+                validation_data=validation_data,
+                epochs=self.config.epochs,
+                batch_size=self.config.batch_size,
+                callbacks=callbacks,
+                verbose=2
+            )
+
+            logger.info(f"Training completed for {model_type} H={horizon}")
+
+            return {
+                "history": history.history,
+                "model": model
+            }
+
+        except Exception as e:
+            logger.error(f"Training failed for {model_type} H={horizon}: {e}")
+            raise
 
     def evaluate_model(
         self,
-        model: NBeatsNet,
+        model: keras.Model,
         test_data: Dict[str, Tuple[np.ndarray, np.ndarray]],
         horizon: int,
         model_type: str
@@ -787,30 +977,35 @@ class NBeatsTrainer:
 
         for task_name, (X_test, y_test) in test_data.items():
             if len(X_test) == 0:
+                logger.warning(f"No test data for task {task_name}")
                 continue
 
-            # Generate predictions
-            predictions = model.predict(X_test, verbose=0)
+            try:
+                # Generate predictions
+                predictions = model.predict(X_test, verbose=0)
 
-            # Transform back to original scale
-            pred_orig = self.processor.inverse_transform_data(task_name, predictions)
-            y_test_orig = self.processor.inverse_transform_data(task_name, y_test)
+                # Transform back to original scale
+                pred_orig = self.processor.inverse_transform_data(task_name, predictions)
+                y_test_orig = self.processor.inverse_transform_data(task_name, y_test)
 
-            # Get training series for MASE calculation
-            raw_train_series = self.raw_train_data[task_name]
+                # Get training series for MASE calculation
+                raw_train_series = self.raw_train_data.get(task_name, np.array([]))
 
-            # Calculate comprehensive metrics
-            metrics = self._calculate_forecast_metrics(
-                y_test_orig, pred_orig, raw_train_series,
-                task_name, model_type, horizon
-            )
+                # Calculate comprehensive metrics
+                metrics = self._calculate_forecast_metrics(
+                    y_test_orig, pred_orig, raw_train_series,
+                    task_name, model_type, horizon
+                )
 
-            task_metrics[task_name] = metrics
+                task_metrics[task_name] = metrics
 
-            logger.info(
-                f"Task {task_name}: RMSE={metrics.rmse:.4f}, "
-                f"MASE={metrics.mase:.4f}, Coverage_90={metrics.coverage_90:.4f}"
-            )
+                logger.info(
+                    f"Task {task_name}: RMSE={metrics.rmse:.4f}, "
+                    f"MASE={metrics.mase:.4f}, Coverage_90={metrics.coverage_90:.4f}"
+                )
+
+            except Exception as e:
+                logger.warning(f"Failed to evaluate {task_name}: {e}")
 
         return task_metrics
 
@@ -884,18 +1079,22 @@ class NBeatsTrainer:
 
         # Prediction intervals using empirical residuals
         forecast_residuals = (y_pred - y_true).flatten()
-        q_lower = np.quantile(forecast_residuals, q=0.05)
-        q_upper = np.quantile(forecast_residuals, q=0.95)
+        if len(forecast_residuals) > 10:  # Need sufficient samples
+            q_lower = np.quantile(forecast_residuals, q=0.05)
+            q_upper = np.quantile(forecast_residuals, q=0.95)
 
-        # Interval width
-        interval_width_90 = np.abs(q_upper - q_lower)
+            # Interval width
+            interval_width_90 = np.abs(q_upper - q_lower)
 
-        # Coverage calculation
-        lower_bound = y_pred_flat + q_lower
-        upper_bound = y_pred_flat + q_upper
-        coverage_90 = np.mean(
-            (y_true_flat >= lower_bound) & (y_true_flat <= upper_bound)
-        )
+            # Coverage calculation
+            lower_bound = y_pred_flat + q_lower
+            upper_bound = y_pred_flat + q_upper
+            coverage_90 = np.mean(
+                (y_true_flat >= lower_bound) & (y_true_flat <= upper_bound)
+            )
+        else:
+            interval_width_90 = 0.0
+            coverage_90 = 0.0
 
         return ForecastMetrics(
             task_name=task_name,
@@ -917,7 +1116,7 @@ class NBeatsTrainer:
 
     def plot_final_forecasts(
         self,
-        models: Dict[int, Dict[str, NBeatsNet]],
+        models: Dict[int, Dict[str, keras.Model]],
         test_data: Dict[int, Dict[str, Tuple[np.ndarray, np.ndarray]]],
         save_dir: str
     ) -> None:
@@ -930,121 +1129,141 @@ class NBeatsTrainer:
         """
         logger.info("Creating final N-BEATS forecast visualizations with prediction intervals...")
 
-        plot_dir = os.path.join(save_dir, 'final_forecasts')
-        os.makedirs(plot_dir, exist_ok=True)
+        try:
+            plot_dir = os.path.join(save_dir, 'final_forecasts')
+            os.makedirs(plot_dir, exist_ok=True)
 
-        for category in self.task_categories:
-            # Get tasks for this category
-            category_tasks = self.generator.get_tasks_by_category(category)
+            for category in self.task_categories:
+                # Get tasks for this category
+                category_tasks = self.generator.get_tasks_by_category(category)
 
-            for horizon in self.config.forecast_horizons:
-                # Select tasks to plot
-                num_tasks = min(4, len(category_tasks))
-                if num_tasks == 0:
-                    continue
+                for horizon in self.config.forecast_horizons:
+                    # Select tasks to plot
+                    available_tasks = [
+                        task for task in category_tasks
+                        if task in test_data.get(horizon, {})
+                        and len(test_data[horizon][task]) > 0
+                    ]
 
-                plot_tasks = self.random_state.choice(
-                    category_tasks, size=num_tasks, replace=False
-                )
-
-                # Create subplot grid
-                fig, axes = plt.subplots(2, 2, figsize=(20, 12), squeeze=False)
-                axes = axes.flatten()
-                fig.suptitle(
-                    f'Final Forecasts - {category.title()} (Horizon {horizon})',
-                    fontsize=16
-                )
-
-                for i, task_name in enumerate(plot_tasks):
-                    ax = axes[i]
-
-                    # Check if test data exists for this task
-                    if task_name not in test_data[horizon]:
-                        ax.set_title(f'{task_name.replace("_", " ").title()} (No test data)')
+                    num_tasks = min(4, len(available_tasks))
+                    if num_tasks == 0:
                         continue
 
-                    X_test, y_test = test_data[horizon][task_name]["test"]
-
-                    if len(X_test) == 0:
-                        ax.set_title(f'{task_name.replace("_", " ").title()} (No test data)')
-                        continue
-
-                    # Transform test data back to original scale
-                    y_test_orig = self.processor.inverse_transform_data(task_name, y_test)
-
-                    # Select random sample for visualization
-                    sample_idx = self.random_state.choice(len(X_test))
-
-                    # Create time axes
-                    time_backcast = np.arange(-self.config.backcast_length, 0)
-                    time_forecast = np.arange(
-                        self.config.backcast_length,
-                        self.config.backcast_length + horizon
+                    plot_tasks = self.random_state.choice(
+                        available_tasks, size=num_tasks, replace=False
                     )
 
-                    # Plot true values
-                    ax.plot(
-                        time_forecast, y_test_orig[sample_idx].flatten(),
-                        'o-', color='blue', label='True'
+                    # Create subplot grid
+                    fig, axes = plt.subplots(2, 2, figsize=(20, 12), squeeze=False)
+                    axes = axes.flatten()
+                    fig.suptitle(
+                        f'Final Forecasts - {category.title()} (Horizon {horizon})',
+                        fontsize=16
                     )
 
-                    # Plot predictions for each model type
-                    colors = {
-                        'interpretable': 'red',
-                        'generic': 'green',
-                        'hybrid': 'purple'
-                    }
+                    for i, task_name in enumerate(plot_tasks):
+                        ax = axes[i]
 
-                    for model_type, model in models[horizon].items():
-                        # Get prediction intervals based on all test residuals
-                        all_preds_scaled = model.predict(X_test, verbose=0)
-                        residuals = y_test - all_preds_scaled
-                        q_lower = np.quantile(residuals.flatten(), q=0.05)
-                        q_upper = np.quantile(residuals.flatten(), q=0.95)
+                        # Check if test data exists for this task
+                        if task_name not in test_data[horizon]:
+                            ax.set_title(f'{task_name.replace("_", " ").title()} (No test data)')
+                            ax.set_visible(False)
+                            continue
 
-                        # Get prediction for selected sample
-                        pred_sample_scaled = all_preds_scaled[sample_idx]
-                        pred_sample_orig = self.processor.inverse_transform_data(
-                            task_name, pred_sample_scaled
-                        )
+                        X_test, y_test = test_data[horizon][task_name]
 
-                        # Calculate prediction intervals
-                        lower_bound = self.processor.inverse_transform_data(
-                            task_name, pred_sample_scaled + q_lower
-                        )
-                        upper_bound = self.processor.inverse_transform_data(
-                            task_name, pred_sample_scaled + q_upper
-                        )
+                        if len(X_test) == 0:
+                            ax.set_title(f'{task_name.replace("_", " ").title()} (No test data)')
+                            ax.set_visible(False)
+                            continue
 
-                        # Plot forecast and prediction intervals
-                        color = colors.get(model_type, 'gray')
+                        # Transform test data back to original scale
+                        y_test_orig = self.processor.inverse_transform_data(task_name, y_test)
+
+                        # Select random sample for visualization
+                        sample_idx = self.random_state.choice(len(X_test))
+
+                        # Create time axes
+                        time_backcast = np.arange(-self.config.backcast_length, 0)
+                        time_forecast = np.arange(0, horizon)
+
+                        # Plot true values
                         ax.plot(
-                            time_forecast, pred_sample_orig.flatten(),
-                            '--', color=color,
-                            label=f'{model_type.title()} Forecast'
-                        )
-                        ax.fill_between(
-                            time_forecast, lower_bound.flatten(), upper_bound.flatten(),
-                            color=color, alpha=0.2,
-                            label=f'{model_type.title()} 90% PI'
+                            time_forecast, y_test_orig[sample_idx].flatten(),
+                            'o-', color='blue', label='True', markersize=4
                         )
 
-                    # Format subplot
-                    ax.set_title(f'{task_name.replace("_", " ").title()}')
-                    ax.legend()
-                    ax.grid(True, alpha=0.3)
+                        # Plot predictions for each model type
+                        colors = {
+                            'interpretable': 'red',
+                            'generic': 'green',
+                            'hybrid': 'purple'
+                        }
 
-                # Hide unused subplots
-                for j in range(len(plot_tasks), 4):
-                    axes[j].set_visible(False)
+                        for model_type in self.config.model_types:
+                            if model_type not in models.get(horizon, {}):
+                                continue
 
-                # Save plot
-                plt.tight_layout(rect=[0, 0, 1, 0.96])
-                plt.savefig(
-                    os.path.join(plot_dir, f'forecast_{category}_h{horizon}.png'),
-                    dpi=150
-                )
-                plt.close(fig)
+                            model = models[horizon][model_type]
+
+                            try:
+                                # Get prediction intervals based on all test residuals
+                                all_preds_scaled = model.predict(X_test, verbose=0)
+                                residuals = y_test - all_preds_scaled
+                                q_lower = np.quantile(residuals.flatten(), q=0.05)
+                                q_upper = np.quantile(residuals.flatten(), q=0.95)
+
+                                # Get prediction for selected sample
+                                pred_sample_scaled = all_preds_scaled[sample_idx]
+                                pred_sample_orig = self.processor.inverse_transform_data(
+                                    task_name, pred_sample_scaled
+                                )
+
+                                # Calculate prediction intervals
+                                lower_bound = self.processor.inverse_transform_data(
+                                    task_name, pred_sample_scaled + q_lower
+                                )
+                                upper_bound = self.processor.inverse_transform_data(
+                                    task_name, pred_sample_scaled + q_upper
+                                )
+
+                                # Plot forecast and prediction intervals
+                                color = colors.get(model_type, 'gray')
+                                ax.plot(
+                                    time_forecast, pred_sample_orig.flatten(),
+                                    '--', color=color, linewidth=2,
+                                    label=f'{model_type.title()} Forecast'
+                                )
+                                ax.fill_between(
+                                    time_forecast, lower_bound.flatten(), upper_bound.flatten(),
+                                    color=color, alpha=0.2,
+                                    label=f'{model_type.title()} 90% PI'
+                                )
+
+                            except Exception as e:
+                                logger.warning(f"Failed to plot {model_type} for {task_name}: {e}")
+
+                        # Format subplot
+                        ax.set_title(f'{task_name.replace("_", " ").title()}')
+                        ax.legend()
+                        ax.grid(True, alpha=0.3)
+                        ax.set_xlabel('Time Step')
+                        ax.set_ylabel('Value')
+
+                    # Hide unused subplots
+                    for j in range(len(plot_tasks), 4):
+                        axes[j].set_visible(False)
+
+                    # Save plot
+                    plt.tight_layout(rect=[0, 0, 1, 0.96])
+                    plt.savefig(
+                        os.path.join(plot_dir, f'forecast_{category}_h{horizon}.png'),
+                        dpi=150, bbox_inches='tight'
+                    )
+                    plt.close(fig)
+
+        except Exception as e:
+            logger.error(f"Failed to create final forecast plots: {e}")
 
     def plot_training_history(
         self,
@@ -1061,45 +1280,55 @@ class NBeatsTrainer:
             horizon: Forecast horizon.
             save_dir: Directory to save plots.
         """
-        plot_dir = os.path.join(save_dir, 'training_history')
-        os.makedirs(plot_dir, exist_ok=True)
+        try:
+            plot_dir = os.path.join(save_dir, 'training_history')
+            os.makedirs(plot_dir, exist_ok=True)
 
-        # Create subplots
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6))
-        fig.suptitle(
-            f'Training History for {model_type.title()} Model (Horizon {horizon})',
-            fontsize=16
-        )
+            # Create subplots
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6))
+            fig.suptitle(
+                f'Training History for {model_type.title()} Model (Horizon {horizon})',
+                fontsize=16
+            )
 
-        # Plot loss
-        ax1.plot(history['loss'], label='Training Loss')
-        ax1.plot(history['val_loss'], label='Validation Loss')
-        ax1.set_title('Model Loss')
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('Loss')
-        ax1.legend()
-        ax1.grid(True)
+            # Plot loss
+            epochs = range(1, len(history['loss']) + 1)
+            ax1.plot(epochs, history['loss'], label='Training Loss', linewidth=2)
+            if 'val_loss' in history:
+                ax1.plot(epochs, history['val_loss'], label='Validation Loss', linewidth=2)
+            ax1.set_title('Model Loss')
+            ax1.set_xlabel('Epoch')
+            ax1.set_ylabel('Loss')
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
 
-        # Plot MAE if available
-        if 'mae' in history and 'val_mae' in history:
-            ax2.plot(history['mae'], label='Training MAE')
-            ax2.plot(history['val_mae'], label='Validation MAE')
-            ax2.set_title('Model MAE')
-            ax2.set_xlabel('Epoch')
-            ax2.set_ylabel('Mean Absolute Error')
-            ax2.legend()
-            ax2.grid(True)
+            # Plot MAE if available
+            if 'mae' in history:
+                ax2.plot(epochs, history['mae'], label='Training MAE', linewidth=2)
+                if 'val_mae' in history:
+                    ax2.plot(epochs, history['val_mae'], label='Validation MAE', linewidth=2)
+                ax2.set_title('Model MAE')
+                ax2.set_xlabel('Epoch')
+                ax2.set_ylabel('Mean Absolute Error')
+                ax2.legend()
+                ax2.grid(True, alpha=0.3)
+            else:
+                ax2.set_visible(False)
 
-        # Save plot
-        plt.tight_layout(rect=[0, 0, 1, 0.95])
-        plt.savefig(
-            os.path.join(plot_dir, f'history_{model_type}_h{horizon}.png')
-        )
-        plt.close(fig)
+            # Save plot
+            plt.tight_layout(rect=[0, 0, 1, 0.95])
+            plt.savefig(
+                os.path.join(plot_dir, f'history_{model_type}_h{horizon}.png'),
+                dpi=150, bbox_inches='tight'
+            )
+            plt.close(fig)
+
+        except Exception as e:
+            logger.warning(f"Failed to plot training history: {e}")
 
     def plot_error_analysis(
         self,
-        models: Dict[int, Dict[str, NBeatsNet]],
+        models: Dict[int, Dict[str, keras.Model]],
         test_data: Dict[int, Dict[str, Tuple[np.ndarray, np.ndarray]]],
         save_dir: str
     ) -> None:
@@ -1112,198 +1341,236 @@ class NBeatsTrainer:
         """
         logger.info("Creating error analysis visualizations...")
 
-        plot_dir = os.path.join(save_dir, 'error_analysis')
-        os.makedirs(plot_dir, exist_ok=True)
+        try:
+            plot_dir = os.path.join(save_dir, 'error_analysis')
+            os.makedirs(plot_dir, exist_ok=True)
 
-        # Select representative tasks for analysis
-        tasks_to_plot = [
-            'linear_trend_strong', 'multi_seasonal',
-            'arma_process', 'level_shift'
-        ]
+            # Select representative tasks for analysis
+            tasks_to_plot = [
+                'linear_trend_strong', 'multi_seasonal',
+                'arma_process', 'level_shift'
+            ]
 
-        for model_type in self.config.model_types:
-            for horizon in self.config.forecast_horizons:
-                model = models[horizon][model_type]
-
-                for task_name in tasks_to_plot:
-                    # Check if task data exists
-                    if task_name not in test_data[horizon]:
+            for model_type in self.config.model_types:
+                for horizon in self.config.forecast_horizons:
+                    if horizon not in models or model_type not in models[horizon]:
                         continue
 
-                    X_test, y_test = test_data[horizon][task_name]
-                    if len(X_test) == 0:
-                        continue
+                    model = models[horizon][model_type]
 
-                    # Generate predictions and transform to original scale
-                    preds_scaled = model.predict(X_test, verbose=0)
-                    preds_orig = self.processor.inverse_transform_data(
-                        task_name, preds_scaled
-                    )
-                    y_test_orig = self.processor.inverse_transform_data(
-                        task_name, y_test
-                    )
+                    for task_name in tasks_to_plot:
+                        # Check if task data exists
+                        if (horizon not in test_data or
+                            task_name not in test_data[horizon] or
+                            len(test_data[horizon][task_name][0]) == 0):
+                            continue
 
-                    # Calculate errors
-                    errors = y_test_orig - preds_orig
+                        try:
+                            X_test, y_test = test_data[horizon][task_name]
 
-                    # Create error analysis plots
-                    fig, axes = plt.subplots(2, 2, figsize=(20, 12))
-                    fig.suptitle(
-                        f'Error Analysis: {model_type.title()} H={horizon} '
-                        f'on {task_name.replace("_", " ").title()}',
-                        fontsize=16
-                    )
+                            # Generate predictions and transform to original scale
+                            preds_scaled = model.predict(X_test, verbose=0)
+                            preds_orig = self.processor.inverse_transform_data(
+                                task_name, preds_scaled
+                            )
+                            y_test_orig = self.processor.inverse_transform_data(
+                                task_name, y_test
+                            )
 
-                    # 1. Residuals histogram
-                    axes[0, 0].hist(errors.flatten(), bins=50, density=True)
-                    axes[0, 0].set_title('Distribution of Forecast Errors (Residuals)')
-                    axes[0, 0].set_xlabel('Error')
-                    axes[0, 0].set_ylabel('Density')
-                    axes[0, 0].grid(True, alpha=0.5)
+                            # Calculate errors
+                            errors = y_test_orig - preds_orig
 
-                    # 2. Residuals vs. predictions
-                    axes[0, 1].scatter(preds_orig.flatten(), errors.flatten(), alpha=0.3)
-                    axes[0, 1].axhline(0, color='red', linestyle='--')
-                    axes[0, 1].set_title('Residuals vs. Predicted Values')
-                    axes[0, 1].set_xlabel('Predicted Value')
-                    axes[0, 1].set_ylabel('Error')
-                    axes[0, 1].grid(True, alpha=0.5)
+                            # Create error analysis plots
+                            fig, axes = plt.subplots(2, 2, figsize=(20, 12))
+                            fig.suptitle(
+                                f'Error Analysis: {model_type.title()} H={horizon} '
+                                f'on {task_name.replace("_", " ").title()}',
+                                fontsize=16
+                            )
 
-                    # 3. MAE per forecast step
-                    mae_per_step = np.mean(np.abs(errors), axis=0).flatten()
-                    axes[1, 0].bar(range(1, horizon + 1), mae_per_step)
-                    axes[1, 0].set_title('MAE per Forecast Step')
-                    axes[1, 0].set_xlabel('Forecast Horizon Step')
-                    axes[1, 0].set_ylabel('Mean Absolute Error')
-                    axes[1, 0].grid(True, axis='y', alpha=0.5)
-                    axes[1, 0].set_xticks(range(1, horizon + 1))
+                            # 1. Residuals histogram
+                            axes[0, 0].hist(errors.flatten(), bins=50, density=True, alpha=0.7)
+                            axes[0, 0].set_title('Distribution of Forecast Errors (Residuals)')
+                            axes[0, 0].set_xlabel('Error')
+                            axes[0, 0].set_ylabel('Density')
+                            axes[0, 0].grid(True, alpha=0.5)
 
-                    # 4. Actual vs. predicted scatter
-                    axes[1, 1].scatter(
-                        y_test_orig.flatten(), preds_orig.flatten(), alpha=0.3
-                    )
+                            # 2. Residuals vs. predictions
+                            axes[0, 1].scatter(preds_orig.flatten(), errors.flatten(), alpha=0.3)
+                            axes[0, 1].axhline(0, color='red', linestyle='--')
+                            axes[0, 1].set_title('Residuals vs. Predicted Values')
+                            axes[0, 1].set_xlabel('Predicted Value')
+                            axes[0, 1].set_ylabel('Error')
+                            axes[0, 1].grid(True, alpha=0.5)
 
-                    # Add diagonal reference line
-                    lims = [
-                        np.min([axes[1,1].get_xlim(), axes[1,1].get_ylim()]),
-                        np.max([axes[1,1].get_xlim(), axes[1,1].get_ylim()])
-                    ]
-                    axes[1, 1].plot(lims, lims, 'r--', alpha=0.75, zorder=0, label='y=x')
-                    axes[1, 1].set_title('Actual vs. Predicted Values')
-                    axes[1, 1].set_xlabel('Actual Value')
-                    axes[1, 1].set_ylabel('Predicted Value')
-                    axes[1, 1].grid(True, alpha=0.5)
-                    axes[1, 1].legend()
+                            # 3. MAE per forecast step
+                            mae_per_step = np.mean(np.abs(errors), axis=0).flatten()
+                            axes[1, 0].bar(range(1, horizon + 1), mae_per_step)
+                            axes[1, 0].set_title('MAE per Forecast Step')
+                            axes[1, 0].set_xlabel('Forecast Horizon Step')
+                            axes[1, 0].set_ylabel('Mean Absolute Error')
+                            axes[1, 0].grid(True, axis='y', alpha=0.5)
+                            axes[1, 0].set_xticks(range(1, horizon + 1))
 
-                    # Save plot
-                    plt.tight_layout(rect=[0, 0, 1, 0.95])
-                    plt.savefig(
-                        os.path.join(
-                            plot_dir,
-                            f'errors_{model_type}_h{horizon}_{task_name}.png'
-                        )
-                    )
-                    plt.close(fig)
+                            # 4. Actual vs. predicted scatter
+                            axes[1, 1].scatter(
+                                y_test_orig.flatten(), preds_orig.flatten(), alpha=0.3
+                            )
+
+                            # Add diagonal reference line
+                            lims = [
+                                np.min([axes[1,1].get_xlim(), axes[1,1].get_ylim()]),
+                                np.max([axes[1,1].get_xlim(), axes[1,1].get_ylim()])
+                            ]
+                            axes[1, 1].plot(lims, lims, 'r--', alpha=0.75, zorder=0, label='y=x')
+                            axes[1, 1].set_title('Actual vs. Predicted Values')
+                            axes[1, 1].set_xlabel('Actual Value')
+                            axes[1, 1].set_ylabel('Predicted Value')
+                            axes[1, 1].grid(True, alpha=0.5)
+                            axes[1, 1].legend()
+
+                            # Save plot
+                            plt.tight_layout(rect=[0, 0, 1, 0.95])
+                            plt.savefig(
+                                os.path.join(
+                                    plot_dir,
+                                    f'errors_{model_type}_h{horizon}_{task_name}.png'
+                                ),
+                                dpi=150, bbox_inches='tight'
+                            )
+                            plt.close(fig)
+
+                        except Exception as e:
+                            logger.warning(f"Failed to create error analysis for {task_name}: {e}")
+
+        except Exception as e:
+            logger.error(f"Failed to create error analysis plots: {e}")
 
     def run_experiment(self) -> Dict[str, Any]:
         """Run the complete N-BEATS experiment.
 
         Returns:
             Dictionary containing experiment results and metrics.
+
+        Raises:
+            Exception: If experiment fails with detailed error information.
         """
-        # Create experiment directory
-        exp_dir = os.path.join(
-            self.config.result_dir,
-            f"{self.config.experiment_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        )
-        os.makedirs(exp_dir, exist_ok=True)
+        try:
+            # Create experiment directory
+            exp_dir = os.path.join(
+                self.config.result_dir,
+                f"{self.config.experiment_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
+            os.makedirs(exp_dir, exist_ok=True)
 
-        logger.info(f"Starting N-BEATS experiment: {exp_dir}")
+            logger.info(f"Starting N-BEATS experiment: {exp_dir}")
 
-        # Prepare data
-        prepared_data = self.prepare_data()
+            # Prepare data
+            prepared_data = self.prepare_data()
 
-        # Initialize storage for results
-        trained_models: Dict[int, Dict[str, NBeatsNet]] = {}
-        all_metrics: Dict[int, Dict[str, Dict[str, ForecastMetrics]]] = {}
-        all_histories: Dict[int, Dict[str, Dict[str, List[float]]]] = {}
+            # Initialize storage for results
+            trained_models: Dict[int, Dict[str, keras.Model]] = {}
+            all_metrics: Dict[int, Dict[str, Dict[str, ForecastMetrics]]] = {}
+            all_histories: Dict[int, Dict[str, Dict[str, List[float]]]] = {}
 
-        # Train models for each horizon and type
-        for horizon in self.config.forecast_horizons:
-            trained_models[horizon] = {}
-            all_metrics[horizon] = {}
-            all_histories[horizon] = {}
+            # Train models for each horizon and type
+            for horizon in self.config.forecast_horizons:
+                trained_models[horizon] = {}
+                all_metrics[horizon] = {}
+                all_histories[horizon] = {}
 
-            for model_type in self.config.model_types:
-                logger.info(
-                    f"\n{'='*60}\n"
-                    f"Training {model_type} model for horizon {horizon}\n"
-                    f"{'='*60}"
-                )
-
-                # Create model
-                model = self.create_model(model_type, horizon)
-
-                # Extract data for current horizon
-                train_data = {
-                    name: data["train"]
-                    for name, data in prepared_data[horizon].items()
-                }
-                val_data = {
-                    name: data["val"]
-                    for name, data in prepared_data[horizon].items()
-                }
-                test_data = {
-                    name: data["test"]
-                    for name, data in prepared_data[horizon].items()
-                }
-
-                # Train model
-                training_results = self.train_model(
-                    model, train_data, val_data, horizon, model_type, exp_dir
-                )
-
-                trained_model = training_results["model"]
-                history = training_results["history"]
-
-                # Store results
-                trained_models[horizon][model_type] = trained_model
-                all_histories[horizon][model_type] = history
-
-                # Evaluate model
-                task_metrics = self.evaluate_model(
-                    trained_model, test_data, horizon, model_type
-                )
-                all_metrics[horizon][model_type] = task_metrics
-
-                # Save model if requested
-                if self.config.save_results:
-                    model_path = os.path.join(exp_dir, f"{model_type}_h{horizon}.keras")
-                    trained_model.save(model_path)
-
-        # Generate visualizations and summaries
-        if self.config.save_results:
-            visuals_dir = os.path.join(exp_dir, 'visuals')
-
-            # Plot training histories
-            for horizon, histories in all_histories.items():
-                for model_type, history in histories.items():
-                    self.plot_training_history(
-                        history, model_type, horizon, visuals_dir
+                for model_type in self.config.model_types:
+                    logger.info(
+                        f"\n{'='*60}\n"
+                        f"Training {model_type} model for horizon {horizon}\n"
+                        f"{'='*60}"
                     )
 
-            # Plot final forecasts
-            self.plot_final_forecasts(trained_models, prepared_data, visuals_dir)
+                    try:
+                        # Create model
+                        model = self.create_model(model_type, horizon)
 
-            # Plot error analysis
-            self.plot_error_analysis(trained_models, prepared_data, visuals_dir)
+                        # Extract data for current horizon
+                        horizon_data = prepared_data.get(horizon, {})
+                        if not horizon_data:
+                            logger.warning(f"No data available for horizon {horizon}")
+                            continue
 
-            # Generate results summary
-            self._generate_results_summary(all_metrics, exp_dir)
+                        train_data = {
+                            name: data["train"]
+                            for name, data in horizon_data.items()
+                            if "train" in data
+                        }
+                        val_data = {
+                            name: data["val"]
+                            for name, data in horizon_data.items()
+                            if "val" in data
+                        }
+                        test_data = {
+                            name: data["test"]
+                            for name, data in horizon_data.items()
+                            if "test" in data
+                        }
 
-        logger.info(f"Experiment completed. Results saved to: {exp_dir}")
+                        if not train_data:
+                            logger.warning(f"No training data for {model_type} H={horizon}")
+                            continue
 
-        return {"results_dir": exp_dir, "metrics": all_metrics}
+                        # Train model
+                        training_results = self.train_model(
+                            model, train_data, val_data, horizon, model_type, exp_dir
+                        )
+
+                        trained_model = training_results["model"]
+                        history = training_results["history"]
+
+                        # Store results
+                        trained_models[horizon][model_type] = trained_model
+                        all_histories[horizon][model_type] = history
+
+                        # Evaluate model
+                        task_metrics = self.evaluate_model(
+                            trained_model, test_data, horizon, model_type
+                        )
+                        all_metrics[horizon][model_type] = task_metrics
+
+                        # Save model if requested
+                        if self.config.save_results:
+                            model_path = os.path.join(exp_dir, f"{model_type}_h{horizon}.keras")
+                            trained_model.save(model_path)
+                            logger.info(f"Saved model to {model_path}")
+
+                    except Exception as e:
+                        logger.error(f"Failed to train {model_type} H={horizon}: {e}")
+                        continue
+
+            # Generate visualizations and summaries
+            if self.config.save_results:
+                visuals_dir = os.path.join(exp_dir, 'visuals')
+
+                # Plot training histories
+                for horizon, histories in all_histories.items():
+                    for model_type, history in histories.items():
+                        self.plot_training_history(
+                            history, model_type, horizon, visuals_dir
+                        )
+
+                # Plot final forecasts
+                self.plot_final_forecasts(trained_models, prepared_data, visuals_dir)
+
+                # Plot error analysis
+                self.plot_error_analysis(trained_models, prepared_data, visuals_dir)
+
+                # Generate results summary
+                self._generate_results_summary(all_metrics, exp_dir)
+
+            logger.info(f"Experiment completed successfully. Results saved to: {exp_dir}")
+
+            return {"results_dir": exp_dir, "metrics": all_metrics}
+
+        except Exception as e:
+            logger.error(f"Experiment failed: {e}", exc_info=True)
+            raise
 
     def _generate_results_summary(
         self,
@@ -1316,54 +1583,63 @@ class NBeatsTrainer:
             all_metrics: Dictionary containing all calculated metrics.
             exp_dir: Experiment directory for saving results.
         """
-        # Convert metrics to list of dictionaries
-        results_data = [
-            dataclasses.asdict(metrics)
-            for h_metrics in all_metrics.values()
-            for m_metrics in h_metrics.values()
-            for metrics in m_metrics.values()
-        ]
+        try:
+            # Convert metrics to list of dictionaries
+            results_data = [
+                dataclasses.asdict(metrics)
+                for h_metrics in all_metrics.values()
+                for m_metrics in h_metrics.values()
+                for metrics in m_metrics.values()
+            ]
 
-        if not results_data:
-            logger.warning("No results were generated to summarize.")
-            return
+            if not results_data:
+                logger.warning("No results were generated to summarize.")
+                return
 
-        # Create results dataframe
-        results_df = pd.DataFrame(results_data)
+            # Create results dataframe
+            results_df = pd.DataFrame(results_data)
 
-        # Log summary information
-        logger.info(
-            "=" * 120 + "\n"
-            "N-BEATS MULTI-TASK FORECASTING RESULTS\n" +
-            "=" * 120
-        )
-        logger.info(f"Detailed Results (Sample):\n{results_df.head().to_string()}")
+            # Log summary information
+            logger.info(
+                "=" * 120 + "\n"
+                "N-BEATS MULTI-TASK FORECASTING RESULTS\n" +
+                "=" * 120
+            )
+            logger.info(f"Total results: {len(results_df)} task-model combinations")
+            if len(results_df) > 0:
+                logger.info(f"Detailed Results (Sample):\n{results_df.head().to_string()}")
 
-        # Summary by model type and horizon
-        summary_cols = ['rmse', 'mae', 'smape', 'mase', 'coverage_90']
-        summary_by_model = results_df.groupby(['model_type', 'horizon'])[summary_cols].mean().round(4)
+                # Summary by model type and horizon
+                summary_cols = ['rmse', 'mae', 'smape', 'mase', 'coverage_90']
+                available_cols = [col for col in summary_cols if col in results_df.columns]
 
-        logger.info(
-            "=" * 80 + "\n"
-            "SUMMARY BY MODEL TYPE AND HORIZON\n" +
-            "=" * 80 + f"\n{summary_by_model}"
-        )
+                if available_cols:
+                    summary_by_model = results_df.groupby(['model_type', 'horizon'])[available_cols].mean().round(4)
 
-        # Summary by task category
-        summary_by_category = results_df.groupby(['task_category'])[summary_cols].mean().round(4)
+                    logger.info(
+                        "=" * 80 + "\n"
+                        "SUMMARY BY MODEL TYPE AND HORIZON\n" +
+                        "=" * 80 + f"\n{summary_by_model}"
+                    )
 
-        logger.info(
-            "=" * 80 + "\n"
-            "SUMMARY BY CATEGORY\n" +
-            "=" * 80 + f"\n{summary_by_category}"
-        )
+                    # Summary by task category
+                    summary_by_category = results_df.groupby(['task_category'])[available_cols].mean().round(4)
 
-        # Save results to CSV files
-        results_df.to_csv(os.path.join(exp_dir, 'detailed_results.csv'), index=False)
-        summary_by_model.to_csv(os.path.join(exp_dir, 'summary_by_model.csv'))
-        summary_by_category.to_csv(os.path.join(exp_dir, 'summary_by_category.csv'))
+                    logger.info(
+                        "=" * 80 + "\n"
+                        "SUMMARY BY CATEGORY\n" +
+                        "=" * 80 + f"\n{summary_by_category}"
+                    )
 
-        logger.info(f"Results summaries saved to {exp_dir}")
+                    # Save results to CSV files
+                    results_df.to_csv(os.path.join(exp_dir, 'detailed_results.csv'), index=False)
+                    summary_by_model.to_csv(os.path.join(exp_dir, 'summary_by_model.csv'))
+                    summary_by_category.to_csv(os.path.join(exp_dir, 'summary_by_category.csv'))
+
+                    logger.info(f"Results summaries saved to {exp_dir}")
+
+        except Exception as e:
+            logger.error(f"Failed to generate results summary: {e}")
 
 
 # ---------------------------------------------------------------------

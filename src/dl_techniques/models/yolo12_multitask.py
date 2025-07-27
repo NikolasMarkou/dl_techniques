@@ -85,6 +85,10 @@ Tasks can be specified in multiple flexible ways:
 import keras
 from typing import Optional, Tuple, Dict, Any, List, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.vision_task_types import (
     TaskType,
@@ -98,6 +102,7 @@ from dl_techniques.layers.yolo12_heads import (
     YOLOv12ClassificationHead
 )
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class YOLOv12MultiTask(keras.Model):
@@ -411,6 +416,7 @@ class YOLOv12MultiTask(keras.Model):
             'classification': self.num_classification_classes
         }
 
+# ---------------------------------------------------------------------
 
 def create_yolov12_multitask(
     num_detection_classes: Optional[int] = None,
@@ -488,3 +494,5 @@ def create_yolov12_multitask(
     logger.info(f"YOLOv12MultiTask-{scale} created with tasks: {task_names}")
     logger.info(f"Class counts: {class_counts}")
     return model
+
+# ---------------------------------------------------------------------
