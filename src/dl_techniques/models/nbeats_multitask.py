@@ -1,12 +1,14 @@
 """
-Multi-Task N-BEATS Model Implementation.
+Multi-Task N-BEATS Model Implementation with Automatic Task Inference.
 
 This module provides a multi-task variant of the N-BEATS architecture that can
 simultaneously learn multiple time series forecasting tasks with task-specific
-embeddings and shared representation learning.
+embeddings and shared representation learning. When task IDs are not provided,
+the model automatically infers appropriate task adjustments.
 
 The implementation extends the base N-BEATS architecture with:
 - Task embedding layers for task-aware processing
+- Automatic task inference from time series patterns
 - Shared backbone with task-specific adjustments
 - Support for different forecast horizons per task
 - Flexible multi-task training capabilities
@@ -37,6 +39,9 @@ class MultiTaskNBeatsConfig:
         backcast_length: Number of time steps to look back for prediction.
         use_task_embeddings: Whether to use task embedding layers.
         task_embedding_dim: Dimension of task embedding vectors.
+        use_task_inference: Whether to enable automatic task inference when no task IDs provided.
+        task_inference_hidden_dim: Hidden dimension for task inference network.
+        task_inference_dropout: Dropout rate for task inference network.
         stack_types: Types of N-BEATS stacks to use.
         nb_blocks_per_stack: Number of blocks per stack.
         hidden_layer_units: Number of units in hidden layers.
@@ -53,6 +58,9 @@ class MultiTaskNBeatsConfig:
     backcast_length: int = 168
     use_task_embeddings: bool = True
     task_embedding_dim: int = 32
+    use_task_inference: bool = True
+    task_inference_hidden_dim: int = 128
+    task_inference_dropout: float = 0.2
     stack_types: List[str] = None
     nb_blocks_per_stack: int = 3
     hidden_layer_units: int = 512
@@ -76,17 +84,24 @@ class MultiTaskNBeatsConfig:
 
 @keras.saving.register_keras_serializable()
 class MultiTaskNBeatsNet(keras.Model):
-    """Multi-task N-BEATS model with task embeddings and shared architecture.
+    """Multi-task N-BEATS model with task embeddings, shared architecture, and automatic task inference.
 
     This model extends the standard N-BEATS architecture to handle multiple
     time series forecasting tasks simultaneously. It uses task embeddings
     to provide task-specific adjustments while maintaining a shared backbone
     for efficient learning across tasks.
 
+    Key features:
+    - Automatic task inference when no task IDs are provided
+    - Task-specific adjustments through learned embeddings
+    - Backwards compatible with single-task usage
+    - Weighted task combination for intelligent adjustments
+
     The architecture consists of:
     1. A base N-BEATS model for shared feature extraction
     2. Task embedding layers for task-specific representations
-    3. Task adjustment layers for fine-tuning predictions
+    3. Task inference network for automatic task detection
+    4. Task adjustment layers for fine-tuning predictions
 
     Args:
         config: Configuration object containing model parameters.
@@ -104,6 +119,9 @@ class MultiTaskNBeatsNet(keras.Model):
         >>> x_data = np.random.randn(32, 168, 1)
         >>> task_ids = np.random.randint(0, 3, (32,))
         >>> predictions = model((x_data, task_ids))
+        >>>
+        >>> # Single input format with automatic task inference
+        >>> predictions = model(x_data)  # Automatically infers task adjustments
         >>> print(predictions.shape)  # (32, 24, 1)
     """
 
@@ -132,6 +150,12 @@ class MultiTaskNBeatsNet(keras.Model):
                 name='task_embedding'
             )
 
+        # Task inference network (for automatic task detection)
+        self.task_inference_network = None
+        if config.use_task_inference and config.use_task_embeddings:
+            # Will be built in build() method
+            self.task_inference_layers = {}
+
         # Main N-BEATS model (created in build)
         self.nbeats_model = None
 
@@ -142,19 +166,26 @@ class MultiTaskNBeatsNet(keras.Model):
         logger.info(f"  - Number of tasks: {num_tasks}")
         logger.info(f"  - Forecast length: {forecast_length}")
         logger.info(f"  - Task embeddings: {'✓' if config.use_task_embeddings else '✗'}")
+        logger.info(f"  - Task inference: {'✓' if config.use_task_inference else '✗'}")
         logger.info(f"  - Stack types: {config.stack_types}")
 
     def build(self, input_shape: Union[Tuple, List[Tuple]]) -> None:
         """Build the multi-task N-BEATS model.
 
-        This method creates the internal N-BEATS model and task-specific layers
-        based on the provided configuration.
+        This method creates the internal N-BEATS model, task-specific layers,
+        and task inference network based on the provided configuration.
 
         Args:
             input_shape: Input shape specification. Can be a single shape tuple
                 for time series data or a list of shapes for multi-input format.
         """
         logger.info("Building Multi-Task N-BEATS model...")
+
+        # Handle different input shape formats
+        if isinstance(input_shape, list):
+            time_series_shape = input_shape[0]
+        else:
+            time_series_shape = input_shape
 
         # Create the base N-BEATS model with the specific forecast length
         try:
@@ -191,8 +222,173 @@ class MultiTaskNBeatsNet(keras.Model):
 
             logger.info("✓ Task adjustment layer created")
 
+        # Build task inference network if enabled
+        if self.config.use_task_inference and self.config.use_task_embeddings:
+            self._build_task_inference_network(time_series_shape)
+            logger.info("✓ Task inference network created")
+
         super().build(input_shape)
         logger.info("✓ Multi-Task N-BEATS model built successfully")
+
+    def _build_task_inference_network(self, time_series_shape: Tuple) -> None:
+        """Build the task inference network for automatic task detection.
+
+        This network analyzes the input time series to predict task probabilities,
+        which are then used to create weighted task adjustments.
+
+        Args:
+            time_series_shape: Shape of the time series input.
+        """
+        # Global average pooling to get series-level features
+        self.task_inference_layers['global_pool'] = keras.layers.GlobalAveragePooling1D(
+            name='task_inference_global_pool'
+        )
+
+        # Additional statistical features
+        self.task_inference_layers['flatten'] = keras.layers.Flatten(
+            name='task_inference_flatten'
+        )
+
+        # Feature extraction layers
+        self.task_inference_layers['dense1'] = keras.layers.Dense(
+            self.config.task_inference_hidden_dim,
+            activation='relu',
+            kernel_initializer='he_normal',
+            kernel_regularizer=keras.regularizers.L2(self.config.kernel_regularizer_l2),
+            name='task_inference_dense1'
+        )
+
+        self.task_inference_layers['dropout1'] = keras.layers.Dropout(
+            self.config.task_inference_dropout,
+            name='task_inference_dropout1'
+        )
+
+        self.task_inference_layers['dense2'] = keras.layers.Dense(
+            self.config.task_inference_hidden_dim // 2,
+            activation='relu',
+            kernel_initializer='he_normal',
+            kernel_regularizer=keras.regularizers.L2(self.config.kernel_regularizer_l2),
+            name='task_inference_dense2'
+        )
+
+        self.task_inference_layers['dropout2'] = keras.layers.Dropout(
+            self.config.task_inference_dropout,
+            name='task_inference_dropout2'
+        )
+
+        # Task probability prediction
+        self.task_inference_layers['task_probs'] = keras.layers.Dense(
+            self.num_tasks,
+            activation='softmax',
+            kernel_initializer='glorot_uniform',
+            name='task_inference_probs'
+        )
+
+    def _infer_task_probabilities(
+            self,
+            time_series_data: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """Infer task probabilities from time series data.
+
+        Args:
+            time_series_data: Input time series data.
+            training: Boolean indicating training mode.
+
+        Returns:
+            Task probabilities with shape (batch_size, num_tasks).
+        """
+        # Extract global features
+        global_features = self.task_inference_layers['global_pool'](time_series_data)
+
+        # Compute additional statistical features
+        # Mean, std, min, max along time dimension
+        time_mean = keras.ops.mean(time_series_data, axis=1)
+        time_std = keras.ops.std(time_series_data, axis=1)
+        time_min = keras.ops.min(time_series_data, axis=1)
+        time_max = keras.ops.max(time_series_data, axis=1)
+
+        # Trend estimation (simple linear trend)
+        batch_size = keras.ops.shape(time_series_data)[0]
+        seq_len = keras.ops.shape(time_series_data)[1]
+        features = keras.ops.shape(time_series_data)[2]
+
+        # Create time indices for trend calculation
+        time_indices = keras.ops.cast(
+            keras.ops.arange(seq_len, dtype='float32'),
+            time_series_data.dtype
+        )
+        time_indices = keras.ops.reshape(time_indices, (1, seq_len, 1))
+        time_indices = keras.ops.broadcast_to(time_indices, (batch_size, seq_len, features))
+
+        # Simple trend estimation using correlation
+        centered_data = time_series_data - keras.ops.expand_dims(time_mean, axis=1)
+        centered_time = time_indices - keras.ops.expand_dims(keras.ops.mean(time_indices, axis=1), axis=1)
+
+        # Compute trend strength (correlation with time)
+        numerator = keras.ops.mean(centered_data * centered_time, axis=1)
+        data_var = keras.ops.mean(centered_data ** 2, axis=1)
+        time_var = keras.ops.mean(centered_time ** 2, axis=1)
+        trend_strength = numerator / (keras.ops.sqrt(data_var * time_var) + 1e-8)
+
+        # Combine all features
+        combined_features = keras.ops.concatenate([
+            global_features,
+            time_mean,
+            time_std,
+            time_min,
+            time_max,
+            trend_strength
+        ], axis=-1)
+
+        # Process through inference network
+        x = self.task_inference_layers['dense1'](combined_features, training=training)
+        x = self.task_inference_layers['dropout1'](x, training=training)
+        x = self.task_inference_layers['dense2'](x, training=training)
+        x = self.task_inference_layers['dropout2'](x, training=training)
+
+        task_probs = self.task_inference_layers['task_probs'](x, training=training)
+
+        return task_probs
+
+    def _compute_weighted_task_adjustment(
+            self,
+            task_probs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """Compute weighted task adjustment based on task probabilities.
+
+        Args:
+            task_probs: Task probabilities with shape (batch_size, num_tasks).
+            training: Boolean indicating training mode.
+
+        Returns:
+            Weighted task adjustment with shape (batch_size, forecast_length, 1).
+        """
+        batch_size = keras.ops.shape(task_probs)[0]
+
+        # Get all task embeddings
+        all_task_ids = keras.ops.arange(self.num_tasks)
+        all_task_embeddings = self.task_embedding(all_task_ids, training=training)  # (num_tasks, embedding_dim)
+
+        # Compute task adjustments for all tasks
+        all_task_adjustments = self.task_adjustment_layer(
+            all_task_embeddings, training=training
+        )  # (num_tasks, forecast_length)
+
+        # Weight task adjustments by probabilities
+        # task_probs: (batch_size, num_tasks)
+        # all_task_adjustments: (num_tasks, forecast_length)
+        weighted_adjustment = keras.ops.einsum(
+            'bn,nf->bf',
+            task_probs,
+            all_task_adjustments
+        )  # (batch_size, forecast_length)
+
+        # Add feature dimension
+        weighted_adjustment = keras.ops.expand_dims(weighted_adjustment, axis=-1)
+
+        return weighted_adjustment
 
     def call(
             self,
@@ -212,31 +408,33 @@ class MultiTaskNBeatsNet(keras.Model):
             Forecast predictions with shape (batch_size, forecast_length, features).
 
         Raises:
-            ValueError: If input format is invalid or task embeddings are expected
-                but not provided.
+            ValueError: If input format is invalid.
         """
         if isinstance(inputs, tuple) and len(inputs) == 2:
             # Multi-task format: (time_series_data, task_ids)
             time_series_data, task_ids = inputs
 
-            # Validate inputs
-            if task_ids is None and self.config.use_task_embeddings:
-                raise ValueError("Task IDs required when task embeddings are enabled")
-
             # Get base N-BEATS prediction
             base_prediction = self.nbeats_model(time_series_data, training=training)
 
             if self.config.use_task_embeddings and self.task_adjustment_layer is not None:
-                # Get task embeddings
-                task_emb = self.task_embedding(task_ids, training=training)
-
-                # Task-specific adjustment
-                task_adjustment = self.task_adjustment_layer(task_emb, training=training)
-                task_adjustment = keras.ops.expand_dims(task_adjustment, axis=-1)
+                if task_ids is not None:
+                    # Explicit task IDs provided - use them directly
+                    task_emb = self.task_embedding(task_ids, training=training)
+                    task_adjustment = self.task_adjustment_layer(task_emb, training=training)
+                    task_adjustment = keras.ops.expand_dims(task_adjustment, axis=-1)
+                else:
+                    # No task IDs but in tuple format - infer from data
+                    if self.config.use_task_inference:
+                        task_probs = self._infer_task_probabilities(time_series_data, training=training)
+                        task_adjustment = self._compute_weighted_task_adjustment(task_probs, training=training)
+                    else:
+                        # No inference capability - return base prediction
+                        return base_prediction
 
                 # Combine base prediction with task-specific adjustment
                 # Use small adjustment factor to preserve base model performance
-                final_prediction = base_prediction + 0.05 * task_adjustment
+                final_prediction = base_prediction + 0.01 * task_adjustment
 
                 return final_prediction
             else:
@@ -247,7 +445,27 @@ class MultiTaskNBeatsNet(keras.Model):
 
         else:
             # Standard format: just time series data
-            return self.nbeats_model(inputs, training=training)
+            # Get base N-BEATS prediction
+            base_prediction = self.nbeats_model(inputs, training=training)
+
+            # Apply automatic task inference if enabled
+            if (self.config.use_task_embeddings and
+                self.config.use_task_inference and
+                self.task_adjustment_layer is not None):
+
+                # Infer task probabilities from the time series
+                task_probs = self._infer_task_probabilities(inputs, training=training)
+
+                # Compute weighted task adjustment
+                task_adjustment = self._compute_weighted_task_adjustment(task_probs, training=training)
+
+                # Combine with base prediction
+                final_prediction = base_prediction + 0.05 * task_adjustment
+
+                return final_prediction
+            else:
+                # No task embeddings or inference - return base prediction
+                return base_prediction
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization.
@@ -336,6 +554,37 @@ class MultiTaskNBeatsNet(keras.Model):
 
         return self.predict((x, task_ids), **kwargs)
 
+    def predict_with_task_inference(
+            self,
+            x: np.ndarray,
+            return_task_probs: bool = False,
+            **kwargs
+    ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+        """Make predictions using automatic task inference.
+
+        Args:
+            x: Input time series data with shape (batch_size, sequence_length, features).
+            return_task_probs: Whether to return inferred task probabilities.
+            **kwargs: Additional arguments passed to predict().
+
+        Returns:
+            If return_task_probs is False: predictions with shape (batch_size, forecast_length, features).
+            If return_task_probs is True: tuple of (predictions, task_probabilities).
+        """
+        if not self.config.use_task_inference:
+            raise ValueError("Task inference is not enabled. Set use_task_inference=True in config.")
+
+        # Get predictions (will use automatic task inference)
+        predictions = self.predict(x, **kwargs)
+
+        if return_task_probs:
+            # Get task probabilities separately
+            task_probs = self._infer_task_probabilities(x, training=False)
+            task_probs_np = keras.ops.convert_to_numpy(task_probs)
+            return predictions, task_probs_np
+        else:
+            return predictions
+
     def summary(self, **kwargs) -> None:
         """Print model summary including task information."""
         print("=" * 80)
@@ -344,6 +593,7 @@ class MultiTaskNBeatsNet(keras.Model):
         print(f"Number of tasks: {self.num_tasks}")
         print(f"Forecast length: {self.forecast_length}")
         print(f"Task embeddings: {'Enabled' if self.config.use_task_embeddings else 'Disabled'}")
+        print(f"Task inference: {'Enabled' if self.config.use_task_inference else 'Disabled'}")
         print(f"Task embedding dimension: {self.config.task_embedding_dim}")
         print(f"Stack types: {self.config.stack_types}")
         print(f"Blocks per stack: {self.config.nb_blocks_per_stack}")
@@ -386,7 +636,8 @@ def create_multi_task_nbeats(
         >>> config = MultiTaskNBeatsConfig(
         ...     backcast_length=168,
         ...     use_task_embeddings=True,
-        ...     task_embedding_dim=32
+        ...     task_embedding_dim=32,
+        ...     use_task_inference=True
         ... )
         >>> task_mapping = {'trend': 0, 'seasonal': 1, 'residual': 2}
         >>> model = create_multi_task_nbeats(config, 3, task_mapping, 24)
@@ -429,6 +680,15 @@ def create_multi_task_nbeats_from_tasks(
     Example:
         >>> tasks = ['linear_trend', 'daily_seasonality', 'random_walk']
         >>> model = create_multi_task_nbeats_from_tasks(tasks, forecast_length=24)
+        >>>
+        >>> # Can now use with or without explicit task IDs
+        >>> x = np.random.randn(10, 168, 1)
+        >>> predictions = model(x)  # Automatic task inference
+        >>>
+        >>> # Or with explicit tasks
+        >>> task_ids = np.array([0, 1, 2, 0, 1, 2, 0, 1, 2, 0])
+        >>> predictions = model((x, task_ids))
+        >>>
         >>> model.summary()
     """
     if config is None:

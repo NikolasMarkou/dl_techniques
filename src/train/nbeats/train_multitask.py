@@ -19,7 +19,6 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.nbeats import create_nbeats_model
 from dl_techniques.losses.smape_loss import SMAPELoss
 from dl_techniques.utils.datasets.nbeats import TimeSeriesNormalizer
 from dl_techniques.utils.datasets.time_series_generator import TimeSeriesGenerator, TimeSeriesConfig
@@ -58,7 +57,7 @@ set_random_seeds(42)
 # ---------------------------------------------------------------------
 
 @dataclass
-class MultiTaskNBeatsConfig:
+class MultiTaskNBeatsTrainingConfig:
     """Configuration for multi-task N-BEATS training with interim visualizations."""
 
     # General experiment configuration
@@ -938,7 +937,7 @@ def main():
     """Run the multi-task N-BEATS experiment with interim visualizations."""
 
     # Configuration
-    config = MultiTaskNBeatsConfig(
+    config = MultiTaskNBeatsTrainingConfig(
         # Multi-task specific
         backcast_length=168,
         forecast_length=24,
