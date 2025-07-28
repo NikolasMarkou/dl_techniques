@@ -1019,7 +1019,7 @@ class MultiTaskNBeatsTrainer:
                 callbacks = [
                     keras.callbacks.EarlyStopping(
                         monitor='val_loss',
-                        patience=20,  # Increased patience
+                        patience=50,
                         restore_best_weights=True,
                         verbose=1
                     ),
