@@ -42,6 +42,8 @@ class MultiTaskNBeatsConfig:
         use_task_inference: Whether to enable automatic task inference when no task IDs provided.
         task_inference_hidden_dim: Hidden dimension for task inference network.
         task_inference_dropout: Dropout rate for task inference network.
+        task_inference_activation: Activation function for task inference network.
+        use_bias: Whether to use bias terms in dense layers.
         stack_types: Types of N-BEATS stacks to use.
         nb_blocks_per_stack: Number of blocks per stack.
         hidden_layer_units: Number of units in hidden layers.
@@ -61,6 +63,8 @@ class MultiTaskNBeatsConfig:
     use_task_inference: bool = True
     task_inference_hidden_dim: int = 128
     task_inference_dropout: float = 0.2
+    task_inference_activation: str = 'gelu'
+    use_bias: bool = False
     stack_types: List[str] = None
     nb_blocks_per_stack: int = 3
     hidden_layer_units: int = 512
@@ -96,11 +100,13 @@ class MultiTaskNBeatsNet(keras.Model):
     - Task-specific adjustments through learned embeddings
     - Backwards compatible with single-task usage
     - Weighted task combination for intelligent adjustments
+    - Configurable bias usage and batch normalization
+    - Modern training practices with proper normalization
 
     The architecture consists of:
     1. A base N-BEATS model for shared feature extraction
     2. Task embedding layers for task-specific representations
-    3. Task inference network for automatic task detection
+    3. Task inference network with batch normalization for automatic task detection
     4. Task adjustment layers for fine-tuning predictions
 
     Args:
@@ -167,6 +173,8 @@ class MultiTaskNBeatsNet(keras.Model):
         logger.info(f"  - Forecast length: {forecast_length}")
         logger.info(f"  - Task embeddings: {'✓' if config.use_task_embeddings else '✗'}")
         logger.info(f"  - Task inference: {'✓' if config.use_task_inference else '✗'}")
+        logger.info(f"  - Task inference activation: {config.task_inference_activation}")
+        logger.info(f"  - Use bias: {'✓' if config.use_bias else '✗'}")
         logger.info(f"  - Stack types: {config.stack_types}")
 
     def build(self, input_shape: Union[Tuple, List[Tuple]]) -> None:
@@ -215,8 +223,9 @@ class MultiTaskNBeatsNet(keras.Model):
             self.task_adjustment_layer = keras.layers.Dense(
                 self.forecast_length,
                 activation='linear',
+                use_bias=self.config.use_bias,
                 kernel_initializer='glorot_uniform',
-                bias_initializer='zeros',
+                bias_initializer='zeros' if self.config.use_bias else None,
                 name='task_adjustment'
             )
 
@@ -252,10 +261,23 @@ class MultiTaskNBeatsNet(keras.Model):
         # Feature extraction layers
         self.task_inference_layers['dense1'] = keras.layers.Dense(
             self.config.task_inference_hidden_dim,
-            activation='relu',
+            activation='linear',
+            use_bias=self.config.use_bias,
             kernel_initializer='he_normal',
             kernel_regularizer=keras.regularizers.L2(self.config.kernel_regularizer_l2),
+            bias_initializer='zeros' if self.config.use_bias else None,
             name='task_inference_dense1'
+        )
+
+        self.task_inference_layers['bn1'] = keras.layers.BatchNormalization(
+            center=self.config.use_bias,
+            scale=True,
+            name='task_inference_bn1'
+        )
+
+        self.task_inference_layers['activation1'] = keras.layers.Activation(
+            self.config.task_inference_activation,
+            name='task_inference_activation1'
         )
 
         self.task_inference_layers['dropout1'] = keras.layers.Dropout(
@@ -265,10 +287,23 @@ class MultiTaskNBeatsNet(keras.Model):
 
         self.task_inference_layers['dense2'] = keras.layers.Dense(
             self.config.task_inference_hidden_dim // 2,
-            activation='relu',
+            activation='linear',
+            use_bias=self.config.use_bias,
             kernel_initializer='he_normal',
             kernel_regularizer=keras.regularizers.L2(self.config.kernel_regularizer_l2),
+            bias_initializer='zeros' if self.config.use_bias else None,
             name='task_inference_dense2'
+        )
+
+        self.task_inference_layers['bn2'] = keras.layers.BatchNormalization(
+            center=self.config.use_bias,
+            scale=True,
+            name='task_inference_bn2'
+        )
+
+        self.task_inference_layers['activation2'] = keras.layers.Activation(
+            self.config.task_inference_activation,
+            name='task_inference_activation2'
         )
 
         self.task_inference_layers['dropout2'] = keras.layers.Dropout(
@@ -280,7 +315,9 @@ class MultiTaskNBeatsNet(keras.Model):
         self.task_inference_layers['task_probs'] = keras.layers.Dense(
             self.num_tasks,
             activation='softmax',
+            use_bias=self.config.use_bias,
             kernel_initializer='glorot_uniform',
+            bias_initializer='zeros' if self.config.use_bias else None,
             name='task_inference_probs'
         )
 
@@ -343,8 +380,13 @@ class MultiTaskNBeatsNet(keras.Model):
 
         # Process through inference network
         x = self.task_inference_layers['dense1'](combined_features, training=training)
+        x = self.task_inference_layers['bn1'](x, training=training)
+        x = self.task_inference_layers['activation1'](x, training=training)
         x = self.task_inference_layers['dropout1'](x, training=training)
+
         x = self.task_inference_layers['dense2'](x, training=training)
+        x = self.task_inference_layers['bn2'](x, training=training)
+        x = self.task_inference_layers['activation2'](x, training=training)
         x = self.task_inference_layers['dropout2'](x, training=training)
 
         task_probs = self.task_inference_layers['task_probs'](x, training=training)
@@ -434,7 +476,7 @@ class MultiTaskNBeatsNet(keras.Model):
 
                 # Combine base prediction with task-specific adjustment
                 # Use small adjustment factor to preserve base model performance
-                final_prediction = base_prediction + 0.01 * task_adjustment
+                final_prediction = base_prediction + 0.05 * task_adjustment
 
                 return final_prediction
             else:
@@ -594,6 +636,8 @@ class MultiTaskNBeatsNet(keras.Model):
         print(f"Forecast length: {self.forecast_length}")
         print(f"Task embeddings: {'Enabled' if self.config.use_task_embeddings else 'Disabled'}")
         print(f"Task inference: {'Enabled' if self.config.use_task_inference else 'Disabled'}")
+        print(f"Task inference activation: {self.config.task_inference_activation}")
+        print(f"Use bias: {'Enabled' if self.config.use_bias else 'Disabled'}")
         print(f"Task embedding dimension: {self.config.task_embedding_dim}")
         print(f"Stack types: {self.config.stack_types}")
         print(f"Blocks per stack: {self.config.nb_blocks_per_stack}")
@@ -637,7 +681,9 @@ def create_multi_task_nbeats(
         ...     backcast_length=168,
         ...     use_task_embeddings=True,
         ...     task_embedding_dim=32,
-        ...     use_task_inference=True
+        ...     use_task_inference=True,
+        ...     task_inference_activation='gelu',
+        ...     use_bias=False
         ... )
         >>> task_mapping = {'trend': 0, 'seasonal': 1, 'residual': 2}
         >>> model = create_multi_task_nbeats(config, 3, task_mapping, 24)
