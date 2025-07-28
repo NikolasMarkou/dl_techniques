@@ -1,9 +1,237 @@
 """
-Generic Time Series Generator for Deep Learning Experiments
+Comprehensive Time Series Generator for Deep Learning and Forecasting Experiments
 
-This module provides a comprehensive time series generator that creates diverse
-patterns including trend, seasonal, stochastic, and composite time series for
-machine learning and forecasting experiments.
+This module provides a sophisticated time series generator designed to create diverse,
+realistic time series patterns for machine learning research, model testing, and
+forecasting experiments. The generator supports over 80 different time series patterns
+across multiple domains and categories.
+
+Overview
+--------
+The TimeSeriesGenerator creates synthetic time series data that mimics real-world
+patterns found in various domains including finance, weather, industrial sensors,
+biomedical signals, network traffic, and more. Each pattern is carefully designed
+to exhibit characteristic behaviors that challenge different aspects of forecasting
+models and time series analysis techniques.
+
+Key Features
+------------
+* **Comprehensive Pattern Library**: 80+ predefined time series patterns
+* **Domain-Specific Patterns**: Specialized generators for finance, weather,
+  industrial, biomedical, and network domains
+* **Configurable Parameters**: Fully customizable generation parameters
+* **Reproducible Generation**: Seed-based random state for consistent results
+* **Multiple Pattern Categories**: Organized patterns by type and complexity
+* **Custom Pattern Creation**: Build custom patterns with specific parameters
+
+Pattern Categories
+------------------
+The generator organizes patterns into the following categories:
+
+**Basic Patterns:**
+* **trend**: Linear, exponential, polynomial, logarithmic trends
+* **seasonal**: Single and multi-period seasonal patterns
+* **composite**: Combined trend and seasonal patterns
+
+**Stochastic Processes:**
+* **stochastic**: AR, MA, ARMA processes, random walks
+* **volatility**: GARCH models with volatility clustering
+* **regime**: Regime-switching models
+* **structural**: Structural breaks and change points
+
+**Domain-Specific Patterns:**
+* **financial**: Stock prices, commodity prices, interest rates, crypto
+* **weather**: Temperature, precipitation, humidity, wind patterns
+* **network**: Web traffic, server load, bandwidth usage, latency
+* **biomedical**: ECG, EEG, blood pressure, respiratory signals
+* **industrial**: Motor vibration, HVAC systems, production rates
+
+**Advanced Patterns:**
+* **intermittent**: Sparse and lumpy demand patterns
+* **outliers**: Additive, innovation, and level outliers
+* **chaotic**: Henon map, Lorenz attractor, Mackey-Glass equation
+
+Classes
+-------
+TimeSeriesConfig
+    Configuration dataclass containing all generation parameters including
+    sample size, noise levels, trend strengths, seasonal periods, and
+    domain-specific parameters.
+
+TimeSeriesGenerator
+    Main generator class that creates time series patterns based on the
+    provided configuration. Supports both predefined patterns and custom
+    pattern generation.
+
+Usage Examples
+--------------
+Basic Usage:
+    >>> from dl_techniques.utils.datasets.time_series_generator import (
+    ...     TimeSeriesGenerator, TimeSeriesConfig
+    ... )
+    >>> config = TimeSeriesConfig(n_samples=1000, random_seed=42)
+    >>> generator = TimeSeriesGenerator(config)
+    >>>
+    >>> # Generate specific pattern
+    >>> trend_data = generator.generate_task_data("linear_trend_strong")
+    >>> seasonal_data = generator.generate_task_data("multi_seasonal")
+
+Generate All Patterns:
+    >>> # Generate complete pattern set
+    >>> all_patterns = generator.generate_all_patterns()
+    >>> print(f"Generated {len(all_patterns)} different patterns")
+
+Category-Based Generation:
+    >>> # Get patterns by category
+    >>> stochastic_tasks = generator.get_tasks_by_category("stochastic")
+    >>>
+    >>> # Generate random pattern from category
+    >>> task_name, data = generator.generate_random_pattern(category="financial")
+
+Custom Pattern Generation:
+    >>> # Create custom trend pattern
+    >>> custom_trend = generator.generate_custom_pattern(
+    ...     "trend",
+    ...     trend_type="polynomial",
+    ...     coefficients=[0, 0.002, -1e-6],
+    ...     noise_level=0.05
+    ... )
+    >>>
+    >>> # Create custom ARMA process
+    >>> custom_arma = generator.generate_custom_pattern(
+    ...     "stochastic",
+    ...     process_type="arma",
+    ...     ar_coeffs=[0.8, -0.3],
+    ...     ma_coeffs=[0.4],
+    ...     noise_std=0.1
+    ... )
+
+Multi-Task Dataset Creation:
+    >>> # Create dataset for multiple forecasting tasks
+    >>> selected_tasks = [
+    ...     "linear_trend_strong", "multi_seasonal", "arma_process",
+    ...     "garch_low_vol", "intermittent_demand"
+    ... ]
+    >>>
+    >>> dataset = {}
+    >>> for task_name in selected_tasks:
+    ...     task_data = []
+    ...     for i in range(100):  # 100 series per task
+    ...         config = TimeSeriesConfig(n_samples=200, random_seed=42 + i)
+    ...         gen = TimeSeriesGenerator(config)
+    ...         series = gen.generate_task_data(task_name)
+    ...         task_data.append(series)
+    ...     dataset[task_name] = np.array(task_data)
+
+Integration with Deep Learning:
+    >>> import keras
+    >>> from dl_techniques.models.nbeats import create_nbeats_model
+    >>>
+    >>> # Generate training data
+    >>> config = TimeSeriesConfig(n_samples=1000)
+    >>> generator = TimeSeriesGenerator(config)
+    >>> training_patterns = generator.generate_all_patterns()
+    >>>
+    >>> # Prepare data for N-BEATS model
+    >>> model = create_nbeats_model(
+    ...     backcast_length=100,
+    ...     forecast_length=20,
+    ...     stack_types=['trend', 'seasonality', 'generic']
+    ... )
+    >>>
+    >>> # Train on synthetic patterns
+    >>> for pattern_name, series in training_patterns.items():
+    ...     # Create input-output pairs and train model
+    ...     pass
+
+Available Patterns
+------------------
+The generator includes the following predefined patterns:
+
+**Trend Patterns (8 patterns):**
+* linear_trend_strong, linear_trend_weak
+* exponential_growth, polynomial_trend, quadratic_trend, cubic_trend
+* logistic_growth, logarithmic_trend
+
+**Seasonal Patterns (7 patterns):**
+* daily_seasonality, weekly_seasonality, hourly_seasonality, yearly_seasonality
+* multi_seasonal, complex_seasonal, triple_seasonal
+
+**Composite Patterns (4 patterns):**
+* trend_daily_seasonal, trend_weekly_seasonal
+* exp_trend_multi_seasonal, poly_trend_complex_seasonal
+
+**Stochastic Processes (7 patterns):**
+* random_walk, ar_process, ma_process, arma_process
+* mean_reverting, ar_high_order, ma_high_order
+
+**Financial Patterns (5 patterns):**
+* stock_returns, commodity_prices, interest_rates
+* currency_exchange, crypto_prices
+
+**Weather Patterns (4 patterns):**
+* temperature_daily, precipitation, humidity, wind_speed
+
+**Network Patterns (4 patterns):**
+* web_traffic, server_load, network_latency, bandwidth_usage
+
+**Biomedical Patterns (4 patterns):**
+* heartbeat, brain_waves, blood_pressure, respiratory_rate
+
+**Industrial Patterns (4 patterns):**
+* machine_vibration, energy_consumption, production_rate, temperature_sensor
+
+**Advanced Patterns:**
+* intermittent_demand, lumpy_demand, sparse_events (3 patterns)
+* garch_low_vol, garch_high_vol, garch_persistent (3 patterns)
+* regime_switching, multi_regime_switching (2 patterns)
+* level_shift, trend_change, variance_break (3 patterns)
+* additive_outliers, innovation_outliers, level_outliers (3 patterns)
+* henon_map, lorenz_x, lorenz_y, mackey_glass (4 patterns)
+
+Configuration Parameters
+------------------------
+The TimeSeriesConfig class provides extensive customization options:
+
+* **n_samples**: Number of time steps (default: 5000)
+* **random_seed**: Random seed for reproducibility (default: 42)
+* **default_noise_level**: Base noise level (default: 0.1)
+* **trend_strengths**: Range of trend strengths (default: (0.00005, 0.01))
+* **seasonal_periods**: Available seasonal periods (default: [12, 24, 48, ...])
+* **seasonal_amplitudes**: Range of seasonal amplitudes (default: (0.2, 3.0))
+* **ar_coeffs_range**: Range for AR coefficients (default: (-0.8, 0.8))
+* **ma_coeffs_range**: Range for MA coefficients (default: (-0.8, 0.8))
+* **volatility_range**: Range for volatility parameters (default: (0.01, 0.3))
+
+Notes
+-----
+* All generated time series are returned as numpy arrays with shape (n_samples, 1)
+* The generator uses a seeded random state for reproducible results
+* Patterns are designed to be challenging for different types of forecasting models
+* Domain-specific patterns include realistic parameter ranges and behaviors
+* Custom patterns can be created by directly calling generator methods with parameters
+
+Dependencies
+------------
+* numpy: Numerical computing and array operations
+* scipy: Scientific computing (used in some pattern generators)
+* dataclasses: Configuration class definition
+* typing: Type hints for better code documentation
+
+References
+----------
+The patterns implemented in this generator are based on established time series
+models and real-world phenomena documented in forecasting literature, including:
+
+* Box, G. E. P., & Jenkins, G. M. (1976). Time Series Analysis: Forecasting and Control
+* Hyndman, R. J., & Athanasopoulos, G. (2018). Forecasting: Principles and Practice
+* Hamilton, J. D. (1994). Time Series Analysis
+* Tsay, R. S. (2010). Analysis of Financial Time Series
+
+The chaotic systems implementations follow standard formulations:
+* Henon, M. (1976). A two-dimensional mapping with a strange attractor
+* Lorenz, E. N. (1963). Deterministic nonperiodic flow
+* Mackey, M. C., & Glass, L. (1977). Oscillation and chaos in physiological control systems
 """
 
 import numpy as np

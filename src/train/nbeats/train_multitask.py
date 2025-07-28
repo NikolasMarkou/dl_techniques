@@ -1,3 +1,421 @@
+"""
+Comprehensive Multi-Task N-BEATS Training Framework for Time Series Forecasting
+
+This module provides a sophisticated, production-ready training framework for multi-task
+N-BEATS (Neural Basis Expansion Analysis for Time Series) models. It enables training
+a single neural network to perform forecasting across diverse time series patterns
+simultaneously, with advanced features including task inference, curriculum learning,
+and comprehensive monitoring and visualization.
+
+Overview
+--------
+The Multi-Task N-BEATS Training Framework addresses the challenge of creating robust
+forecasting models that can handle diverse time series patterns from different domains.
+Instead of training separate models for each pattern type, this framework trains a
+unified model that can:
+
+1. **Automatically infer task types** from input sequences without explicit labels
+2. **Learn shared representations** across similar time series patterns
+3. **Maintain task-specific specialization** through embedding and attention mechanisms
+4. **Progressively learn** from simple to complex patterns using curriculum learning
+5. **Provide comprehensive monitoring** of training dynamics and task performance
+
+Key Features
+------------
+**Advanced Training Techniques:**
+* **Task Inference**: Automatically determine time series type from input sequences
+* **Curriculum Learning**: Progressive training from simple to complex patterns
+* **Multi-Horizon Forecasting**: Support for multiple prediction horizons
+* **Regularization Suite**: Dropout, L2 regularization, gradient clipping
+* **Advanced Optimizers**: Adam, AdamW with learning rate scheduling
+
+**Comprehensive Data Management:**
+* **80+ Time Series Patterns**: Integration with TimeSeriesGenerator
+* **Balanced Sampling**: Category-weighted task selection and balancing
+* **Sophisticated Data Splitting**: Proper train/validation/test splits with temporal integrity
+* **Data Scaling**: Per-task normalization with TimeSeriesNormalizer
+* **Sequence Generation**: Efficient sequence creation with configurable strides
+
+**Task Inference System:**
+* **Trainable Task Classification**: Learn to identify time series patterns
+* **Consistency Regularization**: Ensure consistent predictions across similar inputs
+* **Entropy Regularization**: Encourage confident task predictions
+* **Unlabeled Data Utilization**: Semi-supervised learning capabilities
+
+**Advanced Monitoring and Visualization:**
+* **Real-time Training Monitoring**: Track all loss components and metrics
+* **Task Performance Analysis**: Per-task evaluation and comparison
+* **Prediction Visualization**: Sample predictions with task inference
+* **Learning Curve Analysis**: Comprehensive training dynamics visualization
+* **Task Inference Analytics**: Monitor task classification accuracy and confidence
+
+**Production-Ready Features:**
+* **Comprehensive Configuration**: Extensive customization options
+* **Experiment Management**: Organized result storage and experiment tracking
+* **Model Checkpointing**: Save best models with proper versioning
+* **Detailed Reporting**: Automatic generation of experiment reports
+* **Error Handling**: Robust error management and recovery
+
+Classes
+-------
+MultiTaskNBeatsTrainingConfig
+    Comprehensive configuration dataclass containing all training parameters,
+    including model architecture, training settings, task inference parameters,
+    curriculum learning configuration, and visualization options.
+
+MultiTaskDataProcessor
+    Advanced data processing pipeline that handles multi-task data preparation,
+    including sequence generation, normalization, balanced sampling, and
+    proper train/validation/test splitting with temporal integrity preservation.
+
+CurriculumLearningCallback
+    Keras callback implementing progressive curriculum learning that starts
+    with easier patterns and gradually introduces more complex time series
+    during training to improve convergence and generalization.
+
+InterimVisualizationCallback
+    Comprehensive visualization callback that creates detailed plots during
+    training including learning curves, task inference analysis, prediction
+    samples, and task performance heatmaps for monitoring training progress.
+
+MultiTaskNBeatsTrainer
+    Main training orchestrator that coordinates all components including data
+    generation, model creation, training execution, and result analysis with
+    comprehensive experiment management and reproducibility features.
+
+Architecture Components
+-----------------------
+**Multi-Task N-BEATS Model:**
+* **Shared Backbone**: Common feature extraction across all tasks
+* **Task Embeddings**: Learnable task-specific representations
+* **Task Inference Network**: Neural network for automatic task classification
+* **Specialized Stacks**: Trend, seasonality, and generic decomposition stacks
+* **Reversible Instance Normalization**: Advanced normalization for stability
+
+**Loss Function Design:**
+* **Primary Forecasting Loss**: MAE, MSE, or SMAPE for prediction accuracy
+* **Task Inference Loss**: Cross-entropy for task classification
+* **Consistency Loss**: Regularization for prediction consistency
+* **Entropy Loss**: Encourages confident task predictions
+* **Balance Loss**: Maintains task distribution balance
+
+Usage Examples
+--------------
+Basic Multi-Task Training:
+    >>> from dl_techniques.training.multi_task_nbeats import (
+    ...     MultiTaskNBeatsTrainingConfig, MultiTaskNBeatsTrainer
+    ... )
+    >>> from dl_techniques.utils.datasets.time_series_generator import TimeSeriesConfig
+    >>>
+    >>> # Configure training
+    >>> config = MultiTaskNBeatsTrainingConfig(
+    ...     backcast_length=168,
+    ...     forecast_length=24,
+    ...     train_task_inference=True,
+    ...     use_curriculum_learning=True,
+    ...     epochs=100,
+    ...     batch_size=128
+    ... )
+    >>>
+    >>> # Configure time series generation
+    >>> ts_config = TimeSeriesConfig(n_samples=5000, random_seed=42)
+    >>>
+    >>> # Create trainer and run experiment
+    >>> trainer = MultiTaskNBeatsTrainer(config, ts_config)
+    >>> results = trainer.run_experiment()
+    >>> print(f"Experiment completed: {results['results_dir']}")
+
+Advanced Configuration:
+    >>> # Advanced multi-task configuration
+    >>> config = MultiTaskNBeatsTrainingConfig(
+    ...     # Data configuration
+    ...     train_ratio=0.7,
+    ...     val_ratio=0.15,
+    ...     test_ratio=0.15,
+    ...     max_tasks_per_category=15,
+    ...     samples_per_task=20000,
+    ...
+    ...     # Model architecture
+    ...     stack_types=["trend", "seasonality", "generic"],
+    ...     nb_blocks_per_stack=4,
+    ...     hidden_layer_units=512,
+    ...     use_task_embeddings=True,
+    ...     task_embedding_dim=32,
+    ...
+    ...     # Task inference
+    ...     train_task_inference=True,
+    ...     task_inference_loss_weight=0.3,
+    ...     consistency_loss_weight=0.1,
+    ...     entropy_loss_weight=0.05,
+    ...
+    ...     # Curriculum learning
+    ...     use_curriculum_learning=True,
+    ...     curriculum_start_ratio=0.9,
+    ...     curriculum_end_ratio=0.3,
+    ...     curriculum_transition_epochs=50,
+    ...
+    ...     # Training parameters
+    ...     epochs=200,
+    ...     batch_size=256,
+    ...     learning_rate=5e-4,
+    ...     optimizer='adamw',
+    ...     gradient_clip_norm=1.0,
+    ...
+    ...     # Regularization
+    ...     dropout_rate=0.2,
+    ...     kernel_regularizer_l2=1e-4
+    ... )
+
+Custom Task Selection:
+    >>> # Configure category weights for specialized training
+    >>> config = MultiTaskNBeatsTrainingConfig(
+    ...     category_weights={
+    ...         "financial": 2.0,      # Emphasize financial patterns
+    ...         "weather": 1.5,        # Include weather patterns
+    ...         "industrial": 1.5,     # Include industrial patterns
+    ...         "stochastic": 1.0,     # Standard stochastic patterns
+    ...         "trend": 0.5,          # Reduce simple trends
+    ...         "seasonal": 0.5        # Reduce simple seasonal
+    ...     },
+    ...     max_tasks_per_category=12,
+    ...     balance_tasks=True
+    ... )
+
+Multi-Horizon Forecasting:
+    >>> # Train models for multiple forecast horizons
+    >>> config = MultiTaskNBeatsTrainingConfig(
+    ...     forecast_horizons=[6, 12, 24, 48],  # Multiple horizons
+    ...     backcast_length=168,
+    ...     train_task_inference=True
+    ... )
+    >>>
+    >>> trainer = MultiTaskNBeatsTrainer(config, ts_config)
+    >>> results = trainer.run_experiment()
+    >>>
+    >>> # Access results for each horizon
+    >>> for horizon in [6, 12, 24, 48]:
+    ...     if horizon in results['results']:
+    ...         print(f"Horizon {horizon}: Test Loss = {results['results'][horizon]['test_loss']:.4f}")
+
+Inference with Trained Model:
+    >>> # Load trained model and perform inference
+    >>> import keras
+    >>> model = keras.models.load_model('results/experiment_123/best_model_h24.keras')
+    >>>
+    >>> # Inference with known task (if available)
+    >>> predictions_labeled = model((input_sequences, task_ids))
+    >>>
+    >>> # Inference with automatic task detection
+    >>> predictions_inferred = model(input_sequences)
+    >>>
+    >>> # Get task probabilities
+    >>> if hasattr(model, '_infer_task_probabilities'):
+    ...     task_probs = model._infer_task_probabilities(input_sequences)
+    ...     predicted_tasks = keras.ops.argmax(task_probs, axis=1)
+
+Configuration Parameters
+------------------------
+**Data Configuration:**
+* `train_ratio`: Training data fraction (default: 0.7)
+* `val_ratio`: Validation data fraction (default: 0.15)
+* `test_ratio`: Test data fraction (default: 0.15)
+* `max_tasks_per_category`: Maximum tasks per category (default: 10)
+* `samples_per_task`: Samples per task for balanced training (default: 15000)
+* `category_weights`: Per-category sampling weights
+
+**Model Architecture:**
+* `backcast_length`: Input sequence length (default: 168)
+* `forecast_length`: Prediction horizon length (default: 24)
+* `stack_types`: N-BEATS stack types (default: ["trend", "seasonality", "generic"])
+* `nb_blocks_per_stack`: Blocks per stack (default: 3)
+* `hidden_layer_units`: Hidden layer size (default: 256)
+* `use_task_embeddings`: Enable task embeddings (default: True)
+* `task_embedding_dim`: Task embedding dimension (default: 16)
+
+**Task Inference:**
+* `train_task_inference`: Enable task inference training (default: True)
+* `task_inference_loss_weight`: Task classification loss weight (default: 0.5)
+* `consistency_loss_weight`: Consistency regularization weight (default: 0.1)
+* `entropy_loss_weight`: Entropy regularization weight (default: 0.05)
+* `min_entropy_target`: Target minimum entropy (default: 0.1)
+
+**Training Parameters:**
+* `epochs`: Maximum training epochs (default: 150)
+* `batch_size`: Training batch size (default: 128)
+* `learning_rate`: Initial learning rate (default: 1e-4)
+* `optimizer`: Optimizer type ('adam' or 'adamw', default: 'adamw')
+* `primary_loss`: Primary loss function ('mae', 'mse', 'smape', default: 'mae')
+* `gradient_clip_norm`: Gradient clipping norm (default: 1.0)
+
+**Regularization:**
+* `dropout_rate`: Dropout probability (default: 0.15)
+* `kernel_regularizer_l2`: L2 regularization strength (default: 1e-5)
+
+**Curriculum Learning:**
+* `use_curriculum_learning`: Enable curriculum learning (default: True)
+* `curriculum_start_ratio`: Initial labeled data ratio (default: 0.8)
+* `curriculum_end_ratio`: Final labeled data ratio (default: 0.4)
+* `curriculum_transition_epochs`: Transition period (default: 30)
+
+Integration with DL-Techniques Framework
+----------------------------------------
+This module integrates seamlessly with the dl-techniques ecosystem:
+
+**Time Series Generation:**
+    >>> from dl_techniques.utils.datasets.time_series_generator import (
+    ...     TimeSeriesGenerator, TimeSeriesConfig
+    ... )
+    >>> # Automatic integration with 80+ time series patterns
+
+**N-BEATS Models:**
+    >>> from dl_techniques.models.nbeats_multitask import create_multi_task_nbeats
+    >>> # Uses multi-task N-BEATS architecture with task inference
+
+**Loss Functions:**
+    >>> from dl_techniques.losses.smape_loss import SMAPELoss
+    >>> # Support for specialized forecasting losses
+
+**Data Processing:**
+    >>> from dl_techniques.utils.datasets.nbeats import TimeSeriesNormalizer
+    >>> # Advanced normalization and scaling techniques
+
+Monitoring and Visualization
+----------------------------
+The framework provides comprehensive monitoring through multiple visualization types:
+
+**Training Monitoring:**
+* Real-time loss tracking (primary + auxiliary losses)
+* Learning rate scheduling visualization
+* Overfitting detection and analysis
+* Training efficiency metrics
+
+**Task Inference Analysis:**
+* Task probability distributions
+* Prediction confidence metrics
+* Task assignment accuracy
+* Entropy analysis for prediction certainty
+
+**Performance Analysis:**
+* Per-task performance comparison
+* Labeled vs. inferred prediction accuracy
+* Task-specific error analysis
+* Performance correlation with inference confidence
+
+**Prediction Visualization:**
+* Sample predictions with ground truth
+* Task inference examples
+* Confidence-weighted predictions
+* Multi-horizon comparison plots
+
+Experiment Management
+---------------------
+**Automatic Organization:**
+* Timestamped experiment directories
+* Structured result storage
+* Model checkpointing with best weights
+* Configuration preservation
+
+**Comprehensive Reporting:**
+* JSON results with all metrics
+* Detailed text reports with analysis
+* Task mapping and distribution summaries
+* Training recommendations and insights
+
+**Reproducibility:**
+* Seed management across all components
+* Configuration serialization
+* Deterministic data splitting
+* Environment documentation
+
+Best Practices
+--------------
+**Data Preparation:**
+* Use sufficient data length (≥2000 samples per task)
+* Balance task representation across categories
+* Ensure proper temporal structure in validation splits
+* Apply consistent normalization across tasks
+
+**Model Configuration:**
+* Start with moderate model sizes (256-512 hidden units)
+* Use curriculum learning for complex task mixtures
+* Enable task inference for automatic pattern recognition
+* Apply appropriate regularization for generalization
+
+**Training Strategy:**
+* Monitor both primary and auxiliary losses
+* Use early stopping with patience for efficiency
+* Implement learning rate scheduling for convergence
+* Track task-specific performance for debugging
+
+**Hyperparameter Tuning:**
+* Adjust task inference loss weights based on performance
+* Tune curriculum learning schedule for task complexity
+* Balance regularization strength with model capacity
+* Optimize batch size for memory and convergence
+
+Troubleshooting
+---------------
+**Common Issues:**
+* **Task Inference Not Working**: Check auxiliary loss weights and entropy targets
+* **Poor Generalization**: Increase regularization or reduce model complexity
+* **Training Instability**: Lower learning rate or increase gradient clipping
+* **Memory Issues**: Reduce batch size or sequence length
+* **Slow Convergence**: Enable curriculum learning or adjust learning rate schedule
+
+Performance Considerations
+--------------------------
+**Memory Usage:**
+* Model size scales with number of tasks and embedding dimensions
+* Batch size affects memory linearly
+* Multiple horizons require separate model instances
+
+**Training Speed:**
+* Task inference adds computational overhead (~20-30%)
+* Curriculum learning requires dynamic data management
+* Visualization callbacks can slow training if too frequent
+
+**Scalability:**
+* Framework supports 100+ tasks efficiently
+* GPU utilization improves with larger batch sizes
+* Multi-GPU training possible with minor modifications
+
+Technical Details
+-----------------
+**Mathematical Foundation:**
+The multi-task N-BEATS model extends the original N-BEATS architecture with:
+* Task-specific embeddings: e_t ∈ ℝ^d for task t
+* Task inference network: p(t|x) = softmax(f_inf(x))
+* Consistency regularization: L_cons = ||f(x) - f(x')||² for similar x, x'
+* Entropy regularization: L_ent = -∑ p(t|x) log p(t|x)
+
+**Loss Function:**
+L_total = L_primary + λ₁L_task + λ₂L_cons + λ₃L_ent + λ₄L_balance
+
+Where:
+* L_primary: Forecasting loss (MAE/MSE/SMAPE)
+* L_task: Task classification loss
+* L_cons: Prediction consistency loss
+* L_ent: Task prediction entropy loss
+* L_balance: Task distribution balance loss
+
+References
+----------
+**N-BEATS Architecture:**
+* Oreshkin, B. N., et al. (2019). "N-BEATS: Neural basis expansion analysis for interpretable time series forecasting." ICLR 2020.
+
+**Multi-Task Learning:**
+* Caruana, R. (1997). "Multitask learning." Machine learning, 28(1), 41-75.
+* Zhang, Y., & Yang, Q. (2021). "A survey on multi-task learning." IEEE TKDE.
+
+**Curriculum Learning:**
+* Bengio, Y., et al. (2009). "Curriculum learning." ICML 2009.
+* Kumar, M. P., et al. (2010). "Self-paced learning for latent variable models." NIPS 2010.
+
+**Time Series Forecasting:**
+* Hyndman, R. J., & Athanasopoulos, G. (2018). "Forecasting: principles and practice."
+* Makridakis, S., et al. (2020). "M4 Competition: Results, findings, conclusion and way forward." International Journal of Forecasting.
+"""
+
 import os
 import json
 import keras

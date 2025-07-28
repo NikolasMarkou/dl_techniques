@@ -1,14 +1,320 @@
 """
-Multi-Task N-BEATS Model Implementation with Trainable Task Inference
+Multi-Task N-BEATS Model with Trainable Task Inference for Time Series Forecasting
 
-This module provides a multi-task variant of the N-BEATS architecture that can
-simultaneously learn multiple time series forecasting tasks with task-specific
-embeddings and trainable task inference. The model can learn to automatically
-infer appropriate task adjustments even when task IDs are not provided during training.
+This module provides a sophisticated multi-task variant of the N-BEATS (Neural Basis
+Expansion Analysis for Time Series) architecture that can simultaneously learn multiple
+time series forecasting tasks with task-specific embeddings and trainable task inference.
+The model represents a significant advancement in unified time series forecasting, capable
+of automatically adapting to different time series patterns without explicit task labels.
 
-References:
-    - Oreshkin, B. N., et al. "N-BEATS: Neural basis expansion analysis for interpretable time series forecasting." ICLR 2020.
-    - Multi-task learning principles adapted for time series forecasting
+Overview
+--------
+Traditional time series forecasting approaches require separate models for different
+types of patterns (trend, seasonal, financial, etc.), leading to inefficient resource
+usage and limited knowledge transfer. This Multi-Task N-BEATS implementation addresses
+these limitations by:
+
+1. **Unified Architecture**: Single model handling diverse time series patterns
+2. **Automatic Task Inference**: Learn to identify time series types from data alone
+3. **Task-Specific Adaptations**: Specialized adjustments while sharing core representations
+4. **Knowledge Transfer**: Leverage similarities between related forecasting tasks
+5. **Semi-Supervised Learning**: Train on both labeled and unlabeled time series data
+
+The model extends the original N-BEATS architecture with task embeddings, task inference
+networks, and specialized loss functions that enable robust multi-task learning with
+automatic pattern recognition capabilities.
+
+Key Features
+------------
+**Advanced Architecture Components:**
+* **Task Embedding System**: Learnable representations for different time series types
+* **Task Inference Network**: Automatic classification of time series patterns
+* **Weighted Task Adjustment**: Probability-based adaptation of predictions
+* **Shared N-BEATS Backbone**: Common feature extraction across all tasks
+* **Graph-Compatible Design**: Full TensorFlow graph mode compatibility
+
+**Training Innovations:**
+* **Multi-Objective Learning**: Primary forecasting + auxiliary task inference losses
+* **Consistency Regularization**: Ensure similar series receive similar task classifications
+* **Entropy Regularization**: Encourage confident task predictions
+* **Balance Regularization**: Maintain uniform task distribution during training
+* **Gradient Clipping**: Stable training with multiple loss components
+
+**Flexible Inference Modes:**
+* **Supervised Mode**: Use explicit task IDs when available
+* **Semi-Supervised Mode**: Automatic task inference from input sequences
+* **Hybrid Mode**: Combine labeled and unlabeled data during training
+* **Confidence Estimation**: Probability distributions over task assignments
+
+**Production-Ready Features:**
+* **Model Serialization**: Complete save/load support with custom components
+* **Configurable Architecture**: Extensive customization through configuration objects
+* **Comprehensive Metrics**: Track all loss components and training dynamics
+* **Memory Efficient**: Optimized implementation for large-scale deployment
+
+Classes
+-------
+MultiTaskNBeatsConfig
+    Comprehensive configuration dataclass containing all model parameters including
+    architecture settings, task inference parameters, training configurations, and
+    regularization options. Provides sensible defaults for all components.
+
+MultiTaskNBeatsNet
+    Main multi-task N-BEATS model class implementing the complete architecture with
+    task embeddings, task inference network, and specialized training procedures.
+    Inherits from keras.Model with full graph compatibility.
+
+Architecture Details
+--------------------
+**Model Components:**
+
+1. **Input Processing**:
+   - Time series sequences (batch_size, backcast_length, features)
+   - Optional task IDs (batch_size,) for supervised training
+   - Automatic shape inference and validation
+
+2. **Task Embedding Layer**:
+   - Learnable embeddings for each task type
+   - Configurable embedding dimension
+   - Used for task-specific adjustments
+
+3. **Task Inference Network**:
+   - Convolutional feature extraction for pattern recognition
+   - Global pooling for statistical feature aggregation
+   - Multi-layer perceptron for task classification
+   - Softmax output for task probability distribution
+
+4. **Base N-BEATS Model**:
+   - Standard N-BEATS architecture with stacks (trend, seasonality, generic)
+   - Configurable number of blocks per stack
+   - Optional Reversible Instance Normalization (RevIN)
+
+5. **Task Adjustment Layer**:
+   - Dense layer for task-specific prediction modifications
+   - Weighted combination based on task probabilities
+   - Configurable adjustment strength
+
+**Loss Function Design:**
+The model optimizes multiple objectives simultaneously:
+* **Primary Loss**: Standard forecasting loss (MAE, MSE, or SMAPE)
+* **Task Inference Loss**: Cross-entropy for task classification accuracy
+* **Consistency Loss**: KL-divergence for similar series consistency
+* **Entropy Loss**: Encourages confident task predictions
+* **Balance Loss**: Maintains uniform task distribution
+
+Usage Examples
+--------------
+Basic Multi-Task Model Creation:
+    >>> from dl_techniques.models.nbeats_multitask import (
+    ...     create_multi_task_nbeats, MultiTaskNBeatsConfig
+    ... )
+    >>>
+    >>> # Define task mapping
+    >>> task_to_id = {
+    ...     'trend_strong': 0, 'seasonal_daily': 1, 'financial_stock': 2,
+    ...     'weather_temp': 3, 'network_traffic': 4
+    ... }
+    >>>
+    >>> # Configure model
+    >>> config = MultiTaskNBeatsConfig(
+    ...     backcast_length=168,
+    ...     use_task_embeddings=True,
+    ...     use_task_inference=True,
+    ...     train_task_inference=True,
+    ...     task_embedding_dim=32,
+    ...     stack_types=['trend', 'seasonality', 'generic']
+    ... )
+    >>>
+    >>> # Create model
+    >>> model = create_multi_task_nbeats(
+    ...     config=config,
+    ...     num_tasks=len(task_to_id),
+    ...     task_to_id=task_to_id,
+    ...     forecast_length=24
+    ... )
+    >>>
+    >>> # Build and compile
+    >>> sample_input = (tf.random.normal([32, 168, 1]), tf.zeros([32], dtype=tf.int32))
+    >>> model(sample_input)  # Build the model
+    >>> model.compile(optimizer='adam', loss='mae')
+
+Advanced Configuration:
+    >>> # Advanced multi-task configuration
+    >>> advanced_config = MultiTaskNBeatsConfig(
+    ...     # Architecture
+    ...     backcast_length=336,
+    ...     use_task_embeddings=True,
+    ...     task_embedding_dim=64,
+    ...     use_task_inference=True,
+    ...     task_inference_hidden_dim=256,
+    ...
+    ...     # Task inference network
+    ...     task_inference_use_conv=True,
+    ...     task_inference_conv_filters=[32, 64, 128],
+    ...     task_inference_conv_kernels=[7, 5, 3],
+    ...     task_inference_dropout=0.2,
+    ...
+    ...     # Training parameters
+    ...     train_task_inference=True,
+    ...     task_inference_loss_weight=0.3,
+    ...     consistency_loss_weight=0.1,
+    ...     entropy_loss_weight=0.05,
+    ...     min_entropy_target=0.1,
+    ...
+    ...     # N-BEATS parameters
+    ...     stack_types=['trend', 'seasonality', 'generic'],
+    ...     nb_blocks_per_stack=4,
+    ...     hidden_layer_units=512,
+    ...     use_revin=True,
+    ...
+    ...     # Regularization
+    ...     dropout_rate=0.15,
+    ...     kernel_regularizer_l2=1e-4,
+    ...     gradient_clip_norm=1.0
+    ... )
+
+Training with Multiple Input Modes:
+    >>> # Prepare training data
+    >>> # Supervised training (with task IDs)
+    >>> x_supervised = tf.random.normal([1000, 168, 1])
+    >>> y_supervised = tf.random.normal([1000, 24, 1])
+    >>> task_ids_supervised = tf.random.uniform([1000], 0, 5, dtype=tf.int32)
+    >>>
+    >>> # Semi-supervised training (without task IDs)
+    >>> x_unsupervised = tf.random.normal([500, 168, 1])
+    >>> y_unsupervised = tf.random.normal([500, 24, 1])
+    >>>
+    >>> # Training step with labeled data
+    >>> with tf.GradientTape() as tape:
+    ...     # Forward pass with task IDs
+    ...     pred_supervised, aux_losses = model(
+    ...         (x_supervised, task_ids_supervised),
+    ...         training=True,
+    ...         return_aux_losses=True
+    ...     )
+    ...     primary_loss = tf.reduce_mean(tf.abs(y_supervised - pred_supervised))
+    ...
+    ...     # Add auxiliary losses for task inference training
+    ...     total_loss = primary_loss
+    ...     for loss_name, loss_value in aux_losses.items():
+    ...         if loss_name == 'entropy_loss':
+    ...             total_loss += config.entropy_loss_weight * loss_value
+    ...         elif loss_name == 'consistency_loss':
+    ...             total_loss += config.consistency_loss_weight * loss_value
+    >>>
+    >>> # Training step with unlabeled data (task inference only)
+    >>> pred_unsupervised = model(x_unsupervised, training=True)
+
+Inference with Task Inference:
+    >>> # Automatic task detection and prediction
+    >>> test_sequences = tf.random.normal([10, 168, 1])
+    >>>
+    >>> # Get predictions with automatic task inference
+    >>> predictions = model.predict_with_task_inference(test_sequences.numpy())
+    >>>
+    >>> # Get predictions with task probabilities
+    >>> predictions, task_probs = model.predict_with_task_inference(
+    ...     test_sequences.numpy(),
+    ...     return_task_probs=True
+    ... )
+    >>>
+    >>> # Show predicted tasks
+    >>> predicted_task_ids = np.argmax(task_probs, axis=1)
+    >>> for i, (task_id, probs) in enumerate(zip(predicted_task_ids, task_probs)):
+    ...     confidence = np.max(probs)
+    ...     task_name = model.get_task_name(task_id)
+    ...     print(f"Series {i}: Predicted task '{task_name}' with confidence {confidence:.3f}")
+
+Single Task Prediction:
+    >>> # Predict for specific known task
+    >>> financial_data = tf.random.normal([5, 168, 1])
+    >>> financial_predictions = model.predict_single_task(
+    ...     financial_data.numpy(),
+    ...     task_name='financial_stock'
+    ... )
+
+Model Analysis and Interpretation:
+    >>> # Analyze task inference capabilities
+    >>> test_data = tf.random.normal([100, 168, 1])
+    >>> task_probabilities = model._infer_task_probabilities(test_data, training=False)
+    >>>
+    >>> # Compute prediction confidence
+    >>> max_probs = tf.reduce_max(task_probabilities, axis=1)
+    >>> avg_confidence = tf.reduce_mean(max_probs)
+    >>> print(f"Average task inference confidence: {avg_confidence:.3f}")
+    >>>
+    >>> # Analyze task distribution
+    >>> predicted_tasks = tf.argmax(task_probabilities, axis=1)
+    >>> task_counts = tf.math.bincount(predicted_tasks, minlength=model.num_tasks)
+    >>> print(f"Task distribution: {task_counts.numpy()}")
+
+Model Serialization:
+    >>> # Save complete model with custom components
+    >>> model.save('multi_task_nbeats_model.keras')
+    >>>
+    >>> # Load model (requires custom_objects for complex components)
+    >>> loaded_model = keras.models.load_model(
+    ...     'multi_task_nbeats_model.keras',
+    ...     custom_objects={'MultiTaskNBeatsNet': MultiTaskNBeatsNet}
+    ... )
+    >>>
+    >>> # Verify task mapping preservation
+    >>> print(f"Original tasks: {model.task_to_id}")
+    >>> print(f"Loaded tasks: {loaded_model.task_to_id}")
+
+Configuration Parameters
+------------------------
+**Architecture Parameters:**
+* `backcast_length`: Input sequence length (default: 168)
+* `use_task_embeddings`: Enable task-specific embeddings (default: True)
+* `task_embedding_dim`: Task embedding dimension (default: 32)
+* `use_task_inference`: Enable automatic task inference (default: True)
+* `task_inference_hidden_dim`: Task inference network hidden dimension (default: 128)
+
+**Task Inference Network:**
+* `task_inference_use_conv`: Use convolutional feature extraction (default: True)
+* `task_inference_conv_filters`: Convolutional layer filter sizes (default: [16, 32, 64])
+* `task_inference_conv_kernels`: Convolutional kernel sizes (default: [7, 5, 3])
+* `task_inference_dropout`: Dropout rate in task inference network (default: 0.1)
+* `task_inference_activation`: Activation function (default: 'gelu')
+
+**Training Parameters:**
+* `train_task_inference`: Enable task inference training (default: True)
+* `task_inference_loss_weight`: Weight for task classification loss (default: 0.5)
+* `consistency_loss_weight`: Weight for consistency regularization (default: 0.1)
+* `entropy_loss_weight`: Weight for entropy regularization (default: 0.05)
+* `min_entropy_target`: Target minimum entropy for predictions (default: 0.1)
+
+**N-BEATS Parameters:**
+* `stack_types`: Types of N-BEATS stacks (default: ['trend', 'seasonality', 'generic'])
+* `nb_blocks_per_stack`: Number of blocks per stack (default: 3)
+* `hidden_layer_units`: Hidden layer size in N-BEATS blocks (default: 512)
+* `use_revin`: Enable Reversible Instance Normalization (default: True)
+
+**Regularization:**
+* `dropout_rate`: Dropout rate in N-BEATS blocks (default: 0.1)
+* `kernel_regularizer_l2`: L2 regularization strength (default: 1e-5)
+* `gradient_clip_norm`: Gradient clipping norm (default: 1.0)
+
+**Optimization:**
+* `optimizer`: Optimizer type ('adam' or 'adamw', default: 'adamw')
+* `primary_loss`: Primary forecasting loss ('mae', 'mse', 'smape', default: 'mae')
+* `learning_rate`: Initial learning rate (default: 1e-3)
+
+Technical Implementation Details
+
+**Task Inference Algorithm:**
+1. **Feature Extraction**: Extract statistical and convolutional features from input sequences
+2. **Pattern Recognition**: Multi-layer neural network processes features
+3. **Probability Estimation**: Softmax layer outputs task probabilities
+4. **Weighted Adjustment**: Task-specific adjustments weighted by probabilities
+
+**Loss Function Components:**
+* **Primary Loss**: L(y, ŷ) where ŷ is the forecasting prediction
+* **Task Inference Loss**: -∑ log p(t|x) for true task t
+* **Consistency Loss**: KL(sim(x_i, x_j) || sim(p_i, p_j)) for input similarity
+* **Entropy Loss**: max(0, H(p(t|x)) - H_min) to encourage confidence
+* **Balance Loss**: KL(p̄(t) || uniform) for task distribution balance
 """
 
 import keras
@@ -40,7 +346,7 @@ class MultiTaskNBeatsConfig:
     task_inference_conv_kernels: List[int] = None
     task_inference_conv_activation: str = 'gelu'
 
-    # Task inference training parameters - FIXED WEIGHTS
+    # Task inference training parameters
     train_task_inference: bool = True
     task_inference_loss_weight: float = 0.5
     consistency_loss_weight: float = 0.1
@@ -305,13 +611,13 @@ class MultiTaskNBeatsNet(keras.Model):
             task_probs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> Dict[str, keras.KerasTensor]:
-        """Compute auxiliary losses for task inference training - GRAPH MODE FIXED."""
+        """Compute auxiliary losses for task inference training """
         losses = {}
 
         if not training or not self.config.train_task_inference:
             return losses
 
-        # 1. FIXED Entropy regularization loss
+        # 1. Entropy regularization loss
         # Encourage confident predictions but not too extreme
         entropy = -keras.ops.sum(task_probs * keras.ops.log(task_probs + 1e-8), axis=-1)
 
@@ -320,7 +626,7 @@ class MultiTaskNBeatsNet(keras.Model):
         entropy_loss = keras.ops.mean(keras.ops.maximum(0.0, entropy - self.config.min_entropy_target))
         losses['entropy_loss'] = entropy_loss
 
-        # 2. FIXED Consistency regularization loss - GRAPH COMPATIBLE
+        # 2. Consistency regularization loss - GRAPH COMPATIBLE
         batch_size = keras.ops.shape(time_series_data)[0]
 
         def compute_consistency_loss():
@@ -351,7 +657,7 @@ class MultiTaskNBeatsNet(keras.Model):
             """Return zero loss when batch_size <= 1."""
             return keras.ops.convert_to_tensor(0.0, dtype=task_probs.dtype)
 
-        # FIXED: Use keras.ops.cond instead of Python if for graph compatibility
+        # Use keras.ops.cond instead of Python if for graph compatibility
         consistency_loss = keras.ops.cond(
             batch_size > 1,
             compute_consistency_loss,
@@ -359,7 +665,7 @@ class MultiTaskNBeatsNet(keras.Model):
         )
         losses['consistency_loss'] = consistency_loss
 
-        # 3. FIXED Balance regularization loss
+        # 3. Balance regularization loss
         # Encourage balanced task predictions across the batch
         mean_task_probs = keras.ops.mean(task_probs, axis=0)
         uniform_distribution = keras.ops.ones_like(mean_task_probs) / keras.ops.cast(self.num_tasks,
@@ -427,7 +733,7 @@ class MultiTaskNBeatsNet(keras.Model):
         return (final_prediction, aux_losses) if return_aux_losses else final_prediction
 
     def train_step(self, data):
-        """FIXED custom training step with proper auxiliary loss handling."""
+        """custom training step with proper auxiliary loss handling."""
         if not isinstance(data, tuple) or len(data) != 2:
             raise ValueError("Expected data to be a tuple of (x, y)")
 
