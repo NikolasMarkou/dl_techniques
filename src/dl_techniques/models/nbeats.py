@@ -6,12 +6,12 @@ from typing import List, Tuple, Optional, Union, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.time_series.nbeats_blocks import (
     GenericBlock, TrendBlock, SeasonalityBlock, RevIN
 )
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class NBeatsNet(keras.Model):
@@ -426,6 +426,7 @@ class NBeatsNet(keras.Model):
 
         logger.info("=" * 80)
         super().summary(**kwargs)
+
 # ---------------------------------------------------------------------
 
 def create_nbeats_model(
