@@ -34,7 +34,7 @@ set_random_seeds(42)
 
 
 @dataclass
-class FixedMultiTaskNBeatsTrainingConfig:
+class MultiTaskNBeatsTrainingConfig:
     """Configuration for multi-task N-BEATS training."""
 
     # General experiment configuration
@@ -58,35 +58,35 @@ class FixedMultiTaskNBeatsTrainingConfig:
 
     # Trainable Task Inference Configuration
     train_task_inference: bool = True
-    task_inference_loss_weight: float = 0.5      # FIXED: Increased from 0.1
-    consistency_loss_weight: float = 0.1         # FIXED: Increased from 0.05
-    entropy_loss_weight: float = 0.05            # FIXED: Increased from 0.02
+    task_inference_loss_weight: float = 0.5      # Increased from 0.1
+    consistency_loss_weight: float = 0.1         # Increased from 0.05
+    entropy_loss_weight: float = 0.05            # Increased from 0.02
     consistency_temperature: float = 0.1
-    min_entropy_target: float = 0.1              # FIXED: Reduced from 0.5 to reasonable value
+    min_entropy_target: float = 0.1              # Reduced from 0.5 to reasonable value
 
-    # FIXED: Curriculum Learning Configuration (improved schedule)
+    # Curriculum Learning Configuration (improved schedule)
     use_curriculum_learning: bool = True
-    curriculum_start_ratio: float = 0.8          # FIXED: Start with 80% labeled (was 1.0)
-    curriculum_end_ratio: float = 0.4            # FIXED: End with 40% labeled (was 0.3)
-    curriculum_transition_epochs: int = 30       # FIXED: Faster transition (was 50)
+    curriculum_start_ratio: float = 0.8          # Start with 80% labeled (was 1.0)
+    curriculum_end_ratio: float = 0.4            # End with 40% labeled (was 0.3)
+    curriculum_transition_epochs: int = 30       # Faster transition (was 50)
 
-    # ORIGINAL Model architecture (mostly restored)
-    stack_types: List[str] = field(default_factory=lambda: ["trend", "seasonality", "generic"])  # RESTORED
-    nb_blocks_per_stack: int = 3                 # RESTORED original
-    hidden_layer_units: int = 256                # KEPT reduced for stability (was 512)
+    # Model architecture
+    stack_types: List[str] = field(default_factory=lambda: ["trend", "seasonality", "generic"])
+    nb_blocks_per_stack: int = 3
+    hidden_layer_units: int = 256                # reduced for stability (was 512)
     use_revin: bool = True
 
     # ORIGINAL Training configuration (restored)
-    epochs: int = 150                            # RESTORED original
-    batch_size: int = 128                        # RESTORED original
-    learning_rate: float = 1e-4                  # RESTORED original
-    gradient_clip_norm: float = 1.0              # RESTORED original
+    epochs: int = 150
+    batch_size: int = 128
+    learning_rate: float = 1e-4
+    gradient_clip_norm: float = 1.0
     optimizer: str = 'adamw'
     primary_loss: str = "mae"
 
     # BALANCED Regularization (not too aggressive, not too weak)
-    kernel_regularizer_l2: float = 1e-5          # RESTORED original
-    dropout_rate: float = 0.15                   # BALANCED (was 0.25 original, 0.1 too low)
+    kernel_regularizer_l2: float = 1e-5
+    dropout_rate: float = 0.15
 
     # ORIGINAL Task selection and balancing (restored)
     max_tasks_per_category: int = 5              # RESTORED original
@@ -123,21 +123,21 @@ class FixedMultiTaskNBeatsTrainingConfig:
         if self.val_ratio < 0.2:
             logger.warning(f"Validation ratio {self.val_ratio} might be too small for reliable validation")
 
-        logger.info(f"FIXED Multi-Task N-BEATS Configuration with ORIGINAL parameters:")
-        logger.info(f"  ✅ FIXED train/val split: {self.train_ratio:.1f}/{self.val_ratio:.1f}/{self.test_ratio:.1f}")
-        logger.info(f"  ✅ ORIGINAL data generation: n_samples will be 3000")
-        logger.info(f"  ✅ ORIGINAL task selection: {self.max_tasks_per_category} tasks per category")
-        logger.info(f"  ✅ ORIGINAL model size: {self.nb_blocks_per_stack} blocks, {self.hidden_layer_units} units")
-        logger.info(f"  ✅ FIXED auxiliary loss weights: {self.task_inference_loss_weight:.1f}/{self.consistency_loss_weight:.1f}/{self.entropy_loss_weight:.2f}")
-        logger.info(f"  ✅ ORIGINAL training: {self.epochs} epochs, batch {self.batch_size}, lr {self.learning_rate}")
-        logger.info(f"  ✅ BALANCED regularization: dropout {self.dropout_rate}, L2 {self.kernel_regularizer_l2}")
-        logger.info(f"  ✅ FIXED curriculum learning: {self.curriculum_start_ratio:.1f} → {self.curriculum_end_ratio:.1f} over {self.curriculum_transition_epochs} epochs")
+        logger.info(f"Multi-Task N-BEATS Configuration with parameters:")
+        logger.info(f"  ✅ train/val split: {self.train_ratio:.1f}/{self.val_ratio:.1f}/{self.test_ratio:.1f}")
+        logger.info(f"  ✅ data generation: n_samples will be 3000")
+        logger.info(f"  ✅ task selection: {self.max_tasks_per_category} tasks per category")
+        logger.info(f"  ✅ model size: {self.nb_blocks_per_stack} blocks, {self.hidden_layer_units} units")
+        logger.info(f"  ✅ auxiliary loss weights: {self.task_inference_loss_weight:.1f}/{self.consistency_loss_weight:.1f}/{self.entropy_loss_weight:.2f}")
+        logger.info(f"  ✅ training: {self.epochs} epochs, batch {self.batch_size}, lr {self.learning_rate}")
+        logger.info(f"  ✅ regularization: dropout {self.dropout_rate}, L2 {self.kernel_regularizer_l2}")
+        logger.info(f"  ✅ curriculum learning: {self.curriculum_start_ratio:.1f} → {self.curriculum_end_ratio:.1f} over {self.curriculum_transition_epochs} epochs")
 
 
-class FixedMultiTaskDataProcessor:
-    """FIXED Data processor with better validation handling."""
+class MultiTaskDataProcessor:
+    """Data processor with better validation handling."""
 
-    def __init__(self, config: FixedMultiTaskNBeatsTrainingConfig):
+    def __init__(self, config: MultiTaskNBeatsTrainingConfig):
         self.config = config
         self.scalers: Dict[str, TimeSeriesNormalizer] = {}
         self.task_to_id: Dict[str, int] = {}
@@ -147,9 +147,9 @@ class FixedMultiTaskDataProcessor:
             self,
             raw_task_data: Dict[str, np.ndarray]
     ) -> Dict[str, Dict[str, Tuple]]:
-        """FIXED: Prepare multi-task data with better validation split."""
+        """: Prepare multi-task data with better validation split."""
 
-        logger.info("Preparing FIXED multi-task data...")
+        logger.info("Preparing multi-task data...")
 
         # Create task ID mapping
         self.task_to_id = {task: idx for idx, task in enumerate(raw_task_data.keys())}
@@ -172,13 +172,11 @@ class FixedMultiTaskDataProcessor:
                 task_id = self.task_to_id[task_name]
 
                 try:
-                    # FIXED: More reasonable minimum length calculation
                     min_length = self.config.backcast_length + horizon + 100  # Reduced buffer from 200
                     if len(data) < min_length:
                         logger.warning(f"Insufficient data for {task_name} H={horizon}: {len(data)} < {min_length}")
                         continue
 
-                    # FIXED: Better data splitting with original parameters
                     train_size = int(self.config.train_ratio * len(data))
                     val_size = int(self.config.val_ratio * len(data))
 
@@ -186,7 +184,6 @@ class FixedMultiTaskDataProcessor:
                     val_data = data[train_size:train_size + val_size]
                     test_data = data[train_size + val_size:]
 
-                    # FIXED: More lenient minimum sequence requirements
                     min_seq_len = self.config.backcast_length + horizon
                     if len(train_data) < min_seq_len * 5:  # Reduced from 10 sequences
                         logger.warning(f"Not enough training data for {task_name}: {len(train_data)} < {min_seq_len * 5}")
@@ -205,7 +202,6 @@ class FixedMultiTaskDataProcessor:
                     val_X, val_y = self._create_sequences(val_scaled, horizon, stride=horizon//3)  # Reduced overlap
                     test_X, test_y = self._create_sequences(test_scaled, horizon, stride=horizon//3)
 
-                    # ORIGINAL: Better balancing with original parameters
                     if self.config.balance_tasks and len(train_X) > self.config.samples_per_task:
                         # Use stratified sampling to maintain temporal structure
                         step = max(1, len(train_X) // self.config.samples_per_task)
@@ -259,14 +255,12 @@ class FixedMultiTaskDataProcessor:
             combined_unlabeled_X = np.concatenate(all_unlabeled_X, axis=0) if all_unlabeled_X else np.array([])
             combined_unlabeled_y = np.concatenate(all_unlabeled_y, axis=0) if all_unlabeled_y else np.array([])
 
-            # FIXED: Proper shuffling while maintaining task relationships
             train_indices = np.random.permutation(len(combined_train_X))
             combined_train_X = combined_train_X[train_indices]
             combined_train_y = combined_train_y[train_indices]
             combined_train_task_ids = combined_train_task_ids[train_indices]
 
             # Don't shuffle validation data to maintain evaluation consistency
-
             prepared_data[horizon] = {
                 'labeled': (
                     (combined_train_X, combined_train_y, combined_train_task_ids),
@@ -276,7 +270,7 @@ class FixedMultiTaskDataProcessor:
                 'unlabeled': (combined_unlabeled_X, combined_unlabeled_y) if len(combined_unlabeled_X) > 0 else None
             }
 
-            logger.info(f"FIXED H={horizon} data: train={len(combined_train_X)}, val={len(combined_val_X)}, test={len(combined_test_X)}")
+            logger.info(f"H={horizon} data: train={len(combined_train_X)}, val={len(combined_val_X)}, test={len(combined_test_X)}")
 
         return prepared_data
 
@@ -313,12 +307,12 @@ class FixedMultiTaskDataProcessor:
         return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
 
 
-class FixedCurriculumLearningCallback(keras.callbacks.Callback):
-    """FIXED Curriculum Learning callback with proper implementation."""
+class CurriculumLearningCallback(keras.callbacks.Callback):
+    """Curriculum Learning callback with proper implementation."""
 
     def __init__(
             self,
-            config: FixedMultiTaskNBeatsTrainingConfig,
+            config: MultiTaskNBeatsTrainingConfig,
             labeled_data: Tuple[np.ndarray, np.ndarray, np.ndarray],
             unlabeled_data: Optional[Tuple[np.ndarray, np.ndarray]] = None
     ):
@@ -351,13 +345,13 @@ class FixedCurriculumLearningCallback(keras.callbacks.Callback):
             logger.info(f"Epoch {epoch}: Curriculum labeled ratio = {self.current_labeled_ratio:.3f}")
 
 
-class FixedInterimVisualizationCallback(keras.callbacks.Callback):
-    """FIXED Visualization callback with ALL visualizations from original version."""
+class InterimVisualizationCallback(keras.callbacks.Callback):
+    """Visualization callback"""
 
     def __init__(
             self,
-            config: FixedMultiTaskNBeatsTrainingConfig,
-            data_processor: FixedMultiTaskDataProcessor,
+            config: MultiTaskNBeatsTrainingConfig,
+            data_processor: MultiTaskDataProcessor,
             test_data: Dict[int, Tuple],
             unlabeled_data: Dict[int, Tuple],
             save_dir: str
@@ -369,7 +363,6 @@ class FixedInterimVisualizationCallback(keras.callbacks.Callback):
         self.unlabeled_data = unlabeled_data
         self.save_dir = save_dir
 
-        # FIXED: Better history tracking
         self.training_history = {
             'epoch': [],
             'loss': [],
@@ -389,7 +382,6 @@ class FixedInterimVisualizationCallback(keras.callbacks.Callback):
         if logs is None:
             logs = {}
 
-        # FIXED: Better log tracking with default values
         self.training_history['epoch'].append(epoch)
         self.training_history['loss'].append(logs.get('loss', 0.0))
         self.training_history['val_loss'].append(logs.get('val_loss', 0.0))
@@ -402,34 +394,34 @@ class FixedInterimVisualizationCallback(keras.callbacks.Callback):
 
         # Create ALL visualizations at specified intervals
         if (epoch + 1) % self.config.visualize_every_n_epochs == 0:
-            logger.info(f"Creating ALL FIXED interim visualizations at epoch {epoch + 1}")
-            self._create_all_fixed_interim_plots(epoch)
+            logger.info(f"Creating interim visualizations at epoch {epoch + 1}")
+            self._create_all_interim_plots(epoch)
 
-    def _create_all_fixed_interim_plots(self, epoch: int):
+    def _create_all_interim_plots(self, epoch: int):
         """Create ALL comprehensive interim plots with task inference monitoring."""
         try:
             # 1. Enhanced learning curves
             if self.config.create_learning_curves:
-                self._plot_fixed_enhanced_learning_curves(epoch)
+                self._plot_enhanced_learning_curves(epoch)
 
             # 2. Task inference analysis
-            self._plot_fixed_task_inference_analysis(epoch)
+            self._plot_task_inference_analysis(epoch)
 
             # 3. Prediction samples with task inference
             if self.config.create_prediction_plots:
-                self._plot_fixed_prediction_samples_with_inference(epoch)
+                self._plot_prediction_samples_with_inference(epoch)
 
             # 4. Task performance heatmap
             if self.config.create_task_performance_heatmap:
-                self._plot_fixed_enhanced_task_performance(epoch)
+                self._plot_enhanced_task_performance(epoch)
 
-            logger.info(f"All FIXED interim plots saved for epoch {epoch + 1}")
+            logger.info(f"All interim plots saved for epoch {epoch + 1}")
 
         except Exception as e:
-            logger.warning(f"Failed to create FIXED interim plots: {e}")
+            logger.warning(f"Failed to create interim plots: {e}")
 
-    def _plot_fixed_enhanced_learning_curves(self, epoch: int):
-        """Plot enhanced training and validation loss curves with auxiliary losses - FIXED."""
+    def _plot_enhanced_learning_curves(self, epoch: int):
+        """Plot enhanced training and validation loss curves with auxiliary losses"""
         fig, axes = plt.subplots(2, 2, figsize=(18, 12))
 
         epochs = self.training_history['epoch']
@@ -439,7 +431,7 @@ class FixedInterimVisualizationCallback(keras.callbacks.Callback):
         axes[0, 0].plot(epochs, self.training_history['val_loss'], label='Validation Loss', color='red', linewidth=2)
         axes[0, 0].plot(epochs, self.training_history['primary_loss'], label='Primary Loss', color='green', linewidth=1,
                         linestyle='--', alpha=0.7)
-        axes[0, 0].set_title(f'FIXED Learning Curves (Epoch {epoch + 1})')
+        axes[0, 0].set_title(f'Learning Curves (Epoch {epoch + 1})')
         axes[0, 0].set_xlabel('Epoch')
         axes[0, 0].set_ylabel('Loss')
         axes[0, 0].legend()
@@ -453,7 +445,7 @@ class FixedInterimVisualizationCallback(keras.callbacks.Callback):
             y_min, y_max = min(y_values), max(y_values)
             axes[0, 0].set_ylim(y_min * 0.9, y_max * 1.1)
 
-        # FIXED: Auxiliary losses with better handling
+        # Auxiliary losses
         aux_loss_plotted = False
         if any(v > 1e-6 for v in self.training_history['aux_entropy_loss']):
             axes[0, 1].plot(epochs, self.training_history['aux_entropy_loss'], label='Entropy Loss', color='purple')
@@ -507,12 +499,12 @@ class FixedInterimVisualizationCallback(keras.callbacks.Callback):
             axes[1, 1].grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(os.path.join(self.save_dir, f'fixed_enhanced_learning_curves_epoch_{epoch + 1:03d}.png'),
+        plt.savefig(os.path.join(self.save_dir, f'learning_curves_epoch_{epoch + 1:03d}.png'),
                     dpi=150, bbox_inches='tight')
         plt.close()
 
-    def _plot_fixed_task_inference_analysis(self, epoch: int):
-        """Plot FIXED task inference analysis."""
+    def _plot_task_inference_analysis(self, epoch: int):
+        """Plot task inference analysis."""
         horizon = self.config.forecast_horizons[0]
 
         if horizon not in self.unlabeled_data or self.unlabeled_data[horizon] is None:
@@ -531,7 +523,7 @@ class FixedInterimVisualizationCallback(keras.callbacks.Callback):
             sample_indices = np.random.choice(len(unlabeled_X), sample_size, replace=False)
             sample_X = unlabeled_X[sample_indices]
 
-            # Get task probabilities - FIXED to handle model structure
+            # Get task probabilities - to handle model structure
             if hasattr(self.model, '_infer_task_probabilities'):
                 task_probs = self.model._infer_task_probabilities(sample_X, training=False)
                 task_probs_np = keras.ops.convert_to_numpy(task_probs)
@@ -589,17 +581,17 @@ class FixedInterimVisualizationCallback(keras.callbacks.Callback):
             axes[1, 1].legend()
             axes[1, 1].grid(True, alpha=0.3)
 
-            plt.suptitle(f'FIXED Task Inference Analysis (Epoch {epoch + 1})', fontsize=16)
+            plt.suptitle(f'Task Inference Analysis (Epoch {epoch + 1})', fontsize=16)
             plt.tight_layout()
-            plt.savefig(os.path.join(self.save_dir, f'fixed_task_inference_analysis_epoch_{epoch + 1:03d}.png'),
+            plt.savefig(os.path.join(self.save_dir, f'task_inference_analysis_epoch_{epoch + 1:03d}.png'),
                         dpi=150, bbox_inches='tight')
             plt.close()
 
         except Exception as e:
             logger.warning(f"Failed to create task inference analysis: {e}")
 
-    def _plot_fixed_prediction_samples_with_inference(self, epoch: int):
-        """Plot FIXED prediction samples with task inference information."""
+    def _plot_prediction_samples_with_inference(self, epoch: int):
+        """Plot prediction samples with task inference information."""
         horizon = self.config.forecast_horizons[0]
 
         # Get labeled test data
@@ -716,17 +708,17 @@ class FixedInterimVisualizationCallback(keras.callbacks.Callback):
             for i in range(plot_idx, len(axes)):
                 fig.delaxes(axes[i])
 
-            plt.suptitle(f'FIXED Prediction Samples with Task Inference (Epoch {epoch + 1})', fontsize=16)
+            plt.suptitle(f'Prediction Samples with Task Inference (Epoch {epoch + 1})', fontsize=16)
             plt.tight_layout()
-            plt.savefig(os.path.join(self.save_dir, f'fixed_predictions_with_inference_epoch_{epoch + 1:03d}.png'),
+            plt.savefig(os.path.join(self.save_dir, f'predictions_with_inference_epoch_{epoch + 1:03d}.png'),
                         dpi=150, bbox_inches='tight')
             plt.close()
 
         except Exception as e:
             logger.warning(f"Failed to create prediction samples plot: {e}")
 
-    def _plot_fixed_enhanced_task_performance(self, epoch: int):
-        """Plot FIXED enhanced task-specific performance analysis."""
+    def _plot_enhanced_task_performance(self, epoch: int):
+        """Plot enhanced task-specific performance analysis."""
         horizon = self.config.forecast_horizons[0]
         test_X, test_y, test_task_ids = self.test_data[horizon]
 
@@ -847,9 +839,9 @@ class FixedInterimVisualizationCallback(keras.callbacks.Callback):
                 # Add colorbar
                 plt.colorbar(scatter, ax=axes[1, 1], label='Inferred MAE')
 
-                plt.suptitle(f'FIXED Enhanced Task Performance Analysis (Epoch {epoch + 1})', fontsize=16)
+                plt.suptitle(f'Task Performance Analysis (Epoch {epoch + 1})', fontsize=16)
                 plt.tight_layout()
-                plt.savefig(os.path.join(self.save_dir, f'fixed_enhanced_task_performance_epoch_{epoch + 1:03d}.png'),
+                plt.savefig(os.path.join(self.save_dir, f'task_performance_epoch_{epoch + 1:03d}.png'),
                             dpi=150, bbox_inches='tight')
                 plt.close()
 
@@ -857,21 +849,21 @@ class FixedInterimVisualizationCallback(keras.callbacks.Callback):
             logger.warning(f"Failed to create task performance analysis: {e}")
 
 
-class FixedMultiTaskNBeatsTrainer:
-    """FIXED Multi-task N-BEATS trainer with improved training process."""
+class MultiTaskNBeatsTrainer:
+    """Multi-task N-BEATS trainer with improved training process."""
 
-    def __init__(self, config: FixedMultiTaskNBeatsTrainingConfig, ts_config: TimeSeriesConfig):
+    def __init__(self, config: MultiTaskNBeatsTrainingConfig, ts_config: TimeSeriesConfig):
         self.config = config
         self.ts_config = ts_config
         self.generator = TimeSeriesGenerator(ts_config)
-        self.processor = FixedMultiTaskDataProcessor(config)
+        self.processor = MultiTaskDataProcessor(config)
 
         # Get tasks
         self.all_tasks = self.generator.get_task_names()
         self.task_categories = self.generator.get_task_categories()
         self.selected_tasks = self._select_tasks()
 
-        logger.info(f"FIXED Multi-Task N-BEATS Trainer initialized:")
+        logger.info(f"Multi-Task N-BEATS Trainer initialized:")
         logger.info(f"  - Selected {len(self.selected_tasks)} tasks")
         logger.info(f"  - Improved auxiliary loss handling")
         logger.info(f"  - Better validation split: {config.val_ratio:.1f}")
@@ -909,23 +901,23 @@ class FixedMultiTaskNBeatsTrainer:
         }
 
     def create_model(self, num_tasks: int, task_to_id: Dict[str, int], forecast_length: int):
-        """Create FIXED model with proper configuration."""
-        # Import the FIXED model classes - update this path as needed
+        """Create model with proper configuration."""
+        # Import the model classes - update this path as needed
         try:
             from dl_techniques.models.nbeats_multitask import MultiTaskNBeatsConfig, create_multi_task_nbeats
         except ImportError:
-            # Fallback if using the fixed version from artifacts
-            logger.warning("Using local MultiTaskNBeatsConfig - ensure fixed model is available")
+            # Fallback if using the version from artifacts
+            logger.warning("Using local MultiTaskNBeatsConfig")
             from dl_techniques.models.nbeats_multitask import MultiTaskNBeatsConfig, create_multi_task_nbeats
 
-        # Create FIXED model configuration
+        # Create model configuration
         model_config = MultiTaskNBeatsConfig(
             backcast_length=self.config.backcast_length,
             use_task_embeddings=self.config.use_task_embeddings,
             task_embedding_dim=self.config.task_embedding_dim,
             use_task_inference=True,
 
-            # FIXED task inference parameters
+            # task inference parameters
             train_task_inference=self.config.train_task_inference,
             task_inference_loss_weight=self.config.task_inference_loss_weight,
             consistency_loss_weight=self.config.consistency_loss_weight,
@@ -951,11 +943,11 @@ class FixedMultiTaskNBeatsTrainer:
             num_tasks=num_tasks,
             task_to_id=task_to_id,
             forecast_length=forecast_length,
-            name=f"FixedMultiTaskNBeats_H{forecast_length}"
+            name=f"MultiTaskNBeats_H{forecast_length}"
         )
 
     def _compile_model(self, model):
-        """FIXED model compilation."""
+        """model compilation."""
         if self.config.optimizer.lower() == 'adamw':
             optimizer = keras.optimizers.AdamW(
                 learning_rate=self.config.learning_rate,
@@ -980,10 +972,10 @@ class FixedMultiTaskNBeatsTrainer:
             metrics=['mae']
         )
 
-        logger.info("✓ FIXED model compiled with proper auxiliary loss tracking")
+        logger.info("✓ model compiled with proper auxiliary loss tracking")
 
     def run_experiment(self) -> Dict[str, Any]:
-        """Run the FIXED multi-task experiment."""
+        """Run the multi-task experiment."""
         try:
             exp_dir = os.path.join(
                 self.config.result_dir,
@@ -991,7 +983,7 @@ class FixedMultiTaskNBeatsTrainer:
             )
             os.makedirs(exp_dir, exist_ok=True)
 
-            logger.info(f"🚀 Starting FIXED Multi-Task N-BEATS Experiment: {exp_dir}")
+            logger.info(f"🚀 Starting Multi-Task N-BEATS Experiment: {exp_dir}")
 
             # Prepare data
             data_info = self.prepare_data()
@@ -1006,7 +998,7 @@ class FixedMultiTaskNBeatsTrainer:
                 if horizon not in prepared_data:
                     continue
 
-                logger.info(f"\n{'='*50}\n🎯 Training FIXED Model H={horizon}\n{'='*50}")
+                logger.info(f"\n{'='*50}\n🎯 Training Model H={horizon}\n{'='*50}")
 
                 # Create and build model
                 model = self.create_model(data_info['num_tasks'], data_info['task_to_id'], horizon)
@@ -1021,7 +1013,7 @@ class FixedMultiTaskNBeatsTrainer:
                 self._compile_model(model)
 
                 # Create callbacks
-                viz_dir = os.path.join(exp_dir, f'fixed_visualizations_h{horizon}')
+                viz_dir = os.path.join(exp_dir, f'visualizations_h{horizon}')
                 unlabeled_dict = {horizon: unlabeled_data} if unlabeled_data is not None else {}
 
                 callbacks = [
@@ -1038,7 +1030,7 @@ class FixedMultiTaskNBeatsTrainer:
                         min_lr=1e-6,
                         verbose=1
                     ),
-                    FixedInterimVisualizationCallback(
+                    InterimVisualizationCallback(
                         config=self.config,
                         data_processor=self.processor,
                         test_data={horizon: test_data},
@@ -1046,7 +1038,7 @@ class FixedMultiTaskNBeatsTrainer:
                         save_dir=viz_dir
                     ),
                     keras.callbacks.ModelCheckpoint(
-                        filepath=os.path.join(exp_dir, f'fixed_best_model_h{horizon}.keras'),
+                        filepath=os.path.join(exp_dir, f'best_model_h{horizon}.keras'),
                         monitor='val_loss',
                         save_best_only=True,
                         verbose=1
@@ -1055,13 +1047,13 @@ class FixedMultiTaskNBeatsTrainer:
 
                 # Add curriculum learning
                 if self.config.use_curriculum_learning:
-                    curriculum_callback = FixedCurriculumLearningCallback(
+                    curriculum_callback = CurriculumLearningCallback(
                         config=self.config,
                         labeled_data=train_data,
                         unlabeled_data=unlabeled_data
                     )
                     callbacks.append(curriculum_callback)
-                    logger.info("✓ FIXED Curriculum learning callback added")
+                    logger.info("✓ Curriculum learning callback added")
 
                 # Add progress callback for detailed monitoring
                 progress_callback = keras.callbacks.LambdaCallback(
@@ -1078,7 +1070,7 @@ class FixedMultiTaskNBeatsTrainer:
                 callbacks.append(progress_callback)
 
                 # Train model
-                logger.info("🚀 Starting FIXED training...")
+                logger.info("🚀 Starting training...")
                 start_time = datetime.now()
 
                 history = model.fit(
@@ -1108,41 +1100,33 @@ class FixedMultiTaskNBeatsTrainer:
                     'training_time': training_time,
                     'test_loss': test_loss,
                     'test_mae': test_mae,
-                    'final_epoch': len(history.history['loss']),
-                    'fixed_version': True
+                    'final_epoch': len(history.history['loss'])
                 }
 
-                logger.info(f"✅ FIXED training completed for H={horizon}:")
+                logger.info(f"✅ training completed for H={horizon}:")
                 logger.info(f"   - Training time: {training_time:.1f}s")
                 logger.info(f"   - Test loss: {test_loss:.4f}")
 
             # Save results
             self._save_results(results, exp_dir, data_info)
 
-            logger.info("🎉 FIXED Multi-Task Experiment completed successfully!")
+            logger.info("🎉 Multi-Task Experiment completed successfully!")
             return {
                 "results_dir": exp_dir,
                 "results": results,
                 "num_tasks": data_info['num_tasks'],
-                "task_mapping": data_info['task_to_id'],
-                "fixed_improvements": [
-                    "Better validation split",
-                    "Improved auxiliary loss handling",
-                    "Reduced model complexity",
-                    "Enhanced curriculum learning",
-                    "Better training stability"
-                ]
+                "task_mapping": data_info['task_to_id']
             }
 
         except Exception as e:
-            logger.error(f"💥 FIXED experiment failed: {e}", exc_info=True)
+            logger.error(f"💥 experiment failed: {e}", exc_info=True)
             raise
 
     def _save_results(self, results: Dict, exp_dir: str, data_info: Dict):
         """Save experiment results with ALL visualizations."""
         try:
             # Save JSON results
-            with open(os.path.join(exp_dir, 'fixed_results.json'), 'w') as f:
+            with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
                 json_results = {}
                 for horizon, result in results.items():
                     json_results[str(horizon)] = {
@@ -1153,7 +1137,6 @@ class FixedMultiTaskNBeatsTrainer:
                         'final_train_loss': result['history']['loss'][-1],
                         'final_val_loss': result['history']['val_loss'][-1],
                         'has_aux_losses': any(k.startswith('aux_') for k in result['history'].keys()),
-                        'fixed_version': True,
                         'final_aux_entropy_loss': result['history'].get('aux_entropy_loss', [0])[-1] if result['history'].get('aux_entropy_loss') else 0,
                         'final_aux_consistency_loss': result['history'].get('aux_consistency_loss', [0])[-1] if result['history'].get('aux_consistency_loss') else 0,
                         'final_aux_balance_loss': result['history'].get('aux_balance_loss', [0])[-1] if result['history'].get('aux_balance_loss') else 0
@@ -1161,12 +1144,12 @@ class FixedMultiTaskNBeatsTrainer:
                 json.dump(json_results, f, indent=2)
 
             # Save task information
-            with open(os.path.join(exp_dir, 'fixed_task_info.json'), 'w') as f:
+            with open(os.path.join(exp_dir, 'task_info.json'), 'w') as f:
                 json.dump({
                     'num_tasks': data_info['num_tasks'],
                     'task_to_id': data_info['task_to_id'],
                     'selected_tasks': self.selected_tasks,
-                    'fixed_improvements': {
+                    'improvements': {
                         'better_data_split': f"{self.config.train_ratio}/{self.config.val_ratio}/{self.config.test_ratio}",
                         'improved_aux_loss_weights': {
                             'task_inference_loss_weight': self.config.task_inference_loss_weight,
@@ -1187,7 +1170,7 @@ class FixedMultiTaskNBeatsTrainer:
             # Create detailed experiment report
             self._create_detailed_experiment_report(results, exp_dir, data_info)
 
-            logger.info(f"FIXED results with ALL visualizations saved to {exp_dir}")
+            logger.info(f"results with ALL visualizations saved to {exp_dir}")
         except Exception as e:
             logger.error(f"Failed to save results: {e}")
 
@@ -1287,9 +1270,9 @@ class FixedMultiTaskNBeatsTrainer:
                 axes[2, 1].text(bar.get_x() + bar.get_width()/2., height,
                                f'{value:.1f}s', ha='center', va='bottom')
 
-            plt.suptitle('FIXED Multi-Task N-BEATS Training Summary\n(with Comprehensive Visualizations)', fontsize=16)
+            plt.suptitle('Multi-Task N-BEATS Training Summary\n(with Comprehensive Visualizations)', fontsize=16)
             plt.tight_layout()
-            plt.savefig(os.path.join(exp_dir, 'fixed_comprehensive_final_summary.png'), dpi=150, bbox_inches='tight')
+            plt.savefig(os.path.join(exp_dir, 'comprehensive_final_summary.png'), dpi=150, bbox_inches='tight')
             plt.close()
 
             # Create additional analysis plot
@@ -1351,9 +1334,9 @@ class FixedMultiTaskNBeatsTrainer:
             axes[1, 1].grid(True, alpha=0.3)
             axes[1, 1].axhline(y=0, color='black', linestyle='--', alpha=0.5)
 
-            plt.suptitle('FIXED Training Analysis: Efficiency and Overfitting', fontsize=14)
+            plt.suptitle('Training Analysis: Efficiency and Overfitting', fontsize=14)
             plt.tight_layout()
-            plt.savefig(os.path.join(exp_dir, 'fixed_training_analysis.png'), dpi=150, bbox_inches='tight')
+            plt.savefig(os.path.join(exp_dir, 'training_analysis.png'), dpi=150, bbox_inches='tight')
             plt.close()
 
         except Exception as e:
@@ -1366,7 +1349,7 @@ class FixedMultiTaskNBeatsTrainer:
 
             with open(report_path, 'w') as f:
                 f.write("=" * 80 + "\n")
-                f.write("FIXED MULTI-TASK N-BEATS EXPERIMENT REPORT\n")
+                f.write("MULTI-TASK N-BEATS EXPERIMENT REPORT\n")
                 f.write("=" * 80 + "\n\n")
 
                 # Experiment overview
@@ -1451,18 +1434,6 @@ class FixedMultiTaskNBeatsTrainer:
                     f.write(f"Task {task_id:2d}: {task_name}\n")
                 f.write("\n")
 
-                # Key improvements applied
-                f.write("KEY FIXES APPLIED\n")
-                f.write("-" * 17 + "\n")
-                f.write("✅ Better train/validation split (60/25/15) for improved generalization\n")
-                f.write("✅ Increased auxiliary loss weights for effective task inference training\n")
-                f.write("✅ Reduced model complexity to prevent overfitting\n")
-                f.write("✅ Enhanced curriculum learning with smoother transition\n")
-                f.write("✅ Improved regularization and training parameters\n")
-                f.write("✅ Fixed auxiliary loss computation and tracking\n")
-                f.write("✅ Comprehensive visualization and monitoring\n")
-                f.write("✅ Better error handling and stability improvements\n\n")
-
                 # Recommendations
                 f.write("RECOMMENDATIONS\n")
                 f.write("-" * 15 + "\n")
@@ -1489,78 +1460,70 @@ class FixedMultiTaskNBeatsTrainer:
 
 
 def main():
-    """Run the FIXED multi-task experiment with ORIGINAL configuration values."""
+    """Run the multi-task experiment with ORIGINAL configuration values."""
 
-    # FIXED configuration with ORIGINAL data parameters restored
-    config = FixedMultiTaskNBeatsTrainingConfig(
-        # Better data splits (FIXED)
-        train_ratio=0.6,
-        val_ratio=0.25,
+    #  configuration with ORIGINAL data parameters restored
+    config = MultiTaskNBeatsTrainingConfig(
+        train_ratio=0.70,
+        val_ratio=0.15,
         test_ratio=0.15,
 
-        # ORIGINAL N-BEATS configuration restored
         backcast_length=168,
         forecast_length=24,
         forecast_horizons=[12],
 
-        # Improved task inference (FIXED)
         train_task_inference=True,
         task_inference_loss_weight=0.5,
         consistency_loss_weight=0.1,
         entropy_loss_weight=0.05,
         min_entropy_target=0.1,
 
-        # Better curriculum learning (FIXED)
         use_curriculum_learning=True,
         curriculum_start_ratio=0.8,
         curriculum_end_ratio=0.4,
         curriculum_transition_epochs=30,
 
-        # ORIGINAL model architecture (mostly restored with key fixes)
-        stack_types=["trend", "seasonality", "generic"],  # RESTORED original
-        nb_blocks_per_stack=3,                            # RESTORED original
-        hidden_layer_units=256,                           # Keep reduced for stability
+        stack_types=["trend", "seasonality", "generic"],
+        nb_blocks_per_stack=3,
+        hidden_layer_units=256,
         use_revin=True,
 
-        # ORIGINAL task selection (restored)
-        max_tasks_per_category=5,                         # RESTORED original
-        min_data_length=1000,                             # ORIGINAL
+        max_tasks_per_category=5,
+        min_data_length=1000,
         balance_tasks=True,
-        samples_per_task=10000,                           # RESTORED original
+        samples_per_task=10000,
 
-        # Better training parameters (FIXED but reasonable)
-        epochs=150,                                       # RESTORED original
-        batch_size=128,                                   # RESTORED original
-        learning_rate=1e-4,                               # RESTORED original
-        dropout_rate=0.15,                                # Slightly reduced
-        kernel_regularizer_l2=1e-5,                       # RESTORED original
-        gradient_clip_norm=1.0,                           # RESTORED original
+        epochs=150,
+        batch_size=128,
+        learning_rate=1e-4,
+        dropout_rate=0.15,
+        kernel_regularizer_l2=1e-5,
+        gradient_clip_norm=1.0,
         optimizer='adamw',
         primary_loss="mae",
 
-        # ALL VISUALIZATIONS ENABLED
-        visualize_every_n_epochs=5,                       # RESTORED original frequency
+        visualize_every_n_epochs=5,
         save_interim_plots=True,
-        plot_top_k_tasks=6,                               # RESTORED original
+        plot_top_k_tasks=6,
         create_learning_curves=True,
         create_prediction_plots=True,
         create_task_performance_heatmap=True,
         eval_during_training=True,
-        eval_every_n_epochs=10,                           # RESTORED original
+        eval_every_n_epochs=10,
     )
 
     # ORIGINAL TimeSeriesConfig restored
     ts_config = TimeSeriesConfig(
-        n_samples=3000,                                   # RESTORED original
+        n_samples=3000,
         random_seed=42,
         default_noise_level=0.01
     )
 
     try:
-        trainer = FixedMultiTaskNBeatsTrainer(config, ts_config)
+        trainer = MultiTaskNBeatsTrainer(config, ts_config)
         results = trainer.run_experiment()
     except Exception as e:
-        logger.error(f"💥 FIXED experiment failed: {e}", exc_info=True)
+        logger.error(f"💥 experiment failed: {e}", exc_info=True)
         raise
 
 
