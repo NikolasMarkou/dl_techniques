@@ -49,16 +49,16 @@ class TimeSeriesConfig:
     """
 
     # Basic configuration
-    n_samples: int = 1000
+    n_samples: int = 5000
     random_seed: int = 42
     default_noise_level: float = 0.1
 
     # Trend parameters
-    trend_strengths: Tuple[float, float] = (0.0001, 0.005)
+    trend_strengths: Tuple[float, float] = (0.00005, 0.01)
 
     # Seasonal parameters
-    seasonal_periods: List[int] = field(default_factory=lambda: [12, 24, 48, 96, 168, 336])
-    seasonal_amplitudes: Tuple[float, float] = (0.5, 2.0)
+    seasonal_periods: List[int] = field(default_factory=lambda: [12, 24, 48, 60, 96, 168, 336, 720, 8760])
+    seasonal_amplitudes: Tuple[float, float] = (0.2, 3.0)
 
     # Stochastic parameters
     ar_coeffs_range: Tuple[float, float] = (-0.8, 0.8)
@@ -166,6 +166,32 @@ class TimeSeriesGenerator:
                 "noise_level": 0.1
             }
         }
+        tasks["quadratic_trend"] = {
+            "category": "trend",
+            "generator": self._generate_trend_series,
+            "params": {
+                "trend_type": "polynomial",
+                "coefficients": [0, 0, 1e-6],
+                "noise_level": 0.08
+            }
+        }
+        tasks["cubic_trend"] = {
+            "category": "trend",
+            "generator": self._generate_trend_series,
+            "params": {
+                "trend_type": "polynomial",
+                "coefficients": [0, 0, 0, 1e-9],
+                "noise_level": 0.1
+            }
+        }
+        tasks["logarithmic_trend"] = {
+            "category": "trend",
+            "generator": self._generate_log_trend,
+            "params": {
+                "strength": 0.5,
+                "noise_level": 0.12
+            }
+        }
 
         # === SEASONAL PATTERNS ===
         tasks["daily_seasonality"] = {
@@ -204,6 +230,33 @@ class TimeSeriesGenerator:
                 "noise_level": 0.12
             }
         }
+        tasks["hourly_seasonality"] = {
+            "category": "seasonal",
+            "generator": self._generate_seasonal_series,
+            "params": {
+                "periods": [60],
+                "amplitudes": [0.8],
+                "noise_level": 0.1
+            }
+        }
+        tasks["yearly_seasonality"] = {
+            "category": "seasonal",
+            "generator": self._generate_seasonal_series,
+            "params": {
+                "periods": [8760],
+                "amplitudes": [2.0],
+                "noise_level": 0.15
+            }
+        }
+        tasks["triple_seasonal"] = {
+            "category": "seasonal",
+            "generator": self._generate_seasonal_series,
+            "params": {
+                "periods": [12, 24, 168, 8760],
+                "amplitudes": [0.5, 1.0, 0.8, 1.5],
+                "noise_level": 0.2
+            }
+        }
 
         # === TREND + SEASONAL COMBINATIONS ===
         tasks["trend_daily_seasonal"] = {
@@ -237,6 +290,18 @@ class TimeSeriesGenerator:
                 "periods": [24, 168],
                 "seasonal_amplitudes": [1.0, 0.6],
                 "noise_level": 0.12
+            }
+        }
+        tasks["poly_trend_complex_seasonal"] = {
+            "category": "composite",
+            "generator": self._generate_trend_seasonal,
+            "params": {
+                "trend_type": "polynomial",
+                "trend_strength": 0.0005,
+                "coefficients": [0, 0.001, -1e-7],
+                "periods": [12, 24, 168],
+                "seasonal_amplitudes": [0.5, 1.0, 0.7],
+                "noise_level": 0.15
             }
         }
 
@@ -287,6 +352,229 @@ class TimeSeriesGenerator:
                 "sigma": 0.2
             }
         }
+        tasks["ar_high_order"] = {
+            "category": "stochastic",
+            "generator": self._generate_stochastic_series,
+            "params": {
+                "process_type": "ar",
+                "ar_coeffs": [0.6, -0.3, 0.1, -0.05],
+                "noise_std": 0.12
+            }
+        }
+        tasks["ma_high_order"] = {
+            "category": "stochastic",
+            "generator": self._generate_stochastic_series,
+            "params": {
+                "process_type": "ma",
+                "ma_coeffs": [0.7, 0.2, -0.1, 0.05],
+                "noise_std": 0.1
+            }
+        }
+
+        # === FINANCIAL PATTERNS ===
+        tasks["stock_returns"] = {
+            "category": "financial",
+            "generator": self._generate_financial_series,
+            "params": {
+                "return_type": "stock",
+                "volatility": 0.2,
+                "drift": 0.05
+            }
+        }
+        tasks["commodity_prices"] = {
+            "category": "financial",
+            "generator": self._generate_financial_series,
+            "params": {
+                "return_type": "commodity",
+                "volatility": 0.35,
+                "drift": 0.02
+            }
+        }
+        tasks["interest_rates"] = {
+            "category": "financial",
+            "generator": self._generate_financial_series,
+            "params": {
+                "return_type": "rates",
+                "volatility": 0.1,
+                "drift": -0.01
+            }
+        }
+        tasks["currency_exchange"] = {
+            "category": "financial",
+            "generator": self._generate_financial_series,
+            "params": {
+                "return_type": "currency",
+                "volatility": 0.15,
+                "drift": 0.0
+            }
+        }
+        tasks["crypto_prices"] = {
+            "category": "financial",
+            "generator": self._generate_financial_series,
+            "params": {
+                "return_type": "crypto",
+                "volatility": 0.8,
+                "drift": 0.1
+            }
+        }
+
+        # === WEATHER PATTERNS ===
+        tasks["temperature_daily"] = {
+            "category": "weather",
+            "generator": self._generate_weather_series,
+            "params": {
+                "weather_type": "temperature",
+                "seasonal_strength": 15,
+                "noise_level": 2.0
+            }
+        }
+        tasks["precipitation"] = {
+            "category": "weather",
+            "generator": self._generate_weather_series,
+            "params": {
+                "weather_type": "precipitation",
+                "intermittent_prob": 0.3,
+                "noise_level": 0.5
+            }
+        }
+        tasks["humidity"] = {
+            "category": "weather",
+            "generator": self._generate_weather_series,
+            "params": {
+                "weather_type": "humidity",
+                "base_level": 60,
+                "seasonal_variation": 20,
+                "noise_level": 5
+            }
+        }
+        tasks["wind_speed"] = {
+            "category": "weather",
+            "generator": self._generate_weather_series,
+            "params": {
+                "weather_type": "wind",
+                "base_speed": 10,
+                "gust_prob": 0.1,
+                "noise_level": 2
+            }
+        }
+
+        # === NETWORK/TRAFFIC PATTERNS ===
+        tasks["web_traffic"] = {
+            "category": "network",
+            "generator": self._generate_network_series,
+            "params": {
+                "pattern_type": "web_traffic",
+                "peak_hours": [9, 14, 20],
+                "weekend_factor": 0.6
+            }
+        }
+        tasks["server_load"] = {
+            "category": "network",
+            "generator": self._generate_network_series,
+            "params": {
+                "pattern_type": "server_load",
+                "spike_prob": 0.02,
+                "baseline": 0.3
+            }
+        }
+        tasks["network_latency"] = {
+            "category": "network",
+            "generator": self._generate_network_series,
+            "params": {
+                "pattern_type": "latency",
+                "base_latency": 50,
+                "congestion_periods": [8, 12, 18, 22]
+            }
+        }
+        tasks["bandwidth_usage"] = {
+            "category": "network",
+            "generator": self._generate_network_series,
+            "params": {
+                "pattern_type": "bandwidth",
+                "daily_cycle": True,
+                "burst_prob": 0.05
+            }
+        }
+
+        # === BIOMEDICAL PATTERNS ===
+        tasks["heartbeat"] = {
+            "category": "biomedical",
+            "generator": self._generate_biomedical_series,
+            "params": {
+                "signal_type": "ecg",
+                "heart_rate": 72,
+                "noise_level": 0.1
+            }
+        }
+        tasks["brain_waves"] = {
+            "category": "biomedical",
+            "generator": self._generate_biomedical_series,
+            "params": {
+                "signal_type": "eeg",
+                "frequency_bands": [8, 13, 30],
+                "noise_level": 0.2
+            }
+        }
+        tasks["blood_pressure"] = {
+            "category": "biomedical",
+            "generator": self._generate_biomedical_series,
+            "params": {
+                "signal_type": "bp",
+                "systolic_base": 120,
+                "diastolic_base": 80,
+                "noise_level": 5
+            }
+        }
+        tasks["respiratory_rate"] = {
+            "category": "biomedical",
+            "generator": self._generate_biomedical_series,
+            "params": {
+                "signal_type": "resp",
+                "base_rate": 16,
+                "variability": 2,
+                "noise_level": 0.5
+            }
+        }
+
+        # === INDUSTRIAL PATTERNS ===
+        tasks["machine_vibration"] = {
+            "category": "industrial",
+            "generator": self._generate_industrial_series,
+            "params": {
+                "machine_type": "motor",
+                "degradation_rate": 0.001,
+                "fault_prob": 0.01
+            }
+        }
+        tasks["energy_consumption"] = {
+            "category": "industrial",
+            "generator": self._generate_industrial_series,
+            "params": {
+                "machine_type": "hvac",
+                "efficiency_trend": -0.0005,
+                "seasonal_periods": [24, 168]
+            }
+        }
+        tasks["production_rate"] = {
+            "category": "industrial",
+            "generator": self._generate_industrial_series,
+            "params": {
+                "machine_type": "production",
+                "target_rate": 100,
+                "maintenance_cycles": [720, 4320],
+                "noise_level": 5
+            }
+        }
+        tasks["temperature_sensor"] = {
+            "category": "industrial",
+            "generator": self._generate_industrial_series,
+            "params": {
+                "machine_type": "sensor",
+                "operating_temp": 85,
+                "drift_rate": 0.01,
+                "spike_prob": 0.005
+            }
+        }
 
         # === INTERMITTENT PATTERNS ===
         tasks["intermittent_demand"] = {
@@ -305,6 +593,15 @@ class TimeSeriesGenerator:
                 "demand_prob": 0.1,
                 "demand_mean": 5.0,
                 "demand_std": 1.0
+            }
+        }
+        tasks["sparse_events"] = {
+            "category": "intermittent",
+            "generator": self._generate_intermittent_series,
+            "params": {
+                "demand_prob": 0.05,
+                "demand_mean": 10.0,
+                "demand_std": 2.0
             }
         }
 
@@ -327,6 +624,15 @@ class TimeSeriesGenerator:
                 "omega": 0.05
             }
         }
+        tasks["garch_persistent"] = {
+            "category": "volatility",
+            "generator": self._generate_garch_series,
+            "params": {
+                "alpha": 0.05,
+                "beta": 0.93,
+                "omega": 0.001
+            }
+        }
 
         # === REGIME SWITCHING ===
         tasks["regime_switching"] = {
@@ -336,6 +642,15 @@ class TimeSeriesGenerator:
                 "regimes": 2,
                 "switch_prob": 0.02,
                 "regime_params": [(0.001, 0.05), (0.005, 0.15)]
+            }
+        }
+        tasks["multi_regime_switching"] = {
+            "category": "regime",
+            "generator": self._generate_regime_switching,
+            "params": {
+                "regimes": 3,
+                "switch_prob": 0.03,
+                "regime_params": [(0.0, 0.05), (0.002, 0.1), (-0.001, 0.2)]
             }
         }
 
@@ -358,6 +673,15 @@ class TimeSeriesGenerator:
                 "break_points": [0.4, 0.7]
             }
         }
+        tasks["variance_break"] = {
+            "category": "structural",
+            "generator": self._generate_structural_break,
+            "params": {
+                "break_type": "variance",
+                "break_magnitude": 2.0,
+                "break_points": [0.6]
+            }
+        }
 
         # === OUTLIER PATTERNS ===
         tasks["additive_outliers"] = {
@@ -376,6 +700,15 @@ class TimeSeriesGenerator:
                 "outlier_type": "innovation",
                 "outlier_prob": 0.03,
                 "outlier_magnitude": 2.0
+            }
+        }
+        tasks["level_outliers"] = {
+            "category": "outliers",
+            "generator": self._generate_outlier_series,
+            "params": {
+                "outlier_type": "level",
+                "outlier_prob": 0.02,
+                "outlier_magnitude": 4.0
             }
         }
 
@@ -398,6 +731,28 @@ class TimeSeriesGenerator:
                 "sigma": 10,
                 "rho": 28,
                 "beta": 8 / 3
+            }
+        }
+        tasks["lorenz_y"] = {
+            "category": "chaotic",
+            "generator": self._generate_chaotic_series,
+            "params": {
+                "system": "lorenz",
+                "component": "y",
+                "sigma": 10,
+                "rho": 28,
+                "beta": 8 / 3
+            }
+        }
+        tasks["mackey_glass"] = {
+            "category": "chaotic",
+            "generator": self._generate_chaotic_series,
+            "params": {
+                "system": "mackey_glass",
+                "a": 0.2,
+                "b": 0.1,
+                "c": 10,
+                "tau": 17
             }
         }
 
@@ -462,7 +817,7 @@ class TimeSeriesGenerator:
         logger.info(f"Generating all {len(self.task_definitions)} time series patterns...")
 
         patterns = {}
-        for task_name in self.task_names:
+        for task_name in self.get_task_names():
             patterns[task_name] = self.generate_task_data(task_name)
 
         logger.info("All patterns generated successfully")
@@ -523,7 +878,12 @@ class TimeSeriesGenerator:
             "structural_break": self._generate_structural_break,
             "outliers": self._generate_outlier_series,
             "chaotic": self._generate_chaotic_series,
-            "logistic": self._generate_logistic_growth
+            "logistic": self._generate_logistic_growth,
+            "financial": self._generate_financial_series,
+            "weather": self._generate_weather_series,
+            "network": self._generate_network_series,
+            "biomedical": self._generate_biomedical_series,
+            "industrial": self._generate_industrial_series
         }
 
         if pattern_type not in generator_map:
@@ -573,6 +933,17 @@ class TimeSeriesGenerator:
             raise ValueError(f"Unknown trend type: {trend_type}")
 
         # Add noise to the trend
+        noise = self.random_state.normal(0, noise_level, len(y))
+        return (y + noise).reshape(-1, 1)
+
+    def _generate_log_trend(
+            self,
+            strength: float,
+            noise_level: float
+    ) -> np.ndarray:
+        """Generate logarithmic trend series."""
+        t = np.arange(1, self.config.n_samples + 1)
+        y = strength * np.log(t)
         noise = self.random_state.normal(0, noise_level, len(y))
         return (y + noise).reshape(-1, 1)
 
@@ -638,6 +1009,9 @@ class TimeSeriesGenerator:
             trend = trend_strength * t
         elif trend_type == "exponential":
             trend = np.exp(trend_strength * t) - 1
+        elif trend_type == "polynomial":
+            coeffs = kwargs.get("coefficients", [0, 0.001, -1e-7])
+            trend = np.polyval(coeffs[::-1], t)
         else:
             trend = np.zeros_like(t)
 
@@ -843,7 +1217,7 @@ class TimeSeriesGenerator:
         """Generate time series with structural breaks.
 
         Args:
-            break_type: Type of structural break ('level' or 'trend').
+            break_type: Type of structural break ('level', 'trend', 'variance').
             break_magnitude: Magnitude of the structural break.
             break_points: List of break points as fractions of series length.
 
@@ -853,7 +1227,8 @@ class TimeSeriesGenerator:
         n = self.config.n_samples
 
         # Start with basic trend and noise
-        y = 0.0005 * np.arange(n) + self.random_state.normal(0, 0.1, n)
+        base_noise_std = 0.1
+        y = 0.0005 * np.arange(n) + self.random_state.normal(0, base_noise_std, n)
 
         # Apply structural breaks
         for bp in break_points:
@@ -864,6 +1239,10 @@ class TimeSeriesGenerator:
             elif break_type == "trend":
                 # Trend change
                 y[idx:] += break_magnitude * np.arange(n - idx)
+            elif break_type == "variance":
+                # Variance change
+                new_noise = self.random_state.normal(0, base_noise_std * break_magnitude, n - idx)
+                y[idx:] = y[idx:] - self.random_state.normal(0, base_noise_std, n - idx) + new_noise
 
         return y.reshape(-1, 1)
 
@@ -876,7 +1255,7 @@ class TimeSeriesGenerator:
         """Generate time series with outliers.
 
         Args:
-            outlier_type: Type of outliers ('additive' or 'innovation').
+            outlier_type: Type of outliers ('additive', 'innovation', 'level').
             outlier_prob: Probability of outlier occurrence.
             outlier_magnitude: Magnitude of outliers.
 
@@ -895,6 +1274,17 @@ class TimeSeriesGenerator:
 
         if outlier_type == "additive":
             y[outlier_locations] += outlier_magnitudes[outlier_locations]
+        elif outlier_type == "innovation":
+            # Innovation outliers affect subsequent values through AR structure
+            for i in np.where(outlier_locations)[0]:
+                for j in range(min(5, n - i)):  # Affect next 5 points
+                    if i + j < n:
+                        y[i + j:] += outlier_magnitudes[i] * (0.5 ** j)
+        elif outlier_type == "level":
+            # Level outliers create temporary level shifts
+            for i in np.where(outlier_locations)[0]:
+                duration = min(self.random_state.randint(3, 10), n - i)
+                y[i:i + duration] += outlier_magnitudes[i]
 
         return y.reshape(-1, 1)
 
@@ -903,10 +1293,10 @@ class TimeSeriesGenerator:
             system: str,
             **kwargs: Any
     ) -> np.ndarray:
-        """Generate chaotic time series (Henon map, Lorenz system).
+        """Generate chaotic time series (Henon map, Lorenz system, Mackey-Glass).
 
         Args:
-            system: Type of chaotic system ('henon' or 'lorenz').
+            system: Type of chaotic system ('henon', 'lorenz', 'mackey_glass').
             **kwargs: Parameters specific to the chaotic system.
 
         Returns:
@@ -940,6 +1330,7 @@ class TimeSeriesGenerator:
             sigma = kwargs.get("sigma", 10)
             rho = kwargs.get("rho", 28)
             beta = kwargs.get("beta", 8 / 3)
+            component = kwargs.get("component", "x")
             dt = 0.01
 
             # Initialize
@@ -960,7 +1351,41 @@ class TimeSeriesGenerator:
 
                 # Skip burn-in and subsample
                 if i >= 1000 and i % 10 == 0:
-                    trajectory.append(x)
+                    if component == "x":
+                        trajectory.append(x)
+                    elif component == "y":
+                        trajectory.append(y)
+                    else:
+                        trajectory.append(z)
+
+            data = np.array(trajectory)
+
+        elif system == "mackey_glass":
+            # Mackey-Glass delay differential equation
+            a = kwargs.get("a", 0.2)
+            b = kwargs.get("b", 0.1)
+            c = kwargs.get("c", 10)
+            tau = kwargs.get("tau", 17)
+
+            # Initialize history
+            history = np.ones(tau + 1) * 1.2
+            trajectory = []
+
+            for i in range(n + 100):
+                # Mackey-Glass equation
+                current = history[-1]
+                delayed = history[-tau] if len(history) > tau else history[0]
+
+                dx = (a * delayed) / (1 + delayed ** c) - b * current
+                new_val = current + dx
+
+                history = np.append(history, max(0, new_val))
+                if len(history) > tau + 10:
+                    history = history[-tau - 5:]
+
+                # Skip burn-in period
+                if i >= 100:
+                    trajectory.append(new_val)
 
             data = np.array(trajectory)
 
@@ -995,5 +1420,373 @@ class TimeSeriesGenerator:
         # Add noise
         noise = self.random_state.normal(0, noise_level, len(y))
         return (y + noise).reshape(-1, 1)
+
+    def _generate_financial_series(
+            self,
+            return_type: str,
+            volatility: float,
+            drift: float
+    ) -> np.ndarray:
+        """Generate financial time series patterns."""
+        n = self.config.n_samples
+
+        if return_type == "stock":
+            # Geometric Brownian Motion
+            dt = 1/252  # Daily returns
+            returns = self.random_state.normal(drift * dt, volatility * np.sqrt(dt), n)
+            prices = 100 * np.exp(np.cumsum(returns))
+
+        elif return_type == "commodity":
+            # Mean-reverting with jumps
+            prices = np.zeros(n)
+            prices[0] = 50
+            for t in range(1, n):
+                mean_reversion = 0.1 * (50 - prices[t-1])
+                volatility_term = volatility * self.random_state.normal()
+                jump = 0 if self.random_state.rand() > 0.05 else self.random_state.normal(0, 5)
+                prices[t] = prices[t-1] + mean_reversion + volatility_term + jump
+
+        elif return_type == "rates":
+            # Vasicek model for interest rates
+            rates = np.zeros(n)
+            rates[0] = 0.05  # Start at 5%
+            for t in range(1, n):
+                dr = 0.1 * (0.05 - rates[t-1]) + volatility * self.random_state.normal()
+                rates[t] = max(0, rates[t-1] + dr)
+            prices = rates * 100
+
+        elif return_type == "currency":
+            # Random walk with mean reversion
+            prices = np.zeros(n)
+            prices[0] = 1.0
+            for t in range(1, n):
+                mean_reversion = 0.01 * (1.0 - prices[t-1])
+                random_shock = volatility * self.random_state.normal()
+                prices[t] = prices[t-1] + mean_reversion + random_shock
+
+        elif return_type == "crypto":
+            # High volatility with occasional large jumps
+            prices = np.zeros(n)
+            prices[0] = 1000
+            for t in range(1, n):
+                # Base volatility
+                base_change = self.random_state.normal(drift/252, volatility/np.sqrt(252))
+                # Occasional large jumps
+                if self.random_state.rand() < 0.02:
+                    jump = self.random_state.normal(0, 0.2)
+                    base_change += jump
+                prices[t] = prices[t-1] * (1 + base_change)
+
+        return prices.reshape(-1, 1)
+
+    def _generate_weather_series(
+            self,
+            weather_type: str,
+            **kwargs: Any
+    ) -> np.ndarray:
+        """Generate weather-related time series."""
+        t = np.arange(self.config.n_samples)
+
+        if weather_type == "temperature":
+            seasonal_strength = kwargs.get("seasonal_strength", 15)
+            noise_level = kwargs.get("noise_level", 2.0)
+
+            # Annual cycle + daily cycle + trend + noise
+            annual = seasonal_strength * np.sin(2 * np.pi * t / 365.25)
+            daily = 5 * np.sin(2 * np.pi * t / 24) if self.config.n_samples > 100 else 0
+            trend = 0.01 * t / 365.25  # Slight warming trend
+            noise = self.random_state.normal(0, noise_level, len(t))
+
+            y = 20 + annual + daily + trend + noise
+
+        elif weather_type == "precipitation":
+            intermittent_prob = kwargs.get("intermittent_prob", 0.3)
+            noise_level = kwargs.get("noise_level", 0.5)
+
+            # Seasonal precipitation pattern
+            seasonal_factor = 1 + 0.5 * np.sin(2 * np.pi * t / 365.25)
+            rain_occurs = self.random_state.binomial(1, intermittent_prob * seasonal_factor, len(t))
+            rain_amounts = self.random_state.exponential(5, len(t))
+
+            y = rain_occurs * rain_amounts
+
+        elif weather_type == "humidity":
+            base_level = kwargs.get("base_level", 60)
+            seasonal_variation = kwargs.get("seasonal_variation", 20)
+            noise_level = kwargs.get("noise_level", 5)
+
+            seasonal = seasonal_variation * np.sin(2 * np.pi * t / 365.25 + np.pi)
+            daily = 10 * np.sin(2 * np.pi * t / 24 + np.pi/2)
+            noise = self.random_state.normal(0, noise_level, len(t))
+
+            y = base_level + seasonal + daily + noise
+            y = np.clip(y, 0, 100)  # Humidity is 0-100%
+
+        elif weather_type == "wind":
+            base_speed = kwargs.get("base_speed", 10)
+            gust_prob = kwargs.get("gust_prob", 0.1)
+            noise_level = kwargs.get("noise_level", 2)
+
+            # Base wind with seasonal variation
+            seasonal = 3 * np.sin(2 * np.pi * t / 365.25)
+            base_wind = base_speed + seasonal
+
+            # Add gusts
+            gusts = self.random_state.binomial(1, gust_prob, len(t)) * self.random_state.exponential(5, len(t))
+            noise = self.random_state.normal(0, noise_level, len(t))
+
+            y = base_wind + gusts + noise
+            y = np.maximum(y, 0)
+
+        return y.reshape(-1, 1)
+
+    def _generate_network_series(
+            self,
+            pattern_type: str,
+            **kwargs: Any
+    ) -> np.ndarray:
+        """Generate network/traffic patterns."""
+        t = np.arange(self.config.n_samples)
+
+        if pattern_type == "web_traffic":
+            peak_hours = kwargs.get("peak_hours", [9, 14, 20])
+            weekend_factor = kwargs.get("weekend_factor", 0.6)
+
+            # Daily pattern with multiple peaks
+            daily_pattern = np.zeros_like(t, dtype=float)
+            for hour in peak_hours:
+                daily_pattern += np.exp(-0.5 * ((t % 24 - hour) / 2) ** 2)
+
+            # Weekly pattern (lower on weekends)
+            weekly_factor = np.where((t // 24) % 7 >= 5, weekend_factor, 1.0)
+
+            # Growth trend + seasonality + noise
+            growth = 1 + 0.0001 * t
+            noise = self.random_state.normal(0, 0.1, len(t))
+
+            y = 1000 * growth * daily_pattern * weekly_factor * (1 + noise)
+
+        elif pattern_type == "server_load":
+            spike_prob = kwargs.get("spike_prob", 0.02)
+            baseline = kwargs.get("baseline", 0.3)
+
+            # Base load with daily cycle
+            daily_cycle = 0.3 + 0.4 * (1 + np.sin(2 * np.pi * t / 24 - np.pi/2)) / 2
+            base_load = baseline + daily_cycle
+
+            # Add spikes
+            spikes = self.random_state.binomial(1, spike_prob, len(t)) * self.random_state.exponential(0.5, len(t))
+            noise = self.random_state.normal(0, 0.05, len(t))
+
+            y = base_load + spikes + noise
+            y = np.clip(y, 0, 1)  # Load is 0-100%
+
+        elif pattern_type == "latency":
+            base_latency = kwargs.get("base_latency", 50)
+            congestion_periods = kwargs.get("congestion_periods", [8, 12, 18, 22])
+
+            # Base latency
+            latency = np.full(len(t), base_latency, dtype=float)
+
+            # Add congestion periods
+            for period in congestion_periods:
+                congestion_mask = np.abs((t % 24) - period) < 2
+                latency += congestion_mask * 20
+
+            # Add network jitter
+            jitter = self.random_state.exponential(5, len(t))
+            occasional_spikes = self.random_state.binomial(1, 0.01, len(t)) * self.random_state.exponential(100, len(t))
+
+            y = latency + jitter + occasional_spikes
+
+        elif pattern_type == "bandwidth":
+            daily_cycle = kwargs.get("daily_cycle", True)
+            burst_prob = kwargs.get("burst_prob", 0.05)
+
+            if daily_cycle:
+                # Business hours pattern
+                business_hours = (8 <= (t % 24)) & ((t % 24) <= 18)
+                base_usage = np.where(business_hours, 0.7, 0.2)
+            else:
+                base_usage = 0.4
+
+            # Add bursts
+            bursts = self.random_state.binomial(1, burst_prob, len(t)) * self.random_state.exponential(0.3, len(t))
+            noise = self.random_state.normal(0, 0.1, len(t))
+
+            y = base_usage + bursts + noise
+            y = np.clip(y, 0, 1)
+
+        return np.maximum(y, 0).reshape(-1, 1)
+
+    def _generate_biomedical_series(
+            self,
+            signal_type: str,
+            **kwargs: Any
+    ) -> np.ndarray:
+        """Generate biomedical signal patterns."""
+        t = np.arange(self.config.n_samples)
+
+        if signal_type == "ecg":
+            heart_rate = kwargs.get("heart_rate", 72)
+            noise_level = kwargs.get("noise_level", 0.1)
+
+            # ECG waveform approximation
+            rr_interval = 60 / heart_rate  # seconds between beats
+            beat_times = np.arange(0, len(t), rr_interval * 100)  # Assume 100 samples per second
+
+            ecg = np.zeros(len(t))
+            for beat_time in beat_times:
+                if beat_time < len(t):
+                    # Simplified QRS complex
+                    peak_idx = int(beat_time)
+                    if peak_idx < len(t):
+                        ecg[peak_idx] = 1.0
+                        # Add P and T waves
+                        if peak_idx > 20:
+                            ecg[peak_idx - 20] = 0.2
+                        if peak_idx + 40 < len(t):
+                            ecg[peak_idx + 40] = 0.3
+
+            # Smooth and add noise
+            from scipy.ndimage import gaussian_filter1d
+            ecg = gaussian_filter1d(ecg, sigma=2)
+            noise = self.random_state.normal(0, noise_level, len(t))
+            y = ecg + noise
+
+        elif signal_type == "eeg":
+            frequency_bands = kwargs.get("frequency_bands", [8, 13, 30])
+            noise_level = kwargs.get("noise_level", 0.2)
+
+            # Simulate EEG as sum of frequency bands
+            y = np.zeros(len(t))
+            for freq in frequency_bands:
+                amplitude = self.random_state.uniform(0.5, 1.5)
+                phase = self.random_state.uniform(0, 2*np.pi)
+                y += amplitude * np.sin(2 * np.pi * freq * t / 1000 + phase)
+
+            # Add 1/f noise characteristic of EEG
+            noise = self.random_state.normal(0, noise_level, len(t))
+            y += noise
+
+        elif signal_type == "bp":
+            systolic_base = kwargs.get("systolic_base", 120)
+            diastolic_base = kwargs.get("diastolic_base", 80)
+            noise_level = kwargs.get("noise_level", 5)
+
+            # Simulate blood pressure with cardiac cycle
+            cardiac_cycle = np.sin(2 * np.pi * t / 100)  # ~60 bpm
+            systolic_pressure = systolic_base + 10 * np.maximum(cardiac_cycle, 0)
+            diastolic_pressure = diastolic_base + 5 * np.minimum(cardiac_cycle, 0)
+
+            # Combine and add noise
+            y = (systolic_pressure + diastolic_pressure) / 2
+            noise = self.random_state.normal(0, noise_level, len(t))
+            y += noise
+
+        elif signal_type == "resp":
+            base_rate = kwargs.get("base_rate", 16)
+            variability = kwargs.get("variability", 2)
+            noise_level = kwargs.get("noise_level", 0.5)
+
+            # Respiratory rate with natural variability
+            resp_rate = base_rate + variability * np.sin(2 * np.pi * t / 500)
+            y = np.sin(2 * np.pi * resp_rate * t / 3600)
+
+            # Add noise
+            noise = self.random_state.normal(0, noise_level, len(t))
+            y += noise
+
+        return y.reshape(-1, 1)
+
+    def _generate_industrial_series(
+            self,
+            machine_type: str,
+            **kwargs: Any
+    ) -> np.ndarray:
+        """Generate industrial sensor/machine patterns."""
+        t = np.arange(self.config.n_samples)
+
+        if machine_type == "motor":
+            degradation_rate = kwargs.get("degradation_rate", 0.001)
+            fault_prob = kwargs.get("fault_prob", 0.01)
+
+            # Base vibration level with degradation
+            base_vibration = 1.0 + degradation_rate * t
+
+            # Normal operating vibration
+            normal_vib = base_vibration * (1 + 0.1 * np.sin(2 * np.pi * t / 100))
+
+            # Add faults
+            faults = self.random_state.binomial(1, fault_prob, len(t))
+            fault_amplitude = self.random_state.exponential(2, len(t))
+
+            y = normal_vib + faults * fault_amplitude
+
+        elif machine_type == "hvac":
+            efficiency_trend = kwargs.get("efficiency_trend", -0.0005)
+            seasonal_periods = kwargs.get("seasonal_periods", [24, 168])
+
+            # Base energy consumption with efficiency trend
+            base_consumption = 100 * (1 + efficiency_trend * t)
+
+            # Seasonal patterns (daily and weekly)
+            seasonal = 0
+            for period in seasonal_periods:
+                seasonal += 20 * np.sin(2 * np.pi * t / period)
+
+            # Operating mode switches
+            mode_switches = self.random_state.binomial(1, 0.01, len(t))
+            mode_changes = np.cumsum(mode_switches) % 3
+            mode_factor = 1 + 0.3 * mode_changes
+
+            y = base_consumption + seasonal
+            y = y * mode_factor
+
+        elif machine_type == "production":
+            target_rate = kwargs.get("target_rate", 100)
+            maintenance_cycles = kwargs.get("maintenance_cycles", [720, 4320])
+            noise_level = kwargs.get("noise_level", 5)
+
+            # Base production rate
+            y = np.full(len(t), target_rate, dtype=float)
+
+            # Maintenance cycles (performance drops periodically)
+            for cycle in maintenance_cycles:
+                maintenance_times = t % cycle
+                performance_drop = 20 * np.exp(-(maintenance_times / 50) ** 2)
+                y -= performance_drop
+
+            # Random equipment issues
+            issues = self.random_state.binomial(1, 0.005, len(t))
+            issue_impact = self.random_state.exponential(15, len(t))
+            y -= issues * issue_impact
+
+            # Add noise and ensure non-negative
+            noise = self.random_state.normal(0, noise_level, len(t))
+            y = np.maximum(y + noise, 0)
+
+        elif machine_type == "sensor":
+            operating_temp = kwargs.get("operating_temp", 85)
+            drift_rate = kwargs.get("drift_rate", 0.01)
+            spike_prob = kwargs.get("spike_prob", 0.005)
+
+            # Base temperature with drift
+            y = operating_temp + drift_rate * t
+
+            # Add thermal cycles
+            thermal_cycle = 5 * np.sin(2 * np.pi * t / 200)
+            y += thermal_cycle
+
+            # Temperature spikes
+            spikes = self.random_state.binomial(1, spike_prob, len(t))
+            spike_magnitude = self.random_state.exponential(10, len(t))
+            y += spikes * spike_magnitude
+
+            # Sensor noise
+            noise = self.random_state.normal(0, 1, len(t))
+            y += noise
+
+        return y.reshape(-1, 1)
 
 # ---------------------------------------------------------------------

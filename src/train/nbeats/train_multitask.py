@@ -58,25 +58,25 @@ class MultiTaskNBeatsTrainingConfig:
 
     # Trainable Task Inference Configuration
     train_task_inference: bool = True
-    task_inference_loss_weight: float = 0.5      # Increased from 0.1
-    consistency_loss_weight: float = 0.1         # Increased from 0.05
-    entropy_loss_weight: float = 0.05            # Increased from 0.02
+    task_inference_loss_weight: float = 0.5
+    consistency_loss_weight: float = 0.1
+    entropy_loss_weight: float = 0.05
     consistency_temperature: float = 0.1
-    min_entropy_target: float = 0.1              # Reduced from 0.5 to reasonable value
+    min_entropy_target: float = 0.1
 
-    # Curriculum Learning Configuration (improved schedule)
+    # Curriculum Learning Configuration
     use_curriculum_learning: bool = True
-    curriculum_start_ratio: float = 0.8          # Start with 80% labeled (was 1.0)
-    curriculum_end_ratio: float = 0.4            # End with 40% labeled (was 0.3)
-    curriculum_transition_epochs: int = 30       # Faster transition (was 50)
+    curriculum_start_ratio: float = 0.8
+    curriculum_end_ratio: float = 0.4
+    curriculum_transition_epochs: int = 30
 
     # Model architecture
     stack_types: List[str] = field(default_factory=lambda: ["trend", "seasonality", "generic"])
     nb_blocks_per_stack: int = 3
-    hidden_layer_units: int = 256                # reduced for stability (was 512)
+    hidden_layer_units: int = 256
     use_revin: bool = True
 
-    # ORIGINAL Training configuration
+    # Training configuration
     epochs: int = 150
     batch_size: int = 128
     learning_rate: float = 1e-4
@@ -84,30 +84,49 @@ class MultiTaskNBeatsTrainingConfig:
     optimizer: str = 'adamw'
     primary_loss: str = "mae"
 
-    # BALANCED Regularization (not too aggressive, not too weak)
+    # Regularization
     kernel_regularizer_l2: float = 1e-5
     dropout_rate: float = 0.15
 
-    # ORIGINAL Task selection and balancing
-    max_tasks_per_category: int = 5
-    min_data_length: int = 1000
+    # Task selection and balancing
+    max_tasks_per_category: int = 10
+    min_data_length: int = 2000
     balance_tasks: bool = True
-    samples_per_task: int = 10000
+    samples_per_task: int = 15000
 
-    # ORIGINAL Visualization configuration
+    # Category weights for balanced sampling
+    category_weights: Dict[str, float] = field(default_factory=lambda: {
+        "trend": 1.0,
+        "seasonal": 1.0,
+        "composite": 1.2,
+        "stochastic": 1.0,
+        "financial": 1.5,
+        "weather": 1.3,
+        "network": 1.4,
+        "biomedical": 1.2,
+        "industrial": 1.3,
+        "intermittent": 1.0,
+        "volatility": 1.1,
+        "regime": 1.2,
+        "structural": 1.1,
+        "outliers": 1.0,
+        "chaotic": 1.1
+    })
+
+    # Visualization configuration
     visualize_every_n_epochs: int = 5
     save_interim_plots: bool = True
-    plot_top_k_tasks: int = 6
+    plot_top_k_tasks: int = 8
     create_learning_curves: bool = True
     create_prediction_plots: bool = True
     create_task_performance_heatmap: bool = True
 
-    # ORIGINAL Evaluation configuration
+    # Evaluation configuration
     eval_during_training: bool = True
     eval_every_n_epochs: int = 10
 
     def __post_init__(self) -> None:
-        """Enhanced validation with better error checking."""
+        """Validation with better error checking."""
         total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
         if not np.isclose(total_ratio, 1.0, atol=1e-6):
             raise ValueError(f"Data ratios must sum to 1.0, got {total_ratio}")
@@ -119,19 +138,21 @@ class MultiTaskNBeatsTrainingConfig:
             if not (0.0 <= self.curriculum_end_ratio <= self.curriculum_start_ratio <= 1.0):
                 raise ValueError("Invalid curriculum learning ratios")
 
-        # Check if we have enough validation data
-        if self.val_ratio < 0.2:
+        if self.val_ratio < 0.1:
             logger.warning(f"Validation ratio {self.val_ratio} might be too small for reliable validation")
 
         logger.info(f"Multi-Task N-BEATS Configuration with parameters:")
         logger.info(f"  ✅ train/val split: {self.train_ratio:.1f}/{self.val_ratio:.1f}/{self.test_ratio:.1f}")
-        logger.info(f"  ✅ data generation: n_samples will be 3000")
+        logger.info(f"  ✅ data generation: n_samples will be 5000")
         logger.info(f"  ✅ task selection: {self.max_tasks_per_category} tasks per category")
         logger.info(f"  ✅ model size: {self.nb_blocks_per_stack} blocks, {self.hidden_layer_units} units")
-        logger.info(f"  ✅ auxiliary loss weights: {self.task_inference_loss_weight:.1f}/{self.consistency_loss_weight:.1f}/{self.entropy_loss_weight:.2f}")
+        logger.info(
+            f"  ✅ auxiliary loss weights: {self.task_inference_loss_weight:.1f}/{self.consistency_loss_weight:.1f}/{self.entropy_loss_weight:.2f}")
         logger.info(f"  ✅ training: {self.epochs} epochs, batch {self.batch_size}, lr {self.learning_rate}")
         logger.info(f"  ✅ regularization: dropout {self.dropout_rate}, L2 {self.kernel_regularizer_l2}")
-        logger.info(f"  ✅ curriculum learning: {self.curriculum_start_ratio:.1f} → {self.curriculum_end_ratio:.1f} over {self.curriculum_transition_epochs} epochs")
+        logger.info(
+            f"  ✅ curriculum learning: {self.curriculum_start_ratio:.1f} → {self.curriculum_end_ratio:.1f} over {self.curriculum_transition_epochs} epochs")
+        logger.info(f"  ✅ category weights: {len(self.category_weights)} categories with weighted sampling")
 
 
 class MultiTaskDataProcessor:
@@ -147,7 +168,7 @@ class MultiTaskDataProcessor:
             self,
             raw_task_data: Dict[str, np.ndarray]
     ) -> Dict[str, Dict[str, Tuple]]:
-        """: Prepare multi-task data with better validation split."""
+        """Prepare multi-task data with better validation split."""
 
         logger.info("Preparing multi-task data...")
 
@@ -172,7 +193,7 @@ class MultiTaskDataProcessor:
                 task_id = self.task_to_id[task_name]
 
                 try:
-                    min_length = self.config.backcast_length + horizon + 100  # Reduced buffer from 200
+                    min_length = self.config.backcast_length + horizon + 100
                     if len(data) < min_length:
                         logger.warning(f"Insufficient data for {task_name} H={horizon}: {len(data)} < {min_length}")
                         continue
@@ -185,11 +206,13 @@ class MultiTaskDataProcessor:
                     test_data = data[train_size + val_size:]
 
                     min_seq_len = self.config.backcast_length + horizon
-                    if len(train_data) < min_seq_len * 5:  # Reduced from 10 sequences
-                        logger.warning(f"Not enough training data for {task_name}: {len(train_data)} < {min_seq_len * 5}")
+                    if len(train_data) < min_seq_len * 5:
+                        logger.warning(
+                            f"Not enough training data for {task_name}: {len(train_data)} < {min_seq_len * 5}")
                         continue
-                    if len(val_data) < min_seq_len * 2:  # Reduced from 3 sequences
-                        logger.warning(f"Not enough validation data for {task_name}: {len(val_data)} < {min_seq_len * 2}")
+                    if len(val_data) < min_seq_len * 2:
+                        logger.warning(
+                            f"Not enough validation data for {task_name}: {len(val_data)} < {min_seq_len * 2}")
                         continue
 
                     # Transform data
@@ -199,8 +222,8 @@ class MultiTaskDataProcessor:
 
                     # Create sequences with different strides for train/val
                     train_X, train_y = self._create_sequences(train_scaled, horizon, stride=1)
-                    val_X, val_y = self._create_sequences(val_scaled, horizon, stride=horizon//3)  # Reduced overlap
-                    test_X, test_y = self._create_sequences(test_scaled, horizon, stride=horizon//3)
+                    val_X, val_y = self._create_sequences(val_scaled, horizon, stride=horizon // 3)
+                    test_X, test_y = self._create_sequences(test_scaled, horizon, stride=horizon // 3)
 
                     if self.config.balance_tasks and len(train_X) > self.config.samples_per_task:
                         # Use stratified sampling to maintain temporal structure
@@ -223,7 +246,7 @@ class MultiTaskDataProcessor:
                     all_test_task_ids.append(np.full(len(test_X), task_id))
 
                     # Create unlabeled data for task inference training
-                    unlabeled_size = min(len(train_X)//2, 500)  # Increased from 200
+                    unlabeled_size = min(len(train_X) // 2, 500)
                     if len(train_X) > unlabeled_size:
                         unlabeled_indices = np.random.choice(len(train_X), unlabeled_size, replace=False)
                         all_unlabeled_X.append(train_X[unlabeled_indices])
@@ -270,7 +293,8 @@ class MultiTaskDataProcessor:
                 'unlabeled': (combined_unlabeled_X, combined_unlabeled_y) if len(combined_unlabeled_X) > 0 else None
             }
 
-            logger.info(f"H={horizon} data: train={len(combined_train_X)}, val={len(combined_val_X)}, test={len(combined_test_X)}")
+            logger.info(
+                f"H={horizon} data: train={len(combined_train_X)}, val={len(combined_val_X)}, test={len(combined_test_X)}")
 
         return prepared_data
 
@@ -335,8 +359,8 @@ class CurriculumLearningCallback(keras.callbacks.Callback):
             # Use cosine annealing for smoother transition
             cos_progress = 0.5 * (1 + np.cos(np.pi * progress))
             self.current_labeled_ratio = (
-                self.config.curriculum_end_ratio +
-                (self.config.curriculum_start_ratio - self.config.curriculum_end_ratio) * cos_progress
+                    self.config.curriculum_end_ratio +
+                    (self.config.curriculum_start_ratio - self.config.curriculum_end_ratio) * cos_progress
             )
         else:
             self.current_labeled_ratio = self.config.curriculum_end_ratio
@@ -400,9 +424,9 @@ class InterimVisualizationCallback(keras.callbacks.Callback):
     def _create_all_interim_plots(self, epoch: int):
         """Create ALL comprehensive interim plots with task inference monitoring."""
         try:
-            # 1. Enhanced learning curves
+            # 1. Learning curves
             if self.config.create_learning_curves:
-                self._plot_enhanced_learning_curves(epoch)
+                self._plot_learning_curves(epoch)
 
             # 2. Task inference analysis
             self._plot_task_inference_analysis(epoch)
@@ -413,15 +437,15 @@ class InterimVisualizationCallback(keras.callbacks.Callback):
 
             # 4. Task performance heatmap
             if self.config.create_task_performance_heatmap:
-                self._plot_enhanced_task_performance(epoch)
+                self._plot_task_performance(epoch)
 
             logger.info(f"All interim plots saved for epoch {epoch + 1}")
 
         except Exception as e:
             logger.warning(f"Failed to create interim plots: {e}")
 
-    def _plot_enhanced_learning_curves(self, epoch: int):
-        """Plot enhanced training and validation loss curves with auxiliary losses"""
+    def _plot_learning_curves(self, epoch: int):
+        """Plot training and validation loss curves with auxiliary losses"""
         fig, axes = plt.subplots(2, 2, figsize=(18, 12))
 
         epochs = self.training_history['epoch']
@@ -440,8 +464,8 @@ class InterimVisualizationCallback(keras.callbacks.Callback):
         # Set reasonable y-limits to avoid scale issues
         if len(epochs) > 5:
             y_values = (self.training_history['loss'][5:] +
-                       self.training_history['val_loss'][5:] +
-                       self.training_history['primary_loss'][5:])
+                        self.training_history['val_loss'][5:] +
+                        self.training_history['primary_loss'][5:])
             y_min, y_max = min(y_values), max(y_values)
             axes[0, 0].set_ylim(y_min * 0.9, y_max * 1.1)
 
@@ -451,7 +475,8 @@ class InterimVisualizationCallback(keras.callbacks.Callback):
             axes[0, 1].plot(epochs, self.training_history['aux_entropy_loss'], label='Entropy Loss', color='purple')
             aux_loss_plotted = True
         if any(v > 1e-6 for v in self.training_history['aux_consistency_loss']):
-            axes[0, 1].plot(epochs, self.training_history['aux_consistency_loss'], label='Consistency Loss', color='orange')
+            axes[0, 1].plot(epochs, self.training_history['aux_consistency_loss'], label='Consistency Loss',
+                            color='orange')
             aux_loss_plotted = True
         if any(v > 1e-6 for v in self.training_history['aux_balance_loss']):
             axes[0, 1].plot(epochs, self.training_history['aux_balance_loss'], label='Balance Loss', color='brown')
@@ -465,7 +490,7 @@ class InterimVisualizationCallback(keras.callbacks.Callback):
             axes[0, 1].grid(True, alpha=0.3)
         else:
             axes[0, 1].text(0.5, 0.5, 'Auxiliary losses not active\n(all values near zero)',
-                           ha='center', va='center', transform=axes[0, 1].transAxes)
+                            ha='center', va='center', transform=axes[0, 1].transAxes)
             axes[0, 1].set_title('Auxiliary Losses (Task Inference)')
 
         # Learning rate tracking
@@ -488,7 +513,7 @@ class InterimVisualizationCallback(keras.callbacks.Callback):
 
             # Avoid division by zero
             ratios = np.divide(primary_losses, total_losses,
-                             out=np.ones_like(primary_losses), where=total_losses!=0)
+                               out=np.ones_like(primary_losses), where=total_losses != 0)
 
             axes[1, 1].plot(epochs, ratios, label='Primary Loss Ratio', color='blue')
             axes[1, 1].set_title('Loss Decomposition')
@@ -523,7 +548,7 @@ class InterimVisualizationCallback(keras.callbacks.Callback):
             sample_indices = np.random.choice(len(unlabeled_X), sample_size, replace=False)
             sample_X = unlabeled_X[sample_indices]
 
-            # Get task probabilities - to handle model structure
+            # Get task probabilities
             if hasattr(self.model, '_infer_task_probabilities'):
                 task_probs = self.model._infer_task_probabilities(sample_X, training=False)
                 task_probs_np = keras.ops.convert_to_numpy(task_probs)
@@ -542,7 +567,7 @@ class InterimVisualizationCallback(keras.callbacks.Callback):
             axes[0, 0].set_ylabel('Frequency')
             axes[0, 0].grid(True, alpha=0.3)
             axes[0, 0].axvline(x=np.mean(max_probs), color='red', linestyle='--',
-                              label=f'Mean: {np.mean(max_probs):.3f}')
+                               label=f'Mean: {np.mean(max_probs):.3f}')
             axes[0, 0].legend()
 
             # Task assignment distribution
@@ -717,8 +742,8 @@ class InterimVisualizationCallback(keras.callbacks.Callback):
         except Exception as e:
             logger.warning(f"Failed to create prediction samples plot: {e}")
 
-    def _plot_enhanced_task_performance(self, epoch: int):
-        """Plot enhanced task-specific performance analysis."""
+    def _plot_task_performance(self, epoch: int):
+        """Plot task-specific performance analysis."""
         horizon = self.config.forecast_horizons[0]
         test_X, test_y, test_task_ids = self.test_data[horizon]
 
@@ -738,7 +763,7 @@ class InterimVisualizationCallback(keras.callbacks.Callback):
                 if not np.any(task_mask):
                     continue
 
-                task_X = test_X[task_mask][:50]  # Limit to 50 samples for speed
+                task_X = test_X[task_mask][:50]
                 task_y = test_y[task_mask][:50]
                 task_ids = np.full(len(task_X), task_id)
 
@@ -763,7 +788,7 @@ class InterimVisualizationCallback(keras.callbacks.Callback):
                         task_probs_np = keras.ops.convert_to_numpy(task_probs)
                         avg_confidence = np.mean(np.max(task_probs_np, axis=1))
                     else:
-                        avg_confidence = 0.5  # Default when inference not available
+                        avg_confidence = 0.5
 
                     task_metrics['task_names'].append(task_name)
                     task_metrics['labeled_mae'].append(labeled_mae)
@@ -776,7 +801,7 @@ class InterimVisualizationCallback(keras.callbacks.Callback):
                     continue
 
             if task_metrics['task_names']:
-                # Create enhanced performance visualization
+                # Create performance visualization
                 fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 
                 # MAE comparison
@@ -809,7 +834,7 @@ class InterimVisualizationCallback(keras.callbacks.Callback):
                 # Add value labels on bars
                 for bar, value in zip(bars, task_metrics['mae_difference']):
                     height = bar.get_height()
-                    axes[0, 1].text(bar.get_x() + bar.get_width()/2., height,
+                    axes[0, 1].text(bar.get_x() + bar.get_width() / 2., height,
                                     f'{value:.3f}', ha='center', va='bottom' if height >= 0 else 'top')
 
                 # Task inference confidence
@@ -824,7 +849,8 @@ class InterimVisualizationCallback(keras.callbacks.Callback):
 
                 # Confidence vs Performance scatter
                 scatter = axes[1, 1].scatter(task_metrics['confidence'], task_metrics['mae_difference'],
-                                           c=task_metrics['inferred_mae'], cmap='viridis', s=100, alpha=0.7, edgecolors='black')
+                                             c=task_metrics['inferred_mae'], cmap='viridis', s=100, alpha=0.7,
+                                             edgecolors='black')
                 axes[1, 1].set_title('Confidence vs Performance')
                 axes[1, 1].set_xlabel('Inference Confidence')
                 axes[1, 1].set_ylabel('MAE Difference')
@@ -834,7 +860,7 @@ class InterimVisualizationCallback(keras.callbacks.Callback):
                 # Add task name labels to scatter points
                 for i, txt in enumerate(task_metrics['task_names']):
                     axes[1, 1].annotate(txt, (task_metrics['confidence'][i], task_metrics['mae_difference'][i]),
-                                       xytext=(5, 5), textcoords='offset points', fontsize=8, alpha=0.7)
+                                        xytext=(5, 5), textcoords='offset points', fontsize=8, alpha=0.7)
 
                 # Add colorbar
                 plt.colorbar(scatter, ax=axes[1, 1], label='Inferred MAE')
@@ -864,32 +890,72 @@ class MultiTaskNBeatsTrainer:
         self.selected_tasks = self._select_tasks()
 
         logger.info(f"Multi-Task N-BEATS Trainer initialized:")
+        logger.info(f"  - Available categories: {len(self.task_categories)}")
+        logger.info(f"  - Total tasks available: {len(self.all_tasks)}")
         logger.info(f"  - Selected {len(self.selected_tasks)} tasks")
-        logger.info(f"  - Improved auxiliary loss handling")
-        logger.info(f"  - Better validation split: {config.val_ratio:.1f}")
+        logger.info(f"  - Category distribution: {self._get_category_distribution()}")
 
     def _select_tasks(self) -> List[str]:
-        """Select tasks for training."""
+        """Select tasks for training with category weighting."""
         selected = []
+
         for category in self.task_categories:
             category_tasks = self.generator.get_tasks_by_category(category)
-            selected.extend(category_tasks[:self.config.max_tasks_per_category])
+
+            # Apply category weight
+            weight = self.config.category_weights.get(category, 1.0)
+            max_tasks = min(int(self.config.max_tasks_per_category * weight), len(category_tasks))
+
+            # Select tasks (use all if fewer than max)
+            if len(category_tasks) <= max_tasks:
+                selected.extend(category_tasks)
+            else:
+                # Randomly sample without replacement
+                selected_from_category = np.random.choice(
+                    category_tasks,
+                    size=max_tasks,
+                    replace=False
+                ).tolist()
+                selected.extend(selected_from_category)
+
         return selected
+
+    def _get_category_distribution(self) -> Dict[str, int]:
+        """Get distribution of selected tasks by category."""
+        distribution = {}
+        for task in self.selected_tasks:
+            category = None
+            for cat in self.task_categories:
+                if task in self.generator.get_tasks_by_category(cat):
+                    category = cat
+                    break
+            if category:
+                distribution[category] = distribution.get(category, 0) + 1
+        return distribution
 
     def prepare_data(self) -> Dict[str, Any]:
         """Prepare training data."""
         logger.info("Generating data for selected tasks...")
 
         raw_task_data = {}
+        generation_failures = []
+
         for task_name in self.selected_tasks:
             try:
                 data = self.generator.generate_task_data(task_name)
                 if len(data) >= self.config.min_data_length:
                     raw_task_data[task_name] = data
+                else:
+                    logger.warning(
+                        f"Generated data for {task_name} too short: {len(data)} < {self.config.min_data_length}")
+                    generation_failures.append(task_name)
             except Exception as e:
                 logger.warning(f"Failed to generate {task_name}: {e}")
+                generation_failures.append(task_name)
 
-        logger.info(f"Generated data for {len(raw_task_data)} tasks")
+        logger.info(f"Successfully generated data for {len(raw_task_data)} tasks")
+        if generation_failures:
+            logger.info(f"Failed to generate {len(generation_failures)} tasks: {generation_failures[:5]}...")
 
         prepared_data = self.processor.prepare_multi_task_data(raw_task_data)
 
@@ -897,16 +963,29 @@ class MultiTaskNBeatsTrainer:
             'prepared_data': prepared_data,
             'raw_task_data': raw_task_data,
             'num_tasks': len(raw_task_data),
-            'task_to_id': self.processor.task_to_id
+            'task_to_id': self.processor.task_to_id,
+            'generation_failures': generation_failures,
+            'category_distribution': self._get_final_category_distribution(raw_task_data)
         }
+
+    def _get_final_category_distribution(self, raw_task_data: Dict[str, np.ndarray]) -> Dict[str, int]:
+        """Get final category distribution after data generation."""
+        distribution = {}
+        for task in raw_task_data.keys():
+            category = None
+            for cat in self.task_categories:
+                if task in self.generator.get_tasks_by_category(cat):
+                    category = cat
+                    break
+            if category:
+                distribution[category] = distribution.get(category, 0) + 1
+        return distribution
 
     def create_model(self, num_tasks: int, task_to_id: Dict[str, int], forecast_length: int):
         """Create model with proper configuration."""
-        # Import the model classes - update this path as needed
         try:
             from dl_techniques.models.nbeats_multitask import MultiTaskNBeatsConfig, create_multi_task_nbeats
         except ImportError:
-            # Fallback if using the version from artifacts
             logger.warning("Using local MultiTaskNBeatsConfig")
             from dl_techniques.models.nbeats_multitask import MultiTaskNBeatsConfig, create_multi_task_nbeats
 
@@ -998,7 +1077,7 @@ class MultiTaskNBeatsTrainer:
                 if horizon not in prepared_data:
                     continue
 
-                logger.info(f"\n{'='*50}\n🎯 Training Model H={horizon}\n{'='*50}")
+                logger.info(f"\n{'=' * 50}\n🎯 Training Model H={horizon}\n{'=' * 50}")
 
                 # Create and build model
                 model = self.create_model(data_info['num_tasks'], data_info['task_to_id'], horizon)
@@ -1058,7 +1137,7 @@ class MultiTaskNBeatsTrainer:
                 # Add progress callback for detailed monitoring
                 progress_callback = keras.callbacks.LambdaCallback(
                     on_epoch_end=lambda epoch, logs: logger.info(
-                        f"Epoch {epoch+1:3d}: "
+                        f"Epoch {epoch + 1:3d}: "
                         f"loss={logs.get('loss', 0):.4f}, "
                         f"val_loss={logs.get('val_loss', 0):.4f}, "
                         f"primary={logs.get('primary_loss', 0):.4f}, "
@@ -1115,7 +1194,8 @@ class MultiTaskNBeatsTrainer:
                 "results_dir": exp_dir,
                 "results": results,
                 "num_tasks": data_info['num_tasks'],
-                "task_mapping": data_info['task_to_id']
+                "task_mapping": data_info['task_to_id'],
+                "category_distribution": data_info['category_distribution']
             }
 
         except Exception as e:
@@ -1137,9 +1217,12 @@ class MultiTaskNBeatsTrainer:
                         'final_train_loss': result['history']['loss'][-1],
                         'final_val_loss': result['history']['val_loss'][-1],
                         'has_aux_losses': any(k.startswith('aux_') for k in result['history'].keys()),
-                        'final_aux_entropy_loss': result['history'].get('aux_entropy_loss', [0])[-1] if result['history'].get('aux_entropy_loss') else 0,
-                        'final_aux_consistency_loss': result['history'].get('aux_consistency_loss', [0])[-1] if result['history'].get('aux_consistency_loss') else 0,
-                        'final_aux_balance_loss': result['history'].get('aux_balance_loss', [0])[-1] if result['history'].get('aux_balance_loss') else 0
+                        'final_aux_entropy_loss': result['history'].get('aux_entropy_loss', [0])[-1] if result[
+                            'history'].get('aux_entropy_loss') else 0,
+                        'final_aux_consistency_loss': result['history'].get('aux_consistency_loss', [0])[-1] if result[
+                            'history'].get('aux_consistency_loss') else 0,
+                        'final_aux_balance_loss': result['history'].get('aux_balance_loss', [0])[-1] if result[
+                            'history'].get('aux_balance_loss') else 0
                     }
                 json.dump(json_results, f, indent=2)
 
@@ -1149,14 +1232,23 @@ class MultiTaskNBeatsTrainer:
                     'num_tasks': data_info['num_tasks'],
                     'task_to_id': data_info['task_to_id'],
                     'selected_tasks': self.selected_tasks,
-                    'improvements': {
+                    'category_distribution': data_info['category_distribution'],
+                    'category_weights': self.config.category_weights,
+                    'generation_failures': data_info.get('generation_failures', []),
+                    'data_config': {
+                        'samples_per_task': self.config.samples_per_task,
+                        'min_data_length': self.config.min_data_length,
+                        'max_tasks_per_category': self.config.max_tasks_per_category,
+                        'time_series_length': self.ts_config.n_samples
+                    },
+                    'model_improvements': {
                         'better_data_split': f"{self.config.train_ratio}/{self.config.val_ratio}/{self.config.test_ratio}",
-                        'improved_aux_loss_weights': {
+                        'auxiliary_loss_weights': {
                             'task_inference_loss_weight': self.config.task_inference_loss_weight,
                             'consistency_loss_weight': self.config.consistency_loss_weight,
                             'entropy_loss_weight': self.config.entropy_loss_weight
                         },
-                        'reduced_complexity': {
+                        'architecture': {
                             'stack_types': self.config.stack_types,
                             'nb_blocks_per_stack': self.config.nb_blocks_per_stack,
                             'hidden_layer_units': self.config.hidden_layer_units
@@ -1230,11 +1322,11 @@ class MultiTaskNBeatsTrainer:
                 axes[1, 1].grid(True, alpha=0.3)
             else:
                 axes[1, 0].text(0.5, 0.5, 'Auxiliary losses not active\n(Check model configuration)',
-                               ha='center', va='center', transform=axes[1, 0].transAxes)
+                                ha='center', va='center', transform=axes[1, 0].transAxes)
                 axes[1, 0].set_title('Auxiliary Loss: Entropy')
 
                 axes[1, 1].text(0.5, 0.5, 'Auxiliary losses not active\n(Check model configuration)',
-                               ha='center', va='center', transform=axes[1, 1].transAxes)
+                                ha='center', va='center', transform=axes[1, 1].transAxes)
                 axes[1, 1].set_title('Auxiliary Loss: Consistency')
 
             # Performance summary
@@ -1253,10 +1345,11 @@ class MultiTaskNBeatsTrainer:
             # Add value labels on bars
             for bar, value in zip(bars1, test_losses):
                 height = bar.get_height()
-                axes[2, 0].text(bar.get_x() + bar.get_width()/2., height,
-                               f'{value:.3f}', ha='center', va='bottom')
+                axes[2, 0].text(bar.get_x() + bar.get_width() / 2., height,
+                                f'{value:.3f}', ha='center', va='bottom')
 
-            bars2 = axes[2, 1].bar(range(len(horizons)), training_times, color='lightcoral', alpha=0.7, edgecolor='black')
+            bars2 = axes[2, 1].bar(range(len(horizons)), training_times, color='lightcoral', alpha=0.7,
+                                   edgecolor='black')
             axes[2, 1].set_title('Training Time by Horizon')
             axes[2, 1].set_xlabel('Horizon')
             axes[2, 1].set_ylabel('Training Time (s)')
@@ -1267,10 +1360,10 @@ class MultiTaskNBeatsTrainer:
             # Add value labels on bars
             for bar, value in zip(bars2, training_times):
                 height = bar.get_height()
-                axes[2, 1].text(bar.get_x() + bar.get_width()/2., height,
-                               f'{value:.1f}s', ha='center', va='bottom')
+                axes[2, 1].text(bar.get_x() + bar.get_width() / 2., height,
+                                f'{value:.1f}s', ha='center', va='bottom')
 
-            plt.suptitle('Multi-Task N-BEATS Training Summary\n(with Comprehensive Visualizations)', fontsize=16)
+            plt.suptitle('Multi-Task N-BEATS Training Summary\n(with Comprehensive Task Categories)', fontsize=16)
             plt.tight_layout()
             plt.savefig(os.path.join(exp_dir, 'comprehensive_final_summary.png'), dpi=150, bbox_inches='tight')
             plt.close()
@@ -1357,9 +1450,19 @@ class MultiTaskNBeatsTrainer:
                 f.write("-" * 20 + "\n")
                 f.write(f"Experiment Name: {self.config.experiment_name}\n")
                 f.write(f"Number of Tasks: {data_info['num_tasks']}\n")
-                f.write(f"Selected Tasks: {', '.join(self.selected_tasks)}\n")
+                f.write(f"Available Task Categories: {len(self.task_categories)}\n")
+                f.write(f"Time Series Length: {self.ts_config.n_samples}\n")
                 f.write(f"Forecast Horizons: {self.config.forecast_horizons}\n")
                 f.write(f"Experiment Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+                # Task distribution
+                f.write("TASK DISTRIBUTION BY CATEGORY\n")
+                f.write("-" * 30 + "\n")
+                for category, count in data_info['category_distribution'].items():
+                    weight = self.config.category_weights.get(category, 1.0)
+                    f.write(f"{category:15s}: {count:2d} tasks (weight: {weight:.1f})\n")
+                f.write(f"\nTotal Categories Used: {len(data_info['category_distribution'])}\n")
+                f.write(f"Total Tasks Generated: {sum(data_info['category_distribution'].values())}\n\n")
 
                 # Configuration summary
                 f.write("MODEL CONFIGURATION\n")
@@ -1375,14 +1478,16 @@ class MultiTaskNBeatsTrainer:
                 # Training configuration
                 f.write("TRAINING CONFIGURATION\n")
                 f.write("-" * 20 + "\n")
-                f.write(f"Data Split: {self.config.train_ratio:.1f}/{self.config.val_ratio:.1f}/{self.config.test_ratio:.1f}\n")
+                f.write(
+                    f"Data Split: {self.config.train_ratio:.1f}/{self.config.val_ratio:.1f}/{self.config.test_ratio:.1f}\n")
                 f.write(f"Epochs: {self.config.epochs}\n")
                 f.write(f"Batch Size: {self.config.batch_size}\n")
                 f.write(f"Learning Rate: {self.config.learning_rate}\n")
                 f.write(f"Optimizer: {self.config.optimizer}\n")
                 f.write(f"Primary Loss: {self.config.primary_loss}\n")
                 f.write(f"Dropout Rate: {self.config.dropout_rate}\n")
-                f.write(f"L2 Regularization: {self.config.kernel_regularizer_l2}\n\n")
+                f.write(f"L2 Regularization: {self.config.kernel_regularizer_l2}\n")
+                f.write(f"Samples per Task: {self.config.samples_per_task}\n\n")
 
                 # Task inference configuration
                 if self.config.train_task_inference:
@@ -1427,11 +1532,14 @@ class MultiTaskNBeatsTrainer:
                     f.write(f"Overfitting Gap: {overfitting_gap:.6f}\n")
                     f.write("\n")
 
-                # Task mapping
-                f.write("TASK MAPPING\n")
-                f.write("-" * 12 + "\n")
-                for task_name, task_id in data_info['task_to_id'].items():
+                # Task mapping (sample)
+                f.write("TASK MAPPING (Sample)\n")
+                f.write("-" * 18 + "\n")
+                sample_tasks = list(data_info['task_to_id'].items())[:20]  # Show first 20
+                for task_name, task_id in sample_tasks:
                     f.write(f"Task {task_id:2d}: {task_name}\n")
+                if len(data_info['task_to_id']) > 20:
+                    f.write(f"... and {len(data_info['task_to_id']) - 20} more tasks\n")
                 f.write("\n")
 
                 # Recommendations
@@ -1447,7 +1555,12 @@ class MultiTaskNBeatsTrainer:
                 else:
                     f.write("✅ Task inference training appears to be working correctly\n")
                     f.write("✅ Model configuration looks appropriate\n")
-                    f.write("✅ Training completed successfully with proper monitoring\n")
+                    f.write("✅ Training completed successfully with comprehensive task coverage\n")
+
+                f.write(
+                    f"✅ Successfully trained on {len(data_info['category_distribution'])} different task categories\n")
+                f.write(
+                    f"✅ Generated {sum(data_info['category_distribution'].values())} diverse time series patterns\n")
 
                 f.write("\n" + "=" * 80 + "\n")
                 f.write("End of Report\n")
@@ -1460,9 +1573,8 @@ class MultiTaskNBeatsTrainer:
 
 
 def main():
-    """Run the multi-task experiment with ORIGINAL configuration values."""
+    """Run the multi-task experiment with comprehensive task coverage."""
 
-    #  configuration with ORIGINAL data parameters restored
     config = MultiTaskNBeatsTrainingConfig(
         train_ratio=0.70,
         val_ratio=0.15,
@@ -1488,10 +1600,10 @@ def main():
         hidden_layer_units=256,
         use_revin=True,
 
-        max_tasks_per_category=5,
-        min_data_length=1000,
+        max_tasks_per_category=10,
+        min_data_length=2000,
         balance_tasks=True,
-        samples_per_task=10000,
+        samples_per_task=15000,
 
         epochs=150,
         batch_size=128,
@@ -1504,7 +1616,7 @@ def main():
 
         visualize_every_n_epochs=5,
         save_interim_plots=True,
-        plot_top_k_tasks=6,
+        plot_top_k_tasks=8,
         create_learning_curves=True,
         create_prediction_plots=True,
         create_task_performance_heatmap=True,
@@ -1512,9 +1624,8 @@ def main():
         eval_every_n_epochs=10,
     )
 
-    # ORIGINAL TimeSeriesConfig restored
     ts_config = TimeSeriesConfig(
-        n_samples=3000,
+        n_samples=5000,
         random_seed=42,
         default_noise_level=0.01
     )
