@@ -1,5 +1,5 @@
 """
-Multi-Task N-BEATS Model Implementation with Trainable Task Inference.
+Multi-Task N-BEATS Model Implementation with Trainable Task Inference - GRAPH MODE FIXED.
 
 This module provides a multi-task variant of the N-BEATS architecture that can
 simultaneously learn multiple time series forecasting tasks with task-specific
@@ -13,6 +13,7 @@ Key improvements:
 - Entropy regularization for confident task predictions
 - Curriculum learning support (labeled → unlabeled)
 - Mixed training with and without task IDs
+- FIXED: Graph-compatible conditional operations using keras.ops.cond
 
 References:
     - Oreshkin, B. N., et al. "N-BEATS: Neural basis expansion analysis for interpretable time series forecasting." ICLR 2020.
@@ -25,57 +26,13 @@ import tensorflow as tf
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Union, Any, Tuple
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from .nbeats import create_nbeats_model
 
-# ---------------------------------------------------------------------
 
 @dataclass
 class MultiTaskNBeatsConfig:
-    """Configuration class for Multi-Task N-BEATS model with trainable task inference.
-
-    This configuration class encapsulates all parameters needed to create
-    and train a multi-task N-BEATS model with trainable task inference.
-
-    Args:
-        backcast_length: Number of time steps to look back for prediction.
-        use_task_embeddings: Whether to use task embedding layers.
-        task_embedding_dim: Dimension of task embedding vectors.
-        use_task_inference: Whether to enable automatic task inference.
-        task_inference_hidden_dim: Hidden dimension for task inference network.
-        task_inference_dropout: Dropout rate for task inference network.
-        task_inference_activation: Activation function for task inference network.
-
-        # NEW: Task inference convolutional feature extractor parameters
-        task_inference_use_conv: Whether to use a Conv1D extractor for inference.
-        task_inference_conv_filters: List of filters for each Conv1D layer.
-        task_inference_conv_kernels: List of kernel sizes for each Conv1D layer.
-        task_inference_conv_activation: Activation for the convolutional blocks.
-
-        # Task inference training parameters
-        train_task_inference: Whether to train task inference network.
-        task_inference_loss_weight: Weight for task inference auxiliary losses.
-        consistency_loss_weight: Weight for consistency regularization.
-        entropy_loss_weight: Weight for entropy regularization.
-        consistency_temperature: Temperature for consistency loss.
-        min_entropy_target: Target minimum entropy for task predictions.
-
-        use_bias: Whether to use bias terms in dense layers.
-        stack_types: Types of N-BEATS stacks to use.
-        nb_blocks_per_stack: Number of blocks per stack.
-        hidden_layer_units: Number of units in hidden layers.
-        use_revin: Whether to use RevIN normalization.
-        dropout_rate: Dropout rate for regularization.
-        kernel_regularizer_l2: L2 regularization strength.
-        optimizer: Optimizer type to use.
-        primary_loss: Primary loss function.
-        learning_rate: Learning rate for training.
-        gradient_clip_norm: Gradient clipping norm.
-    """
+    """Configuration class for Multi-Task N-BEATS model with trainable task inference."""
 
     # Architecture parameters
     backcast_length: int = 168
@@ -83,23 +40,23 @@ class MultiTaskNBeatsConfig:
     task_embedding_dim: int = 32
     use_task_inference: bool = True
     task_inference_hidden_dim: int = 128
-    task_inference_dropout: float = 0.2
+    task_inference_dropout: float = 0.1
     task_inference_activation: str = 'gelu'
 
-    # NEW: Task inference convolutional feature extractor parameters
+    # Task inference convolutional feature extractor parameters
     task_inference_use_conv: bool = True
     task_inference_conv_filters: List[int] = None
     task_inference_conv_kernels: List[int] = None
     task_inference_conv_activation: str = 'gelu'
 
-    # Task inference training parameters
+    # Task inference training parameters - FIXED WEIGHTS
     train_task_inference: bool = True
-    task_inference_loss_weight: float = 0.1
-    consistency_loss_weight: float = 0.05
-    entropy_loss_weight: float = 0.02
+    task_inference_loss_weight: float = 0.5
+    consistency_loss_weight: float = 0.1
+    entropy_loss_weight: float = 0.05
     consistency_temperature: float = 0.1
-    min_entropy_target: float = 0.5
-    task_adjustment: float = 0.25
+    min_entropy_target: float = 0.1
+    task_adjustment: float = 0.1
 
     use_bias: bool = False
     stack_types: List[str] = None
@@ -108,8 +65,8 @@ class MultiTaskNBeatsConfig:
     use_revin: bool = True
 
     # Regularization parameters
-    dropout_rate: float = 0.15
-    kernel_regularizer_l2: float = 1e-4
+    dropout_rate: float = 0.1
+    kernel_regularizer_l2: float = 1e-5
 
     # Training parameters
     optimizer: str = 'adamw'
@@ -121,7 +78,6 @@ class MultiTaskNBeatsConfig:
         """Initialize default values after object creation."""
         if self.stack_types is None:
             self.stack_types = ["trend", "seasonality", "generic"]
-        # Default values for Conv1D parameters
         if self.task_inference_conv_filters is None:
             self.task_inference_conv_filters = [16, 32, 64]
         if self.task_inference_conv_kernels is None:
@@ -130,29 +86,7 @@ class MultiTaskNBeatsConfig:
 
 @keras.saving.register_keras_serializable()
 class MultiTaskNBeatsNet(keras.Model):
-    """Multi-task N-BEATS model with trainable task inference.
-
-    This model extends the standard N-BEATS architecture to handle multiple
-    time series forecasting tasks simultaneously with trainable task inference.
-    The model can learn to automatically infer appropriate task adjustments
-    even when task IDs are not provided during training.
-
-    Key features:
-    - Trainable task inference with auxiliary losses
-    - Convolutional feature extractor for enhanced inference
-    - Consistency regularization for similar time series
-    - Entropy regularization for confident predictions
-    - Mixed training with and without task IDs
-    - Curriculum learning support
-    - Self-supervised task learning
-
-    Args:
-        config: Configuration object containing model parameters.
-        num_tasks: Number of different tasks to handle.
-        task_to_id: Mapping from task names to integer IDs.
-        forecast_length: Number of time steps to forecast.
-        **kwargs: Additional keyword arguments for the base Model class.
-    """
+    """Multi-task N-BEATS model with graph-compatible trainable task inference."""
 
     def __init__(
             self,
@@ -179,11 +113,8 @@ class MultiTaskNBeatsNet(keras.Model):
                 name='task_embedding'
             )
 
-        # Task inference network (for automatic task detection)
+        # Task inference network components
         self.task_inference_layers = {}
-        if config.use_task_inference and config.use_task_embeddings:
-            # Will be built in the build() method
-            pass
 
         # Main N-BEATS model (created in build)
         self.nbeats_model = None
@@ -191,21 +122,22 @@ class MultiTaskNBeatsNet(keras.Model):
         # Task-specific adjustment layer
         self.task_adjustment_layer = None
 
-        logger.info(f"Initialized MultiTaskNBeatsNet with Trainable Task Inference:")
+        # Track auxiliary losses for monitoring
+        self.aux_loss_tracker = {
+            'entropy_loss': keras.metrics.Mean(name='aux_entropy_loss'),
+            'consistency_loss': keras.metrics.Mean(name='aux_consistency_loss'),
+            'balance_loss': keras.metrics.Mean(name='aux_balance_loss')
+        }
+
+        logger.info(f"Initialized Graph-Compatible MultiTaskNBeatsNet:")
         logger.info(f"  - Number of tasks: {num_tasks}")
-        logger.info(f"  - Forecast length: {forecast_length}")
-        logger.info(f"  - Task embeddings: {'✓' if config.use_task_embeddings else '✗'}")
-        logger.info(f"  - Task inference: {'✓' if config.use_task_inference else '✗'}")
-        logger.info(f"  - Trainable task inference: {'✓' if config.train_task_inference else '✗'}")
-        logger.info(f"  - Task inference Conv1D extractor: {'✓' if config.task_inference_use_conv else '✗'}")
-        logger.info(f"  - Task inference activation: {config.task_inference_activation}")
-        logger.info(f"  - Use bias: {'✓' if config.use_bias else '✗'}")
+        logger.info(f"  - Task inference enabled: {config.use_task_inference}")
+        logger.info(f"  - Task inference loss weights: {config.task_inference_loss_weight}")
 
     def build(self, input_shape: Union[Tuple, List[Tuple]]) -> None:
-        """Build the multi-task N-BEATS model with trainable task inference."""
-        logger.info("Building Multi-Task N-BEATS model with trainable task inference...")
+        """Build the multi-task N-BEATS model."""
+        logger.info("Building Graph-Compatible Multi-Task N-BEATS model...")
 
-        # Handle different input shape formats
         if isinstance(input_shape, list):
             time_series_shape = input_shape[0]
         else:
@@ -227,12 +159,12 @@ class MultiTaskNBeatsNet(keras.Model):
                 learning_rate=self.config.learning_rate,
                 gradient_clip_norm=self.config.gradient_clip_norm
             )
-            logger.info("✓ Base N-BEATS model created successfully")
+            logger.info("✓ Base N-BEATS model created")
         except Exception as e:
             logger.error(f"Failed to create base N-BEATS model: {e}")
             raise
 
-        # Add task-specific adjustment layer if using embeddings
+        # Add task-specific adjustment layer
         if self.config.use_task_embeddings:
             self.task_adjustment_layer = keras.layers.Dense(
                 units=self.forecast_length,
@@ -244,84 +176,51 @@ class MultiTaskNBeatsNet(keras.Model):
             )
             logger.info("✓ Task adjustment layer created")
 
-        # Build task inference network if enabled
+        # Build task inference network
         if self.config.use_task_inference and self.config.use_task_embeddings:
-            self._build_task_inference_network(time_series_shape)
-            logger.info("✓ Task inference network created")
+            self._build_improved_task_inference_network(time_series_shape)
+            logger.info("✓ Improved task inference network created")
 
         super().build(input_shape)
-        logger.info("✓ Multi-Task N-BEATS model built successfully")
+        logger.info("✓ Graph-Compatible Multi-Task N-BEATS model built successfully")
 
-    def _build_conv_feature_extractor(self) -> None:
-        """Build the convolutional feature extractor for the task inference network."""
-        self.task_inference_layers['conv_blocks'] = []
-        for i, (filters, kernel_size) in enumerate(zip(
-            self.config.task_inference_conv_filters,
-            self.config.task_inference_conv_kernels
-        )):
-            block = {
-                'conv': keras.layers.Conv1D(
-                    filters=filters,
-                    kernel_size=kernel_size,
-                    padding='same',
-                    use_bias=False,  # Bias is handled by BatchNormalization
-                    kernel_initializer='he_normal',
-                    kernel_regularizer=keras.regularizers.L2(self.config.kernel_regularizer_l2),
-                    name=f'task_inference_conv{i+1}'
-                ),
-                'bn': keras.layers.BatchNormalization(
-                    center=self.config.use_bias,
-                    scale=True,
-                    name=f'task_inference_conv_bn{i+1}'
-                ),
-                'activation': keras.layers.Activation(
-                    self.config.task_inference_conv_activation,
-                    name=f'task_inference_conv_act{i+1}'
-                ),
-                'pool': keras.layers.MaxPooling1D(
-                    pool_size=2,
-                    name=f'task_inference_conv_pool{i+1}'
-                )
-            }
-            self.task_inference_layers['conv_blocks'].append(block)
+    def _build_improved_task_inference_network(self, time_series_shape: Tuple) -> None:
+        """Build improved task inference network with better architecture."""
 
-        # Final pooling layer to aggregate the output of the conv blocks
-        self.task_inference_layers['conv_global_pool'] = keras.layers.GlobalAveragePooling1D(
-            name='task_inference_conv_global_pool'
+        # Simplified and more robust feature extraction
+        # 1. Global pooling for basic statistics
+        self.task_inference_layers['global_avg_pool'] = keras.layers.GlobalAveragePooling1D(
+            name='task_inference_global_avg'
+        )
+        self.task_inference_layers['global_max_pool'] = keras.layers.GlobalMaxPooling1D(
+            name='task_inference_global_max'
         )
 
-    def _build_task_inference_network(self, time_series_shape: Tuple) -> None:
-        """Build the task inference network for trainable task detection."""
-        # Build convolutional part if enabled
+        # 2. Optional conv layers for pattern extraction
         if self.config.task_inference_use_conv:
-            self._build_conv_feature_extractor()
-            logger.info("✓ Built Conv1D feature extractor for task inference.")
+            self.task_inference_layers['conv1'] = keras.layers.Conv1D(
+                filters=32,
+                kernel_size=7,
+                padding='same',
+                activation=self.config.task_inference_conv_activation,
+                kernel_regularizer=keras.regularizers.L2(self.config.kernel_regularizer_l2),
+                name='task_inference_conv1'
+            )
+            self.task_inference_layers['conv2'] = keras.layers.Conv1D(
+                filters=16,
+                kernel_size=3,
+                padding='same',
+                activation=self.config.task_inference_conv_activation,
+                kernel_regularizer=keras.regularizers.L2(self.config.kernel_regularizer_l2),
+                name='task_inference_conv2'
+            )
 
-        # Global average pooling to get series-level statistical features
-        self.task_inference_layers['stat_global_pool'] = keras.layers.GlobalAveragePooling1D(
-            name='task_inference_stat_global_pool'
-        )
-
-        # Feature extraction layers with stronger regularization for training
+        # 3. Dense layers for task classification
         self.task_inference_layers['dense1'] = keras.layers.Dense(
             self.config.task_inference_hidden_dim,
-            activation='linear',
-            use_bias=self.config.use_bias,
-            kernel_initializer='he_normal',
-            kernel_regularizer=keras.regularizers.L2(self.config.kernel_regularizer_l2 * 2),
-            bias_initializer='zeros' if self.config.use_bias else None,
+            activation=self.config.task_inference_activation,
+            kernel_regularizer=keras.regularizers.L2(self.config.kernel_regularizer_l2),
             name='task_inference_dense1'
-        )
-
-        self.task_inference_layers['bn1'] = keras.layers.BatchNormalization(
-            center=self.config.use_bias,
-            scale=True,
-            name='task_inference_bn1'
-        )
-
-        self.task_inference_layers['activation1'] = keras.layers.Activation(
-            self.config.task_inference_activation,
-            name='task_inference_activation1'
         )
 
         self.task_inference_layers['dropout1'] = keras.layers.Dropout(
@@ -331,23 +230,9 @@ class MultiTaskNBeatsNet(keras.Model):
 
         self.task_inference_layers['dense2'] = keras.layers.Dense(
             self.config.task_inference_hidden_dim // 2,
-            activation='linear',
-            use_bias=self.config.use_bias,
-            kernel_initializer='he_normal',
-            kernel_regularizer=keras.regularizers.L2(self.config.kernel_regularizer_l2 * 2),
-            bias_initializer='zeros' if self.config.use_bias else None,
+            activation=self.config.task_inference_activation,
+            kernel_regularizer=keras.regularizers.L2(self.config.kernel_regularizer_l2),
             name='task_inference_dense2'
-        )
-
-        self.task_inference_layers['bn2'] = keras.layers.BatchNormalization(
-            center=self.config.use_bias,
-            scale=True,
-            name='task_inference_bn2'
-        )
-
-        self.task_inference_layers['activation2'] = keras.layers.Activation(
-            self.config.task_inference_activation,
-            name='task_inference_activation2'
         )
 
         self.task_inference_layers['dropout2'] = keras.layers.Dropout(
@@ -355,13 +240,11 @@ class MultiTaskNBeatsNet(keras.Model):
             name='task_inference_dropout2'
         )
 
-        # Task probability prediction
+        # 4. Task probability prediction
         self.task_inference_layers['task_probs'] = keras.layers.Dense(
             self.num_tasks,
             activation='softmax',
-            use_bias=self.config.use_bias,
             kernel_initializer='glorot_uniform',
-            bias_initializer='zeros' if self.config.use_bias else None,
             name='task_inference_probs'
         )
 
@@ -370,69 +253,33 @@ class MultiTaskNBeatsNet(keras.Model):
             time_series_data: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Infer task probabilities from time series data."""
-        all_features = []
+        """Improved task probability inference."""
 
-        # 1. Convolutional Feature Extraction (if enabled)
-        if self.config.task_inference_use_conv and 'conv_blocks' in self.task_inference_layers:
-            x_conv = time_series_data
-            for block in self.task_inference_layers['conv_blocks']:
-                x_conv = block['conv'](x_conv, training=training)
-                x_conv = block['bn'](x_conv, training=training)
-                x_conv = block['activation'](x_conv)
-                x_conv = block['pool'](x_conv)
-
-            conv_features = self.task_inference_layers['conv_global_pool'](x_conv)
-            all_features.append(conv_features)
-
-        # 2. Statistical and Global Feature Extraction
-        # Extract global features from original data
-        global_features = self.task_inference_layers['stat_global_pool'](time_series_data)
+        # Extract basic statistical features
+        global_avg = self.task_inference_layers['global_avg_pool'](time_series_data)
+        global_max = self.task_inference_layers['global_max_pool'](time_series_data)
 
         # Compute additional statistical features
-        time_mean = keras.ops.mean(time_series_data, axis=1)
         time_std = keras.ops.std(time_series_data, axis=1)
         time_min = keras.ops.min(time_series_data, axis=1)
-        time_max = keras.ops.max(time_series_data, axis=1)
 
-        # Trend estimation
-        batch_size = keras.ops.shape(time_series_data)[0]
-        seq_len = keras.ops.shape(time_series_data)[1]
-        features = keras.ops.shape(time_series_data)[2]
+        # Start with statistical features
+        features = keras.ops.concatenate([global_avg, global_max, time_std, time_min], axis=-1)
 
-        time_indices = keras.ops.cast(keras.ops.arange(seq_len, dtype='float32'), time_series_data.dtype)
-        time_indices = keras.ops.reshape(time_indices, (1, seq_len, 1))
-        time_indices = keras.ops.broadcast_to(time_indices, (batch_size, seq_len, features))
+        # Add convolutional features if enabled
+        if self.config.task_inference_use_conv and 'conv1' in self.task_inference_layers:
+            conv_features = self.task_inference_layers['conv1'](time_series_data, training=training)
+            conv_features = self.task_inference_layers['conv2'](conv_features, training=training)
+            conv_features = self.task_inference_layers['global_avg_pool'](conv_features)
+            features = keras.ops.concatenate([features, conv_features], axis=-1)
 
-        centered_data = time_series_data - keras.ops.expand_dims(time_mean, axis=1)
-        centered_time = time_indices - keras.ops.expand_dims(keras.ops.mean(time_indices, axis=1), axis=1)
-
-        numerator = keras.ops.mean(centered_data * centered_time, axis=1)
-        data_var = keras.ops.mean(centered_data ** 2, axis=1)
-        time_var = keras.ops.mean(centered_time ** 2, axis=1)
-
-        # Combine statistical features
-        statistical_features = keras.ops.concatenate([
-            global_features, time_mean, time_std, time_min, time_max
-        ], axis=-1)
-        all_features.append(statistical_features)
-
-        # Combine all features for the dense network
-        combined_features = keras.ops.concatenate(all_features, axis=-1)
-
-        # Process through dense inference network
-        x = self.task_inference_layers['dense1'](combined_features, training=training)
-        x = self.task_inference_layers['bn1'](x, training=training)
-        x = self.task_inference_layers['activation1'](x, training=training)
+        # Process through dense network
+        x = self.task_inference_layers['dense1'](features, training=training)
         x = self.task_inference_layers['dropout1'](x, training=training)
-
         x = self.task_inference_layers['dense2'](x, training=training)
-        x = self.task_inference_layers['bn2'](x, training=training)
-        x = self.task_inference_layers['activation2'](x, training=training)
         x = self.task_inference_layers['dropout2'](x, training=training)
 
         task_probs = self.task_inference_layers['task_probs'](x, training=training)
-
         return task_probs
 
     def _compute_weighted_task_adjustment(
@@ -459,7 +306,6 @@ class MultiTaskNBeatsNet(keras.Model):
 
         # Add feature dimension
         weighted_adjustment = keras.ops.expand_dims(weighted_adjustment, axis=-1)
-
         return weighted_adjustment
 
     def _compute_task_inference_losses(
@@ -468,40 +314,70 @@ class MultiTaskNBeatsNet(keras.Model):
             task_probs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> Dict[str, keras.KerasTensor]:
-        """Compute auxiliary losses for task inference training."""
+        """Compute auxiliary losses for task inference training - GRAPH MODE FIXED."""
         losses = {}
 
         if not training or not self.config.train_task_inference:
             return losses
 
-        # 1. Entropy regularization loss
+        # 1. FIXED Entropy regularization loss
+        # Encourage confident predictions but not too extreme
         entropy = -keras.ops.sum(task_probs * keras.ops.log(task_probs + 1e-8), axis=-1)
-        target_entropy = self.config.min_entropy_target
-        entropy_loss = keras.ops.mean(keras.ops.maximum(0.0, entropy - target_entropy))
+
+        # We want entropy to be low (confident predictions) but not zero
+        # Penalty when entropy is too high (uncertain predictions)
+        entropy_loss = keras.ops.mean(keras.ops.maximum(0.0, entropy - self.config.min_entropy_target))
         losses['entropy_loss'] = entropy_loss
 
-        # 2. Consistency regularization loss
-        if keras.ops.shape(time_series_data)[0] > 1:
-            batch_size = keras.ops.shape(time_series_data)[0]
+        # 2. FIXED Consistency regularization loss - GRAPH COMPATIBLE
+        batch_size = keras.ops.shape(time_series_data)[0]
+
+        def compute_consistency_loss():
+            """Compute consistency loss when batch_size > 1."""
+            # Compute pairwise similarities between time series
             flat_series = keras.ops.reshape(time_series_data, (batch_size, -1))
+
+            # L2 normalize for cosine similarity
             flat_series_norm = flat_series / (keras.ops.norm(flat_series, axis=1, keepdims=True) + 1e-8)
             similarity_matrix = keras.ops.matmul(flat_series_norm, keras.ops.transpose(flat_series_norm))
+
+            # Convert similarities to probabilities
             similarity_probs = keras.ops.softmax(similarity_matrix / self.config.consistency_temperature)
 
+            # Compute task probability similarities
             task_similarity_matrix = keras.ops.matmul(task_probs, keras.ops.transpose(task_probs))
             task_similarity_probs = keras.ops.softmax(task_similarity_matrix / self.config.consistency_temperature)
 
+            # KL divergence between time series similarity and task probability similarity
             kl_div = keras.ops.sum(
-                similarity_probs * (keras.ops.log(similarity_probs + 1e-8) - keras.ops.log(task_similarity_probs + 1e-8)),
+                similarity_probs * (
+                            keras.ops.log(similarity_probs + 1e-8) - keras.ops.log(task_similarity_probs + 1e-8)),
                 axis=-1
             )
-            consistency_loss = keras.ops.mean(kl_div)
-            losses['consistency_loss'] = consistency_loss
+            return keras.ops.mean(kl_div)
 
-        # 3. Balance regularization loss
+        def no_consistency_loss():
+            """Return zero loss when batch_size <= 1."""
+            return keras.ops.convert_to_tensor(0.0, dtype=task_probs.dtype)
+
+        # FIXED: Use keras.ops.cond instead of Python if for graph compatibility
+        consistency_loss = keras.ops.cond(
+            batch_size > 1,
+            compute_consistency_loss,
+            no_consistency_loss
+        )
+        losses['consistency_loss'] = consistency_loss
+
+        # 3. FIXED Balance regularization loss
+        # Encourage balanced task predictions across the batch
         mean_task_probs = keras.ops.mean(task_probs, axis=0)
-        uniform_distribution = keras.ops.ones_like(mean_task_probs) / self.num_tasks
-        balance_loss = keras.ops.sum(keras.ops.square(mean_task_probs - uniform_distribution))
+        uniform_distribution = keras.ops.ones_like(mean_task_probs) / keras.ops.cast(self.num_tasks,
+                                                                                     dtype=mean_task_probs.dtype)
+
+        # Use KL divergence instead of MSE for better balance
+        balance_loss = keras.ops.sum(
+            mean_task_probs * keras.ops.log(mean_task_probs / (uniform_distribution + 1e-8) + 1e-8)
+        )
         losses['balance_loss'] = balance_loss
 
         return losses
@@ -512,85 +388,119 @@ class MultiTaskNBeatsNet(keras.Model):
             training: Optional[bool] = None,
             return_aux_losses: bool = False
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, Dict[str, keras.KerasTensor]]]:
-        """Forward pass with trainable task-aware processing."""
+        """Forward pass with improved task-aware processing."""
         aux_losses = {}
 
+        # Handle input formats
         if isinstance(inputs, tuple) and len(inputs) == 2:
             time_series_data, task_ids = inputs
-            base_prediction = self.nbeats_model(time_series_data, training=training)
-
-            if self.config.use_task_embeddings and self.task_adjustment_layer is not None:
-                if task_ids is not None:
-                    task_emb = self.task_embedding(task_ids, training=training)
-                    task_adjustment = self.task_adjustment_layer(task_emb, training=training)
-                    task_adjustment = keras.ops.expand_dims(task_adjustment, axis=-1)
-                else:
-                    if self.config.use_task_inference:
-                        task_probs = self._infer_task_probabilities(time_series_data, training=training)
-                        task_adjustment = self._compute_weighted_task_adjustment(task_probs, training=training)
-                        if training and self.config.train_task_inference:
-                            aux_losses = self._compute_task_inference_losses(time_series_data, task_probs, training=training)
-                    else:
-                        return (base_prediction, aux_losses) if return_aux_losses else base_prediction
-
-                final_prediction = base_prediction + (self.config.task_adjustment * task_adjustment)
-                return (final_prediction, aux_losses) if return_aux_losses else final_prediction
-            else:
-                return (base_prediction, aux_losses) if return_aux_losses else base_prediction
-
+            has_task_ids = task_ids is not None
         elif isinstance(inputs, (tuple, list)) and len(inputs) != 2:
             raise ValueError(f"Expected 2 inputs for multi-task format, got {len(inputs)}")
+        else:
+            time_series_data = inputs
+            task_ids = None
+            has_task_ids = False
 
-        base_prediction = self.nbeats_model(inputs, training=training)
+        # Get base prediction
+        base_prediction = self.nbeats_model(time_series_data, training=training)
 
-        if (self.config.use_task_embeddings and self.config.use_task_inference and self.task_adjustment_layer is not None):
-            task_probs = self._infer_task_probabilities(inputs, training=training)
-            task_adjustment = self._compute_weighted_task_adjustment(task_probs, training=training)
+        # Apply task adjustments if using task embeddings
+        if self.config.use_task_embeddings and self.task_adjustment_layer is not None:
+            if has_task_ids:
+                # Use provided task IDs
+                task_emb = self.task_embedding(task_ids, training=training)
+                task_adjustment = self.task_adjustment_layer(task_emb, training=training)
+                task_adjustment = keras.ops.expand_dims(task_adjustment, axis=-1)
 
-            if training and self.config.train_task_inference:
-                aux_losses = self._compute_task_inference_losses(inputs, task_probs, training=training)
+                # Also compute task inference for auxiliary losses
+                if training and self.config.use_task_inference and self.config.train_task_inference:
+                    task_probs = self._infer_task_probabilities(time_series_data, training=training)
+                    aux_losses = self._compute_task_inference_losses(time_series_data, task_probs, training=training)
+
+            elif self.config.use_task_inference:
+                # Use task inference
+                task_probs = self._infer_task_probabilities(time_series_data, training=training)
+                task_adjustment = self._compute_weighted_task_adjustment(task_probs, training=training)
+
+                # Compute auxiliary losses during training
+                if training and self.config.train_task_inference:
+                    aux_losses = self._compute_task_inference_losses(time_series_data, task_probs, training=training)
+            else:
+                task_adjustment = 0.0
 
             final_prediction = base_prediction + (self.config.task_adjustment * task_adjustment)
-            return (final_prediction, aux_losses) if return_aux_losses else final_prediction
         else:
-            return (base_prediction, aux_losses) if return_aux_losses else base_prediction
+            final_prediction = base_prediction
+
+        return (final_prediction, aux_losses) if return_aux_losses else final_prediction
 
     def train_step(self, data):
-        """Custom training step with auxiliary losses for task inference."""
+        """FIXED custom training step with proper auxiliary loss handling."""
         if not isinstance(data, tuple) or len(data) != 2:
             raise ValueError("Expected data to be a tuple of (x, y)")
+
         x, y = data
 
         with tf.GradientTape() as tape:
+            # Forward pass with auxiliary losses
             predictions, aux_losses = self(x, training=True, return_aux_losses=True)
+
+            # Compute primary loss
             primary_loss = self.compute_loss(y=y, y_pred=predictions)
 
+            # Initialize total loss with primary loss
             total_loss = primary_loss
+
+            # Add auxiliary losses with proper weights
             if self.config.train_task_inference and aux_losses:
                 for loss_name, loss_value in aux_losses.items():
+                    # Ensure loss value is a scalar
+                    if isinstance(loss_value, tf.Tensor):
+                        loss_value = tf.reduce_mean(loss_value)
+
+                    # Apply appropriate weight
                     if loss_name == 'entropy_loss':
                         weight = self.config.entropy_loss_weight
                     elif loss_name == 'consistency_loss':
                         weight = self.config.consistency_loss_weight
-                    else: # 'balance_loss' and any other
+                    else:  # balance_loss and others
                         weight = self.config.task_inference_loss_weight
-                    total_loss += weight * loss_value
 
+                    weighted_loss = weight * loss_value
+                    total_loss += weighted_loss
+
+                    # Update auxiliary loss trackers
+                    if loss_name in self.aux_loss_tracker:
+                        self.aux_loss_tracker[loss_name].update_state(loss_value)
+
+        # Compute gradients and apply
         trainable_vars = self.trainable_variables
         gradients = tape.gradient(total_loss, trainable_vars)
+
+        # Apply gradient clipping if specified
+        if self.config.gradient_clip_norm > 0:
+            gradients, _ = tf.clip_by_global_norm(gradients, self.config.gradient_clip_norm)
+
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
+        # Update metrics
         self.compiled_metrics.update_state(y, predictions)
+
+        # Prepare results dictionary
         results = {m.name: m.result() for m in self.metrics}
         results['loss'] = total_loss
         results['primary_loss'] = primary_loss
+
+        # Add auxiliary loss results
         if aux_losses:
-            for loss_name, loss_value in aux_losses.items():
-                results[f'aux_{loss_name}'] = loss_value
+            for loss_name in self.aux_loss_tracker:
+                results[f'aux_{loss_name}'] = self.aux_loss_tracker[loss_name].result()
+
         return results
 
     def test_step(self, data):
-        """Custom test step."""
+        """Custom test step - unchanged."""
         if not isinstance(data, tuple) or len(data) != 2:
             raise ValueError("Expected data to be a tuple of (x, y)")
         x, y = data
@@ -603,10 +513,23 @@ class MultiTaskNBeatsNet(keras.Model):
         results['loss'] = loss
         return results
 
+    @property
+    def metrics(self):
+        """Include auxiliary loss trackers in metrics."""
+        metrics = super().metrics
+        if self.config.train_task_inference:
+            metrics.extend(list(self.aux_loss_tracker.values()))
+        return metrics
+
+    def reset_metrics(self):
+        """Reset all metrics including auxiliary loss trackers."""
+        super().reset_metrics()
+        for tracker in self.aux_loss_tracker.values():
+            tracker.reset_state()
+
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
         base_config = super().get_config()
-        # **FIX:** Convert the dataclass to a dictionary to make it serializable
         base_config.update({
             'config': asdict(self.config),
             'num_tasks': self.num_tasks,
@@ -618,13 +541,11 @@ class MultiTaskNBeatsNet(keras.Model):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'MultiTaskNBeatsNet':
         """Create model from configuration dictionary."""
-        # **FIX:** Reconstruct the dataclass from the serialized dictionary
         config_data = config.pop('config')
         mt_config = MultiTaskNBeatsConfig(**config_data)
-
-        # The remaining items in 'config' are the direct arguments for __init__
         return cls(config=mt_config, **config)
 
+    # Utility methods remain the same...
     def get_task_id(self, task_name: str) -> int:
         """Get task ID for a given task name."""
         if task_name not in self.task_to_id:
@@ -660,35 +581,21 @@ class MultiTaskNBeatsNet(keras.Model):
     def summary(self, **kwargs) -> None:
         """Print model summary including task information."""
         print("=" * 80)
-        print("MULTI-TASK N-BEATS MODEL SUMMARY (WITH TRAINABLE TASK INFERENCE)")
+        print("GRAPH-COMPATIBLE MULTI-TASK N-BEATS MODEL SUMMARY")
         print("=" * 80)
         print(f"Number of tasks: {self.num_tasks}")
         print(f"Forecast length: {self.forecast_length}")
         print(f"Task embeddings: {'Enabled' if self.config.use_task_embeddings else 'Disabled'}")
         print(f"Task inference: {'Enabled' if self.config.use_task_inference else 'Disabled'}")
         print(f"Trainable task inference: {'Enabled' if self.config.train_task_inference else 'Disabled'}")
-        print(f"Task inference Conv1D extractor: {'Enabled' if self.config.task_inference_use_conv else 'Disabled'}")
-        if self.config.task_inference_use_conv:
-            print(f"  Conv filters: {self.config.task_inference_conv_filters}")
-            print(f"  Conv kernels: {self.config.task_inference_conv_kernels}")
-            print(f"  Conv activation: {self.config.task_inference_conv_activation}")
-        print(f"Task inference activation (dense): {self.config.task_inference_activation}")
-        print(f"Use bias: {'Enabled' if self.config.use_bias else 'Disabled'}")
-        print(f"Task embedding dimension: {self.config.task_embedding_dim}")
 
         if self.config.train_task_inference:
             print(f"\nTask Inference Training Parameters:")
             print(f"  Task inference loss weight: {self.config.task_inference_loss_weight}")
             print(f"  Consistency loss weight: {self.config.consistency_loss_weight}")
             print(f"  Entropy loss weight: {self.config.entropy_loss_weight}")
-            print(f"  Consistency temperature: {self.config.consistency_temperature}")
             print(f"  Min entropy target: {self.config.min_entropy_target}")
 
-        print(f"\nArchitecture:")
-        print(f"  Stack types: {self.config.stack_types}")
-        print(f"  Blocks per stack: {self.config.nb_blocks_per_stack}")
-        print(f"  Hidden units: {self.config.hidden_layer_units}")
-        print(f"  RevIN normalization: {'Enabled' if self.config.use_revin else 'Disabled'}")
         print("\nTask Mapping:")
         for task_name, task_id in self.task_to_id.items():
             print(f"  {task_id:2d}: {task_name}")
@@ -707,8 +614,8 @@ def create_multi_task_nbeats(
         forecast_length: int,
         name: Optional[str] = None
 ) -> MultiTaskNBeatsNet:
-    """Create a Multi-Task N-BEATS model with trainable task inference."""
-    logger.info("Creating Multi-Task N-BEATS model with trainable task inference...")
+    """Create a Graph-Compatible Multi-Task N-BEATS model."""
+    logger.info("Creating Graph-Compatible Multi-Task N-BEATS model...")
 
     model = MultiTaskNBeatsNet(
         config=config,
@@ -718,10 +625,9 @@ def create_multi_task_nbeats(
         name=name
     )
 
-    logger.info("✓ Multi-Task N-BEATS model with trainable task inference created successfully")
+    logger.info("✓ Graph-Compatible Multi-Task N-BEATS model created successfully")
     return model
 
-# ---------------------------------------------------------------------
 
 def create_multi_task_nbeats_from_tasks(
         task_names: List[str],
@@ -729,12 +635,12 @@ def create_multi_task_nbeats_from_tasks(
         config: Optional[MultiTaskNBeatsConfig] = None,
         name: Optional[str] = None
 ) -> MultiTaskNBeatsNet:
-    """Create a Multi-Task N-BEATS model from a list of task names with trainable task inference."""
+    """Create a Graph-Compatible Multi-Task N-BEATS model from a list of task names."""
     if config is None:
         config = MultiTaskNBeatsConfig()
 
     task_to_id = {task: idx for idx, task in enumerate(task_names)}
-    logger.info(f"Creating Multi-Task N-BEATS with trainable task inference for {len(task_names)} tasks: {task_names}")
+    logger.info(f"Creating Graph-Compatible Multi-Task N-BEATS for {len(task_names)} tasks: {task_names}")
 
     return create_multi_task_nbeats(
         config=config,
