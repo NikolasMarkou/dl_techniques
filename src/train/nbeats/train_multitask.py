@@ -54,7 +54,7 @@ class MultiTaskNBeatsTrainingConfig:
 
     # Multi-task model configuration
     use_task_embeddings: bool = True
-    task_embedding_dim: int = 32
+    task_embedding_dim: int = 16
 
     # Trainable Task Inference Configuration
     train_task_inference: bool = True
@@ -76,7 +76,7 @@ class MultiTaskNBeatsTrainingConfig:
     hidden_layer_units: int = 256                # reduced for stability (was 512)
     use_revin: bool = True
 
-    # ORIGINAL Training configuration (restored)
+    # ORIGINAL Training configuration
     epochs: int = 150
     batch_size: int = 128
     learning_rate: float = 1e-4
@@ -88,23 +88,23 @@ class MultiTaskNBeatsTrainingConfig:
     kernel_regularizer_l2: float = 1e-5
     dropout_rate: float = 0.15
 
-    # ORIGINAL Task selection and balancing (restored)
-    max_tasks_per_category: int = 5              # RESTORED original
-    min_data_length: int = 1000                  # ORIGINAL
+    # ORIGINAL Task selection and balancing
+    max_tasks_per_category: int = 5
+    min_data_length: int = 1000
     balance_tasks: bool = True
-    samples_per_task: int = 10000                # RESTORED original
+    samples_per_task: int = 10000
 
     # ORIGINAL Visualization configuration (restored)
-    visualize_every_n_epochs: int = 5            # RESTORED original
+    visualize_every_n_epochs: int = 5
     save_interim_plots: bool = True
-    plot_top_k_tasks: int = 6                    # RESTORED original
+    plot_top_k_tasks: int = 6
     create_learning_curves: bool = True
     create_prediction_plots: bool = True
     create_task_performance_heatmap: bool = True
 
     # ORIGINAL Evaluation configuration (restored)
     eval_during_training: bool = True
-    eval_every_n_epochs: int = 10                # RESTORED original
+    eval_every_n_epochs: int = 10
 
     def __post_init__(self) -> None:
         """Enhanced validation with better error checking."""
