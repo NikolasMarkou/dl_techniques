@@ -94,7 +94,7 @@ class MultiTaskNBeatsTrainingConfig:
     balance_tasks: bool = True
     samples_per_task: int = 10000
 
-    # ORIGINAL Visualization configuration (restored)
+    # ORIGINAL Visualization configuration
     visualize_every_n_epochs: int = 5
     save_interim_plots: bool = True
     plot_top_k_tasks: int = 6
@@ -102,7 +102,7 @@ class MultiTaskNBeatsTrainingConfig:
     create_prediction_plots: bool = True
     create_task_performance_heatmap: bool = True
 
-    # ORIGINAL Evaluation configuration (restored)
+    # ORIGINAL Evaluation configuration
     eval_during_training: bool = True
     eval_every_n_epochs: int = 10
 

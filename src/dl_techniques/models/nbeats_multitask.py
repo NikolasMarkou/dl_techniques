@@ -1,19 +1,10 @@
 """
-Multi-Task N-BEATS Model Implementation with Trainable Task Inference - GRAPH MODE FIXED.
+Multi-Task N-BEATS Model Implementation with Trainable Task Inference
 
 This module provides a multi-task variant of the N-BEATS architecture that can
 simultaneously learn multiple time series forecasting tasks with task-specific
 embeddings and trainable task inference. The model can learn to automatically
 infer appropriate task adjustments even when task IDs are not provided during training.
-
-Key improvements:
-- Trainable task inference with auxiliary losses
-- Convolutional feature extractor for improved task inference
-- Consistency regularization for task inference
-- Entropy regularization for confident task predictions
-- Curriculum learning support (labeled → unlabeled)
-- Mixed training with and without task IDs
-- FIXED: Graph-compatible conditional operations using keras.ops.cond
 
 References:
     - Oreshkin, B. N., et al. "N-BEATS: Neural basis expansion analysis for interpretable time series forecasting." ICLR 2020.
