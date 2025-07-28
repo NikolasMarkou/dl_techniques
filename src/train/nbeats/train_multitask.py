@@ -97,26 +97,26 @@ class MultiTaskNBeatsTrainingConfig:
     # Model architecture
     stack_types: List[str] = field(default_factory=lambda: ["trend", "seasonality", "generic"])
     nb_blocks_per_stack: int = 3
-    hidden_layer_units: int = 512
+    hidden_layer_units: int = 256
     use_revin: bool = True
 
     # Training configuration
     epochs: int = 150
     batch_size: int = 128
-    learning_rate: float = 1e-3
+    learning_rate: float = 1e-4
     gradient_clip_norm: float = 1.0
     optimizer: str = 'adamw'
     primary_loss: str = "mae"
 
     # Regularization
-    kernel_regularizer_l2: float = 1e-4
-    dropout_rate: float = 0.15
+    kernel_regularizer_l2: float = 1e-5
+    dropout_rate: float = 0.25
 
     # Task selection and balancing
     max_tasks_per_category: int = 5
     min_data_length: int = 1000
     balance_tasks: bool = True
-    samples_per_task: int = 2000
+    samples_per_task: int = 10000
 
     # Interim visualization configuration
     visualize_every_n_epochs: int = 5
