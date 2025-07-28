@@ -493,6 +493,7 @@ class MultiTaskNBeatsTrainingConfig:
     nb_blocks_per_stack: int = 3
     hidden_layer_units: int = 256
     use_revin: bool = True
+    use_bias: bool = True
 
     # Training configuration
     epochs: int = 150
@@ -500,7 +501,7 @@ class MultiTaskNBeatsTrainingConfig:
     learning_rate: float = 1e-4
     gradient_clip_norm: float = 1.0
     optimizer: str = 'adamw'
-    primary_loss: str = "mae"
+    primary_loss: str = "smape"
 
     # Regularization
     kernel_regularizer_l2: float = 1e-5
@@ -1425,6 +1426,7 @@ class MultiTaskNBeatsTrainer:
             nb_blocks_per_stack=self.config.nb_blocks_per_stack,
             hidden_layer_units=self.config.hidden_layer_units,
             use_revin=self.config.use_revin,
+            use_bias=self.config.use_bias,
 
             dropout_rate=self.config.dropout_rate,
             kernel_regularizer_l2=self.config.kernel_regularizer_l2,
