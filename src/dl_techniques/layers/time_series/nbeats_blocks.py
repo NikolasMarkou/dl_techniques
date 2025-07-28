@@ -146,6 +146,7 @@ class NBeatsBlock(keras.layers.Layer):
         forecast_length: Integer, length of the forecast horizon.
         share_weights: Boolean, whether to share weights across blocks in the same stack.
         activation: String or callable, activation function for hidden layers.
+        use_bias: Boolean, whether to add bias to the dense blocks.
         use_revin: Boolean, whether to apply RevIN normalization.
         kernel_initializer: String or Initializer, initializer for FC layers.
         theta_initializer: String or Initializer, initializer for theta layers.
@@ -162,6 +163,7 @@ class NBeatsBlock(keras.layers.Layer):
             forecast_length: int,
             share_weights: bool = False,
             activation: Union[str, callable] = 'relu',
+            use_bias: bool = False,
             use_revin: bool = False,
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
             theta_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
@@ -199,6 +201,7 @@ class NBeatsBlock(keras.layers.Layer):
         self.theta_initializer = keras.initializers.get(theta_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.theta_regularizer = keras.regularizers.get(theta_regularizer)
+        self.use_bias = use_bias
 
         # Will be initialized in build()
         self.revin_layer = None
@@ -228,6 +231,7 @@ class NBeatsBlock(keras.layers.Layer):
 
         self.dense1 = keras.layers.Dense(
             layer_sizes[0],
+            use_bias=self.use_bias,
             activation=self.activation,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -235,6 +239,7 @@ class NBeatsBlock(keras.layers.Layer):
         )
         self.dense2 = keras.layers.Dense(
             layer_sizes[1],
+            use_bias=self.use_bias,
             activation=self.activation,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -242,6 +247,7 @@ class NBeatsBlock(keras.layers.Layer):
         )
         self.dense3 = keras.layers.Dense(
             layer_sizes[2],
+            use_bias=self.use_bias,
             activation=self.activation,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -249,6 +255,7 @@ class NBeatsBlock(keras.layers.Layer):
         )
         self.dense4 = keras.layers.Dense(
             layer_sizes[3],
+            use_bias=self.use_bias,
             activation=self.activation,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -342,6 +349,7 @@ class NBeatsBlock(keras.layers.Layer):
             'share_weights': self.share_weights,
             'activation': self.activation,
             'use_revin': self.use_revin,
+            'use_bias': self.use_bias,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'theta_initializer': keras.initializers.serialize(self.theta_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
