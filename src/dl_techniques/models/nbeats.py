@@ -249,6 +249,7 @@ class NBeatsNet(keras.Model):
                     'kernel_initializer': self.kernel_initializer,
                     'kernel_regularizer': self.kernel_regularizer,
                     'theta_regularizer': self.theta_regularizer,
+                    'use_bias': False,
                     'name': block_name
                 }
 

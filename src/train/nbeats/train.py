@@ -3,14 +3,14 @@ Comprehensive Base N-BEATS Training Framework for Multiple Time Series Patterns
 
 This module provides a sophisticated, production-ready training framework for base
 N-BEATS models trained on multiple time series patterns. It enables training
-individual or ensemble N-BEATS models across diverse time series patterns
-with comprehensive monitoring, visualization, and performance analysis.
+N-BEATS models across diverse time series patterns with comprehensive monitoring,
+visualization, and performance analysis.
 
 Classes
 -------
 BaseNBeatsTrainingConfig
     Comprehensive configuration dataclass containing all training parameters,
-    including model architecture, training strategies, data management,
+    including model architecture, training parameters, data management,
     regularization, and visualization settings.
 
 MultiPatternDataProcessor
@@ -24,44 +24,25 @@ PatternPerformanceCallback
     performance, and learning dynamics.
 
 BaseNBeatsTrainer
-    Main training orchestrator supporting multiple training strategies including
-    individual models per pattern, unified multi-pattern models, and ensemble
-    approaches with comprehensive experiment management.
+    Main training orchestrator for multi-pattern N-BEATS training with
+    comprehensive experiment management and performance analysis.
 
-Training Strategies
--------------------
-**Individual Models Strategy:**
-* Train separate N-BEATS models for each time series pattern
-* Optimal for pattern-specific optimization
-* Enables specialized forecasting for each pattern type
-* Supports ensemble predictions across models
-
-**Unified Model Strategy:**
-* Train single N-BEATS model on mixed patterns
-* Learns general forecasting representations
-* Efficient deployment with single model
-* Good generalization across unseen patterns
-
-**Ensemble Strategy:**
-* Train multiple models with different configurations
-* Combine predictions for improved robustness
-* Reduces prediction variance
-* Optimal for critical forecasting applications
-
-**Pattern-Specific Strategy:**
-* Focus training on specific pattern categories
-* Ideal for domain-specific applications
-* Enhanced performance on target pattern types
-* Reduced model complexity
+Training Approach
+-----------------
+The framework trains a single N-BEATS model on mixed patterns from multiple
+time series categories. This approach:
+* Learns general forecasting representations across diverse patterns
+* Provides efficient deployment with a single model
+* Achieves good generalization across unseen patterns
+* Optimizes computational resources
 
 Usage Examples
 --------------
 Basic Multi-Pattern Training:
     >>> # Configure training
-    >>> config = NBeatsTrainingConfig(
+    >>> config = BaseNBeatsTrainingConfig(
     ...     backcast_length=168,
     ...     forecast_length=24,
-    ...     training_strategy='unified',
     ...     epochs=100,
     ...     batch_size=128
     ... )
@@ -74,45 +55,9 @@ Basic Multi-Pattern Training:
     >>> results = trainer.run_experiment()
     >>> print(f"Experiment completed: {results['results_dir']}")
 
-Individual Models Strategy:
-    >>> # Train separate models for each pattern
-    >>> config = NBeatsTrainingConfig(
-    ...     training_strategy='individual',
-    ...     backcast_length=168,
-    ...     forecast_length=24,
-    ...     max_patterns=20,  # Limit for manageable training
-    ...     epochs=150,
-    ...     batch_size=64
-    ... )
-    >>>
-    >>> trainer = BaseNBeatsTrainer(config, ts_config)
-    >>> results = trainer.run_experiment()
-    >>>
-    >>> # Access individual model results
-    >>> for pattern_name, result in results['pattern_results'].items():
-    ...     print(f"{pattern_name}: Test Loss = {result['test_loss']:.4f}")
-
-Ensemble Strategy:
-    >>> # Train ensemble of models with different configurations
-    >>> config = NBeatsTrainingConfig(
-    ...     training_strategy='ensemble',
-    ...     ensemble_size=5,
-    ...     ensemble_diversity='architecture',  # or 'data', 'hyperparams'
-    ...     backcast_length=168,
-    ...     forecast_length=24
-    ... )
-    >>>
-    >>> trainer = BaseNBeatsTrainer(config, ts_config)
-    >>> results = trainer.run_experiment()
-    >>>
-    >>> # Ensemble predictions are automatically combined
-    >>> ensemble_loss = results['ensemble_performance']['test_loss']
-    >>> print(f"Ensemble Test Loss: {ensemble_loss:.4f}")
-
 Pattern-Specific Training:
     >>> # Focus on specific pattern categories
-    >>> config = NBeatsTrainingConfig(
-    ...     training_strategy='pattern_specific',
+    >>> config = BaseNBeatsTrainingConfig(
     ...     target_categories=['financial', 'weather', 'industrial'],
     ...     category_weights={'financial': 2.0, 'weather': 1.5, 'industrial': 1.5},
     ...     max_patterns_per_category=15
@@ -123,9 +68,8 @@ Pattern-Specific Training:
 
 Multi-Horizon Training:
     >>> # Train for multiple forecast horizons
-    >>> config = NBeatsTrainingConfig(
+    >>> config = BaseNBeatsTrainingConfig(
     ...     forecast_horizons=[6, 12, 24, 48],
-    ...     training_strategy='unified',
     ...     backcast_length=168
     ... )
     >>>
@@ -139,12 +83,6 @@ Multi-Horizon Training:
 
 Configuration Parameters
 ------------------------
-**Training Strategy:**
-* `training_strategy`: Strategy type ('individual', 'unified', 'ensemble', 'pattern_specific')
-* `ensemble_size`: Number of models in ensemble (default: 5)
-* `ensemble_diversity`: Diversity source ('architecture', 'data', 'hyperparams')
-* `target_categories`: Specific categories for pattern-specific training
-
 **Data Configuration:**
 * `train_ratio`: Training data fraction (default: 0.7)
 * `val_ratio`: Validation data fraction (default: 0.15)
@@ -182,20 +120,19 @@ The base N-BEATS training uses the standard N-BEATS architecture:
 * RevIN normalization for improved performance
 * Pattern-aware data balancing for robust training
 
-**Training Strategies Comparison:**
-1. **Individual**: Optimal pattern-specific performance, higher computational cost
-2. **Unified**: Good generalization, efficient deployment, moderate performance
-3. **Ensemble**: Best overall performance, highest computational cost
-4. **Pattern-Specific**: Domain-optimized, efficient for specific use cases
+**Multi-Pattern Learning:**
+* Combined training on diverse time series patterns
+* Pattern-aware data balancing for robust learning
+* Cross-pattern generalization capabilities
+* Efficient single-model deployment
 
 References
 ----------
 **N-BEATS Architecture:**
 * Oreshkin, B. N., et al. (2019). "N-BEATS: Neural basis expansion analysis for interpretable time series forecasting." ICLR 2020.
 
-**Ensemble Methods:**
-* Breiman, L. (1996). "Bagging predictors." Machine learning, 24(2), 123-140.
-* Hansen, L. K., & Salamon, P. (1990). "Neural network ensembles." IEEE transactions on pattern analysis and machine intelligence, 12(10), 993-1001.
+**Multi-Pattern Time Series Learning:**
+* Salinas, D., et al. (2020). "DeepAR: Probabilistic forecasting with autoregressive recurrent neural networks." International Journal of Forecasting, 36(3), 1181-1191.
 """
 
 import os
@@ -209,7 +146,6 @@ import tensorflow as tf
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Any, Optional, Union
-from enum import Enum
 
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -224,8 +160,15 @@ plt.style.use('default')
 sns.set_palette("husl")
 
 
-def set_random_seeds(seed: int = 42):
-    """Set random seeds for reproducibility."""
+def set_random_seeds(seed: int = 42) -> None:
+    """
+    Set random seeds for reproducibility.
+
+    Parameters
+    ----------
+    seed : int, optional
+        Random seed value, by default 42
+    """
     random.seed(seed)
     np.random.seed(seed)
     keras.utils.set_random_seed(seed)
@@ -235,34 +178,118 @@ def set_random_seeds(seed: int = 42):
 set_random_seeds(42)
 
 
-class TrainingStrategy(Enum):
-    """Training strategy enumeration."""
-    INDIVIDUAL = "individual"
-    UNIFIED = "unified"
-    ENSEMBLE = "ensemble"
-    PATTERN_SPECIFIC = "pattern_specific"
-
-
-class EnsembleDiversity(Enum):
-    """Ensemble diversity source enumeration."""
-    ARCHITECTURE = "architecture"
-    DATA = "data"
-    HYPERPARAMS = "hyperparams"
-
-
 @dataclass
-class NBeatsTrainingConfig:
-    """Configuration for base N-BEATS training with multiple strategies."""
+class BaseNBeatsTrainingConfig:
+    """
+    Configuration for base N-BEATS training with multiple patterns.
+
+    This dataclass contains comprehensive configuration options for training
+    N-BEATS models on diverse time series patterns with various regularization,
+    optimization, and visualization settings.
+
+    Attributes
+    ----------
+    result_dir : str
+        Directory to save experiment results
+    save_results : bool
+        Whether to save training results and visualizations
+    experiment_name : str
+        Name of the experiment for identification
+
+    Data Configuration
+    ------------------
+    train_ratio : float
+        Fraction of data used for training (default: 0.7)
+    val_ratio : float
+        Fraction of data used for validation (default: 0.15)
+    test_ratio : float
+        Fraction of data used for testing (default: 0.15)
+    target_categories : Optional[List[str]]
+        Specific pattern categories to focus on
+
+    Model Architecture
+    ------------------
+    backcast_length : int
+        Length of input sequence (default: 168)
+    forecast_length : int
+        Length of forecast horizon (default: 24)
+    forecast_horizons : List[int]
+        Multiple forecast horizons to train for
+    stack_types : List[str]
+        Types of N-BEATS stacks to use
+    nb_blocks_per_stack : int
+        Number of blocks per stack (default: 3)
+    hidden_layer_units : int
+        Size of hidden layers (default: 256)
+    use_revin : bool
+        Whether to use RevIN normalization (default: True)
+    use_bias : bool
+        Whether to use bias in linear layers (default: True)
+
+    Training Configuration
+    ----------------------
+    epochs : int
+        Maximum number of training epochs (default: 150)
+    batch_size : int
+        Training batch size (default: 128)
+    learning_rate : float
+        Initial learning rate (default: 1e-4)
+    gradient_clip_norm : float
+        Gradient clipping norm value (default: 1.0)
+    optimizer : str
+        Optimizer type ('adam' or 'adamw')
+    primary_loss : str
+        Primary loss function name
+
+    Regularization
+    --------------
+    kernel_regularizer_l2 : float
+        L2 regularization strength for kernels
+    dropout_rate : float
+        Dropout probability (default: 0.15)
+
+    Pattern Selection
+    -----------------
+    max_patterns : Optional[int]
+        Maximum number of patterns to use
+    max_patterns_per_category : int
+        Maximum patterns per category (default: 10)
+    min_data_length : int
+        Minimum required data length (default: 2000)
+    balance_patterns : bool
+        Whether to balance pattern representation
+    samples_per_pattern : int
+        Number of samples per pattern (default: 15000)
+    category_weights : Dict[str, float]
+        Weights for different pattern categories
+
+    Visualization
+    -------------
+    visualize_every_n_epochs : int
+        Frequency of visualization creation
+    save_interim_plots : bool
+        Whether to save intermediate plots
+    plot_top_k_patterns : int
+        Number of top patterns to visualize
+    create_learning_curves : bool
+        Whether to create learning curve plots
+    create_prediction_plots : bool
+        Whether to create prediction visualization plots
+
+    Evaluation
+    ----------
+    eval_during_training : bool
+        Whether to evaluate during training
+    eval_every_n_epochs : int
+        Frequency of evaluation during training
+    """
 
     # General experiment configuration
     result_dir: str = "results"
     save_results: bool = True
     experiment_name: str = "base_nbeats_multi_pattern"
 
-    # Training strategy configuration
-    training_strategy: Union[TrainingStrategy, str] = TrainingStrategy.UNIFIED
-    ensemble_size: int = 5
-    ensemble_diversity: Union[EnsembleDiversity, str] = EnsembleDiversity.ARCHITECTURE
+    # Pattern selection configuration
     target_categories: Optional[List[str]] = None
 
     # Data configuration
@@ -332,13 +359,14 @@ class NBeatsTrainingConfig:
     eval_every_n_epochs: int = 10
 
     def __post_init__(self) -> None:
-        """Validation and configuration processing."""
-        # Convert string enums to enum objects
-        if isinstance(self.training_strategy, str):
-            self.training_strategy = TrainingStrategy(self.training_strategy)
-        if isinstance(self.ensemble_diversity, str):
-            self.ensemble_diversity = EnsembleDiversity(self.ensemble_diversity)
+        """
+        Validate configuration parameters after initialization.
 
+        Raises
+        ------
+        ValueError
+            If configuration parameters are invalid
+        """
         # Validate data ratios
         total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
         if not np.isclose(total_ratio, 1.0, atol=1e-6):
@@ -351,35 +379,42 @@ class NBeatsTrainingConfig:
         if self.val_ratio < 0.1:
             logger.warning(f"Validation ratio {self.val_ratio} might be too small for reliable validation")
 
-        # Validate ensemble configuration
-        if self.training_strategy == TrainingStrategy.ENSEMBLE:
-            if self.ensemble_size < 2:
-                raise ValueError("ensemble_size must be at least 2")
-            if self.ensemble_size > 10:
-                logger.warning(f"Large ensemble size ({self.ensemble_size}) may be computationally expensive")
-
-        # Validate pattern-specific configuration
-        if self.training_strategy == TrainingStrategy.PATTERN_SPECIFIC:
-            if not self.target_categories:
-                logger.warning("No target_categories specified for pattern-specific training")
-
         logger.info(f"Base N-BEATS Training Configuration:")
-        logger.info(f"  ✅ Strategy: {self.training_strategy.value}")
         logger.info(f"  ✅ Data split: {self.train_ratio:.1f}/{self.val_ratio:.1f}/{self.test_ratio:.1f}")
         logger.info(f"  ✅ Model: {self.nb_blocks_per_stack} blocks, {self.hidden_layer_units} units")
         logger.info(f"  ✅ Training: {self.epochs} epochs, batch {self.batch_size}, lr {self.learning_rate}")
         logger.info(f"  ✅ Regularization: dropout {self.dropout_rate}, L2 {self.kernel_regularizer_l2}")
 
-        if self.training_strategy == TrainingStrategy.ENSEMBLE:
-            logger.info(f"  ✅ Ensemble: {self.ensemble_size} models, diversity: {self.ensemble_diversity.value}")
-        if self.training_strategy == TrainingStrategy.PATTERN_SPECIFIC and self.target_categories:
+        if self.target_categories:
             logger.info(f"  ✅ Target categories: {self.target_categories}")
 
 
 class MultiPatternDataProcessor:
-    """Advanced data processor for multiple pattern training strategies."""
+    """
+    Advanced data processor for multiple pattern training.
 
-    def __init__(self, config: NBeatsTrainingConfig):
+    This class handles the preparation of time series data from multiple patterns,
+    including normalization, sequence generation, and proper train/validation/test
+    splitting while maintaining temporal integrity.
+
+    Parameters
+    ----------
+    config : BaseNBeatsTrainingConfig
+        Configuration object containing data processing parameters
+
+    Attributes
+    ----------
+    config : BaseNBeatsTrainingConfig
+        Configuration object
+    scalers : Dict[str, TimeSeriesNormalizer]
+        Fitted scalers for each pattern
+    pattern_to_id : Dict[str, int]
+        Mapping from pattern names to integer IDs
+    id_to_pattern : Dict[int, str]
+        Mapping from integer IDs to pattern names
+    """
+
+    def __init__(self, config: BaseNBeatsTrainingConfig) -> None:
         self.config = config
         self.scalers: Dict[str, TimeSeriesNormalizer] = {}
         self.pattern_to_id: Dict[str, int] = {}
@@ -389,9 +424,24 @@ class MultiPatternDataProcessor:
             self,
             raw_pattern_data: Dict[str, np.ndarray]
     ) -> Dict[str, Any]:
-        """Prepare multi-pattern data for different training strategies."""
+        """
+        Prepare multi-pattern data for training.
 
-        logger.info(f"Preparing data for {self.config.training_strategy.value} strategy...")
+        This method combines data from multiple time series patterns into
+        a single training dataset while maintaining pattern diversity and
+        temporal structure.
+
+        Parameters
+        ----------
+        raw_pattern_data : Dict[str, np.ndarray]
+            Dictionary mapping pattern names to time series data arrays
+
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary containing prepared training data for each forecast horizon
+        """
+        logger.info(f"Preparing data for multi-pattern training...")
 
         # Create pattern ID mapping
         self.pattern_to_id = {pattern: idx for idx, pattern in enumerate(raw_pattern_data.keys())}
@@ -404,78 +454,30 @@ class MultiPatternDataProcessor:
 
         for horizon in self.config.forecast_horizons:
             logger.info(f"Preparing data for horizon {horizon}")
-
-            if self.config.training_strategy == TrainingStrategy.INDIVIDUAL:
-                prepared_data[horizon] = self._prepare_individual_data(raw_pattern_data, horizon)
-            elif self.config.training_strategy == TrainingStrategy.UNIFIED:
-                prepared_data[horizon] = self._prepare_unified_data(raw_pattern_data, horizon)
-            elif self.config.training_strategy == TrainingStrategy.ENSEMBLE:
-                prepared_data[horizon] = self._prepare_ensemble_data(raw_pattern_data, horizon)
-            elif self.config.training_strategy == TrainingStrategy.PATTERN_SPECIFIC:
-                prepared_data[horizon] = self._prepare_pattern_specific_data(raw_pattern_data, horizon)
+            prepared_data[horizon] = self._prepare_mixed_pattern_data(raw_pattern_data, horizon)
 
         return prepared_data
 
-    def _prepare_individual_data(
+    def _prepare_mixed_pattern_data(
             self,
             raw_pattern_data: Dict[str, np.ndarray],
             horizon: int
-    ) -> Dict[str, Tuple]:
-        """Prepare data for individual model training strategy."""
-        pattern_datasets = {}
+    ) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
+        """
+        Prepare data by mixing multiple patterns.
 
-        for pattern_name, data in raw_pattern_data.items():
-            try:
-                min_length = self.config.backcast_length + horizon + 100
-                if len(data) < min_length:
-                    logger.warning(f"Insufficient data for {pattern_name} H={horizon}: {len(data)} < {min_length}")
-                    continue
+        Parameters
+        ----------
+        raw_pattern_data : Dict[str, np.ndarray]
+            Dictionary of pattern data
+        horizon : int
+            Forecast horizon length
 
-                # Split data temporally
-                train_size = int(self.config.train_ratio * len(data))
-                val_size = int(self.config.val_ratio * len(data))
-
-                train_data = data[:train_size]
-                val_data = data[train_size:train_size + val_size]
-                test_data = data[train_size + val_size:]
-
-                # Transform data
-                train_scaled = self.scalers[pattern_name].transform(train_data)
-                val_scaled = self.scalers[pattern_name].transform(val_data)
-                test_scaled = self.scalers[pattern_name].transform(test_data)
-
-                # Create sequences
-                train_X, train_y = self._create_sequences(train_scaled, horizon, stride=1)
-                val_X, val_y = self._create_sequences(val_scaled, horizon, stride=horizon // 2)
-                test_X, test_y = self._create_sequences(test_scaled, horizon, stride=horizon // 2)
-
-                # Balance data if needed
-                if self.config.balance_patterns and len(train_X) > self.config.samples_per_pattern:
-                    step = max(1, len(train_X) // self.config.samples_per_pattern)
-                    indices = np.arange(0, len(train_X), step)[:self.config.samples_per_pattern]
-                    train_X = train_X[indices]
-                    train_y = train_y[indices]
-
-                pattern_datasets[pattern_name] = {
-                    'train': (train_X, train_y),
-                    'val': (val_X, val_y),
-                    'test': (test_X, test_y)
-                }
-
-                logger.info(f"Pattern {pattern_name}: train={len(train_X)}, val={len(val_X)}, test={len(test_X)}")
-
-            except Exception as e:
-                logger.warning(f"Failed to prepare {pattern_name} H={horizon}: {e}")
-                continue
-
-        return pattern_datasets
-
-    def _prepare_unified_data(
-            self,
-            raw_pattern_data: Dict[str, np.ndarray],
-            horizon: int
-    ) -> Dict[str, Tuple]:
-        """Prepare data for unified model training strategy."""
+        Returns
+        -------
+        Dict[str, Tuple[np.ndarray, np.ndarray]]
+            Dictionary containing combined training data
+        """
         all_train_X, all_train_y = [], []
         all_val_X, all_val_y = [], []
         all_test_X, all_test_y = [], []
@@ -539,73 +541,22 @@ class MultiPatternDataProcessor:
         combined_train_y = combined_train_y[train_indices]
 
         return {
-            'unified': {
+            'mixed_patterns': {
                 'train': (combined_train_X, combined_train_y),
                 'val': (combined_val_X, combined_val_y),
                 'test': (combined_test_X, combined_test_y)
             }
         }
 
-    def _prepare_ensemble_data(
-            self,
-            raw_pattern_data: Dict[str, np.ndarray],
-            horizon: int
-    ) -> Dict[str, Any]:
-        """Prepare data for ensemble training strategy."""
-        if self.config.ensemble_diversity == EnsembleDiversity.DATA:
-            # Create different data subsets for each ensemble member
-            ensemble_datasets = {}
-            base_data = self._prepare_unified_data(raw_pattern_data, horizon)['unified']
-
-            for i in range(self.config.ensemble_size):
-                # Create bootstrap sample
-                train_X, train_y = base_data['train']
-                n_samples = len(train_X)
-                bootstrap_indices = np.random.choice(n_samples, size=n_samples, replace=True)
-
-                ensemble_datasets[f'model_{i}'] = {
-                    'train': (train_X[bootstrap_indices], train_y[bootstrap_indices]),
-                    'val': base_data['val'],
-                    'test': base_data['test']
-                }
-
-            return ensemble_datasets
-        else:
-            # Use same data for all ensemble members (diversity comes from architecture/hyperparams)
-            base_data = self._prepare_unified_data(raw_pattern_data, horizon)
-            ensemble_datasets = {}
-
-            for i in range(self.config.ensemble_size):
-                ensemble_datasets[f'model_{i}'] = base_data['unified']
-
-            return ensemble_datasets
-
-    def _prepare_pattern_specific_data(
-            self,
-            raw_pattern_data: Dict[str, np.ndarray],
-            horizon: int
-    ) -> Dict[str, Tuple]:
-        """Prepare data for pattern-specific training strategy."""
-        if not self.config.target_categories:
-            logger.warning("No target categories specified, using all patterns")
-            return self._prepare_unified_data(raw_pattern_data, horizon)
-
-        # Filter patterns by target categories
-        from dl_techniques.utils.datasets.time_series_generator import TimeSeriesGenerator
-        generator = TimeSeriesGenerator()
-
-        filtered_data = {}
-        for pattern_name, data in raw_pattern_data.items():
-            for category in self.config.target_categories:
-                if pattern_name in generator.get_tasks_by_category(category):
-                    filtered_data[pattern_name] = data
-                    break
-
-        logger.info(f"Filtered to {len(filtered_data)} patterns from target categories")
-        return self._prepare_unified_data(filtered_data, horizon)
-
     def _fit_scalers(self, pattern_data: Dict[str, np.ndarray]) -> None:
-        """Fit scalers for each pattern."""
+        """
+        Fit scalers for each pattern.
+
+        Parameters
+        ----------
+        pattern_data : Dict[str, np.ndarray]
+            Dictionary mapping pattern names to time series data
+        """
         for pattern_name, data in pattern_data.items():
             if len(data) < self.config.min_data_length:
                 continue
@@ -623,7 +574,23 @@ class MultiPatternDataProcessor:
             forecast_length: int,
             stride: int = 1
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Create sequences with specified stride."""
+        """
+        Create sequences with specified stride.
+
+        Parameters
+        ----------
+        data : np.ndarray
+            Time series data
+        forecast_length : int
+            Length of forecast horizon
+        stride : int, optional
+            Stride for sequence creation, by default 1
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray]
+            Input sequences and target sequences
+        """
         X, y = [], []
 
         for i in range(0, len(data) - self.config.backcast_length - forecast_length + 1, stride):
@@ -638,16 +605,50 @@ class MultiPatternDataProcessor:
 
 
 class PatternPerformanceCallback(keras.callbacks.Callback):
-    """Comprehensive callback for monitoring pattern-specific performance."""
+    """
+    Comprehensive callback for monitoring pattern-specific performance.
+
+    This callback tracks training progress across multiple patterns and creates
+    detailed visualizations of learning dynamics, prediction quality, and
+    performance metrics.
+
+    Parameters
+    ----------
+    config : BaseNBeatsTrainingConfig
+        Configuration object containing visualization settings
+    data_processor : MultiPatternDataProcessor
+        Data processor containing pattern information
+    test_data : Dict[int, Any]
+        Test data for visualization
+    save_dir : str
+        Directory to save visualization plots
+    model_name : str, optional
+        Name of the model for identification, by default "model"
+
+    Attributes
+    ----------
+    config : BaseNBeatsTrainingConfig
+        Configuration object
+    data_processor : MultiPatternDataProcessor
+        Data processor instance
+    test_data : Dict[int, Any]
+        Test data dictionary
+    save_dir : str
+        Directory for saving plots
+    model_name : str
+        Model identifier
+    training_history : Dict[str, List]
+        Training history tracking
+    """
 
     def __init__(
             self,
-            config: NBeatsTrainingConfig,
+            config: BaseNBeatsTrainingConfig,
             data_processor: MultiPatternDataProcessor,
             test_data: Dict[int, Any],
             save_dir: str,
             model_name: str = "model"
-    ):
+    ) -> None:
         super().__init__()
         self.config = config
         self.data_processor = data_processor
@@ -665,8 +666,17 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
 
         os.makedirs(save_dir, exist_ok=True)
 
-    def on_epoch_end(self, epoch, logs=None):
-        """Track training progress and create visualizations."""
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, float]] = None) -> None:
+        """
+        Track training progress and create visualizations.
+
+        Parameters
+        ----------
+        epoch : int
+            Current epoch number
+        logs : Optional[Dict[str, float]], optional
+            Training logs, by default None
+        """
         if logs is None:
             logs = {}
 
@@ -681,8 +691,15 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
             logger.info(f"Creating visualizations for {self.model_name} at epoch {epoch + 1}")
             self._create_interim_plots(epoch)
 
-    def _create_interim_plots(self, epoch: int):
-        """Create comprehensive interim plots."""
+    def _create_interim_plots(self, epoch: int) -> None:
+        """
+        Create comprehensive interim plots.
+
+        Parameters
+        ----------
+        epoch : int
+            Current epoch number
+        """
         try:
             if self.config.create_learning_curves:
                 self._plot_learning_curves(epoch)
@@ -693,8 +710,15 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
         except Exception as e:
             logger.warning(f"Failed to create interim plots for {self.model_name}: {e}")
 
-    def _plot_learning_curves(self, epoch: int):
-        """Plot training and validation curves."""
+    def _plot_learning_curves(self, epoch: int) -> None:
+        """
+        Plot training and validation curves.
+
+        Parameters
+        ----------
+        epoch : int
+            Current epoch number
+        """
         fig, axes = plt.subplots(1, 2, figsize=(15, 5))
 
         epochs = self.training_history['epoch']
@@ -718,78 +742,27 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
         axes[1].grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(os.path.join(self.save_dir, f'{self.model_name}_learning_curves_epoch_{epoch + 1:03d}.png'),
+        plt.savefig(os.path.join(self.save_dir, f'learning_curves_epoch_{epoch + 1:03d}.png'),
                     dpi=150, bbox_inches='tight')
         plt.close()
 
-    def _plot_prediction_samples(self, epoch: int):
-        """Plot sample predictions."""
+    def _plot_prediction_samples(self, epoch: int) -> None:
+        """
+        Plot sample predictions.
+
+        Parameters
+        ----------
+        epoch : int
+            Current epoch number
+        """
         horizon = self.config.forecast_horizons[0]
 
         if horizon not in self.test_data:
             return
 
         test_data = self.test_data[horizon]
-
-        if self.config.training_strategy == TrainingStrategy.INDIVIDUAL:
-            self._plot_individual_predictions(epoch, test_data)
-        else:
-            self._plot_unified_predictions(epoch, test_data)
-
-    def _plot_individual_predictions(self, epoch: int, test_data: Dict):
-        """Plot predictions for individual models."""
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-        axes = axes.flatten()
-
-        plot_idx = 0
-        pattern_names = list(test_data.keys())[:6]  # Top 6 patterns
-
-        for pattern_name in pattern_names:
-            if plot_idx >= len(axes):
-                break
-
-            pattern_test_data = test_data[pattern_name]
-            test_X, test_y = pattern_test_data['test']
-
-            if len(test_X) == 0:
-                continue
-
-            # Take first sample
-            sample_X = test_X[0:1]
-            sample_y = test_y[0:1]
-
-            # Get prediction
-            pred_y = self.model(sample_X, training=False)
-
-            # Plot
-            backcast_x = np.arange(-self.config.backcast_length, 0)
-            forecast_x = np.arange(0, self.config.forecast_length)
-
-            axes[plot_idx].plot(backcast_x, sample_X[0], label='Input', color='blue', alpha=0.7)
-            axes[plot_idx].plot(forecast_x, sample_y[0].flatten(), label='True', color='green', linewidth=2)
-            axes[plot_idx].plot(forecast_x, pred_y[0].numpy().flatten(), label='Predicted', color='red', linewidth=2)
-
-            axes[plot_idx].set_title(f'{pattern_name}')
-            axes[plot_idx].legend()
-            axes[plot_idx].grid(True, alpha=0.3)
-            axes[plot_idx].axvline(x=0, color='black', linestyle='-', alpha=0.5)
-
-            plot_idx += 1
-
-        # Remove empty subplots
-        for i in range(plot_idx, len(axes)):
-            fig.delaxes(axes[i])
-
-        plt.suptitle(f'Prediction Samples (Epoch {epoch + 1})', fontsize=16)
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.save_dir, f'predictions_epoch_{epoch + 1:03d}.png'),
-                    dpi=150, bbox_inches='tight')
-        plt.close()
-
-    def _plot_unified_predictions(self, epoch: int, test_data: Dict):
-        """Plot predictions for unified model."""
-        unified_data = test_data['unified']
-        test_X, test_y = unified_data['test']
+        mixed_data = test_data['mixed_patterns']
+        test_X, test_y = mixed_data['test']
 
         if len(test_X) == 0:
             return
@@ -828,9 +801,39 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
 
 
 class BaseNBeatsTrainer:
-    """Comprehensive trainer for base N-BEATS with multiple training strategies."""
+    """
+    Comprehensive trainer for base N-BEATS with multiple pattern support.
 
-    def __init__(self, config: NBeatsTrainingConfig, ts_config: TimeSeriesConfig):
+    This class orchestrates the complete training process for N-BEATS models
+    on multiple time series patterns, including data preparation, model training,
+    evaluation, and result visualization.
+
+    Parameters
+    ----------
+    config : BaseNBeatsTrainingConfig
+        Configuration object containing all training parameters
+    ts_config : TimeSeriesConfig
+        Time series generation configuration
+
+    Attributes
+    ----------
+    config : BaseNBeatsTrainingConfig
+        Training configuration
+    ts_config : TimeSeriesConfig
+        Time series configuration
+    generator : TimeSeriesGenerator
+        Time series pattern generator
+    processor : MultiPatternDataProcessor
+        Data processing pipeline
+    all_patterns : List[str]
+        All available pattern names
+    pattern_categories : List[str]
+        All available pattern categories
+    selected_patterns : List[str]
+        Selected patterns for training
+    """
+
+    def __init__(self, config: BaseNBeatsTrainingConfig, ts_config: TimeSeriesConfig) -> None:
         self.config = config
         self.ts_config = ts_config
         self.generator = TimeSeriesGenerator(ts_config)
@@ -842,18 +845,24 @@ class BaseNBeatsTrainer:
         self.selected_patterns = self._select_patterns()
 
         logger.info(f"Base N-BEATS Trainer initialized:")
-        logger.info(f"  - Strategy: {self.config.training_strategy.value}")
         logger.info(f"  - Available categories: {len(self.pattern_categories)}")
         logger.info(f"  - Total patterns available: {len(self.all_patterns)}")
         logger.info(f"  - Selected {len(self.selected_patterns)} patterns")
         logger.info(f"  - Category distribution: {self._get_category_distribution()}")
 
     def _select_patterns(self) -> List[str]:
-        """Select patterns based on strategy and configuration."""
+        """
+        Select patterns based on configuration.
+
+        Returns
+        -------
+        List[str]
+            List of selected pattern names
+        """
         selected = []
 
-        # Handle pattern-specific strategy
-        if self.config.training_strategy == TrainingStrategy.PATTERN_SPECIFIC and self.config.target_categories:
+        # Handle target categories
+        if self.config.target_categories:
             for category in self.config.target_categories:
                 category_patterns = self.generator.get_tasks_by_category(category)
                 max_patterns = self.config.max_patterns_per_category
@@ -889,7 +898,14 @@ class BaseNBeatsTrainer:
         return selected
 
     def _get_category_distribution(self) -> Dict[str, int]:
-        """Get distribution of selected patterns by category."""
+        """
+        Get distribution of selected patterns by category.
+
+        Returns
+        -------
+        Dict[str, int]
+            Dictionary mapping categories to pattern counts
+        """
         distribution = {}
         for pattern in self.selected_patterns:
             category = None
@@ -902,7 +918,14 @@ class BaseNBeatsTrainer:
         return distribution
 
     def prepare_data(self) -> Dict[str, Any]:
-        """Prepare training data for the selected strategy."""
+        """
+        Prepare training data for the model.
+
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary containing prepared data and metadata
+        """
         logger.info("Generating data for selected patterns...")
 
         raw_pattern_data = {}
@@ -937,7 +960,19 @@ class BaseNBeatsTrainer:
         }
 
     def _get_final_category_distribution(self, raw_pattern_data: Dict[str, np.ndarray]) -> Dict[str, int]:
-        """Get final category distribution after data generation."""
+        """
+        Get final category distribution after data generation.
+
+        Parameters
+        ----------
+        raw_pattern_data : Dict[str, np.ndarray]
+            Generated pattern data
+
+        Returns
+        -------
+        Dict[str, int]
+            Final category distribution
+        """
         distribution = {}
         for pattern in raw_pattern_data.keys():
             category = None
@@ -949,19 +984,20 @@ class BaseNBeatsTrainer:
                 distribution[category] = distribution.get(category, 0) + 1
         return distribution
 
-    def create_model(self, forecast_length: int, model_id: str = "base") -> NBeatsNet:
-        """Create N-BEATS model with enhanced configuration."""
+    def create_model(self, forecast_length: int) -> NBeatsNet:
+        """
+        Create N-BEATS model with enhanced configuration.
 
-        # Generate diverse configurations for ensemble
-        if self.config.training_strategy == TrainingStrategy.ENSEMBLE and self.config.ensemble_diversity == EnsembleDiversity.ARCHITECTURE:
-            return self._create_diverse_model(forecast_length, model_id)
-        elif self.config.training_strategy == TrainingStrategy.ENSEMBLE and self.config.ensemble_diversity == EnsembleDiversity.HYPERPARAMS:
-            return self._create_hyperparameter_diverse_model(forecast_length, model_id)
-        else:
-            return self._create_standard_model(forecast_length)
+        Parameters
+        ----------
+        forecast_length : int
+            Length of forecast horizon
 
-    def _create_standard_model(self, forecast_length: int) -> NBeatsNet:
-        """Create standard N-BEATS model."""
+        Returns
+        -------
+        NBeatsNet
+            Configured N-BEATS model instance
+        """
         kernel_regularizer = keras.regularizers.L2(
             self.config.kernel_regularizer_l2) if self.config.kernel_regularizer_l2 > 0 else None
 
@@ -977,84 +1013,27 @@ class BaseNBeatsTrainer:
             optimizer=self.config.optimizer,
             loss=self.config.primary_loss,
             learning_rate=self.config.learning_rate,
-            gradient_clip_norm=self.config.gradient_clip_norm
-        )
-
-    def _create_diverse_model(self, forecast_length: int, model_id: str) -> NBeatsNet:
-        """Create architecturally diverse model for ensemble."""
-        # Different stack configurations for ensemble diversity
-        stack_configs = [
-            ["trend", "seasonality"],
-            ["trend", "seasonality", "generic"],
-            ["seasonality", "generic"],
-            ["trend", "generic", "generic"],
-            ["generic", "generic", "generic"]
-        ]
-
-        block_configs = [2, 3, 4]
-        hidden_configs = [128, 256, 512]
-
-        # Select configuration based on model_id
-        model_idx = int(model_id.split('_')[-1]) if '_' in model_id else 0
-
-        stack_types = stack_configs[model_idx % len(stack_configs)]
-        nb_blocks = block_configs[model_idx % len(block_configs)]
-        hidden_units = hidden_configs[model_idx % len(hidden_configs)]
-
-        kernel_regularizer = keras.regularizers.L2(
-            self.config.kernel_regularizer_l2) if self.config.kernel_regularizer_l2 > 0 else None
-
-        return create_nbeats_model(
-            backcast_length=self.config.backcast_length,
-            forecast_length=forecast_length,
-            stack_types=stack_types,
-            nb_blocks_per_stack=nb_blocks,
-            hidden_layer_units=hidden_units,
-            use_revin=self.config.use_revin,
-            kernel_regularizer=kernel_regularizer,
-            dropout_rate=self.config.dropout_rate,
-            optimizer=self.config.optimizer,
-            loss=self.config.primary_loss,
-            learning_rate=self.config.learning_rate,
-            gradient_clip_norm=self.config.gradient_clip_norm
-        )
-
-    def _create_hyperparameter_diverse_model(self, forecast_length: int, model_id: str) -> NBeatsNet:
-        """Create hyperparameter diverse model for ensemble."""
-        # Different hyperparameter configurations
-        lr_configs = [5e-5, 1e-4, 2e-4, 5e-4, 1e-3]
-        dropout_configs = [0.0, 0.1, 0.15, 0.2, 0.25]
-        l2_configs = [0, 1e-6, 1e-5, 1e-4, 1e-3]
-
-        model_idx = int(model_id.split('_')[-1]) if '_' in model_id else 0
-
-        learning_rate = lr_configs[model_idx % len(lr_configs)]
-        dropout_rate = dropout_configs[model_idx % len(dropout_configs)]
-        l2_reg = l2_configs[model_idx % len(l2_configs)]
-
-        kernel_regularizer = keras.regularizers.L2(l2_reg) if l2_reg > 0 else None
-
-        return create_nbeats_model(
-            backcast_length=self.config.backcast_length,
-            forecast_length=forecast_length,
-            stack_types=self.config.stack_types.copy(),
-            nb_blocks_per_stack=self.config.nb_blocks_per_stack,
-            hidden_layer_units=self.config.hidden_layer_units,
-            use_revin=self.config.use_revin,
-            kernel_regularizer=kernel_regularizer,
-            dropout_rate=dropout_rate,
-            optimizer=self.config.optimizer,
-            loss=self.config.primary_loss,
-            learning_rate=learning_rate,
             gradient_clip_norm=self.config.gradient_clip_norm
         )
 
     def run_experiment(self) -> Dict[str, Any]:
-        """Run the multi-pattern experiment with the selected strategy."""
+        """
+        Run the multi-pattern experiment.
+
+        Returns
+        -------
+        Dict[str, Any]
+            Comprehensive experiment results
+
+        Raises
+        ------
+        ValueError
+            If no data is prepared for training
+        """
         try:
             exp_dir = os.path.join(
                 self.config.result_dir,
-                f"{self.config.experiment_name}_{self.config.training_strategy.value}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                f"{self.config.experiment_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             )
             os.makedirs(exp_dir, exist_ok=True)
 
@@ -1073,17 +1052,11 @@ class BaseNBeatsTrainer:
                 if horizon not in prepared_data:
                     continue
 
-                logger.info(f"{'=' * 50}\n🎯 Training Models H={horizon}\n{'=' * 50}")
+                logger.info(f"{'=' * 50}")
+                logger.info(f"🎯 Training Model H={horizon}")
+                logger.info(f"{'=' * 50}")
 
-                if self.config.training_strategy == TrainingStrategy.INDIVIDUAL:
-                    horizon_results = self._train_individual_models(prepared_data[horizon], horizon, exp_dir)
-                elif self.config.training_strategy == TrainingStrategy.UNIFIED:
-                    horizon_results = self._train_unified_model(prepared_data[horizon], horizon, exp_dir)
-                elif self.config.training_strategy == TrainingStrategy.ENSEMBLE:
-                    horizon_results = self._train_ensemble_models(prepared_data[horizon], horizon, exp_dir)
-                elif self.config.training_strategy == TrainingStrategy.PATTERN_SPECIFIC:
-                    horizon_results = self._train_pattern_specific_model(prepared_data[horizon], horizon, exp_dir)
-
+                horizon_results = self._train_model(prepared_data[horizon], horizon, exp_dir)
                 results[horizon] = horizon_results
 
             # Save comprehensive results
@@ -1095,109 +1068,37 @@ class BaseNBeatsTrainer:
                 "results": results,
                 "num_patterns": data_info['num_patterns'],
                 "pattern_mapping": data_info['pattern_to_id'],
-                "category_distribution": data_info['category_distribution'],
-                "training_strategy": self.config.training_strategy.value
+                "category_distribution": data_info['category_distribution']
             }
 
         except Exception as e:
             logger.error(f"💥 experiment failed: {e}", exc_info=True)
             raise
 
-    def _train_individual_models(self, pattern_data: Dict, horizon: int, exp_dir: str) -> Dict[str, Any]:
-        """Train individual models for each pattern."""
-        logger.info(f"Training individual models for {len(pattern_data)} patterns")
+    def _train_model(self, pattern_data: Dict, horizon: int, exp_dir: str) -> Dict[str, Any]:
+        """
+        Train model on mixed patterns.
 
-        pattern_results = {}
+        Parameters
+        ----------
+        pattern_data : Dict
+            Prepared pattern data
+        horizon : int
+            Forecast horizon
+        exp_dir : str
+            Experiment directory
 
-        for pattern_name, data in pattern_data.items():
-            logger.info(f"Training model for pattern: {pattern_name}")
+        Returns
+        -------
+        Dict[str, Any]
+            Training results
+        """
+        logger.info("Training model on mixed patterns")
 
-            try:
-                # Create model
-                model = self.create_model(horizon, f"individual_{pattern_name}")
-
-                # Build model
-                train_X, train_y = data['train']
-                model(train_X[:1])  # Build with sample data
-
-                # Create callbacks
-                viz_dir = os.path.join(exp_dir, f'visualizations_h{horizon}')
-                callback = PatternPerformanceCallback(
-                    config=self.config,
-                    data_processor=self.processor,
-                    test_data={horizon: {pattern_name: data}},
-                    save_dir=viz_dir,
-                    model_name=f"individual_{pattern_name}"
-                )
-
-                callbacks = [
-                    keras.callbacks.EarlyStopping(
-                        monitor='val_loss',
-                        patience=30,
-                        restore_best_weights=True,
-                        verbose=0
-                    ),
-                    keras.callbacks.ReduceLROnPlateau(
-                        monitor='val_loss',
-                        factor=0.5,
-                        patience=10,
-                        min_lr=1e-6,
-                        verbose=0
-                    ),
-                    callback,
-                    keras.callbacks.ModelCheckpoint(
-                        filepath=os.path.join(exp_dir, f'best_model_{pattern_name}_h{horizon}.keras'),
-                        monitor='val_loss',
-                        save_best_only=True,
-                        verbose=0
-                    )
-                ]
-
-                # Train model
-                start_time = datetime.now()
-
-                val_X, val_y = data['val']
-                history = model.fit(
-                    train_X, train_y,
-                    validation_data=(val_X, val_y),
-                    epochs=self.config.epochs,
-                    batch_size=self.config.batch_size,
-                    callbacks=callbacks,
-                    verbose=0
-                )
-
-                training_time = (datetime.now() - start_time).total_seconds()
-
-                # Evaluate
-                test_X, test_y = data['test']
-                test_results = model.evaluate(test_X, test_y, verbose=0)
-                test_loss = test_results[0] if isinstance(test_results, list) else test_results
-                test_mae = test_results[1] if len(test_results) > 1 else None
-
-                pattern_results[pattern_name] = {
-                    'history': history.history,
-                    'training_time': training_time,
-                    'test_loss': test_loss,
-                    'test_mae': test_mae,
-                    'final_epoch': len(history.history['loss'])
-                }
-
-                logger.info(f"✅ {pattern_name}: Test Loss = {test_loss:.4f}, Time = {training_time:.1f}s")
-
-            except Exception as e:
-                logger.warning(f"Failed to train model for {pattern_name}: {e}")
-                continue
-
-        return {'pattern_results': pattern_results}
-
-    def _train_unified_model(self, pattern_data: Dict, horizon: int, exp_dir: str) -> Dict[str, Any]:
-        """Train unified model on mixed patterns."""
-        logger.info("Training unified model on mixed patterns")
-
-        data = pattern_data['unified']
+        data = pattern_data['mixed_patterns']
 
         # Create model
-        model = self.create_model(horizon, "unified")
+        model = self.create_model(horizon)
 
         # Build model
         train_X, train_y = data['train']
@@ -1210,7 +1111,7 @@ class BaseNBeatsTrainer:
             data_processor=self.processor,
             test_data={horizon: pattern_data},
             save_dir=viz_dir,
-            model_name="unified"
+            model_name="nbeats_model"
         )
 
         callbacks = [
@@ -1223,13 +1124,13 @@ class BaseNBeatsTrainer:
             keras.callbacks.ReduceLROnPlateau(
                 monitor='val_loss',
                 factor=0.5,
-                patience=15,
+                patience=30,
                 min_lr=1e-6,
                 verbose=1
             ),
             callback,
             keras.callbacks.ModelCheckpoint(
-                filepath=os.path.join(exp_dir, f'best_unified_model_h{horizon}.keras'),
+                filepath=os.path.join(exp_dir, f'best_model_h{horizon}.keras'),
                 monitor='val_loss',
                 save_best_only=True,
                 verbose=1
@@ -1246,6 +1147,7 @@ class BaseNBeatsTrainer:
             epochs=self.config.epochs,
             batch_size=self.config.batch_size,
             callbacks=callbacks,
+            shuffle=True,
             verbose=1
         )
 
@@ -1257,10 +1159,10 @@ class BaseNBeatsTrainer:
         test_loss = test_results[0] if isinstance(test_results, list) else test_results
         test_mae = test_results[1] if len(test_results) > 1 else None
 
-        logger.info(f"✅ Unified model: Test Loss = {test_loss:.4f}, Time = {training_time:.1f}s")
+        logger.info(f"✅ Model: Test Loss = {test_loss:.4f}, Time = {training_time:.1f}s")
 
         return {
-            'unified_results': {
+            'model_results': {
                 'history': history.history,
                 'training_time': training_time,
                 'test_loss': test_loss,
@@ -1269,122 +1171,19 @@ class BaseNBeatsTrainer:
             }
         }
 
-    def _train_ensemble_models(self, pattern_data: Dict, horizon: int, exp_dir: str) -> Dict[str, Any]:
-        """Train ensemble of models."""
-        logger.info(f"Training ensemble of {self.config.ensemble_size} models")
+    def _save_results(self, results: Dict, exp_dir: str, data_info: Dict) -> None:
+        """
+        Save comprehensive experiment results.
 
-        ensemble_results = {}
-        ensemble_predictions = []
-
-        for model_id, data in pattern_data.items():
-            logger.info(f"Training ensemble member: {model_id}")
-
-            try:
-                # Create model
-                model = self.create_model(horizon, model_id)
-
-                # Build model
-                train_X, train_y = data['train']
-                model(train_X[:1])  # Build with sample data
-
-                # Create callbacks
-                viz_dir = os.path.join(exp_dir, f'visualizations_h{horizon}')
-                callback = PatternPerformanceCallback(
-                    config=self.config,
-                    data_processor=self.processor,
-                    test_data={horizon: {model_id: data}},
-                    save_dir=viz_dir,
-                    model_name=model_id
-                )
-
-                callbacks = [
-                    keras.callbacks.EarlyStopping(
-                        monitor='val_loss',
-                        patience=30,
-                        restore_best_weights=True,
-                        verbose=0
-                    ),
-                    keras.callbacks.ReduceLROnPlateau(
-                        monitor='val_loss',
-                        factor=0.5,
-                        patience=10,
-                        min_lr=1e-6,
-                        verbose=0
-                    ),
-                    callback,
-                    keras.callbacks.ModelCheckpoint(
-                        filepath=os.path.join(exp_dir, f'best_{model_id}_h{horizon}.keras'),
-                        monitor='val_loss',
-                        save_best_only=True,
-                        verbose=0
-                    )
-                ]
-
-                # Train model
-                start_time = datetime.now()
-
-                val_X, val_y = data['val']
-                history = model.fit(
-                    train_X, train_y,
-                    validation_data=(val_X, val_y),
-                    epochs=self.config.epochs,
-                    batch_size=self.config.batch_size,
-                    callbacks=callbacks,
-                    verbose=0
-                )
-
-                training_time = (datetime.now() - start_time).total_seconds()
-
-                # Evaluate
-                test_X, test_y = data['test']
-                test_results = model.evaluate(test_X, test_y, verbose=0)
-                test_loss = test_results[0] if isinstance(test_results, list) else test_results
-                test_mae = test_results[1] if len(test_results) > 1 else None
-
-                # Get predictions for ensemble
-                predictions = model.predict(test_X, verbose=0)
-                ensemble_predictions.append(predictions)
-
-                ensemble_results[model_id] = {
-                    'history': history.history,
-                    'training_time': training_time,
-                    'test_loss': test_loss,
-                    'test_mae': test_mae,
-                    'final_epoch': len(history.history['loss'])
-                }
-
-                logger.info(f"✅ {model_id}: Test Loss = {test_loss:.4f}, Time = {training_time:.1f}s")
-
-            except Exception as e:
-                logger.warning(f"Failed to train {model_id}: {e}")
-                continue
-
-        # Compute ensemble performance
-        if ensemble_predictions:
-            ensemble_pred = np.mean(ensemble_predictions, axis=0)
-            ensemble_loss = np.mean(np.abs(test_y - ensemble_pred))
-            ensemble_mae = ensemble_loss  # Same for MAE
-
-            logger.info(f"✅ Ensemble: Test Loss = {ensemble_loss:.4f}")
-
-            ensemble_results['ensemble_performance'] = {
-                'test_loss': ensemble_loss,
-                'test_mae': ensemble_mae,
-                'individual_losses': [result['test_loss'] for result in ensemble_results.values() if
-                                      'test_loss' in result]
-            }
-
-        return {'ensemble_results': ensemble_results}
-
-    def _train_pattern_specific_model(self, pattern_data: Dict, horizon: int, exp_dir: str) -> Dict[str, Any]:
-        """Train pattern-specific model."""
-        logger.info("Training pattern-specific model")
-
-        # Use unified training on filtered patterns
-        return self._train_unified_model(pattern_data, horizon, exp_dir)
-
-    def _save_results(self, results: Dict, exp_dir: str, data_info: Dict):
-        """Save comprehensive experiment results."""
+        Parameters
+        ----------
+        results : Dict
+            Experiment results
+        exp_dir : str
+            Experiment directory
+        data_info : Dict
+            Data information
+        """
         try:
             # Save JSON results
             with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
@@ -1396,7 +1195,6 @@ class BaseNBeatsTrainer:
             # Save experiment information
             with open(os.path.join(exp_dir, 'experiment_info.json'), 'w') as f:
                 json.dump({
-                    'training_strategy': self.config.training_strategy.value,
                     'num_patterns': data_info['num_patterns'],
                     'pattern_to_id': data_info['pattern_to_id'],
                     'selected_patterns': self.selected_patterns,
@@ -1428,31 +1226,23 @@ class BaseNBeatsTrainer:
             logger.error(f"Failed to save results: {e}")
 
     def _serialize_results(self, result: Dict[str, Any]) -> Dict[str, Any]:
-        """Serialize results for JSON storage."""
+        """
+        Serialize results for JSON storage.
+
+        Parameters
+        ----------
+        result : Dict[str, Any]
+            Results to serialize
+
+        Returns
+        -------
+        Dict[str, Any]
+            Serialized results
+        """
         serialized = {}
 
         for key, value in result.items():
-            if key in ['pattern_results', 'ensemble_results']:
-                serialized[key] = {}
-                for sub_key, sub_value in value.items():
-                    if isinstance(sub_value, dict):
-                        serialized[key][sub_key] = {}
-                        for metric_key, metric_value in sub_value.items():
-                            if metric_key == 'history':
-                                # Convert numpy arrays to lists for JSON serialization
-                                serialized[key][sub_key][metric_key] = {
-                                    hist_key: [float(v) for v in hist_value] if isinstance(hist_value, (list,
-                                                                                                        np.ndarray)) else hist_value
-                                    for hist_key, hist_value in metric_value.items()
-                                }
-                            else:
-                                serialized[key][sub_key][metric_key] = float(metric_value) if isinstance(metric_value,
-                                                                                                         (np.floating,
-                                                                                                          np.integer)) else metric_value
-                    else:
-                        serialized[key][sub_key] = float(sub_value) if isinstance(sub_value, (np.floating,
-                                                                                              np.integer)) else sub_value
-            elif key == 'unified_results':
+            if key == 'model_results':
                 serialized[key] = {}
                 for metric_key, metric_value in value.items():
                     if metric_key == 'history':
@@ -1469,95 +1259,44 @@ class BaseNBeatsTrainer:
 
         return serialized
 
-    def _create_comprehensive_summary_plots(self, results: Dict, exp_dir: str):
-        """Create comprehensive summary visualization."""
+    def _create_comprehensive_summary_plots(self, results: Dict, exp_dir: str) -> None:
+        """
+        Create comprehensive summary visualization.
+
+        Parameters
+        ----------
+        results : Dict
+            Experiment results
+        exp_dir : str
+            Experiment directory
+        """
         try:
             for horizon, result in results.items():
-                if self.config.training_strategy == TrainingStrategy.INDIVIDUAL:
-                    self._plot_individual_summary(result, horizon, exp_dir)
-                elif self.config.training_strategy == TrainingStrategy.UNIFIED:
-                    self._plot_unified_summary(result, horizon, exp_dir)
-                elif self.config.training_strategy == TrainingStrategy.ENSEMBLE:
-                    self._plot_ensemble_summary(result, horizon, exp_dir)
-                elif self.config.training_strategy == TrainingStrategy.PATTERN_SPECIFIC:
-                    self._plot_pattern_specific_summary(result, horizon, exp_dir)
-
+                self._plot_model_summary(result, horizon, exp_dir)
         except Exception as e:
             logger.warning(f"Failed to create summary plots: {e}")
 
-    def _plot_individual_summary(self, results: Dict, horizon: int, exp_dir: str):
-        """Plot summary for individual models strategy."""
-        pattern_results = results.get('pattern_results', {})
+    def _plot_model_summary(self, results: Dict, horizon: int, exp_dir: str) -> None:
+        """
+        Plot summary for model.
 
-        if not pattern_results:
+        Parameters
+        ----------
+        results : Dict
+            Model results
+        horizon : int
+            Forecast horizon
+        exp_dir : str
+            Experiment directory
+        """
+        model_results = results.get('model_results', {})
+
+        if not model_results:
             return
 
         fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 
-        # Test losses comparison
-        pattern_names = list(pattern_results.keys())
-        test_losses = [pattern_results[name]['test_loss'] for name in pattern_names]
-
-        axes[0, 0].bar(range(len(pattern_names)), test_losses, color='skyblue', alpha=0.7, edgecolor='black')
-        axes[0, 0].set_title(f'Test Loss by Pattern (H={horizon})')
-        axes[0, 0].set_xlabel('Pattern')
-        axes[0, 0].set_ylabel('Test Loss')
-        axes[0, 0].set_xticks(range(len(pattern_names)))
-        axes[0, 0].set_xticklabels(pattern_names, rotation=45, ha='right')
-        axes[0, 0].grid(True, alpha=0.3)
-
-        # Training times
-        training_times = [pattern_results[name]['training_time'] for name in pattern_names]
-
-        axes[0, 1].bar(range(len(pattern_names)), training_times, color='lightcoral', alpha=0.7, edgecolor='black')
-        axes[0, 1].set_title(f'Training Time by Pattern (H={horizon})')
-        axes[0, 1].set_xlabel('Pattern')
-        axes[0, 1].set_ylabel('Training Time (s)')
-        axes[0, 1].set_xticks(range(len(pattern_names)))
-        axes[0, 1].set_xticklabels(pattern_names, rotation=45, ha='right')
-        axes[0, 1].grid(True, alpha=0.3)
-
-        # Training epochs
-        final_epochs = [pattern_results[name]['final_epoch'] for name in pattern_names]
-
-        axes[1, 0].bar(range(len(pattern_names)), final_epochs, color='lightgreen', alpha=0.7, edgecolor='black')
-        axes[1, 0].set_title(f'Training Epochs by Pattern (H={horizon})')
-        axes[1, 0].set_xlabel('Pattern')
-        axes[1, 0].set_ylabel('Final Epoch')
-        axes[1, 0].set_xticks(range(len(pattern_names)))
-        axes[1, 0].set_xticklabels(pattern_names, rotation=45, ha='right')
-        axes[1, 0].grid(True, alpha=0.3)
-
-        # Summary statistics
-        avg_loss = np.mean(test_losses)
-        std_loss = np.std(test_losses)
-        min_loss = np.min(test_losses)
-        max_loss = np.max(test_losses)
-
-        axes[1, 1].text(0.1, 0.8, f'Summary Statistics (H={horizon})', fontsize=14, fontweight='bold',
-                        transform=axes[1, 1].transAxes)
-        axes[1, 1].text(0.1, 0.7, f'Average Test Loss: {avg_loss:.4f}', fontsize=12, transform=axes[1, 1].transAxes)
-        axes[1, 1].text(0.1, 0.6, f'Std Test Loss: {std_loss:.4f}', fontsize=12, transform=axes[1, 1].transAxes)
-        axes[1, 1].text(0.1, 0.5, f'Min Test Loss: {min_loss:.4f}', fontsize=12, transform=axes[1, 1].transAxes)
-        axes[1, 1].text(0.1, 0.4, f'Max Test Loss: {max_loss:.4f}', fontsize=12, transform=axes[1, 1].transAxes)
-        axes[1, 1].text(0.1, 0.3, f'Total Patterns: {len(pattern_names)}', fontsize=12, transform=axes[1, 1].transAxes)
-        axes[1, 1].axis('off')
-
-        plt.suptitle(f'Individual Models Summary (H={horizon})', fontsize=16)
-        plt.tight_layout()
-        plt.savefig(os.path.join(exp_dir, f'individual_summary_h{horizon}.png'), dpi=150, bbox_inches='tight')
-        plt.close()
-
-    def _plot_unified_summary(self, results: Dict, horizon: int, exp_dir: str):
-        """Plot summary for unified model strategy."""
-        unified_results = results.get('unified_results', {})
-
-        if not unified_results:
-            return
-
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-
-        history = unified_results.get('history', {})
+        history = model_results.get('history', {})
 
         # Training curves
         if 'loss' in history and 'val_loss' in history:
@@ -1581,10 +1320,10 @@ class BaseNBeatsTrainer:
             axes[0, 1].grid(True, alpha=0.3)
 
         # Performance metrics
-        test_loss = unified_results.get('test_loss', 0)
-        test_mae = unified_results.get('test_mae', 0)
-        training_time = unified_results.get('training_time', 0)
-        final_epoch = unified_results.get('final_epoch', 0)
+        test_loss = model_results.get('test_loss', 0)
+        test_mae = model_results.get('test_mae', 0)
+        training_time = model_results.get('training_time', 0)
+        final_epoch = model_results.get('final_epoch', 0)
 
         metrics = ['Test Loss', 'Test MAE', 'Training Time (s)', 'Final Epoch']
         values = [test_loss, test_mae, training_time, final_epoch]
@@ -1600,106 +1339,33 @@ class BaseNBeatsTrainer:
             axes[1, 0].text(i, v, f'{v:.3f}' if v < 100 else f'{v:.0f}', ha='center', va='bottom')
 
         # Summary text
-        axes[1, 1].text(0.1, 0.8, f'Unified Model Summary (H={horizon})', fontsize=14, fontweight='bold',
+        axes[1, 1].text(0.1, 0.8, f'Model Summary (H={horizon})', fontsize=14, fontweight='bold',
                         transform=axes[1, 1].transAxes)
         axes[1, 1].text(0.1, 0.7, f'Test Loss: {test_loss:.4f}', fontsize=12, transform=axes[1, 1].transAxes)
         axes[1, 1].text(0.1, 0.6, f'Test MAE: {test_mae:.4f}', fontsize=12, transform=axes[1, 1].transAxes)
         axes[1, 1].text(0.1, 0.5, f'Training Time: {training_time:.1f}s', fontsize=12, transform=axes[1, 1].transAxes)
         axes[1, 1].text(0.1, 0.4, f'Final Epoch: {final_epoch}', fontsize=12, transform=axes[1, 1].transAxes)
-        axes[1, 1].text(0.1, 0.3, f'Strategy: Unified', fontsize=12, transform=axes[1, 1].transAxes)
+        axes[1, 1].text(0.1, 0.3, f'Multi-Pattern Training', fontsize=12, transform=axes[1, 1].transAxes)
         axes[1, 1].axis('off')
 
-        plt.suptitle(f'Unified Model Summary (H={horizon})', fontsize=16)
+        plt.suptitle(f'Model Summary (H={horizon})', fontsize=16)
         plt.tight_layout()
-        plt.savefig(os.path.join(exp_dir, f'unified_summary_h{horizon}.png'), dpi=150, bbox_inches='tight')
+        plt.savefig(os.path.join(exp_dir, f'model_summary_h{horizon}.png'), dpi=150, bbox_inches='tight')
         plt.close()
 
-    def _plot_ensemble_summary(self, results: Dict, horizon: int, exp_dir: str):
-        """Plot summary for ensemble strategy."""
-        ensemble_results = results.get('ensemble_results', {})
+    def _create_detailed_experiment_report(self, results: Dict, exp_dir: str, data_info: Dict) -> None:
+        """
+        Create detailed text report of experiment results.
 
-        if not ensemble_results:
-            return
-
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-
-        # Extract individual model results
-        individual_results = {k: v for k, v in ensemble_results.items() if k != 'ensemble_performance'}
-        ensemble_performance = ensemble_results.get('ensemble_performance', {})
-
-        if individual_results:
-            model_names = list(individual_results.keys())
-            test_losses = [individual_results[name]['test_loss'] for name in model_names]
-
-            # Individual model performance
-            axes[0, 0].bar(range(len(model_names)), test_losses, color='skyblue', alpha=0.7, edgecolor='black')
-            axes[0, 0].set_title(f'Individual Model Performance (H={horizon})')
-            axes[0, 0].set_xlabel('Model')
-            axes[0, 0].set_ylabel('Test Loss')
-            axes[0, 0].set_xticks(range(len(model_names)))
-            axes[0, 0].set_xticklabels(model_names, rotation=45, ha='right')
-            axes[0, 0].grid(True, alpha=0.3)
-
-            # Ensemble vs individual comparison
-            if ensemble_performance:
-                ensemble_loss = ensemble_performance.get('test_loss', 0)
-                avg_individual = np.mean(test_losses)
-
-                comparison_names = ['Ensemble', 'Avg Individual']
-                comparison_values = [ensemble_loss, avg_individual]
-
-                axes[0, 1].bar(comparison_names, comparison_values,
-                               color=['gold', 'lightcoral'], alpha=0.7, edgecolor='black')
-                axes[0, 1].set_title(f'Ensemble vs Individual (H={horizon})')
-                axes[0, 1].set_ylabel('Test Loss')
-                axes[0, 1].grid(True, alpha=0.3)
-
-                # Add value labels
-                for i, v in enumerate(comparison_values):
-                    axes[0, 1].text(i, v, f'{v:.4f}', ha='center', va='bottom')
-
-            # Training times
-            training_times = [individual_results[name]['training_time'] for name in model_names]
-
-            axes[1, 0].bar(range(len(model_names)), training_times, color='lightgreen', alpha=0.7, edgecolor='black')
-            axes[1, 0].set_title(f'Training Times (H={horizon})')
-            axes[1, 0].set_xlabel('Model')
-            axes[1, 0].set_ylabel('Training Time (s)')
-            axes[1, 0].set_xticks(range(len(model_names)))
-            axes[1, 0].set_xticklabels(model_names, rotation=45, ha='right')
-            axes[1, 0].grid(True, alpha=0.3)
-
-        # Summary statistics
-        if ensemble_performance and individual_results:
-            ensemble_loss = ensemble_performance.get('test_loss', 0)
-            avg_individual = np.mean([individual_results[name]['test_loss'] for name in individual_results])
-            improvement = ((avg_individual - ensemble_loss) / avg_individual) * 100
-
-            axes[1, 1].text(0.1, 0.8, f'Ensemble Summary (H={horizon})', fontsize=14, fontweight='bold',
-                            transform=axes[1, 1].transAxes)
-            axes[1, 1].text(0.1, 0.7, f'Ensemble Loss: {ensemble_loss:.4f}', fontsize=12,
-                            transform=axes[1, 1].transAxes)
-            axes[1, 1].text(0.1, 0.6, f'Avg Individual: {avg_individual:.4f}', fontsize=12,
-                            transform=axes[1, 1].transAxes)
-            axes[1, 1].text(0.1, 0.5, f'Improvement: {improvement:.2f}%', fontsize=12, transform=axes[1, 1].transAxes)
-            axes[1, 1].text(0.1, 0.4, f'Ensemble Size: {len(individual_results)}', fontsize=12,
-                            transform=axes[1, 1].transAxes)
-            axes[1, 1].text(0.1, 0.3, f'Diversity: {self.config.ensemble_diversity.value}', fontsize=12,
-                            transform=axes[1, 1].transAxes)
-            axes[1, 1].axis('off')
-
-        plt.suptitle(f'Ensemble Summary (H={horizon})', fontsize=16)
-        plt.tight_layout()
-        plt.savefig(os.path.join(exp_dir, f'ensemble_summary_h{horizon}.png'), dpi=150, bbox_inches='tight')
-        plt.close()
-
-    def _plot_pattern_specific_summary(self, results: Dict, horizon: int, exp_dir: str):
-        """Plot summary for pattern-specific strategy."""
-        # Similar to unified summary but with pattern-specific context
-        self._plot_unified_summary(results, horizon, exp_dir)
-
-    def _create_detailed_experiment_report(self, results: Dict, exp_dir: str, data_info: Dict):
-        """Create detailed text report of experiment results."""
+        Parameters
+        ----------
+        results : Dict
+            Experiment results
+        exp_dir : str
+            Experiment directory
+        data_info : Dict
+            Data information
+        """
         try:
             report_path = os.path.join(exp_dir, 'detailed_experiment_report.txt')
 
@@ -1712,23 +1378,15 @@ class BaseNBeatsTrainer:
                 f.write("EXPERIMENT OVERVIEW\n")
                 f.write("-" * 20 + "\n")
                 f.write(f"Experiment Name: {self.config.experiment_name}\n")
-                f.write(f"Training Strategy: {self.config.training_strategy.value}\n")
                 f.write(f"Number of Patterns: {data_info['num_patterns']}\n")
                 f.write(f"Available Pattern Categories: {len(self.pattern_categories)}\n")
                 f.write(f"Time Series Length: {self.ts_config.n_samples}\n")
                 f.write(f"Forecast Horizons: {self.config.forecast_horizons}\n")
                 f.write(f"Experiment Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
 
-                # Strategy-specific details
-                if self.config.training_strategy == TrainingStrategy.ENSEMBLE:
-                    f.write("ENSEMBLE CONFIGURATION\n")
-                    f.write("-" * 22 + "\n")
-                    f.write(f"Ensemble Size: {self.config.ensemble_size}\n")
-                    f.write(f"Diversity Source: {self.config.ensemble_diversity.value}\n\n")
-
-                if self.config.training_strategy == TrainingStrategy.PATTERN_SPECIFIC:
-                    f.write("PATTERN-SPECIFIC CONFIGURATION\n")
-                    f.write("-" * 32 + "\n")
+                if self.config.target_categories:
+                    f.write("TARGET CATEGORIES\n")
+                    f.write("-" * 17 + "\n")
                     f.write(f"Target Categories: {self.config.target_categories}\n\n")
 
                 # Pattern distribution
@@ -1755,7 +1413,7 @@ class BaseNBeatsTrainer:
                 f.write("TRAINING CONFIGURATION\n")
                 f.write("-" * 21 + "\n")
                 f.write(
-                    f"Data Split: {self.config.train_ratio:.1f}/{self.config.val_ratio:.1f}/{self.config.test_ratio:.1f}\n")
+                    f"Data Split: {self.config.train_ratio:.2f}/{self.config.val_ratio:.2f}/{self.config.test_ratio:.2f}\n")
                 f.write(f"Epochs: {self.config.epochs}\n")
                 f.write(f"Batch Size: {self.config.batch_size}\n")
                 f.write(f"Learning Rate: {self.config.learning_rate}\n")
@@ -1768,50 +1426,12 @@ class BaseNBeatsTrainer:
                     f.write(f"RESULTS FOR HORIZON {horizon}\n")
                     f.write("-" * 25 + "\n")
 
-                    if self.config.training_strategy == TrainingStrategy.INDIVIDUAL:
-                        pattern_results = result.get('pattern_results', {})
-                        if pattern_results:
-                            avg_loss = np.mean([r['test_loss'] for r in pattern_results.values()])
-                            std_loss = np.std([r['test_loss'] for r in pattern_results.values()])
-                            min_loss = np.min([r['test_loss'] for r in pattern_results.values()])
-                            max_loss = np.max([r['test_loss'] for r in pattern_results.values()])
-                            total_time = sum([r['training_time'] for r in pattern_results.values()])
-
-                            f.write(f"Strategy: Individual Models\n")
-                            f.write(f"Number of Models: {len(pattern_results)}\n")
-                            f.write(f"Average Test Loss: {avg_loss:.6f}\n")
-                            f.write(f"Std Test Loss: {std_loss:.6f}\n")
-                            f.write(f"Min Test Loss: {min_loss:.6f}\n")
-                            f.write(f"Max Test Loss: {max_loss:.6f}\n")
-                            f.write(f"Total Training Time: {total_time:.1f} seconds\n")
-
-                    elif self.config.training_strategy == TrainingStrategy.UNIFIED:
-                        unified_results = result.get('unified_results', {})
-                        if unified_results:
-                            f.write(f"Strategy: Unified Model\n")
-                            f.write(f"Test Loss: {unified_results['test_loss']:.6f}\n")
-                            f.write(f"Test MAE: {unified_results.get('test_mae', 'N/A')}\n")
-                            f.write(f"Training Time: {unified_results['training_time']:.1f} seconds\n")
-                            f.write(f"Final Epoch: {unified_results['final_epoch']}\n")
-
-                    elif self.config.training_strategy == TrainingStrategy.ENSEMBLE:
-                        ensemble_results = result.get('ensemble_results', {})
-                        if ensemble_results:
-                            ensemble_perf = ensemble_results.get('ensemble_performance', {})
-                            individual_results = {k: v for k, v in ensemble_results.items() if
-                                                  k != 'ensemble_performance'}
-
-                            f.write(f"Strategy: Ensemble\n")
-                            f.write(f"Ensemble Size: {len(individual_results)}\n")
-                            if ensemble_perf:
-                                f.write(f"Ensemble Test Loss: {ensemble_perf['test_loss']:.6f}\n")
-                                if individual_results:
-                                    avg_individual = np.mean([r['test_loss'] for r in individual_results.values()])
-                                    improvement = ((avg_individual - ensemble_perf['test_loss']) / avg_individual) * 100
-                                    f.write(f"Average Individual Loss: {avg_individual:.6f}\n")
-                                    f.write(f"Ensemble Improvement: {improvement:.2f}%\n")
-                                total_time = sum([r['training_time'] for r in individual_results.values()])
-                                f.write(f"Total Training Time: {total_time:.1f} seconds\n")
+                    model_results = result.get('model_results', {})
+                    if model_results:
+                        f.write(f"Test Loss: {model_results['test_loss']:.6f}\n")
+                        f.write(f"Test MAE: {model_results.get('test_mae', 'N/A')}\n")
+                        f.write(f"Training Time: {model_results['training_time']:.1f} seconds\n")
+                        f.write(f"Final Epoch: {model_results['final_epoch']}\n")
 
                     f.write("\n")
 
@@ -1829,17 +1449,10 @@ class BaseNBeatsTrainer:
                 f.write("RECOMMENDATIONS\n")
                 f.write("-" * 15 + "\n")
                 f.write("✅ Base N-BEATS training completed successfully\n")
-                f.write(f"✅ Trained using {self.config.training_strategy.value} strategy\n")
                 f.write(f"✅ Successfully processed {len(data_info['category_distribution'])} pattern categories\n")
                 f.write(
                     f"✅ Generated {sum(data_info['category_distribution'].values())} diverse time series patterns\n")
-
-                if self.config.training_strategy == TrainingStrategy.ENSEMBLE:
-                    f.write("✅ Ensemble approach provides robust predictions with reduced variance\n")
-                elif self.config.training_strategy == TrainingStrategy.INDIVIDUAL:
-                    f.write("✅ Individual models provide pattern-specific optimization\n")
-                elif self.config.training_strategy == TrainingStrategy.UNIFIED:
-                    f.write("✅ Unified model provides efficient deployment with good generalization\n")
+                f.write("✅ Model provides efficient deployment with good generalization\n")
 
                 f.write("\n" + "=" * 80 + "\n")
                 f.write("End of Report\n")
@@ -1851,12 +1464,10 @@ class BaseNBeatsTrainer:
             logger.warning(f"Failed to create detailed experiment report: {e}")
 
 
-def main():
-    """Run the base N-BEATS experiment with different training strategies."""
+def main() -> None:
+    """Run the base N-BEATS experiment."""
 
-    # Unified strategy (single model on mixed patterns)
-    config = NBeatsTrainingConfig(
-        training_strategy=TrainingStrategy.UNIFIED,
+    config = BaseNBeatsTrainingConfig(
         experiment_name="base_nbeats",
 
         backcast_length=168,
@@ -1896,12 +1507,12 @@ def main():
     )
 
     try:
-        logger.info("🚀 Running Unified Strategy Experiment")
-        trainer_unified = BaseNBeatsTrainer(config, ts_config)
-        results_unified = trainer_unified.run_experiment()
-        logger.info(f"✅ Unified experiment completed: {results_unified['results_dir']}")
+        logger.info("🚀 Running N-BEATS Multi-Pattern Experiment")
+        trainer = BaseNBeatsTrainer(config, ts_config)
+        results = trainer.run_experiment()
+        logger.info(f"✅ Experiment completed: {results['results_dir']}")
     except Exception as e:
-        logger.error(f"💥 Unified experiment failed: {e}", exc_info=True)
+        logger.error(f"💥 Experiment failed: {e}", exc_info=True)
 
 
 if __name__ == "__main__":

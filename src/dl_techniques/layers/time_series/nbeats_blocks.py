@@ -4,6 +4,7 @@ from keras import ops
 from abc import abstractmethod
 from typing import Optional, Any, Tuple, Union, Dict
 
+from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
@@ -284,32 +285,32 @@ class NBeatsBlock(keras.layers.Layer):
             self.units,
             use_bias=self.use_bias,
             activation=self.activation,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
+            kernel_initializer=keras.initializers.Orthogonal(gain=0.1),
+            kernel_regularizer=SoftOrthonormalConstraintRegularizer(lambda_coefficient=0.01),
             name='dense1'
         )
         self.dense2 = keras.layers.Dense(
             self.units,
             use_bias=self.use_bias,
             activation=self.activation,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
+            kernel_initializer=keras.initializers.Orthogonal(gain=0.1),
+            kernel_regularizer=SoftOrthonormalConstraintRegularizer(lambda_coefficient=0.01),
             name='dense2'
         )
         self.dense3 = keras.layers.Dense(
             self.units,
             use_bias=self.use_bias,
             activation=self.activation,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
+            kernel_initializer=keras.initializers.Orthogonal(gain=0.1),
+            kernel_regularizer=SoftOrthonormalConstraintRegularizer(lambda_coefficient=0.01),
             name='dense3'
         )
         self.dense4 = keras.layers.Dense(
             self.units,
             use_bias=self.use_bias,
             activation=self.activation,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
+            kernel_initializer=keras.initializers.Orthogonal(gain=0.1),
+            kernel_regularizer=SoftOrthonormalConstraintRegularizer(lambda_coefficient=0.01),
             name='dense4'
         )
 
