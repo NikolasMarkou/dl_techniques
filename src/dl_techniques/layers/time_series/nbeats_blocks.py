@@ -1,8 +1,8 @@
 import keras
 import numpy as np
 from keras import ops
-from typing import Optional, Any, Tuple, Union
 from abc import abstractmethod
+from typing import Optional, Any, Tuple, Union, Dict
 
 # ---------------------------------------------------------------------
 # local imports
@@ -18,18 +18,19 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class RevIN(keras.layers.Layer):
-    """Reversible Instance Normalization for N-BEATS.
+    """Stateless Reversible Instance Normalization for N-BEATS.
 
     This normalization technique significantly improves N-BEATS performance
     by handling distribution shifts in time series data. It provides 10-20%
     performance improvement in most cases.
 
-    The layer stores normalization statistics during the forward pass to enable
-    proper denormalization of predictions back to the original scale.
+    The layer is stateless - it computes normalization statistics from input
+    and returns both normalized data and statistics needed for denormalization.
 
     Args:
         eps: Small constant for numerical stability.
         affine: Whether to apply learnable affine transformation.
+        return_stats: Whether to return normalization statistics along with normalized data.
         **kwargs: Additional keyword arguments for the Layer parent class.
     """
 
@@ -37,15 +38,13 @@ class RevIN(keras.layers.Layer):
             self,
             eps: float = 1e-5,
             affine: bool = True,
+            return_stats: bool = True,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
         self.eps = eps
         self.affine = affine
-
-        # Instance variables for statistics (not layer weights)
-        self.mean = None
-        self.stdev = None
+        self.return_stats = return_stats
 
         # Affine parameters (if enabled) - scalars for time series
         self.affine_weight = None
@@ -74,65 +73,72 @@ class RevIN(keras.layers.Layer):
 
         super().build(input_shape)
 
-    def call(self, inputs, mode: str = 'norm', training: Optional[bool] = None):
-        """Apply RevIN normalization or denormalization.
+    def call(self, inputs, training: Optional[bool] = None):
+        """Apply RevIN normalization and return normalized data with statistics.
 
         Args:
             inputs: Input tensor of shape (batch_size, sequence_length).
-            mode: 'norm' for normalization, 'denorm' for denormalization.
             training: Boolean indicating training mode.
 
         Returns:
-            Normalized or denormalized tensor.
-        """
-        if mode == 'norm':
-            return self._normalize(inputs)
-        elif mode == 'denorm':
-            return self._denormalize(inputs)
-        else:
-            raise ValueError(f"Invalid mode: {mode}. Use 'norm' or 'denorm'.")
+            If return_stats is True: Tuple of (normalized_tensor, normalization_stats)
+            If return_stats is False: Only normalized_tensor
 
-    def _normalize(self, x):
-        """Apply normalization and store statistics.
-
-        Args:
-            x: Input tensor to normalize.
-
-        Returns:
-            Normalized tensor.
+            normalization_stats is a dict containing:
+            - 'mean': mean values used for normalization
+            - 'stdev': standard deviation values used for normalization
+            - 'affine_weight': affine weight parameter (if affine=True)
+            - 'affine_bias': affine bias parameter (if affine=True)
         """
         # Calculate statistics along sequence dimension (axis=1)
-        self.mean = ops.mean(x, axis=1, keepdims=True)
-        self.stdev = ops.sqrt(ops.var(x, axis=1, keepdims=True) + self.eps)
+        mean = ops.mean(inputs, axis=1, keepdims=True)
+        variance = ops.var(inputs, axis=1, keepdims=True)
+        stdev = ops.sqrt(variance + self.eps)
 
         # Normalize: (x - mean) / stdev
-        x_norm = (x - self.mean) / self.stdev
+        normalized = (inputs - mean) / stdev
 
         # Apply scalar affine transformation if enabled
         if self.affine:
-            x_norm = x_norm * self.affine_weight + self.affine_bias
+            normalized = normalized * self.affine_weight + self.affine_bias
 
-        return x_norm
+        if self.return_stats:
+            # Prepare normalization statistics for denormalization
+            stats = {
+                'mean': mean,
+                'stdev': stdev,
+            }
+            if self.affine:
+                stats['affine_weight'] = self.affine_weight
+                stats['affine_bias'] = self.affine_bias
 
-    def _denormalize(self, x):
-        """Apply denormalization using stored statistics.
+            return normalized, stats
+        else:
+            return normalized
+
+    def denormalize(self, normalized_data, normalization_stats: Dict[str, Any]):
+        """Apply denormalization using provided statistics.
 
         Args:
-            x: Normalized tensor to denormalize.
+            normalized_data: Normalized tensor to denormalize.
+            normalization_stats: Statistics dict returned from normalization.
 
         Returns:
             Denormalized tensor.
         """
-        if self.mean is None or self.stdev is None:
-            raise RuntimeError("Cannot denormalize before normalizing. Call with mode='norm' first.")
+        # Remove scalar affine transformation if it was applied
+        data = normalized_data
+        if self.affine and 'affine_weight' in normalization_stats:
+            affine_weight = normalization_stats['affine_weight']
+            affine_bias = normalization_stats['affine_bias']
+            data = (data - affine_bias) / affine_weight
 
-        # Remove scalar affine transformation if enabled
-        if self.affine:
-            x = (x - self.affine_bias) / self.affine_weight
+        # Apply denormalization using provided statistics
+        mean = normalization_stats['mean']
+        stdev = normalization_stats['stdev']
+        denormalized = data * stdev + mean
 
-        # Use stored statistics to denormalize
-        x_denorm = x * self.stdev + self.mean
-        return x_denorm
+        return denormalized
 
     def get_config(self) -> dict:
         """Get layer configuration for serialization.
@@ -144,8 +150,39 @@ class RevIN(keras.layers.Layer):
         config.update({
             'eps': self.eps,
             'affine': self.affine,
+            'return_stats': self.return_stats,
         })
         return config
+
+
+# ---------------------------------------------------------------------
+# Utility function for standalone denormalization
+# ---------------------------------------------------------------------
+
+def denormalize_with_revin_stats(data, normalization_stats: Dict[str, Any], eps: float = 1e-5) -> keras.KerasTensor:
+    """Standalone function to denormalize data using RevIN statistics.
+
+    Args:
+        data: Tensor to denormalize.
+        normalization_stats: Statistics dict from RevIN normalization.
+        eps: Small constant for numerical stability.
+
+    Returns:
+        Denormalized tensor.
+    """
+    # Remove affine transformation if present
+    result = data
+    if 'affine_weight' in normalization_stats and 'affine_bias' in normalization_stats:
+        affine_weight = normalization_stats['affine_weight']
+        affine_bias = normalization_stats['affine_bias']
+        result = (result - affine_bias) / affine_weight
+
+    # Apply denormalization
+    mean = normalization_stats['mean']
+    stdev = normalization_stats['stdev']
+    result = result * stdev + mean
+
+    return result
 
 
 # ---------------------------------------------------------------------
@@ -157,7 +194,7 @@ class NBeatsBlock(keras.layers.Layer):
     This is the base class for all N-BEATS blocks with improved:
     - Initialization strategies for better gradient flow
     - Numerical stability improvements
-    - Optional RevIN normalization (applied to inputs only)
+    - Stateless design (no internal RevIN normalization)
     - Better error handling and validation
 
     Args:
@@ -168,7 +205,6 @@ class NBeatsBlock(keras.layers.Layer):
         share_weights: Boolean, whether to share weights across blocks in the same stack.
         activation: String or callable, activation function for hidden layers.
         use_bias: Boolean, whether to add bias to the dense blocks.
-        use_revin: Boolean, whether to apply RevIN normalization to inputs.
         kernel_initializer: String or Initializer, initializer for FC layers.
         theta_initializer: String or Initializer, initializer for theta layers.
         kernel_regularizer: Optional regularizer for FC layer weights.
@@ -183,9 +219,8 @@ class NBeatsBlock(keras.layers.Layer):
             backcast_length: int,
             forecast_length: int,
             share_weights: bool = False,
-            activation: Union[str, callable] = 'relu',
+            activation: Union[str, callable] = 'gelu',
             use_bias: bool = False,
-            use_revin: bool = False,
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
             theta_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
@@ -217,7 +252,6 @@ class NBeatsBlock(keras.layers.Layer):
         self.forecast_length = forecast_length
         self.share_weights = share_weights
         self.activation = activation
-        self.use_revin = use_revin
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.theta_initializer = keras.initializers.get(theta_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
@@ -225,7 +259,6 @@ class NBeatsBlock(keras.layers.Layer):
         self.use_bias = use_bias
 
         # Will be initialized in build()
-        self.revin_layer = None
         self.dense1 = None
         self.dense2 = None
         self.dense3 = None
@@ -245,10 +278,6 @@ class NBeatsBlock(keras.layers.Layer):
         # Validate input shape
         if len(input_shape) != 2:
             raise ValueError(f"Expected 2D input shape, got {len(input_shape)}D: {input_shape}")
-
-        # Add RevIN normalization if requested
-        if self.use_revin:
-            self.revin_layer = RevIN(name='revin')
 
         # Four fully connected layers with improved initialization
         self.dense1 = keras.layers.Dense(
@@ -322,13 +351,8 @@ class NBeatsBlock(keras.layers.Layer):
         if len(input_shape) != 2:
             raise ValueError(f"Expected 2D input, got shape: {input_shape}")
 
-        # CORRECTED: Apply RevIN normalization to inputs only
-        x = inputs
-        if self.use_revin:
-            x = self.revin_layer(x, mode='norm', training=training)
-
         # Pass through four fully connected layers
-        x = self.dense1(x, training=training)
+        x = self.dense1(inputs, training=training)
         x = self.dense2(x, training=training)
         x = self.dense3(x, training=training)
         x = self.dense4(x, training=training)
@@ -340,16 +364,6 @@ class NBeatsBlock(keras.layers.Layer):
         # Generate backcast and forecast using basis functions
         backcast = self._generate_backcast(theta_b)
         forecast = self._generate_forecast(theta_f)
-
-        # CORRECTED: Only denormalize if we have a way to do it correctly
-        # For N-BEATS, the model learns to predict differences/residuals
-        # The final denormalization should happen at the model level
-        if self.use_revin:
-            # Denormalize the backcast to match input scale
-            backcast = self.revin_layer(backcast, mode='denorm', training=training)
-            # For forecast, we need to be more careful - it should be in the same scale
-            # but we can't directly apply the same denormalization
-            # This is a design choice - some implementations keep forecast normalized
 
         return backcast, forecast
 
@@ -409,7 +423,6 @@ class NBeatsBlock(keras.layers.Layer):
             'forecast_length': self.forecast_length,
             'share_weights': self.share_weights,
             'activation': self.activation,
-            'use_revin': self.use_revin,
             'use_bias': self.use_bias,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'theta_initializer': keras.initializers.serialize(self.theta_initializer),

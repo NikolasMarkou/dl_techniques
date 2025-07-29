@@ -1860,8 +1860,8 @@ def main():
         experiment_name="base_nbeats",
 
         backcast_length=168,
-        forecast_length=4,
-        forecast_horizons=[4, 8],
+        forecast_length=12,
+        forecast_horizons=[12],
 
         stack_types=["trend", "seasonality", "generic"],
         nb_blocks_per_stack=3,
