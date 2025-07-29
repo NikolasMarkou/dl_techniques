@@ -15,10 +15,7 @@ from dl_techniques.layers.time_series.nbeats_blocks import (
 
 @keras.saving.register_keras_serializable()
 class NBeatsNet(keras.Model):
-    """N-BEATS neural network with CORRECTED RevIN handling.
-
-    CRITICAL FIX: RevIN normalization is only applied to inputs, not outputs,
-    to avoid dimension mismatch issues between backcast_length and forecast_length.
+    """N-BEATS neural network.
 
     Args:
         backcast_length: Integer, length of the input time series window.
@@ -96,7 +93,7 @@ class NBeatsNet(keras.Model):
         self.output_projection = None
         self.dropout_layers: List[keras.layers.Dropout] = []
 
-        # CRITICAL FIX: Store input scaling factors for proper output denormalization
+        # Store input scaling factors for proper output denormalization
         self.input_scale_factor = None
         self.input_mean = None
 
@@ -289,7 +286,7 @@ class NBeatsNet(keras.Model):
         logger.info(f"Built {total_blocks} total blocks across {len(self.blocks)} stacks")
 
     def call(self, inputs, training: Optional[bool] = None) -> keras.KerasTensor:
-        """Forward pass implementing proper N-BEATS residual connections with FIXED RevIN."""
+        """Forward pass implementing proper N-BEATS residual connections with RevIN."""
 
         # Normalize input shape to 2D for block processing
         if len(inputs.shape) == 3:
@@ -398,7 +395,7 @@ class NBeatsNet(keras.Model):
         logger.info(f"Input → Output: {self.backcast_length} → {self.forecast_length}")
         logger.info(f"Backcast/Forecast ratio: {self.backcast_length / self.forecast_length:.1f}")
         logger.info(f"Hidden units: {self.hidden_layer_units}")
-        logger.info(f"RevIN normalization: {'✓ Enabled (FIXED)' if self.use_revin else '✗ Disabled'}")
+        logger.info(f"RevIN normalization: {'✓ Enabled' if self.use_revin else '✗ Disabled'}")
         logger.info(f"Dropout rate: {self.dropout_rate}")
         logger.info(f"Weight sharing: {'✓' if self.share_weights_in_stack else '✗'}")
 
@@ -422,7 +419,7 @@ class NBeatsNet(keras.Model):
             logger.warning("⚠ Consider increasing backcast_length for better performance")
 
         if self.use_revin:
-            logger.info("✓ RevIN enabled: expect 10-20% performance improvement (FIXED)")
+            logger.info("✓ RevIN enabled: expect 10-20% performance improvement")
 
         logger.info("=" * 80)
         super().summary(**kwargs)

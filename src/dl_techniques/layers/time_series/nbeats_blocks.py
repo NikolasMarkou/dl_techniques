@@ -533,13 +533,7 @@ class GenericBlock(NBeatsBlock):
 
 @keras.saving.register_keras_serializable()
 class TrendBlock(NBeatsBlock):
-    """Trend N-BEATS block with CORRECTED polynomial basis functions.
-
-    CRITICAL FIXES:
-    - Continuous time vector for proper polynomial extrapolation
-    - Correct polynomial basis calculation
-    - Improved numerical stability
-    - Better handling of edge cases
+    """Trend N-BEATS block withpolynomial basis functions.
 
     Args:
         normalize_basis: Boolean, whether to normalize polynomial basis functions.
@@ -742,39 +736,41 @@ class SeasonalityBlock(NBeatsBlock):
             # Frequency for this harmonic
             frequency = 2.0 * np.pi * harmonic / total_length
 
-            # Cosine component
+            # Cosine component with continuous normalization
             if basis_idx < self.thetas_dim:
                 cos_backcast = np.cos(frequency * backcast_indices)
                 cos_forecast = np.cos(frequency * forecast_indices)
 
-                # Optional normalization for better conditioning
+                # Normalize based on COMBINED sequence for continuity
                 if self.normalize_basis:
-                    # Normalize to unit norm
-                    cos_backcast_norm = np.linalg.norm(cos_backcast)
-                    cos_forecast_norm = np.linalg.norm(cos_forecast)
-                    if cos_backcast_norm > 1e-8:
-                        cos_backcast /= cos_backcast_norm
-                    if cos_forecast_norm > 1e-8:
-                        cos_forecast /= cos_forecast_norm
+                    # Create full continuous cosine for norm calculation
+                    full_indices = np.arange(total_length, dtype=np.float32)
+                    full_cosine = np.cos(frequency * full_indices)
+                    full_norm = np.linalg.norm(full_cosine)
+
+                    if full_norm > 1e-8:
+                        cos_backcast /= full_norm
+                        cos_forecast /= full_norm
 
                 backcast_basis[basis_idx] = cos_backcast
                 forecast_basis[basis_idx] = cos_forecast
                 basis_idx += 1
 
-            # Sine component
+            # Sine component with continuous normalization
             if basis_idx < self.thetas_dim:
                 sin_backcast = np.sin(frequency * backcast_indices)
                 sin_forecast = np.sin(frequency * forecast_indices)
 
-                # Optional normalization for better conditioning
+                # Normalize based on COMBINED sequence for continuity
                 if self.normalize_basis:
-                    # Normalize to unit norm
-                    sin_backcast_norm = np.linalg.norm(sin_backcast)
-                    sin_forecast_norm = np.linalg.norm(sin_forecast)
-                    if sin_backcast_norm > 1e-8:
-                        sin_backcast /= sin_backcast_norm
-                    if sin_forecast_norm > 1e-8:
-                        sin_forecast /= sin_forecast_norm
+                    # Create full continuous sine for norm calculation
+                    full_indices = np.arange(total_length, dtype=np.float32)
+                    full_sine = np.sin(frequency * full_indices)
+                    full_norm = np.linalg.norm(full_sine)
+
+                    if full_norm > 1e-8:
+                        sin_backcast /= full_norm
+                        sin_forecast /= full_norm
 
                 backcast_basis[basis_idx] = sin_backcast
                 forecast_basis[basis_idx] = sin_forecast
@@ -804,7 +800,7 @@ class SeasonalityBlock(NBeatsBlock):
         self.backcast_basis_matrix.assign(backcast_basis)
         self.forecast_basis_matrix.assign(forecast_basis)
 
-        logger.info(f"SeasonalityBlock: Created Fourier basis with {num_harmonics} harmonics")
+        logger.info(f"SeasonalityBlock: Created continuous Fourier basis with {num_harmonics} harmonics")
 
     def _generate_backcast(self, theta) -> keras.KerasTensor:
         """Generate backcast using corrected Fourier basis functions.
