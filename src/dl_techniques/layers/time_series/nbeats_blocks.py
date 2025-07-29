@@ -4,187 +4,11 @@ from keras import ops
 from abc import abstractmethod
 from typing import Optional, Any, Tuple, Union, Dict
 
-from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-
-
-# ---------------------------------------------------------------------
-# Reversible Instance Normalization Layer
-# ---------------------------------------------------------------------
-
-
-@keras.saving.register_keras_serializable()
-class RevIN(keras.layers.Layer):
-    """Stateless Reversible Instance Normalization for N-BEATS.
-
-    This normalization technique significantly improves N-BEATS performance
-    by handling distribution shifts in time series data. It provides 10-20%
-    performance improvement in most cases.
-
-    The layer is stateless - it computes normalization statistics from input
-    and returns both normalized data and statistics needed for denormalization.
-
-    Args:
-        eps: Small constant for numerical stability.
-        affine: Whether to apply learnable affine transformation.
-        return_stats: Whether to return normalization statistics along with normalized data.
-        **kwargs: Additional keyword arguments for the Layer parent class.
-    """
-
-    def __init__(
-            self,
-            eps: float = 1e-5,
-            affine: bool = True,
-            return_stats: bool = True,
-            **kwargs: Any
-    ) -> None:
-        super().__init__(**kwargs)
-        self.eps = eps
-        self.affine = affine
-        self.return_stats = return_stats
-
-        # Affine parameters (if enabled) - scalars for time series
-        self.affine_weight = None
-        self.affine_bias = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the RevIN layer with scalar affine parameters.
-
-        Args:
-            input_shape: Shape of the input tensor.
-        """
-        if self.affine:
-            # Scalar affine parameters for time series data
-            self.affine_weight = self.add_weight(
-                name='affine_weight',
-                shape=(),
-                initializer='ones',
-                trainable=True
-            )
-            self.affine_bias = self.add_weight(
-                name='affine_bias',
-                shape=(),
-                initializer='zeros',
-                trainable=True
-            )
-
-        super().build(input_shape)
-
-    def call(self, inputs, training: Optional[bool] = None):
-        """Apply RevIN normalization and return normalized data with statistics.
-
-        Args:
-            inputs: Input tensor of shape (batch_size, sequence_length).
-            training: Boolean indicating training mode.
-
-        Returns:
-            If return_stats is True: Tuple of (normalized_tensor, normalization_stats)
-            If return_stats is False: Only normalized_tensor
-
-            normalization_stats is a dict containing:
-            - 'mean': mean values used for normalization
-            - 'stdev': standard deviation values used for normalization
-            - 'affine_weight': affine weight parameter (if affine=True)
-            - 'affine_bias': affine bias parameter (if affine=True)
-        """
-        # Calculate statistics along sequence dimension (axis=1)
-        mean = ops.mean(inputs, axis=1, keepdims=True)
-        variance = ops.var(inputs, axis=1, keepdims=True)
-        stdev = ops.sqrt(variance + self.eps)
-
-        # Normalize: (x - mean) / stdev
-        normalized = (inputs - mean) / stdev
-
-        # Apply scalar affine transformation if enabled
-        if self.affine:
-            normalized = normalized * self.affine_weight + self.affine_bias
-
-        if self.return_stats:
-            # Prepare normalization statistics for denormalization
-            stats = {
-                'mean': mean,
-                'stdev': stdev,
-            }
-            if self.affine:
-                stats['affine_weight'] = self.affine_weight
-                stats['affine_bias'] = self.affine_bias
-
-            return normalized, stats
-        else:
-            return normalized
-
-    def denormalize(self, normalized_data, normalization_stats: Dict[str, Any]):
-        """Apply denormalization using provided statistics.
-
-        Args:
-            normalized_data: Normalized tensor to denormalize.
-            normalization_stats: Statistics dict returned from normalization.
-
-        Returns:
-            Denormalized tensor.
-        """
-        # Remove scalar affine transformation if it was applied
-        data = normalized_data
-        if self.affine and 'affine_weight' in normalization_stats:
-            affine_weight = normalization_stats['affine_weight']
-            affine_bias = normalization_stats['affine_bias']
-            data = (data - affine_bias) / affine_weight
-
-        # Apply denormalization using provided statistics
-        mean = normalization_stats['mean']
-        stdev = normalization_stats['stdev']
-        denormalized = data * stdev + mean
-
-        return denormalized
-
-    def get_config(self) -> dict:
-        """Get layer configuration for serialization.
-
-        Returns:
-            Configuration dictionary.
-        """
-        config = super().get_config()
-        config.update({
-            'eps': self.eps,
-            'affine': self.affine,
-            'return_stats': self.return_stats,
-        })
-        return config
-
-
-# ---------------------------------------------------------------------
-# Utility function for standalone denormalization
-# ---------------------------------------------------------------------
-
-def denormalize_with_revin_stats(data, normalization_stats: Dict[str, Any], eps: float = 1e-5) -> keras.KerasTensor:
-    """Standalone function to denormalize data using RevIN statistics.
-
-    Args:
-        data: Tensor to denormalize.
-        normalization_stats: Statistics dict from RevIN normalization.
-        eps: Small constant for numerical stability.
-
-    Returns:
-        Denormalized tensor.
-    """
-    # Remove affine transformation if present
-    result = data
-    if 'affine_weight' in normalization_stats and 'affine_bias' in normalization_stats:
-        affine_weight = normalization_stats['affine_weight']
-        affine_bias = normalization_stats['affine_bias']
-        result = (result - affine_bias) / affine_weight
-
-    # Apply denormalization
-    mean = normalization_stats['mean']
-    stdev = normalization_stats['stdev']
-    result = result * stdev + mean
-
-    return result
-
 
 # ---------------------------------------------------------------------
 
@@ -220,8 +44,8 @@ class NBeatsBlock(keras.layers.Layer):
             backcast_length: int,
             forecast_length: int,
             share_weights: bool = False,
-            activation: Union[str, callable] = 'gelu',
-            use_bias: bool = False,
+            activation: Union[str, callable] = 'silu',
+            use_bias: bool = True,
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
             theta_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
@@ -285,32 +109,32 @@ class NBeatsBlock(keras.layers.Layer):
             self.units,
             use_bias=self.use_bias,
             activation=self.activation,
-            kernel_initializer=keras.initializers.Orthogonal(gain=0.1),
-            kernel_regularizer=SoftOrthonormalConstraintRegularizer(lambda_coefficient=0.01),
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
             name='dense1'
         )
         self.dense2 = keras.layers.Dense(
             self.units,
             use_bias=self.use_bias,
             activation=self.activation,
-            kernel_initializer=keras.initializers.Orthogonal(gain=0.1),
-            kernel_regularizer=SoftOrthonormalConstraintRegularizer(lambda_coefficient=0.01),
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
             name='dense2'
         )
         self.dense3 = keras.layers.Dense(
             self.units,
             use_bias=self.use_bias,
             activation=self.activation,
-            kernel_initializer=keras.initializers.Orthogonal(gain=0.1),
-            kernel_regularizer=SoftOrthonormalConstraintRegularizer(lambda_coefficient=0.01),
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
             name='dense3'
         )
         self.dense4 = keras.layers.Dense(
             self.units,
             use_bias=self.use_bias,
             activation=self.activation,
-            kernel_initializer=keras.initializers.Orthogonal(gain=0.1),
-            kernel_regularizer=SoftOrthonormalConstraintRegularizer(lambda_coefficient=0.01),
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
             name='dense4'
         )
 

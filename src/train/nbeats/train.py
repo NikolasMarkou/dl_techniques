@@ -1,14 +1,14 @@
 """
-Comprehensive Base N-BEATS Training Framework for Multiple Time Series Patterns
+Comprehensive N-BEATS Training Framework for Multiple Time Series Patterns
 
-This module provides a sophisticated, production-ready training framework for base
+This module provides a sophisticated, production-ready training framework for
 N-BEATS models trained on multiple time series patterns. It enables training
 N-BEATS models across diverse time series patterns with comprehensive monitoring,
 visualization, and performance analysis.
 
 Classes
 -------
-BaseNBeatsTrainingConfig
+NBeatsTrainingConfig
     Comprehensive configuration dataclass containing all training parameters,
     including model architecture, training parameters, data management,
     regularization, and visualization settings.
@@ -23,7 +23,7 @@ PatternPerformanceCallback
     creating detailed visualizations of training progress, pattern-specific
     performance, and learning dynamics.
 
-BaseNBeatsTrainer
+NBeatsTrainer
     Main training orchestrator for multi-pattern N-BEATS training with
     comprehensive experiment management and performance analysis.
 
@@ -35,12 +35,14 @@ time series categories. This approach:
 * Provides efficient deployment with a single model
 * Achieves good generalization across unseen patterns
 * Optimizes computational resources
+* Applies configurable noise augmentation for improved robustness
+* Shuffles data at every epoch for enhanced training stability
 
 Usage Examples
 --------------
 Basic Multi-Pattern Training:
     >>> # Configure training
-    >>> config = BaseNBeatsTrainingConfig(
+    >>> config = NBeatsTrainingConfig(
     ...     backcast_length=168,
     ...     forecast_length=24,
     ...     epochs=100,
@@ -51,35 +53,47 @@ Basic Multi-Pattern Training:
     >>> ts_config = TimeSeriesConfig(n_samples=5000, random_seed=42)
     >>>
     >>> # Create trainer and run experiment
-    >>> trainer = BaseNBeatsTrainer(config, ts_config)
+    >>> trainer = NBeatsTrainer(config, ts_config)
     >>> results = trainer.run_experiment()
     >>> print(f"Experiment completed: {results['results_dir']}")
 
 Pattern-Specific Training:
     >>> # Focus on specific pattern categories
-    >>> config = BaseNBeatsTrainingConfig(
+    >>> config = NBeatsTrainingConfig(
     ...     target_categories=['financial', 'weather', 'industrial'],
     ...     category_weights={'financial': 2.0, 'weather': 1.5, 'industrial': 1.5},
     ...     max_patterns_per_category=15
     ... )
     >>>
-    >>> trainer = BaseNBeatsTrainer(config, ts_config)
+    >>> trainer = NBeatsTrainer(config, ts_config)
     >>> results = trainer.run_experiment()
 
 Multi-Horizon Training:
     >>> # Train for multiple forecast horizons
-    >>> config = BaseNBeatsTrainingConfig(
+    >>> config = NBeatsTrainingConfig(
     ...     forecast_horizons=[6, 12, 24, 48],
     ...     backcast_length=168
     ... )
     >>>
-    >>> trainer = BaseNBeatsTrainer(config, ts_config)
+    >>> trainer = NBeatsTrainer(config, ts_config)
     >>> results = trainer.run_experiment()
     >>>
     >>> # Access results for each horizon
     >>> for horizon in [6, 12, 24, 48]:
     ...     if horizon in results['horizon_results']:
     ...         print(f"Horizon {horizon}: {results['horizon_results'][horizon]['test_loss']:.4f}")
+
+Data Augmentation Configuration:
+    >>> # Configure noise augmentation for robustness
+    >>> config = NBeatsTrainingConfig(
+    ...     multiplicative_noise_std=0.02,  # 2% multiplicative noise
+    ...     additive_noise_std=0.005,       # Lower additive noise
+    ...     enable_multiplicative_noise=True,
+    ...     enable_additive_noise=False     # Disable additive noise
+    ... )
+    >>>
+    >>> trainer = NBeatsTrainer(config, ts_config)
+    >>> results = trainer.run_experiment()
 
 Configuration Parameters
 ------------------------
@@ -111,10 +125,16 @@ Configuration Parameters
 * `dropout_rate`: Dropout probability (default: 0.15)
 * `kernel_regularizer_l2`: L2 regularization strength (default: 1e-5)
 
+**Data Augmentation:**
+* `multiplicative_noise_std`: Standard deviation for multiplicative noise (default: 0.01)
+* `additive_noise_std`: Standard deviation for additive noise (default: 0.01)
+* `enable_multiplicative_noise`: Enable multiplicative noise augmentation (default: True)
+* `enable_additive_noise`: Enable additive noise augmentation (default: True)
+
 Technical Details
 -----------------
 **Mathematical Foundation:**
-The base N-BEATS training uses the standard N-BEATS architecture:
+The N-BEATS training uses the standard N-BEATS architecture:
 * Doubly residual stacking: residual = residual - backcast
 * Forecast accumulation: forecast_sum = Σ forecast_i
 * RevIN normalization for improved performance
@@ -179,9 +199,9 @@ set_random_seeds(42)
 
 
 @dataclass
-class BaseNBeatsTrainingConfig:
+class NBeatsTrainingConfig:
     """
-    Configuration for base N-BEATS training with multiple patterns.
+    Configuration for N-BEATS training with multiple patterns.
 
     This dataclass contains comprehensive configuration options for training
     N-BEATS models on diverse time series patterns with various regularization,
@@ -282,12 +302,23 @@ class BaseNBeatsTrainingConfig:
         Whether to evaluate during training
     eval_every_n_epochs : int
         Frequency of evaluation during training
+
+    Data Augmentation
+    -----------------
+    multiplicative_noise_std : float
+        Standard deviation for multiplicative noise (default: 0.01)
+    additive_noise_std : float
+        Standard deviation for additive noise (default: 0.01)
+    enable_multiplicative_noise : bool
+        Whether to apply multiplicative noise (default: True)
+    enable_additive_noise : bool
+        Whether to apply additive noise (default: True)
     """
 
     # General experiment configuration
     result_dir: str = "results"
     save_results: bool = True
-    experiment_name: str = "base_nbeats_multi_pattern"
+    experiment_name: str = "nbeats_multi_pattern"
 
     # Pattern selection configuration
     target_categories: Optional[List[str]] = None
@@ -358,6 +389,12 @@ class BaseNBeatsTrainingConfig:
     eval_during_training: bool = True
     eval_every_n_epochs: int = 10
 
+    # Data augmentation configuration
+    multiplicative_noise_std: float = 0.01
+    additive_noise_std: float = 0.01
+    enable_multiplicative_noise: bool = True
+    enable_additive_noise: bool = True
+
     def __post_init__(self) -> None:
         """
         Validate configuration parameters after initialization.
@@ -379,11 +416,12 @@ class BaseNBeatsTrainingConfig:
         if self.val_ratio < 0.1:
             logger.warning(f"Validation ratio {self.val_ratio} might be too small for reliable validation")
 
-        logger.info(f"Base N-BEATS Training Configuration:")
+        logger.info(f"N-BEATS Training Configuration:")
         logger.info(f"  ✅ Data split: {self.train_ratio:.1f}/{self.val_ratio:.1f}/{self.test_ratio:.1f}")
         logger.info(f"  ✅ Model: {self.nb_blocks_per_stack} blocks, {self.hidden_layer_units} units")
         logger.info(f"  ✅ Training: {self.epochs} epochs, batch {self.batch_size}, lr {self.learning_rate}")
         logger.info(f"  ✅ Regularization: dropout {self.dropout_rate}, L2 {self.kernel_regularizer_l2}")
+        logger.info(f"  ✅ Augmentation: mult_noise {self.multiplicative_noise_std if self.enable_multiplicative_noise else 'disabled'}, add_noise {self.additive_noise_std if self.enable_additive_noise else 'disabled'}")
 
         if self.target_categories:
             logger.info(f"  ✅ Target categories: {self.target_categories}")
@@ -399,12 +437,12 @@ class MultiPatternDataProcessor:
 
     Parameters
     ----------
-    config : BaseNBeatsTrainingConfig
+    config : NBeatsTrainingConfig
         Configuration object containing data processing parameters
 
     Attributes
     ----------
-    config : BaseNBeatsTrainingConfig
+    config : NBeatsTrainingConfig
         Configuration object
     scalers : Dict[str, TimeSeriesNormalizer]
         Fitted scalers for each pattern
@@ -414,7 +452,7 @@ class MultiPatternDataProcessor:
         Mapping from integer IDs to pattern names
     """
 
-    def __init__(self, config: BaseNBeatsTrainingConfig) -> None:
+    def __init__(self, config: NBeatsTrainingConfig) -> None:
         self.config = config
         self.scalers: Dict[str, TimeSeriesNormalizer] = {}
         self.pattern_to_id: Dict[str, int] = {}
@@ -462,7 +500,7 @@ class MultiPatternDataProcessor:
             self,
             raw_pattern_data: Dict[str, np.ndarray],
             horizon: int
-    ) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
+    ) -> Dict[str, tf.data.Dataset]:
         """
         Prepare data by mixing multiple patterns.
 
@@ -475,8 +513,8 @@ class MultiPatternDataProcessor:
 
         Returns
         -------
-        Dict[str, Tuple[np.ndarray, np.ndarray]]
-            Dictionary containing combined training data
+        Dict[str, tf.data.Dataset]
+            Dictionary containing combined training datasets
         """
         all_train_X, all_train_y = [], []
         all_val_X, all_val_y = [], []
@@ -535,16 +573,35 @@ class MultiPatternDataProcessor:
         combined_test_X = np.concatenate(all_test_X, axis=0)
         combined_test_y = np.concatenate(all_test_y, axis=0)
 
-        # Shuffle training data
-        train_indices = np.random.permutation(len(combined_train_X))
-        combined_train_X = combined_train_X[train_indices]
-        combined_train_y = combined_train_y[train_indices]
+        # Create TensorFlow datasets
+        train_dataset = self._create_tf_dataset(
+            combined_train_X, combined_train_y,
+            batch_size=self.config.batch_size,
+            shuffle=True,
+            apply_augmentation=True
+        )
+
+        val_dataset = self._create_tf_dataset(
+            combined_val_X, combined_val_y,
+            batch_size=self.config.batch_size,
+            shuffle=False,
+            apply_augmentation=False
+        )
+
+        test_dataset = self._create_tf_dataset(
+            combined_test_X, combined_test_y,
+            batch_size=self.config.batch_size,
+            shuffle=False,
+            apply_augmentation=False
+        )
 
         return {
             'mixed_patterns': {
-                'train': (combined_train_X, combined_train_y),
-                'val': (combined_val_X, combined_val_y),
-                'test': (combined_test_X, combined_test_y)
+                'train': train_dataset,
+                'val': val_dataset,
+                'test': test_dataset,
+                # Keep raw arrays for callback visualization
+                'test_arrays': (combined_test_X, combined_test_y)
             }
         }
 
@@ -603,6 +660,95 @@ class MultiPatternDataProcessor:
 
         return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
 
+    def _apply_noise_augmentation(self, x: tf.Tensor, y: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+        """
+        Apply multiplicative and additive noise augmentation to input data.
+
+        Parameters
+        ----------
+        x : tf.Tensor
+            Input sequences
+        y : tf.Tensor
+            Target sequences
+
+        Returns
+        -------
+        Tuple[tf.Tensor, tf.Tensor]
+            Augmented input and target sequences
+        """
+        # Apply noise only to input sequences (x), not targets (y)
+        augmented_x = x
+
+        if self.config.enable_multiplicative_noise and self.config.multiplicative_noise_std > 0:
+            # Multiplicative noise: x * (1 + noise)
+            mult_noise = tf.random.normal(
+                tf.shape(x),
+                mean=0.0,
+                stddev=self.config.multiplicative_noise_std,
+                dtype=x.dtype
+            )
+            augmented_x = augmented_x * (1.0 + mult_noise)
+
+        if self.config.enable_additive_noise and self.config.additive_noise_std > 0:
+            # Additive noise: x + noise
+            add_noise = tf.random.normal(
+                tf.shape(augmented_x),
+                mean=0.0,
+                stddev=self.config.additive_noise_std,
+                dtype=augmented_x.dtype
+            )
+            augmented_x = augmented_x + add_noise
+
+        return augmented_x, y
+
+    def _create_tf_dataset(
+            self,
+            X: np.ndarray,
+            y: np.ndarray,
+            batch_size: int,
+            shuffle: bool = True,
+            apply_augmentation: bool = False
+    ) -> tf.data.Dataset:
+        """
+        Create TensorFlow dataset with optional augmentation.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            Input sequences
+        y : np.ndarray
+            Target sequences
+        batch_size : int
+            Batch size
+        shuffle : bool, optional
+            Whether to shuffle data, by default True
+        apply_augmentation : bool, optional
+            Whether to apply noise augmentation, by default False
+
+        Returns
+        -------
+        tf.data.Dataset
+            Configured TensorFlow dataset
+        """
+        dataset = tf.data.Dataset.from_tensor_slices((X, y))
+
+        if shuffle:
+            # Use large buffer size for thorough shuffling
+            buffer_size = min(10000, len(X))
+            dataset = dataset.shuffle(buffer_size, reshuffle_each_iteration=True)
+
+        dataset = dataset.batch(batch_size, drop_remainder=False)
+
+        if apply_augmentation:
+            dataset = dataset.map(
+                self._apply_noise_augmentation,
+                num_parallel_calls=tf.data.AUTOTUNE
+            )
+
+        dataset = dataset.prefetch(tf.data.AUTOTUNE)
+
+        return dataset
+
 
 class PatternPerformanceCallback(keras.callbacks.Callback):
     """
@@ -614,7 +760,7 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
 
     Parameters
     ----------
-    config : BaseNBeatsTrainingConfig
+    config : NBeatsTrainingConfig
         Configuration object containing visualization settings
     data_processor : MultiPatternDataProcessor
         Data processor containing pattern information
@@ -627,7 +773,7 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
 
     Attributes
     ----------
-    config : BaseNBeatsTrainingConfig
+    config : NBeatsTrainingConfig
         Configuration object
     data_processor : MultiPatternDataProcessor
         Data processor instance
@@ -643,7 +789,7 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
 
     def __init__(
             self,
-            config: BaseNBeatsTrainingConfig,
+            config: NBeatsTrainingConfig,
             data_processor: MultiPatternDataProcessor,
             test_data: Dict[int, Any],
             save_dir: str,
@@ -762,7 +908,12 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
 
         test_data = self.test_data[horizon]
         mixed_data = test_data['mixed_patterns']
-        test_X, test_y = mixed_data['test']
+
+        # Use test arrays for visualization
+        if 'test_arrays' not in mixed_data:
+            return
+
+        test_X, test_y = mixed_data['test_arrays']
 
         if len(test_X) == 0:
             return
@@ -800,9 +951,9 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
         plt.close()
 
 
-class BaseNBeatsTrainer:
+class NBeatsTrainer:
     """
-    Comprehensive trainer for base N-BEATS with multiple pattern support.
+    Comprehensive trainer for N-BEATS with multiple pattern support.
 
     This class orchestrates the complete training process for N-BEATS models
     on multiple time series patterns, including data preparation, model training,
@@ -810,14 +961,14 @@ class BaseNBeatsTrainer:
 
     Parameters
     ----------
-    config : BaseNBeatsTrainingConfig
+    config : NBeatsTrainingConfig
         Configuration object containing all training parameters
     ts_config : TimeSeriesConfig
         Time series generation configuration
 
     Attributes
     ----------
-    config : BaseNBeatsTrainingConfig
+    config : NBeatsTrainingConfig
         Training configuration
     ts_config : TimeSeriesConfig
         Time series configuration
@@ -833,7 +984,7 @@ class BaseNBeatsTrainer:
         Selected patterns for training
     """
 
-    def __init__(self, config: BaseNBeatsTrainingConfig, ts_config: TimeSeriesConfig) -> None:
+    def __init__(self, config: NBeatsTrainingConfig, ts_config: TimeSeriesConfig) -> None:
         self.config = config
         self.ts_config = ts_config
         self.generator = TimeSeriesGenerator(ts_config)
@@ -844,7 +995,7 @@ class BaseNBeatsTrainer:
         self.pattern_categories = self.generator.get_task_categories()
         self.selected_patterns = self._select_patterns()
 
-        logger.info(f"Base N-BEATS Trainer initialized:")
+        logger.info(f"N-BEATS Trainer initialized:")
         logger.info(f"  - Available categories: {len(self.pattern_categories)}")
         logger.info(f"  - Total patterns available: {len(self.all_patterns)}")
         logger.info(f"  - Selected {len(self.selected_patterns)} patterns")
@@ -1037,7 +1188,7 @@ class BaseNBeatsTrainer:
             )
             os.makedirs(exp_dir, exist_ok=True)
 
-            logger.info(f"🚀 Starting Base N-BEATS Experiment: {exp_dir}")
+            logger.info(f"🚀 Starting N-BEATS Experiment: {exp_dir}")
 
             # Prepare data
             data_info = self.prepare_data()
@@ -1062,7 +1213,7 @@ class BaseNBeatsTrainer:
             # Save comprehensive results
             self._save_results(results, exp_dir, data_info)
 
-            logger.info("🎉 Base N-BEATS Experiment completed successfully!")
+            logger.info("🎉 N-BEATS Experiment completed successfully!")
             return {
                 "results_dir": exp_dir,
                 "results": results,
@@ -1100,9 +1251,9 @@ class BaseNBeatsTrainer:
         # Create model
         model = self.create_model(horizon)
 
-        # Build model
-        train_X, train_y = data['train']
-        model(train_X[:1])  # Build with sample data
+        # Build model with sample data from test arrays
+        test_X, _ = data['test_arrays']
+        model(test_X[:1])  # Build with sample data
 
         # Create callbacks
         viz_dir = os.path.join(exp_dir, f'visualizations_h{horizon}')
@@ -1137,25 +1288,25 @@ class BaseNBeatsTrainer:
             )
         ]
 
-        # Train model
+        # Train model using tf.data.Dataset
         start_time = datetime.now()
 
-        val_X, val_y = data['val']
+        train_dataset = data['train']
+        val_dataset = data['val']
+
         history = model.fit(
-            train_X, train_y,
-            validation_data=(val_X, val_y),
+            train_dataset,
+            validation_data=val_dataset,
             epochs=self.config.epochs,
-            batch_size=self.config.batch_size,
             callbacks=callbacks,
-            shuffle=True,
             verbose=1
         )
 
         training_time = (datetime.now() - start_time).total_seconds()
 
-        # Evaluate
-        test_X, test_y = data['test']
-        test_results = model.evaluate(test_X, test_y, verbose=0)
+        # Evaluate using test dataset
+        test_dataset = data['test']
+        test_results = model.evaluate(test_dataset, verbose=0)
         test_loss = test_results[0] if isinstance(test_results, list) else test_results
         test_mae = test_results[1] if len(test_results) > 1 else None
 
@@ -1371,7 +1522,7 @@ class BaseNBeatsTrainer:
 
             with open(report_path, 'w') as f:
                 f.write("=" * 80 + "\n")
-                f.write("BASE N-BEATS MULTI-PATTERN EXPERIMENT REPORT\n")
+                f.write("N-BEATS MULTI-PATTERN EXPERIMENT REPORT\n")
                 f.write("=" * 80 + "\n\n")
 
                 # Experiment overview
@@ -1448,7 +1599,7 @@ class BaseNBeatsTrainer:
                 # Recommendations
                 f.write("RECOMMENDATIONS\n")
                 f.write("-" * 15 + "\n")
-                f.write("✅ Base N-BEATS training completed successfully\n")
+                f.write("✅ N-BEATS training completed successfully\n")
                 f.write(f"✅ Successfully processed {len(data_info['category_distribution'])} pattern categories\n")
                 f.write(
                     f"✅ Generated {sum(data_info['category_distribution'].values())} diverse time series patterns\n")
@@ -1465,10 +1616,10 @@ class BaseNBeatsTrainer:
 
 
 def main() -> None:
-    """Run the base N-BEATS experiment."""
+    """Run the N-BEATS experiment."""
 
-    config = BaseNBeatsTrainingConfig(
-        experiment_name="base_nbeats",
+    config = NBeatsTrainingConfig(
+        experiment_name="nbeats",
 
         backcast_length=168,
         forecast_length=12,
@@ -1497,7 +1648,13 @@ def main() -> None:
         save_interim_plots=True,
         plot_top_k_patterns=6,
         create_learning_curves=True,
-        create_prediction_plots=True
+        create_prediction_plots=True,
+
+        # Data augmentation
+        multiplicative_noise_std=0.01,
+        additive_noise_std=0.001,
+        enable_multiplicative_noise=True,
+        enable_additive_noise=True
     )
 
     ts_config = TimeSeriesConfig(
@@ -1508,7 +1665,7 @@ def main() -> None:
 
     try:
         logger.info("🚀 Running N-BEATS Multi-Pattern Experiment")
-        trainer = BaseNBeatsTrainer(config, ts_config)
+        trainer = NBeatsTrainer(config, ts_config)
         results = trainer.run_experiment()
         logger.info(f"✅ Experiment completed: {results['results_dir']}")
     except Exception as e:

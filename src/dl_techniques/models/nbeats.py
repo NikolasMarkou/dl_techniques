@@ -8,14 +8,19 @@ from typing import List, Tuple, Optional, Union, Any, Dict
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.time_series.nbeats_blocks import (
-    GenericBlock, TrendBlock, SeasonalityBlock, RevIN, denormalize_with_revin_stats
+    GenericBlock, TrendBlock, SeasonalityBlock
 )
+from dl_techniques.layers.time_series.revin import RevIN
+
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class NBeatsNet(keras.Model):
-    """N-BEATS neural network with stateless RevIN normalization.
+    """N-BEATS neural network with proper RevIN normalization.
+
+    This implementation uses the stateful RevIN layer that stores normalization
+    statistics internally and provides proper 3D input/output handling.
 
     Args:
         backcast_length: Integer, length of the input time series window.
@@ -54,7 +59,7 @@ class NBeatsNet(keras.Model):
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             theta_regularizer: Optional[keras.regularizers.Regularizer] = None,
             dropout_rate: float = 0.0,
-            activation: Union[str, callable] = 'relu',
+            activation: Union[str, callable] = 'silu',
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
             input_dim: int = 1,
             output_dim: int = 1,
@@ -87,7 +92,6 @@ class NBeatsNet(keras.Model):
         self.output_dim = output_dim
 
         # Components to be built
-        self.input_layer = None
         self.global_revin = None
         self.blocks: List[List[Union[GenericBlock, TrendBlock, SeasonalityBlock]]] = []
         self.output_projection = None
@@ -123,7 +127,7 @@ class NBeatsNet(keras.Model):
         if output_dim <= 0:
             raise ValueError(f"output_dim must be positive, got {output_dim}")
 
-        # CRITICAL: Check backcast/forecast ratio for performance
+        # Check backcast/forecast ratio for performance
         ratio = backcast_length / forecast_length
         if ratio < 2.0:
             logger.warning(
@@ -177,7 +181,7 @@ class NBeatsNet(keras.Model):
         """Build the N-BEATS network components."""
         logger.info(f"Building N-BEATS network with input shape: {input_shape}")
 
-        # Validate and normalize input shape
+        # Validate input shape - expect 3D (batch, sequence, features) or 2D (batch, sequence)
         if len(input_shape) == 2:
             batch_size, seq_len = input_shape
             if seq_len != self.backcast_length:
@@ -185,7 +189,8 @@ class NBeatsNet(keras.Model):
                     f"Input sequence length {seq_len} doesn't match "
                     f"configured backcast_length {self.backcast_length}"
                 )
-            normalized_shape = (batch_size, seq_len, self.input_dim)
+            # Assume single feature for 2D input
+            effective_input_dim = 1
         elif len(input_shape) == 3:
             batch_size, seq_len, features = input_shape
             if seq_len != self.backcast_length:
@@ -198,20 +203,21 @@ class NBeatsNet(keras.Model):
                     f"Input feature dimension {features} doesn't match "
                     f"configured input_dim {self.input_dim}"
                 )
-            normalized_shape = input_shape
+            effective_input_dim = features
         else:
             raise ValueError(
                 f"Input must be 2D (batch, sequence) or 3D (batch, sequence, features), "
                 f"got {len(input_shape)}D: {input_shape}"
             )
 
-        # Create input processing layer
-        self.input_layer = keras.layers.Flatten(name='input_flatten')
-
-        # Add global RevIN normalization if enabled
+        # Add RevIN normalization if enabled
         if self.use_revin:
-            self.global_revin = RevIN(return_stats=True, name='global_revin')
-            logger.info("Added stateless RevIN normalization for 10-20% performance boost")
+            self.global_revin = RevIN(
+                num_features=effective_input_dim,
+                affine=True,
+                name='global_revin'
+            )
+            logger.info("Added stateful RevIN normalization for 10-20% performance boost")
 
         # Build blocks for each stack
         self._build_stacks()
@@ -238,7 +244,7 @@ class NBeatsNet(keras.Model):
             for block_id in range(self.nb_blocks_per_stack):
                 block_name = f"stack_{stack_id}_block_{block_id}_{stack_type}"
 
-                # Common block parameters (no per-block RevIN)
+                # Common block parameters
                 block_kwargs = {
                     'units': self.hidden_layer_units,
                     'thetas_dim': theta_dim,
@@ -282,41 +288,41 @@ class NBeatsNet(keras.Model):
         logger.info(f"Built {total_blocks} total blocks across {len(self.blocks)} stacks")
 
     def call(self, inputs, training: Optional[bool] = None) -> keras.KerasTensor:
-        """Forward pass implementing proper N-BEATS residual connections with stateless RevIN."""
+        """Forward pass implementing proper N-BEATS residual connections with RevIN."""
 
-        # Normalize input shape to 2D for block processing
-        if len(inputs.shape) == 3:
-            if inputs.shape[-1] == self.input_dim:
-                if self.input_dim == 1:
-                    processed_input = ops.squeeze(inputs, axis=-1)
-                else:
-                    # For multi-dimensional input, we could process each dimension separately
-                    # or apply some aggregation. For now, take the first dimension as the main signal
-                    processed_input = inputs[..., 0]
-            else:
-                raise ValueError(
-                    f"Input feature dimension {inputs.shape[-1]} doesn't match "
-                    f"expected input_dim {self.input_dim}"
-                )
-        elif len(inputs.shape) == 2:
-            processed_input = inputs
+        # Ensure input is 3D for RevIN processing
+        if len(inputs.shape) == 2:
+            # Convert 2D to 3D: (batch, sequence) -> (batch, sequence, 1)
+            inputs_3d = ops.expand_dims(inputs, axis=-1)
+        elif len(inputs.shape) == 3:
+            inputs_3d = inputs
         else:
             raise ValueError(f"Invalid input shape: {inputs.shape}")
 
-        batch_size = ops.shape(processed_input)[0]
+        batch_size = ops.shape(inputs_3d)[0]
 
-        # Apply stateless RevIN normalization
-        normalization_stats = None
+        # Apply RevIN normalization (stateful - stores statistics internally)
         if self.use_revin:
-            processed_input, normalization_stats = self.global_revin(
-                processed_input, training=training
+            normalized_input = self.global_revin(inputs_3d, training=training)
+        else:
+            normalized_input = inputs_3d
+
+        # Convert to 2D for block processing: (batch, sequence, features) -> (batch, sequence*features)
+        if self.input_dim == 1:
+            # For univariate time series, squeeze the feature dimension
+            processed_input = ops.squeeze(normalized_input, axis=-1)
+        else:
+            # For multivariate, flatten the sequence and feature dimensions
+            processed_input = ops.reshape(
+                normalized_input,
+                (batch_size, self.backcast_length * self.input_dim)
             )
 
-        # Initialize residual and forecast accumulator correctly
-        residual = processed_input  # Shape: (batch_size, backcast_length)
+        # Initialize residual and forecast accumulator
+        residual = processed_input  # Shape: (batch_size, backcast_length) or (batch_size, backcast_length*input_dim)
         forecast_sum = ops.zeros((batch_size, self.forecast_length))
 
-        # Process through all stacks and blocks with CORRECT residual connections
+        # Process through all stacks and blocks with correct residual connections
         dropout_idx = 0
         for stack_id, stack_blocks in enumerate(self.blocks):
             for block_id, block in enumerate(stack_blocks):
@@ -328,26 +334,35 @@ class NBeatsNet(keras.Model):
                     forecast = self.dropout_layers[dropout_idx](forecast, training=training)
                     dropout_idx += 1
 
-                # CORRECT residual connection: SUBTRACT backcast from residual
+                # Correct residual connection: SUBTRACT backcast from residual
                 residual = residual - backcast
 
                 # Accumulate forecast
                 forecast_sum = forecast_sum + forecast
 
-        # Apply denormalization to forecast using stored statistics
-        if self.use_revin and normalization_stats is not None:
-            # Denormalize the forecast using the input normalization statistics
-            # This assumes the forecast should be in the same scale as the original input
-            forecast_sum = denormalize_with_revin_stats(forecast_sum, normalization_stats)
+        # Reshape forecast to 3D: (batch, forecast_length) -> (batch, forecast_length, output_dim)
+        if self.output_dim == 1:
+            forecast_3d = ops.expand_dims(forecast_sum, axis=-1)
+        else:
+            # For multivariate output, need to reshape appropriately
+            forecast_3d = ops.reshape(
+                forecast_sum,
+                (batch_size, self.forecast_length, self.output_dim)
+            )
 
-        # Reshape to 3D output format: (batch_size, forecast_length, output_dim)
-        forecast_output = ops.expand_dims(forecast_sum, axis=-1)
+        # Apply denormalization using the RevIN layer's stored statistics
+        if self.use_revin:
+            # The RevIN layer has stored the normalization statistics from the forward pass
+            # and can denormalize the forecast
+            denormalized_forecast = self.global_revin.denormalize(forecast_3d)
+        else:
+            denormalized_forecast = forecast_3d
 
         # Apply output projection if needed
         if self.output_projection is not None:
-            forecast_output = self.output_projection(forecast_output, training=training)
+            denormalized_forecast = self.output_projection(denormalized_forecast, training=training)
 
-        return forecast_output
+        return denormalized_forecast
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the model."""
@@ -384,13 +399,14 @@ class NBeatsNet(keras.Model):
     def summary(self, **kwargs) -> None:
         """Print detailed model summary with performance information."""
         logger.info("=" * 80)
-        logger.info("ENHANCED N-BEATS MODEL SUMMARY (STATELESS REVIN)")
+        logger.info("ENHANCED N-BEATS MODEL SUMMARY (STATEFUL REVIN)")
         logger.info("=" * 80)
         logger.info(f"Architecture: {len(self.stack_types)} stacks × {self.nb_blocks_per_stack} blocks")
         logger.info(f"Input → Output: {self.backcast_length} → {self.forecast_length}")
+        logger.info(f"Features: {self.input_dim} → {self.output_dim}")
         logger.info(f"Backcast/Forecast ratio: {self.backcast_length / self.forecast_length:.1f}")
         logger.info(f"Hidden units: {self.hidden_layer_units}")
-        logger.info(f"Stateless RevIN: {'✓ Enabled' if self.use_revin else '✗ Disabled'}")
+        logger.info(f"Stateful RevIN: {'✓ Enabled' if self.use_revin else '✗ Disabled'}")
         logger.info(f"Dropout rate: {self.dropout_rate}")
         logger.info(f"Weight sharing: {'✓' if self.share_weights_in_stack else '✗'}")
 
@@ -414,10 +430,11 @@ class NBeatsNet(keras.Model):
             logger.warning("⚠ Consider increasing backcast_length for better performance")
 
         if self.use_revin:
-            logger.info("✓ Stateless RevIN enabled: expect 10-20% performance improvement")
+            logger.info("✓ Stateful RevIN enabled: expect 10-20% performance improvement")
 
         logger.info("=" * 80)
         super().summary(**kwargs)
+
 
 # ---------------------------------------------------------------------
 
@@ -438,11 +455,11 @@ def create_nbeats_model(
         dropout_rate: float = 0.0,
         **kwargs: Any
 ) -> NBeatsNet:
-    """Create an enhanced N-BEATS model with stateless RevIN and performance optimizations.
+    """Create an enhanced N-BEATS model with proper RevIN and performance optimizations.
 
     PERFORMANCE IMPROVEMENTS:
     - Corrected residual connections
-    - Stateless RevIN normalization enabled by default
+    - Stateful RevIN normalization enabled by default
     - Proper gradient clipping
     - Better hyperparameter defaults
     - Enhanced loss function selection
@@ -455,7 +472,7 @@ def create_nbeats_model(
         nb_blocks_per_stack: Number of blocks per stack. Default: 3.
         thetas_dim: Theta dimensions for each stack. Auto-set if None.
         hidden_layer_units: Hidden units in each layer. Default: 256.
-        use_revin: Whether to use stateless RevIN normalization. Default: True.
+        use_revin: Whether to use RevIN normalization. Default: True.
         optimizer: Optimizer for training. Default: 'adam'.
         loss: Loss function. Default: 'mae' (better than MSE for N-BEATS).
         metrics: List of metrics to track. Default: ['mae', 'mse'].
@@ -474,7 +491,7 @@ def create_nbeats_model(
         thetas_dim = []
         for stack_type in stack_types:
             if stack_type == 'trend':
-                # Use 4th order polynomial (5 theta dimensions)
+                # Use 4th order polynomial (4 theta dimensions)
                 thetas_dim.append(4)
             elif stack_type == 'seasonality':
                 # Use number of harmonics based on forecast length
@@ -523,7 +540,7 @@ def create_nbeats_model(
         }
         optimizer_cls = optimizer_map.get(optimizer.lower())
         if optimizer_cls:
-            # CRITICAL: Add gradient clipping for training stability
+            # Add gradient clipping for training stability
             optimizer = optimizer_cls(
                 learning_rate=learning_rate,
                 clipnorm=gradient_clip_norm  # Essential for N-BEATS
@@ -542,10 +559,10 @@ def create_nbeats_model(
         metrics=metrics
     )
 
-    logger.info("Created enhanced N-BEATS model with stateless RevIN and performance optimizations:")
+    logger.info("Created enhanced N-BEATS model with stateful RevIN and performance optimizations:")
     logger.info(f"  - Architecture: {len(stack_types)} stacks, {nb_blocks_per_stack} blocks each")
     logger.info(f"  - Sequence: {backcast_length} → {forecast_length} (ratio: {ratio:.1f})")
-    logger.info(f"  - Stateless RevIN: {'✓ Enabled' if use_revin else '✗ Disabled'}")
+    logger.info(f"  - Stateful RevIN: {'✓ Enabled' if use_revin else '✗ Disabled'}")
     logger.info(f"  - Gradient clipping: {gradient_clip_norm}")
     logger.info(f"  - Optimizer: {optimizer.__class__.__name__} (lr={learning_rate})")
     logger.info(f"  - Loss: {loss}")
@@ -559,14 +576,14 @@ def create_interpretable_nbeats_model(
         trend_polynomial_degree: int = 3,
         seasonality_harmonics: int = 6,
         hidden_units: int = 256,
-        use_revin: bool = True,  # Enable stateless RevIN by default
+        use_revin: bool = True,  # Enable RevIN by default
         **kwargs: Any
 ) -> NBeatsNet:
-    """Create an enhanced interpretable N-BEATS model with stateless RevIN.
+    """Create an enhanced interpretable N-BEATS model with proper RevIN.
 
     ENHANCEMENTS:
     - Corrected basis function implementations
-    - Stateless RevIN normalization for better performance
+    - Stateful RevIN normalization for better performance
     - Proper theta dimension calculations
     - Enhanced numerical stability
     - Thread-safe design
@@ -577,7 +594,7 @@ def create_interpretable_nbeats_model(
         trend_polynomial_degree: Degree of polynomial for trend modeling. Default: 3.
         seasonality_harmonics: Number of Fourier harmonics. Default: 6.
         hidden_units: Number of hidden units in each layer. Default: 256.
-        use_revin: Whether to use stateless RevIN normalization. Default: True.
+        use_revin: Whether to use RevIN normalization. Default: True.
         **kwargs: Additional arguments for model creation.
 
     Returns:
@@ -588,7 +605,7 @@ def create_interpretable_nbeats_model(
     trend_theta_dim = trend_polynomial_degree + 1  # Polynomial degree + 1
     seasonality_theta_dim = seasonality_harmonics * 2  # sin/cos pairs
 
-    logger.info(f"Creating interpretable N-BEATS with stateless RevIN:")
+    logger.info(f"Creating interpretable N-BEATS with stateful RevIN:")
     logger.info(f"  - Trend: polynomial degree {trend_polynomial_degree} ({trend_theta_dim} params)")
     logger.info(f"  - Seasonality: {seasonality_harmonics} harmonics ({seasonality_theta_dim} params)")
 
@@ -610,14 +627,14 @@ def create_production_nbeats_model(
         model_complexity: str = 'medium',  # 'simple', 'medium', 'complex'
         **kwargs: Any
 ) -> NBeatsNet:
-    """Create production-ready N-BEATS model with stateless RevIN and optimal configurations.
+    """Create production-ready N-BEATS model with proper RevIN and optimal configurations.
 
     PRODUCTION OPTIMIZATIONS:
     - Ensemble-ready architecture
     - Robust hyperparameters
     - Enhanced regularization
     - Optimal stack configurations
-    - Stateless and thread-safe design
+    - Stateful and thread-safe design
     - Improved serialization support
 
     Args:
@@ -627,7 +644,7 @@ def create_production_nbeats_model(
         **kwargs: Additional arguments for model creation.
 
     Returns:
-        Production-ready N-BEATS model with stateless RevIN.
+        Production-ready N-BEATS model with proper RevIN.
     """
 
     # Configuration based on complexity
@@ -660,16 +677,14 @@ def create_production_nbeats_model(
     # Add production-grade regularization
     kernel_regularizer = keras.regularizers.L2(1e-4)
 
-    logger.info(f"Creating {model_complexity} production N-BEATS model with stateless RevIN")
+    logger.info(f"Creating {model_complexity} production N-BEATS model with stateful RevIN")
 
     return create_nbeats_model(
         backcast_length=backcast_length,
         forecast_length=forecast_length,
         kernel_regularizer=kernel_regularizer,
-        use_revin=True,  # Always use stateless RevIN in production
+        use_revin=True,  # Always use RevIN in production
         gradient_clip_norm=1.0,  # Essential for stability
         **config,
         **kwargs
     )
-
-# ---------------------------------------------------------------------
