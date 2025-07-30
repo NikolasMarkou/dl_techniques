@@ -8,15 +8,6 @@ from dl_techniques.utils.datasets.time_series_normalizer import (
     NormalizationMethod
 )
 
-
-# Note: We use tolerances of 1e-6 instead of 1e-10 for floating-point comparisons
-# because normalization operations can introduce small numerical errors due to:
-# 1. Floating-point arithmetic precision limits
-# 2. Division operations in scaling
-# 3. Multiple arithmetic operations in sequence
-# This is normal and expected behavior for numerical computations.
-
-
 class TestTimeSeriesNormalizer:
     """Comprehensive test suite for TimeSeriesNormalizer class."""
 
