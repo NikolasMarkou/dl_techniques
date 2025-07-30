@@ -165,16 +165,16 @@ import seaborn as sns
 import tensorflow as tf
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Any, Optional, Union
+from typing import Dict, List, Tuple, Any, Optional
 
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.losses.smape_loss import SMAPELoss
-from dl_techniques.utils.datasets.nbeats import TimeSeriesNormalizer
-from dl_techniques.utils.datasets.time_series_generator import TimeSeriesGenerator, TimeSeriesConfig
 from dl_techniques.models.nbeats import create_nbeats_model, NBeatsNet
+from dl_techniques.utils.datasets.time_series_normalizer import TimeSeriesNormalizer
+from dl_techniques.utils.datasets.time_series_generator import TimeSeriesGenerator, TimeSeriesConfig
+
 
 plt.style.use('default')
 sns.set_palette("husl")
@@ -206,113 +206,6 @@ class NBeatsTrainingConfig:
     This dataclass contains comprehensive configuration options for training
     N-BEATS models on diverse time series patterns with various regularization,
     optimization, and visualization settings.
-
-    Attributes
-    ----------
-    result_dir : str
-        Directory to save experiment results
-    save_results : bool
-        Whether to save training results and visualizations
-    experiment_name : str
-        Name of the experiment for identification
-
-    Data Configuration
-    ------------------
-    train_ratio : float
-        Fraction of data used for training (default: 0.7)
-    val_ratio : float
-        Fraction of data used for validation (default: 0.15)
-    test_ratio : float
-        Fraction of data used for testing (default: 0.15)
-    target_categories : Optional[List[str]]
-        Specific pattern categories to focus on
-
-    Model Architecture
-    ------------------
-    backcast_length : int
-        Length of input sequence (default: 168)
-    forecast_length : int
-        Length of forecast horizon (default: 24)
-    forecast_horizons : List[int]
-        Multiple forecast horizons to train for
-    stack_types : List[str]
-        Types of N-BEATS stacks to use
-    nb_blocks_per_stack : int
-        Number of blocks per stack (default: 3)
-    hidden_layer_units : int
-        Size of hidden layers (default: 256)
-    use_revin : bool
-        Whether to use RevIN normalization (default: True)
-    use_bias : bool
-        Whether to use bias in linear layers (default: True)
-
-    Training Configuration
-    ----------------------
-    epochs : int
-        Maximum number of training epochs (default: 150)
-    batch_size : int
-        Training batch size (default: 128)
-    learning_rate : float
-        Initial learning rate (default: 1e-4)
-    gradient_clip_norm : float
-        Gradient clipping norm value (default: 1.0)
-    optimizer : str
-        Optimizer type ('adam' or 'adamw')
-    primary_loss : str
-        Primary loss function name
-
-    Regularization
-    --------------
-    kernel_regularizer_l2 : float
-        L2 regularization strength for kernels
-    dropout_rate : float
-        Dropout probability (default: 0.15)
-
-    Pattern Selection
-    -----------------
-    max_patterns : Optional[int]
-        Maximum number of patterns to use
-    max_patterns_per_category : int
-        Maximum patterns per category (default: 10)
-    min_data_length : int
-        Minimum required data length (default: 2000)
-    balance_patterns : bool
-        Whether to balance pattern representation
-    samples_per_pattern : int
-        Number of samples per pattern (default: 15000)
-    category_weights : Dict[str, float]
-        Weights for different pattern categories
-
-    Visualization
-    -------------
-    visualize_every_n_epochs : int
-        Frequency of visualization creation
-    save_interim_plots : bool
-        Whether to save intermediate plots
-    plot_top_k_patterns : int
-        Number of top patterns to visualize
-    create_learning_curves : bool
-        Whether to create learning curve plots
-    create_prediction_plots : bool
-        Whether to create prediction visualization plots
-
-    Evaluation
-    ----------
-    eval_during_training : bool
-        Whether to evaluate during training
-    eval_every_n_epochs : int
-        Frequency of evaluation during training
-
-    Data Augmentation
-    -----------------
-    multiplicative_noise_std : float
-        Standard deviation for multiplicative noise (default: 0.01)
-    additive_noise_std : float
-        Standard deviation for additive noise (default: 0.01)
-    enable_multiplicative_noise : bool
-        Whether to apply multiplicative noise (default: True)
-    enable_additive_noise : bool
-        Whether to apply additive noise (default: True)
     """
 
     # General experiment configuration
@@ -683,11 +576,11 @@ class MultiPatternDataProcessor:
             # Multiplicative noise: x * (1 + noise)
             mult_noise = tf.random.normal(
                 tf.shape(x),
-                mean=0.0,
+                mean=1.0,
                 stddev=self.config.multiplicative_noise_std,
                 dtype=x.dtype
             )
-            augmented_x = augmented_x * (1.0 + mult_noise)
+            augmented_x = augmented_x * mult_noise
 
         if self.config.enable_additive_noise and self.config.additive_noise_std > 0:
             # Additive noise: x + noise
