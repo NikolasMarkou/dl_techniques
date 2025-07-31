@@ -5,12 +5,18 @@ This module provides utilities for training, evaluating, and monitoring CCNets m
 including specialized callbacks, metrics, and data preparation functions.
 """
 
-from typing import Dict, List, Optional, Tuple, Any, Callable
-import numpy as np
 import keras
+import numpy as np
 from keras import ops
+from typing import Dict, List, Optional, Tuple, Callable
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 class CCNetsMetrics:
     """
@@ -184,6 +190,7 @@ class CCNetsCallback(keras.callbacks.Callback):
         except Exception as e:
             logger.warning(f"Could not analyze validation performance: {e}")
 
+# ---------------------------------------------------------------------
 
 class CCNetsDataGenerator:
     """
@@ -240,6 +247,7 @@ class CCNetsDataGenerator:
         if self.shuffle:
             np.random.shuffle(self.indices)
 
+# ---------------------------------------------------------------------
 
 def prepare_ccnets_data(
         observations: np.ndarray,
@@ -290,6 +298,7 @@ def prepare_ccnets_data(
 
     return train_generator, val_generator
 
+# ---------------------------------------------------------------------
 
 def train_ccnets_model(
         model: 'CCNetsModel',
@@ -358,6 +367,7 @@ def train_ccnets_model(
 
     return history
 
+# ---------------------------------------------------------------------
 
 def evaluate_ccnets_model(
         model: 'CCNetsModel',
@@ -440,6 +450,7 @@ def evaluate_ccnets_model(
 
     return metrics
 
+# ---------------------------------------------------------------------
 
 def ccnets_inference(
         model: 'CCNetsModel',
@@ -469,6 +480,7 @@ def ccnets_inference(
 
     return results
 
+# ---------------------------------------------------------------------
 
 def simulate_approval_scenario(
         model: 'CCNetsModel',
@@ -504,3 +516,5 @@ def simulate_approval_scenario(
         'reconstructed_original': reconstructed_original.numpy(),
         'validation_error': float(ops.mean(ops.abs(reconstructed_original - rejected_application)))
     }
+
+# ---------------------------------------------------------------------

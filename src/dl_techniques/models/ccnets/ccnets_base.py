@@ -7,11 +7,17 @@ This module implements the three fundamental networks of CCNets:
 - Producer Network: Generates and reconstructs data based on labels and explanations
 """
 
-from typing import Optional, Union, Tuple, Dict, Any
 import keras
 from keras import ops
+from typing import Optional, Tuple, Dict, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 class ExplainerNetwork(keras.Model):
     """
@@ -111,6 +117,7 @@ class ExplainerNetwork(keras.Model):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 class ReasonerNetwork(keras.Model):
     """
@@ -239,6 +246,7 @@ class ReasonerNetwork(keras.Model):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 class ProducerNetwork(keras.Model):
     """
@@ -359,6 +367,7 @@ class ProducerNetwork(keras.Model):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 def create_explainer_network(
         input_dim: int,
@@ -382,6 +391,7 @@ def create_explainer_network(
         **kwargs
     )
 
+# ---------------------------------------------------------------------
 
 def create_reasoner_network(
         input_dim: int,
@@ -408,6 +418,7 @@ def create_reasoner_network(
         **kwargs
     )
 
+# ---------------------------------------------------------------------
 
 def create_producer_network(
         label_dim: int,
@@ -433,3 +444,5 @@ def create_producer_network(
         output_dim=output_dim,
         **kwargs
     )
+
+# ---------------------------------------------------------------------

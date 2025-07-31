@@ -5,11 +5,18 @@ This module implements the main CCNets model that orchestrates the three network
 and implements the cooperative learning algorithm with proper gradient management.
 """
 
-from typing import Optional, Union, Tuple, Dict, Any, List
+
 import keras
 from keras import ops
+from typing import Optional, Tuple, Dict, Any, List
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 class CCNetsLoss:
     """
@@ -109,6 +116,7 @@ class CCNetsLoss:
 
         return explainer_error, reasoner_error, producer_error
 
+# ---------------------------------------------------------------------
 
 class CCNetsModel(keras.Model):
     """
@@ -391,6 +399,7 @@ class CCNetsModel(keras.Model):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 def create_ccnets_model(
         input_dim: int,
@@ -455,3 +464,5 @@ def create_ccnets_model(
         f"Created CCNetsModel: input_dim={input_dim}, explanation_dim={explanation_dim}, output_dim={output_dim}")
 
     return model
+
+# ---------------------------------------------------------------------

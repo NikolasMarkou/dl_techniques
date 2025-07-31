@@ -6,13 +6,17 @@ for different types of problems, including classification, regression,
 and data simulation scenarios.
 """
 
-from typing import Dict, List, Optional, Tuple, Any
-import numpy as np
-import matplotlib.pyplot as plt
 import keras
-from keras import ops
+import numpy as np
+from typing import Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 def create_synthetic_dataset(
     n_samples: int = 1000,
@@ -64,6 +68,7 @@ def create_synthetic_dataset(
 
     return observations, labels
 
+# ---------------------------------------------------------------------
 
 def create_loan_approval_dataset(
     n_samples: int = 1000,
@@ -139,6 +144,7 @@ def create_loan_approval_dataset(
 
     return applications, approvals
 
+# ---------------------------------------------------------------------
 
 def train_ccnets_classifier_example():
     """
@@ -233,6 +239,7 @@ def train_ccnets_classifier_example():
 
     return model, history, metrics
 
+# ---------------------------------------------------------------------
 
 def train_ccnets_loan_approval_example():
     """
@@ -338,6 +345,7 @@ def train_ccnets_loan_approval_example():
 
     return model, history, metrics
 
+# ---------------------------------------------------------------------
 
 def visualize_ccnets_cooperation(history: keras.callbacks.History):
     """
@@ -412,6 +420,7 @@ def visualize_ccnets_cooperation(history: keras.callbacks.History):
     except ImportError:
         logger.warning("Matplotlib not available for visualization")
 
+# ---------------------------------------------------------------------
 
 def run_complete_ccnets_demo():
     """
@@ -465,6 +474,7 @@ def run_complete_ccnets_demo():
         logger.error(f"Demo failed with error: {e}")
         raise
 
+# ---------------------------------------------------------------------
 
 if __name__ == "__main__":
     # Run the complete demo when this file is executed
