@@ -115,7 +115,7 @@ def create_bfcnn_denoiser(
     # Output same number of channels as input
     output_channels = input_shape[-1]
     outputs = BiasFreeConv2D(
-        filters=output_channels,  # Fixed: was input_shape[:-1] which was incorrect
+        filters=output_channels,
         kernel_size=1,
         activation=final_activation,
         kernel_initializer=kernel_initializer,
