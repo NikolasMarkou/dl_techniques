@@ -2,13 +2,209 @@
 
 This module implements various Wasserstein loss functions commonly used in
 Wasserstein GANs (WGANs) and WGAN-GP (Wasserstein GAN with Gradient Penalty).
+These losses are based on the Wasserstein distance (also known as Earth Mover's
+Distance) which provides more stable training dynamics compared to traditional
+GAN losses.
+
+Overview
+--------
+Wasserstein GANs replace the traditional minimax loss with the Wasserstein distance,
+which measures the minimum cost of transporting mass to transform one distribution
+into another. This approach addresses several issues with traditional GANs:
+
+1. **Mode collapse**: Wasserstein distance provides meaningful gradients even when
+   distributions have non-overlapping support.
+2. **Training stability**: The loss correlates with sample quality, providing better
+   training signals.
+3. **Vanishing gradients**: Wasserstein distance doesn't saturate like traditional
+   GAN losses.
+
+Theory
+------
+The Wasserstein-1 distance between two distributions P_r (real) and P_g (generated) is:
+
+.. math::
+    W(P_r, P_g) = \\inf_{\\gamma \\in \\Pi(P_r, P_g)} \\mathbb{E}_{(x,y) \\sim \\gamma}[||x - y||]
+
+Where Π(P_r, P_g) is the set of all joint distributions with marginals P_r and P_g.
+
+By the Kantorovich-Rubinstein duality, this can be expressed as:
+
+.. math::
+    W(P_r, P_g) = \\sup_{||f||_L \\leq 1} \\mathbb{E}_{x \\sim P_r}[f(x)] - \\mathbb{E}_{x \\sim P_g}[f(x)]
+
+Where f is any 1-Lipschitz function.
+
+Classes
+-------
+WassersteinLoss
+    Basic Wasserstein loss for training WGAN critic and generator.
+
+WassersteinGradientPenaltyLoss
+    Wasserstein loss with gradient penalty (WGAN-GP) for improved stability.
+
+WassersteinDivergence
+    Wasserstein divergence loss for general distribution matching tasks.
+
+Functions
+---------
+compute_gradient_penalty
+    Computes gradient penalty term for WGAN-GP training.
+
+create_wgan_losses
+    Factory function to create basic WGAN critic and generator losses.
+
+create_wgan_gp_losses
+    Factory function to create WGAN-GP critic and generator losses.
+
+Implementation Details
+----------------------
+
+**Critic Loss (Discriminator)**:
+The critic is trained to maximize the Wasserstein distance:
+
+.. math::
+    L_{critic} = \\mathbb{E}_{x \\sim P_{fake}}[D(x)] - \\mathbb{E}_{x \\sim P_{real}}[D(x)]
+
+**Generator Loss**:
+The generator is trained to minimize the Wasserstein distance:
+
+.. math::
+    L_{generator} = -\\mathbb{E}_{x \\sim P_{fake}}[D(x)]
+
+**Gradient Penalty (WGAN-GP)**:
+To enforce the Lipschitz constraint without weight clipping, WGAN-GP adds a gradient
+penalty term:
+
+.. math::
+    L_{GP} = \\lambda \\mathbb{E}_{\\hat{x} \\sim P_{\\hat{x}}}[(||\\nabla_{\\hat{x}} D(\\hat{x})||_2 - 1)^2]
+
+Where :math:`\\hat{x}` is sampled uniformly along straight lines between real and fake samples.
+
+Usage Examples
+--------------
+
+**Basic WGAN Training**:
+
+.. code-block:: python
+
+    import keras
+    from dl_techniques.losses.wasserstein_loss import create_wgan_losses
+
+    # Create losses
+    critic_loss, generator_loss = create_wgan_losses()
+
+    # Compile models
+    critic.compile(optimizer='rmsprop', loss=critic_loss)
+    generator.compile(optimizer='rmsprop', loss=generator_loss)
+
+    # Training loop with weight clipping
+    for batch in dataset:
+        # Train critic
+        real_labels = tf.ones((batch_size,))
+        fake_labels = tf.zeros((batch_size,))
+
+        critic_loss_real = critic.train_on_batch(real_batch, real_labels)
+        critic_loss_fake = critic.train_on_batch(fake_batch, fake_labels)
+
+        # Clip weights to enforce Lipschitz constraint
+        for layer in critic.layers:
+            weights = layer.get_weights()
+            weights = [tf.clip_by_value(w, -0.01, 0.01) for w in weights]
+            layer.set_weights(weights)
+
+        # Train generator
+        generator.train_on_batch(noise, fake_labels)
+
+**WGAN-GP Training**:
+
+.. code-block:: python
+
+    # Create losses
+    critic_loss, generator_loss = create_wgan_gp_losses(lambda_gp=10.0)
+
+    # Custom training step with gradient penalty
+    @tf.function
+    def train_critic_step(real_batch, fake_batch):
+        with tf.GradientTape() as tape:
+            # Critic predictions
+            real_pred = critic(real_batch, training=True)
+            fake_pred = critic(fake_batch, training=True)
+
+            # Wasserstein loss
+            real_labels = tf.ones_like(real_pred)
+            fake_labels = tf.zeros_like(fake_pred)
+            w_loss = critic_loss(
+                tf.concat([real_labels, fake_labels], 0),
+                tf.concat([real_pred, fake_pred], 0)
+            )
+
+            # Gradient penalty
+            gp_loss = compute_gradient_penalty(critic, real_batch, fake_batch)
+
+            total_loss = w_loss + gp_loss
+
+        gradients = tape.gradient(total_loss, critic.trainable_variables)
+        critic_optimizer.apply_gradients(zip(gradients, critic.trainable_variables))
+
+        return total_loss
+
+**Distribution Matching**:
+
+.. code-block:: python
+
+    from dl_techniques.losses.wasserstein_loss import WassersteinDivergence
+
+    # For comparing two probability distributions
+    divergence_loss = WassersteinDivergence()
+
+    # In model compilation
+    model.compile(
+        optimizer='adam',
+        loss=divergence_loss,
+        metrics=['mae']
+    )
+
+Notes
+-----
+- **Weight Clipping vs Gradient Penalty**: Original WGAN uses weight clipping to enforce
+  the Lipschitz constraint, but this can lead to undesirable behavior. WGAN-GP uses
+  gradient penalty instead, which provides better convergence properties.
+
+- **Critic Training**: The critic should be trained more frequently than the generator
+  (typically 5:1 ratio) to maintain the optimal critic assumption.
+
+- **Learning Rates**: Use lower learning rates (e.g., 5e-5) compared to traditional GANs
+  for better stability.
+
+- **Architecture**: Remove batch normalization from the critic as it can interfere with
+  the Lipschitz constraint.
+
+References
+----------
+.. [1] Arjovsky, M., Chintala, S., & Bottou, L. (2017). "Wasserstein Generative
+       Adversarial Networks." International Conference on Machine Learning (ICML).
+
+.. [2] Gulrajani, I., Ahmed, F., Arjovsky, M., Dumoulin, V., & Courville, A. (2017).
+       "Improved Training of Wasserstein GANs." Advances in Neural Information
+       Processing Systems (NeurIPS).
+
+.. [3] Villani, C. (2003). "Topics in Optimal Transport." Graduate Studies in
+       Mathematics, American Mathematical Society.
 """
 
 import keras
 from keras import ops
 import tensorflow as tf
 from typing import Optional, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -103,6 +299,7 @@ class WassersteinLoss(keras.losses.Loss):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class WassersteinGradientPenaltyLoss(keras.losses.Loss):
@@ -175,6 +372,7 @@ class WassersteinGradientPenaltyLoss(keras.losses.Loss):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 def compute_gradient_penalty(
         critic: keras.Model,
@@ -228,6 +426,7 @@ def compute_gradient_penalty(
 
     return gradient_penalty
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class WassersteinDivergence(keras.losses.Loss):
@@ -296,8 +495,10 @@ class WassersteinDivergence(keras.losses.Loss):
         })
         return config
 
-
+# ---------------------------------------------------------------------
 # Utility functions for WGAN training
+# ---------------------------------------------------------------------
+
 def create_wgan_losses(lambda_gp: float = 10.0) -> tuple[WassersteinLoss, WassersteinLoss]:
     """Create critic and generator losses for WGAN.
 
@@ -318,6 +519,7 @@ def create_wgan_losses(lambda_gp: float = 10.0) -> tuple[WassersteinLoss, Wasser
     logger.info("Created WGAN losses (critic and generator)")
     return critic_loss, generator_loss
 
+# ---------------------------------------------------------------------
 
 def create_wgan_gp_losses(lambda_gp: float = 10.0) -> tuple[
     WassersteinGradientPenaltyLoss, WassersteinGradientPenaltyLoss]:
@@ -338,3 +540,5 @@ def create_wgan_gp_losses(lambda_gp: float = 10.0) -> tuple[
 
     logger.info(f"Created WGAN-GP losses with lambda_gp={lambda_gp}")
     return critic_loss, generator_loss
+
+# ---------------------------------------------------------------------
