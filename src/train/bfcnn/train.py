@@ -14,8 +14,15 @@ from dataclasses import dataclass
 from typing import Tuple, List, Optional, Dict, Any
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.filesystem import count_available_files, image_file_generator
 from dl_techniques.optimization import optimizer_builder, learning_rate_schedule_builder
-from dl_techniques.models.bfcnn_denoiser import create_bfcnn_denoiser, create_bfcnn_standard
+from dl_techniques.models.bfcnn_denoiser import (
+    create_bfcnn_denoiser,
+    create_bfcnn_standard,
+    create_bfcnn_light,
+    create_bfcnn_deep
+)
+
 
 # ---------------------------------------------------------------------
 # CONFIGURATION
@@ -75,7 +82,7 @@ class TrainingConfig:
     # Note: reduce_lr_patience removed - learning rate schedule handles LR changes
 
     # === Output Configuration ===
-    output_dir: str = 'bfcnn_experiments'
+    output_dir: str = 'results'
     experiment_name: str = None        # Auto-generated if None
     save_training_images: bool = True  # Save sample denoised images during training
     save_model_checkpoints: bool = True
@@ -97,117 +104,12 @@ class TrainingConfig:
             raise ValueError("Invalid patch size or channel configuration")
 
 # ---------------------------------------------------------------------
-# GENERATOR-BASED FILE DISCOVERY
-# ---------------------------------------------------------------------
-
-def image_file_generator(directories: List[str],
-                        extensions: List[str],
-                        max_files: Optional[int] = None,
-                        patches_per_image: int = 1):
-    """
-    Generator that yields image file paths on-the-fly without storing them in memory.
-
-    Args:
-        directories: List of directories to search
-        extensions: List of valid file extensions
-        max_files: Maximum number of files to discover (None = no limit)
-        patches_per_image: Number of times to yield each file path
-
-    Yields:
-        str: Image file path
-    """
-    if not directories:
-        logger.warning("No directories provided for file discovery")
-        return
-
-    extensions_set = set(ext.lower() for ext in extensions)
-    extensions_set.update(ext.upper() for ext in extensions)
-
-    file_count = 0
-    total_yielded = 0
-
-    for directory in directories:
-        dir_path = Path(directory)
-        if not dir_path.exists():
-            logger.warning(f"Directory does not exist: {directory}")
-            continue
-
-        logger.info(f"Processing files from: {directory}")
-
-        try:
-            for file_path in dir_path.rglob("*"):
-                if file_path.is_file() and file_path.suffix in extensions_set:
-                    file_count += 1
-
-                    # Yield this file path multiple times for patch extraction
-                    for _ in range(patches_per_image):
-                        yield str(file_path)
-                        total_yielded += 1
-
-                    # Check file limit
-                    if max_files and file_count >= max_files:
-                        logger.info(f"Reached max files limit: {max_files}")
-                        logger.info(f"Total paths yielded: {total_yielded}")
-                        return
-
-                    # Progress logging
-                    if file_count % 1000 == 0:
-                        logger.info(f"Processed {file_count} files, yielded {total_yielded} paths...")
-
-        except Exception as e:
-            logger.error(f"Error processing files in {directory}: {e}")
-            continue
-
-    logger.info(f"Generator completed: {file_count} files processed, {total_yielded} paths yielded")
-
-def count_available_files(directories: List[str],
-                         extensions: List[str],
-                         max_files: Optional[int] = None) -> int:
-    """
-    Count available files without loading them into memory.
-    Used for logging and steps_per_epoch calculation.
-
-    Args:
-        directories: List of directories to search
-        extensions: List of valid file extensions
-        max_files: Maximum number of files to count
-
-    Returns:
-        int: Number of available files
-    """
-    if not directories:
-        return 0
-
-    extensions_set = set(ext.lower() for ext in extensions)
-    extensions_set.update(ext.upper() for ext in extensions)
-
-    count = 0
-
-    for directory in directories:
-        dir_path = Path(directory)
-        if not dir_path.exists():
-            continue
-
-        try:
-            for file_path in dir_path.rglob("*"):
-                if file_path.is_file() and file_path.suffix in extensions_set:
-                    count += 1
-                    if max_files and count >= max_files:
-                        return count
-        except Exception as e:
-            logger.error(f"Error counting files in {directory}: {e}")
-            continue
-
-    return count
-
-# ---------------------------------------------------------------------
 # DATASET BUILDER WITH GRAPH MODE FIXES
 # ---------------------------------------------------------------------
 
 def load_and_preprocess_image(image_path: tf.Tensor, config: TrainingConfig) -> tf.Tensor:
     """
     Load and preprocess a single image using TensorFlow operations.
-    FIXED: Uses tf.cond for graph-compatible conditional execution and ceil for robust resizing.
 
     Args:
         image_path: Tensor containing path to image file
@@ -241,12 +143,12 @@ def load_and_preprocess_image(image_path: tf.Tensor, config: TrainingConfig) -> 
     min_dim = tf.minimum(height, width)
     min_size = config.patch_size
 
-    # --- FIXED: Use tf.cond for data-dependent control flow ---
+    # Use tf.cond for data-dependent control flow ---
     def resize_if_small():
         """Logic to resize the image if it's smaller than the patch size."""
         scale_factor = tf.cast(min_size, tf.float32) / tf.cast(min_dim, tf.float32)
 
-        # --- SOLUTION: Use tf.math.ceil to avoid truncation errors ---
+        # Use tf.math.ceil to avoid truncation errors ---
         # This ensures the new dimensions are always large enough after scaling.
         new_height = tf.cast(tf.math.ceil(tf.cast(height, tf.float32) * scale_factor), tf.int32)
         new_width = tf.cast(tf.math.ceil(tf.cast(width, tf.float32) * scale_factor), tf.int32)
@@ -278,10 +180,6 @@ def augment_patch(patch: tf.Tensor) -> tf.Tensor:
     # Random flips
     patch = tf.image.random_flip_left_right(patch)
     patch = tf.image.random_flip_up_down(patch)
-
-    # Random 90-degree rotations
-    k = tf.random.uniform([], 0, 4, dtype=tf.int32)
-    patch = tf.image.rot90(patch, k=k)
 
     return patch
 
@@ -703,12 +601,10 @@ def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
     input_shape = (config.patch_size, config.patch_size, config.channels)
 
     if config.model_type == 'light':
-        from dl_techniques.models.bfcnn_denoiser import create_bfcnn_light
         model = create_bfcnn_light(input_shape)
     elif config.model_type == 'standard':
         model = create_bfcnn_standard(input_shape)
     elif config.model_type == 'deep':
-        from dl_techniques.models.bfcnn_denoiser import create_bfcnn_deep
         model = create_bfcnn_deep(input_shape)
     elif config.model_type == 'custom':
         model = create_bfcnn_denoiser(
@@ -802,36 +698,40 @@ def main():
     config = TrainingConfig(
         # Data paths
         train_image_dirs=[
+            '/media/arxwn/data0_4tb/datasets/Megadepth',
+            'media/arxwn/data0_4tb/datasets/div2k/train',
+            '/media/arxwn/data0_4tb/datasets/bdd_data/train',
             '/media/arxwn/data0_4tb/datasets/ade20k/images/ADE/training',
         ],
         val_image_dirs=[
+            'media/arxwn/data0_4tb/datasets/div2k/validation',
             '/media/arxwn/data0_4tb/datasets/ade20k/images/ADE/validation'
         ],
 
         # Training parameters
-        patch_size=64,
+        patch_size=128,
         channels=1,  # 1 for grayscale, 3 for RGB
         batch_size=32,
         epochs=100,
         patches_per_image=16,
 
         # File limits for manageable training
-        max_train_files=10000,      # Limit training files
-        max_val_files=1000,         # Limit validation files
-        parallel_reads=8,           # Parallel file processing
-        dataset_shuffle_buffer=2000, # Shuffle buffer size
+        max_train_files=100000,      # Limit training files
+        max_val_files=1000,          # Limit validation files
+        parallel_reads=8,            # Parallel file processing
+        dataset_shuffle_buffer=1013, # Shuffle buffer size
 
         # Model configuration
         model_type='standard',  # 'light', 'standard', 'deep', or 'custom'
 
         # Noise configuration (universal range as per paper)
         noise_sigma_min=0.0,
-        noise_sigma_max=0.4,
+        noise_sigma_max=0.5,
         noise_distribution='uniform',
 
         # Optimization
         learning_rate=1e-3,
-        optimizer_type='adam',
+        optimizer_type='adamw',
         lr_schedule_type='cosine_decay',
         warmup_epochs=5,
 
