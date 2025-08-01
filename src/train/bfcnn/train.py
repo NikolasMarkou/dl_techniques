@@ -329,7 +329,7 @@ def create_dataset(file_paths: List[str], config: TrainingConfig, is_training: b
 
     # Batch and prefetch
     dataset = dataset.batch(config.batch_size, drop_remainder=is_training)
-    dataset = dataset.prefetch(tf.data.AUTOTUNE)
+    dataset = dataset.prefetch(batch=16)
 
     return dataset
 
@@ -728,7 +728,7 @@ def main():
         patches_per_image=16,
 
         # File limits for manageable training
-        max_train_files=10000,      # Limit training files
+        max_train_files=100000,     # Limit training files
         max_val_files=1000,         # Limit validation files
         parallel_reads=8,           # Parallel file processing
         dataset_shuffle_buffer=2000, # Shuffle buffer size
