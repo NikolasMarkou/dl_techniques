@@ -2,12 +2,10 @@
 Bias-Free CNN Denoiser Training Script with Complete Fixes for Graph Mode Compatibility
 """
 
-import os
 import gc
 import json
 import time
 import keras
-import argparse
 import tensorflow as tf
 from pathlib import Path
 from datetime import datetime
@@ -159,7 +157,7 @@ def discover_image_files(directories: List[str],
 def load_and_preprocess_image(image_path: tf.Tensor, config: TrainingConfig) -> tf.Tensor:
     """
     Load and preprocess a single image using TensorFlow operations.
-    FIXED: Uses tf.cond for graph-compatible conditional execution.
+    FIXED: Uses tf.cond for graph-compatible conditional execution and ceil for robust resizing.
 
     Args:
         image_path: Tensor containing path to image file
@@ -196,8 +194,12 @@ def load_and_preprocess_image(image_path: tf.Tensor, config: TrainingConfig) -> 
     def resize_if_small():
         """Logic to resize the image if it's smaller than the patch size."""
         scale_factor = tf.cast(min_size, tf.float32) / tf.cast(min_dim, tf.float32)
-        new_height = tf.cast(tf.cast(height, tf.float32) * scale_factor, tf.int32)
-        new_width = tf.cast(tf.cast(width, tf.float32) * scale_factor, tf.int32)
+
+        # --- SOLUTION: Use tf.math.ceil to avoid truncation errors ---
+        # This ensures the new dimensions are always large enough after scaling.
+        new_height = tf.cast(tf.math.ceil(tf.cast(height, tf.float32) * scale_factor), tf.int32)
+        new_width = tf.cast(tf.math.ceil(tf.cast(width, tf.float32) * scale_factor), tf.int32)
+
         return tf.image.resize(image, [new_height, new_width])
 
     def identity():
@@ -205,8 +207,9 @@ def load_and_preprocess_image(image_path: tf.Tensor, config: TrainingConfig) -> 
         return image
 
     # Use tf.cond to choose which function to execute
+    # More explicit condition: resize if either dimension is too small
     image = tf.cond(
-        min_dim < min_size,
+        tf.logical_or(height < min_size, width < min_size),
         true_fn=resize_if_small,
         false_fn=identity
     )
@@ -708,7 +711,10 @@ def main():
     config = TrainingConfig(
         # Data paths
         train_image_dirs=[
+            '/media/arxwn/data0_4tb/datasets/Megadepth',
+            '/media/arxwn/data0_4tb/datasets/VGG-Face2/data/train',
             '/media/arxwn/data0_4tb/datasets/ade20k/images/ADE/training',
+            '/media/arxwn/data0_4tb/datasets/KITTI/data/depth/raw_image_values'
         ],
         val_image_dirs=[
             '/media/arxwn/data0_4tb/datasets/ade20k/images/ADE/validation'
@@ -737,7 +743,7 @@ def main():
 
         # Optimization
         learning_rate=1e-3,
-        optimizer_type='adam',
+        optimizer_type='adamw',
         lr_schedule_type='cosine_decay',
         warmup_epochs=5,
 
