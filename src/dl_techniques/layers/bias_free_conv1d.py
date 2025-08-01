@@ -10,7 +10,7 @@ Convolutional Neural Networks" (Mohan et al., ICLR 2020), adapted for 1D signals
 
 import keras
 from keras import layers
-from typing import Optional, Union, Tuple
+from typing import Optional, Union
 
 # ---------------------------------------------------------------------
 # local imports
