@@ -71,8 +71,8 @@ class TrainingConfig:
     monitor_every_n_epochs: int = 5    # Save intermediate results every N epochs
     save_best_only: bool = True        # Only save model if validation loss improves
     early_stopping_patience: int = 15  # Early stopping patience
-    reduce_lr_patience: int = 8        # Learning rate reduction patience
     validation_steps: Optional[int] = 100  # Number of validation steps
+    # Note: reduce_lr_patience removed - learning rate schedule handles LR changes
 
     # === Output Configuration ===
     output_dir: str = 'bfcnn_experiments'
@@ -97,31 +97,34 @@ class TrainingConfig:
             raise ValueError("Invalid patch size or channel configuration")
 
 # ---------------------------------------------------------------------
-# FILE DISCOVERY UTILITIES
+# GENERATOR-BASED FILE DISCOVERY
 # ---------------------------------------------------------------------
 
-def discover_image_files(directories: List[str],
+def image_file_generator(directories: List[str],
                         extensions: List[str],
-                        max_files: Optional[int] = None) -> List[str]:
+                        max_files: Optional[int] = None,
+                        patches_per_image: int = 1):
     """
-    Discover image files in directories.
+    Generator that yields image file paths on-the-fly without storing them in memory.
 
     Args:
         directories: List of directories to search
         extensions: List of valid file extensions
-        max_files: Maximum number of files to return
+        max_files: Maximum number of files to discover (None = no limit)
+        patches_per_image: Number of times to yield each file path
 
-    Returns:
-        List of discovered image file paths
+    Yields:
+        str: Image file path
     """
     if not directories:
         logger.warning("No directories provided for file discovery")
-        return []
+        return
 
     extensions_set = set(ext.lower() for ext in extensions)
     extensions_set.update(ext.upper() for ext in extensions)
 
-    discovered_files = []
+    file_count = 0
+    total_yielded = 0
 
     for directory in directories:
         dir_path = Path(directory)
@@ -129,26 +132,73 @@ def discover_image_files(directories: List[str],
             logger.warning(f"Directory does not exist: {directory}")
             continue
 
-        logger.info(f"Discovering files in: {directory}")
+        logger.info(f"Processing files from: {directory}")
 
         try:
             for file_path in dir_path.rglob("*"):
                 if file_path.is_file() and file_path.suffix in extensions_set:
-                    discovered_files.append(str(file_path))
+                    file_count += 1
 
-                    if max_files and len(discovered_files) >= max_files:
+                    # Yield this file path multiple times for patch extraction
+                    for _ in range(patches_per_image):
+                        yield str(file_path)
+                        total_yielded += 1
+
+                    # Check file limit
+                    if max_files and file_count >= max_files:
                         logger.info(f"Reached max files limit: {max_files}")
-                        return discovered_files
+                        logger.info(f"Total paths yielded: {total_yielded}")
+                        return
 
-                    if len(discovered_files) % 1000 == 0:
-                        logger.info(f"Discovered {len(discovered_files)} files...")
+                    # Progress logging
+                    if file_count % 1000 == 0:
+                        logger.info(f"Processed {file_count} files, yielded {total_yielded} paths...")
 
         except Exception as e:
-            logger.error(f"Error discovering files in {directory}: {e}")
+            logger.error(f"Error processing files in {directory}: {e}")
             continue
 
-    logger.info(f"Total files discovered: {len(discovered_files)}")
-    return discovered_files
+    logger.info(f"Generator completed: {file_count} files processed, {total_yielded} paths yielded")
+
+def count_available_files(directories: List[str],
+                         extensions: List[str],
+                         max_files: Optional[int] = None) -> int:
+    """
+    Count available files without loading them into memory.
+    Used for logging and steps_per_epoch calculation.
+
+    Args:
+        directories: List of directories to search
+        extensions: List of valid file extensions
+        max_files: Maximum number of files to count
+
+    Returns:
+        int: Number of available files
+    """
+    if not directories:
+        return 0
+
+    extensions_set = set(ext.lower() for ext in extensions)
+    extensions_set.update(ext.upper() for ext in extensions)
+
+    count = 0
+
+    for directory in directories:
+        dir_path = Path(directory)
+        if not dir_path.exists():
+            continue
+
+        try:
+            for file_path in dir_path.rglob("*"):
+                if file_path.is_file() and file_path.suffix in extensions_set:
+                    count += 1
+                    if max_files and count >= max_files:
+                        return count
+        except Exception as e:
+            logger.error(f"Error counting files in {directory}: {e}")
+            continue
+
+    return count
 
 # ---------------------------------------------------------------------
 # DATASET BUILDER WITH GRAPH MODE FIXES
@@ -180,7 +230,8 @@ def load_and_preprocess_image(image_path: tf.Tensor, config: TrainingConfig) -> 
     # Convert to float32 and normalize if requested
     image = tf.cast(image, tf.float32)
     if config.normalize_input:
-        image = image / 255.0
+        # Normalize from [0, 255] to [-1, +1]
+        image = (image / 255.0) * 2.0 - 1.0
 
     # Get image dimensions
     shape = tf.shape(image)
@@ -261,42 +312,52 @@ def add_noise_to_patch(patch: tf.Tensor, config: TrainingConfig) -> Tuple[tf.Ten
     noisy_patch = patch + noise
 
     # Clip to valid range if input is normalized
-    noisy_patch = tf.clip_by_value(noisy_patch, 0.0, 1.0)
+    noisy_patch = tf.clip_by_value(noisy_patch, -1.0, 1.0)
 
     return noisy_patch, patch
 
-def create_dataset(file_paths: List[str], config: TrainingConfig, is_training: bool = True) -> tf.data.Dataset:
+def create_dataset(directories: List[str], config: TrainingConfig, is_training: bool = True) -> tf.data.Dataset:
     """
-    Create a properly structured dataset that yields (x, y) pairs.
+    Create a dataset using generator-based file discovery (memory-efficient).
 
     Args:
-        file_paths: List of image file paths
+        directories: List of directories to search for images
         config: Training configuration
         is_training: Whether this is for training (affects augmentation and repetition)
 
     Returns:
         TensorFlow Dataset yielding (noisy_patches, clean_patches) pairs
     """
-    logger.info(f"Creating {'training' if is_training else 'validation'} dataset from {len(file_paths)} files")
+    logger.info(f"Creating {'training' if is_training else 'validation'} dataset from directories: {directories}")
 
-    # Create dataset from file paths
-    dataset = tf.data.Dataset.from_tensor_slices(file_paths)
+    # Determine file limits and patches per image
+    max_files = config.max_train_files if is_training else config.max_val_files
+    patches_per_image = config.patches_per_image
 
-    if is_training:
-        # Repeat files to get multiple patches per image
-        dataset = dataset.repeat(config.patches_per_image)
-
-        # Shuffle files
-        dataset = dataset.shuffle(
-            buffer_size=min(len(file_paths) * config.patches_per_image, config.dataset_shuffle_buffer),
-            reshuffle_each_iteration=True
+    # Create generator function for tf.data
+    def path_generator():
+        """Generator function for tf.data.Dataset.from_generator"""
+        return image_file_generator(
+            directories=directories,
+            extensions=config.image_extensions,
+            max_files=max_files,
+            patches_per_image=patches_per_image
         )
 
+    # Create dataset from generator
+    dataset = tf.data.Dataset.from_generator(
+        path_generator,
+        output_signature=tf.TensorSpec(shape=(), dtype=tf.string)
+    )
+
+    # Shuffle the file paths if training
+    if is_training:
+        dataset = dataset.shuffle(
+            buffer_size=config.dataset_shuffle_buffer,
+            reshuffle_each_iteration=True
+        )
         # Repeat for multiple epochs
         dataset = dataset.repeat()
-    else:
-        # For validation, just repeat to get multiple patches
-        dataset = dataset.repeat(config.patches_per_image)
 
     # Load and preprocess images directly (graph-compatible)
     dataset = dataset.map(
@@ -329,7 +390,7 @@ def create_dataset(file_paths: List[str], config: TrainingConfig, is_training: b
 
     # Batch and prefetch
     dataset = dataset.batch(config.batch_size, drop_remainder=is_training)
-    dataset = dataset.prefetch(batch=16)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
 
     return dataset
 
@@ -340,6 +401,7 @@ def create_dataset(file_paths: List[str], config: TrainingConfig, is_training: b
 def psnr_metric(y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
     """
     PSNR (Peak Signal-to-Noise Ratio) metric for image denoising.
+    Updated for [-1, +1] normalization range.
 
     Args:
         y_true: Ground truth images
@@ -348,7 +410,7 @@ def psnr_metric(y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
     Returns:
         Mean PSNR value across the batch
     """
-    return tf.reduce_mean(tf.image.psnr(y_pred, y_true, max_val=1.0))
+    return tf.reduce_mean(tf.image.psnr(y_pred, y_true, max_val=2.0))
 
 # ---------------------------------------------------------------------
 # MONITORING AND CALLBACKS WITH GRAPH MODE FIXES
@@ -360,7 +422,7 @@ class StreamingResultMonitor(keras.callbacks.Callback):
     FIXED: Uses tf.py_function for graph-compatible eager operations.
     """
 
-    def __init__(self, config: TrainingConfig, val_file_paths: List[str]):
+    def __init__(self, config: TrainingConfig, val_directories: List[str]):
         super().__init__()
         self.config = config
         self.monitor_freq = config.monitor_every_n_epochs
@@ -369,11 +431,36 @@ class StreamingResultMonitor(keras.callbacks.Callback):
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
         # Create a small validation dataset for monitoring
-        self._create_monitor_dataset(val_file_paths)
+        self._create_monitor_dataset(val_directories)
 
-    def _create_monitor_dataset(self, val_file_paths: List[str]):
+    def _create_monitor_dataset(self, val_directories: List[str]):
         """Create a small dataset for consistent monitoring."""
-        monitor_files = val_file_paths[:min(4, len(val_file_paths))]
+        # Get a few sample files for monitoring (without loading all into memory)
+        monitor_files = []
+        extensions_set = set(ext.lower() for ext in self.config.image_extensions)
+        extensions_set.update(ext.upper() for ext in self.config.image_extensions)
+
+        for directory in val_directories:
+            dir_path = Path(directory)
+            if not dir_path.exists():
+                continue
+
+            try:
+                for file_path in dir_path.rglob("*"):
+                    if file_path.is_file() and file_path.suffix in extensions_set:
+                        monitor_files.append(str(file_path))
+                        if len(monitor_files) >= 4:  # Only need 4 files for monitoring
+                            break
+                if len(monitor_files) >= 4:
+                    break
+            except Exception as e:
+                logger.error(f"Error getting monitor files from {directory}: {e}")
+                continue
+
+        if not monitor_files:
+            logger.warning("No files found for monitoring")
+            return
+
         clean_patches = []
         for file_path in monitor_files:
             path_tensor = tf.constant(file_path)
@@ -479,8 +566,8 @@ class StreamingResultMonitor(keras.callbacks.Callback):
         plt.clf()
         gc.collect()
 
-def create_callbacks(config: TrainingConfig, val_file_paths: List[str]) -> List[keras.callbacks.Callback]:
-    """Create training callbacks for streaming training."""
+def create_callbacks(config: TrainingConfig, val_directories: List[str]) -> List[keras.callbacks.Callback]:
+    """Create training callbacks for generator-based training."""
     callbacks = []
 
     output_dir = Path(config.output_dir) / config.experiment_name
@@ -509,16 +596,10 @@ def create_callbacks(config: TrainingConfig, val_file_paths: List[str]) -> List[
         )
     )
 
-    # Learning rate reduction
-    callbacks.append(
-        keras.callbacks.ReduceLROnPlateau(
-            monitor='val_loss',
-            factor=0.5,
-            patience=config.reduce_lr_patience,
-            min_lr=1e-7,
-            verbose=1
-        )
-    )
+    # NOTE: ReduceLROnPlateau callback removed because we're using a learning rate schedule
+    # The schedule (cosine decay, exponential decay, etc.) already handles LR changes
+    # ReduceLROnPlateau conflicts with LearningRateSchedule objects
+    logger.info("Using learning rate schedule - ReduceLROnPlateau callback disabled")
 
     # CSV logging
     csv_path = output_dir / "training_log.csv"
@@ -528,7 +609,7 @@ def create_callbacks(config: TrainingConfig, val_file_paths: List[str]) -> List[
 
     # Streaming result monitoring with graph mode fixes
     callbacks.append(
-        StreamingResultMonitor(config, val_file_paths)
+        StreamingResultMonitor(config, val_directories)
     )
 
     # TensorBoard logging
@@ -550,7 +631,7 @@ def create_callbacks(config: TrainingConfig, val_file_paths: List[str]) -> List[
 
 def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
     """
-    Train a bias-free CNN denoiser model with streaming data loading.
+    Train a bias-free CNN denoiser model with generator-based data loading (memory-efficient).
 
     Args:
         config: Training configuration
@@ -558,7 +639,7 @@ def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
     Returns:
         Trained Keras model
     """
-    logger.info("Starting streaming bias-free CNN denoiser training")
+    logger.info("Starting generator-based bias-free CNN denoiser training")
     logger.info(f"Experiment: {config.experiment_name}")
 
     # Create output directory and save config
@@ -569,40 +650,50 @@ def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
     with open(config_path, 'w') as f:
         json.dump(config.__dict__, f, indent=2, default=str)
 
-    # Discover files
-    logger.info("Discovering training files...")
-    train_files = discover_image_files(
+    # Validate directories exist
+    for directory in config.train_image_dirs:
+        if not Path(directory).exists():
+            raise ValueError(f"Training directory does not exist: {directory}")
+
+    for directory in config.val_image_dirs:
+        if not Path(directory).exists():
+            raise ValueError(f"Validation directory does not exist: {directory}")
+
+    logger.info(f"Training directories: {config.train_image_dirs}")
+    logger.info(f"Validation directories: {config.val_image_dirs}")
+
+    # Count available files for logging and steps calculation (without loading into memory)
+    logger.info("Counting available files...")
+    train_file_count = count_available_files(
         config.train_image_dirs,
         config.image_extensions,
         config.max_train_files
     )
-
-    logger.info("Discovering validation files...")
-    val_files = discover_image_files(
+    val_file_count = count_available_files(
         config.val_image_dirs,
         config.image_extensions,
         config.max_val_files
     )
 
-    if not train_files:
+    if train_file_count == 0:
         raise ValueError("No training files found!")
-    if not val_files:
+    if val_file_count == 0:
         raise ValueError("No validation files found!")
 
-    logger.info(f"Found {len(train_files)} training files")
-    logger.info(f"Found {len(val_files)} validation files")
+    logger.info(f"Found approximately {train_file_count} training files")
+    logger.info(f"Found approximately {val_file_count} validation files")
 
-    # Create datasets that yield (x, y) pairs
-    logger.info("Creating datasets...")
-    train_dataset = create_dataset(train_files, config, is_training=True)
-    val_dataset = create_dataset(val_files, config, is_training=False)
+    # Create datasets using generator-based approach (memory-efficient)
+    logger.info("Creating generator-based datasets...")
+    train_dataset = create_dataset(config.train_image_dirs, config, is_training=True)
+    val_dataset = create_dataset(config.val_image_dirs, config, is_training=False)
 
-    # Calculate steps per epoch based on discovered files
+    # Calculate steps per epoch based on file count
     if config.steps_per_epoch is not None:
         steps_per_epoch = config.steps_per_epoch
     else:
-        # Calculate based on actual discovered files
-        total_patches = len(train_files) * config.patches_per_image
+        # Calculate based on estimated files and patches per image
+        total_patches = train_file_count * config.patches_per_image
         steps_per_epoch = max(100, total_patches // config.batch_size)
 
     logger.info(f"Using {steps_per_epoch} steps per epoch")
@@ -662,11 +753,11 @@ def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
 
     logger.info(f"Model compiled with {model.count_params():,} parameters")
 
-    # Create callbacks
-    callbacks = create_callbacks(config, val_files)
+    # Create callbacks (using directories instead of file lists)
+    callbacks = create_callbacks(config, config.val_image_dirs)
 
     # Train model
-    logger.info("Starting training...")
+    logger.info("Starting generator-based training...")
     start_time = time.time()
 
     # Determine validation steps
@@ -706,15 +797,12 @@ def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
 # ---------------------------------------------------------------------
 
 def main():
-    """Main training function with streaming file discovery and graph mode compatibility."""
-    # Configuration for streaming training
+    """Main training function with generator-based file discovery and memory-efficient processing."""
+    # Configuration for generator-based training
     config = TrainingConfig(
         # Data paths
         train_image_dirs=[
-            '/media/arxwn/data0_4tb/datasets/Megadepth',
-            '/media/arxwn/data0_4tb/datasets/VGG-Face2/data/train',
             '/media/arxwn/data0_4tb/datasets/ade20k/images/ADE/training',
-            '/media/arxwn/data0_4tb/datasets/KITTI/data/depth/raw_image_values'
         ],
         val_image_dirs=[
             '/media/arxwn/data0_4tb/datasets/ade20k/images/ADE/validation'
@@ -728,7 +816,7 @@ def main():
         patches_per_image=16,
 
         # File limits for manageable training
-        max_train_files=100000,     # Limit training files
+        max_train_files=10000,      # Limit training files
         max_val_files=1000,         # Limit validation files
         parallel_reads=8,           # Parallel file processing
         dataset_shuffle_buffer=2000, # Shuffle buffer size
@@ -743,7 +831,7 @@ def main():
 
         # Optimization
         learning_rate=1e-3,
-        optimizer_type='adamw',
+        optimizer_type='adam',
         lr_schedule_type='cosine_decay',
         warmup_epochs=5,
 
@@ -758,7 +846,7 @@ def main():
     )
 
     try:
-        # Train the model with streaming data and graph mode fixes
+        # Train the model with generator-based data loading (memory-efficient)
         model = train_bfcnn_denoiser(config)
         logger.info("Training completed successfully!")
 
