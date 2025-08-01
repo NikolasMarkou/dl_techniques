@@ -699,7 +699,7 @@ def main():
         # Data paths
         train_image_dirs=[
             '/media/arxwn/data0_4tb/datasets/Megadepth',
-            'media/arxwn/data0_4tb/datasets/div2k/train',
+            '/media/arxwn/data0_4tb/datasets/div2k/train',
             '/media/arxwn/data0_4tb/datasets/bdd_data/train',
             '/media/arxwn/data0_4tb/datasets/ade20k/images/ADE/training',
         ],
