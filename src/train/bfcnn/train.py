@@ -704,7 +704,7 @@ def main():
             '/media/arxwn/data0_4tb/datasets/ade20k/images/ADE/training',
         ],
         val_image_dirs=[
-            'media/arxwn/data0_4tb/datasets/div2k/validation',
+            '/media/arxwn/data0_4tb/datasets/div2k/validation',
             '/media/arxwn/data0_4tb/datasets/ade20k/images/ADE/validation'
         ],
 
