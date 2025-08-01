@@ -125,7 +125,7 @@ Think of the theorem in terms of **energy landscapes**:
 Noisy Point (y) ──────> Clean Estimate (x̂)
       │                        │
       │ Movement Direction     │
-      │ = σ²∇log p(y)         │
+      │ = σ²∇log p(y)          │
       └────────────────────────┘
 ```
 
