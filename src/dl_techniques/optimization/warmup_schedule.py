@@ -9,13 +9,13 @@ destabilize the model.
 
 The WarmupSchedule class acts as a wrapper around any Keras learning rate
 schedule, adding a warmup period at the beginning of training. The schedule
-tracks steps internally to ensure correct warmup behavior regardless of how
-step values are provided to the scheduler.
+uses the step parameter directly to avoid device placement issues with internal
+counters.
 
 Key Features:
 - Linear warmup from configurable starting learning rate
 - Seamless transition to primary schedule after warmup
-- Internal step tracking for consistent behavior
+- Device-agnostic implementation
 - Full serialization support for model saving/loading
 - Compatible with all Keras optimizers and schedules
 
@@ -76,9 +76,8 @@ class WarmupSchedule(keras.optimizers.schedules.LearningRateSchedule):
     helps prevent training instability in early epochs by gradually increasing
     the learning rate instead of starting with the full rate immediately.
 
-    The schedule maintains an internal step counter to ensure consistent warmup
-    behavior regardless of the step values passed to the __call__ method. This
-    is important because different training loops may pass different step values.
+    The schedule uses the step parameter directly to determine warmup progress,
+    avoiding device placement issues with internal variables.
 
     Attributes:
         warmup_steps: Number of steps over which to perform warmup.
@@ -138,19 +137,10 @@ class WarmupSchedule(keras.optimizers.schedules.LearningRateSchedule):
                 "LearningRateSchedule instance to use after warmup."
             )
 
-        # Store configuration as TensorFlow constants for efficiency
-        self.warmup_steps = tf.constant(warmup_steps, dtype=tf.int32, name="warmup_steps")
-        self.warmup_start_lr = tf.constant(warmup_start_lr, dtype=tf.float32, name="warmup_start_lr")
+        # Store configuration - keep warmup_steps as Python int for boolean checks
+        self.warmup_steps = warmup_steps  # Python int for boolean checks
+        self.warmup_start_lr = warmup_start_lr  # Keep as Python float
         self.primary_schedule = primary_schedule
-
-        # Initialize internal step counter for tracking warmup progress
-        # This counter is independent of the step parameter passed to __call__
-        self._internal_step_counter = tf.Variable(
-            0,
-            trainable=False,
-            dtype=tf.int32,
-            name="warmup_internal_step_counter"
-        )
 
         # Log initialization with configuration details
         logger.info(
@@ -160,50 +150,38 @@ class WarmupSchedule(keras.optimizers.schedules.LearningRateSchedule):
         )
 
     def __call__(self, step: Union[int, tf.Tensor]) -> tf.Tensor:
-        """Calculate the learning rate for the current step.
-
-        This method implements the core warmup logic by using an internal step
-        counter to track warmup progress, while still passing the provided step
-        to the primary schedule for consistency.
-
-        Args:
-            step: Current training step index. This is passed to the primary
-                schedule but the internal counter is used for warmup calculations
-                to ensure consistent behavior.
-
-        Returns:
-            Learning rate tensor for the current step. During warmup, this is
-            a linear interpolation between warmup_start_lr and the primary
-            schedule's rate. After warmup, this is the primary schedule's rate.
-
-        Note:
-            The internal step counter is incremented on each call, ensuring
-            consistent warmup behavior regardless of the step parameter values.
-        """
-        # Increment internal step counter for warmup tracking
-        self._internal_step_counter.assign_add(1)
-        current_internal_step = tf.cast(self._internal_step_counter, tf.float32)
-
-        # Get the target learning rate from primary schedule
-        primary_learning_rate = self.primary_schedule(step)
-
+        """Calculate the learning rate for the current step with corrected logic."""
         # Handle the no-warmup case efficiently
         if self.warmup_steps == 0:
-            return primary_learning_rate
+            return self.primary_schedule(step)
 
-        # Calculate warmup progress as a fraction (0.0 to 1.0)
+        # Cast all values to float32 for graph-safe calculations
+        step_float = tf.cast(step, tf.float32)
         warmup_steps_float = tf.cast(self.warmup_steps, tf.float32)
-        warmup_progress = tf.minimum(current_internal_step / warmup_steps_float, 1.0)
 
-        # Linear interpolation between warmup_start_lr and primary_lr
-        learning_rate_range = primary_learning_rate - self.warmup_start_lr
-        warmup_learning_rate = self.warmup_start_lr + learning_rate_range * warmup_progress
+        # --- KEY FIX 1: Determine a FIXED target learning rate ---
+        # This is the learning rate the warmup should ramp up to.
+        # It's the initial_learning_rate of the primary schedule (i.e., its value at step 0).
+        target_learning_rate = self.primary_schedule(0)
 
-        # Use warmup learning rate during warmup phase, primary rate afterward
+        # Logic for the warmup phase
+        def warmup_fn():
+            warmup_progress = step_float / warmup_steps_float
+            # Correct linear interpolation to the fixed target
+            return self.warmup_start_lr + (target_learning_rate - self.warmup_start_lr) * warmup_progress
+
+        # Logic for the post-warmup phase
+        def primary_fn():
+            # --- KEY FIX 2: Adjust the step for the primary schedule ---
+            # The primary schedule should start its decay *after* the warmup is complete.
+            # So, we pass it a step count that starts from 0 at the end of warmup.
+            return self.primary_schedule(step - self.warmup_steps)
+
+        # Use TensorFlow conditional to choose between warmup and primary rate
         return tf.cond(
-            current_internal_step <= warmup_steps_float,
-            lambda: warmup_learning_rate,
-            lambda: primary_learning_rate
+            step_float < warmup_steps_float,
+            true_fn=warmup_fn,
+            false_fn=primary_fn
         )
 
     def get_config(self) -> Dict[str, Any]:
@@ -219,8 +197,8 @@ class WarmupSchedule(keras.optimizers.schedules.LearningRateSchedule):
             >>> restored_schedule = WarmupSchedule.from_config(config)
         """
         return {
-            'warmup_steps': int(self.warmup_steps.numpy()),
-            'warmup_start_lr': float(self.warmup_start_lr.numpy()),
+            'warmup_steps': self.warmup_steps,
+            'warmup_start_lr': self.warmup_start_lr,
             'primary_schedule': keras.optimizers.schedules.serialize(self.primary_schedule)
         }
 
@@ -268,7 +246,7 @@ class WarmupSchedule(keras.optimizers.schedules.LearningRateSchedule):
         """
         return (
             f"WarmupSchedule("
-            f"warmup_steps={int(self.warmup_steps.numpy())}, "
-            f"warmup_start_lr={float(self.warmup_start_lr.numpy())}, "
+            f"warmup_steps={self.warmup_steps}, "
+            f"warmup_start_lr={self.warmup_start_lr}, "
             f"primary_schedule={self.primary_schedule.__class__.__name__})"
         )
