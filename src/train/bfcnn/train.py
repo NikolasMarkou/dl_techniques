@@ -394,9 +394,9 @@ class StreamingResultMonitor(keras.callbacks.Callback):
                         denoised_images
                     )
 
-                # Compute metrics (TF ops)
+                # Compute metrics (TF ops) - FIXED: Use correct max_val for [-1, +1] range
                 mse_loss = tf.reduce_mean(tf.square(denoised_images - clean_images))
-                psnr = tf.reduce_mean(tf.image.psnr(denoised_images, clean_images, max_val=1.0))
+                psnr = tf.reduce_mean(tf.image.psnr(denoised_images, clean_images, max_val=2.0))  # FIXED: max_val=2.0
 
                 # Log and save metrics (calls .numpy()/float(), needs eager mode)
                 logger.info(f"Epoch {epoch_val} - Validation MSE: {mse_loss.numpy():.6f}, PSNR: {psnr.numpy():.2f} dB")
@@ -434,10 +434,15 @@ class StreamingResultMonitor(keras.callbacks.Callback):
             axes = axes.reshape(-1, 1)
 
         for i in range(num_samples):
-            # This part is now safe as it's called from within the tf.py_function
-            noisy_img = noisy[i].numpy()
-            clean_img = clean[i].numpy()
-            denoised_img = denoised[i].numpy()
+            # FIXED: Denormalize from [-1, +1] to [0, 1] for proper visualization
+            noisy_img = (noisy[i].numpy() + 1.0) / 2.0
+            clean_img = (clean[i].numpy() + 1.0) / 2.0
+            denoised_img = (denoised[i].numpy() + 1.0) / 2.0
+
+            # Ensure values are in [0, 1] range after denormalization
+            noisy_img = np.clip(noisy_img, 0.0, 1.0)
+            clean_img = np.clip(clean_img, 0.0, 1.0)
+            denoised_img = np.clip(denoised_img, 0.0, 1.0)
 
             if noisy_img.shape[-1] == 1:
                 noisy_img, clean_img, denoised_img = map(lambda x: x.squeeze(-1), [noisy_img, clean_img, denoised_img])
@@ -445,6 +450,7 @@ class StreamingResultMonitor(keras.callbacks.Callback):
             else:
                 cmap = None
 
+            # Now use correct vmin=0, vmax=1 since we denormalized
             axes[0, i].imshow(noisy_img, cmap=cmap, vmin=0, vmax=1)
             axes[0, i].set_title(f'Noisy {i+1}')
             axes[0, i].axis('off')
