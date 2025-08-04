@@ -33,7 +33,7 @@ class TestSwinMLP:
         assert layer.hidden_dim == 128
         assert layer.out_dim is None
         assert layer.act_layer == "gelu"
-        assert layer.drop_rate == 0.0
+        assert layer.dropout_rate == 0.0
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
         assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
         assert layer.kernel_regularizer is None
@@ -48,7 +48,7 @@ class TestSwinMLP:
             hidden_dim=256,
             out_dim=64,
             act_layer="relu",
-            drop=0.2,
+            dropout_rate=0.2,
             kernel_initializer="he_normal",
             bias_initializer="ones",
             kernel_regularizer=custom_regularizer,
@@ -60,7 +60,7 @@ class TestSwinMLP:
         assert layer.hidden_dim == 256
         assert layer.out_dim == 64
         assert layer.act_layer == "relu"
-        assert layer.drop_rate == 0.2
+        assert layer.dropout_rate == 0.2
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
         assert isinstance(layer.bias_initializer, keras.initializers.Ones)
         assert layer.kernel_regularizer == custom_regularizer
@@ -79,14 +79,14 @@ class TestSwinMLP:
 
         # Test invalid dropout rate
         with pytest.raises(ValueError, match="drop rate must be between 0.0 and 1.0"):
-            SwinMLP(hidden_dim=64, drop=-0.1)
+            SwinMLP(hidden_dim=64, dropout_rate=-0.1)
 
         with pytest.raises(ValueError, match="drop rate must be between 0.0 and 1.0"):
-            SwinMLP(hidden_dim=64, drop=1.5)
+            SwinMLP(hidden_dim=64, dropout_rate=1.5)
 
     def test_build_process(self, input_tensor):
         """Test that the layer builds properly."""
-        layer = SwinMLP(hidden_dim=256, drop=0.1)
+        layer = SwinMLP(hidden_dim=256, dropout_rate=0.1)
         layer(input_tensor)  # Forward pass triggers build
 
         # Check that weights were created
@@ -107,7 +107,7 @@ class TestSwinMLP:
 
     def test_build_process_no_dropout(self, input_tensor):
         """Test build process without dropout."""
-        layer = SwinMLP(hidden_dim=256, drop=0.0)
+        layer = SwinMLP(hidden_dim=256, dropout_rate=0.0)
         layer(input_tensor)
 
         # Check that dropout layers were not created
@@ -176,7 +176,7 @@ class TestSwinMLP:
 
     def test_dropout_behavior(self, input_tensor):
         """Test dropout behavior during training vs inference."""
-        layer = SwinMLP(hidden_dim=128, drop=0.5)
+        layer = SwinMLP(hidden_dim=128, dropout_rate=0.5)
 
         # Test inference mode (no dropout)
         output_inference = layer(input_tensor, training=False)
@@ -194,7 +194,7 @@ class TestSwinMLP:
             hidden_dim=256,
             out_dim=64,
             act_layer="relu",
-            drop=0.1,
+            dropout_rate=0.1,
             kernel_initializer="he_normal",
             kernel_regularizer=keras.regularizers.L2(1e-4)
         )
@@ -215,7 +215,7 @@ class TestSwinMLP:
         assert recreated_layer.hidden_dim == original_layer.hidden_dim
         assert recreated_layer.out_dim == original_layer.out_dim
         assert recreated_layer.act_layer == original_layer.act_layer
-        assert recreated_layer.drop_rate == original_layer.drop_rate
+        assert recreated_layer.dropout_rate == original_layer.dropout_rate
 
         # Check weights match (shapes should be the same)
         assert len(recreated_layer.weights) == len(original_layer.weights)
@@ -362,7 +362,7 @@ class TestSwinMLP:
 
     def test_training_vs_inference_mode(self, input_tensor):
         """Test behavior differences between training and inference modes."""
-        layer = SwinMLP(hidden_dim=128, drop=0.3)
+        layer = SwinMLP(hidden_dim=128, dropout_rate=0.3)
 
         # Test multiple calls in inference mode - should be consistent
         output1 = layer(input_tensor, training=False)

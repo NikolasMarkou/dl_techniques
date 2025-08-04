@@ -1,13 +1,48 @@
 """
-SRIP (Spectral Restricted Isometry Property) Regularizer Implementation
-====================================================================
+This module provides a Keras implementation of the Spectral Restricted Isometry
+Property (SRIP) regularizer, a powerful technique for improving the training of
+deep neural networks, particularly Convolutional Neural Networks (CNNs).
 
-This implementation follows the paper:
-"Can We Gain More from Orthogonality Regularizations in Training Deep CNNs?"
-by Bansal et al. (arXiv:1810.09102)
+The core idea behind this regularizer, as proposed by Bansal et al. in "Can We Gain
+More from Orthogonality Regularizations in Training Deep CNNs?", is that encouraging
+the weight matrices of a network to be "approximately orthogonal" can lead to
+significant benefits. An orthogonal matrix preserves the norm of vectors, which helps
+to mitigate the exploding and vanishing gradient problems during training. This leads
+to more stable training, faster convergence, and often better generalization.
 
-The SRIP regularizer enforces approximate orthogonality of weight matrices
-by minimizing the spectral norm of W^T W - I.
+How it Works:
+
+1.  **The Orthogonality Condition:** A matrix `W` is orthogonal if its transpose is
+    also its inverse, which means `W^T * W = I` (where `I` is the identity matrix).
+    This regularizer aims to enforce this condition.
+
+2.  **The SRIP Loss Function:** Instead of a strict enforcement, SRIP encourages
+    *near-orthogonality* by penalizing the deviation of `W^T * W` from the identity
+    matrix `I`. The loss is calculated as:
+    `Loss = lambda * ||W^T * W - I||_2`
+    where `||...||_2` is the spectral norm (the largest singular value of the matrix).
+    Minimizing this loss pushes the Gram matrix `W^T * W` to be close to `I`.
+
+3.  **Spectral Norm Estimation:** Calculating the exact spectral norm is computationally
+    expensive. This implementation uses the **power iteration method**, an efficient
+    iterative algorithm, to approximate the largest singular value. The number of
+    `power_iterations` controls the trade-off between accuracy and computational cost.
+
+4.  **Support for Convolutional and Dense Layers:** The regularizer is designed to
+    work with both `Dense` and `Conv2D` layers. For convolutional kernels, which are
+    4D tensors, it automatically reshapes them into 2D matrices so that the `W^T * W`
+    operation can be performed.
+
+5.  **Lambda Scheduling:** The strength of the regularization is controlled by a
+    parameter, `lambda`. This implementation includes a dynamic scheduling mechanism.
+    The `update_lambda` method allows the regularization strength to be decayed over
+    the course of training (e.g., via a Keras callback). This is often beneficial, as
+    strong regularization is most needed in the early stages of training, and can be
+    relaxed later to allow for fine-tuning.
+
+By adding this regularizer to the kernel of `Dense` or `Conv2D` layers, one can
+improve the conditioning of the network's weight matrices, leading to a more robust
+and effective training process.
 """
 
 import keras

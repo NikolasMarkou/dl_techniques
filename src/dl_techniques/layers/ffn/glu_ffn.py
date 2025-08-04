@@ -145,7 +145,7 @@ class GLUFFN(keras.layers.Layer):
             self,
             hidden_dim: int,
             output_dim: int,
-            activation: Callable = tf.nn.sigmoid,
+            activation: Callable = keras.ops.sigmoid,
             dropout_rate: float = 0.0,
             kernel_initializer: Union[str, Initializer] = 'glorot_uniform',
             kernel_regularizer: Optional[Regularizer] = None,

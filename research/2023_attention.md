@@ -137,6 +137,7 @@ from keras import layers
 from keras import ops
 import math
 
+
 # Configuration object to hold all hyperparameters
 class Config:
     d_model = 768
@@ -150,11 +151,14 @@ class Config:
     layer_norm_epsilon = 1e-5
     # FFN expansion factor
     ffn_expansion_factor = 4
-    
+
+
 config = Config()
+
 
 class SwiGLUFFN(layers.Layer):
     """ SwiGLU Feed-Forward Network as seen in LLaMA and PaLM """
+
     def __init__(self, config, **kwargs):
         super().__init__(**kwargs)
         hidden_dim = int(config.d_model * config.ffn_expansion_factor)
@@ -165,13 +169,13 @@ class SwiGLUFFN(layers.Layer):
         hidden_dim = ffn_dim_multiple_of * ((hidden_dim + ffn_dim_multiple_of - 1) // ffn_dim_multiple_of)
 
         # SOTA Detail: use_bias=False
-        self.w1 = layers.Dense(hidden_dim, use_bias=False) # Gating projection
-        self.w2 = layers.Dense(hidden_dim, use_bias=False) # Value projection
-        self.w3 = layers.Dense(config.d_model, use_bias=False) # Output projection
-        
+        self.w1 = layers.Dense(hidden_dim, use_bias=False)  # Gating projection
+        self.w2 = layers.Dense(hidden_dim, use_bias=False)  # Value projection
+        self.w3 = layers.Dense(config.d_model, use_bias=False)  # Output projection
+
         # SOTA Detail: Dropout on the final FFN output
-        self.dropout = layers.Dropout(config.dropout_prob)
-        
+        self.dropout = layers.Dropout(config.dropout_rate)
+
     def call(self, x, training=None):
         # Apply Swish to the first projection and multiply by the second (gating)
         gated_x = self.w1(x)
@@ -179,14 +183,15 @@ class SwiGLUFFN(layers.Layer):
         # LLaMA uses SiLU (Swish) which is ops.silu
         # GELU can also be used here and is a common choice.
         activated_gate = ops.silu(gated_x)
-        
+
         # Element-wise multiplication
         x = activated_gate * value_x
-        
+
         # Project back to d_model and apply dropout
         x = self.w3(x)
         x = self.dropout(x, training=training)
         return x
+
 
 class CausalSelfAttention(layers.Layer):
     # (Implementation from the previous answer remains the same)
@@ -198,8 +203,8 @@ class CausalSelfAttention(layers.Layer):
         self.head_dim = self.d_model // self.n_head
         self.c_attn = layers.Dense(3 * self.d_model, use_bias=False)
         self.c_proj = layers.Dense(self.d_model, use_bias=False)
-        self.attn_dropout = layers.Dropout(config.dropout_prob)
-        
+        self.attn_dropout = layers.Dropout(config.dropout_rate)
+
     def call(self, x, training=None):
         B, T, C = ops.shape(x)
         q, k, v = ops.split(self.c_attn(x), 3, axis=-1)
@@ -215,14 +220,15 @@ class CausalSelfAttention(layers.Layer):
         output = ops.reshape(ops.transpose(output, (0, 2, 1, 3)), (B, T, C))
         return self.c_proj(output)
 
+
 class TransformerBlock(layers.Layer):
     def __init__(self, config, **kwargs):
         super().__init__(**kwargs)
         self.ln_1 = layers.LayerNormalization(epsilon=config.layer_norm_epsilon)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = layers.LayerNormalization(epsilon=config.layer_norm_epsilon)
-        self.ffn = SwiGLUFFN(config) # Using the SOTA FFN
-        
+        self.ffn = SwiGLUFFN(config)  # Using the SOTA FFN
+
         # SOTA Detail: Stochastic Depth for regularization
         self.stochastic_depth = layers.StochasticDepth(config.stochastic_depth_prob)
 
@@ -230,11 +236,12 @@ class TransformerBlock(layers.Layer):
         # Pre-LN architecture with Stochastic Depth
         attn_output = self.attn(self.ln_1(x), training=training)
         x = x + self.stochastic_depth(attn_output, training=training)
-        
+
         ffn_output = self.ffn(self.ln_2(x), training=training)
         x = x + self.stochastic_depth(ffn_output, training=training)
-        
+
         return x
+
 
 # Build and Compile with AdamW
 inputs = keras.Input(shape=(config.block_size, config.d_model))

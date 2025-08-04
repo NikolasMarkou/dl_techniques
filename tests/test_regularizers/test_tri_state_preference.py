@@ -10,8 +10,7 @@ import pytest
 import tensorflow as tf
 from keras.api.layers import Dense
 from keras.api.models import Sequential
-from dl_techniques.regularizers.tri_state_preference import (
-    TriStatePreferenceRegularizer, get_tri_state_regularizer)
+from dl_techniques.regularizers.tri_state_preference import TriStatePreferenceRegularizer
 
 
 @pytest.fixture
@@ -119,21 +118,10 @@ def test_config_serialization():
     assert new_reg.base_coefficient == original_reg.base_coefficient
 
 
-def test_factory_function():
-    """Test the get_tri_state_regularizer factory function."""
-    # Test default parameters
-    reg1 = get_tri_state_regularizer()
-    assert isinstance(reg1, TriStatePreferenceRegularizer)
-    assert reg1.scale == 1.0
-
-    # Test custom scale
-    reg2 = get_tri_state_regularizer(scale=2.0)
-    assert reg2.scale == 2.0
-
 
 def test_keras_integration():
     """Test integration with Keras model."""
-    regularizer = get_tri_state_regularizer(scale=1.0)
+    regularizer = TriStatePreferenceRegularizer(scale=1.0)
 
     # Create simple model with regularizer
     model = Sequential([

@@ -1,3 +1,51 @@
+"""
+This module provides a `StandardScaler` layer, a Keras-native implementation of
+standard (z-score) normalization, designed primarily for time series data and
+other sequential inputs.
+
+Standard scaling is a crucial preprocessing step that transforms data to have a
+mean of zero and a standard deviation of one. This is achieved by applying the
+formula: `(x - mean) / std_dev`. Normalizing the input data this way ensures that
+all features are on a comparable scale, which can significantly stabilize and
+accelerate the training of deep neural networks.
+
+Key Features and Mechanisms:
+
+1.  **On-the-Fly, Per-Batch Normalization:**
+    -   By default, this layer operates in a stateless, on-the-fly manner. For each
+        batch of data that passes through it, it computes the mean and standard
+        deviation *of that specific batch* along the specified feature axis.
+    -   This is particularly useful for non-stationary time series where the statistical
+        properties of the data may change over time, making a global, fixed scaling
+        less effective.
+
+2.  **Stateful Statistics Storage (`store_stats=True`):**
+    -   When `store_stats` is enabled, the layer becomes stateful. It creates
+        non-trainable weights (buffers) to store the mean and standard deviation
+        computed from the most recent batch.
+    -   This feature is essential for model persistence. When a model is saved and
+        re-loaded, these stored statistics are restored, allowing for consistent
+        behavior during inference without needing to re-compute statistics.
+
+3.  **Inverse Transformation:**
+    -   The layer includes a crucial `inverse_transform` method. This allows you to
+        take the normalized output of the model and convert it back to its original
+        data scale.
+    -   This is vital for interpreting model outputs, visualizing predictions in their
+        original units, and evaluating performance using metrics that are sensitive
+        to the data's scale. The method uses the statistics computed from the
+        last forward pass to ensure a perfect reconstruction.
+
+4.  **Robustness:**
+    -   It includes built-in robustness features, such as replacing `NaN` values before
+        computation and adding a small `epsilon` to the standard deviation to prevent
+        division by zero in cases of constant-valued features.
+
+This layer provides a self-contained, invertible, and backend-agnostic way to handle
+data normalization directly within the model graph, simplifying data preprocessing
+pipelines and ensuring that the normalization logic is saved with the model itself.
+"""
+
 import keras
 from keras import ops
 from typing import Optional, Any, Tuple

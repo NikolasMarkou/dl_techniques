@@ -75,7 +75,7 @@ Usage Examples:
     ...     d_model=768,
     ...     ffn_expansion_factor=8,  # Larger expansion
     ...     ffn_multiple_of=128,     # Hardware-friendly multiple
-    ...     dropout_prob=0.1,        # Regularization
+    ...     dropout_rate=0.1,        # Regularization
     ...     use_bias=False           # Memory efficiency
     ... )
 """
@@ -109,7 +109,7 @@ class SwiGLUFFN(keras.layers.Layer):
             Factor by which to expand the hidden dimension relative to d_model.
         ffn_multiple_of: int, default=256
             Round hidden dimension to this multiple for hardware efficiency.
-        dropout_prob: float, default=0.0
+        dropout_rate: float, default=0.0
             Dropout probability applied to the output.
         use_bias: bool, default=False
             Whether to use bias in linear projections.
@@ -131,19 +131,19 @@ class SwiGLUFFN(keras.layers.Layer):
             d_model: int,
             ffn_expansion_factor: int = 4,
             ffn_multiple_of: int = 256,
-            dropout_prob: float = 0.0,
+            dropout_rate: float = 0.0,
             use_bias: bool = False,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
         # Validate inputs
-        self._validate_inputs(d_model, ffn_expansion_factor, ffn_multiple_of, dropout_prob)
+        self._validate_inputs(d_model, ffn_expansion_factor, ffn_multiple_of, dropout_rate)
 
         self.d_model = d_model
         self.ffn_expansion_factor = ffn_expansion_factor
         self.ffn_multiple_of = ffn_multiple_of
-        self.dropout_prob = dropout_prob
+        self.dropout_rate = dropout_rate
         self.use_bias = use_bias
 
         # Calculate hidden dimension with proper rounding (2/3 rule from PaLM)
@@ -225,7 +225,7 @@ class SwiGLUFFN(keras.layers.Layer):
 
         # Dropout layer
         self.dropout = keras.layers.Dropout(
-            self.dropout_prob
+            self.dropout_rate
         )
 
         # Build sublayers
@@ -271,7 +271,7 @@ class SwiGLUFFN(keras.layers.Layer):
         output = self.down_proj(hidden)
 
         # Apply dropout if specified
-        if self.dropout_prob > 0.0:
+        if self.dropout_rate > 0.0:
             output = self.dropout(output, training=training)
 
         return output
@@ -287,7 +287,7 @@ class SwiGLUFFN(keras.layers.Layer):
             "d_model": self.d_model,
             "ffn_expansion_factor": self.ffn_expansion_factor,
             "ffn_multiple_of": self.ffn_multiple_of,
-            "dropout_prob": self.dropout_prob,
+            "dropout_prob": self.dropout_rate,
             "use_bias": self.use_bias,
         })
         return config

@@ -281,7 +281,7 @@ class TestSwinTransformerBlock:
         assert recreated_layer.shift_size == original_layer.shift_size
         assert recreated_layer.mlp_ratio == original_layer.mlp_ratio
         assert recreated_layer.qkv_bias == original_layer.qkv_bias
-        assert recreated_layer.drop_rate == original_layer.drop_rate
+        assert recreated_layer.dropout_rate == original_layer.drop_rate
         assert recreated_layer.attn_drop_rate == original_layer.attn_drop_rate
         assert recreated_layer.drop_path_rate == original_layer.drop_path_rate
         assert recreated_layer.act_layer == original_layer.act_layer

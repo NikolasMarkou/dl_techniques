@@ -1,5 +1,5 @@
 """
-This module implements the Stochastic Depth regularization technique as a custom Keras layer.
+This module implements the Stochastic Depth regularization technique.
 
 Stochastic Depth is a regularization method primarily used in very deep neural networks,
 particularly those with residual connections (e.g., ResNets, Vision Transformers). Its

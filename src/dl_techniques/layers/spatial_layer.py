@@ -1,139 +1,186 @@
+"""
+This module provides a `SpatialLayer`, a custom Keras layer that dynamically
+generates spatial coordinate grids and injects them into a model.
+
+In many computer vision tasks, particularly those involving complex spatial reasoning
+or generative models, it is beneficial for the network to have explicit knowledge of
+pixel locations. Standard convolutional networks build this understanding implicitly
+through their local receptive fields, but providing coordinate information directly
+can enhance performance. This layer serves as a "coordinate encoder," generating a
+normalized `(x, y)` coordinate for every pixel position.
+
+The layer is non-trainable; it does not learn any parameters from data. Instead, it
+functions as a pre-defined feature generator that operates in two main stages:
+
+1.  **Grid Creation (`build` phase):**
+    -   A low-resolution coordinate grid is created once when the layer is built.
+    -   This grid represents normalized `x` and `y` coordinates, typically ranging
+        from -0.5 to 0.5.
+    -   Crucially, these coordinates are then standardized (normalized to have zero
+        mean and unit standard deviation). This ensures that the coordinate features
+        are on a similar scale to the activations of other layers, promoting stable
+        training.
+
+2.  **Dynamic Resizing (`call` phase):**
+    -   During the forward pass, the layer takes an input tensor (e.g., a feature map
+        from a preceding layer).
+    -   It dynamically resizes its internal, low-resolution coordinate grid to match
+        the spatial dimensions (height and width) of the input tensor. This is done
+        using a specified interpolation method (`'nearest'` or `'bilinear'`).
+    -   The resized grid is then tiled to match the batch size of the input, producing
+        a final output tensor of shape `(batch_size, height, width, 2)`.
+
+This output tensor can then be concatenated with the original feature map, providing
+every subsequent layer with explicit information about the absolute position of each
+feature vector in the grid. This is a common technique in architectures like
+CoordConv and is also used in various generative models and attention mechanisms.
+"""
+
 import keras
 from keras import ops
-import tensorflow as tf
-from typing import Optional, Tuple
+from typing import Tuple, Optional, Any
 
 # ---------------------------------------------------------------------
 
 
 @keras.utils.register_keras_serializable()
 class SpatialLayer(keras.layers.Layer):
-    """
-    A custom Keras layer that generates and resizes spatial coordinate grids.
+    """A custom Keras layer that generates and resizes spatial coordinate grids.
 
-    This layer creates a normalized meshgrid of spatial coordinates that can be
-    resized and batched to match input tensor dimensions.
-
-    Attributes:
-        resolution (Tuple[int, int]): The initial resolution of the spatial grid.
-        resize_method (tf.image.ResizeMethod): Method used for resizing the grid.
-        xy_grid (Optional[tf.Tensor]): Preprocessed spatial coordinate grid.
+    This layer creates normalized coordinate grids (x, y) and resizes them to match
+    the input tensor dimensions. The coordinates range from -0.5 to +0.5 and are
+    normalized to have zero mean and unit standard deviation.
 
     Args:
-        resolution (Tuple[int, int], optional): Grid resolution. Defaults to (4, 4).
-        resize_method (tf.image.ResizeMethod, optional): Resize interpolation method.
-            Defaults to NEAREST_NEIGHBOR.
+        resolution: Tuple of integers specifying the initial grid resolution (height, width).
+            Defaults to (4, 4).
+        resize_method: String specifying the interpolation method for resizing.
+            Options: 'nearest', 'bilinear'. Defaults to 'nearest'.
+        **kwargs: Additional keyword arguments passed to the parent Layer class.
+
+    Input shape:
+        4D tensor with shape: (batch_size, height, width, channels)
+
+    Output shape:
+        4D tensor with shape: (batch_size, height, width, 2)
+        The last dimension contains the (x, y) coordinates.
+
+    Example:
+        >>> spatial_layer = SpatialLayer(resolution=(8, 8), resize_method='bilinear')
+        >>> input_tensor = keras.ops.ones((2, 64, 64, 3))
+        >>> coords = spatial_layer(input_tensor)
+        >>> print(coords.shape)  # (2, 64, 64, 2)
     """
 
     def __init__(
-        self,
-        resolution: Tuple[int, int] = (4, 4),
-        resize_method: tf.image.ResizeMethod = tf.image.ResizeMethod.NEAREST_NEIGHBOR,
-        **kwargs
-    ):
-        """
-        Initialize the SpatialLayer.
-
-        Args:
-            resolution (Tuple[int, int], optional): Grid resolution. Defaults to (4, 4).
-            resize_method (tf.image.ResizeMethod, optional): Resize interpolation method.
-                Defaults to NEAREST_NEIGHBOR.
-            **kwargs: Additional keyword arguments passed to the parent class.
-        """
+            self,
+            resolution: Tuple[int, int] = (4, 4),
+            resize_method: str = 'nearest',
+            **kwargs: Any
+    ) -> None:
         super().__init__(trainable=False, **kwargs)
-        self.xy_grid: Optional[tf.Tensor] = None
-        self.resolution: Tuple[int, int] = resolution
-        self.resize_method: tf.image.ResizeMethod = resize_method
+        self.resolution = resolution
+        self.resize_method = resize_method
+        self.xy_grid = None
 
-    def build(self, input_shape: tf.TensorShape) -> None:
-        """
-        Build the layer by creating and normalizing the spatial grid.
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Creates the coordinate grid during layer building.
 
         Args:
-            input_shape (tf.TensorShape): Shape of the input tensor.
+            input_shape: Shape tuple of the input tensor.
         """
-        # Create coordinate grids
-        x_grid = ops.linspace(start=-0.5, stop=0.5, num=self.resolution[0])
-        y_grid = ops.linspace(start=-0.5, stop=0.5, num=self.resolution[1])
+        # Create coordinate grids using keras.ops
+        x_grid = ops.linspace(
+            start=-0.5,
+            stop=0.5,
+            num=self.resolution[0]
+        )
+        y_grid = ops.linspace(
+            start=-0.5,
+            stop=0.5,
+            num=self.resolution[1]
+        )
 
         # Create meshgrid
         xx_grid, yy_grid = ops.meshgrid(x_grid, y_grid)
 
-        # Normalize the grids
+        # Normalize the grids to have zero mean and unit standard deviation
         xx_grid = (xx_grid - ops.mean(xx_grid)) / (ops.std(xx_grid) + 1e-7)
         yy_grid = (yy_grid - ops.mean(yy_grid)) / (ops.std(yy_grid) + 1e-7)
 
-        # Validate grid dimensions
-        tf.debugging.assert_rank(x=xx_grid, rank=2)
-        tf.debugging.assert_rank(x=yy_grid, rank=2)
-
-        # Prepare grids for later use
+        # Prepare grids for concatenation
         xx_grid = ops.expand_dims(xx_grid, axis=2)
         yy_grid = ops.expand_dims(yy_grid, axis=2)
-        self.xy_grid = ops.concatenate([xx_grid, yy_grid], axis=2)
-        self.xy_grid = ops.expand_dims(self.xy_grid, axis=0)
 
-        # Validate final grid dimensions
-        tf.debugging.assert_rank(x=self.xy_grid, rank=4)
+        # Combine x and y grids
+        self.xy_grid = ops.concatenate([xx_grid, yy_grid], axis=2)
+
+        # Add batch dimension
+        self.xy_grid = ops.expand_dims(self.xy_grid, axis=0)
 
         super().build(input_shape)
 
     def call(
-        self,
-        inputs: tf.Tensor,
-        training: Optional[bool] = None,
-        **kwargs
-    ) -> tf.Tensor:
-        """
-        Generate resized and batched spatial coordinate grids.
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None,
+            **kwargs: Any
+    ) -> keras.KerasTensor:
+        """Forward pass of the layer.
 
         Args:
-            inputs (tf.Tensor): Input tensor to match grid dimensions.
-            training (Optional[bool], optional): Training mode flag. Defaults to None.
+            inputs: Input tensor with shape (batch_size, height, width, channels).
+            training: Boolean indicating whether the layer should behave in training mode.
             **kwargs: Additional keyword arguments.
 
         Returns:
-            tf.Tensor: Resized and batched spatial coordinate grid.
+            Coordinate grid tensor with shape (batch_size, height, width, 2).
         """
-        shape = ops.shape(inputs)
-        batch_size, height, width = shape[0], shape[1], shape[2]
+        input_shape = ops.shape(inputs)
+        batch_size = input_shape[0]
+        height = input_shape[1]
+        width = input_shape[2]
 
-        # Resize grid to match input dimensions
-        xy_grid = tf.image.resize(
-            images=self.xy_grid,
+        # Resize the coordinate grid to match input spatial dimensions
+        xy_grid_resized = ops.image.resize(
+            image=self.xy_grid,
             size=(height, width),
-            method=self.resize_method
+            interpolation=self.resize_method,
+            data_format='channels_last'
         )
 
-        # Repeat grids to match batch size
-        xy_grid_batched = ops.repeat(xy_grid, axis=0, repeats=batch_size)
+        # Repeat grid to match batch size
+        xy_grid_batched = ops.repeat(
+            xy_grid_resized,
+            repeats=batch_size,
+            axis=0
+        )
 
         return xy_grid_batched
 
-    def compute_output_shape(self, input_shape: tf.TensorShape) -> tf.TensorShape:
-        """
-        Compute the output shape of the layer.
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Computes the output shape of the layer.
 
         Args:
-            input_shape (tf.TensorShape): Shape of the input tensor.
+            input_shape: Shape tuple of the input.
 
         Returns:
-            tf.TensorShape: Shape of the output tensor.
+            Output shape tuple.
         """
-        return input_shape[:-1] + (input_shape[-1] + 2,)
+        return input_shape[:-1] + (2,)
 
     def get_config(self) -> dict:
-        """
-        Get the configuration of the layer for serialization.
+        """Returns the configuration of the layer.
 
         Returns:
-            dict: Configuration dictionary containing layer parameters.
+            Dictionary containing the layer configuration.
         """
-        base_config = super().get_config()
-        base_config.update({
+        config = super().get_config()
+        config.update({
             'resolution': self.resolution,
             'resize_method': self.resize_method
         })
-        return base_config
+        return config
 
 # ---------------------------------------------------------------------
+

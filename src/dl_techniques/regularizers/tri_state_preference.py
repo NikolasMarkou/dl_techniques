@@ -31,7 +31,7 @@ gradient descent.
 
 import keras
 from keras import ops
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 
 # ---------------------------------------------------------------------
 # local imports
@@ -156,51 +156,5 @@ class TriStatePreferenceRegularizer(keras.regularizers.Regularizer):
             f"multiplier={self.multiplier}, "
             f"scale={self.scale})"
         )
-
-
-def get_tri_state_regularizer(
-    multiplier: Optional[float] = 1.0,
-    scale: Optional[float] = 1.0
-) -> TriStatePreferenceRegularizer:
-    """Factory function to create a tri-state preference regularizer instance.
-
-    This function provides a convenient way to create regularizer instances
-    with sensible defaults and parameter validation.
-
-    Args:
-        multiplier: Multiplier factor for the regularization term.
-            Higher values create stronger quantization pressure.
-            Defaults to 1.0.
-        scale: Scaling factor applied to weights before regularization.
-            Controls the effective range of the regularization.
-            Defaults to 1.0.
-
-    Returns:
-        An instance of the TriStatePreferenceRegularizer.
-
-    Raises:
-        ValueError: If multiplier or scale are not positive numbers.
-
-    Example:
-        >>> # Create regularizer with default parameters
-        >>> regularizer = get_tri_state_regularizer()
-        >>> dense_layer = keras.layers.Dense(64, kernel_regularizer=regularizer)
-        >>>
-        >>> # Create regularizer with stronger quantization pressure
-        >>> strong_regularizer = get_tri_state_regularizer(multiplier=2.0)
-        >>> conv_layer = keras.layers.Conv2D(
-        ...     32, 3, kernel_regularizer=strong_regularizer
-        ... )
-        >>>
-        >>> # Create regularizer with different scaling
-        >>> scaled_regularizer = get_tri_state_regularizer(
-        ...     multiplier=1.5, scale=0.8
-        ... )
-    """
-    return TriStatePreferenceRegularizer(multiplier=multiplier, scale=scale)
-
-
-# Alias for backward compatibility
-tri_state_regularizer = get_tri_state_regularizer
 
 # ---------------------------------------------------------------------

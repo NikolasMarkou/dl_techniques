@@ -194,7 +194,7 @@ class SwinTransformerBlock(keras.layers.Layer):
             use_bias=self.use_bias,
             out_dim=self.dim,
             act_layer=self.act_layer,
-            drop=self.drop_rate,
+            dropout_rate=self.drop_rate,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,

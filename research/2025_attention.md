@@ -249,33 +249,33 @@ SwiGLU consistently outperforms GELU/ReLU through its gating mechanism.
 class SwiGLUFFN(layers.Layer):
     def __init__(self, config, **kwargs):
         super().__init__(**kwargs)
-        
+
         # Calculate hidden dimension with proper rounding
         hidden_dim = int(config.d_model * config.ffn_expansion_factor * 2 / 3)
         # Round to multiple for hardware efficiency
         hidden_dim = config.ffn_multiple_of * ((hidden_dim + config.ffn_multiple_of - 1) // config.ffn_multiple_of)
-        
+
         # Three projections for SwiGLU
         self.gate_proj = layers.Dense(hidden_dim, use_bias=False)  # Gating
-        self.up_proj = layers.Dense(hidden_dim, use_bias=False)    # Value
+        self.up_proj = layers.Dense(hidden_dim, use_bias=False)  # Value
         self.down_proj = layers.Dense(config.d_model, use_bias=False)  # Output
-        
-        self.dropout = layers.Dropout(config.dropout_prob)
-        
+
+        self.dropout = layers.Dropout(config.dropout_rate)
+
     def call(self, x, training=None):
         # SwiGLU formula: Swish(xW₁) ⊗ xW₂
         gate = self.gate_proj(x)
         up = self.up_proj(x)
-        
+
         # Apply SiLU (Swish) activation to gate
         gate_activated = ops.silu(gate)  # x * sigmoid(x)
-        
+
         # Element-wise multiplication (gating)
         hidden = gate_activated * up
-        
+
         # Project back to model dimension
         output = self.down_proj(hidden)
-        
+
         return self.dropout(output, training=training)
 ```
 

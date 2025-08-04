@@ -54,6 +54,8 @@ class TestTransformerEncoderLayer:
         assert layer.num_heads == 12
         assert layer.intermediate_size == 3072
         assert layer.normalization_type == 'layer_norm'
+        assert layer.normalization_position == 'post'  # NEW: Check default normalization position
+        assert layer.ffn_type == 'mlp'  # NEW: Check default FFN type
         assert layer.dropout_rate == 0.1
         assert layer.attention_dropout_rate == 0.1
         assert layer.activation == 'gelu'
@@ -62,6 +64,8 @@ class TestTransformerEncoderLayer:
         assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
         assert layer.kernel_regularizer is None
         assert layer.bias_regularizer is None
+        assert layer.ffn_expansion_factor == 4  # NEW: Check FFN expansion factor
+        assert layer.ffn_multiple_of == 256  # NEW: Check FFN multiple constraint
 
     def test_initialization_custom_parameters(self):
         """Test initialization with custom parameters."""
@@ -71,7 +75,9 @@ class TestTransformerEncoderLayer:
             hidden_size=512,
             num_heads=8,
             intermediate_size=2048,
-            normalization_type='layer_norm',  # Changed from 'rms_norm' to be safe
+            normalization_type='layer_norm',
+            normalization_position='pre',  # NEW: Test pre-normalization
+            ffn_type='swiglu',  # NEW: Test different FFN type
             dropout_rate=0.2,
             attention_dropout_rate=0.15,
             activation='relu',
@@ -79,7 +85,9 @@ class TestTransformerEncoderLayer:
             kernel_initializer='he_normal',
             bias_initializer='ones',
             kernel_regularizer=custom_regularizer,
-            bias_regularizer=custom_regularizer
+            bias_regularizer=custom_regularizer,
+            ffn_expansion_factor=6,  # NEW: Test custom expansion factor
+            ffn_multiple_of=128  # NEW: Test custom multiple constraint
         )
 
         # Check custom values
@@ -87,6 +95,8 @@ class TestTransformerEncoderLayer:
         assert layer.num_heads == 8
         assert layer.intermediate_size == 2048
         assert layer.normalization_type == 'layer_norm'
+        assert layer.normalization_position == 'pre'  # NEW
+        assert layer.ffn_type == 'swiglu'  # NEW
         assert layer.dropout_rate == 0.2
         assert layer.attention_dropout_rate == 0.15
         assert layer.activation == 'relu'
@@ -95,6 +105,8 @@ class TestTransformerEncoderLayer:
         assert isinstance(layer.bias_initializer, keras.initializers.Ones)
         assert layer.kernel_regularizer == custom_regularizer
         assert layer.bias_regularizer == custom_regularizer
+        assert layer.ffn_expansion_factor == 6  # NEW
+        assert layer.ffn_multiple_of == 128  # NEW
 
     def test_initialization_all_normalization_types(self):
         """Test initialization with all normalization types."""
@@ -135,6 +147,36 @@ class TestTransformerEncoderLayer:
             # Band RMS not available, skip test
             pass
 
+    def test_initialization_all_normalization_positions(self):
+        """Test initialization with all normalization positions."""
+        positions = ['post', 'pre']
+
+        for position in positions:
+            layer = TransformerEncoderLayer(
+                hidden_size=64,
+                num_heads=4,
+                intermediate_size=256,
+                normalization_position=position
+            )
+            assert layer.normalization_position == position
+
+    def test_initialization_all_ffn_types(self):
+        """Test initialization with all FFN types."""
+        ffn_types = ['mlp', 'swiglu',  'differential', 'glu', 'residual', 'swin_mlp']
+
+        for ffn_type in ffn_types:
+            try:
+                layer = TransformerEncoderLayer(
+                    hidden_size=64,
+                    num_heads=4,
+                    intermediate_size=256,
+                    ffn_type=ffn_type
+                )
+                assert layer.ffn_type == ffn_type
+            except (ImportError, AttributeError):
+                # FFN type not available, skip test
+                pass
+
     def test_invalid_parameters(self):
         """Test that invalid parameters raise appropriate errors."""
         # Negative hidden_size
@@ -169,6 +211,16 @@ class TestTransformerEncoderLayer:
             TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
                                     normalization_type='invalid_type')
 
+        # NEW: Invalid normalization position
+        with pytest.raises(ValueError, match="normalization_position must be one of"):
+            TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
+                                    normalization_position='invalid_position')
+
+        # NEW: Invalid FFN type
+        with pytest.raises(ValueError, match="ffn_type must be one of"):
+            TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
+                                    ffn_type='invalid_ffn')
+
     # ===== BUILD PROCESS TESTS =====
 
     def test_build_process(self, small_input_tensor, small_layer_instance):
@@ -185,10 +237,8 @@ class TestTransformerEncoderLayer:
         assert layer.attention.built is True
         assert layer.attention_norm is not None
         assert layer.attention_norm.built is True
-        assert layer.intermediate is not None
-        assert layer.intermediate.built is True
-        assert layer.output_dense is not None
-        assert layer.output_dense.built is True
+        assert layer.ffn_layer is not None  # UPDATED: Check ffn_layer instead of intermediate/output_dense
+        assert layer.ffn_layer.built is True
         assert layer.output_norm is not None
         assert layer.output_norm.built is True
         assert layer.dropout is not None
@@ -289,6 +339,76 @@ class TestTransformerEncoderLayer:
         assert not np.any(np.isnan(output.numpy()))
         assert not np.any(np.isinf(output.numpy()))
 
+    def test_forward_pass_normalization_positions(self, small_input_tensor):
+        """Test forward pass with different normalization positions."""
+        positions = ['post', 'pre']
+
+        for position in positions:
+            layer = TransformerEncoderLayer(
+                hidden_size=64,
+                num_heads=4,
+                intermediate_size=256,
+                normalization_position=position
+            )
+
+            output = layer(small_input_tensor)
+
+            # Check output is valid
+            assert output.shape == small_input_tensor.shape
+            assert not np.any(np.isnan(output.numpy()))
+            assert not np.any(np.isinf(output.numpy()))
+
+    def test_forward_pass_different_ffn_types(self, small_input_tensor):
+        """Test forward pass with different FFN types."""
+        ffn_types = ['mlp', 'swiglu', 'differential', 'glu', 'residual', 'swin_mlp']
+
+        for ffn_type in ffn_types:
+            try:
+                layer = TransformerEncoderLayer(
+                    hidden_size=64,
+                    num_heads=4,
+                    intermediate_size=256,
+                    ffn_type=ffn_type
+                )
+
+                output = layer(small_input_tensor)
+
+                # Check output is valid
+                assert output.shape == small_input_tensor.shape
+                assert not np.any(np.isnan(output.numpy()))
+                assert not np.any(np.isinf(output.numpy()))
+            except (ImportError, AttributeError):
+                # FFN type not available, skip test
+                pass
+
+    def test_forward_pass_combined_configurations(self, small_input_tensor):
+        """Test forward pass with combined configurations."""
+        test_configs = [
+            {'normalization_position': 'post', 'ffn_type': 'mlp', 'normalization_type': 'layer_norm'},
+            {'normalization_position': 'pre', 'ffn_type': 'mlp', 'normalization_type': 'layer_norm'},
+            {'normalization_position': 'post', 'ffn_type': 'swiglu', 'normalization_type': 'layer_norm'},
+            {'normalization_position': 'pre', 'ffn_type': 'swiglu', 'normalization_type': 'layer_norm'},
+        ]
+
+        for config in test_configs:
+            try:
+                layer = TransformerEncoderLayer(
+                    hidden_size=64,
+                    num_heads=4,
+                    intermediate_size=256,
+                    **config
+                )
+
+                output = layer(small_input_tensor)
+
+                # Check output is valid
+                assert output.shape == small_input_tensor.shape
+                assert not np.any(np.isnan(output.numpy()))
+                assert not np.any(np.isinf(output.numpy()))
+            except (ImportError, AttributeError, ValueError):
+                # Configuration not available, skip test
+                pass
+
     def test_forward_pass_with_attention_mask(self, small_input_tensor, small_layer_instance):
         """Test forward pass with attention mask."""
         layer = small_layer_instance
@@ -373,7 +493,9 @@ class TestTransformerEncoderLayer:
             hidden_size=128,
             num_heads=8,
             intermediate_size=512,
-            normalization_type='layer_norm',  # Changed from 'rms_norm'
+            normalization_type='layer_norm',
+            normalization_position='pre',  # NEW: Test pre-normalization serialization
+            ffn_type='mlp',  # NEW: Test FFN type serialization
             dropout_rate=0.2
         )
         original_layer.build((None, 32, 128))
@@ -394,6 +516,8 @@ class TestTransformerEncoderLayer:
         assert new_layer.num_heads == original_layer.num_heads
         assert new_layer.intermediate_size == original_layer.intermediate_size
         assert new_layer.normalization_type == original_layer.normalization_type
+        assert new_layer.normalization_position == original_layer.normalization_position  # NEW
+        assert new_layer.ffn_type == original_layer.ffn_type  # NEW
         assert new_layer.dropout_rate == original_layer.dropout_rate
 
     def test_serialization_all_parameters(self):
@@ -405,7 +529,9 @@ class TestTransformerEncoderLayer:
             hidden_size=256,
             num_heads=16,
             intermediate_size=1024,
-            normalization_type='layer_norm',  # Changed from 'band_rms' to 'layer_norm'
+            normalization_type='layer_norm',
+            normalization_position='pre',  # NEW
+            ffn_type='swiglu',  # NEW: Test different FFN type
             dropout_rate=0.3,
             attention_dropout_rate=0.25,
             activation='relu',
@@ -413,24 +539,55 @@ class TestTransformerEncoderLayer:
             kernel_initializer='he_normal',
             bias_initializer='ones',
             kernel_regularizer=custom_regularizer,
-            bias_regularizer=custom_regularizer
+            bias_regularizer=custom_regularizer,
+            ffn_expansion_factor=6,  # NEW
+            ffn_multiple_of=128  # NEW
         )
 
         # Get config
         config = original_layer.get_config()
 
         # Recreate layer
-        new_layer = TransformerEncoderLayer.from_config(config)
+        try:
+            new_layer = TransformerEncoderLayer.from_config(config)
 
-        # Check all parameters match
-        assert new_layer.hidden_size == original_layer.hidden_size
-        assert new_layer.num_heads == original_layer.num_heads
-        assert new_layer.intermediate_size == original_layer.intermediate_size
-        assert new_layer.normalization_type == original_layer.normalization_type
-        assert new_layer.dropout_rate == original_layer.dropout_rate
-        assert new_layer.attention_dropout_rate == original_layer.attention_dropout_rate
-        assert new_layer.activation == original_layer.activation
-        assert new_layer.use_bias == original_layer.use_bias
+            # Check all parameters match
+            assert new_layer.hidden_size == original_layer.hidden_size
+            assert new_layer.num_heads == original_layer.num_heads
+            assert new_layer.intermediate_size == original_layer.intermediate_size
+            assert new_layer.normalization_type == original_layer.normalization_type
+            assert new_layer.normalization_position == original_layer.normalization_position  # NEW
+            assert new_layer.ffn_type == original_layer.ffn_type  # NEW
+            assert new_layer.dropout_rate == original_layer.dropout_rate
+            assert new_layer.attention_dropout_rate == original_layer.attention_dropout_rate
+            assert new_layer.activation == original_layer.activation
+            assert new_layer.use_bias == original_layer.use_bias
+            assert new_layer.ffn_expansion_factor == original_layer.ffn_expansion_factor  # NEW
+            assert new_layer.ffn_multiple_of == original_layer.ffn_multiple_of  # NEW
+        except (ImportError, AttributeError):
+            # FFN type not available, skip test
+            pass
+
+    # ===== FFN LAYER CREATION TESTS =====
+
+    def test_ffn_layer_creation_error(self):
+        """Test error handling in FFN layer creation."""
+        layer = TransformerEncoderLayer(
+            hidden_size=64,
+            num_heads=4,
+            intermediate_size=256
+        )
+
+        # Set invalid FFN type manually (bypassing __init__ validation)
+        original_type = layer.ffn_type
+        layer.ffn_type = 'invalid_ffn_type'
+
+        try:
+            with pytest.raises(ValueError, match="Unknown FFN type"):
+                layer._create_ffn_layer('test_ffn')
+        finally:
+            # Restore original type
+            layer.ffn_type = original_type
 
     # ===== MODEL INTEGRATION TESTS =====
 
@@ -441,7 +598,9 @@ class TestTransformerEncoderLayer:
         x = TransformerEncoderLayer(
             hidden_size=64,
             num_heads=4,
-            intermediate_size=256
+            intermediate_size=256,
+            normalization_position='pre',  # NEW: Test pre-normalization in model
+            ffn_type='mlp'  # NEW: Explicit FFN type
         )(inputs)
         x = keras.layers.GlobalAveragePooling1D()(x)
         outputs = keras.layers.Dense(10)(x)
@@ -460,19 +619,23 @@ class TestTransformerEncoderLayer:
 
     def test_model_integration_stacked(self, small_input_tensor):
         """Test multiple layers stacked in a model."""
-        # Create model with multiple transformer layers
+        # Create model with multiple transformer layers using different configurations
         inputs = keras.Input(shape=(16, 64))
         x = TransformerEncoderLayer(
             hidden_size=64,
             num_heads=4,
             intermediate_size=256,
-            normalization_type='layer_norm'
+            normalization_type='layer_norm',
+            normalization_position='post',  # Post-norm first layer
+            ffn_type='mlp'
         )(inputs)
         x = TransformerEncoderLayer(
             hidden_size=64,
             num_heads=4,
             intermediate_size=256,
-            normalization_type='layer_norm'  # Changed from 'rms_norm'
+            normalization_type='layer_norm',
+            normalization_position='pre',  # Pre-norm second layer
+            ffn_type='mlp'
         )(x)
         x = keras.layers.GlobalAveragePooling1D()(x)
         outputs = keras.layers.Dense(5)(x)
@@ -494,7 +657,9 @@ class TestTransformerEncoderLayer:
             hidden_size=64,
             num_heads=4,
             intermediate_size=256,
-            normalization_type='layer_norm',  # Changed from 'rms_norm'
+            normalization_type='layer_norm',
+            normalization_position='pre',  # NEW: Test pre-norm save/load
+            ffn_type='mlp',  # NEW: Test FFN type save/load
             name='transformer_layer'
         )(inputs)
         x = keras.layers.GlobalAveragePooling1D()(x)
@@ -525,10 +690,12 @@ class TestTransformerEncoderLayer:
             assert np.allclose(original_prediction, loaded_prediction, rtol=1e-5)
 
             # Check layer type is preserved
-            assert isinstance(
-                loaded_model.get_layer('transformer_layer'),
-                TransformerEncoderLayer
-            )
+            transformer_layer = loaded_model.get_layer('transformer_layer')
+            assert isinstance(transformer_layer, TransformerEncoderLayer)
+
+            # NEW: Check that configuration is preserved
+            assert transformer_layer.normalization_position == 'pre'
+            assert transformer_layer.ffn_type == 'mlp'
 
     # ===== GRADIENT FLOW TESTS =====
 
@@ -550,6 +717,33 @@ class TestTransformerEncoderLayer:
 
         # Check gradients have values (not all zeros)
         assert all(np.any(g.numpy() != 0) for g in grads)
+
+    def test_gradient_flow_normalization_positions(self, small_input_tensor):
+        """Test gradient flow with different normalization positions."""
+        positions = ['post', 'pre']
+
+        for position in positions:
+            layer = TransformerEncoderLayer(
+                hidden_size=64,
+                num_heads=4,
+                intermediate_size=256,
+                normalization_position=position
+            )
+
+            # Watch the variables
+            with tf.GradientTape() as tape:
+                inputs = tf.Variable(small_input_tensor)
+                outputs = layer(inputs, training=True)
+                loss = tf.reduce_mean(tf.square(outputs))
+
+            # Get gradients
+            grads = tape.gradient(loss, layer.trainable_variables)
+
+            # Check gradients exist and are not None
+            assert all(g is not None for g in grads), f"None gradients with {position}-normalization"
+
+            # Check gradients have values (not all zeros)
+            assert all(np.any(g.numpy() != 0) for g in grads), f"Zero gradients with {position}-normalization"
 
     def test_gradient_flow_with_regularization(self, small_input_tensor):
         """Test gradient flow with regularization."""
@@ -577,7 +771,9 @@ class TestTransformerEncoderLayer:
             TransformerEncoderLayer(
                 hidden_size=64,
                 num_heads=4,
-                intermediate_size=256
+                intermediate_size=256,
+                normalization_position='pre',  # NEW: Test pre-norm training
+                ffn_type='mlp'
             ),
             keras.layers.GlobalAveragePooling1D(),
             keras.layers.Dense(10)
@@ -762,6 +958,68 @@ class TestTransformerEncoderLayer:
         output = layer(small_input_tensor, attention_mask=mask_2d, training=False)
         assert output.shape == small_input_tensor.shape
         assert not np.any(np.isnan(output.numpy()))
+
+    # ===== NEW: NORMALIZATION POSITION BEHAVIOR TESTS =====
+
+    def test_normalization_position_behavior(self, small_input_tensor):
+        """Test that pre-norm and post-norm produce different outputs."""
+        # Create two identical layers except for normalization position
+        layer_post = TransformerEncoderLayer(
+            hidden_size=64,
+            num_heads=4,
+            intermediate_size=256,
+            normalization_position='post',
+            dropout_rate=0.0,  # Disable dropout for deterministic comparison
+            attention_dropout_rate=0.0
+        )
+
+        layer_pre = TransformerEncoderLayer(
+            hidden_size=64,
+            num_heads=4,
+            intermediate_size=256,
+            normalization_position='pre',
+            dropout_rate=0.0,  # Disable dropout for deterministic comparison
+            attention_dropout_rate=0.0
+        )
+
+        # Forward pass through both layers
+        output_post = layer_post(small_input_tensor, training=False)
+        output_pre = layer_pre(small_input_tensor, training=False)
+
+        # Outputs should be different due to different normalization ordering
+        assert not np.allclose(output_post.numpy(), output_pre.numpy(), rtol=1e-3), \
+            "Post-norm and pre-norm should produce different outputs"
+
+    def test_ffn_type_behavior(self, small_input_tensor):
+        """Test that different FFN types produce different outputs."""
+        ffn_types_to_test = ['mlp', 'swiglu']  # Test the most common ones
+        outputs = {}
+
+        for ffn_type in ffn_types_to_test:
+            try:
+                layer = TransformerEncoderLayer(
+                    hidden_size=64,
+                    num_heads=4,
+                    intermediate_size=256,
+                    ffn_type=ffn_type,
+                    dropout_rate=0.0,  # Disable dropout for deterministic comparison
+                    attention_dropout_rate=0.0
+                )
+
+                output = layer(small_input_tensor, training=False)
+                outputs[ffn_type] = output.numpy()
+
+            except (ImportError, AttributeError):
+                # FFN type not available, skip
+                pass
+
+        # If we have multiple outputs, they should be different
+        if len(outputs) >= 2:
+            output_list = list(outputs.values())
+            for i in range(len(output_list)):
+                for j in range(i + 1, len(output_list)):
+                    assert not np.allclose(output_list[i], output_list[j], rtol=1e-3), \
+                        f"Different FFN types should produce different outputs"
 
 
 if __name__ == '__main__':

@@ -7,6 +7,23 @@ through binary masking. This is particularly useful in scenarios where you want
 to prevent gradients from flowing through certain parts of your network during
 training.
 
+Key Features:
+------------
+- Binary mask-based gradient control
+- Preserves forward pass behavior
+- Training/inference mode awareness
+- Compatible with any tensor shape
+- Proper gradient handling
+- Backend-agnostic using keras.ops
+
+Applications:
+------------
+- Adversarial training
+- Feature disentanglement
+- Partial network freezing
+- Controlled feature learning
+- Gradient manipulation studies
+
 Architecture:
 ------------
 The layer implements a dual-path mechanism during training:
@@ -181,8 +198,6 @@ class SelectiveGradientMask(layers.Layer):
                     f"Range: [{mask_min}, {mask_max}]. Consider using binary mask (0, 1)."
                 )
 
-        # Training mode: Apply selective gradient masking
-        if training:
             # Create stopped gradient path for masked regions (mask = 1)
             stopped_path = ops.multiply(ops.stop_gradient(signal), mask)
 
@@ -248,4 +263,3 @@ class SelectiveGradientMask(layers.Layer):
             self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------
-

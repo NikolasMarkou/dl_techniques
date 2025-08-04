@@ -79,6 +79,7 @@ Usage Guidelines
 - lambda_coefficient should typically be in the range [1e-4, 1e-2]
 - Matrix scaling is recommended for networks with varying layer sizes
 """
+
 import keras
 from keras import ops
 from typing import Dict, Any, Optional, Union

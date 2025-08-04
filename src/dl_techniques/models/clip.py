@@ -294,7 +294,7 @@ class TransformerBlock(layers.Layer):
             d_model=self.d_model,
             ffn_expansion_factor=self.ffn_expansion_factor,
             ffn_multiple_of=self.ffn_multiple_of,
-            dropout_prob=self.dropout_prob,
+            dropout_rate=self.dropout_prob,
             name='ffn'
         )
 

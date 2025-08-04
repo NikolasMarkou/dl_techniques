@@ -1,3 +1,60 @@
+"""
+This module provides a `TransformerEncoderLayer`, a highly configurable and generic
+implementation of the fundamental building block of Transformer-based neural networks.
+
+This layer encapsulates the two primary sub-layers of a standard Transformer encoder:
+a multi-head self-attention mechanism and a position-wise feed-forward network. Both
+sub-layers are wrapped with residual connections and normalization, which are crucial
+for enabling the training of very deep networks.
+
+A key feature of this implementation is its flexibility. It is designed to serve as a
+versatile component for research and development, allowing for easy experimentation
+with different normalization techniques and feed-forward network architectures.
+
+Architectural Design (Configurable Normalization):
+
+This implementation supports both "post-normalization" (Post-LN) and "pre-normalization"
+(Pre-LN) architectures, configurable via the `normalization_position` parameter.
+
+**Post-Normalization (Post-LN)**: Used in the original "Attention Is All You Need" paper.
+- Operational flow: `output = Norm(SubLayer(x) + x)`
+- Flow: SubLayer -> Add residual -> Normalize
+
+**Pre-Normalization (Pre-LN)**: Often more stable for training deep networks.
+- Operational flow: `output = x + SubLayer(Norm(x))`
+- Flow: Normalize -> SubLayer -> Add residual
+
+The full flow through the layer depends on normalization position:
+
+**Post-LN Flow:**
+1.  **Self-Attention Block:** MultiHeadAttention(x) -> Add residual -> LayerNorm
+2.  **Feed-Forward Block:** FFN(attn_out) -> Add residual -> LayerNorm
+
+**Pre-LN Flow:**
+1.  **Self-Attention Block:** LayerNorm(x) -> MultiHeadAttention -> Add residual
+2.  **Feed-Forward Block:** LayerNorm(attn_out) -> FFN -> Add residual
+
+**Feed-Forward Network Options:**
+The FFN can be one of several configurable architectures:
+- 'mlp': Standard MLP with intermediate expansion
+- 'swiglu': SwiGLU activation with gating mechanism
+- 'differential': Differential FFN with separate positive/negative pathways
+- 'glu': Gated Linear Unit with sigmoid gating
+- 'residual': Residual block with skip connections
+- 'swin_mlp': Swin Transformer MLP variant
+
+Configurable Components:
+
+Major strengths of this layer include:
+- `normalization_type`: Easily swap normalization functions (layer_norm, rms_norm, etc.)
+- `normalization_position`: Choose between post-LN and pre-LN architectures
+- `ffn_type`: Choose from various feed-forward architectures for different use cases
+- Full parameter control for both attention and FFN components
+
+This configurability makes the layer an excellent tool for architectural experimentation
+and for building custom Transformer variants.
+"""
+
 import keras
 from typing import Optional, Union, Any, Dict, Tuple
 
@@ -9,17 +66,25 @@ from dl_techniques.utils.logger import logger
 from .norms.rms_norm import RMSNorm
 from .norms.band_rms import BandRMS
 
+# FFN imports
+from .ffn.mlp import MLPBlock
+from .ffn.swiglu_ffn import SwiGLUFFN
+from .ffn.diff_ffn import DifferentialFFN
+from .ffn.glu_ffn import GLUFFN
+from .ffn.residual_block import ResidualBlock
+from .ffn.swin_mlp import SwinMLP
+
 # ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
 class TransformerEncoderLayer(keras.layers.Layer):
     """
-    Generic transformer encoder layer with configurable normalization.
+    Generic transformer encoder layer with configurable normalization and FFN.
 
     This layer implements a standard transformer encoder block with:
     - Multi-head self-attention
-    - Feed-forward network
+    - Configurable feed-forward network
     - Residual connections
     - Configurable normalization
 
@@ -28,12 +93,23 @@ class TransformerEncoderLayer(keras.layers.Layer):
         num_heads: Integer, number of attention heads.
         intermediate_size: Integer, size of the intermediate (feed-forward) layer.
         normalization_type: String, type of normalization to use.
-            Available options depend on installed dependencies:
-            - 'layer_norm': Standard layer normalization (always available)
-            - 'batch_norm': Batch normalization (always available)
-            - 'rms_norm': Root Mean Square normalization (if RMSNorm is available)
-            - 'band_rms': Band-constrained RMS normalization (if BandRMS is available)
-            Defaults to 'layer_norm'.
+            Available options:
+            - 'layer_norm': Standard layer normalization (default)
+            - 'batch_norm': Batch normalization
+            - 'rms_norm': Root Mean Square normalization
+            - 'band_rms': Band-constrained RMS normalization
+        normalization_position: String, position of normalization layers.
+            Available options:
+            - 'post': Post-normalization (original Transformer, default)
+            - 'pre': Pre-normalization (often more stable for deep networks)
+        ffn_type: String, type of feed-forward network to use.
+            Available options:
+            - 'mlp': Standard MLP with intermediate expansion (default)
+            - 'swiglu': SwiGLU activation with gating mechanism
+            - 'differential': Differential FFN with separate pathways
+            - 'glu': Gated Linear Unit with sigmoid gating
+            - 'residual': Residual block with skip connections
+            - 'swin_mlp': Swin Transformer MLP variant
         dropout_rate: Float, dropout rate. Defaults to 0.1.
         attention_dropout_rate: Float, attention-specific dropout rate. Defaults to 0.1.
         activation: String or callable, activation function for feed-forward network.
@@ -45,6 +121,8 @@ class TransformerEncoderLayer(keras.layers.Layer):
             Defaults to 'zeros'.
         kernel_regularizer: Optional regularizer for kernel weights.
         bias_regularizer: Optional regularizer for bias weights.
+        ffn_expansion_factor: Integer, expansion factor for SwiGLU FFN. Defaults to 4.
+        ffn_multiple_of: Integer, multiple constraint for SwiGLU FFN. Defaults to 256.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
@@ -59,7 +137,9 @@ class TransformerEncoderLayer(keras.layers.Layer):
         ...     hidden_size=768,
         ...     num_heads=12,
         ...     intermediate_size=3072,
-        ...     normalization_type='layer_norm'
+        ...     normalization_type='layer_norm',
+        ...     normalization_position='pre',
+        ...     ffn_type='swiglu'
         ... )
         >>> outputs = layer(inputs)
         >>> print(outputs.shape)
@@ -72,6 +152,8 @@ class TransformerEncoderLayer(keras.layers.Layer):
             num_heads: int,
             intermediate_size: int,
             normalization_type: str = 'layer_norm',
+            normalization_position: str = 'post',
+            ffn_type: str = 'mlp',
             dropout_rate: float = 0.1,
             attention_dropout_rate: float = 0.1,
             activation: Union[str, callable] = 'gelu',
@@ -80,6 +162,8 @@ class TransformerEncoderLayer(keras.layers.Layer):
             bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            ffn_expansion_factor: int = 4,
+            ffn_multiple_of: int = 256,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -104,11 +188,21 @@ class TransformerEncoderLayer(keras.layers.Layer):
         if normalization_type not in valid_norm_types:
             raise ValueError(f"normalization_type must be one of {valid_norm_types}, got {normalization_type}")
 
+        valid_norm_positions = ['post', 'pre']
+        if normalization_position not in valid_norm_positions:
+            raise ValueError(f"normalization_position must be one of {valid_norm_positions}, got {normalization_position}")
+
+        valid_ffn_types = ['mlp', 'swiglu', 'differential', 'glu', 'residual', 'swin_mlp']
+        if ffn_type not in valid_ffn_types:
+            raise ValueError(f"ffn_type must be one of {valid_ffn_types}, got {ffn_type}")
+
         # Store configuration parameters
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.intermediate_size = intermediate_size
         self.normalization_type = normalization_type
+        self.normalization_position = normalization_position
+        self.ffn_type = ffn_type
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
         self.activation = activation
@@ -117,12 +211,13 @@ class TransformerEncoderLayer(keras.layers.Layer):
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+        self.ffn_expansion_factor = ffn_expansion_factor
+        self.ffn_multiple_of = ffn_multiple_of
 
         # Initialize layers to None - will be created in build()
         self.attention = None
         self.attention_norm = None
-        self.intermediate = None
-        self.output_dense = None
+        self.ffn_layer = None
         self.output_norm = None
         self.dropout = None
         self.attention_dropout = None
@@ -156,6 +251,129 @@ class TransformerEncoderLayer(keras.layers.Layer):
         else:
             raise ValueError(f"Unknown normalization type: {self.normalization_type}")
 
+    def _get_ffn_params(self, ffn_type: str, name: str) -> Dict[str, Any]:
+        """Get parameters for FFN layer creation based on type.
+
+        Args:
+            ffn_type: Type of FFN layer.
+            name: Name for the layer.
+
+        Returns:
+            Dictionary of parameters for the specific FFN type.
+        """
+        if ffn_type == 'mlp':
+            # MLPBlock parameters (known to work except bias_regularizer)
+            return {
+                'hidden_dim': self.intermediate_size,
+                'output_dim': self.hidden_size,
+                'activation': self.activation,
+                'dropout_rate': self.dropout_rate,
+                'use_bias': self.use_bias,
+                'kernel_initializer': self.kernel_initializer,
+                'bias_initializer': self.bias_initializer,
+                'kernel_regularizer': self.kernel_regularizer,
+                'name': name
+            }
+        elif ffn_type == 'swiglu':
+            # SwiGLUFFN - be very conservative, only pass core parameters
+            return {
+                'd_model': self.hidden_size,
+                'ffn_expansion_factor': self.ffn_expansion_factor,
+                'ffn_multiple_of': self.ffn_multiple_of,
+                'name': name
+            }
+        elif ffn_type == 'differential':
+            # DifferentialFFN parameters
+            return {
+                'hidden_dim': self.intermediate_size,
+                'output_dim': self.hidden_size,
+                'branch_activation': self.activation,
+                'dropout_rate': self.dropout_rate,
+                'use_bias': self.use_bias,
+                'kernel_initializer': self.kernel_initializer,
+                'bias_initializer': self.bias_initializer,
+                'kernel_regularizer': self.kernel_regularizer,
+                'name': name
+            }
+        elif ffn_type == 'glu':
+            # GLUFFN parameters
+            return {
+                'hidden_dim': self.intermediate_size,
+                'output_dim': self.hidden_size,
+                'activation': keras.activations.get(self.activation),
+                'use_bias': self.use_bias,
+                'kernel_initializer': self.kernel_initializer,
+                'bias_initializer': self.bias_initializer,
+                'kernel_regularizer': self.kernel_regularizer,
+                'name': name
+            }
+        elif ffn_type == 'residual':
+            # ResidualBlock parameters
+            return {
+                'hidden_dim': self.intermediate_size,
+                'output_dim': self.hidden_size,
+                'dropout_rate': self.dropout_rate,
+                'use_bias': self.use_bias,
+                'kernel_initializer': self.kernel_initializer,
+                'bias_initializer': self.bias_initializer,
+                'kernel_regularizer': self.kernel_regularizer,
+                'name': name
+            }
+        elif ffn_type == 'swin_mlp':
+            # SwinMLP parameters
+            return {
+                'hidden_dim': self.intermediate_size,
+                'out_dim': self.hidden_size,
+                'activation': self.activation,
+                'dropout_rate': self.dropout_rate,
+                'use_bias': self.use_bias,
+                'kernel_initializer': self.kernel_initializer,
+                'bias_initializer': self.bias_initializer,
+                'kernel_regularizer': self.kernel_regularizer,
+                'name': name
+            }
+        else:
+            raise ValueError(f"Unknown FFN type: {ffn_type}")
+
+    def _create_ffn_layer(self, name: str) -> keras.layers.Layer:
+        """Create a feed-forward network layer based on the specified type.
+
+        Args:
+            name: Name for the FFN layer.
+
+        Returns:
+            An FFN layer instance.
+        """
+        # Get parameters for this FFN type
+        params = self._get_ffn_params(self.ffn_type, name)
+
+        try:
+            if self.ffn_type == 'mlp':
+                return MLPBlock(**params)
+            elif self.ffn_type == 'swiglu':
+                return SwiGLUFFN(**params)
+            elif self.ffn_type == 'differential':
+                return DifferentialFFN(**params)
+            elif self.ffn_type == 'glu':
+                return GLUFFN(**params)
+            elif self.ffn_type == 'residual':
+                return ResidualBlock(**params)
+            elif self.ffn_type == 'swin_mlp':
+                return SwinMLP(**params)
+            else:
+                raise ValueError(f"Unknown FFN type: {self.ffn_type}")
+        except (TypeError, ValueError) as e:
+            # Log the issue and provide helpful error message
+            logger.warning(f"Failed to create {self.ffn_type} layer: {e}")
+            logger.warning(f"Attempted parameters: {list(params.keys())}")
+
+            # If creation fails, provide a more informative error
+            raise ValueError(
+                f"Failed to create {self.ffn_type} layer. "
+                f"This might be due to parameter incompatibility or missing dependencies. "
+                f"Original error: {e}"
+            )
+
     def build(self, input_shape: Tuple[int, ...]) -> None:
         """Build the transformer layer components.
 
@@ -187,27 +405,8 @@ class TransformerEncoderLayer(keras.layers.Layer):
         # Attention layer normalization
         self.attention_norm = self._create_normalization_layer('attention_norm')
 
-        # Feed-forward network
-        self.intermediate = keras.layers.Dense(
-            self.intermediate_size,
-            activation=self.activation,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name='intermediate'
-        )
-
-        self.output_dense = keras.layers.Dense(
-            self.hidden_size,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name='output'
-        )
+        # Feed-forward network (configurable)
+        self.ffn_layer = self._create_ffn_layer('ffn')
 
         # Output layer normalization
         self.output_norm = self._create_normalization_layer('output_norm')
@@ -222,12 +421,7 @@ class TransformerEncoderLayer(keras.layers.Layer):
         # Build sublayers
         self.attention.build(query_shape=input_shape, value_shape=input_shape)
         self.attention_norm.build(input_shape)
-        self.intermediate.build(input_shape)
-
-        # Output layer takes intermediate output
-        intermediate_shape = list(input_shape)
-        intermediate_shape[-1] = self.intermediate_size
-        self.output_dense.build(tuple(intermediate_shape))
+        self.ffn_layer.build(input_shape)
         self.output_norm.build(input_shape)
 
         super().build(input_shape)
@@ -252,8 +446,7 @@ class TransformerEncoderLayer(keras.layers.Layer):
         Returns:
             Output tensor of shape [batch_size, seq_length, hidden_size]
         """
-        # For now, let's handle only 3D masks to avoid shape issues
-        # TODO: Add proper 2D mask processing later
+        # Handle attention mask processing
         processed_mask = None
         if attention_mask is not None:
             if len(attention_mask.shape) == 3:
@@ -267,22 +460,45 @@ class TransformerEncoderLayer(keras.layers.Layer):
                 logger.warning(f"Skipping 2D attention mask of shape {attention_mask.shape}. Use 3D mask instead.")
                 processed_mask = None
 
-        # Multi-head attention with residual connection
-        attention_output = self.attention(
-            query=inputs,
-            value=inputs,  # value = query for self-attention
-            key=inputs,  # key = query for self-attention
-            attention_mask=processed_mask,
-            training=training
-        )
-        attention_output = self.attention_dropout(attention_output, training=training)
-        attention_output = self.attention_norm(attention_output + inputs, training=training)
+        if self.normalization_position == 'post':
+            # Post-normalization: SubLayer(x) -> Add residual -> Normalize
 
-        # Feed-forward network with residual connection
-        intermediate_output = self.intermediate(attention_output, training=training)
-        layer_output = self.output_dense(intermediate_output, training=training)
-        layer_output = self.dropout(layer_output, training=training)
-        layer_output = self.output_norm(layer_output + attention_output, training=training)
+            # Multi-head attention with residual connection
+            attention_output = self.attention(
+                query=inputs,
+                value=inputs,  # value = query for self-attention
+                key=inputs,  # key = query for self-attention
+                attention_mask=processed_mask,
+                training=training
+            )
+            attention_output = self.attention_dropout(attention_output, training=training)
+            attention_output = self.attention_norm(attention_output + inputs, training=training)
+
+            # Feed-forward network with residual connection
+            ffn_output = self.ffn_layer(attention_output, training=training)
+
+            layer_output = self.output_norm(ffn_output + attention_output, training=training)
+
+        else:  # pre-normalization
+            # Pre-normalization: Normalize -> SubLayer(x) -> Add residual
+
+            # Multi-head attention with residual connection
+            normalized_inputs = self.attention_norm(inputs, training=training)
+            attention_output = self.attention(
+                query=normalized_inputs,
+                value=normalized_inputs,  # value = query for self-attention
+                key=normalized_inputs,  # key = query for self-attention
+                attention_mask=processed_mask,
+                training=training
+            )
+            attention_output = self.attention_dropout(attention_output, training=training)
+            attention_output = attention_output + inputs  # Add residual
+
+            # Feed-forward network with residual connection
+            normalized_attention = self.output_norm(attention_output, training=training)
+            ffn_output = self.ffn_layer(normalized_attention, training=training)
+
+            layer_output = ffn_output + attention_output  # Add residual
 
         return layer_output
 
@@ -313,6 +529,8 @@ class TransformerEncoderLayer(keras.layers.Layer):
             'num_heads': self.num_heads,
             'intermediate_size': self.intermediate_size,
             'normalization_type': self.normalization_type,
+            'normalization_position': self.normalization_position,
+            'ffn_type': self.ffn_type,
             'dropout_rate': self.dropout_rate,
             'attention_dropout_rate': self.attention_dropout_rate,
             'activation': self.activation,
@@ -321,6 +539,8 @@ class TransformerEncoderLayer(keras.layers.Layer):
             'bias_initializer': keras.initializers.serialize(self.bias_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
             'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
+            'ffn_expansion_factor': self.ffn_expansion_factor,
+            'ffn_multiple_of': self.ffn_multiple_of,
         })
         return config
 
