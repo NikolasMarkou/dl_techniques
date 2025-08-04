@@ -1,8 +1,59 @@
 """
-TabM (Tabular Model) Implementation for Keras 3.x
+This module provides the `TabMModel`, a flexible and powerful Keras Model for tabular
+data that integrates various efficient deep ensemble architectures.
 
-This module implements the TabM architecture for tabular deep learning,
-including various ensemble mechanisms and feature processing strategies.
+The `TabMModel` serves as a high-level orchestrator, combining a preprocessing pipeline
+for numerical and categorical features with a configurable MLP backbone that can
+operate either as a standard single model or as a high-performance deep ensemble.
+It is designed to be a versatile tool for tackling a wide range of tabular data
+problems, from simple classification and regression to more complex tasks requiring
+robust uncertainty estimation.
+
+Architectural Variants (`arch_type`):
+
+The model's behavior is primarily controlled by the `arch_type` parameter, which
+selects from several pre-configured architectures:
+
+-   **`'plain'` (Standard MLP):**
+    -   This is a baseline, non-ensemble architecture. It functions as a standard
+        Multi-Layer Perceptron, providing a reference point for evaluating the
+        benefits of ensembling.
+
+-   **`'tabm'` (Full Efficient Ensemble):**
+    -   This is the main ensemble architecture. It uses the `LinearEfficientEnsemble`
+        for its hidden layers, which employs a shared kernel with rank-1 perturbations
+        to create diversity among the `k` ensemble members in a parameter-efficient way.
+    -   The output layer uses `NLinear` to give each of the `k` members its own
+        independent prediction head.
+
+-   **`'tabm-mini'` (Minimal Ensemble Adapter):**
+    -   This is a more lightweight ensemble variant. It uses a standard MLP backbone
+        where all `k` members *share the exact same weights*.
+    -   Diversity is introduced *only* at the input layer via the `ScaleEnsemble`
+        adapter, which applies a unique, learnable scaling factor to the input features
+        for each member. This is a very parameter-efficient way to create an ensemble,
+        relying on the idea that slightly different initial inputs will lead the
+        shared network down different optimization paths.
+
+-   **`'tabm-packed'` / `'tabm-normal'` etc.:**
+    -   These represent other potential variations, for instance, by changing the
+        initialization distribution of the `ScaleEnsemble` adapter.
+
+Key Features:
+
+1.  **Integrated Preprocessing:** The model internally handles the one-hot encoding
+    of categorical features, simplifying the data pipeline. It seamlessly combines
+    numerical and categorical inputs into a single feature vector.
+
+2.  **Batched Ensembling:** All ensemble variants operate in a "batched" or "implicit"
+    manner. The `k` ensemble members are represented along an additional dimension
+    in the tensors, allowing all members to be trained in parallel within a single
+    model forward/backward pass.
+
+3.  **Factory Functions and Helpers:** The module includes several factory functions
+    (`create_tabm_plain`, `create_tabm_ensemble`, etc.) to simplify the instantiation
+    of different model variants, as well as a helper function to automatically configure
+    a model based on the properties of a given dataset.
 """
 
 import keras
@@ -16,549 +67,10 @@ from typing import Dict, List, Literal, Optional, Tuple, Union, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.one_hot_encoding import OneHotEncoding
+from dl_techniques.layers.tabm_blocks import (
+    ScaleEnsemble, NLinear, TabMBackbone)
 
 # ---------------------------------------------------------------------
-
-class ScaleEnsemble(keras.layers.Layer):
-    """Enhanced ensemble adapter with learnable scaling weights.
-
-    This layer implements efficient learnable scaling for ensemble members,
-    inspired by the project's scaling layer patterns with improved initialization
-    and regularization support.
-
-    Args:
-        k: Number of ensemble members.
-        input_dim: Input feature dimension.
-        init_distribution: Initialization distribution ('normal' or 'random-signs').
-        kernel_initializer: Initializer for the scaling weights.
-        kernel_regularizer: Optional regularizer for scaling weights.
-        **kwargs: Additional layer arguments.
-    """
-
-    def __init__(
-            self,
-            k: int,
-            input_dim: int,
-            init_distribution: Literal['normal', 'random-signs'] = 'normal',
-            kernel_initializer: Union[str, keras.initializers.Initializer] = 'ones',
-            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            **kwargs
-    ) -> None:
-        super().__init__(**kwargs)
-        self.k = k
-        self.input_dim = input_dim
-        self.init_distribution = init_distribution
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-
-        # Adjust initializer based on distribution type
-        if init_distribution == 'random-signs':
-            self.kernel_initializer = keras.initializers.RandomUniform(
-                minval=-1.0, maxval=1.0, seed=None
-            )
-        elif init_distribution == 'normal':
-            self.kernel_initializer = keras.initializers.RandomNormal(
-                mean=0.0, stddev=0.1, seed=None
-            )
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the scaling weights with proper initialization."""
-        self.weight = self.add_weight(
-            shape=(self.k, self.input_dim),
-            initializer=self.kernel_initializer,
-            regularizer=self.kernel_regularizer,
-            trainable=True,
-            name='ensemble_weight'
-        )
-        super().build(input_shape)
-
-    def call(self, inputs: Any) -> Any:
-        """Apply ensemble scaling to inputs.
-
-        Args:
-            inputs: Input tensor of shape (batch_size, k, input_dim).
-
-        Returns:
-            Scaled tensor of shape (batch_size, k, input_dim).
-        """
-        # Efficient broadcasting: inputs (B, K, D) * weight (K, D) -> (B, K, D)
-        return ops.multiply(inputs, ops.expand_dims(self.weight, axis=0))
-
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer."""
-        return input_shape
-
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            "k": self.k,
-            "input_dim": self.input_dim,
-            "init_distribution": self.init_distribution,
-            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
-        })
-        return config
-
-
-class LinearEfficientEnsemble(keras.layers.Layer):
-    """Efficient ensemble linear layer with separate input/output scaling.
-
-    This layer implements efficient ensemble linear transformations with optional
-    input and output scaling, following the project's patterns for robust layer design.
-
-    Args:
-        units: Output dimension.
-        k: Number of ensemble members.
-        use_bias: Whether to use bias.
-        ensemble_scaling_in: Whether to use input scaling.
-        ensemble_scaling_out: Whether to use output scaling.
-        kernel_initializer: Initializer for the main weights.
-        bias_initializer: Initializer for bias.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional layer arguments.
-    """
-
-    def __init__(
-            self,
-            units: int,
-            k: int,
-            use_bias: bool = True,
-            ensemble_scaling_in: bool = True,
-            ensemble_scaling_out: bool = True,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            **kwargs
-    ) -> None:
-        super().__init__(**kwargs)
-        self.units = units
-        self.k = k
-        self.use_bias = use_bias
-        self.ensemble_scaling_in = ensemble_scaling_in
-        self.ensemble_scaling_out = ensemble_scaling_out
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.bias_initializer = keras.initializers.get(bias_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the ensemble linear layer weights."""
-        input_dim = input_shape[-1]
-
-        # Main weight matrix shared across ensemble members
-        self.kernel = self.add_weight(
-            shape=(input_dim, self.units),
-            initializer=self.kernel_initializer,
-            regularizer=self.kernel_regularizer,
-            trainable=True,
-            name='kernel'
-        )
-
-        # Input scaling weights
-        if self.ensemble_scaling_in:
-            self.r = self.add_weight(
-                shape=(self.k, input_dim),
-                initializer='ones',
-                trainable=True,
-                name='input_scaling'
-            )
-
-        # Output scaling weights
-        if self.ensemble_scaling_out:
-            self.s = self.add_weight(
-                shape=(self.k, self.units),
-                initializer='ones',
-                trainable=True,
-                name='output_scaling'
-            )
-
-        # Bias weights
-        if self.use_bias:
-            self.bias = self.add_weight(
-                shape=(self.k, self.units),
-                initializer=self.bias_initializer,
-                regularizer=self.bias_regularizer,
-                trainable=True,
-                name='bias'
-            )
-
-        super().build(input_shape)
-
-    def call(self, inputs: Any) -> Any:
-        """Forward pass through efficient ensemble layer.
-
-        Args:
-            inputs: Input tensor of shape (batch_size, k, input_dim).
-
-        Returns:
-            Output tensor of shape (batch_size, k, units).
-        """
-        x = inputs
-
-        # Apply input scaling if enabled
-        if self.ensemble_scaling_in:
-            x = ops.multiply(x, ops.expand_dims(self.r, axis=0))
-
-        # Apply main linear transformation efficiently
-        # Use einsum for better performance and clarity
-        x = ops.einsum('bki,iu->bku', x, self.kernel)
-
-        # Apply output scaling if enabled
-        if self.ensemble_scaling_out:
-            x = ops.multiply(x, ops.expand_dims(self.s, axis=0))
-
-        # Add bias if enabled
-        if self.use_bias:
-            x = ops.add(x, ops.expand_dims(self.bias, axis=0))
-
-        return x
-
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], int, int]:
-        """Compute the output shape of the layer."""
-        return (input_shape[0], input_shape[1], self.units)
-
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            "units": self.units,
-            "k": self.k,
-            "use_bias": self.use_bias,
-            "ensemble_scaling_in": self.ensemble_scaling_in,
-            "ensemble_scaling_out": self.ensemble_scaling_out,
-            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
-            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
-            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
-            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
-        })
-        return config
-
-
-class NLinear(keras.layers.Layer):
-    """N parallel linear layers for ensemble output with enhanced efficiency.
-
-    This layer implements efficient parallel linear transformations for ensemble
-    outputs using optimized tensor operations.
-
-    Args:
-        n: Number of parallel linear layers.
-        input_dim: Input dimension.
-        output_dim: Output dimension per linear layer.
-        use_bias: Whether to use bias.
-        kernel_initializer: Initializer for weights.
-        bias_initializer: Initializer for bias.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional layer arguments.
-    """
-
-    def __init__(
-            self,
-            n: int,
-            input_dim: int,
-            output_dim: int,
-            use_bias: bool = True,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            **kwargs
-    ) -> None:
-        super().__init__(**kwargs)
-        self.n = n
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.use_bias = use_bias
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.bias_initializer = keras.initializers.get(bias_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the parallel linear layer weights."""
-        self.kernels = self.add_weight(
-            shape=(self.n, self.input_dim, self.output_dim),
-            initializer=self.kernel_initializer,
-            regularizer=self.kernel_regularizer,
-            trainable=True,
-            name='kernels'
-        )
-
-        if self.use_bias:
-            self.biases = self.add_weight(
-                shape=(self.n, self.output_dim),
-                initializer=self.bias_initializer,
-                regularizer=self.bias_regularizer,
-                trainable=True,
-                name='biases'
-            )
-
-        super().build(input_shape)
-
-    def call(self, inputs: Any) -> Any:
-        """Forward pass through N parallel linear layers.
-
-        Args:
-            inputs: Input tensor of shape (batch_size, n, input_dim).
-
-        Returns:
-            Output tensor of shape (batch_size, n, output_dim).
-        """
-        # Efficient parallel matrix multiplication using einsum
-        outputs = ops.einsum('bni,nio->bno', inputs, self.kernels)
-
-        if self.use_bias:
-            outputs = ops.add(outputs, ops.expand_dims(self.biases, axis=0))
-
-        return outputs
-
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], int, int]:
-        """Compute the output shape of the layer."""
-        return (input_shape[0], self.n, self.output_dim)
-
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            "n": self.n,
-            "input_dim": self.input_dim,
-            "output_dim": self.output_dim,
-            "use_bias": self.use_bias,
-            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
-            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
-            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
-            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
-        })
-        return config
-
-
-class MLPBlock(keras.layers.Layer):
-    """MLP block with efficient ensemble support and enhanced configurability.
-
-    This layer implements a single MLP block that can work in both plain and ensemble
-    modes with proper regularization and initialization support.
-
-    Args:
-        units: Number of units in the hidden layer.
-        k: Number of ensemble members (None for plain MLP).
-        activation: Activation function.
-        dropout_rate: Dropout rate.
-        use_bias: Whether to use bias.
-        kernel_initializer: Initializer for weights.
-        bias_initializer: Initializer for bias.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional layer arguments.
-    """
-
-    def __init__(
-            self,
-            units: int,
-            k: Optional[int] = None,
-            activation: str = 'relu',
-            dropout_rate: float = 0.0,
-            use_bias: bool = True,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            **kwargs
-    ) -> None:
-        super().__init__(**kwargs)
-        self.units = units
-        self.k = k
-        self.activation = keras.activations.get(activation)
-        self.dropout_rate = dropout_rate
-        self.use_bias = use_bias
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.bias_initializer = keras.initializers.get(bias_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
-
-        # Layers will be built in build()
-        self.linear = None
-        self.dropout = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the MLP block layers."""
-        if self.k is None:
-            # Plain linear layer
-            self.linear = keras.layers.Dense(
-                self.units,
-                use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                bias_regularizer=self.bias_regularizer,
-                name='linear'
-            )
-        else:
-            # Efficient ensemble layer
-            self.linear = LinearEfficientEnsemble(
-                self.units,
-                self.k,
-                use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                bias_regularizer=self.bias_regularizer,
-                name='linear'
-            )
-
-        if self.dropout_rate > 0:
-            self.dropout = keras.layers.Dropout(self.dropout_rate)
-
-        super().build(input_shape)
-
-    def call(self, inputs: Any, training: Optional[bool] = None) -> Any:
-        """Forward pass through MLP block.
-
-        Args:
-            inputs: Input tensor.
-            training: Training mode flag.
-
-        Returns:
-            Output tensor after linear transformation, activation, and dropout.
-        """
-        x = self.linear(inputs)
-        x = self.activation(x)
-
-        if self.dropout_rate > 0 and self.dropout is not None:
-            x = self.dropout(x, training=training)
-
-        return x
-
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer."""
-        if self.k is None:
-            return (input_shape[0], self.units)
-        else:
-            return (input_shape[0], self.k, self.units)
-
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            "units": self.units,
-            "k": self.k,
-            "activation": keras.activations.serialize(self.activation),
-            "dropout_rate": self.dropout_rate,
-            "use_bias": self.use_bias,
-            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
-            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
-            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
-            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
-        })
-        return config
-
-
-class TabMBackbone(keras.layers.Layer):
-    """TabM backbone MLP with ensemble support and proper layer management.
-
-    This layer implements the core TabM backbone using a stack of MLP blocks
-    with proper weight sharing and ensemble support.
-
-    Args:
-        hidden_dims: List of hidden layer dimensions.
-        k: Number of ensemble members (None for plain MLP).
-        activation: Activation function.
-        dropout_rate: Dropout rate.
-        use_bias: Whether to use bias.
-        kernel_initializer: Initializer for weights.
-        bias_initializer: Initializer for bias.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional layer arguments.
-    """
-
-    def __init__(
-            self,
-            hidden_dims: List[int],
-            k: Optional[int] = None,
-            activation: str = 'relu',
-            dropout_rate: float = 0.0,
-            use_bias: bool = True,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            **kwargs
-    ) -> None:
-        super().__init__(**kwargs)
-        self.hidden_dims = hidden_dims
-        self.k = k
-        self.activation = activation
-        self.dropout_rate = dropout_rate
-        self.use_bias = use_bias
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.bias_initializer = keras.initializers.get(bias_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
-
-        # Blocks will be built in build()
-        self.blocks = []
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the backbone MLP blocks."""
-        self.blocks = []
-        for i, units in enumerate(self.hidden_dims):
-            block = MLPBlock(
-                units=units,
-                k=self.k,
-                activation=self.activation,
-                dropout_rate=self.dropout_rate,
-                use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                bias_regularizer=self.bias_regularizer,
-                name=f'block_{i}'
-            )
-            self.blocks.append(block)
-
-        super().build(input_shape)
-
-    def call(self, inputs: Any, training: Optional[bool] = None) -> Any:
-        """Forward pass through backbone MLP.
-
-        Args:
-            inputs: Input tensor.
-            training: Training mode flag.
-
-        Returns:
-            Output tensor after passing through all MLP blocks.
-        """
-        x = inputs
-        for block in self.blocks:
-            x = block(x, training=training)
-        return x
-
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer."""
-        shape = input_shape
-        for block in self.blocks:
-            shape = block.compute_output_shape(shape)
-        return shape
-
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            "hidden_dims": self.hidden_dims,
-            "k": self.k,
-            "activation": self.activation,
-            "dropout_rate": self.dropout_rate,
-            "use_bias": self.use_bias,
-            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
-            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
-            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
-            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
-        })
-        return config
-
 
 class TabMModel(keras.Model):
     """TabM (Tabular Model) implementation with various ensemble architectures.
@@ -975,68 +487,6 @@ def create_tabm_mini(
         k=k,
         **kwargs
     )
-
-
-class TabMLoss(keras.losses.Loss):
-    """Custom loss for TabM ensemble training with enhanced efficiency.
-
-    Args:
-        base_loss: Base loss function to use.
-        share_training_batches: Whether batches are shared across ensemble members.
-        name: Loss name.
-    """
-
-    def __init__(
-            self,
-            base_loss: Union[str, keras.losses.Loss] = 'mse',
-            share_training_batches: bool = True,
-            name: str = 'tabm_loss',
-            **kwargs
-    ) -> None:
-        super().__init__(name=name, **kwargs)
-        self.base_loss = keras.losses.get(base_loss)
-        self.share_training_batches = share_training_batches
-
-    def call(self, y_true: Any, y_pred: Any) -> Any:
-        """Compute loss for TabM ensemble predictions.
-
-        Args:
-            y_true: True labels with shape (batch_size,) or (batch_size, n_classes).
-            y_pred: Ensemble predictions with shape (batch_size, k, n_outputs).
-
-        Returns:
-            Computed loss value.
-        """
-        # Get shapes for efficient operations
-        batch_size = ops.shape(y_pred)[0]
-        k = ops.shape(y_pred)[1]
-        n_outputs = ops.shape(y_pred)[-1]
-
-        # Flatten ensemble predictions: (batch_size, k, n_outputs) -> (batch_size * k, n_outputs)
-        y_pred_flat = ops.reshape(y_pred, (batch_size * k, n_outputs))
-
-        if self.share_training_batches:
-            # Repeat true labels for each ensemble member efficiently
-            if len(ops.shape(y_true)) == 1:
-                # For 1D labels: (batch_size,) -> (batch_size * k,)
-                y_true_expanded = ops.repeat(y_true, k, axis=0)
-            else:
-                # For multi-dimensional labels: (batch_size, n_classes) -> (batch_size * k, n_classes)
-                y_true_expanded = ops.repeat(y_true, k, axis=0)
-        else:
-            # Labels are already arranged for each ensemble member
-            y_true_expanded = y_true
-
-        return self.base_loss(y_true_expanded, y_pred_flat)
-
-    def get_config(self) -> Dict[str, Any]:
-        """Get loss configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            'base_loss': keras.losses.serialize(self.base_loss),
-            'share_training_batches': self.share_training_batches,
-        })
-        return config
 
 
 def ensemble_predict(

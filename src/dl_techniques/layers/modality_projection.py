@@ -1,17 +1,52 @@
 """
-Modality Projection Layer for nanoVLM.
+This module provides the `ModalityProjection` layer, a critical component for
+multimodal architectures like Vision-Language Models (VLMs).
 
-This module implements a modality projection layer that projects visual features
-to language embedding space using pixel shuffle for token reduction followed by
-linear projection.
+Its primary function is to act as a "bridge" between the visual and textual
+modalities. It takes high-dimensional feature vectors from a vision encoder (e.g.,
+the output of a Vision Transformer) and transforms them into a format that is
+compatible with a language model's embedding space. This alignment is essential for
+the language model to be able to "understand" and reason about the visual input.
+
+This layer achieves this alignment through a two-stage process that prioritizes
+computational efficiency:
+
+1.  **Efficient Token Reduction via Pixel Shuffle:**
+    -   Before any learned projection, the layer first reduces the number of visual
+        tokens. This is a crucial optimization for handling high-resolution visual
+        features, as the computational cost of attention in the subsequent language
+        model is quadratic with respect to the sequence length.
+    -   Instead of using pooling or a strided convolution (which discard information),
+        it employs `PixelShuffle` (a space-to-depth operation). This operation
+        rearranges spatial information into the channel dimension, effectively merging
+        small blocks of tokens (e.g., a 2x2 block) into a single, richer token. This
+        reduces the token count significantly while preserving all the original
+        information.
+
+2.  **Cross-Modality Linear Projection:**
+    -   After the token sequence has been shortened, the resulting feature vectors
+        are passed through a standard linear (`Dense`) layer.
+    -   This is the main projection step, which learns a mapping from the (rearranged)
+        visual feature space to the target `output_dim`. This `output_dim` is typically
+        chosen to match the embedding dimension of the language model that will
+        receive these features.
+
+3.  **Optional Post-Processing:**
+    -   To stabilize the output and introduce additional non-linearity, the layer can
+        optionally apply a `GELU` activation and a `LayerNormalization` layer. Layer
+        normalization is standard practice in Transformer-based architectures to
+        ensure the outputs are well-conditioned for the subsequent model layers.
+
+In essence, this layer provides a computationally efficient and effective method to
+not only align visual and textual representations but also to reduce the sequence
+length of visual tokens, making the overall VLM more performant.
 """
-
 
 import keras
 from typing import Optional, Tuple, Union, Any, Dict
 
 # ---------------------------------------------------------------------
-# lolca imports
+# local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger

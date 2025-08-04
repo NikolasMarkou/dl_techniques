@@ -1,12 +1,52 @@
+"""
+This module provides a `OneHotEncoding` layer, a custom Keras layer that performs
+one-hot encoding for multiple categorical features simultaneously.
+
+One-hot encoding is a standard and essential preprocessing step for machine learning models
+that work with categorical data. It converts integer-based categorical labels
+(e.g., 0, 1, 2) into a binary vector format where only one bit is "hot" (set to 1),
+representing the specific category. This prevents the model from assuming a false
+ordinal relationship between categories (i.e., that category 2 is "greater" than
+category 1).
+
+While this operation can be done in an offline preprocessing step, implementing it
+as a Keras layer offers significant advantages, which this implementation provides.
+
+Key Features and Architectural Benefits:
+
+1.  **Model Encapsulation:**
+    -   By making one-hot encoding a layer, the preprocessing logic becomes an integral
+        part of the model itself.
+    -   This simplifies deployment and inference pipelines, as the model is self-contained.
+        You can feed it raw categorical integers, and it will handle the conversion
+        internally, eliminating the need to manage a separate preprocessing step in
+        production.
+
+2.  **Multi-Feature Handling:**
+    -   This layer is explicitly designed to handle tabular data with multiple
+        categorical columns. The `cardinalities` list directly corresponds to the
+        number of unique categories in each input feature column.
+    -   It processes all features in a single `call`, making it a clean and unified
+        interface for tabular data.
+
+3.  **Efficient and Vectorized Operation:**
+    -   The layer iterates through each categorical feature and applies the backend-agnostic
+        and highly optimized `keras.ops.one_hot` function.
+    -   The resulting one-hot vectors for each feature are then efficiently combined
+        using a single `keras.ops.concatenate` operation at the end. This approach
+        leverages the performance of the underlying backend (TensorFlow, JAX, or PyTorch)
+        for fast, vectorized computation.
+
+The operational flow is as follows:
+-   The layer is initialized with a list of `cardinalities`, one for each input feature.
+-   During the forward pass, it takes a batch of integer-encoded data of shape `(batch_size, num_features)`.
+-   It loops through each feature column, creating a one-hot vector of the specified cardinality.
+-   Finally, it concatenates all these vectors along the last axis to produce a single, wide one-hot encoded tensor.
+"""
+
 import keras
 from keras import ops
 from typing import Dict, List, Optional, Tuple, Any
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
