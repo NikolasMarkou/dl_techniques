@@ -1,29 +1,70 @@
 """
-Enhanced Data Loader with Expert-Recommended Class Balancing
+This module provides a suite of advanced data handling utilities designed to address
+the common and critical problem of class imbalance in machine learning datasets. It
+is built around the expert-recommended philosophy of "fixing the data first" — that
+is, prioritizing data-level balancing techniques over complex, often less stable,
+loss-level adjustments.
 
-This module provides enhanced data loading capabilities that implement the expert
-recommendation of "fixing the data first" through data-level balancing rather
-than aggressive loss-level weighting.
+By manipulating the dataset composition *before* training, this module aims to create
+a more balanced and representative training set. This approach often leads to more
+stable training, better generalization, and models that are less biased towards the
+majority class.
 
-Key Features:
-    - Intelligent class balancing strategies (undersample, oversample, hybrid)
-    - Stratified dataset splitting to maintain class distribution
-    - Comprehensive class distribution analysis
-    - Data quality monitoring and validation
-    - Enhanced patch extraction with balance-aware sampling
+The module is composed of a set of cohesive, single-responsibility classes that work
+together to analyze, split, and balance a dataset:
 
-Expert Recommendation Applied:
-    "Fix the data first: Use data-level undersampling to create a balanced
-    training set (e.g., 1:10 or 1:5 ratio)."
+1.  **`DataBalanceAnalyzer` (The Diagnostic Tool):**
+    -   This class serves as the first step in the pipeline. It takes a list of
+        annotations and performs a comprehensive analysis of the class distribution.
+    -   It calculates key metrics like class counts, ratios, and the imbalance ratio,
+        and provides a qualitative assessment (e.g., "excellent," "severe_imbalance").
+    -   Crucially, it generates actionable recommendations, such as suggesting
+        undersampling or oversampling, guiding the user on the best course of action.
+
+2.  **`BalancingStrategy` (The Core Balancing Logic):**
+    -   This is an abstract base class with several concrete implementations that
+        encapsulate different data-level balancing techniques:
+        -   `UnderSamplingStrategy`: Reduces the number of samples from the majority class.
+          This is often the expert-recommended first approach as it is simple and
+          effective.
+        -   `OverSamplingStrategy`: Increases the number of samples from the minority
+          class, typically by creating augmented duplicates.
+        -   `HybridBalancingStrategy`: A more nuanced approach that combines moderate
+          undersampling of the majority class with moderate oversampling of the
+          minority class.
+
+3.  **`StratifiedDataSplitter` (Leakage-Free Splitting):**
+    -   A utility for splitting the dataset into training, validation, and test sets.
+    -   It performs a *stratified* split, which ensures that the original class
+        distribution is preserved across all splits. This is vital for obtaining
+        reliable validation and test metrics that accurately reflect the model's
+        performance on the original, imbalanced data distribution.
+
+4.  **`SmartPatchSampler` and `BalancedDatasetConfig` (Configuration and Application):**
+    -   These classes provide a framework for configuring and applying the balancing
+        strategies in a structured way.
+    -   `BalancedDatasetConfig` allows for the declarative definition of a complete
+        balancing pipeline (e.g., which strategy to use, target ratios, etc.).
+    -   `SmartPatchSampler` demonstrates how these balancing principles can be extended
+        to more complex sampling scenarios, such as extracting patches from images in a
+        balance-aware manner.
+
+Together, these utilities provide a robust, end-to-end workflow for diagnosing and
+remedying class imbalance at the data level, promoting more stable and effective
+model training.
 """
 
 import json
 import numpy as np
 from typing import Dict, List, Tuple, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 class DataBalanceAnalyzer:
     """
@@ -594,3 +635,5 @@ def apply_expert_balancing(annotations: List[Dict],
 
     logger.info("✅ Expert-recommended balancing applied successfully")
     return balanced_annotations
+
+# ---------------------------------------------------------------------

@@ -1,14 +1,14 @@
 import numpy as np
+from typing import Optional
 from keras import datasets, utils
-from typing import Tuple, Optional
+
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-
-from .common import normalize_images, get_data_shape, Dataset
+from .common import normalize_images, Dataset
 
 # ---------------------------------------------------------------------
 
