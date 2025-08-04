@@ -1,11 +1,48 @@
 """
-Custom Keras Layers for Scaling and Multiplication Operations
-============================================================
+This module provides a specialized Keras layer, `LearnableMultiplier`, for implementing
+learnable, element-wise scaling operations. It allows a network to adaptively scale
+feature maps, either globally or on a per-channel basis, providing a flexible
+building block for modern neural network architectures.
 
-This module provides specialized Keras layers for learnable scaling operations:
+The primary purpose of this layer is to introduce a simple, data-driven scaling
+factor into a model's computation graph. Instead of using a fixed scalar or a
+complex transformation (like a `Dense` layer), this layer learns a parameter `gamma`
+that multiplies the entire input tensor. This can be used to dynamically adjust the
+magnitude of activations, effectively allowing the network to learn the importance of
+certain features or pathways. It is conceptually similar to the learnable `gamma`
+parameter in `BatchNormalization` or `LayerNormalization`, but offered as a
+standalone layer.
 
-- LearnableMultiplier: Creates trainable multipliers (global or per-channel) with
-  configurable constraints
+Key Features and Mechanisms:
+
+1.  **Learnable Scaling Parameter (`gamma`):** The core of the layer is a trainable
+    weight `gamma` that performs the element-wise multiplication.
+
+2.  **Two Operational Modes (`multiplier_type`):**
+    -   **`GLOBAL`:** A single scalar `gamma` is learned and broadcasted across the
+        entire input tensor. This uniformly scales all features, learning a global
+        importance score for the entire tensor.
+    -   **`CHANNEL`:** A vector `gamma` is learned with a size equal to the number of
+        input channels (the last dimension). Each channel is multiplied by its own
+        unique `gamma` value, allowing the network to independently re-weight each
+        feature map.
+
+3.  **Sensible Defaults for Stability:**
+    -   **Initializer:** Defaults to `ones`, meaning the layer initially acts as an
+        identity function (`output = 1 * input`). This is crucial for stable
+        training, as it ensures that inserting the layer into a network does not
+        drastically change the signal propagation at the beginning of training.
+    -   **Constraint:** Defaults to `non_neg`, ensuring the learned multipliers are
+        always zero or positive. This is useful for preventing the layer from
+        flipping the sign of features and allows it to function as a "soft gate" that
+        can only attenuate or amplify signals.
+
+Common Use Cases:
+-   **Gating Residual Connections:** Used in residual blocks to learn how much of the
+    residual to add: `output = x + LearnableMultiplier(type='GLOBAL')(residual_block(x))`.
+-   **Feature Re-weighting:** Dynamically adjusting the importance of different channels
+    before they are fused or combined with other features.
+-   **Simple Attention:** Acting as a very simple channel-wise attention mechanism.
 """
 
 import keras

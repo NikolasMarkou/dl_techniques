@@ -4,7 +4,7 @@ import keras
 import os
 import tempfile
 
-from dl_techniques.layers.window_attention import WindowAttention
+from dl_techniques.layers.attention.window_attention import WindowAttention
 
 
 class TestWindowAttention:

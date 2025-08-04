@@ -31,7 +31,7 @@ from typing import List, Tuple, Optional
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.mobile_mqa import MobileMQA
+from dl_techniques.layers.attention.mobile_mqa import MobileMQA
 from dl_techniques.layers.universal_inverted_bottleneck import UIB
 
 # ---------------------------------------------------------------------

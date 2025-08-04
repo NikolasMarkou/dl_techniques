@@ -49,16 +49,6 @@ Example Usage:
     x = MultiHeadAttention(embed_dim=256, num_heads=4)(inputs)
     model = keras.Model(inputs=inputs, outputs=x)
     ```
-
-Implementation Notes:
-    - Uses efficient matrix operations for Q, K, V computation
-    - Scales attention scores by 1/sqrt(head_dim) for stability
-    - Supports both training and inference modes
-    - Maintains numerical stability with proper masking values
-    - Compatible with model saving/loading through proper serialization
-
-Author: DL-Techniques Project
-Version: 1.0.0
 """
 
 import keras

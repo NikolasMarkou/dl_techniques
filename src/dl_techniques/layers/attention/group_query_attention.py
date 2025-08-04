@@ -54,8 +54,8 @@ from typing import Optional, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from .rope import RotaryPositionEmbedding
 from dl_techniques.utils.logger import logger
+from ..rope import RotaryPositionEmbedding
 
 # ---------------------------------------------------------------------
 

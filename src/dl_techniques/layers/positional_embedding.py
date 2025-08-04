@@ -1,9 +1,42 @@
+"""
+This module provides a `PositionalEmbedding` layer, a fundamental component for
+sequence-processing models like Transformers, implemented in Keras.
+
+In many sequence models, especially Transformers, the core mechanisms (like self-attention)
+are inherently order-agnostic; they treat the input as a "bag of tokens" without any
+innate sense of position. This layer addresses this by adding a unique, trainable
+vector to each position in an input sequence. This allows the model to learn the
+significance of word order and relative positioning directly from the data.
+
+Key Features and Mechanisms:
+
+1.  **Learnable Embeddings:**
+    Unlike fixed sinusoidal embeddings, the positional vectors in this layer are
+    trainable weights. This gives the model the flexibility to discover optimal
+    positional representations for a specific task and dataset, rather than relying
+    on a predefined mathematical function.
+
+2.  **Handling Variable Sequence Lengths:**
+    The layer is designed to handle input sequences of variable lengths up to the
+    configured `max_seq_len`. During the forward pass, it dynamically slices its
+    internal embedding table to match the length of the incoming sequence before
+    adding the positional vectors. This makes it efficient and flexible for use
+    with batched data where sequences may have different lengths.
+
+The operational flow of the layer is as follows:
+-   An internal embedding table of shape `(max_seq_len, dim)` is created and learned.
+-   For a given input tensor of shape `(batch_size, seq_len, dim)`, the layer takes
+    the first `seq_len` vectors from its internal table.
+-   These positional vectors are broadcasted and added to the input tensor.
+-   Dropout is applied to the resulting tensor.
+"""
+
 import keras
 from keras import ops
 from keras import layers
-from keras import initializers
 from typing import Optional, Dict, Any, Union
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PositionalEmbedding(keras.layers.Layer):
@@ -204,3 +237,5 @@ class PositionalEmbedding(keras.layers.Layer):
         """
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
+
+# ---------------------------------------------------------------------

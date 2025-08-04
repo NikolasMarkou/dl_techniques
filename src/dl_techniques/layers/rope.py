@@ -95,8 +95,7 @@ Notes:
 """
 
 import keras
-from typing import Optional, Union, Any, Tuple
-from keras import layers, ops
+from typing import Optional, Any, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -108,7 +107,7 @@ from dl_techniques.utils.logger import logger
 
 
 @keras.saving.register_keras_serializable()
-class RotaryPositionEmbedding(layers.Layer):
+class RotaryPositionEmbedding(keras.layers.Layer):
     """Rotary Position Embedding layer for attention mechanisms.
 
     Rotary Position Embedding (RoPE) integrates positional information by rotating
@@ -231,20 +230,20 @@ class RotaryPositionEmbedding(layers.Layer):
         # Create frequency tensor: 1 / (theta ^ (2i / rope_dim)) for i in [0, freq_dim)
         inv_freq = 1.0 / (
             self.rope_theta ** (
-                ops.arange(0, freq_dim, dtype='float32') * 2.0 / self.rope_dim
+                keras.ops.arange(0, freq_dim, dtype='float32') * 2.0 / self.rope_dim
             )
         )
 
         # Position indices: [0, 1, 2, ..., max_seq_len-1]
-        positions = ops.arange(self.max_seq_len, dtype='float32')
+        positions = keras.ops.arange(self.max_seq_len, dtype='float32')
 
         # Outer product to get all position-frequency combinations
         # Shape: (max_seq_len, freq_dim)
-        freqs = ops.outer(positions, inv_freq)
+        freqs = keras.ops.outer(positions, inv_freq)
 
         # Create cos and sin tables
-        cos_table = ops.cos(freqs)
-        sin_table = ops.sin(freqs)
+        cos_table = keras.ops.cos(freqs)
+        sin_table = keras.ops.sin(freqs)
 
         # Store as non-trainable weights for proper serialization
         self.cos_cached = self.add_weight(
@@ -283,7 +282,7 @@ class RotaryPositionEmbedding(layers.Layer):
             Output tensor with same shape as input, with RoPE applied.
         """
         # Get sequence length from input
-        seq_len = ops.shape(inputs)[2]
+        seq_len = keras.ops.shape(inputs)[2]
 
         # Early return if no RoPE dimensions
         if self.rope_dim == 0:
@@ -322,14 +321,14 @@ class RotaryPositionEmbedding(layers.Layer):
         rope_pairs = self.rope_dim // 2
 
         # Get the dynamic shape and construct new shape
-        input_shape = ops.shape(x_rope)
+        input_shape = keras.ops.shape(x_rope)
         batch_size = input_shape[0]
         num_heads = input_shape[1]
         seq_len_dynamic = input_shape[2]
 
         # Create new shape for reshaping
         new_shape = [batch_size, num_heads, seq_len_dynamic, rope_pairs, 2]
-        x_rope_reshaped = ops.reshape(x_rope, new_shape)
+        x_rope_reshaped = keras.ops.reshape(x_rope, new_shape)
 
         # Extract the two elements of each complex pair
         x1 = x_rope_reshaped[..., 0]  # Real-like component
@@ -341,19 +340,19 @@ class RotaryPositionEmbedding(layers.Layer):
         rotated_2 = x1 * sin + x2 * cos
 
         # Stack the rotated components back together
-        x_rope_rotated = ops.stack([rotated_1, rotated_2], axis=-1)
+        x_rope_rotated = keras.ops.stack([rotated_1, rotated_2], axis=-1)
 
         # Reshape back to original rope dimensions
         # From: (batch, heads, seq_len, rope_pairs, 2)
         # To: (batch, heads, seq_len, rope_dim)
-        x_rope_rotated = ops.reshape(
+        x_rope_rotated = keras.ops.reshape(
             x_rope_rotated,
             [batch_size, num_heads, seq_len_dynamic, self.rope_dim]
         )
 
         # Concatenate rotated and pass-through dimensions
         if self.rope_dim < self.head_dim:
-            return ops.concatenate([x_rope_rotated, x_pass], axis=-1)
+            return keras.ops.concatenate([x_rope_rotated, x_pass], axis=-1)
         else:
             return x_rope_rotated
 

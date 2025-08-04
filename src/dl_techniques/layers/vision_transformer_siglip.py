@@ -2,11 +2,15 @@ import keras
 from keras import ops
 from typing import Optional, Tuple, Union
 
-from .patch_embedding import PatchEmbedding2D
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
 from .positional_embedding import PositionalEmbedding
 from .vision_transformer import VisionTransformerLayer
-from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class SigLIPVisionTransformer(keras.layers.Layer):
@@ -320,3 +324,5 @@ class SigLIPVisionTransformer(keras.layers.Layer):
             patch_tokens,
             [batch_size, patch_height, patch_width, self.embed_dim]
         )
+
+# ---------------------------------------------------------------------

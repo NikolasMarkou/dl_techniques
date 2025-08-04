@@ -311,3 +311,5 @@ class SwiGLUFFN(keras.layers.Layer):
         for weight in self.weights:
             total_params += weight.shape.num_elements()
         return total_params
+
+# ---------------------------------------------------------------------

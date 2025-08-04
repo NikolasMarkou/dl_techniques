@@ -1,7 +1,46 @@
+"""
+This module provides Keras layers for applying Laplacian filters to image data,
+a fundamental technique in classical image processing for edge detection.
+
+The Laplacian operator is a second-order derivative filter that is highly sensitive
+to rapid changes in intensity. In the context of images, this makes it an excellent
+tool for edge detection, as it highlights regions like edges, corners, and lines
+where pixel values change abruptly. The output of a Laplacian filter is typically
+zero in areas of constant intensity, positive on one side of an edge, and negative on
+the other side, creating a characteristic 'zero-crossing' at the edge itself.
+
+Since the second derivative is very sensitive to noise, the Laplacian operator is
+almost always combined with a Gaussian smoothing filter first to reduce noise before
+edge detection. This module implements this concept through several common approximations:
+
+-   **Difference of Gaussians (DoG):** A simple and efficient approximation where a
+    Gaussian-blurred version of the image is subtracted from the original.
+-   **Laplacian of Gaussian (LoG):** A more direct approach where a single kernel that
+    combines both the Gaussian smoothing and the Laplacian differentiation is convolved
+    with the image.
+-   **Discrete Kernel:** The use of a small, fixed integer kernel (e.g., a 3x3 matrix)
+    that directly approximates the Laplacian operator.
+
+This module offers two layers to leverage these techniques:
+
+1.  **`LaplacianFilter`:** A straightforward implementation based exclusively on the
+    Difference of Gaussians (DoG) method. It uses an internal `GaussianFilter` layer
+    and is simple to use for general-purpose edge detection.
+
+2.  **`AdvancedLaplacianFilter`:** A more flexible and powerful layer that allows the user
+    to explicitly choose between the three different implementation methods ('dog', 'log',
+    or 'kernel'). This enables experimentation with different trade-offs between
+    computational efficiency, filter accuracy, and kernel size.
+
+It's important to note that these layers implement fixed, non-trainable filters. Their
+parameters (the kernel shapes) are determined by mathematical formulas, not learned
+from data. They serve as classical feature extractors that can be seamlessly integrated
+into a modern deep learning pipeline.
+"""
+
 import keras
 import numpy as np
-import tensorflow as tf
-from typing import Tuple, Union, List, Optional, Sequence
+from typing import Tuple, Union, List, Optional, Sequence, Any
 
 # ---------------------------------------------------------------------
 # local imports
@@ -23,6 +62,16 @@ class LaplacianFilter(keras.layers.Layer):
 
     The implementation uses a difference of Gaussians (DoG) approach, which
     is a common approximation of the Laplacian of Gaussian.
+
+    Args:
+        kernel_size: Tuple of two integers specifying the height and width of the 2D kernel.
+        strides: Tuple of two integers specifying the strides of the convolution.
+        sigma: Standard deviation for the Gaussian kernel. If float, same sigma is used for
+              both dimensions. If tuple, (sigma_height, sigma_width) are used.
+        scale_factor: Scaling factor for the Laplacian response.
+        kernel_initializer: Initializer for the kernel weights.
+        kernel_regularizer: Regularizer for the kernel weights.
+        **kwargs: Additional keyword arguments passed to the parent class constructor.
     """
 
     def __init__(
@@ -37,16 +86,6 @@ class LaplacianFilter(keras.layers.Layer):
     ):
         """
         Initialize the LaplacianFilter layer.
-
-        Args:
-            kernel_size: Tuple of two integers specifying the height and width of the 2D kernel.
-            strides: Tuple of two integers specifying the strides of the convolution.
-            sigma: Standard deviation for the Gaussian kernel. If float, same sigma is used for
-                  both dimensions. If tuple, (sigma_height, sigma_width) are used.
-            scale_factor: Scaling factor for the Laplacian response.
-            kernel_initializer: Initializer for the kernel weights.
-            kernel_regularizer: Regularizer for the kernel weights.
-            **kwargs: Additional keyword arguments passed to the parent class constructor.
         """
         super().__init__(**kwargs)
 
@@ -77,12 +116,12 @@ class LaplacianFilter(keras.layers.Layer):
         # Initialize the Gaussian filter
         self.gaussian_filter = None
 
-    def build(self, input_shape: tf.TensorShape):
+    def build(self, input_shape: Tuple[Optional[int], ...]):
         """
         Build the layer and initialize the Gaussian filter.
 
         Args:
-            input_shape: TensorShape of the input tensor.
+            input_shape: Shape tuple of the input tensor.
         """
         # Create a Gaussian filter for blurring
         self.gaussian_filter = GaussianFilter(
@@ -96,7 +135,7 @@ class LaplacianFilter(keras.layers.Layer):
 
         self.built = True
 
-    def call(self, inputs: tf.Tensor, training: bool = False, **kwargs) -> tf.Tensor:
+    def call(self, inputs: Any, training: bool = False, **kwargs) -> Any:
         """
         Apply the Laplacian filter to the input tensor.
 
@@ -113,7 +152,7 @@ class LaplacianFilter(keras.layers.Layer):
 
         # Compute Laplacian as difference between original and blurred image
         # Multiplying by scale_factor to control the strength of the edge detection
-        laplacian = self._scale_factor * (inputs - blurred)
+        laplacian = keras.ops.multiply(self._scale_factor, keras.ops.subtract(inputs, blurred))
 
         return laplacian
 
@@ -163,6 +202,16 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
     - 'kernel': Using a discrete Laplacian kernel
 
     Each method has different characteristics and performance implications.
+
+    Args:
+        method: The method to use ('dog', 'log', or 'kernel').
+        kernel_size: Tuple of two integers specifying the height and width of the 2D kernel.
+        strides: Tuple of two integers specifying the strides of the convolution.
+        sigma: Standard deviation for the Gaussian kernel.
+        scale_factor: Scaling factor for the Laplacian response.
+        kernel_initializer: Initializer for the kernel weights.
+        kernel_regularizer: Regularizer for the kernel weights.
+        **kwargs: Additional keyword arguments passed to the parent class constructor.
     """
 
     def __init__(
@@ -178,16 +227,6 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
     ):
         """
         Initialize the AdvancedLaplacianFilter layer.
-
-        Args:
-            method: The method to use ('dog', 'log', or 'kernel').
-            kernel_size: Tuple of two integers specifying the height and width of the 2D kernel.
-            strides: Tuple of two integers specifying the strides of the convolution.
-            sigma: Standard deviation for the Gaussian kernel.
-            scale_factor: Scaling factor for the Laplacian response.
-            kernel_initializer: Initializer for the kernel weights.
-            kernel_regularizer: Regularizer for the kernel weights.
-            **kwargs: Additional keyword arguments passed to the parent class constructor.
         """
         super().__init__(**kwargs)
 
@@ -213,7 +252,7 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
         self.gaussian_filter = None
         self._kernel = None
 
-    def _create_laplacian_kernel(self, channels: int) -> tf.Tensor:
+    def _create_laplacian_kernel(self, channels: int) -> Any:
         """
         Create a discrete Laplacian kernel.
 
@@ -240,7 +279,7 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
         for i in range(channels):
             kernel[:, :, i, 0] = kernel_2d
 
-        return tf.constant(kernel, dtype=self.compute_dtype)
+        return keras.ops.convert_to_tensor(kernel, dtype=self.compute_dtype)
 
     def _create_log_kernel(self) -> np.ndarray:
         """
@@ -269,12 +308,12 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
 
         return log_kernel
 
-    def build(self, input_shape: tf.TensorShape):
+    def build(self, input_shape: Tuple[Optional[int], ...]):
         """
         Build the layer and initialize components based on the selected method.
 
         Args:
-            input_shape: TensorShape of the input tensor.
+            input_shape: Shape tuple of the input tensor.
         """
         channels = input_shape[-1]
 
@@ -288,19 +327,17 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
             self.gaussian_filter.build(input_shape)
         elif self._method == 'log':
             # Create a LoG kernel
-            self._kernel = tf.constant(
-                self._create_log_kernel().reshape(*self._kernel_size, 1, 1),
-                dtype=self.compute_dtype
-            )
+            log_kernel = self._create_log_kernel().reshape(*self._kernel_size, 1, 1)
+            kernel_tensor = keras.ops.convert_to_tensor(log_kernel, dtype=self.compute_dtype)
             # Repeat for each channel
-            self._kernel = tf.tile(self._kernel, [1, 1, channels, 1])
+            self._kernel = keras.ops.tile(kernel_tensor, [1, 1, channels, 1])
         else:  # 'kernel'
             # Create a discrete Laplacian kernel
             self._kernel = self._create_laplacian_kernel(channels)
 
         self.built = True
 
-    def call(self, inputs: tf.Tensor, training: bool = False, **kwargs) -> tf.Tensor:
+    def call(self, inputs: Any, training: bool = False, **kwargs) -> Any:
         """
         Apply the Laplacian filter to the input tensor.
 
@@ -315,15 +352,17 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
         if self._method == 'dog':
             # Difference of Gaussians approach
             blurred = self.gaussian_filter(inputs, training=training)
-            return self._scale_factor * (inputs - blurred)
+            result = keras.ops.subtract(inputs, blurred)
+            return keras.ops.multiply(self._scale_factor, result)
         else:
             # Direct convolution with LoG or Laplacian kernel
-            return self._scale_factor * tf.nn.depthwise_conv2d(
-                input=inputs,
-                filter=self._kernel,
+            conv_result = keras.ops.nn.depthwise_conv(
+                inputs=inputs,
+                kernel=self._kernel,
                 strides=self._strides,
-                padding="SAME"
+                padding="same"
             )
+            return keras.ops.multiply(self._scale_factor, conv_result)
 
     def get_config(self):
         """

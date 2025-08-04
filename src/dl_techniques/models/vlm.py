@@ -22,7 +22,7 @@ from dl_techniques.layers.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.positional_embedding import PositionalEmbedding
 from dl_techniques.layers.vision_transformer import VisionTransformerLayer
 from dl_techniques.layers.transformer_encoder import TransformerEncoderLayer
-from dl_techniques.layers.multi_head_attention import MultiHeadAttention
+from dl_techniques.layers.attention.multi_head_attention import MultiHeadAttention
 from dl_techniques.layers.geometric.shared_weights_cross_attention import SharedWeightsCrossAttention
 
 # ---------------------------------------------------------------------

@@ -10,8 +10,13 @@ linear projection.
 import keras
 from typing import Optional, Tuple, Union, Any, Dict
 
+# ---------------------------------------------------------------------
+# lolca imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -283,3 +288,5 @@ class ModalityProjection(keras.layers.Layer):
         """
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
+
+# ---------------------------------------------------------------------

@@ -2,7 +2,7 @@ import keras
 import pytest
 import numpy as np
 import tensorflow as tf
-from dl_techniques.layers.differential_attention import DifferentialMultiHeadAttention
+from dl_techniques.layers.attention.differential_attention import DifferentialMultiHeadAttention
 
 
 @pytest.fixture

@@ -47,7 +47,7 @@ from typing import Dict, Any, Optional, Callable, Union
 
 from dl_techniques.layers.norms.band_rms import BandRMS
 from dl_techniques.layers.norms.rms_norm import RMSNorm
-from dl_techniques.layers.multi_head_attention import MultiHeadAttention
+from dl_techniques.layers.attention.multi_head_attention import MultiHeadAttention
 
 
 # ---------------------------------------------------------------------

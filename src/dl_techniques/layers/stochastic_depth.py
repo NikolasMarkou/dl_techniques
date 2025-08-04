@@ -1,3 +1,49 @@
+"""
+This module implements the Stochastic Depth regularization technique as a custom Keras layer.
+
+Stochastic Depth is a regularization method primarily used in very deep neural networks,
+particularly those with residual connections (e.g., ResNets, Vision Transformers). Its
+purpose is to improve training stability and generalization by randomly dropping
+entire residual blocks (or paths) during training.
+
+Key features and behavior of this `StochasticDepth` implementation:
+
+1.  **Batch-wise Dropping:** Unlike some implementations (e.g., DropPath in timm) that
+    randomly drop paths independently for each *sample* in a batch, this layer
+    implements "batch-wise" dropping. This means that if a residual path is
+    dropped, it is dropped for *all* samples within the current training batch.
+    This simplifies the implementation and aligns with the original paper's "per-batch"
+    drop mode.
+
+2.  **During Training (`training=True`):**
+    - With a probability `drop_path_rate`, the layer outputs a tensor of zeros, effectively
+      "dropping" or bypassing the residual connection that this layer guards.
+    - If the path is not dropped, the input tensor is scaled by `1 / (1 - drop_path_rate)`.
+      This scaling is crucial for maintaining the expected magnitude of activations
+      across dropped paths, ensuring that the expected output during training matches
+      the output during inference. (Note: Keras's `Dropout` layer handles this scaling
+      automatically).
+
+3.  **During Inference (`training=False`):**
+    - The layer acts as an identity function; the input tensor is passed through
+      unchanged. No paths are dropped, and no scaling is applied, as the scaling factor
+      from training ensures the expected output magnitude is preserved.
+
+4.  **Noise Shape for Broadcasting:**
+    The internal Keras `Dropout` layer is configured with a `noise_shape` of
+    `(batch_size, 1, 1, ..., 1)`. This ensures that the dropout mask (which decides
+    whether to drop a path) is consistent across all spatial or feature dimensions
+    of the input for a given sample, making the "drop" an all-or-nothing decision for
+    the entire path.
+
+By randomly dropping residual paths, Stochastic Depth helps mitigate the vanishing
+gradient problem in very deep networks, reduces co-adaptation between layers, and
+encourages individual blocks to learn more robust features.
+
+Reference:
+-   "Deep Networks with Stochastic Depth" by Gao Huang et al. (https://arxiv.org/abs/1603.09382)
+"""
+
 import keras
 from typing import Optional, Dict, Any, Union, Tuple
 

@@ -123,9 +123,9 @@ from typing import Optional, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.stochastic_depth import StochasticDepth
-from dl_techniques.layers.positional_embedding import PositionalEmbedding
-from dl_techniques.layers.differential_attention import DifferentialMultiHeadAttention
+from .stochastic_depth import StochasticDepth
+from .positional_embedding import PositionalEmbedding
+from .attention.differential_attention import DifferentialMultiHeadAttention
 
 # ---------------------------------------------------------------------
 
@@ -554,41 +554,6 @@ def create_diff_transformer(
                  'top_k_categorical_accuracy']
     )
 
-    return model
-
-# ---------------------------------------------------------------------
-
-def test_differential_transformer():
-    """Test function for DifferentialTransformer model.
-
-    This function creates a small test model and checks if it runs without errors.
-    """
-    batch_size = 2
-    seq_len = 16
-    feature_dim = 32
-
-    # Create test inputs
-    x = tf.random.normal((batch_size, seq_len, feature_dim))
-
-    # Create small test model
-    model = create_diff_transformer(
-        num_classes=10,
-        dim=32,
-        depth=2,
-        num_heads=4,
-        head_dim=8,
-        mlp_dim=64,
-        max_seq_len=32
-    )
-
-    # Run forward pass
-    outputs = model(x, training=True)
-
-    # Check output shape
-    expected_shape = (batch_size, 10)
-    assert outputs.shape == expected_shape, f"Expected shape {expected_shape}, got {outputs.shape}"
-
-    print("DifferentialTransformer test passed!")
     return model
 
 # ---------------------------------------------------------------------

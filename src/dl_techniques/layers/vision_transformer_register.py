@@ -8,9 +8,14 @@ which shows that ViTs develop artifacts in feature maps that can be resolved by 
 import keras
 from typing import Optional, Tuple, Union, Any, Dict
 
-from dl_techniques.layers.ffn.mlp import MLPBlock
-from dl_techniques.layers.norms.rms_norm import RMSNorm
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
+from .ffn.mlp import MLPBlock
+from .norms.rms_norm import RMSNorm
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class RegisterEnhancedVisionTransformerLayer(keras.layers.Layer):
@@ -211,3 +216,6 @@ class RegisterEnhancedVisionTransformerLayer(keras.layers.Layer):
         """
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
+
+# ---------------------------------------------------------------------
+

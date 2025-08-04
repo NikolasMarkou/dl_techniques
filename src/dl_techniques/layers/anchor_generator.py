@@ -1,3 +1,50 @@
+"""
+This module provides an `AnchorGenerator` layer, a fundamental component for modern
+anchor-based object detection models like YOLO.
+
+In many object detection architectures, instead of directly predicting bounding box
+coordinates, the model predicts offsets relative to a predefined set of "anchor" points.
+This layer is responsible for generating this set of anchor points. It does not learn
+any parameters from data; instead, it serves as a pre-processing and data-provisioning
+utility that is seamlessly integrated into the Keras model graph.
+
+Core Concepts and Functionality:
+
+1.  **Anchor Points (Not Anchor Boxes):**
+    -   It's important to distinguish that this layer generates *anchor points*, not
+        *anchor boxes*. An anchor point represents the center `(x, y)` coordinate of a
+        grid cell in a feature map. The model's prediction heads will later use these
+        points as a reference to predict the full bounding box (center, width, height).
+    -   This is a key characteristic of anchor-free or anchor-point-based methods,
+        which simplifies the design by removing the need for pre-defined box sizes/ratios.
+
+2.  **Multi-Level Generation:**
+    -   Modern object detectors make predictions at multiple feature map levels
+        (e.g., from a Feature Pyramid Network) to handle objects of different scales.
+        This layer generates anchor points for each of these levels, specified by the
+        `strides_config`.
+    -   A smaller stride (e.g., 8) corresponds to a high-resolution feature map with
+        many small grid cells, ideal for detecting small objects. A larger stride
+        (e.g., 32) corresponds to a low-resolution map with large cells for detecting
+        large objects.
+
+3.  **Graph-Safe Data Provisioning:**
+    -   The set of anchor points and their corresponding strides are constant for a
+        given input image size. Computing them on-the-fly for every forward pass
+        would be inefficient.
+    -   This layer solves this by pre-computing all anchor points and strides during
+        its `build` phase and storing them as **non-trainable weights** (buffers).
+    -   This makes the anchor data a persistent part of the model's computational
+        graph, ensuring it's available and graph-safe for all operations, especially
+        for the loss function which needs to match predictions to anchors.
+
+4.  **Batch-Aware Output:**
+    -   In the `call` method, the layer takes a dummy input tensor *only* to determine
+        the batch size. It then tiles its stored anchor and stride tensors to match
+        this batch size, providing a correctly shaped output for batch processing.
+    -   The content of the input tensor is completely ignored.
+"""
+
 import keras
 from keras import ops
 from typing import Tuple, Any, Dict, List, Optional

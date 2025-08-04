@@ -60,7 +60,7 @@ from typing import Tuple, Optional
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn.mlp import MLPBlock
-from dl_techniques.layers.multi_head_attention import MultiHeadAttention
+from dl_techniques.layers.attention.multi_head_attention import MultiHeadAttention
 from dl_techniques.layers.hierarchical_mlp_stem import HierarchicalMLPStem
 
 # ---------------------------------------------------------------------

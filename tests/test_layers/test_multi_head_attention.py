@@ -13,7 +13,7 @@ import tempfile
 import os
 
 # Import the layer to test
-from dl_techniques.layers.multi_head_attention import MultiHeadAttention
+from dl_techniques.layers.attention.multi_head_attention import MultiHeadAttention
 
 
 class TestMultiHeadAttention:

@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.layers.ffn.swiglu_ffn import SwiGLUFFN
-from dl_techniques.layers.multi_head_attention import MultiHeadAttention
+from dl_techniques.layers.attention.multi_head_attention import MultiHeadAttention
 
 
 @keras.saving.register_keras_serializable()

@@ -1,7 +1,36 @@
-"""PowerMLP layer implementation for Keras 3.x.
+"""
+This module defines the `PowerMLPLayer`, a custom Keras layer designed to enhance
+the expressive power of traditional Multi-Layer Perceptrons (MLPs).
 
-This module implements the PowerMLP layer architecture that combines ReLU-k
-activations with basis functions for enhanced function approximation capabilities.
+At its core, the `PowerMLPLayer` implements a dual-branch architecture that
+processes the input in parallel and combines the results. This design leverages
+the complementary strengths of two different types of non-linear transformations,
+allowing the layer to model complex functions more effectively than a standard
+`Dense` layer.
+
+The two parallel branches are:
+
+1.  **The Main Branch (Piecewise Polynomial Power):**
+    -   **Path:** `Input → Dense → ReLU-k`
+    -   **Purpose:** This branch uses the `ReLUK` activation (`max(0, x)^k`), which is
+        a generalization of the standard ReLU. It excels at modeling sharp,
+        piecewise polynomial relationships within the data. The integer power `k`
+        controls the degree and aggressiveness of the non-linearity. This branch
+        includes a bias term in its dense layer.
+
+2.  **The Basis Branch (Smooth Function Approximation):**
+    -   **Path:** `Input → BasisFunction → Dense`
+    -   **Purpose:** This branch first transforms the input using a set of smooth,
+        continuous basis functions (e.g., sinusoids or other periodic/non-periodic
+        functions). This allows the layer to efficiently model smooth, global trends
+        and periodic patterns that are often difficult to capture with ReLU-based
+        activations alone. This branch's dense layer intentionally omits a bias term.
+
+The outputs of these two branches are then combined through element-wise addition.
+This fusion allows the `PowerMLPLayer` to simultaneously learn both sharp, localized
+features (from the main branch) and smooth, global patterns (from the basis branch).
+leading to superior function approximation capabilities and potentially improved
+gradient flow compared to a standard MLP.
 """
 
 import keras
@@ -12,8 +41,8 @@ from typing import Optional, Union, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.activations.relu_k import ReLUK
-from dl_techniques.layers.activations.basis_function import BasisFunction
+from .activations.relu_k import ReLUK
+from .activations.basis_function import BasisFunction
 
 # ---------------------------------------------------------------------
 

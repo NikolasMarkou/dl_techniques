@@ -49,7 +49,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn.swiglu_ffn import SwiGLUFFN
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.layers.stochastic_depth import StochasticDepth
-from dl_techniques.layers.group_query_attention import GroupedQueryAttention
+from dl_techniques.layers.attention.group_query_attention import GroupedQueryAttention
 
 # ---------------------------------------------------------------------
 

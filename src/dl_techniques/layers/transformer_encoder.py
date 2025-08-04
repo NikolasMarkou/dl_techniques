@@ -1,10 +1,15 @@
 import keras
-from keras import ops
-from typing import Optional, Union, Any, Dict, Tuple, Literal
+from typing import Optional, Union, Any, Dict, Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.norms.rms_norm import RMSNorm
-from dl_techniques.layers.norms.band_rms import BandRMS
+from .norms.rms_norm import RMSNorm
+from .norms.band_rms import BandRMS
+
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -337,3 +342,5 @@ class TransformerEncoderLayer(keras.layers.Layer):
         """
         if config.get('input_shape') is not None:
             self.build(config['input_shape'])
+
+# ---------------------------------------------------------------------

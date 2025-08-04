@@ -1,3 +1,59 @@
+"""
+This module provides a `MobileMQA` layer, an implementation of Multi-Query Attention
+that is highly optimized for efficiency on mobile and edge devices.
+
+Standard Multi-Head Attention (MHA) can be memory-bandwidth intensive because it
+requires separate, large Key (K) and Value (V) tensors to be projected and loaded for
+each attention head. This layer mitigates that bottleneck by using the Multi-Query
+Attention (MQA) strategy.
+
+Core Concepts and Optimizations:
+
+1.  **Shared Key and Value (The MQA Strategy):**
+    -   In MQA, while each attention head gets its own unique Query (Q) projection,
+        all heads *share a single Key and Value projection*.
+    -   This is the defining feature of MQA. It dramatically reduces the memory
+        footprint and I/O required for the K and V tensors, which is a major
+        performance bottleneck on memory-constrained mobile accelerators. The layer
+        implements this by having a single `kv_proj` that is shared across all
+        `num_heads` query heads.
+
+2.  **Optional Spatial Downsampling of Context:**
+    -   The layer includes an optional `use_downsampling` mechanism that further
+        reduces computational load.
+    -   When enabled, it applies an efficient, strided `DepthwiseConv2D` to the
+        Key and Value feature maps *before* the attention calculation.
+    -   This reduces the spatial resolution of the context (K and V) that the
+        queries attend to. The full-resolution queries can still attend to this
+        coarser-grained context, effectively summarizing the key information from a
+        larger receptive field at a lower cost.
+
+3.  **Designed for 4D Image Tensors:**
+    -   This implementation is tailored for computer vision tasks, operating directly
+        on 4D feature maps of shape `(batch, height, width, channels)`. It internally
+        flattens the spatial dimensions to perform attention and then reshapes the
+        output back to the original 4D format.
+
+Architectural Flow:
+
+1.  An input feature map is passed through two parallel projections:
+    a. `q_proj`: To create the multi-headed Query tensor.
+    b. `kv_proj`: To create the *single*, shared Key and Value tensors.
+
+2.  If `use_downsampling` is active, the combined KV tensor is spatially downsampled.
+
+3.  The KV tensor is split into a single Key and a single Value.
+
+4.  The Query tensor is reshaped to have `num_heads`. The Key and Value tensors are
+    reshaped to have a head dimension of 1, ready for broadcasting.
+
+5.  Standard scaled dot-product attention is performed. Due to broadcasting, all query
+    heads attend to the same Key/Value pair.
+
+6.  The output is reshaped back to its 4D spatial format and passed through a final
+    output projection (`o_proj`) to produce the layer's result.
+"""
+
 import keras
 from keras import ops
 from typing import Tuple, Optional, Any, Dict, Union

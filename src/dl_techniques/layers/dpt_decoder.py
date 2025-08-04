@@ -1,3 +1,47 @@
+"""
+This module provides a `DPTDecoder` layer, which implements the decoder component of
+the Dense Prediction Transformer (DPT) architecture.
+
+While the "Transformer" part of DPT refers to its encoder (which uses a Vision
+Transformer to extract features), the decoder's role is to take these powerful,
+high-level features and translate them back into a dense, pixel-wise prediction, such
+as a depth map or a segmentation mask.
+
+This decoder is not a Transformer-based decoder. Instead, it is a lightweight and
+effective convolutional head. It progressively refines the feature maps from the
+encoder, gradually reducing the channel dimensionality while maintaining the spatial
+resolution to produce the final dense output.
+
+Architectural Design:
+
+1.  **Sequential Convolutional Blocks:**
+    -   The core of the decoder is a sequence of simple convolutional blocks.
+    -   Each block consists of a `3x3 Conv2D` layer, followed by `BatchNormalization`
+        and a non-linear `Activation` (e.g., ReLU).
+    -   The number of blocks and the channel dimension of each block are defined by
+        the `dims` parameter. For example, `dims=[256, 128, 64]` would create three
+        such blocks, reducing the channel dimension from the input's size down to 64.
+
+2.  **No Upsampling:**
+    -   A key characteristic of this specific decoder design is that it **does not
+        perform any spatial upsampling**. It assumes that the input features from the
+        encoder already have the desired output spatial resolution.
+    -   This is common in DPT variants where the encoder is designed to preserve
+        spatial detail or where features from multiple scales are fused *before*
+        being passed to this final decoder head.
+
+3.  **Final Output Projection:**
+    -   After the sequence of refining blocks, a final `3x3 Conv2D` layer is used to
+        project the features into the desired number of `output_channels`.
+    -   This final layer also applies an `output_activation` (e.g., `sigmoid` for
+        depth estimation between 0 and 1, or `softmax` for multi-class segmentation)
+        to format the output for the specific prediction task.
+
+In summary, the `DPTDecoder` acts as a simple but effective "prediction head" that
+takes a high-dimensional feature map from a powerful encoder and translates it into a
+low-dimensional, interpretable, pixel-wise output map.
+"""
+
 import keras
 from typing import Dict, Tuple, Optional, Any, List, Union
 

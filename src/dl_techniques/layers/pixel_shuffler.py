@@ -1,14 +1,53 @@
 """
-Pixel Shuffle Layer Implementation for Vision Transformers.
+This module provides a `PixelShuffle` layer, implementing a space-to-depth
+transformation tailored for Vision Transformer (ViT) architectures.
 
-This module implements a pixel shuffle operation for reducing spatial tokens
-in vision transformers by rearranging spatial information into channel dimensions.
+In architectures like Vision Transformers, the computational cost of self-attention
+grows quadratically with the number of input tokens. This layer provides an efficient,
+non-destructive method to reduce the number of spatial tokens at intermediate
+stages of the model, thereby decreasing computational complexity while preserving
+all spatial information.
+
+Key Concept: Space-to-Depth Transformation
+
+Instead of discarding information through pooling or strided convolutions, this
+operation *rearranges* data from the spatial dimensions (height and width) into the
+channel dimension (depth).
+
+The process works as follows:
+
+1.  **Assumes ViT Input:** The layer expects a standard ViT input format: a sequence
+    of tokens where the first token is a special `[CLS]` token and the rest are
+    flattened spatial tokens from an image grid.
+
+2.  **Separate CLS Token:** The `[CLS]` token, which holds the global representation,
+    is temporarily set aside and is not affected by the spatial rearrangement.
+
+3.  **Reshape to 2D Grid:** The sequence of spatial tokens is conceptually reshaped
+    back into its 2D grid format (e.g., `196 tokens -> 14x14 grid`).
+
+4.  **Rearrange Blocks:** The grid is then broken down into non-overlapping blocks of
+    `scale_factor x scale_factor`. The information within each of these small spatial
+    blocks is "folded" or stacked into the channel dimension.
+
+5.  **Result:** This creates a new, smaller spatial grid where each "pixel" or token
+    now has a much larger channel dimension, as it contains all the information
+    from the original block. For example, with a `scale_factor` of 2, a `2x2` block of
+    4 pixels is transformed into a single pixel, and its channel dimension is
+    multiplied by 4.
+
+6.  **Re-assemble Sequence:** The new, smaller spatial grid is flattened back into a
+    sequence of tokens, and the original `[CLS]` token is prepended.
+
+This allows subsequent self-attention layers to operate on a much shorter sequence,
+making the model more efficient.
 """
 
 import keras
 from keras import ops
 from typing import Optional, Tuple, Any
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PixelShuffle(keras.layers.Layer):
@@ -254,3 +293,6 @@ def create_pixel_shuffle_model(
 
     model = keras.Model(inputs=inputs, outputs=outputs, name="pixel_shuffle_model")
     return model
+
+# ---------------------------------------------------------------------
+

@@ -11,7 +11,7 @@ from dl_techniques.utils.tensors import window_reverse, window_partition
 
 from .ffn.swin_mlp import SwinMLP
 from .stochastic_depth import StochasticDepth
-from .window_attention import WindowAttention
+from .attention.window_attention import WindowAttention
 
 
 # ---------------------------------------------------------------------

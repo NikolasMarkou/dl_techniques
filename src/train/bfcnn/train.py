@@ -6,6 +6,7 @@ import gc
 import json
 import time
 import keras
+import numpy as np
 import tensorflow as tf
 from pathlib import Path
 from datetime import datetime
@@ -706,12 +707,14 @@ def main():
         train_image_dirs=[
             '/media/arxwn/data0_4tb/datasets/Megadepth',
             '/media/arxwn/data0_4tb/datasets/div2k/train',
+            '/media/arxwn/data0_4tb/datasets/WFLW/images',
             '/media/arxwn/data0_4tb/datasets/bdd_data/train',
-            '/media/arxwn/data0_4tb/datasets/ade20k/images/ADE/training',
+            '/media/arxwn/data0_4tb/datasets/COCO/train2017',
+            '/media/arxwn/data0_4tb/datasets/VGG-Face2/data/train'
         ],
         val_image_dirs=[
             '/media/arxwn/data0_4tb/datasets/div2k/validation',
-            '/media/arxwn/data0_4tb/datasets/ade20k/images/ADE/validation'
+            '/media/arxwn/data0_4tb/datasets/COCO/val2017',
         ],
 
         # Training parameters
@@ -747,7 +750,7 @@ def main():
         validation_steps=200,  # Fixed number of validation steps
 
         # Output
-        output_dir='bfcnn_experiments',
+        output_dir='results',
         experiment_name=None  # Auto-generated with timestamp
     )
 

@@ -62,7 +62,7 @@ Implementation Notes:
 import keras
 import tensorflow as tf
 from keras import layers
-from typing import Tuple, List, Dict, Any, Optional, Union
+from typing import Tuple, List, Dict, Any, Optional
 
 @keras.utils.register_keras_serializable()
 class SelectiveGradientMask(layers.Layer):

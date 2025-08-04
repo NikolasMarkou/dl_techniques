@@ -1,30 +1,52 @@
 """
-Image Patch Embedding Layer for Vision Transformers (Fixed Version)
+This module provides Keras layers for converting spatial or sequential data into
+a sequence of "patches," a foundational step for applying Transformer architectures
+to domains beyond natural language, such as images and time series.
 
-This module provides a Keras layer for converting images into sequence of patch embeddings,
-which is a core component of Vision Transformer (ViT) architectures. The implementation is
-compatible with Keras 3.8.0 and TensorFlow 2.18.0 backend.
+The core idea is to break down a high-resolution input (like an image or a long
+time series) into a sequence of smaller, manageable chunks or "patches." Each patch
+is then linearly projected into a vector embedding. This process transforms the
+input into a format that a standard Transformer encoder can process: a sequence
+of embedding vectors.
 
-The PatchEmbed layer takes an image and:
-1. Splits it into fixed-size patches using a strided convolution
-2. Projects each patch into an embedding space
-3. Reshapes the output to create a sequence of patch embeddings
+This module offers two specialized layers for this purpose:
 
-Features:
-- Configurable patch size (square or rectangular)
-- Customizable embedding dimension
-- Support for kernel regularization and initialization
-- Optional activation function
-- Proper serialization support for sublayers
+1.  **`PatchEmbedding2D` for Images (Vision Transformers):**
+    -   **Function:** Takes a 2D image and divides it into a grid of non-overlapping
+        rectangular patches.
+    -   **Mechanism:** This is elegantly implemented using a single `Conv2D` layer.
+        By setting the kernel size and stride equal to the `patch_size`, the
+        convolution operation effectively extracts each patch and performs the linear
+        embedding in one efficient step.
+    -   **Output:** Transforms a `(batch, height, width, channels)` image tensor into a
+        `(batch, num_patches, embed_dim)` sequence tensor, ready for a Vision
+        Transformer (ViT).
 
+2.  **`PatchEmbedding1D` for Time Series:**
+    -   **Function:** Takes a 1D sequence (e.g., a time series with multiple features)
+        and converts it into a sequence of overlapping or non-overlapping patches.
+    -   **Mechanism:** Similar to the 2D case, this uses a `Conv1D` layer. The `stride`
+        parameter allows for control over the degree of overlap between consecutive
+        patches, which can be crucial for preserving temporal continuity in time
+        series analysis.
+    -   **Output:** Transforms a `(batch, seq_len, features)` time series tensor into a
+        `(batch, num_patches, embed_dim)` sequence tensor.
+
+Both layers are essential "tokenizer" front-ends that bridge the gap between
+continuous, high-dimensional data and the sequence-based processing of Transformers.
 """
 
 import keras
 from keras import ops
 from typing import Optional, Union, Tuple, Any, Dict
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PatchEmbedding2D(keras.layers.Layer):
@@ -288,6 +310,7 @@ class PatchEmbedding2D(keras.layers.Layer):
         w_patches = width // self.patch_size[1]
         return (h_patches, w_patches)
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PatchEmbedding1D(keras.layers.Layer):
@@ -438,3 +461,5 @@ class PatchEmbedding1D(keras.layers.Layer):
         """Build from configuration."""
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
+
+# ---------------------------------------------------------------------

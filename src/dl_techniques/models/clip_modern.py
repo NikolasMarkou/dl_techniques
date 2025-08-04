@@ -14,15 +14,14 @@ This implementation incorporates latest advances:
 import keras
 from keras import ops
 import tensorflow as tf
-from typing import Dict, List, Optional, Tuple, Union, Any
+from typing import Dict, Optional, Tuple, Any
 from dataclasses import dataclass
 
 from dl_techniques.layers.vision_transformer import VisionTransformerLayer
 from dl_techniques.layers.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.positional_embedding import PositionalEmbedding
-from dl_techniques.layers.multi_head_attention import MultiHeadAttention
 from dl_techniques.layers.norms.rms_norm import RMSNorm
-from dl_techniques.layers.tokenizers.bpe import BPETokenizer, TokenEmbedding
+from dl_techniques.layers.tokenizers.bpe import TokenEmbedding
 from dl_techniques.utils.logger import logger
 
 
