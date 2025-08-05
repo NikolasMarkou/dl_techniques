@@ -98,7 +98,7 @@ class HopfieldAttention(keras.layers.Layer):
         num_heads: Number of attention heads.
         key_dim: Size of each attention head for key and query.
         value_dim: Size of each attention head for value. If None, defaults to key_dim.
-        dropout: Dropout probability for attention weights.
+        dropout_rate: Dropout probability for attention weights.
         use_bias: Whether to use bias in the attention projections.
         kernel_initializer: Initializer for the projection matrices.
         bias_initializer: Initializer for the bias vectors.
@@ -149,7 +149,7 @@ class HopfieldAttention(keras.layers.Layer):
         num_heads: int,
         key_dim: int,
         value_dim: Optional[int] = None,
-        dropout: float = 0.0,
+        dropout_rate: float = 0.0,
         use_bias: bool = True,
         kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
@@ -168,8 +168,8 @@ class HopfieldAttention(keras.layers.Layer):
             raise ValueError(f"num_heads must be positive, got {num_heads}")
         if key_dim <= 0:
             raise ValueError(f"key_dim must be positive, got {key_dim}")
-        if not 0.0 <= dropout <= 1.0:
-            raise ValueError(f"dropout must be in [0, 1], got {dropout}")
+        if not 0.0 <= dropout_rate <= 1.0:
+            raise ValueError(f"dropout_rate must be in [0, 1], got {dropout_rate}")
         if update_steps_max < 0:
             raise ValueError(f"update_steps_max must be non-negative, got {update_steps_max}")
         if update_steps_eps <= 0:
@@ -179,7 +179,7 @@ class HopfieldAttention(keras.layers.Layer):
         self.num_heads = num_heads
         self.key_dim = key_dim
         self.value_dim = value_dim if value_dim is not None else key_dim
-        self.dropout = dropout
+        self.dropout_rate = dropout_rate
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
@@ -277,8 +277,8 @@ class HopfieldAttention(keras.layers.Layer):
         )
 
         # Dropout layer
-        if self.dropout > 0.0:
-            self.dropout_layer = keras.layers.Dropout(self.dropout, name="attention_dropout")
+        if self.dropout_rate > 0.0:
+            self.dropout_layer = keras.layers.Dropout(self.dropout_rate, name="attention_dropout")
 
         # Layer normalization
         if self.normalize_patterns:
@@ -520,7 +520,7 @@ class HopfieldAttention(keras.layers.Layer):
             "num_heads": self.num_heads,
             "key_dim": self.key_dim,
             "value_dim": self.value_dim,
-            "dropout": self.dropout,
+            "dropout_rate": self.dropout_rate,
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
@@ -553,3 +553,5 @@ class HopfieldAttention(keras.layers.Layer):
         """
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
+
+# ---------------------------------------------------------------------

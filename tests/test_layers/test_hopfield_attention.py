@@ -32,7 +32,7 @@ class TestHopfieldAttentionInitialization:
         assert layer.num_heads == 8
         assert layer.key_dim == 64
         assert layer.value_dim == 64  # Should default to key_dim
-        assert layer.dropout == 0.0
+        assert layer.dropout_rate == 0.0
         assert layer.use_bias is True
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
         assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
@@ -49,7 +49,7 @@ class TestHopfieldAttentionInitialization:
             num_heads=4,
             key_dim=32,
             value_dim=48,
-            dropout=0.1,
+            dropout_rate=0.1,
             use_bias=False,
             kernel_initializer="he_normal",
             bias_initializer="ones",
@@ -64,7 +64,7 @@ class TestHopfieldAttentionInitialization:
         assert layer.num_heads == 4
         assert layer.key_dim == 32
         assert layer.value_dim == 48
-        assert layer.dropout == 0.1
+        assert layer.dropout_rate == 0.1
         assert layer.use_bias is False
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
         assert isinstance(layer.bias_initializer, keras.initializers.Ones)
@@ -93,11 +93,11 @@ class TestHopfieldAttentionInitialization:
 
     def test_invalid_dropout(self):
         """Test that invalid dropout rates raise ValueError."""
-        with pytest.raises(ValueError, match="dropout must be in \\[0, 1\\]"):
-            HopfieldAttention(num_heads=8, key_dim=64, dropout=-0.1)
+        with pytest.raises(ValueError, match="dropout_rate must be in \\[0, 1\\]"):
+            HopfieldAttention(num_heads=8, key_dim=64, dropout_rate=-0.1)
 
-        with pytest.raises(ValueError, match="dropout must be in \\[0, 1\\]"):
-            HopfieldAttention(num_heads=8, key_dim=64, dropout=1.1)
+        with pytest.raises(ValueError, match="dropout_rate must be in \\[0, 1\\]"):
+            HopfieldAttention(num_heads=8, key_dim=64, dropout_rate=1.1)
 
     def test_invalid_update_steps_max(self):
         """Test that invalid update_steps_max raises ValueError."""
@@ -157,7 +157,7 @@ class TestHopfieldAttentionBuild:
 
     def test_build_with_dropout(self):
         """Test building with dropout enabled."""
-        layer = HopfieldAttention(num_heads=8, key_dim=64, dropout=0.1)
+        layer = HopfieldAttention(num_heads=8, key_dim=64, dropout_rate=0.1)
         layer.build((None, 32, 512))
 
         assert layer.dropout_layer is not None
@@ -336,7 +336,7 @@ class TestHopfieldAttentionSerialization:
             num_heads=4,
             key_dim=32,
             value_dim=48,
-            dropout=0.1,
+            dropout_rate=0.1,
             use_bias=False,
             normalize_patterns=False,
             update_steps_max=3,
@@ -349,7 +349,7 @@ class TestHopfieldAttentionSerialization:
         assert config["num_heads"] == 4
         assert config["key_dim"] == 32
         assert config["value_dim"] == 48
-        assert config["dropout"] == 0.1
+        assert config["dropout_rate"] == 0.1
         assert config["use_bias"] is False
         assert config["normalize_patterns"] is False
         assert config["update_steps_max"] == 3
@@ -368,7 +368,7 @@ class TestHopfieldAttentionSerialization:
             num_heads=4,
             key_dim=32,
             value_dim=48,
-            dropout=0.1,
+            dropout_rate=0.1,
             normalize_patterns=False
         )
 
@@ -379,7 +379,7 @@ class TestHopfieldAttentionSerialization:
         assert new_layer.num_heads == original_layer.num_heads
         assert new_layer.key_dim == original_layer.key_dim
         assert new_layer.value_dim == original_layer.value_dim
-        assert new_layer.dropout == original_layer.dropout
+        assert new_layer.dropout_rate == original_layer.dropout_rate
         assert new_layer.normalize_patterns == original_layer.normalize_patterns
 
     def test_build_config_serialization(self):
@@ -408,7 +408,7 @@ class TestHopfieldAttentionSerialization:
         layer = HopfieldAttention(
             num_heads=4,
             key_dim=32,
-            dropout=0.1,
+            dropout_rate=0.1,
             normalize_patterns=True
         )
 
@@ -496,7 +496,7 @@ class TestHopfieldAttentionAdvancedFeatures:
         layer = HopfieldAttention(
             num_heads=4,
             key_dim=32,
-            dropout=0.5  # High dropout for testing
+            dropout_rate=0.5  # High dropout for testing
         )
 
         inputs = keras.random.normal((2, 16, 256))
