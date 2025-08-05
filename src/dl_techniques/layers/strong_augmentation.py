@@ -3,8 +3,6 @@ from keras import ops
 from typing import Dict, Tuple, Any
 
 # ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class StrongAugmentation(keras.layers.Layer):

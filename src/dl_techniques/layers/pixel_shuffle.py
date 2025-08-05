@@ -1,46 +1,163 @@
 """
-This module provides a `PixelShuffle` layer, implementing a space-to-depth
-transformation tailored for Vision Transformer (ViT) architectures.
+Pixel Shuffle Layer Implementation for Vision Transformers.
 
-In architectures like Vision Transformers, the computational cost of self-attention
-grows quadratically with the number of input tokens. This layer provides an efficient,
-non-destructive method to reduce the number of spatial tokens at intermediate
-stages of the model, thereby decreasing computational complexity while preserving
-all spatial information.
+This module implements a pixel shuffle operation specifically designed for reducing the number
+of spatial tokens in vision transformers while preserving spatial information by rearranging
+it into channel dimensions. This technique is crucial for efficient vision-language models
+and multi-scale vision processing.
 
-Key Concept: Space-to-Depth Transformation
+## Mathematical Foundation
 
-Instead of discarding information through pooling or strided convolutions, this
-operation *rearranges* data from the spatial dimensions (height and width) into the
-channel dimension (depth).
+The pixel shuffle operation performs a space-to-depth transformation on vision transformer
+tokens arranged as [CLS_token, spatial_tokens]. Given an input with spatial dimensions
+H×W and C channels, the operation:
 
-The process works as follows:
+1. Separates the CLS token from spatial tokens
+2. Reshapes spatial tokens from [B, H*W, C] to [B, H, W, C]
+3. Groups scale_factor × scale_factor spatial blocks into channel dimensions
+4. Reduces spatial dimensions by scale_factor in each direction
+5. Increases channel dimensions by scale_factor²
 
-1.  **Assumes ViT Input:** The layer expects a standard ViT input format: a sequence
-    of tokens where the first token is a special `[CLS]` token and the rest are
-    flattened spatial tokens from an image grid.
+Mathematical transformation:
+- Input:  [B, 1 + H*W, C]
+- Output: [B, 1 + (H/s)*(W/s), C*s²]
 
-2.  **Separate CLS Token:** The `[CLS]` token, which holds the global representation,
-    is temporarily set aside and is not affected by the spatial rearrangement.
+where s is the scale_factor and B is batch size.
 
-3.  **Reshape to 2D Grid:** The sequence of spatial tokens is conceptually reshaped
-    back into its 2D grid format (e.g., `196 tokens -> 14x14 grid`).
+## Key Features
 
-4.  **Rearrange Blocks:** The grid is then broken down into non-overlapping blocks of
-    `scale_factor x scale_factor`. The information within each of these small spatial
-    blocks is "folded" or stacked into the channel dimension.
+- **Token-aware design**: Handles CLS tokens separately from spatial tokens
+- **Efficient processing**: Reduces computational complexity for subsequent layers
+- **Information preservation**: No information loss, only spatial rearrangement
+- **Flexible scaling**: Configurable scale factors for different reduction needs
+- **Runtime validation**: Optional validation of spatial dimension compatibility
 
-5.  **Result:** This creates a new, smaller spatial grid where each "pixel" or token
-    now has a much larger channel dimension, as it contains all the information
-    from the original block. For example, with a `scale_factor` of 2, a `2x2` block of
-    4 pixels is transformed into a single pixel, and its channel dimension is
-    multiplied by 4.
+## Use Cases in Vision Transformers
 
-6.  **Re-assemble Sequence:** The new, smaller spatial grid is flattened back into a
-    sequence of tokens, and the original `[CLS]` token is prepended.
+### 1. Vision-Language Models
+Reducing spatial tokens before cross-attention with text:
+```python
+# Input: [batch, 197, 768] (196 spatial + 1 CLS, 14×14 spatial)
+pixel_shuffle = PixelShuffle(scale_factor=2)
+# Output: [batch, 50, 3072] (49 spatial + 1 CLS, 7×7 spatial)
+```
 
-This allows subsequent self-attention layers to operate on a much shorter sequence,
-making the model more efficient.
+### 2. Hierarchical Processing
+Creating multi-scale representations:
+```python
+# Stage 1: Full resolution
+tokens_high = input_tokens  # [B, 197, 768]
+
+# Stage 2: Reduced resolution with more channels
+shuffle_2x = PixelShuffle(scale_factor=2)
+tokens_mid = shuffle_2x(tokens_high)  # [B, 50, 3072]
+
+# Stage 3: Further reduced resolution
+shuffle_4x = PixelShuffle(scale_factor=2)  # Applied to already shuffled tokens
+tokens_low = shuffle_4x(tokens_mid)  # [B, 14, 12288]
+```
+
+### 3. Computational Efficiency
+Reducing tokens before expensive operations:
+```python
+# Before expensive cross-attention
+shuffled_tokens = PixelShuffle(scale_factor=2)(vision_tokens)
+cross_attention_output = cross_attention(shuffled_tokens, text_tokens)
+```
+
+## Implementation Details
+
+### Spatial Token Arrangement
+The layer assumes spatial tokens are arranged in row-major order representing
+a square spatial grid:
+```
+Token indices for 3×3 spatial grid:
+[CLS] [0] [1] [2] [3] [4] [5] [6] [7] [8]
+
+Spatial arrangement:
+[0] [1] [2]
+[3] [4] [5]
+[6] [7] [8]
+```
+
+### Pixel Shuffle Operation
+For scale_factor=2, each 2×2 spatial block becomes 4 channels:
+```
+Input spatial (2×2):     Output channels:
+[a] [b]          →       [a, b, c, d] (concatenated)
+[c] [d]
+```
+
+### Memory Layout
+The operation preserves all information while changing memory layout:
+- **Before**: Many tokens, fewer channels per token
+- **After**: Fewer tokens, more channels per token
+- **Total parameters**: Unchanged (H*W*C = (H/s)*(W/s)*C*s²)
+
+## Performance Considerations
+
+### Computational Complexity
+- **Spatial complexity**: Reduced by factor of s² for subsequent layers
+- **Channel complexity**: Increased by factor of s² but affects fewer operations
+- **Memory usage**: Identical total memory, different layout
+- **Cache efficiency**: May improve due to spatial locality
+
+### Recommended Scale Factors
+- **scale_factor=2**: Most common, good balance of reduction and information density
+- **scale_factor=4**: Aggressive reduction for very high-resolution inputs
+- **scale_factor=1**: Identity operation, useful for architectural flexibility
+
+## Integration Examples
+
+### Basic Usage
+```python
+# Create layer
+pixel_shuffle = PixelShuffle(scale_factor=2)
+
+# Apply to vision transformer tokens
+reduced_tokens = pixel_shuffle(vision_tokens)
+
+# Use in model
+model = keras.Sequential([
+    # ... vision transformer layers ...
+    PixelShuffle(scale_factor=2),
+    # ... subsequent processing with fewer tokens ...
+])
+```
+
+### With Validation
+```python
+# Strict validation for development
+pixel_shuffle = PixelShuffle(
+    scale_factor=2,
+    validate_spatial_dims=True  # Validates perfect square and divisibility
+)
+
+# Relaxed validation for production
+pixel_shuffle = PixelShuffle(
+    scale_factor=2,
+    validate_spatial_dims=False  # Faster, assumes valid inputs
+)
+```
+
+## References
+
+The pixel shuffle concept is adapted from super-resolution literature and extended
+for vision transformer token processing:
+
+1. Shi, W., et al. "Real-time single image and video super-resolution using an
+   efficient sub-pixel convolutional neural network." CVPR 2016.
+2. Liu, Z., et al. "Swin Transformer: Hierarchical Vision Transformer using
+   Shifted Windows." ICCV 2021.
+3. Radford, A., et al. "Learning Transferable Visual Models From Natural Language
+   Supervision." ICML 2021.
+
+## Notes
+
+- The layer assumes square spatial arrangements (H = W)
+- CLS tokens are preserved and not affected by the shuffle operation
+- Input validation can be disabled for performance in production environments
+- The operation is fully differentiable and suitable for end-to-end training
 """
 
 import keras
@@ -257,42 +374,6 @@ class PixelShuffle(keras.layers.Layer):
         """
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
-
-
-def create_pixel_shuffle_model(
-        input_shape: Tuple[int, int, int],
-        scale_factor: int = 2,
-        num_classes: int = 1000
-) -> keras.Model:
-    """Create a simple model demonstrating PixelShuffle usage.
-
-    Args:
-        input_shape: Input shape (seq_len, channels) for the model.
-        scale_factor: Scale factor for pixel shuffle operation.
-        num_classes: Number of output classes.
-
-    Returns:
-        Keras model with PixelShuffle layer.
-
-    Example:
-        >>> model = create_pixel_shuffle_model((197, 768), scale_factor=2)
-        >>> model.summary()
-    """
-    inputs = keras.Input(shape=input_shape, name="token_inputs")
-
-    # Apply pixel shuffle to reduce spatial tokens
-    x = PixelShuffle(scale_factor=scale_factor, name="pixel_shuffle")(inputs)
-
-    # Extract CLS token for classification
-    cls_token = x[:, 0, :]  # [batch, channels * scale_factor^2]
-
-    # Classification head
-    x = keras.layers.LayerNormalization(name="final_norm")(cls_token)
-    x = keras.layers.Dropout(0.1, name="final_dropout")(x)
-    outputs = keras.layers.Dense(num_classes, name="classifier")(x)
-
-    model = keras.Model(inputs=inputs, outputs=outputs, name="pixel_shuffle_model")
-    return model
 
 # ---------------------------------------------------------------------
 

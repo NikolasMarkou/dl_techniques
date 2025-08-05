@@ -10,11 +10,16 @@ import numpy as np
 from keras import ops, layers
 from typing import Dict, List, Optional, Any
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.norms.rms_norm import RMSNorm
-from dl_techniques.layers.ffn.swiglu_ffn import SwiGLUFFN
-from dl_techniques.layers.attention.multi_head_attention import MultiHeadAttention
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
+from .norms.rms_norm import RMSNorm
+from .ffn.swiglu_ffn import SwiGLUFFN
+from .attention.multi_head_attention import MultiHeadAttention
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class CaptioningHead(keras.layers.Layer):
@@ -153,6 +158,7 @@ class CaptioningHead(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class VQAHead(keras.layers.Layer):
@@ -282,6 +288,7 @@ class VQAHead(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class ContrastiveHead(keras.layers.Layer):
@@ -368,181 +375,4 @@ class ContrastiveHead(keras.layers.Layer):
         })
         return config
 
-
-class VLMTrainingUtils:
-    """Utility functions for training Vision Language Models."""
-
-    @staticmethod
-    def create_causal_mask(seq_len: int) -> np.ndarray:
-        """
-        Create a causal mask for autoregressive generation.
-
-        Args:
-            seq_len: Sequence length.
-
-        Returns:
-            Causal mask of shape (seq_len, seq_len).
-        """
-        mask = np.triu(np.ones((seq_len, seq_len)), k=1)
-        return mask.astype(np.bool_)
-
-    @staticmethod
-    def create_attention_mask(input_ids: np.ndarray, pad_token_id: int = 0) -> np.ndarray:
-        """
-        Create attention mask from input token IDs.
-
-        Args:
-            input_ids: Input token IDs of shape (batch_size, seq_len).
-            pad_token_id: Padding token ID.
-
-        Returns:
-            Attention mask of shape (batch_size, seq_len).
-        """
-        return (input_ids != pad_token_id).astype(np.float32)
-
-    @staticmethod
-    def compute_contrastive_loss(
-            vision_features: keras.KerasTensor,
-            text_features: keras.KerasTensor,
-            temperature: float = 0.07
-    ) -> keras.KerasTensor:
-        """
-        Compute contrastive loss for vision-text pairs.
-
-        Args:
-            vision_features: Normalized vision features.
-            text_features: Normalized text features.
-            temperature: Temperature parameter.
-
-        Returns:
-            Contrastive loss value.
-        """
-        batch_size = ops.shape(vision_features)[0]
-
-        # Compute similarity matrix
-        similarity_matrix = ops.matmul(vision_features, ops.transpose(text_features))
-        logits = similarity_matrix / temperature
-
-        # Create labels (diagonal matrix for positive pairs)
-        labels = ops.cast(ops.eye(batch_size), logits.dtype)
-
-        # Compute cross-entropy loss
-        vision_loss = keras.losses.categorical_crossentropy(
-            labels, ops.softmax(logits, axis=1), from_logits=False
-        )
-        text_loss = keras.losses.categorical_crossentropy(
-            labels, ops.softmax(ops.transpose(logits), axis=1), from_logits=False
-        )
-
-        return (ops.mean(vision_loss) + ops.mean(text_loss)) / 2
-
-    @staticmethod
-    def compute_captioning_loss(
-            predictions: keras.KerasTensor,
-            targets: keras.KerasTensor,
-            mask: Optional[keras.KerasTensor] = None
-    ) -> keras.KerasTensor:
-        """
-        Compute captioning loss with optional masking.
-
-        Args:
-            predictions: Predicted logits of shape (batch_size, seq_len, vocab_size).
-            targets: Target token IDs of shape (batch_size, seq_len).
-            mask: Optional mask of shape (batch_size, seq_len).
-
-        Returns:
-            Captioning loss value.
-        """
-        # Compute cross-entropy loss
-        loss = keras.losses.sparse_categorical_crossentropy(
-            targets, predictions, from_logits=True
-        )
-
-        # Apply mask if provided
-        if mask is not None:
-            loss = loss * mask
-            return ops.sum(loss) / ops.sum(mask)
-        else:
-            return ops.mean(loss)
-
-
-# Complete VLM with task-specific heads
-@keras.saving.register_keras_serializable()
-class CompleteVLM(keras.Model):
-    """
-    Complete Vision Language Model with task-specific heads.
-
-    Args:
-        base_model: Base VisionLanguageModel instance.
-        task_configs: Dictionary of task configurations.
-        **kwargs: Additional keyword arguments.
-    """
-
-    def __init__(
-            self,
-            base_model: keras.Model,
-            task_configs: Dict[str, Dict[str, Any]],
-            **kwargs
-    ):
-        super().__init__(**kwargs)
-        self.base_model = base_model
-        self.task_configs = task_configs
-
-        # Initialize task-specific heads
-        self.heads = {}
-        for task_name, config in task_configs.items():
-            if task_name == "captioning":
-                self.heads[task_name] = CaptioningHead(**config)
-            elif task_name == "vqa":
-                self.heads[task_name] = VQAHead(**config)
-            elif task_name == "contrastive":
-                self.heads[task_name] = ContrastiveHead(**config)
-            else:
-                logger.warning(f"Unknown task: {task_name}")
-
-    def call(self, inputs, task="contrastive", training=None):
-        """
-        Forward pass with task-specific head.
-
-        Args:
-            inputs: Model inputs.
-            task: Task name to use.
-            training: Whether in training mode.
-
-        Returns:
-            Task-specific outputs.
-        """
-        # Get base model outputs
-        base_outputs = self.base_model(inputs, training=training)
-
-        # Apply task-specific head
-        if task in self.heads:
-            if task == "captioning":
-                return self.heads[task](
-                    base_outputs["fused_text_features"],
-                    base_outputs["fused_vision_features"],
-                    training=training
-                )
-            elif task == "vqa":
-                return self.heads[task](
-                    base_outputs["fused_vision_features"],
-                    base_outputs["fused_text_features"],
-                    training=training
-                )
-            elif task == "contrastive":
-                return self.heads[task](
-                    base_outputs["vision_global"],
-                    base_outputs["text_global"],
-                    training=training
-                )
-
-        return base_outputs
-
-    def get_config(self):
-        """Get model configuration."""
-        config = super().get_config()
-        config.update({
-            "base_model": keras.saving.serialize_keras_object(self.base_model),
-            "task_configs": self.task_configs,
-        })
-        return config
+# ---------------------------------------------------------------------

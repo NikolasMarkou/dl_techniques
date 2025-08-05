@@ -1,3 +1,51 @@
+"""
+This module provides the `SwinConvBlock`, a hybrid Keras layer that synergistically
+combines the strengths of convolutional neural networks (CNNs) and the Swin
+Transformer architecture.
+
+This block is designed to capture both local and global dependencies in image-like
+data by processing features through two parallel pathways, which are then fused back
+together. The core idea is to leverage the inductive biases and efficiency of
+convolutions for local feature extraction, while simultaneously using the powerful,
+long-range modeling capabilities of window-based self-attention.
+
+Architectural Design:
+
+The `SwinConvBlock` operates on a "split-transform-merge" principle within a residual
+framework.
+
+1.  **Input Processing and Splitting:**
+    -   The input tensor first passes through a `1x1 Conv2D` layer to prepare the
+        features for the two specialized paths.
+    -   The output of this convolution is then split along the channel dimension into
+        two separate tensors: one for the convolutional path (`conv_x`) and one for the
+        Transformer path (`trans_x`). The size of these splits is controlled by
+        `conv_dim` and `trans_dim`.
+
+2.  **Parallel Pathways:**
+    -   **Convolutional Path:** `conv_x` is processed by a standard residual
+        convolutional block (typically two `3x3 Conv2D` layers with a ReLU activation).
+        This path excels at learning local patterns, textures, and spatial hierarchies
+        efficiently.
+    -   **Transformer Path:** `trans_x` is processed by a `SwinTransformerBlock`. This
+        path uses windowed self-attention (either regular 'W' or shifted 'SW') to
+        model long-range dependencies and contextual relationships between different
+        parts of the feature map.
+
+3.  **Fusion and Output:**
+    -   The outputs of the two parallel paths are concatenated back together along the
+        channel dimension.
+    -   This fused tensor is then passed through a final `1x1 Conv2D` layer to mix the
+        features from both paths.
+    -   A main residual connection adds the original input (`shortcut`) to the output
+        of the entire block, ensuring stable gradient flow and allowing the network
+        to easily bypass the block if needed.
+
+By integrating these two paradigms, the `SwinConvBlock` aims to create a more powerful
+and versatile building block for computer vision models, capable of learning a richer
+set of features than either approach could alone.
+"""
+
 import keras
 from keras import ops
 from typing import Tuple, Optional, Dict, Any, Union

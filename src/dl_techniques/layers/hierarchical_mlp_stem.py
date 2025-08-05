@@ -5,8 +5,6 @@ Hierarchical MLP (hMLP) Stem for Vision Transformers
 This module implements the hierarchical MLP stem as described in
 "Three things everyone should know about Vision Transformers" by Touvron et al.
 
-PAPER OVERVIEW:
---------------
 The paper introduces three key insights about Vision Transformers:
 1. Parallelizing ViT layers can improve efficiency without affecting accuracy
 2. Fine-tuning only attention layers is sufficient for adaptation

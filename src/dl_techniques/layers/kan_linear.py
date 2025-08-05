@@ -54,7 +54,7 @@ References:
 import keras
 import numpy as np
 from keras import ops
-from typing import Tuple, Optional, Dict, Any, Union, List
+from typing import Tuple, Optional, Dict, Any, Union
 
 # ---------------------------------------------------------------------
 # local imports

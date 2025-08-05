@@ -1,8 +1,38 @@
 """
-ConvBlock layer implementation for FractalNet architecture.
+Keras Implementation of the FractalNet Convolutional Block.
 
-This module provides the fundamental building block for FractalNet consisting of:
-Conv2D → BatchNorm → ReLU → Dropout → Conv2D → BatchNorm → ReLU → Dropout
+This file defines the `ConvBlock` layer, which serves as the fundamental
+repeated computational unit in the FractalNet architecture, as described in
+'FractalNet: Ultra-Deep Neural Networks without Residuals' by Larsson et al. (2016).
+Link: https://arxiv.org/abs/1605.07648
+
+The primary export is the `ConvBlock` class, which encapsulates a fixed sequence
+of operations: Conv2D → BatchNorm → ReLU → Dropout, repeated twice.
+
+Implementation Details:
+-----------------------
+
+1.  **Composite Layer Structure:**
+    The `ConvBlock` is not a primitive Keras layer but a composite `keras.layers.Layer`
+    that acts as a container. It internally manages a sequence of standard Keras
+    layers (`Conv2D`, `BatchNormalization`, `Activation`, `Dropout`). This abstraction
+    simplifies the construction of larger models like FractalNet by creating a
+    reusable, self-contained unit.
+
+2.  **Conditional Component Creation:**
+    The inclusion of `BatchNormalization` and `Dropout` layers is conditional,
+    controlled by the `use_batch_norm` and `dropout_rate` arguments respectively.
+    - If `use_batch_norm` is `False`, the `BatchNormalization` layers are not
+      created, and the `use_bias` argument for the `Conv2D` layers is set to `True`.
+    - If `dropout_rate` is `0`, the `Dropout` layers are skipped entirely, avoiding
+      unnecessary overhead during both training and inference.
+
+3.  **Asymmetric Strides for Downsampling:**
+    A key architectural choice is how strides are handled. The `strides` parameter
+    passed during initialization *only* applies to the first `Conv2D` layer (`conv1`).
+    This allows the block to perform spatial downsampling at the beginning. The
+    second `Conv2D` layer (`conv2`) is hardcoded with `strides=1` to preserve the
+    feature map dimensions within the second half of the block.
 """
 
 import keras

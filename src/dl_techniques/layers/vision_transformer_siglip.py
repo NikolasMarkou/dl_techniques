@@ -1,3 +1,61 @@
+"""
+This module provides `SigLIPVisionTransformer`, a Keras Layer that implements a
+complete Vision Transformer (ViT) architecture, with a specific focus on the
+patching strategy inspired by the SigLIP (Sigmoid-Loss for Language-Image Pre-training)
+paper.
+
+A Vision Transformer is a model that applies the highly successful Transformer
+architecture, originally designed for text, to the domain of computer vision. It
+achieves this by treating an image as a sequence of smaller, flattened "patches,"
+which are then processed by a series of Transformer encoder blocks.
+
+This implementation encapsulates the entire ViT pipeline, from initial image
+processing to the final feature extraction.
+
+Key Architectural Components:
+
+1.  **SigLIP-Style Two-Stage Patch Embedding:**
+    -   This is the defining feature of this particular ViT variant. Standard ViTs
+        use a single, large convolutional kernel to convert image patches directly
+        into embeddings.
+    -   The SigLIP approach employs a two-stage process for more hierarchical feature
+        extraction:
+        1.  **Stage 1:** A `Conv2D` layer with a medium-sized kernel and stride
+            (e.g., `patch_size / 2`) performs an initial, coarse-grained patching
+            and embedding. This is followed by `LayerNormalization` and a `GELU`
+            activation.
+        2.  **Stage 2:** A second, smaller `Conv2D` layer (e.g., kernel size 2x2)
+            further processes the output of the first stage, refining the features
+            and bringing them to the final embedding dimension.
+    -   This two-stage design can be seen as a small, local convolutional network
+        that creates more robust patch embeddings before they are fed into the global
+        Transformer blocks.
+
+2.  **Learnable `[CLS]` (Classification) Token:**
+    -   Following the standard ViT design, a special, learnable `[CLS]` token is
+        prepended to the sequence of patch embeddings.
+    -   This token is not associated with any specific image patch. Instead, it acts
+        as a global "summary" vector. After passing through all Transformer layers,
+        the final state of this `[CLS]` token is typically used as the image
+        representation for downstream tasks like classification.
+
+3.  **Positional Embeddings:**
+    -   Since the Transformer architecture is permutation-invariant, explicit
+        positional information must be added. This layer adds a unique, learnable
+        positional embedding to each token in the sequence (both the `[CLS]` token
+        and all patch tokens) to inform the model of their spatial arrangement.
+
+4.  **Stack of Transformer Blocks:**
+    -   The core of the model is a series of standard Transformer encoder blocks
+        (`VisionTransformerLayer`). Each block consists of a multi-head self-attention
+        layer and a feed-forward network, allowing tokens to exchange information
+        and build up a rich, context-aware representation of the entire image.
+
+5.  **Final Normalization:**
+    -   A final `LayerNormalization` is applied to the output of the last Transformer
+        block to produce the final, well-conditioned feature representation.
+"""
+
 import keras
 from keras import ops
 from typing import Optional, Tuple, Union
@@ -14,7 +72,7 @@ from .vision_transformer import VisionTransformerLayer
 
 @keras.saving.register_keras_serializable()
 class SigLIPVisionTransformer(keras.layers.Layer):
-    """SigLIP-based Vision Transformer for nanoVLM.
+    """SigLIP-based Vision Transformer
 
     Implements a vision transformer following SigLIP architecture with
     two-stage patch embedding, positional encoding, and transformer blocks.

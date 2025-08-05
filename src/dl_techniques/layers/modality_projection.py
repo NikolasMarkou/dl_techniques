@@ -50,7 +50,7 @@ from typing import Optional, Tuple, Union, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-
+from .pixel_shuffle import PixelShuffle
 # ---------------------------------------------------------------------
 
 
@@ -178,7 +178,6 @@ class ModalityProjection(keras.layers.Layer):
 
         # Create pixel shuffle layer for token reduction
         # Assuming PixelShuffle layer exists in the project
-        from dl_techniques.layers import PixelShuffle
         self.pixel_shuffle = PixelShuffle(scale_factor=self.scale_factor)
 
         # Calculate expected input dimension after pixel shuffle
