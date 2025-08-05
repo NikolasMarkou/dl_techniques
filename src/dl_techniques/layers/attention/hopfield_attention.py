@@ -1,8 +1,74 @@
-"""
-Modern Hopfield Networks - Fixed Implementation
-==============================================
+"""Modern Hopfield Network Layer with Iterative Updates.
 
-Fixed the build method to properly handle input shapes.
+This layer implements a Modern Hopfield Network, as described in the paper
+"Hopfield Networks is All You Need" [1]. It functions as a content-addressable
+associative memory, capable of storing and retrieving a large number of patterns.
+
+The core of the layer is the scaled dot-product attention mechanism from the
+Transformer architecture, which serves as the update rule for the network's
+state. Unlike a standard attention layer, which performs a single, feed-forward
+computation, this layer can apply the attention mechanism iteratively. An
+initial query (a "probe" or noisy pattern) is repeatedly refined until it
+converges to one of the stored patterns (the "memories"), which are represented
+by the Key-Value pairs.
+
+Difference from Standard Transformer Attention:
+---------------------------------------------
+The fundamental difference is the computational flow:
+
+| Feature                | Standard Transformer Attention      | Modern Hopfield Network (This Layer)    |
+|:-----------------------|:------------------------------------|:----------------------------------------|
+| **Computational Flow** | Single-step, feed-forward           | Iterative, recurrent until convergence  |
+| **Primary Goal**       | Contextual information weighting    | Associative pattern retrieval & cleaning|
+| **Mechanism**          | `output = attention(Q, K, V)`       | `state_t+1 = attention(state_t, K, V)`  |
+| **Query (Q)**          | Static input representation         | Dynamic state vector that evolves       |
+
+In essence, a standard transformer attention layer performs a single update
+step (`update_steps_max=0` in this implementation) of a modern Hopfield network.
+This layer generalizes that concept by allowing for multiple (`update_steps_max > 0`)
+iterative updates, enabling it to function as a true associative memory that
+converges to stable fixed-points (attractors).
+
+Convergence Criteria:
+---------------------
+The iterative update process, which runs when `update_steps_max > 0`,
+terminates based on one of the following conditions:
+
+1.  **Maximum Steps Reached:** The loop hard-stops after completing the number
+    of iterations specified by `update_steps_max`. This acts as a safeguard
+    to control computation time and prevent infinite loops.
+
+2.  **State Convergence:** The network is considered to have converged if the
+    change between consecutive states becomes negligibly small. This is
+    measured by calculating the **Frobenius norm** of the difference between
+    the attention matrix of the current step and the previous step. If this
+    norm falls below the threshold defined by `update_steps_eps`, the
+    iteration stops. This indicates that the system has settled into a
+    stable fixed-point attractor.
+
+Example:
+    >>> # Self-attention with iterative updates
+    >>> x = keras.random.normal((4, 32, 128))
+    >>> hopfield_layer = HopfieldAttention(
+    ...     num_heads=8, key_dim=16, update_steps_max=3
+    ... )
+    >>> output = hopfield_layer(x)
+    >>> print(output.shape)
+    (4, 32, 128)
+
+    >>> # Cross-attention (single step, like standard attention)
+    >>> query = keras.random.normal((4, 32, 128))
+    >>> key_value = keras.random.normal((4, 64, 128))
+    >>> hopfield_layer = HopfieldAttention(
+    ...     num_heads=8, key_dim=16, update_steps_max=0
+    ... )
+    >>> output = hopfield_layer([query, key_value])
+    >>> print(output.shape)
+    (4, 32, 128)
+
+References:
+    [1] Ramsauer, H., et al. (2020). "Hopfield Networks is All You Need".
+        arXiv:2008.02217.
 """
 
 import keras
