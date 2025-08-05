@@ -37,7 +37,7 @@ From novel attention mechanisms and orthonormal layers to information-theoretic 
 This library is a comprehensive suite of tools organized into four key pillars:
 
 <details>
-<summary><b>1. An Arsenal of SOTA Layers & Architectures</b></summary>
+<summary><b>1. An Arsenal of SOTA Layers & Architectures (170+ Layers)</b></summary>
 
 -   **Modern Attention Mechanisms**: A rich collection of advanced attention layers, including `DifferentialMultiHeadAttention`, `HopfieldAttention`, `GroupQueryAttention`, and `NonLocalAttention`, along with essentials like `RotaryPositionEmbedding` (RoPE).
 -   **Advanced Convolutional Blocks**: State-of-the-art convolutional blocks like `ConvNeXtV1` & `V2`, the `Convolutional Block Attention Module` (CBAM), and our novel `OrthoBlock`, which combines orthonormal weights with mean-centering.
@@ -118,12 +118,12 @@ Here's how to integrate advanced components like our novel `OrthoBlock` and `Glo
 
 ```python
 import tensorflow as tf
-from dl_techniques.layers import OrthoBlock
-from dl_techniques.layers.norms import GlobalResponseNorm
+from dl_techniques.layers.experimental import OrthoBlock
+from dl_techniques.layers.norms import GlobalResponseNormalization
 
 inputs = tf.keras.Input(shape=(64,))
 x = OrthoBlock(units=128, activation='gelu')(inputs)
-x = GlobalResponseNorm()(x)
+x = GlobalResponseNormalization()(x)
 outputs = tf.keras.layers.Dense(10, activation='softmax')(x)
 
 model = tf.keras.Model(inputs, outputs)
@@ -152,14 +152,13 @@ model.compile(
 Instantiate a complete, state-of-the-art model like `ConvNeXtV1` with just a few lines of code.
 
 ```python
-from dl_techniques.models import ConvNextV1Tiny
+from dl_techniques.models import create_convnext_v1
 
 # Create the ConvNeXtV1 "Tiny" model for ImageNet
-model = ConvNextV1Tiny(
-    include_top=True,
-    weights=None, # or 'imagenet'
-    input_shape=(224, 224, 3),
-    classes=1000
+model = create_convnext_v1(
+    variant='tiny',
+    num_classes=1000,
+    input_shape=(224, 224, 3)
 )
 
 model.summary()
@@ -172,14 +171,19 @@ Get deep insights into your models with comprehensive analysis covering training
 ```python
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 
-# Compare multiple models
+# Compare multiple models and their training histories
 models = {'ResNet': resnet_model, 'ConvNext': convnext_model}
+histories = {'ResNet': resnet_history, 'ConvNext': convnext_history}
 config = AnalysisConfig(analyze_training_dynamics=True, analyze_calibration=True)
+test_data = DataInput(x_test, y_test)
 
+# Initialize the analyzer
 analyzer = ModelAnalyzer(models, config=config, training_history=histories)
-results = analyzer.analyze(DataInput(x_test, y_test))
 
-# Generates publication-ready visualizations and detailed insights
+# Run all configured analyses
+results = analyzer.analyze(test_data)
+
+# This generates a full suite of publication-ready visualizations and detailed insights.
 ```
 
 ---
