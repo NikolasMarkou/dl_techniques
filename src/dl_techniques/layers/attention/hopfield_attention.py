@@ -1,155 +1,8 @@
 """
-Modern Hopfield Networks - Theory and Implementation Guide
-=======================================================
+Modern Hopfield Networks - Fixed Implementation
+==============================================
 
-Theory and Implementation:
--------------------------
-Modern Hopfield Networks combine the classic Hopfield Network concept with attention mechanisms
-from transformer architectures. Here's a detailed breakdown:
-
-1. Theoretical Foundation:
-------------------------
-Classic Hopfield Networks had limited storage capacity (0.138N patterns for N neurons) and could
-only handle binary patterns. Modern Hopfield Networks overcome these limitations:
-
-- Can store exponentially many patterns (exp(N/c) patterns for constant c)
-- Handle continuous-valued patterns naturally
-- Guaranteed convergence in a single update step under normal conditions
-- No spurious minima unlike classic Hopfield networks
-- Stable retrieval even with partial or noisy patterns
-
-The key innovation is replacing the traditional energy function and Hebbian learning with a
-softmax-based association mechanism, similar to attention in transformers.
-
-2. Key Components:
-----------------
-a) Multi-Head Attention:
-   - Input patterns are projected into three spaces:
-     * Query (Q): represents the pattern to be retrieved/completed
-     * Key (K): represents stored patterns for matching
-     * Value (V): represents the actual content to be retrieved
-   - Multiple attention heads allow parallel pattern association
-   - Each head can focus on different aspects of the patterns
-   - Heads are concatenated and projected to produce final output
-
-b) Pattern Storage:
-   - Patterns are stored implicitly in the Key-Value pairs
-   - No separate weight matrix needed (unlike classic Hopfield)
-   - Storage capacity scales exponentially with dimension
-   - Can dynamically update stored patterns during inference
-   - Continuous-valued patterns are handled naturally
-
-c) Pattern Retrieval:
-   - Uses scaled dot-product attention: softmax(QK^T/sqrt(d))V
-   - The scaling factor sqrt(d) prevents saturation of softmax
-   - Softmax operation ensures proper energy minimization
-   - Retrieval is iterative but typically converges quickly
-   - Can retrieve multiple patterns simultaneously
-
-3. Update Dynamics:
------------------
-The network performs iterative updates until convergence. Each update step consists of:
-
-1. Computing attention scores:
-   score = softmax(QK^T/sqrt(d))
-
-2. Retrieving patterns:
-   output = score * V
-
-3. Checking convergence:
-   - Compute change in attention scores
-   - Stop if change < update_steps_eps
-   - Or if update_steps_max reached
-
-The update rule can be interpreted as:
-- High attention scores indicate pattern matches
-- Softmax ensures competition between patterns
-- The scaling factor controls retrieval sharpness
-
-4. Implementation Details:
-------------------------
-a) Initialization:
-   - Creates projection matrices for Q, K, V transformations
-   - Supports different dimensions for key/query and value
-   - Initializes using Glorot uniform for stability
-   - Sets up layer normalization if enabled
-
-b) Forward Pass:
-   1. Project inputs to Q, K, V spaces
-   2. Reshape for multi-head attention
-   3. Apply layer norm if enabled
-   4. Perform iterative Hopfield updates
-   5. Concatenate heads and project output
-
-c) Optimization Features:
-   - Masking support for variable-length sequences
-   - Dropout for regularization
-   - Layer normalization for training stability
-   - Multiple regularization options (kernel, bias, activity)
-
-5. Mathematical Details:
-----------------------
-Core Update Rule:
-xi_{t+1} = softmax(β * K^T * xi_t) * V
-
-where:
-- xi_t is the state at step t
-- β is the scaling factor (inverse temperature)
-- K is the key matrix
-- V is the value matrix
-
-Energy Function:
-E(xi) = -1/β * log(sum_k exp(β * k_i^T * xi)) + 1/2 * ||xi||^2
-
-Properties:
-- Energy function is continuous and differentiable
-- Global minimum is guaranteed to exist
-- No spurious local minima
-- Convergence typically in one step for β -> ∞
-
-6. Usage Considerations:
-----------------------
-Performance Optimization:
-- Pattern normalization improves convergence but adds compute
-- Number of heads should divide input dimension evenly
-- update_steps_max trades accuracy vs. computation
-- Dropout important for preventing overfitting
-
-Hyperparameter Guidelines:
-- num_heads: typically 4-12 depending on input size
-- key_dim: usually input_dim // num_heads
-- dropout: 0.1-0.3 works well for most cases
-- update_steps_max: 0-3 sufficient for most applications
-- update_steps_eps: 1e-4 is a good default
-
-Common Issues:
-- Poor convergence: try adjusting layer normalization
-- Slow training: reduce update_steps_max
-- Overfitting: increase dropout or add regularization
-- Memory issues: reduce num_heads or key_dim
-
-7. Extensions and Variants:
--------------------------
-Possible modifications include:
-- Adaptive scaling factor (β)
-- Gated update rule
-- Sparse attention patterns
-- Hierarchical pattern storage
-- Continuous update dynamics
-
-8. References:
--------------
-[1] Ramsauer, H., et al. (2020).
-    "Hopfield Networks is All You Need"
-    arXiv:2008.02217
-
-[2] Krotov, D., & Hopfield, J. J. (2016).
-    "Dense Associative Memory for Pattern Recognition"
-    arXiv:1606.01164
-
-[3] Vaswani, A., et al. (2017).
-    "Attention is All You Need"
-    arXiv:1706.03762
+Fixed the build method to properly handle input shapes.
 """
 
 import keras
@@ -296,12 +149,14 @@ class HopfieldAttention(keras.layers.Layer):
         self._build_input_shape = input_shape
 
         # Handle different input formats
-        if isinstance(input_shape, (list, tuple)) and len(input_shape) == 3:
-            # [query, key, value] shapes provided
-            query_shape = input_shape[0]
-        elif isinstance(input_shape, (list, tuple)) and isinstance(input_shape[0], (list, tuple)):
-            # Single input shape provided as nested structure
-            query_shape = input_shape[0]
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0:
+            # Check if this is a list of shapes or a single shape
+            if isinstance(input_shape[0], (list, tuple)):
+                # This is a list of shapes [query_shape, key_shape, value_shape]
+                query_shape = input_shape[0]
+            else:
+                # This is a single shape tuple (None, 32, 512)
+                query_shape = input_shape
         else:
             # Single input shape provided
             query_shape = input_shape
@@ -412,11 +267,28 @@ class HopfieldAttention(keras.layers.Layer):
         scale = ops.sqrt(ops.cast(self.key_dim, query.dtype))
         attention_scores = ops.matmul(query, ops.transpose(key, [0, 1, 3, 2])) / scale
 
-        if mask is not None:
-            # Expand mask to match attention scores shape
-            mask = ops.cast(mask, attention_scores.dtype)
+        # The 'mask' argument can be a tensor, None, or a list of masks propagated
+        # by Keras. We need to resolve this to a single tensor mask or None.
+        actual_mask = None
+        if isinstance(mask, (list, tuple)):
+            # If Keras passes a list, find the first non-None mask.
+            for m in mask:
+                if m is not None:
+                    actual_mask = m
+                    break
+        else:
+            actual_mask = mask
+
+        if actual_mask is not None:
+            mask_tensor = ops.cast(actual_mask, attention_scores.dtype)
+            # Add heads dimension if missing for broadcasting.
+            # attention_scores shape: (batch, num_heads, seq_len_q, seq_len_k)
+            # A common mask shape is (batch, seq_len_q, seq_len_k).
+            if len(ops.shape(mask_tensor)) == 3:
+                mask_tensor = ops.expand_dims(mask_tensor, axis=1)
+
             # Add large negative values to masked positions
-            attention_scores = attention_scores + (1.0 - mask) * -1e9
+            attention_scores = attention_scores + (1.0 - mask_tensor) * -1e9
 
         attention_weights = ops.softmax(attention_scores, axis=-1)
 
@@ -504,15 +376,21 @@ class HopfieldAttention(keras.layers.Layer):
                 current_query, key_proj, value_proj, mask, training
             )
 
+            # If update_steps_max is 0, only do one step (standard attention)
+            if self.update_steps_max == 0:
+                break
+
             # Check convergence if we have previous attention weights
             if prev_attention is not None and self.update_steps_eps > 0:
-                diff_norm = ops.norm(attention_weights - prev_attention, ord=2)
+                # Compute Frobenius norm of the difference
+                diff = attention_weights - prev_attention
+                diff_norm = ops.sqrt(ops.sum(ops.square(diff)))
                 if diff_norm < self.update_steps_eps:
                     logger.debug(f"Hopfield converged after {update_step} steps")
                     break
 
             # Check maximum steps
-            if self.update_steps_max > 0 and update_step >= self.update_steps_max:
+            if update_step >= self.update_steps_max:
                 logger.debug(f"Hopfield stopped at max steps: {self.update_steps_max}")
                 break
 
@@ -520,11 +398,9 @@ class HopfieldAttention(keras.layers.Layer):
             prev_attention = attention_weights
             update_step += 1
 
-            # For next iteration, use the output to compute new queries
+            # Use attention weights to update the query for next iteration
             # This implements the iterative Hopfield dynamics
-            if update_step < self.update_steps_max or self.update_steps_max == 0:
-                # Use attention weights to update the query for next iteration
-                current_query = ops.matmul(attention_weights, key_proj)
+            current_query = ops.matmul(attention_weights, key_proj)
 
         # Reshape output back to original format
         output = ops.transpose(output, [0, 2, 1, 3])  # (batch, seq_len, num_heads, value_dim)
@@ -548,14 +424,16 @@ class HopfieldAttention(keras.layers.Layer):
             Output shape tuple.
         """
         # Handle different input formats
-        if isinstance(input_shape, (list, tuple)) and len(input_shape) == 3:
-            # [query, key, value] shapes provided
-            query_shape = input_shape[0]
-        elif isinstance(input_shape, (list, tuple)) and isinstance(input_shape[0], (list, tuple)):
-            # Nested structure
-            query_shape = input_shape[0]
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0:
+            # Check if this is a list of shapes or a single shape
+            if isinstance(input_shape[0], (list, tuple)):
+                # This is a list of shapes [query_shape, key_shape, value_shape]
+                query_shape = input_shape[0]
+            else:
+                # This is a single shape tuple (None, 32, 512)
+                query_shape = input_shape
         else:
-            # Single input shape
+            # Single input shape provided
             query_shape = input_shape
 
         # Convert to list for manipulation
@@ -609,6 +487,3 @@ class HopfieldAttention(keras.layers.Layer):
         """
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
-
-# ---------------------------------------------------------------------
-
