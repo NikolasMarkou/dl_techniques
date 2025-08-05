@@ -99,9 +99,9 @@ from typing import Tuple, Optional, Union, Dict, Any
 # ---------------------------------------------------------------------
 
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.mps_layer import MPSLayer
-from dl_techniques.regularizers.entropy_regularizer import EntropyRegularizer
+from ..utils.logger import logger
+from ..layers.mps_layer import MPSLayer
+from ..regularizers.entropy_regularizer import EntropyRegularizer
 
 # ---------------------------------------------------------------------
 

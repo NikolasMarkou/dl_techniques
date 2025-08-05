@@ -332,4 +332,3 @@ class MPSLayer(keras.layers.Layer):
             self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------
-
