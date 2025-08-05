@@ -14,16 +14,16 @@ from typing import Dict, Optional, Tuple, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.norms.rms_norm import RMSNorm
-from dl_techniques.layers.ffn.swiglu_ffn import SwiGLUFFN
-from dl_techniques.layers.tokenizers.bpe import TokenEmbedding
-from dl_techniques.layers.patch_embedding import PatchEmbedding2D
-from dl_techniques.layers.positional_embedding import PositionalEmbedding
-from dl_techniques.layers.vision_transformer import VisionTransformerLayer
-from dl_techniques.layers.transformer_encoder import TransformerEncoderLayer
-from dl_techniques.layers.attention.multi_head_attention import MultiHeadAttention
-from dl_techniques.layers.geometric.shared_weights_cross_attention import SharedWeightsCrossAttention
+from ..utils.logger import logger
+from ..layers.norms.rms_norm import RMSNorm
+from ..layers.ffn.swiglu_ffn import SwiGLUFFN
+from ..layers.tokenizers.bpe import TokenEmbedding
+from ..layers.patch_embedding import PatchEmbedding2D
+from ..layers.positional_embedding import PositionalEmbedding
+from ..layers.vision_transformer import VisionTransformerLayer
+from ..layers.transformer_encoder import TransformerEncoderLayer
+from ..layers.attention.multi_head_attention import MultiHeadAttention
+from ..layers.geometric.shared_weights_cross_attention import SharedWeightsCrossAttention
 
 # ---------------------------------------------------------------------
 

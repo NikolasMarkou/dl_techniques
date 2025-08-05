@@ -93,12 +93,6 @@ Technical Details:
       * Proper weight initialization (He normal, small variance for latent layers)
       * Epsilon clamping for log operations
 
-Performance Considerations:
-    - Memory efficient implementation with lazy weight creation
-    - Supports mixed precision training
-    - Configurable batch normalization and dropout for regularization
-    - Optimized for modern GPU architectures
-
 Model Persistence:
     - Fully serializable using Keras .keras format
     - Proper config serialization for all parameters
@@ -672,7 +666,6 @@ class VAE(keras.Model):
 
 # ---------------------------------------------------------------------
 
-# Factory function for the ResNet VAE
 def create_vae(
     input_shape: Tuple[int, int, int],
     latent_dim: int,

@@ -7,7 +7,7 @@ from typing import Tuple, Union, Optional, Sequence
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
+from ..utils.logger import logger
 from .gaussian_filter import GaussianFilter
 
 

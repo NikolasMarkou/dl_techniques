@@ -2,6 +2,7 @@ import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class GlobalSumPooling2D(keras.layers.Layer):
@@ -136,3 +137,5 @@ class GlobalSumPooling2D(keras.layers.Layer):
         """Build the layer from configuration."""
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
+
+# ---------------------------------------------------------------------

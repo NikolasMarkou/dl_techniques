@@ -15,8 +15,8 @@ from typing import Optional, Union, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
+from ..utils.logger import logger
+from ..layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
 
 # ---------------------------------------------------------------------
 

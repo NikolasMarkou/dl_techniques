@@ -51,8 +51,14 @@ model = create_convnext_v2("large", num_classes=100, input_shape=(64, 64, 3))
 import keras
 from typing import List, Optional, Union, Tuple, Dict, Any
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from ..utils.logger import logger
+from ..layers.convnext_v2_block import ConvNextV2Block
+
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -545,6 +551,7 @@ class ConvNeXtV2(keras.Model):
         if self.include_top:
             logger.info(f"  - Number of classes: {self.num_classes}")
 
+# ---------------------------------------------------------------------
 
 def create_convnext_v2(
     variant: str = "tiny",
@@ -587,3 +594,6 @@ def create_convnext_v2(
     )
 
     return model
+
+# ---------------------------------------------------------------------
+

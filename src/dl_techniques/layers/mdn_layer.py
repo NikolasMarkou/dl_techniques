@@ -53,8 +53,8 @@ from typing import Dict, Optional, Tuple, Union, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.utils.tensors import gaussian_probability
+from ..utils.logger import logger
+from ..utils.tensors import gaussian_probability
 from .activations.explanded_activations import elu_plus_one_plus_epsilon
 
 # ---------------------------------------------------------------------

@@ -13,15 +13,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
 
-@dataclass
-class LayerConfig:
-    """Configuration dataclass for SelectiveGradientMask layer."""
-    name: Optional[str] = None
-    trainable: bool = True
-    dtype: Optional[str] = None
-
-# ---------------------------------------------------------------------
-
 
 class SelectiveGradientMask(keras.layers.Layer):
     """
@@ -30,9 +21,6 @@ class SelectiveGradientMask(keras.layers.Layer):
     This layer allows fine-grained control over gradient flow by selectively stopping
     gradients at specified positions based on a binary mask. The layer maintains
     the forward pass signal while controlling backpropagation paths.
-
-    Attributes:
-        config: LayerConfig instance containing layer configuration
 
     Example:
         ```python
@@ -61,11 +49,10 @@ class SelectiveGradientMask(keras.layers.Layer):
             dtype: Optional datatype for layer computations
             **kwargs: Additional keyword arguments passed to parent class
         """
-        self.config = LayerConfig(name=name, trainable=trainable, dtype=dtype)
         super().__init__(
-            name=self.config.name,
-            trainable=self.config.trainable,
-            dtype=self.config.dtype,
+            name=name,
+            trainable=trainable,
+            dtype=dtype,
             **kwargs
         )
 
@@ -172,80 +159,10 @@ class SelectiveGradientMask(keras.layers.Layer):
             Dictionary containing layer configuration
         """
         return {
-            "name": self.config.name,
-            "trainable": self.config.trainable,
-            "dtype": self.config.dtype
+            "name": self.name,
+            "trainable": self.trainable,
+            "dtype": self.dtype
         }
-
-# ---------------------------------------------------------------------
-
-
-def create_model(
-        input_shape: Tuple[int, ...] = (28, 28, 1),
-        num_classes: int = 10,
-        filters: int = 32,
-        kernel_size: int = 3,
-        pool_size: int = 2
-) -> keras.Model:
-    """
-    Create a CNN model with selective gradient masking.
-
-    Args:
-        input_shape: Shape of input tensors (excluding batch dimension)
-        num_classes: Number of output classes
-        filters: Number of convolutional filters
-        kernel_size: Size of convolutional kernel
-        pool_size: Size of pooling window
-
-    Returns:
-        Compiled Keras model
-    """
-    # Input layers
-    signal_input = keras.layers.Input(shape=input_shape, name="signal")
-    mask_input = keras.layers.Input(shape=input_shape, name="mask")
-
-    # Apply selective gradient masking
-    masked = SelectiveGradientMask(name="gradient_mask")(
-        [signal_input, mask_input]
-    )
-
-    # CNN architecture
-    x = keras.layers.Conv2D(
-        filters=filters,
-        kernel_size=kernel_size,
-        activation="relu",
-        padding="same",
-        name="conv1"
-    )(masked)
-
-    x = keras.layers.MaxPooling2D(
-        pool_size=pool_size,
-        name="pool1"
-    )(x)
-
-    x = keras.layers.BatchNormalization(name="bn1")(x)
-    x = keras.layers.Dropout(0.25, name="dropout1")(x)
-    x = keras.layers.Flatten(name="flatten")(x)
-
-    outputs = keras.layers.Dense(
-        units=num_classes,
-        activation="softmax",
-        name="predictions"
-    )(x)
-
-    model = keras.Model(
-        inputs=[signal_input, mask_input],
-        outputs=outputs,
-        name="selective_gradient_cnn"
-    )
-
-    model.compile(
-        optimizer="adam",
-        loss="categorical_crossentropy",
-        metrics=["accuracy"]
-    )
-
-    return model
 
 # ---------------------------------------------------------------------
 

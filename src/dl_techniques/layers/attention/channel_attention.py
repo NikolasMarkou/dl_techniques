@@ -2,12 +2,6 @@ import keras
 from typing import Optional, Union, Dict, Any, Tuple
 
 # ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.logger import logger
-
-# ---------------------------------------------------------------------
 
 @keras.utils.register_keras_serializable()
 class ChannelAttention(keras.layers.Layer):

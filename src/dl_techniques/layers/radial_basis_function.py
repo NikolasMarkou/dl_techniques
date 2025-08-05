@@ -66,7 +66,7 @@ from typing import Any, Optional, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
+from ..constraints.value_range_constraint import ValueRangeConstraint
 
 # ---------------------------------------------------------------------
 

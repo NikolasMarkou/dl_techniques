@@ -80,7 +80,7 @@ from typing import Optional, Dict, Union, List, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.scaling import *
+from ..utils.scaling import *
 
 # ---------------------------------------------------------------------
 

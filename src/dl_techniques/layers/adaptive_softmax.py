@@ -65,7 +65,7 @@ from typing import Optional, Dict, Any, List
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
+from ..utils.logger import logger
 
 # ---------------------------------------------------------------------
 

@@ -41,7 +41,7 @@ from typing import Dict, Optional, Tuple, Union, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
+from ..utils.logger import logger
 from .activations.explanded_activations import elu_plus_one_plus_epsilon
 
 # ---------------------------------------------------------------------

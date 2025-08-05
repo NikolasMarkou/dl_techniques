@@ -16,7 +16,7 @@ from typing import Optional, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
+from ..utils.logger import logger
 
 # ---------------------------------------------------------------------
 

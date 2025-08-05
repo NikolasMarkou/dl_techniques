@@ -62,17 +62,17 @@ from typing import Optional, Union, Any, Dict, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
+from ..utils.logger import logger
+
 from .norms.rms_norm import RMSNorm
 from .norms.band_rms import BandRMS
 
-# FFN imports
 from .ffn.mlp import MLPBlock
+from .ffn.glu_ffn import GLUFFN
+from .ffn.swin_mlp import SwinMLP
 from .ffn.swiglu_ffn import SwiGLUFFN
 from .ffn.diff_ffn import DifferentialFFN
-from .ffn.glu_ffn import GLUFFN
 from .ffn.residual_block import ResidualBlock
-from .ffn.swin_mlp import SwinMLP
 
 # ---------------------------------------------------------------------
 

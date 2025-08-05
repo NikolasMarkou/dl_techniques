@@ -6,15 +6,13 @@ such as image captioning, visual question answering, and contrastive learning.
 """
 
 import keras
-import numpy as np
-from keras import ops, layers
-from typing import Dict, List, Optional, Any
+from keras import ops
+from typing import List
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 from .norms.rms_norm import RMSNorm
 from .ffn.swiglu_ffn import SwiGLUFFN
 from .attention.multi_head_attention import MultiHeadAttention
@@ -99,7 +97,7 @@ class CaptioningHead(keras.layers.Layer):
             self.norm_layers.extend([norm1, norm2, norm3])
 
         # Output projection to vocabulary
-        self.output_projection = layers.Dense(
+        self.output_projection = keras.layers.Dense(
             self.vocab_size,
             name="output_projection",
             kernel_initializer="glorot_normal"
@@ -210,20 +208,20 @@ class VQAHead(keras.layers.Layer):
         # Hidden layers
         prev_dim = self.embed_dim * 2  # Concatenated vision and text features
         for i, hidden_dim in enumerate(self.hidden_dims):
-            hidden_layer = layers.Dense(
+            hidden_layer = keras.layers.Dense(
                 hidden_dim,
                 activation="gelu",
                 kernel_initializer="glorot_normal",
                 name=f"hidden_{i}"
             )
-            dropout_layer = layers.Dropout(self.dropout_rate, name=f"dropout_{i}")
+            dropout_layer = keras.layers.Dropout(self.dropout_rate, name=f"dropout_{i}")
 
             self.hidden_layers.append(hidden_layer)
             self.dropout_layers.append(dropout_layer)
             prev_dim = hidden_dim
 
         # Output layer
-        self.output_layer = layers.Dense(
+        self.output_layer = keras.layers.Dense(
             self.num_answers,
             kernel_initializer="glorot_normal",
             name="output_layer"
@@ -320,13 +318,13 @@ class ContrastiveHead(keras.layers.Layer):
 
     def build(self, input_shape):
         """Build the contrastive head layers."""
-        self.vision_projection = layers.Dense(
+        self.vision_projection = keras.layers.Dense(
             self.projection_dim,
             kernel_initializer="glorot_normal",
             name="vision_projection"
         )
 
-        self.text_projection = layers.Dense(
+        self.text_projection = keras.layers.Dense(
             self.projection_dim,
             kernel_initializer="glorot_normal",
             name="text_projection"

@@ -4,9 +4,10 @@ from keras import ops
 import tensorflow as tf
 from typing import Optional, Tuple, Union, Dict, Any, List
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.sampling import Sampling
 from .vae import VAE
+from ..utils.logger import logger
+from ..layers.sampling import Sampling
+
 
 
 @keras.saving.register_keras_serializable()

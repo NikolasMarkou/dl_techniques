@@ -58,10 +58,10 @@ from typing import Tuple, Optional
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.ffn.mlp import MLPBlock
-from dl_techniques.layers.attention.multi_head_attention import MultiHeadAttention
-from dl_techniques.layers.hierarchical_mlp_stem import HierarchicalMLPStem
+from ..utils.logger import logger
+from ..layers.ffn.mlp import MLPBlock
+from ..layers.hierarchical_mlp_stem import HierarchicalMLPStem
+from ..layers.attention.multi_head_attention import MultiHeadAttention
 
 # ---------------------------------------------------------------------
 
@@ -264,7 +264,6 @@ class ViTWithHMLPStem(keras.Model):
 
 # ---------------------------------------------------------------------
 
-# Example usage
 def create_vit_model(
         image_size: Tuple[int, int] = (224, 224),
         patch_size: Tuple[int, int] = (16, 16),
@@ -312,7 +311,7 @@ def create_vit_model(
 
 # ---------------------------------------------------------------------
 
-# Example demonstrating how to use the hMLP stem with masked self-supervised learning like BeiT
+
 def create_inputs_with_masking(
         batch_size: int = 8,
         image_size: Tuple[int, int] = (224, 224),
@@ -392,26 +391,3 @@ def apply_mask_after_stem(
     return masked_patches, mask
 
 # ---------------------------------------------------------------------
-
-if __name__ == "__main__":
-    # Create a model
-    model = create_vit_model(model_size="small")
-
-    # Create dummy input
-    x = tf.random.normal([2, 224, 224, 3])
-
-    # Test forward pass
-    output = model(x, training=True)
-
-    logger.info(f"Model output shape: {output.shape}")
-    logger.info(f"Number of parameters: {model.count_params()}")
-
-    # Test with masking
-    images, mask = create_inputs_with_masking(batch_size=2)
-    stem = HierarchicalMLPStem(embed_dim=384)
-    masked_patches, _ = apply_mask_after_stem(stem, images, mask)
-
-    logger.info(f"Masked patches shape: {masked_patches.shape}")
-
-# ---------------------------------------------------------------------
-

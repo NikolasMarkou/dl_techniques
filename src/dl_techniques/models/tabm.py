@@ -65,10 +65,9 @@ from typing import Dict, List, Literal, Optional, Tuple, Union, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.one_hot_encoding import OneHotEncoding
-from dl_techniques.layers.tabm_blocks import (
-    ScaleEnsemble, NLinear, TabMBackbone)
+from ..utils.logger import logger
+from ..layers.one_hot_encoding import OneHotEncoding
+from ..layers.tabm_blocks import ScaleEnsemble, NLinear, TabMBackbone
 
 # ---------------------------------------------------------------------
 
@@ -320,7 +319,8 @@ class TabMModel(keras.Model):
         return cls(**config)
 
 
-# Factory functions remain unchanged but with enhanced type hints
+# ---------------------------------------------------------------------
+
 def create_tabm_model(
         n_num_features: int,
         cat_cardinalities: List[int],
@@ -394,6 +394,7 @@ def create_tabm_model(
         **kwargs
     )
 
+# ---------------------------------------------------------------------
 
 def create_tabm_plain(
         n_num_features: int,
@@ -424,6 +425,7 @@ def create_tabm_plain(
         **kwargs
     )
 
+# ---------------------------------------------------------------------
 
 def create_tabm_ensemble(
         n_num_features: int,
@@ -456,6 +458,7 @@ def create_tabm_ensemble(
         **kwargs
     )
 
+# ---------------------------------------------------------------------
 
 def create_tabm_mini(
         n_num_features: int,
@@ -488,6 +491,7 @@ def create_tabm_mini(
         **kwargs
     )
 
+# ---------------------------------------------------------------------
 
 def ensemble_predict(
         model: TabMModel,
@@ -526,6 +530,7 @@ def ensemble_predict(
     else:
         raise ValueError(f"Unknown method: {method}")
 
+# ---------------------------------------------------------------------
 
 def create_tabm_for_dataset(
         X_train: np.ndarray,
@@ -613,3 +618,5 @@ def create_tabm_for_dataset(
         hidden_dims=hidden_dims,
         **kwargs
     )
+
+# ---------------------------------------------------------------------

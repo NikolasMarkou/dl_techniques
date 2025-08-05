@@ -9,10 +9,16 @@ where DP is drop-path (stochastic depth) and F_1(x) = B(x) is the base block.
 import keras
 from typing import Union, Tuple, Optional, Any, Dict, Callable
 
-from dl_techniques.utils.logger import logger
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
+from ..utils.logger import logger
 from .convblock import ConvBlock
 from .stochastic_depth import StochasticDepth
+
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class FractalBlock(keras.layers.Layer):
@@ -319,42 +325,4 @@ class FractalBlock(keras.layers.Layer):
 
         return cls(**config)
 
-    @staticmethod
-    def create_from_block_instance(
-        block: keras.layers.Layer,
-        depth: int,
-        drop_path_rate: float = 0.15,
-        **kwargs: Any
-    ) -> "FractalBlock":
-        """Convenience method to create FractalBlock from a block instance.
-
-        This automatically extracts the configuration and class information
-        from an existing layer instance, ensuring full serialization support.
-
-        Args:
-            block: A Keras layer instance to use as the base block.
-            depth: Fractal expansion depth.
-            drop_path_rate: Drop-path probability.
-            **kwargs: Additional arguments for FractalBlock.
-
-        Returns:
-            FractalBlock instance with configuration extracted from the block.
-
-        Example:
-            >>> base_block = ConvBlock(filters=64, kernel_size=3)
-            >>> fractal = FractalBlock.create_from_block_instance(
-            ...     block=base_block,
-            ...     depth=3,
-            ...     drop_path_rate=0.2
-            ... )
-        """
-        block_config = block.get_config()
-        block_class = block.__class__.__name__
-
-        return cls(
-            block_config=block_config,
-            block_class=block_class,
-            depth=depth,
-            drop_path_rate=drop_path_rate,
-            **kwargs
-        )
+# ---------------------------------------------------------------------

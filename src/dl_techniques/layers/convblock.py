@@ -42,7 +42,7 @@ from typing import Union, Tuple, Optional, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
+from ..utils.logger import logger
 
 # ---------------------------------------------------------------------
 

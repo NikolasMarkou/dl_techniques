@@ -611,44 +611,6 @@ class TestAdaptiveBandRMS:
 
             logger.info(f"✅ Internal RMS computation test passed for {strategy_name}")
 
-    # =========================================================================
-    # PERFORMANCE BENCHMARKS (Optional)
-    # =========================================================================
-
-    @pytest.mark.slow
-    def test_performance_comparison(self, large_input_tensor_4d):
-        """Compare performance of different normalization strategies (marked as slow test)."""
-        import time
-
-        strategies = [
-            ("channel_wise", -1),
-            ("spatial", (1, 2)),
-            ("global", (1, 2, 3))
-        ]
-
-        performance_results = {}
-
-        for strategy_name, axis in strategies:
-            layer = AdaptiveBandRMS(axis=axis)
-
-            # Warm up
-            _ = layer(large_input_tensor_4d[:2])
-
-            # Time multiple forward passes
-            start_time = time.time()
-            for _ in range(10):
-                _ = layer(large_input_tensor_4d)
-            end_time = time.time()
-
-            avg_time = (end_time - start_time) / 10
-            performance_results[strategy_name] = avg_time
-
-            logger.info(f"✅ {strategy_name} average time: {avg_time:.4f}s")
-
-        # Log performance summary
-        fastest_strategy = min(performance_results, key=performance_results.get)
-        logger.info(f"✅ Fastest strategy: {fastest_strategy}")
-
 
 # =========================================================================
 # INTEGRATION TESTS WITH OTHER LAYERS

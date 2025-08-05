@@ -80,12 +80,10 @@ from typing import Optional, Dict, Union, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-
-from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
-from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
-
 from .layer_scale import LearnableMultiplier
 from .norms.global_response_norm import GlobalResponseNormalization
+from ..constraints.value_range_constraint import ValueRangeConstraint
+from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 
 # ---------------------------------------------------------------------
 

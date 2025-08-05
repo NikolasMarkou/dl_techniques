@@ -51,13 +51,6 @@ from enum import Enum
 from typing import Dict, Any, Optional, Union, Tuple
 
 # ---------------------------------------------------------------------
-# Local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.logger import logger
-from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
-
-# ---------------------------------------------------------------------
 
 
 class MultiplierType(Enum):

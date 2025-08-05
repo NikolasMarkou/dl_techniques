@@ -36,8 +36,8 @@ from typing import Optional, Tuple, Union, Dict, Any, List
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.mdn_layer import MDNLayer
+from ..utils.logger import logger
+from ..layers.mdn_layer import MDNLayer
 
 
 # ---------------------------------------------------------------------

@@ -70,14 +70,13 @@ import keras
 import numpy as np
 import tensorflow as tf
 from keras.api.layers import Layer
-from typing import Optional, Tuple, List, Union, Dict, Any
+from typing import Optional, Tuple, Union, Dict, Any
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.random import rayleigh
-
+from ..utils.random import rayleigh
 
 # ---------------------------------------------------------------------
 

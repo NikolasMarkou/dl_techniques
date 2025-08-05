@@ -31,7 +31,7 @@ from typing import Dict, Optional, Union, Literal
 # ---------------------------------------------------------------------
 
 from .conv2d_builder import ConvType, conv2d_wrapper
-from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
+from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 
 # ---------------------------------------------------------------------
 

@@ -6,8 +6,8 @@ from typing import Tuple, Optional, Dict, Any, List
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.kan_linear import KANLinear
+from ..utils.logger import logger
+from ..layers.kan_linear import KANLinear
 
 
 # ---------------------------------------------------------------------

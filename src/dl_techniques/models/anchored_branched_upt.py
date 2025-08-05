@@ -1,13 +1,19 @@
 import keras
 from keras import ops
 
-from dl_techniques.layers.geometric import (
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from ..layers.geometric import (
     ContinuousSincosEmbed,
     ContinuousRoPE,
     PerceiverBlock,
     SupernodePooling,
     TransformerBlock
 )
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class AnchoredBranchedUPT(keras.Model):
@@ -381,6 +387,7 @@ class AnchoredBranchedUPT(keras.Model):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 def create_abupt_model(
         dim: int = 192,
@@ -424,50 +431,4 @@ def create_abupt_model(
 
     return model
 
-
-# Example usage and testing
-if __name__ == "__main__":
-    # Create model
-    model = create_abupt_model()
-
-    # Create test data
-    batch_size = 2
-    num_geometry_points = 1000
-    num_supernodes = 100
-    num_surface_anchors = 200
-    num_volume_anchors = 300
-    num_surface_queries = 50
-    num_volume_queries = 75
-
-    test_inputs = {
-        "geometry_position": keras.random.uniform((num_geometry_points, 3)) * 10,
-        "geometry_supernode_idx": keras.random.uniform((num_supernodes,), 0, num_geometry_points, dtype="int32"),
-        "geometry_batch_idx": None,
-        "surface_anchor_position": keras.random.uniform((batch_size, num_surface_anchors, 3)) * 10,
-        "volume_anchor_position": keras.random.uniform((batch_size, num_volume_anchors, 3)) * 10,
-        "surface_query_position": keras.random.uniform((batch_size, num_surface_queries, 3)) * 10,
-        "volume_query_position": keras.random.uniform((batch_size, num_volume_queries, 3)) * 10,
-    }
-
-    # Test forward pass
-    try:
-        outputs = model(test_inputs)
-        print("✅ Model forward pass successful!")
-        print("\nOutput shapes:")
-        for key, value in outputs.items():
-            print(f"  {key}: {value.shape}")
-
-        # Test without queries
-        test_inputs_no_queries = {k: v for k, v in test_inputs.items()
-                                  if not k.endswith("query_position")}
-        outputs_no_queries = model(test_inputs_no_queries)
-        print(f"\n✅ Model without queries successful!")
-        print(f"   Surface pressure: {outputs_no_queries['surface_anchor_pressure'].shape}")
-        print(f"   Volume velocity: {outputs_no_queries['volume_anchor_velocity'].shape}")
-
-    except Exception as e:
-        print(f"❌ Model forward pass failed: {e}")
-        import traceback
-
-        traceback.print_exc()
-
+# ---------------------------------------------------------------------

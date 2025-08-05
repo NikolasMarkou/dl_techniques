@@ -44,7 +44,6 @@ from typing import Optional, Union, Dict, Any, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 from .channel_attention import ChannelAttention
 from .spatial_attention import SpatialAttention
 
@@ -106,8 +105,6 @@ class CBAM(keras.layers.Layer):
             input_shape: Shape tuple indicating the input shape of the layer.
         """
         self._build_input_shape = input_shape
-
-        logger.info(f"Building CBAM layer with input shape: {input_shape}")
 
         # Create channel attention module
         self.channel_attention = ChannelAttention(

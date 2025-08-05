@@ -6,10 +6,6 @@ perform object detection, instance segmentation, and image classification using 
 feature extraction backbone. The implementation uses Keras Functional API with named
 outputs for clean, dictionary-based results in multi-task scenarios.
 
-FIXED VERSION: Now supports separate class counts for detection and segmentation tasks.
-This allows COCO pretraining with 80-class segmentation and crack detection fine-tuning
-with binary segmentation.
-
 Architecture Overview
 --------------------
 The model follows a multitask learning architecture with three main components:
@@ -89,14 +85,14 @@ from typing import Optional, Tuple, Dict, Any, List, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.utils.vision_task_types import (
+from ..utils.logger import logger
+from ..utils.vision_task_types import (
     TaskType,
     TaskConfiguration,
     parse_task_list
 )
-from dl_techniques.models.yolo12_feature_extractor import YOLOv12FeatureExtractor
-from dl_techniques.layers.yolo12_heads import (
+from ..models.yolo12_feature_extractor import YOLOv12FeatureExtractor
+from ..layers.yolo12_heads import (
     YOLOv12DetectionHead,
     YOLOv12SegmentationHead,
     YOLOv12ClassificationHead

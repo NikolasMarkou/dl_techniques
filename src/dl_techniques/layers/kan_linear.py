@@ -57,12 +57,6 @@ from keras import ops
 from typing import Tuple, Optional, Dict, Any, Union
 
 # ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.logger import logger
-
-# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()

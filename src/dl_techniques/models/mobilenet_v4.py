@@ -30,9 +30,9 @@ from typing import List, Tuple, Optional
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.attention.mobile_mqa import MobileMQA
-from dl_techniques.layers.universal_inverted_bottleneck import UIB
+from ..utils.logger import logger
+from ..layers.attention.mobile_mqa import MobileMQA
+from ..layers.universal_inverted_bottleneck import UIB
 
 # ---------------------------------------------------------------------
 

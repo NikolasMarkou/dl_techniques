@@ -6,11 +6,11 @@ from typing import List, Tuple, Optional, Union, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.time_series.nbeats_blocks import (
+from ..utils.logger import logger
+from ..layers.time_series.nbeats_blocks import (
     GenericBlock, TrendBlock, SeasonalityBlock
 )
-from dl_techniques.layers.time_series.revin import RevIN
+from ..layers.time_series.revin import RevIN
 
 
 # ---------------------------------------------------------------------

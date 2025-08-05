@@ -1,11 +1,17 @@
-from typing import Dict, Optional, Tuple, Union, Any, List
 import keras
 from keras import ops
-from dl_techniques.layers.vision_transformer_siglip import SigLIPVisionTransformer
-from dl_techniques.layers.modality_projection import ModalityProjection
-from dl_techniques.layers.transformer_encoder import TransformerEncoderLayer
-from dl_techniques.utils.logger import logger
+from typing import Dict, Optional, Tuple, Union, Any, List
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from ..utils.logger import logger
+from ..layers.vision_transformer_siglip import SigLIPVisionTransformer
+from ..layers.modality_projection import ModalityProjection
+from ..layers.transformer_encoder import TransformerEncoderLayer
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class NanoVLM(keras.Model):
@@ -466,6 +472,7 @@ class NanoVLM(keras.Model):
         """
         return cls(**config)
 
+# ---------------------------------------------------------------------
 
 # Model configurations for different nanoVLM variants
 NANOVLM_CONFIGS = {
@@ -545,6 +552,7 @@ NANOVLM_CONFIGS = {
     }
 }
 
+# ---------------------------------------------------------------------
 
 def _prepare_configs(
         vision_config: Dict[str, Any],
@@ -573,6 +581,7 @@ def _prepare_configs(
 
     return enhanced_vision_config, language_config.copy(), enhanced_projection_config
 
+# ---------------------------------------------------------------------
 
 def create_nanovlm(
         variant: str = "nanovlm_base",
@@ -639,6 +648,7 @@ def create_nanovlm(
         dropout_rate=dropout_rate
     )
 
+# ---------------------------------------------------------------------
 
 def create_nanovlm_mini() -> NanoVLM:
     """Create nanoVLM-Mini model with compact configuration.
@@ -657,6 +667,7 @@ def create_nanovlm_mini() -> NanoVLM:
     """
     return create_nanovlm("nanovlm_mini")
 
+# ---------------------------------------------------------------------
 
 def create_nanovlm_base() -> NanoVLM:
     """Create nanoVLM-Base model with balanced configuration.
@@ -675,6 +686,7 @@ def create_nanovlm_base() -> NanoVLM:
     """
     return create_nanovlm("nanovlm_base")
 
+# ---------------------------------------------------------------------
 
 def create_nanovlm_222m() -> NanoVLM:
     """Create nanoVLM-222M model with full configuration.
@@ -693,6 +705,7 @@ def create_nanovlm_222m() -> NanoVLM:
     """
     return create_nanovlm("nanovlm_222m")
 
+# ---------------------------------------------------------------------
 
 def get_available_variants() -> List[str]:
     """Get list of available nanoVLM model variants.
@@ -707,6 +720,7 @@ def get_available_variants() -> List[str]:
     """
     return list(NANOVLM_CONFIGS.keys())
 
+# ---------------------------------------------------------------------
 
 def get_variant_info(variant: str) -> Dict[str, Any]:
     """Get detailed information about a specific model variant.
@@ -732,3 +746,5 @@ def get_variant_info(variant: str) -> Dict[str, Any]:
         )
 
     return NANOVLM_CONFIGS[variant].copy()
+
+# ---------------------------------------------------------------------

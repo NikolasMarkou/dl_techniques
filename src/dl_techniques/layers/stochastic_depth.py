@@ -51,10 +51,9 @@ from typing import Optional, Dict, Any, Union, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
+from ..utils.logger import logger
 
 # ---------------------------------------------------------------------
-
 
 @keras.saving.register_keras_serializable()
 class StochasticDepth(keras.layers.Layer):

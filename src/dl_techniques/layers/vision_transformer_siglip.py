@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
+from ..utils.logger import logger
 from .positional_embedding import PositionalEmbedding
 from .vision_transformer import VisionTransformerLayer
 

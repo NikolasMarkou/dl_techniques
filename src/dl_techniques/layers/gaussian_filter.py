@@ -7,8 +7,8 @@ from typing import Tuple, Union, List, Optional, Sequence
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.utils.tensors import depthwise_gaussian_kernel
+from ..utils.logger import logger
+from ..utils.tensors import depthwise_gaussian_kernel
 
 # ---------------------------------------------------------------------
 

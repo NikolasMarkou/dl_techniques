@@ -14,13 +14,13 @@ from typing import Optional, Union, List, Any, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.norms import RMSNorm
-from dl_techniques.layers.standard_scaler import StandardScaler
-from dl_techniques.layers.patch_embedding import PatchEmbedding1D
-from dl_techniques.layers.ffn.residual_block import ResidualBlock
-from dl_techniques.layers.time_series.quantile_head import QuantileHead
-from dl_techniques.layers.time_series.mixed_sequential_block import MixedSequentialBlock
+from ..utils.logger import logger
+from ..layers.norms import RMSNorm
+from ..layers.standard_scaler import StandardScaler
+from ..layers.patch_embedding import PatchEmbedding1D
+from ..layers.ffn.residual_block import ResidualBlock
+from ..layers.time_series.quantile_head import QuantileHead
+from ..layers.time_series.mixed_sequential_block import MixedSequentialBlock
 
 # ---------------------------------------------------------------------
 

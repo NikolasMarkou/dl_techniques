@@ -2,6 +2,8 @@ import tensorflow as tf
 from dataclasses import dataclass
 from typing import Optional, Union, List, Tuple, Any
 
+# ---------------------------------------------------------------------
+
 # Constants for mathematical operations
 math_ops = tf.math
 PI = tf.cast(math_ops.angle(tf.constant(-1, dtype=tf.complex64)), tf.float32)

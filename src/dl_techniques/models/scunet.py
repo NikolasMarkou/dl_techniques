@@ -7,8 +7,8 @@ from typing import List, Optional, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.swin_conv_block import SwinConvBlock
+from ..utils.logger import logger
+from ..layers.swin_conv_block import SwinConvBlock
 
 # ---------------------------------------------------------------------
 
@@ -290,7 +290,10 @@ class SCUNet(keras.Model):
             )
         return blocks
 
-    def call(self, x: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+    def call(self,
+             x: keras.KerasTensor,
+             training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """Forward pass of the SCUNet model.
 
         Args:

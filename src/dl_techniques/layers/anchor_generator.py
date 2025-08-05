@@ -53,7 +53,7 @@ from typing import Tuple, Any, Dict, List, Optional
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
+from ..utils.logger import logger
 
 # ---------------------------------------------------------------------
 

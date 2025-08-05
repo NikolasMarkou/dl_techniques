@@ -44,7 +44,7 @@ from typing import Tuple, Optional, List, Union, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
+from ..utils.logger import logger
 
 # ---------------------------------------------------------------------
 

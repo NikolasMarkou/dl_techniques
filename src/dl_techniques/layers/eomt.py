@@ -5,12 +5,10 @@ Based on: "Your ViT is Secretly an Image Segmentation Model" by Kerssies et al.
 """
 
 import keras
-import numpy as np
 from keras import ops
-from typing import Optional, Union, Any, Dict, Tuple, List
+from typing import Optional, Any, Tuple
 
-
-from dl_techniques.utils.logger import logger
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -304,6 +302,7 @@ class EoMTLayer(keras.layers.Layer):
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class MaskModule(keras.layers.Layer):
@@ -450,3 +449,5 @@ class MaskModule(keras.layers.Layer):
         """Build from configuration."""
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
+
+# ---------------------------------------------------------------------

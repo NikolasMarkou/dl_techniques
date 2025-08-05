@@ -45,9 +45,9 @@ from typing import Dict, Any, Optional, Callable, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.norms.band_rms import BandRMS
-from dl_techniques.layers.norms.rms_norm import RMSNorm
-from dl_techniques.layers.attention.multi_head_attention import MultiHeadAttention
+from ..layers.norms.band_rms import BandRMS
+from ..layers.norms.rms_norm import RMSNorm
+from ..layers.attention.multi_head_attention import MultiHeadAttention
 
 
 # ---------------------------------------------------------------------
@@ -716,6 +716,7 @@ def create_bert_for_classification(
 
     return model
 
+# ---------------------------------------------------------------------
 
 def create_bert_for_sequence_output(
     normalization_type: str = 'layer_norm',

@@ -82,7 +82,7 @@ from keras import ops, constraints, initializers, regularizers
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
+from ..utils.logger import logger
 
 # ---------------------------------------------------------------------
 

@@ -72,7 +72,9 @@ Implementation Notes:
 import keras
 import tensorflow as tf
 from keras import layers
-from typing import List, Tuple, Optional, Union
+from typing import List, Tuple, Optional
+
+# ---------------------------------------------------------------------
 
 @keras.utils.register_keras_serializable()
 class BatchConditionalOutputLayer(layers.Layer):
@@ -171,46 +173,5 @@ class BatchConditionalOutputLayer(layers.Layer):
             )
         return input_shape[0]
 
+# ---------------------------------------------------------------------
 
-def create_demo_data(
-        batch_size: int = 4,
-        height: int = 4,
-        width: int = 4,
-        channels: int = 3
-) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Creates demonstration data for testing the layer.
-
-    Creates test data with mixed cases:
-    - Some batch items all zeros
-    - Some batch items with non-zero values
-
-    Args:
-        batch_size: Number of items in batch
-        height: Height of each item
-        width: Width of each item
-        channels: Number of channels
-
-    Returns:
-        Tuple of (ground_truth, inference) tensors
-    """
-    # Create ground truth with mixed cases
-    ground_truth = tf.random.uniform(
-        (batch_size, height, width, channels)
-    )
-
-    # Set some batch items to zero
-    ground_truth = tf.tensor_scatter_nd_update(
-        ground_truth,
-        indices=[[0], [2]],  # First and third items
-        updates=[
-            tf.zeros((height, width, channels)),
-            tf.zeros((height, width, channels))
-        ]
-    )
-
-    # Create random inference values
-    inference = tf.random.uniform(
-        (batch_size, height, width, channels)
-    )
-
-    return ground_truth, inference

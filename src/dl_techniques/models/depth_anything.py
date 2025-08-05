@@ -38,11 +38,11 @@ from typing import Dict, Tuple, Optional, Union, Any, List
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.dpt_decoder import DPTDecoder
-from dl_techniques.layers.strong_augmentation import StrongAugmentation
-from dl_techniques.losses.affine_invariant_loss import AffineInvariantLoss
-from dl_techniques.losses.feature_alignment_loss import FeatureAlignmentLoss
+from ..utils.logger import logger
+from ..layers.dpt_decoder import DPTDecoder
+from ..layers.strong_augmentation import StrongAugmentation
+from ..losses.affine_invariant_loss import AffineInvariantLoss
+from ..losses.feature_alignment_loss import FeatureAlignmentLoss
 
 # ---------------------------------------------------------------------
 

@@ -55,10 +55,10 @@ from typing import Optional, Tuple, Dict, Any, List, Union
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
+from ..utils.logger import logger
 
 from .yolo12 import ConvBlock
 from .squeeze_excitation import SqueezeExcitation
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

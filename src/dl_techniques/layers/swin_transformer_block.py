@@ -6,8 +6,8 @@ from typing import Tuple, Optional, Dict, Any, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.utils.tensors import window_reverse, window_partition
+from ..utils.logger import logger
+from ..utils.tensors import window_reverse, window_partition
 
 from .ffn.swin_mlp import SwinMLP
 from .stochastic_depth import StochasticDepth

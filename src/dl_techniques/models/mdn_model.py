@@ -85,13 +85,13 @@ from typing import List, Union, Optional, Dict, Any, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.mdn_layer import (
+from ..layers.mdn_layer import (
     MDNLayer,
     get_uncertainty,
     get_point_estimate,
     get_prediction_intervals
 )
-from dl_techniques.utils.logger import logger
+from ..utils.logger import logger
 
 # ---------------------------------------------------------------------
 
@@ -110,17 +110,17 @@ class MDNModel(keras.Model):
     │ [batch, D]  │    │ Extraction  │    │ Extraction  │    │   Layer     │
     │             │    │  Layer 1    │    │  Layer N    │    │ [μ,σ,π]     │
     └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
-                            │                    │                    │
+                            │                    │                   │
                       ┌─────────────┐    ┌─────────────┐             │
                       │ BatchNorm   │    │ BatchNorm   │             │
                       │ (optional)  │    │ (optional)  │             │
                       └─────────────┘    └─────────────┘             │
-                            │                    │                    │
+                            │                    │                   │
                       ┌─────────────┐    ┌─────────────┐             │
                       │ Activation  │    │ Activation  │             │
                       │   (ReLU)    │    │   (ReLU)    │             │
                       └─────────────┘    └─────────────┘             │
-                            │                    │                    │
+                            │                    │                   │
                       ┌─────────────┐    ┌─────────────┐             │
                       │  Dropout    │    │  Dropout    │             │
                       │ (optional)  │    │ (optional)  │             │

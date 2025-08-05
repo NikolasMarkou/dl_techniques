@@ -11,7 +11,7 @@ import tempfile
 import os
 import tensorflow as tf
 
-from dl_techniques.layers.power_mlp_layer import PowerMLPLayer
+from dl_techniques.layers.ffn.power_mlp_layer import PowerMLPLayer
 from dl_techniques.layers.activations.relu_k import ReLUK
 from dl_techniques.layers.activations.basis_function import BasisFunction
 

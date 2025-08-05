@@ -113,14 +113,21 @@ import numpy as np
 from keras import ops
 from typing import Optional, Union, Literal, List, Any, Tuple, Dict
 
-from dl_techniques.initializers.orthonormal_initializer import OrthonormalInitializer
-from dl_techniques.utils.logger import logger
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from ..utils.logger import logger
+from ..initializers.orthonormal_initializer import OrthonormalInitializer
+
+# ---------------------------------------------------------------------
 
 # Type aliases for better readability
 OutputMode = Literal['assignments', 'mixture']
 TensorShape = Union[Tuple[int, ...], List[int]]
 Axis = Union[int, List[int]]
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class KMeansLayer(keras.layers.Layer):
@@ -682,3 +689,5 @@ class KMeansLayer(keras.layers.Layer):
 
         # Reset momentum buffer
         self.centroid_momentum.assign(ops.zeros_like(self.centroid_momentum))
+
+# ---------------------------------------------------------------------

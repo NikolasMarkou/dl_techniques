@@ -41,8 +41,8 @@ from typing import Optional, Union, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from .activations.relu_k import ReLUK
-from .activations.basis_function import BasisFunction
+from dl_techniques.layers.activations.relu_k import ReLUK
+from dl_techniques.layers.activations.basis_function import BasisFunction
 
 # ---------------------------------------------------------------------
 

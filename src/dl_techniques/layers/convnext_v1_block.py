@@ -76,6 +76,7 @@ Notes:
 - Follows proper normalization ordering (Linear/Conv → Norm → Activation)
 - Uses truncated normal initialization (μ=0, σ=0.02)
 """
+
 import copy
 import keras
 from typing import Optional, Dict, Union, Tuple
@@ -85,13 +86,8 @@ from typing import Optional, Dict, Union, Tuple
 # ---------------------------------------------------------------------
 
 from .layer_scale import LearnableMultiplier
-from dl_techniques.regularizers.soft_orthogonal import (
-    SoftOrthonormalConstraintRegularizer
-)
-from dl_techniques.constraints.value_range_constraint import (
-    ValueRangeConstraint
-)
-
+from ..constraints.value_range_constraint import ValueRangeConstraint
+from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 
 # ---------------------------------------------------------------------
 

@@ -73,13 +73,9 @@ from keras.api.layers import Dense, AveragePooling2D, Dropout, Flatten
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.shearlet_transform import ShearletTransform
-from dl_techniques.layers.complex_layers import (
-    ComplexDense,
-    ComplexConv2D,
-    ComplexReLU
-)
+from ..utils.logger import logger
+from ..layers.shearlet_transform import ShearletTransform
+from ..layers.complex_layers import ComplexDense, ComplexConv2D, ComplexReLU
 
 
 # ---------------------------------------------------------------------

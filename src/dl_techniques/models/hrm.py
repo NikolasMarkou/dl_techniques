@@ -56,7 +56,7 @@ from typing import Optional, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.hrm_reasoning_core import HierarchicalReasoningCore
+from ..layers.hrm_reasoning_core import HierarchicalReasoningCore
 
 # ---------------------------------------------------------------------
 

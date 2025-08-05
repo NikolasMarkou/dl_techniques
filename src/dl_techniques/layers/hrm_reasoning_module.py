@@ -49,7 +49,7 @@ from typing import Optional, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.hrm_block import HierarchicalReasoningBlock
+from .hrm_block import HierarchicalReasoningBlock
 
 # ---------------------------------------------------------------------
 

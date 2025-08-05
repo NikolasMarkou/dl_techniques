@@ -28,8 +28,8 @@ from typing import List, Optional, Union, Dict, Any, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.power_mlp_layer import PowerMLPLayer
+from ..utils.logger import logger
+from ..layers.ffn.power_mlp_layer import PowerMLPLayer
 
 # ---------------------------------------------------------------------
 

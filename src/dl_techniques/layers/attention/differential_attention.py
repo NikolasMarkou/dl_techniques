@@ -88,6 +88,7 @@ import numpy as np
 import tensorflow as tf
 from typing import Any, Dict, Optional, Union, Tuple, List
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class DifferentialMultiHeadAttention(keras.layers.Layer):
@@ -333,3 +334,5 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

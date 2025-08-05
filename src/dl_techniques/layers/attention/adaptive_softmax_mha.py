@@ -19,7 +19,7 @@ from keras.src.backend.config import is_flash_attention_enabled
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.adaptive_softmax import AdaptiveTemperatureSoftmax
+from ..adaptive_softmax import AdaptiveTemperatureSoftmax
 
 # ---------------------------------------------------------------------
 

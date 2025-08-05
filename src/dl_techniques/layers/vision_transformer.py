@@ -14,7 +14,7 @@ from typing import Optional, Tuple, Union, Any, Dict
 
 from .ffn.mlp import MLPBlock
 from .norms.rms_norm import RMSNorm
-from dl_techniques.layers.attention.multi_head_attention import MultiHeadAttention
+from .attention.multi_head_attention import MultiHeadAttention
 
 # ---------------------------------------------------------------------
 
