@@ -6,7 +6,7 @@ from keras.api import layers, regularizers, initializers
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.cbam import CBAM
+from dl_techniques.layers.attention.convolutional_block_attention import CBAM
 
 # ---------------------------------------------------------------------
 
