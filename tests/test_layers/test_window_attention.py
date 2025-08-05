@@ -33,8 +33,8 @@ class TestWindowAttention:
         assert layer.qkv_bias is True
         assert layer.qk_scale is None
         assert layer.scale == 32 ** -0.5
-        assert layer.attn_drop_rate == 0.0
-        assert layer.proj_drop_rate == 0.0
+        assert layer.attn_dropout_rate == 0.0
+        assert layer.proj_dropout_rate == 0.0
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
         assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
         assert layer.kernel_regularizer is None
@@ -50,8 +50,8 @@ class TestWindowAttention:
             num_heads=8,
             qkv_bias=False,
             qk_scale=0.1,
-            attn_drop=0.1,
-            proj_drop=0.2,
+            attn_dropout_rate=0.1,
+            proj_dropout_rate=0.2,
             kernel_initializer="he_normal",
             kernel_regularizer=custom_regularizer,
         )
@@ -64,8 +64,8 @@ class TestWindowAttention:
         assert layer.qkv_bias is False
         assert layer.qk_scale == 0.1
         assert layer.scale == 0.1
-        assert layer.attn_drop_rate == 0.1
-        assert layer.proj_drop_rate == 0.2
+        assert layer.attn_dropout_rate == 0.1
+        assert layer.proj_dropout_rate == 0.2
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
         assert layer.kernel_regularizer == custom_regularizer
 
@@ -96,18 +96,18 @@ class TestWindowAttention:
         with pytest.raises(ValueError, match="dim .* must be divisible by num_heads"):
             WindowAttention(dim=97, window_size=7, num_heads=3)
 
-        # Test invalid dropout rates
-        with pytest.raises(ValueError, match="attn_drop must be between 0.0 and 1.0"):
-            WindowAttention(dim=96, window_size=7, num_heads=3, attn_drop=-0.1)
+        # Test invalid dropout rates - using correct parameter names
+        with pytest.raises(ValueError, match="attn_dropout_rate must be between 0.0 and 1.0"):
+            WindowAttention(dim=96, window_size=7, num_heads=3, attn_dropout_rate=-0.1)
 
-        with pytest.raises(ValueError, match="attn_drop must be between 0.0 and 1.0"):
-            WindowAttention(dim=96, window_size=7, num_heads=3, attn_drop=1.1)
+        with pytest.raises(ValueError, match="attn_dropout_rate must be between 0.0 and 1.0"):
+            WindowAttention(dim=96, window_size=7, num_heads=3, attn_dropout_rate=1.1)
 
-        with pytest.raises(ValueError, match="proj_drop must be between 0.0 and 1.0"):
-            WindowAttention(dim=96, window_size=7, num_heads=3, proj_drop=-0.1)
+        with pytest.raises(ValueError, match="proj_dropout_rate must be between 0.0 and 1.0"):
+            WindowAttention(dim=96, window_size=7, num_heads=3, proj_dropout_rate=-0.1)
 
-        with pytest.raises(ValueError, match="proj_drop must be between 0.0 and 1.0"):
-            WindowAttention(dim=96, window_size=7, num_heads=3, proj_drop=1.1)
+        with pytest.raises(ValueError, match="proj_dropout_rate must be between 0.0 and 1.0"):
+            WindowAttention(dim=96, window_size=7, num_heads=3, proj_dropout_rate=1.1)
 
     def test_build_process(self, input_tensor, layer_instance):
         """Test that the layer builds properly."""
@@ -182,8 +182,8 @@ class TestWindowAttention:
         """Test layer with different configurations."""
         configurations = [
             {"dim": 32, "window_size": 4, "num_heads": 2, "qkv_bias": False},
-            {"dim": 64, "window_size": 7, "num_heads": 4, "attn_drop": 0.1},
-            {"dim": 96, "window_size": 7, "num_heads": 3, "proj_drop": 0.2},
+            {"dim": 64, "window_size": 7, "num_heads": 4, "attn_dropout_rate": 0.1},
+            {"dim": 96, "window_size": 7, "num_heads": 3, "proj_dropout_rate": 0.2},
             {"dim": 128, "window_size": 8, "num_heads": 8, "qk_scale": 0.1},
         ]
 
@@ -210,8 +210,8 @@ class TestWindowAttention:
             num_heads=4,
             qkv_bias=True,
             qk_scale=0.1,
-            attn_drop=0.1,
-            proj_drop=0.2,
+            attn_dropout_rate=0.1,
+            proj_dropout_rate=0.2,
             kernel_initializer="he_normal",
         )
 
@@ -233,8 +233,8 @@ class TestWindowAttention:
         assert recreated_layer.num_heads == original_layer.num_heads
         assert recreated_layer.qkv_bias == original_layer.qkv_bias
         assert recreated_layer.qk_scale == original_layer.qk_scale
-        assert recreated_layer.attn_dropout_rate == original_layer.attn_drop_rate
-        assert recreated_layer.proj_drop_rate == original_layer.proj_drop_rate
+        assert recreated_layer.attn_dropout_rate == original_layer.attn_dropout_rate
+        assert recreated_layer.proj_dropout_rate == original_layer.proj_dropout_rate
 
         # Check weights match (shapes should be the same)
         assert len(recreated_layer.weights) == len(original_layer.weights)

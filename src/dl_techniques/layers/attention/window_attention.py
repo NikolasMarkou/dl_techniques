@@ -74,8 +74,8 @@ class WindowAttention(keras.layers.Layer):
         num_heads: Number of attention heads. Must divide dim evenly.
         qkv_bias: Whether to use bias in qkv projection. Defaults to True.
         qk_scale: Override default qk scale of head_dim ** -0.5 if set. Defaults to None.
-        attn_drop: Attention dropout rate. Defaults to 0.0.
-        proj_drop: Output projection dropout rate. Defaults to 0.0.
+        attn_dropout_rate: Attention dropout rate. Defaults to 0.0.
+        proj_dropout_rate: Output projection dropout rate. Defaults to 0.0.
         proj_bias: projection bias, Defaults to True.
         kernel_initializer: Initializer for dense layer kernels. Defaults to "glorot_uniform".
         bias_initializer: Initializer for dense layer biases. Defaults to "zeros".
@@ -117,8 +117,8 @@ class WindowAttention(keras.layers.Layer):
             num_heads: int,
             qkv_bias: bool = True,
             qk_scale: Optional[float] = None,
-            attn_drop: float = 0.0,
-            proj_drop: float = 0.0,
+            attn_dropout_rate: float = 0.0,
+            proj_dropout_rate: float = 0.0,
             proj_bias: bool = True,
             kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
             bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
@@ -137,10 +137,10 @@ class WindowAttention(keras.layers.Layer):
             raise ValueError(f"num_heads must be positive, got {num_heads}")
         if dim % num_heads != 0:
             raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
-        if not (0.0 <= attn_drop <= 1.0):
-            raise ValueError(f"attn_drop must be between 0.0 and 1.0, got {attn_drop}")
-        if not (0.0 <= proj_drop <= 1.0):
-            raise ValueError(f"proj_drop must be between 0.0 and 1.0, got {proj_drop}")
+        if not (0.0 <= attn_dropout_rate <= 1.0):
+            raise ValueError(f"attn_dropout_rate must be between 0.0 and 1.0, got {attn_dropout_rate}")
+        if not (0.0 <= proj_dropout_rate <= 1.0):
+            raise ValueError(f"proj_dropout_rate must be between 0.0 and 1.0, got {proj_dropout_rate}")
 
         self.dim = dim
         self.window_size = window_size
@@ -149,9 +149,11 @@ class WindowAttention(keras.layers.Layer):
         self.qk_scale = qk_scale  # Store original parameter
         self.scale = qk_scale if qk_scale is not None else self.head_dim ** -0.5
         self.qkv_bias = qkv_bias
-        self.attn_drop_rate = attn_drop
-        self.proj_drop_rate = proj_drop
         self.proj_bias = proj_bias
+
+        # Store dropout rates as parameters (don't overwrite them!)
+        self.attn_dropout_rate = attn_dropout_rate
+        self.proj_dropout_rate = proj_dropout_rate
 
         # Store initializers and regularizers
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -159,11 +161,11 @@ class WindowAttention(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # Initialize layers to None - will be created in build()
+        # Initialize layer instances to None - will be created in build()
         self.qkv = None
-        self.attn_drop = None
+        self.attn_dropout = None  # Different name to avoid confusion
         self.proj = None
-        self.proj_drop = None
+        self.proj_dropout = None  # Different name to avoid confusion
         self.relative_position_bias_table = None
         self.relative_position_index = None
 
@@ -213,8 +215,8 @@ class WindowAttention(keras.layers.Layer):
         self.qkv.build(input_shape)
 
         # Create attention dropout
-        if self.attn_drop_rate > 0.0:
-            self.attn_drop = keras.layers.Dropout(self.attn_drop_rate, name="attn_drop")
+        if self.attn_dropout_rate > 0.0:
+            self.attn_dropout = keras.layers.Dropout(self.attn_dropout_rate, name="attn_dropout")
 
         # Create output projection and dropout
         self.proj = keras.layers.Dense(
@@ -227,10 +229,10 @@ class WindowAttention(keras.layers.Layer):
             name="proj"
         )
         # Explicitly build the projection layer
-        self.proj.build(input_shape)
+        self.proj.build((input_shape[0], input_shape[1], self.dim))
 
-        if self.proj_drop_rate > 0.0:
-            self.proj_drop = keras.layers.Dropout(self.proj_drop_rate, name="proj_drop")
+        if self.proj_dropout_rate > 0.0:
+            self.proj_dropout = keras.layers.Dropout(self.proj_dropout_rate, name="proj_dropout")
 
         # Create relative position bias table
         num_relative_distance = (2 * self.window_size - 1) * (2 * self.window_size - 1)
@@ -292,8 +294,8 @@ class WindowAttention(keras.layers.Layer):
         attn = ops.softmax(attn, axis=-1)
 
         # Apply attention dropout
-        if self.attn_drop is not None:
-            attn = self.attn_drop(attn, training=training)
+        if self.attn_dropout is not None:
+            attn = self.attn_dropout(attn, training=training)
 
         # Apply attention to values
         x = ops.matmul(attn, v)  # (B, num_heads, N, head_dim)
@@ -302,8 +304,8 @@ class WindowAttention(keras.layers.Layer):
 
         # Output projection
         x = self.proj(x)
-        if self.proj_drop is not None:
-            x = self.proj_drop(x, training=training)
+        if self.proj_dropout is not None:
+            x = self.proj_dropout(x, training=training)
 
         return x
 
@@ -331,8 +333,8 @@ class WindowAttention(keras.layers.Layer):
             "num_heads": self.num_heads,
             "qkv_bias": self.qkv_bias,
             "qk_scale": self.qk_scale,  # Store original parameter, not computed scale
-            "attn_drop": self.attn_drop_rate,
-            "proj_drop": self.proj_drop_rate,
+            "attn_dropout_rate": self.attn_dropout_rate,
+            "proj_dropout_rate": self.proj_dropout_rate,
             "proj_bias": self.proj_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
