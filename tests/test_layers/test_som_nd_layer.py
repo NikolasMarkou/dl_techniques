@@ -226,6 +226,9 @@ class TestSOMLayer:
 
     def test_training_mode_weight_updates(self, som_2d, input_data_2d):
         """Test that weights are updated during training."""
+        # Build the layer first
+        som_2d.build(input_data_2d.shape)
+
         # Get initial weights
         initial_weights = som_2d.weights_map.numpy().copy()
 
@@ -241,6 +244,9 @@ class TestSOMLayer:
 
     def test_inference_mode_no_weight_updates(self, som_2d, input_data_2d):
         """Test that weights are not updated during inference."""
+        # Build the layer first
+        som_2d.build(input_data_2d.shape)
+
         # Get initial weights
         initial_weights = som_2d.weights_map.numpy().copy()
 
@@ -465,11 +471,14 @@ class TestSOMLayer:
         for test_input in test_cases:
             bmu_indices, quantization_errors = som(test_input, training=True)
 
-            # Check for NaN/Inf values
-            assert not tf.reduce_any(tf.math.is_nan(bmu_indices)).numpy()
-            assert not tf.reduce_any(tf.math.is_inf(bmu_indices)).numpy()
+            # Check for NaN/Inf values in quantization errors (float32)
             assert not tf.reduce_any(tf.math.is_nan(quantization_errors)).numpy()
             assert not tf.reduce_any(tf.math.is_inf(quantization_errors)).numpy()
+
+            # Check BMU indices are valid integers (can't be NaN/Inf by definition)
+            # Just verify they're within expected bounds
+            assert tf.reduce_all(bmu_indices >= 0).numpy()
+            assert tf.reduce_all(bmu_indices < 4).numpy()
 
     def test_gradient_flow(self, input_data_2d):
         """Test that gradients flow properly through the layer."""
@@ -580,6 +589,9 @@ class TestSOMLayer:
 
     def test_multiple_training_sessions(self, som_2d, input_data_2d):
         """Test multiple training sessions with the same SOM."""
+        # Build the layer first by calling it once
+        som_2d(input_data_2d[:1], training=False)
+
         initial_iterations = som_2d.iterations.numpy()
 
         # First training session
