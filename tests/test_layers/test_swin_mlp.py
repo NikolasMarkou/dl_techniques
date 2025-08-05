@@ -32,7 +32,7 @@ class TestSwinMLP:
         # Check default values
         assert layer.hidden_dim == 128
         assert layer.out_dim is None
-        assert layer.act_layer == "gelu"
+        assert layer.activation == "gelu"
         assert layer.dropout_rate == 0.0
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
         assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
@@ -47,7 +47,7 @@ class TestSwinMLP:
         layer = SwinMLP(
             hidden_dim=256,
             out_dim=64,
-            act_layer="relu",
+            activation="relu",
             dropout_rate=0.2,
             kernel_initializer="he_normal",
             bias_initializer="ones",
@@ -59,7 +59,7 @@ class TestSwinMLP:
         # Check custom values
         assert layer.hidden_dim == 256
         assert layer.out_dim == 64
-        assert layer.act_layer == "relu"
+        assert layer.activation == "relu"
         assert layer.dropout_rate == 0.2
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
         assert isinstance(layer.bias_initializer, keras.initializers.Ones)
@@ -154,7 +154,7 @@ class TestSwinMLP:
             out_dim=4,
             kernel_initializer="ones",
             bias_initializer="zeros",
-            act_layer="linear"
+            activation="linear"
         )
         result = deterministic_layer(controlled_input)
 
@@ -167,7 +167,7 @@ class TestSwinMLP:
         activations = ["relu", "gelu", "swish", "tanh", "linear"]
 
         for act in activations:
-            layer = SwinMLP(hidden_dim=128, act_layer=act)
+            layer = SwinMLP(hidden_dim=128, activation=act)
             output = layer(input_tensor)
 
             # Check output is valid
@@ -193,7 +193,7 @@ class TestSwinMLP:
         original_layer = SwinMLP(
             hidden_dim=256,
             out_dim=64,
-            act_layer="relu",
+            activation="relu",
             dropout_rate=0.1,
             kernel_initializer="he_normal",
             kernel_regularizer=keras.regularizers.L2(1e-4)
@@ -214,7 +214,7 @@ class TestSwinMLP:
         # Check configuration matches
         assert recreated_layer.hidden_dim == original_layer.hidden_dim
         assert recreated_layer.out_dim == original_layer.out_dim
-        assert recreated_layer.act_layer == original_layer.act_layer
+        assert recreated_layer.activation == original_layer.activation
         assert recreated_layer.dropout_rate == original_layer.dropout_rate
 
         # Check weights match (shapes should be the same)
@@ -427,7 +427,7 @@ class TestSwinMLPEdgeCases:
         def custom_activation(x):
             return keras.ops.relu(x) * 0.5
 
-        layer = SwinMLP(hidden_dim=64, act_layer=custom_activation)
+        layer = SwinMLP(hidden_dim=64, activation=custom_activation)
         test_input = keras.random.normal([2, 4, 8])
 
         output = layer(test_input)

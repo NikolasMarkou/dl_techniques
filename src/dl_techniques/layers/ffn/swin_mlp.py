@@ -256,7 +256,7 @@ class SwinMLP(keras.layers.Layer):
             "hidden_dim": self.hidden_dim,
             "out_dim": self.out_dim,
             "activation": self.activation,
-            "drop": self.dropout_rate,
+            "dropout_rate": self.dropout_rate,
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
