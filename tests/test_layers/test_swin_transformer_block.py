@@ -36,10 +36,10 @@ class TestSwinTransformerBlock:
         assert layer.shift_size == 0
         assert layer.mlp_ratio == 4.0
         assert layer.qkv_bias is True
-        assert layer.drop_rate == 0.0
-        assert layer.attn_drop_rate == 0.0
+        assert layer.dropout_rate == 0.0
+        assert layer.attn_dropout_rate == 0.0
         assert layer.drop_path_rate == 0.0
-        assert layer.act_layer == "gelu"
+        assert layer.activation == "gelu"
         assert layer.use_bias is True
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
         assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
@@ -57,10 +57,10 @@ class TestSwinTransformerBlock:
             shift_size=3,
             mlp_ratio=3.0,
             qkv_bias=False,
-            drop=0.1,
-            attn_drop=0.1,
+            dropout_rate=0.1,
+            attn_dropout_rate=0.1,
             drop_path=0.1,
-            act_layer="relu",
+            activation="relu",
             use_bias=False,
             kernel_initializer="he_normal",
             kernel_regularizer=custom_regularizer,
@@ -74,10 +74,10 @@ class TestSwinTransformerBlock:
         assert layer.shift_size == 3
         assert layer.mlp_ratio == 3.0
         assert layer.qkv_bias is False
-        assert layer.drop_rate == 0.1
-        assert layer.attn_drop_rate == 0.1
+        assert layer.dropout_rate == 0.1
+        assert layer.attn_dropout_rate == 0.1
         assert layer.drop_path_rate == 0.1
-        assert layer.act_layer == "relu"
+        assert layer.activation == "relu"
         assert layer.use_bias is False
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
         assert layer.kernel_regularizer == custom_regularizer
@@ -108,10 +108,10 @@ class TestSwinTransformerBlock:
 
         # Test invalid dropout rates
         with pytest.raises(ValueError, match="drop must be in"):
-            SwinTransformerBlock(dim=64, num_heads=8, drop=1.5)
+            SwinTransformerBlock(dim=64, num_heads=8, dropout_rate=1.5)
 
         with pytest.raises(ValueError, match="attn_drop must be in"):
-            SwinTransformerBlock(dim=64, num_heads=8, attn_drop=-0.1)
+            SwinTransformerBlock(dim=64, num_heads=8, attn_dropout_rate=-0.1)
 
         with pytest.raises(ValueError, match="drop_path must be in"):
             SwinTransformerBlock(dim=64, num_heads=8, drop_path=1.0)
@@ -204,7 +204,7 @@ class TestSwinTransformerBlock:
         configurations = [
             {"dim": 32, "num_heads": 4, "window_size": 8, "shift_size": 0},
             {"dim": 64, "num_heads": 8, "window_size": 8, "shift_size": 4, "mlp_ratio": 2.0},
-            {"dim": 96, "num_heads": 3, "window_size": 7, "shift_size": 3, "drop": 0.1, "drop_path": 0.1},
+            {"dim": 96, "num_heads": 3, "window_size": 7, "shift_size": 3, "dropout_rate": 0.1, "drop_path": 0.1},
             {"dim": 128, "num_heads": 8, "window_size": 14, "shift_size": 0, "qkv_bias": False},
         ]
 
@@ -254,10 +254,10 @@ class TestSwinTransformerBlock:
             shift_size=3,
             mlp_ratio=3.0,
             qkv_bias=False,
-            drop=0.1,
-            attn_drop=0.05,
+            dropout_rate=0.1,
+            attn_dropout_rate=0.05,
             drop_path=0.1,
-            act_layer="relu",
+            activation="relu",
             use_bias=False,
             kernel_initializer="he_normal",
         )
@@ -281,10 +281,10 @@ class TestSwinTransformerBlock:
         assert recreated_layer.shift_size == original_layer.shift_size
         assert recreated_layer.mlp_ratio == original_layer.mlp_ratio
         assert recreated_layer.qkv_bias == original_layer.qkv_bias
-        assert recreated_layer.dropout_rate == original_layer.drop_rate
-        assert recreated_layer.attn_drop_rate == original_layer.attn_drop_rate
+        assert recreated_layer.dropout_rate == original_layer.dropout_rate
+        assert recreated_layer.attn_dropout_rate == original_layer.attn_dropout_rate
         assert recreated_layer.drop_path_rate == original_layer.drop_path_rate
-        assert recreated_layer.act_layer == original_layer.act_layer
+        assert recreated_layer.activation == original_layer.activation
         assert recreated_layer.use_bias == original_layer.use_bias
 
         # Check weights match (shapes should be the same)
@@ -402,7 +402,7 @@ class TestSwinTransformerBlock:
 
     def test_training_behavior(self, input_tensor):
         """Test different behavior in training vs inference mode."""
-        layer = SwinTransformerBlock(dim=96, num_heads=3, drop_path=0.1, drop=0.1)
+        layer = SwinTransformerBlock(dim=96, num_heads=3, drop_path=0.1, dropout_rate=0.1)
 
         # Test training mode
         training_output = layer(input_tensor, training=True)

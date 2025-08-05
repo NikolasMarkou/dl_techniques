@@ -34,9 +34,9 @@ class SwinTransformerBlock(keras.layers.Layer):
             Defaults to 4.0.
         qkv_bias: If True, add a learnable bias to query, key, value. Defaults to True.
         drop: Dropout rate. Must be in [0, 1). Defaults to 0.0.
-        attn_drop: Attention dropout rate. Must be in [0, 1). Defaults to 0.0.
+        attn_dropout_rate: Attention dropout rate. Must be in [0, 1). Defaults to 0.0.
         drop_path: Stochastic depth rate. Must be in [0, 1). Defaults to 0.0.
-        act_layer: Activation layer. Defaults to "gelu".
+        activation: Activation layer. Defaults to "gelu".
         use_bias: Use bias in layer normalization and projections. Defaults to True.
         kernel_initializer: Initializer for the kernel weights. Defaults to "glorot_uniform".
         bias_initializer: Initializer for the bias vector. Defaults to "zeros".
@@ -64,10 +64,10 @@ class SwinTransformerBlock(keras.layers.Layer):
             shift_size: int = 0,
             mlp_ratio: float = 4.0,
             qkv_bias: bool = True,
-            drop: float = 0.0,
-            attn_drop: float = 0.0,
+            dropout_rate: float = 0.0,
+            attn_dropout_rate: float = 0.0,
             drop_path: float = 0.0,
-            act_layer: str = "gelu",
+            activation: str = "gelu",
             use_bias: bool = True,
             kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
             bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
@@ -90,10 +90,10 @@ class SwinTransformerBlock(keras.layers.Layer):
             raise ValueError(f"shift_size ({shift_size}) must be less than window_size ({window_size})")
         if mlp_ratio <= 0:
             raise ValueError(f"mlp_ratio must be positive, got {mlp_ratio}")
-        if not (0 <= drop < 1):
-            raise ValueError(f"drop must be in [0, 1), got {drop}")
-        if not (0 <= attn_drop < 1):
-            raise ValueError(f"attn_drop must be in [0, 1), got {attn_drop}")
+        if not (0 <= dropout_rate < 1):
+            raise ValueError(f"drop must be in [0, 1), got {dropout_rate}")
+        if not (0 <= attn_dropout_rate < 1):
+            raise ValueError(f"attn_drop must be in [0, 1), got {attn_dropout_rate}")
         if not (0 <= drop_path < 1):
             raise ValueError(f"drop_path must be in [0, 1), got {drop_path}")
 
@@ -104,10 +104,10 @@ class SwinTransformerBlock(keras.layers.Layer):
         self.shift_size = shift_size
         self.mlp_ratio = mlp_ratio
         self.qkv_bias = qkv_bias
-        self.drop_rate = drop
-        self.attn_drop_rate = attn_drop
+        self.dropout_rate = dropout_rate
+        self.attn_dropout_rate = attn_dropout_rate
         self.drop_path_rate = drop_path
-        self.act_layer = act_layer
+        self.activation = activation
         self.use_bias = use_bias
 
         # Store initializers and regularizers
@@ -170,8 +170,8 @@ class SwinTransformerBlock(keras.layers.Layer):
             window_size=self.window_size,
             num_heads=self.num_heads,
             qkv_bias=self.qkv_bias,
-            attn_drop=self.attn_drop_rate,
-            proj_drop=self.drop_rate,
+            attn_drop=self.attn_dropout_rate,
+            proj_drop=self.dropout_rate,
             proj_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
@@ -193,8 +193,8 @@ class SwinTransformerBlock(keras.layers.Layer):
             hidden_dim=mlp_hidden_dim,
             use_bias=self.use_bias,
             out_dim=self.dim,
-            act_layer=self.act_layer,
-            dropout_rate=self.drop_rate,
+            activation=self.activation,
+            dropout_rate=self.dropout_rate,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -316,10 +316,10 @@ class SwinTransformerBlock(keras.layers.Layer):
             "shift_size": self.shift_size,
             "mlp_ratio": self.mlp_ratio,
             "qkv_bias": self.qkv_bias,
-            "drop": self.drop_rate,
-            "attn_drop": self.attn_drop_rate,
+            "dropout_rate": self.dropout_rate,
+            "attn_dropout_rate": self.attn_dropout_rate,
             "drop_path": self.drop_path_rate,
-            "act_layer": self.act_layer,
+            "activation": self.activation,
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
