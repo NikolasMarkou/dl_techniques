@@ -1,3 +1,67 @@
+"""
+This module provides the `Universal Inverted Bottleneck` (UIB), a highly flexible
+and configurable Keras layer that serves as a unified building block for a variety
+of modern, efficient convolutional neural network architectures.
+
+The UIB is not a new, distinct architecture itself, but rather a generalization that
+can be configured to exactly replicate several successful designs, including the
+Inverted Bottleneck (IB) from MobileNetV2, the ConvNeXt block, the Feed-Forward
+Network (FFN) block from Transformers, and a variant with an extra depthwise
+convolution (ExtraDW). This unification allows for easy architectural experimentation
+and searching within a single, consistent framework.
+
+Core Architectural Pattern:
+
+The UIB follows a general "expand-process-project" pattern, common to many efficient
+network designs:
+
+1.  **Expansion Phase:**
+    -   The input feature map, which has a relatively small number of channels, is
+        first "expanded" to a much higher-dimensional space using a `1x1 Conv2D`
+        layer. The degree of this expansion is controlled by the `expansion_factor`.
+
+2.  **Processing Phase (Depthwise Convolutions):**
+    -   The core processing happens in this high-dimensional space using one or two
+        efficient `DepthwiseConv2D` layers. Depthwise convolutions process each
+        channel independently, capturing spatial patterns without the high
+        computational cost of standard convolutions.
+    -   The UIB can be configured to use zero, one (`use_dw2=True`), or two
+        (`use_dw1=True` and `use_dw2=True`) of these depthwise layers. The first one
+        can optionally perform spatial downsampling via its `stride`.
+
+3.  **Projection Phase:**
+    -   After the spatial processing, the high-dimensional feature map is projected
+        back down to the desired number of output channels using another `1x1 Conv2D`
+        layer.
+
+4.  **Residual Connection:**
+    -   If the input and output dimensions match (i.e., `stride=1` and `input_filters=output_filters`),
+        a residual "skip" connection adds the original input to the output of the
+        block. This is crucial for enabling the training of very deep networks.
+
+Emulating Other Architectures:
+
+By toggling its boolean flags (`use_dw1`, `use_dw2`) and other parameters, the UIB
+can mimic the following blocks:
+
+-   **Inverted Bottleneck (IB) / MobileNetV2 block:**
+    -   `use_dw1=True`, `use_dw2=False`. This creates the classic expand -> depthwise conv -> project structure.
+
+-   **ConvNeXt block:**
+    -   `use_dw1=True`, `use_dw2=False`, with `kernel_size=7` and specific normalization/activation
+      ordering (note: this implementation uses a standard BN-ReLU order).
+
+-   **Transformer Feed-Forward Network (FFN):**
+    -   `use_dw1=False`, `use_dw2=False`. This reduces the block to two `1x1` convolutions
+      (expand and project), which is the convolutional equivalent of the two `Dense`
+      layers in a Transformer's FFN.
+
+-   **Extra Depthwise (ExtraDW):**
+    -   `use_dw1=True`, `use_dw2=True`. This adds a second depthwise convolution to the
+      standard IB block, potentially increasing its capacity to learn complex spatial
+      features.
+"""
+
 import keras
 from keras import ops
 from typing import Tuple, Optional, Any, Dict, Union

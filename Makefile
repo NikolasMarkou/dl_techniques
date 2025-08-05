@@ -11,8 +11,8 @@ clean:
 	find ./src/ -name "__pycache__" -type d -type d -exec rm -rf {} +
 	find ./tests/ -name "__pycache__" -type d -type d -exec rm -rf {} +
 
-structure:
+structure: clean
 	tree -L 4 --noreport src/dl_techniques/ | sed 's/^/ /'
 
-docs:
+docs: clean
 	python generate_docs.py

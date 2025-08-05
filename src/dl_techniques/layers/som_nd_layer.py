@@ -374,8 +374,10 @@ class SOMLayer(keras.layers.Layer):
         position_grid = ops.stack(mesh_coords, axis=-1)
         return position_grid
 
-    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> Tuple[
-        keras.KerasTensor, keras.KerasTensor]:
+    def call(self,
+             inputs: keras.KerasTensor,
+             training: Optional[bool] = None
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
         Forward pass for the SOM layer.
 
