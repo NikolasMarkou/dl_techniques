@@ -233,7 +233,7 @@ class TestWindowAttention:
         assert recreated_layer.num_heads == original_layer.num_heads
         assert recreated_layer.qkv_bias == original_layer.qkv_bias
         assert recreated_layer.qk_scale == original_layer.qk_scale
-        assert recreated_layer.attn_drop_rate == original_layer.attn_drop_rate
+        assert recreated_layer.attn_dropout_rate == original_layer.attn_drop_rate
         assert recreated_layer.proj_drop_rate == original_layer.proj_drop_rate
 
         # Check weights match (shapes should be the same)
