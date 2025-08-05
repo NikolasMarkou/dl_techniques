@@ -40,7 +40,6 @@ Implementation Details:
    equivalent to the 2D rotation matrix formulation.
 
 4. **Backend Compatibility**: Uses keras.ops for cross-backend compatibility
-   (TensorFlow, JAX, PyTorch).
 
 Key Advantages:
 ==============
@@ -84,14 +83,6 @@ References:
    arXiv:2306.15595
    https://arxiv.org/abs/2306.15595
 
-Notes:
-======
-
-- This implementation follows the original RoFormer paper specification
-- The rope_theta parameter (default 10000.0) controls the base frequency and
-  can be adjusted for different sequence length requirements
-- For very long sequences, consider using techniques like positional interpolation
-  or NTK-aware scaling to maintain performance
 """
 
 import keras

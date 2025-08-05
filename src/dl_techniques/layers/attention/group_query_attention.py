@@ -55,7 +55,7 @@ from typing import Optional, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from ..rope import RotaryPositionEmbedding
+from ..rotary_position_embedding import RotaryPositionEmbedding
 
 # ---------------------------------------------------------------------
 
@@ -93,7 +93,7 @@ class GroupedQueryAttention(layers.Layer):
         3D tensor with shape: (batch_size, sequence_length, d_model)
 
     Raises:
-        ValueError: If d_model is not divisible by n_head, or if n_head is not 
+        ValueError: If d_model is not divisible by n_head, or if n_head is not
                    divisible by n_kv_head.
 
     Usage Examples:
@@ -178,8 +178,8 @@ class GroupedQueryAttention(layers.Layer):
             raise ValueError(f"n_head ({n_head}) must be divisible by n_kv_head ({n_kv_head})")
         if not 0.0 <= attention_dropout <= 1.0:
             raise ValueError(f"attention_dropout must be in [0, 1], got {attention_dropout}")
-        if not 0.0 <= rope_percentage <= 1.0:
-            raise ValueError(f"rope_percentage must be in [0, 1], got {rope_percentage}")
+        if not 0.0 < rope_percentage <= 1.0:
+            raise ValueError(f"rope_percentage must be in (0, 1], got {rope_percentage}")
 
     def build(self, input_shape) -> None:
         """Build the layer weights and sublayers."""
@@ -224,18 +224,18 @@ class GroupedQueryAttention(layers.Layer):
             name='rope'
         )
 
-        # Build sublayers
+        # Build sublayers with the input shape
         self.w_q.build(input_shape)
         self.w_k.build(input_shape)
         self.w_v.build(input_shape)
-
-        # Output projection input shape is (batch, seq_len, d_model)
         self.w_o.build(input_shape)
 
-        # Build RoPE with appropriate shape
-        # RoPE expects (batch, n_heads, seq_len, head_dim)
-        rope_shape = (input_shape[0], self.n_head, input_shape[1], self.head_dim)
-        self.rope.build(rope_shape)
+        # Build RoPE layer explicitly to ensure proper serialization
+        # RoPE expects (batch, num_heads, seq_len, head_dim)
+        batch_size = input_shape[0] if input_shape[0] is not None else 1
+        seq_len = input_shape[1] if input_shape[1] is not None else self.max_seq_len
+        rope_input_shape = (batch_size, self.n_head, seq_len, self.head_dim)
+        self.rope.build(rope_input_shape)
 
         super().build(input_shape)
 
@@ -278,8 +278,9 @@ class GroupedQueryAttention(layers.Layer):
         v = ops.transpose(v, (0, 2, 1, 3))
 
         # Apply rotary position embeddings to Q and K
-        q = self.rope.apply_rope(q, seq_len)
-        k = self.rope.apply_rope(k, seq_len)
+        # RoPE expects (batch, num_heads, seq_len, head_dim) which is what we have
+        q = self.rope(q, training=training)
+        k = self.rope(k, training=training)
 
         # Key insight: Repeat K,V for each group to match Q head count
         # Each K,V head serves n_group query heads
