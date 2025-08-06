@@ -15,8 +15,8 @@ from typing import Tuple, Dict, Any, List
 
 # Assuming the model module path
 from dl_techniques.models.bfunet_denoiser import (
-    create_bias_free_unet,
-    create_bias_free_unet_variant,
+    create_bfunet_denoiser,
+    create_bfunet_variant,
     BFUNET_CONFIGS
 )
 
@@ -78,7 +78,7 @@ class TestBiasFreeUNet:
 
     def test_initialization_defaults(self, grayscale_input_shape):
         """Test initialization with default parameters."""
-        model = create_bias_free_unet(input_shape=grayscale_input_shape)
+        model = create_bfunet_denoiser(input_shape=grayscale_input_shape)
 
         # Check model properties
         assert model.name == 'bias_free_unet'
@@ -88,7 +88,7 @@ class TestBiasFreeUNet:
 
     def test_initialization_variable_input_size(self, variable_input_shape):
         """Test initialization with variable input size."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=variable_input_shape,
             depth=3,
             initial_filters=16
@@ -112,7 +112,7 @@ class TestBiasFreeUNet:
         depths = [3, 4, 5]  # Updated minimum depth to 3
 
         for depth in depths:
-            model = create_bias_free_unet(
+            model = create_bfunet_denoiser(
                 input_shape=grayscale_input_shape,
                 depth=depth,
                 initial_filters=8
@@ -132,30 +132,30 @@ class TestBiasFreeUNet:
     def test_invalid_input_shape_type(self):
         """Test that invalid input_shape type raises TypeError."""
         with pytest.raises(TypeError, match="input_shape must be a tuple of 3 integers"):
-            create_bias_free_unet(input_shape=[64, 64, 1])
+            create_bfunet_denoiser(input_shape=[64, 64, 1])
 
         with pytest.raises(TypeError, match="input_shape must be a tuple of 3 integers"):
-            create_bias_free_unet(input_shape=(64, 64))
+            create_bfunet_denoiser(input_shape=(64, 64))
 
         with pytest.raises(TypeError, match="input_shape must be a tuple of 3 integers"):
-            create_bias_free_unet(input_shape=(64, 64, 1, 1))
+            create_bfunet_denoiser(input_shape=(64, 64, 1, 1))
 
     def test_invalid_depth(self, grayscale_input_shape):
         """Test that invalid depth raises ValueError."""
         with pytest.raises(ValueError, match="depth must be at least 3"):
-            create_bias_free_unet(
+            create_bfunet_denoiser(
                 input_shape=grayscale_input_shape,
                 depth=0
             )
 
         with pytest.raises(ValueError, match="depth must be at least 3"):
-            create_bias_free_unet(
+            create_bfunet_denoiser(
                 input_shape=grayscale_input_shape,
                 depth=2
             )
 
         with pytest.raises(ValueError, match="depth must be at least 3"):
-            create_bias_free_unet(
+            create_bfunet_denoiser(
                 input_shape=grayscale_input_shape,
                 depth=-1
             )
@@ -163,13 +163,13 @@ class TestBiasFreeUNet:
     def test_invalid_initial_filters(self, grayscale_input_shape):
         """Test that non-positive initial_filters raises ValueError."""
         with pytest.raises(ValueError, match="initial_filters must be positive"):
-            create_bias_free_unet(
+            create_bfunet_denoiser(
                 input_shape=grayscale_input_shape,
                 initial_filters=0
             )
 
         with pytest.raises(ValueError, match="initial_filters must be positive"):
-            create_bias_free_unet(
+            create_bfunet_denoiser(
                 input_shape=grayscale_input_shape,
                 initial_filters=-10
             )
@@ -177,7 +177,7 @@ class TestBiasFreeUNet:
     def test_invalid_filter_multiplier(self, grayscale_input_shape):
         """Test that invalid filter_multiplier raises ValueError."""
         with pytest.raises(ValueError, match="filter_multiplier must be at least 1"):
-            create_bias_free_unet(
+            create_bfunet_denoiser(
                 input_shape=grayscale_input_shape,
                 filter_multiplier=0
             )
@@ -185,14 +185,14 @@ class TestBiasFreeUNet:
     def test_invalid_blocks_per_level(self, grayscale_input_shape):
         """Test that non-positive blocks_per_level raises ValueError."""
         with pytest.raises(ValueError, match="blocks_per_level must be positive"):
-            create_bias_free_unet(
+            create_bfunet_denoiser(
                 input_shape=grayscale_input_shape,
                 blocks_per_level=0
             )
 
     def test_minimal_valid_configuration(self, grayscale_input_shape):
         """Test minimal valid configuration."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=grayscale_input_shape,
             depth=3,  # Updated minimum depth
             initial_filters=1,
@@ -219,7 +219,7 @@ class TestBiasFreeUNet:
 
     def test_create_variant_tiny(self, grayscale_input_shape):
         """Test creating tiny variant."""
-        model = create_bias_free_unet_variant('tiny', grayscale_input_shape)
+        model = create_bfunet_variant('tiny', grayscale_input_shape)
 
         assert model.name == 'bias_free_unet_tiny'
         assert model.input_shape == (None,) + grayscale_input_shape
@@ -232,7 +232,7 @@ class TestBiasFreeUNet:
 
     def test_create_variant_small(self, rgb_input_shape):
         """Test creating small variant."""
-        model = create_bias_free_unet_variant('small', rgb_input_shape)
+        model = create_bfunet_variant('small', rgb_input_shape)
 
         assert model.name == 'bias_free_unet_small'
         assert model.input_shape == (None,) + rgb_input_shape
@@ -245,7 +245,7 @@ class TestBiasFreeUNet:
 
     def test_create_variant_base(self, grayscale_input_shape):
         """Test creating base variant."""
-        model = create_bias_free_unet_variant('base', grayscale_input_shape)
+        model = create_bfunet_variant('base', grayscale_input_shape)
 
         assert model.name == 'bias_free_unet_base'
         assert model.input_shape == (None,) + grayscale_input_shape
@@ -261,7 +261,7 @@ class TestBiasFreeUNet:
 
     def test_create_variant_large(self, grayscale_input_shape):
         """Test creating large variant."""
-        model = create_bias_free_unet_variant('large', grayscale_input_shape)
+        model = create_bfunet_variant('large', grayscale_input_shape)
 
         assert model.name == 'bias_free_unet_large'
         assert model.input_shape == (None,) + grayscale_input_shape
@@ -277,7 +277,7 @@ class TestBiasFreeUNet:
 
     def test_create_variant_xlarge(self, large_input_shape):
         """Test creating xlarge variant."""
-        model = create_bias_free_unet_variant('xlarge', large_input_shape)
+        model = create_bfunet_variant('xlarge', large_input_shape)
 
         assert model.name == 'bias_free_unet_xlarge'
         assert model.input_shape == (None,) + large_input_shape
@@ -294,11 +294,11 @@ class TestBiasFreeUNet:
     def test_invalid_variant(self, grayscale_input_shape):
         """Test that invalid variant name raises ValueError."""
         with pytest.raises(ValueError, match="Unknown variant 'invalid'"):
-            create_bias_free_unet_variant('invalid', grayscale_input_shape)
+            create_bfunet_variant('invalid', grayscale_input_shape)
 
     def test_variant_with_custom_parameters(self, grayscale_input_shape):
         """Test variant creation with custom parameter overrides."""
-        model = create_bias_free_unet_variant(
+        model = create_bfunet_variant(
             'base',
             grayscale_input_shape,
             activation='gelu',
@@ -320,7 +320,7 @@ class TestBiasFreeUNet:
         variants = ['tiny', 'small', 'base']
 
         for variant in variants:
-            model = create_bias_free_unet_variant(variant, input_shape)
+            model = create_bfunet_variant(variant, input_shape)
             output = model(test_input)
 
             # All should produce valid outputs
@@ -338,7 +338,7 @@ class TestBiasFreeUNet:
         initial_filters = 32
         filter_multiplier = 2
 
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=grayscale_input_shape,
             depth=depth,
             initial_filters=initial_filters,
@@ -360,7 +360,7 @@ class TestBiasFreeUNet:
         ]
 
         for input_shape in test_cases:
-            model = create_bias_free_unet(
+            model = create_bfunet_denoiser(
                 input_shape=input_shape,
                 depth=3,  # Updated minimum depth
                 initial_filters=16
@@ -377,7 +377,7 @@ class TestBiasFreeUNet:
         ]
 
         for config in configs:
-            model = create_bias_free_unet(
+            model = create_bfunet_denoiser(
                 input_shape=grayscale_input_shape,
                 depth=3,  # Updated minimum depth
                 initial_filters=32,
@@ -393,7 +393,7 @@ class TestBiasFreeUNet:
     def test_model_creation_success(self, grayscale_input_shape):
         """Test that model creation completes successfully with proper structure."""
         depth = 4
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=grayscale_input_shape,
             depth=depth,
             initial_filters=64,
@@ -415,7 +415,7 @@ class TestBiasFreeUNet:
 
     def test_forward_pass_grayscale(self, test_image_grayscale):
         """Test forward pass with grayscale images."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=(64, 64, 1),
             depth=3,  # Updated minimum depth
             initial_filters=32
@@ -430,7 +430,7 @@ class TestBiasFreeUNet:
 
     def test_forward_pass_rgb(self, test_image_rgb):
         """Test forward pass with RGB images."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=(128, 128, 3),
             depth=3,
             initial_filters=32
@@ -445,7 +445,7 @@ class TestBiasFreeUNet:
 
     def test_forward_pass_large_image(self, test_image_large):
         """Test forward pass with large images."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=(256, 256, 1),
             depth=4,
             initial_filters=32
@@ -460,7 +460,7 @@ class TestBiasFreeUNet:
 
     def test_scaling_invariance_property(self, test_image_grayscale):
         """Test the scaling invariance property of the bias-free U-Net."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=(64, 64, 1),
             depth=3,  # Updated minimum depth
             initial_filters=32,
@@ -487,7 +487,7 @@ class TestBiasFreeUNet:
 
     def test_different_batch_sizes(self, grayscale_input_shape):
         """Test model with different batch sizes."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=grayscale_input_shape,
             depth=3,  # Updated minimum depth
             initial_filters=16
@@ -505,7 +505,7 @@ class TestBiasFreeUNet:
     def test_skip_connections_functionality(self, grayscale_input_shape):
         """Test that skip connections are working properly."""
         # Create a simple test to verify skip connections
-        unet_model = create_bias_free_unet(
+        unet_model = create_bfunet_denoiser(
             input_shape=grayscale_input_shape,
             depth=3,  # Updated minimum depth
             initial_filters=32
@@ -528,7 +528,7 @@ class TestBiasFreeUNet:
 
     def test_numerical_stability(self, grayscale_input_shape):
         """Test model stability with extreme input values."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=grayscale_input_shape,
             depth=3,  # Updated minimum depth
             initial_filters=16
@@ -555,7 +555,7 @@ class TestBiasFreeUNet:
 
     def test_model_serialization(self, test_image_grayscale):
         """Test saving and loading the model."""
-        original_model = create_bias_free_unet(
+        original_model = create_bfunet_denoiser(
             input_shape=(64, 64, 1),
             depth=3,  # Updated minimum depth
             initial_filters=32,
@@ -585,7 +585,7 @@ class TestBiasFreeUNet:
 
     def test_model_compilation(self, grayscale_input_shape):
         """Test that model can be compiled with different optimizers and losses."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=grayscale_input_shape,
             depth=3,  # Updated minimum depth
             initial_filters=16
@@ -605,7 +605,7 @@ class TestBiasFreeUNet:
 
     def test_gradient_flow(self, test_image_grayscale):
         """Test gradient flow through the U-Net model."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=(64, 64, 1),
             depth=3,  # Updated minimum depth
             initial_filters=16
@@ -636,7 +636,7 @@ class TestBiasFreeUNet:
 
     def test_minimum_depth_configuration(self, grayscale_input_shape):
         """Test U-Net with minimum depth (depth=3)."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=grayscale_input_shape,
             depth=3,  # Updated minimum depth
             initial_filters=16
@@ -650,7 +650,7 @@ class TestBiasFreeUNet:
 
     def test_large_depth_configuration(self, large_input_shape):
         """Test U-Net with large depth."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=large_input_shape,
             depth=5,  # Deep U-Net
             initial_filters=16  # Keep filters low to manage memory
@@ -668,7 +668,7 @@ class TestBiasFreeUNet:
         # thanks to the Resizing layer for dimension matching
         input_shape = (96, 80, 1)  # Non-power-of-2 dimensions
 
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=input_shape,
             depth=3,  # Updated minimum depth
             initial_filters=16
@@ -682,7 +682,7 @@ class TestBiasFreeUNet:
 
     def test_large_filter_count(self, grayscale_input_shape):
         """Test model with large number of filters."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=grayscale_input_shape,
             depth=3,  # Updated minimum depth
             initial_filters=256,  # Large filter count
@@ -697,7 +697,7 @@ class TestBiasFreeUNet:
 
     def test_single_block_per_level(self, grayscale_input_shape):
         """Test U-Net with single block per level."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=grayscale_input_shape,
             depth=3,
             initial_filters=32,
@@ -726,7 +726,7 @@ class TestBiasFreeUNetParameterized:
     ])
     def test_various_configurations(self, input_shape, depth, initial_filters):
         """Test model creation with various valid configurations."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=input_shape,
             depth=depth,
             initial_filters=initial_filters
@@ -745,7 +745,7 @@ class TestBiasFreeUNetParameterized:
     ])
     def test_different_activations(self, activation):
         """Test model with different activation functions."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=(64, 64, 1),
             depth=3,  # Updated minimum depth
             initial_filters=16,
@@ -761,7 +761,7 @@ class TestBiasFreeUNetParameterized:
     @pytest.mark.parametrize("kernel_size", [1, 3, 5, 7])
     def test_different_kernel_sizes(self, kernel_size):
         """Test model with different kernel sizes."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=(64, 64, 1),
             depth=3,  # Updated minimum depth
             initial_filters=16,
@@ -777,7 +777,7 @@ class TestBiasFreeUNetParameterized:
     @pytest.mark.parametrize("filter_multiplier", [1, 2, 3, 4])
     def test_different_filter_multipliers(self, filter_multiplier):
         """Test model with different filter multipliers."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=(64, 64, 1),
             depth=3,  # Updated minimum depth
             initial_filters=16,
@@ -793,7 +793,7 @@ class TestBiasFreeUNetParameterized:
     @pytest.mark.parametrize("blocks_per_level", [1, 2, 3, 4])
     def test_different_blocks_per_level(self, blocks_per_level):
         """Test model with different numbers of blocks per level."""
-        model = create_bias_free_unet(
+        model = create_bfunet_denoiser(
             input_shape=(64, 64, 1),
             depth=3,  # Updated minimum depth
             initial_filters=16,
@@ -810,7 +810,7 @@ class TestBiasFreeUNetParameterized:
     def test_all_variants_parameterized(self, variant):
         """Test all variants with parameterized approach."""
         input_shape = (64, 64, 1)
-        model = create_bias_free_unet_variant(variant, input_shape)
+        model = create_bfunet_variant(variant, input_shape)
 
         test_input = np.random.rand(1, 64, 64, 1).astype(np.float32)
         output = model(test_input)

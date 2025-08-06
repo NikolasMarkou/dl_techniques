@@ -64,7 +64,7 @@ BFUNET_CONFIGS: Dict[str, Dict[str, Any]] = {
 # Core Model Creation Function
 # ---------------------------------------------------------------------
 
-def create_bias_free_unet(
+def create_bfunet_denoiser(
         input_shape: Tuple[int, int, int],
         depth: int = 4,
         initial_filters: int = 64,
@@ -116,7 +116,7 @@ def create_bias_free_unet(
 
     Example:
         >>> # Create standard bias-free U-Net
-        >>> model = create_bias_free_unet(
+        >>> model = create_bfunet_denoiser(
         ...     input_shape=(256, 256, 3),
         ...     depth=4,
         ...     initial_filters=64
@@ -324,7 +324,7 @@ def create_bias_free_unet(
 # Variant Creation Functions
 # ---------------------------------------------------------------------
 
-def create_bias_free_unet_variant(
+def create_bfunet_variant(
         variant: str,
         input_shape: Tuple[int, int, int],
         **kwargs
@@ -345,17 +345,17 @@ def create_bias_free_unet_variant(
 
     Example:
         >>> # Standard usage
-        >>> model = create_bias_free_unet_variant('base', (256, 256, 3))
+        >>> model = create_bfunet_variant('base', (256, 256, 3))
         >>> model.summary()
         >>>
         >>> # With custom parameters
-        >>> model = create_bias_free_unet_variant('large', (224, 224, 1),
+        >>> model = create_bfunet_variant('large', (224, 224, 1),
         ...                                     activation='gelu',
         ...                                     use_residual_blocks=False)
         >>>
         >>> # All available variants
         >>> for variant in ['tiny', 'small', 'base', 'large', 'xlarge']:
-        ...     model = create_bias_free_unet_variant(variant, (128, 128, 3))
+        ...     model = create_bfunet_variant(variant, (128, 128, 3))
     """
     if variant not in BFUNET_CONFIGS:
         available_variants = list(BFUNET_CONFIGS.keys())
@@ -373,7 +373,7 @@ def create_bias_free_unet_variant(
 
     logger.info(f"Creating bias-free U-Net variant '{variant}': {description}")
 
-    return create_bias_free_unet(
+    return create_bfunet_denoiser(
         input_shape=input_shape,
         **config
     )

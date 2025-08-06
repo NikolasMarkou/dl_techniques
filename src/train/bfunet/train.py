@@ -18,8 +18,8 @@ from typing import Tuple, List, Optional, Dict, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.filesystem import count_available_files
 from dl_techniques.optimization import optimizer_builder, learning_rate_schedule_builder
-from dl_techniques.models.bfcnn_denoiser import (
-    create_bfcnn_denoiser, BFCNN_CONFIGS, create_bfcnn_variant
+from dl_techniques.models.bfunet_denoiser import (
+    create_bfunet_denoiser, BFUNET_CONFIGS, create_bfunet_variant
 )
 
 
@@ -29,7 +29,7 @@ from dl_techniques.models.bfcnn_denoiser import (
 
 @dataclass
 class TrainingConfig:
-    """Configuration for bias-free CNN denoiser training."""
+    """Configuration for bias-free U-Net denoiser training."""
 
     # === Data Configuration ===
     train_image_dirs: List[str]  # Directories containing training images
@@ -51,9 +51,9 @@ class TrainingConfig:
 
     # === Model Configuration ===
     model_type: str = 'tiny'  # one of 'tiny', 'small', 'base', 'large', 'xlarge' or 'custom'
-    num_blocks: int = 8  # Number of residual blocks (for custom model)
+    depth: int = 3, # Number of depth levels (for custom model)
+    blocks_per_level: int = 2  # Number of residual blocks (for custom model)
     filters: int = 64  # Number of filters (for custom model)
-    initial_kernel_size: int = 5  # Initial convolution kernel size
     kernel_size: int = 3  # Residual block kernel size
     activation: str = 'relu'  # Activation function
 
@@ -92,7 +92,7 @@ class TrainingConfig:
 
         if self.experiment_name is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.experiment_name = f"bfcnn_{self.model_type}_{timestamp}"
+            self.experiment_name = f"bfunet_{self.model_type}_{timestamp}"
 
         # Validation
         if self.noise_sigma_min < 0 or self.noise_sigma_max <= self.noise_sigma_min:
@@ -679,7 +679,7 @@ def create_callbacks(config: TrainingConfig, val_directories: List[str]) -> List
 # TRAINING FUNCTION
 # ---------------------------------------------------------------------
 
-def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
+def train_bfunet_denoiser(config: TrainingConfig) -> keras.Model:
     """
     Train a bias-free CNN denoiser model with unified file list approach (FIXED sampling bias).
 
@@ -752,20 +752,20 @@ def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
     logger.info(f"Creating {config.model_type} model...")
     input_shape = (config.patch_size, config.patch_size, config.channels)
 
-    if config.model_type in BFCNN_CONFIGS:
-        model = create_bfcnn_variant(
+    if config.model_type in BFUNET_CONFIGS:
+        model = create_bfunet_variant(
             variant=config.model_type,
             input_shape=input_shape
         )
     elif config.model_type == 'custom':
-        model = create_bfcnn_denoiser(
+        model = create_bfunet_denoiser(
             input_shape=input_shape,
-            num_blocks=config.num_blocks,
-            filters=config.filters,
-            initial_kernel_size=config.initial_kernel_size,
+            depth=config.depth,
+            initial_filters=config.filters,
+            blocks_per_level=config.num_blocks,
             kernel_size=config.kernel_size,
             activation=config.activation,
-            model_name=f'bfcnn_custom_{config.experiment_name}'
+            model_name=f'bfunet_custom_{config.experiment_name}'
         )
     else:
         raise ValueError(f"Unknown model type: {config.model_type}")
@@ -849,7 +849,7 @@ def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
 def parse_arguments() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='Train Bias-Free CNN Denoiser',
+        description='Train Bias-Free U-Net Denoiser',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
@@ -1005,7 +1005,7 @@ def main():
     logger.info(f"  Experiment Name: {config.experiment_name}")
 
     try:
-        model = train_bfcnn_denoiser(config)
+        model = train_bfunet_denoiser(config)
         logger.info("Refined training completed successfully!")
 
         # Print model summary
