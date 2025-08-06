@@ -23,10 +23,10 @@ The `OrthoBlock` processes inputs through a four-stage pipeline:
       training stability due to the norm-preserving properties of orthogonal
       transformations.
 
-2.  **BandRMS Normalization:**
-    - The output of the dense layer is normalized using `BandRMS`.
+2.  **RMS Normalization:**
+    - The output of the dense layer is normalized using `RMSNorm`.
     - **Purpose:** This stabilizes the activations by constraining their Root Mean
-      Square (RMS) value to a learnable range, preventing the feature magnitudes
+      Square (RMS) value, preventing the feature magnitudes
       from exploding or vanishing.
 
 3.  **Constrained Learnable Scaling:**
@@ -50,7 +50,7 @@ from typing import Optional, Union, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.norms.band_rms import BandRMS
+from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.layers.layer_scale import LearnableMultiplier
 from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
 from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
@@ -63,7 +63,7 @@ class OrthoBlock(keras.layers.Layer):
     """Orthogonal Block layer with constrained feature scaling.
 
     This layer combines an orthogonally regularized dense projection with
-    BandRMS normalization and a constrained learnable feature gate. It is
+    RMSNorm normalization and a constrained learnable feature gate. It is
     designed to improve training stability and model interpretability.
 
     Key Benefits:
@@ -87,7 +87,7 @@ class OrthoBlock(keras.layers.Layer):
         bias_initializer: Initializer for the bias vector. If `None`, the default
             initializer ("zeros") will be used.
         bias_regularizer: Optional regularizer for the bias vector.
-        scale_initial_value: Float, initial value for the constrained feature scale
+        scale_initial_value: Float, initial value for the constrained scale
             parameters. Should be between 0.0 and 1.0.
         **kwargs: Additional keyword arguments for the Layer base class (e.g., name, dtype).
 
@@ -126,7 +126,7 @@ class OrthoBlock(keras.layers.Layer):
     Notes:
         - The orthonormal regularization encourages the weight matrix to have
           orthogonal columns, which can help with feature decorrelation.
-        - The BandRMS normalization helps stabilize training by constraining
+        - The RMSNorm normalization helps stabilize training by constraining
           the L2 norm of activations.
         - The constrained scaling acts as a learnable feature gate, where values
           close to 0 effectively "turn off" features.
@@ -201,8 +201,8 @@ class OrthoBlock(keras.layers.Layer):
             name="ortho_dense"
         )
 
-        # Build BandRMS normalization layer
-        self.norm = BandRMS(name="band_rms")
+        # Build rms normalization layer
+        self.norm = RMSNorm(axis=-1, name="norm_rms", use_scale=False)
 
         # Build constrained scale layer
         self.constrained_scale = LearnableMultiplier(
@@ -239,10 +239,10 @@ class OrthoBlock(keras.layers.Layer):
         # Dense projection with orthonormal regularization
         z = self.dense(inputs, training=training)
 
-        # BandRMS normalization to stabilize activations
+        # normalization to stabilize activations
         z_norm = self.norm(z, training=training)
 
-        # Constrained scaling for feature gating
+        # Constrained scaling for gating
         z_scaled = self.constrained_scale(z_norm, training=training)
 
         # Apply final activation function

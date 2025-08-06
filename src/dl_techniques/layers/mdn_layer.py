@@ -1,5 +1,5 @@
 """
-Enhanced Mixture Density Network (MDN) Layer with Intermediate Processing
+Mixture Density Network (MDN) Layer with Intermediate Processing
 
 This implementation extends the traditional MDN layer with practical improvements
 for better training stability and performance:
@@ -9,15 +9,6 @@ for better training stability and performance:
 3. Sigma constraint at 0.01 minimum to prevent overconfident predictions
 4. Configurable bias usage (default False for cleaner learning)
 5. Improved numerical stability
-
-Key Features:
-    - Models complex, multi-modal target distributions
-    - Outputs full probability distributions instead of point estimates
-    - Provides uncertainty quantification through distribution parameters
-    - Handles ambiguous or one-to-many mapping problems
-    - Enables sampling from the predicted distributions
-    - Prevents common training issues (component collapse, overconfidence)
-    - Enhanced architecture with intermediate processing layers
 
 Theory:
     MDNs extend traditional neural networks by replacing the single output value
@@ -55,7 +46,6 @@ from typing import Dict, Optional, Tuple, Union, Any
 
 from ..utils.logger import logger
 from ..utils.tensors import gaussian_probability
-from .activations.explanded_activations import elu_plus_one_plus_epsilon
 
 # ---------------------------------------------------------------------
 # Constants
@@ -68,10 +58,10 @@ MIN_SIGMA = 1e-3      # Minimum sigma value to prevent overconfidence
 
 @keras.saving.register_keras_serializable()
 class MDNLayer(keras.layers.Layer):
-    """Enhanced Mixture Density Network Layer with Intermediate Processing
+    """Mixture Density Network Layer with Intermediate Processing
 
     This layer outputs parameters for a mixture of Gaussian distributions with
-    practical improvements for training stability and enhanced architecture.
+    practical improvements for training stability.
     Each head now includes intermediate processing layers for better representation
     learning.
 
@@ -865,8 +855,6 @@ class MDNLayer(keras.layers.Layer):
         return cls(**config_copy)
 
 # ---------------------------------------------------------------------
-# Utility Functions (Enhanced)
-# ---------------------------------------------------------------------
 
 def get_point_estimate(
     model: keras.Model,
@@ -931,6 +919,7 @@ def get_point_estimate(
 
     return point_estimates
 
+# ---------------------------------------------------------------------
 
 def get_uncertainty(
     model: keras.Model,
@@ -1014,6 +1003,7 @@ def get_uncertainty(
 
     return total_variance, aleatoric_variance
 
+# ---------------------------------------------------------------------
 
 def get_prediction_intervals(
     point_estimates: np.ndarray,
@@ -1069,6 +1059,7 @@ def get_prediction_intervals(
 
     return lower_bound, upper_bound
 
+# ---------------------------------------------------------------------
 
 def check_component_diversity(
     model: keras.Model,
@@ -1123,3 +1114,6 @@ def check_component_diversity(
         "mean_mixture_weights": np.mean(pi_np, axis=0),
         "std_mixture_weights": np.std(pi_np, axis=0)
     }
+
+# ---------------------------------------------------------------------
+
