@@ -1,7 +1,3 @@
-"""
-Bias-Free CNN Denoiser Training Script with Complete Fixes for Graph Mode Compatibility
-"""
-
 import gc
 import json
 import time
@@ -14,8 +10,12 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Tuple, List, Optional, Dict, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.filesystem import count_available_files, image_file_generator
+from dl_techniques.utils.filesystem import count_available_files
 from dl_techniques.optimization import optimizer_builder, learning_rate_schedule_builder
 from dl_techniques.models.bfcnn_denoiser import (
     create_bfcnn_denoiser,
@@ -35,36 +35,36 @@ class TrainingConfig:
 
     # === Data Configuration ===
     train_image_dirs: List[str]  # Directories containing training images
-    val_image_dirs: List[str]    # Directories containing validation images
-    patch_size: int = 64         # Size of training patches (patch_size x patch_size)
-    channels: int = 1            # Number of input channels (1=grayscale, 3=RGB)
+    val_image_dirs: List[str]  # Directories containing validation images
+    patch_size: int = 64  # Size of training patches (patch_size x patch_size)
+    channels: int = 1  # Number of input channels (1=grayscale, 3=RGB)
     image_extensions: List[str] = None  # Supported image formats
 
     # === Memory Management ===
-    max_train_files: Optional[int] = None     # Limit training files (None = no limit)
-    max_val_files: Optional[int] = None       # Limit validation files
-    parallel_reads: int = 4                   # Parallel file reading threads
-    dataset_shuffle_buffer: int = 1000        # Shuffle buffer size
+    max_train_files: Optional[int] = None  # Limit training files (None = no limit)
+    max_val_files: Optional[int] = None  # Limit validation files
+    parallel_reads: int = 4  # Parallel file reading threads
+    dataset_shuffle_buffer: int = 1000  # Shuffle buffer size
 
     # === Noise Configuration ===
-    noise_sigma_min: float = 0.0    # Minimum noise standard deviation
-    noise_sigma_max: float = 0.4    # Maximum noise standard deviation (universal range)
+    noise_sigma_min: float = 0.0  # Minimum noise standard deviation
+    noise_sigma_max: float = 0.4  # Maximum noise standard deviation (universal range)
     noise_distribution: str = 'uniform'  # 'uniform' or 'log_uniform' sampling
 
     # === Model Configuration ===
-    model_type: str = 'standard'   # 'light', 'standard', 'deep', or 'custom'
-    num_blocks: int = 8            # Number of residual blocks (for custom model)
-    filters: int = 64              # Number of filters (for custom model)
-    initial_kernel_size: int = 5   # Initial convolution kernel size
-    kernel_size: int = 3           # Residual block kernel size
-    activation: str = 'relu'       # Activation function
+    model_type: str = 'deep'  # 'light', 'standard', 'deep', or 'custom'
+    num_blocks: int = 8  # Number of residual blocks (for custom model)
+    filters: int = 64  # Number of filters (for custom model)
+    initial_kernel_size: int = 5  # Initial convolution kernel size
+    kernel_size: int = 3  # Residual block kernel size
+    activation: str = 'relu'  # Activation function
 
     # === Training Configuration ===
     batch_size: int = 32
     epochs: int = 100
-    patches_per_image: int = 16    # Number of patches to extract per image
-    augment_data: bool = True      # Apply data augmentation
-    normalize_input: bool = True   # Normalize input to [0, 1]
+    patches_per_image: int = 16  # Number of patches to extract per image
+    augment_data: bool = True  # Apply data augmentation
+    normalize_input: bool = True  # Normalize input to [0, 1]
     steps_per_epoch: Optional[int] = None  # Manual override for steps per epoch
 
     # === Optimization Configuration ===
@@ -76,15 +76,14 @@ class TrainingConfig:
     gradient_clipping: float = 1.0
 
     # === Monitoring Configuration ===
-    monitor_every_n_epochs: int = 5    # Save intermediate results every N epochs
-    save_best_only: bool = True        # Only save model if validation loss improves
+    monitor_every_n_epochs: int = 5  # Save intermediate results every N epochs
+    save_best_only: bool = True  # Only save model if validation loss improves
     early_stopping_patience: int = 15  # Early stopping patience
     validation_steps: Optional[int] = 100  # Number of validation steps
-    # Note: reduce_lr_patience removed - learning rate schedule handles LR changes
 
     # === Output Configuration ===
     output_dir: str = 'results'
-    experiment_name: str = None        # Auto-generated if None
+    experiment_name: str = None  # Auto-generated if None
     save_training_images: bool = True  # Save sample denoised images during training
     save_model_checkpoints: bool = True
 
@@ -104,8 +103,9 @@ class TrainingConfig:
         if self.patch_size <= 0 or self.channels <= 0:
             raise ValueError("Invalid patch size or channel configuration")
 
+
 # ---------------------------------------------------------------------
-# DATASET BUILDER WITH GRAPH MODE FIXES
+# DATASET BUILDER WITH UNIFIED FILE LIST FIX
 # ---------------------------------------------------------------------
 
 def load_and_preprocess_image(image_path: tf.Tensor, config: TrainingConfig) -> tf.Tensor:
@@ -144,13 +144,12 @@ def load_and_preprocess_image(image_path: tf.Tensor, config: TrainingConfig) -> 
     min_dim = tf.minimum(height, width)
     min_size = config.patch_size
 
-    # Use tf.cond for data-dependent control flow ---
+    # Use tf.cond for data-dependent control flow
     def resize_if_small():
         """Logic to resize the image if it's smaller than the patch size."""
         scale_factor = tf.cast(min_size, tf.float32) / tf.cast(min_dim, tf.float32)
 
-        # Use tf.math.ceil to avoid truncation errors ---
-        # This ensures the new dimensions are always large enough after scaling.
+        # Use tf.math.ceil to avoid truncation errors
         new_height = tf.cast(tf.math.ceil(tf.cast(height, tf.float32) * scale_factor), tf.int32)
         new_width = tf.cast(tf.math.ceil(tf.cast(width, tf.float32) * scale_factor), tf.int32)
 
@@ -161,7 +160,6 @@ def load_and_preprocess_image(image_path: tf.Tensor, config: TrainingConfig) -> 
         return image
 
     # Use tf.cond to choose which function to execute
-    # More explicit condition: resize if either dimension is too small
     image = tf.cond(
         tf.logical_or(height < min_size, width < min_size),
         true_fn=resize_if_small,
@@ -176,6 +174,7 @@ def load_and_preprocess_image(image_path: tf.Tensor, config: TrainingConfig) -> 
 
     return patch
 
+
 def augment_patch(patch: tf.Tensor) -> tf.Tensor:
     """Apply data augmentation to a patch."""
     # Random flips
@@ -183,6 +182,7 @@ def augment_patch(patch: tf.Tensor) -> tf.Tensor:
     patch = tf.image.random_flip_up_down(patch)
 
     return patch
+
 
 def add_noise_to_patch(patch: tf.Tensor, config: TrainingConfig) -> Tuple[tf.Tensor, tf.Tensor]:
     """
@@ -215,71 +215,86 @@ def add_noise_to_patch(patch: tf.Tensor, config: TrainingConfig) -> Tuple[tf.Ten
 
     return noisy_patch, patch
 
+
 def create_dataset(directories: List[str], config: TrainingConfig, is_training: bool = True) -> tf.data.Dataset:
     """
-    Create a dataset using generator-based file discovery (memory-efficient).
-
-    Args:
-        directories: List of directories to search for images
-        config: Training configuration
-        is_training: Whether this is for training (affects augmentation and repetition)
-
-    Returns:
-        TensorFlow Dataset yielding (noisy_patches, clean_patches) pairs
+    Create a dataset using unified file list approach to ensure uniform sampling.
+    FIXED: No more sampling bias from round-robin recreation.
     """
     logger.info(f"Creating {'training' if is_training else 'validation'} dataset from directories: {directories}")
 
-    # Determine file limits and patches per image
-    max_files = config.max_train_files if is_training else config.max_val_files
-    patches_per_image = config.patches_per_image
+    # Build a unified file list from all directories
+    all_file_paths = []
+    extensions_set = {ext.lower() for ext in config.image_extensions}
+    extensions_set.update({ext.upper() for ext in config.image_extensions})
 
-    # Create generator function for tf.data
-    def path_generator():
-        """Generator function for tf.data.Dataset.from_generator"""
-        return image_file_generator(
-            directories=directories,
-            extensions=config.image_extensions,
-            max_files=max_files,
-            patches_per_image=patches_per_image
-        )
+    for directory in directories:
+        dir_path = Path(directory)
+        if not dir_path.is_dir():
+            logger.warning(f"Directory not found, skipping: {directory}")
+            continue
 
-    # Create dataset from generator
-    dataset = tf.data.Dataset.from_generator(
-        path_generator,
-        output_signature=tf.TensorSpec(shape=(), dtype=tf.string)
-    )
+        # Recursively find all image files
+        for file_path in dir_path.rglob("*"):
+            if file_path.is_file() and file_path.suffix in extensions_set:
+                all_file_paths.append(str(file_path))
 
-    # Shuffle the file paths if training
+    if not all_file_paths:
+        raise ValueError(f"No image files found in directories: {directories}")
+
+    logger.info(f"Found a total of {len(all_file_paths)} files.")
+
+    # Apply file limits if specified
+    limit = config.max_train_files if is_training else config.max_val_files
+    if limit and limit < len(all_file_paths):
+        logger.info(f"Limiting to {limit} files as per configuration.")
+        # Shuffle before limiting to get a random subset
+        np.random.shuffle(all_file_paths)
+        all_file_paths = all_file_paths[:limit]
+
+    # Create dataset from the unified list of paths
+    dataset = tf.data.Dataset.from_tensor_slices(all_file_paths)
+
+    # Apply dataset transformations
     if is_training:
         dataset = dataset.shuffle(
             buffer_size=config.dataset_shuffle_buffer,
             reshuffle_each_iteration=True
         )
-        # Repeat for multiple epochs
+        dataset = dataset.repeat()  # Repeat indefinitely for training
+
+    # For validation, repeat to avoid OutOfRangeError
+    if not is_training:
         dataset = dataset.repeat()
 
-    # Load and preprocess images directly (graph-compatible)
+    # Duplicate paths for multiple patches per image if training
+    if is_training and config.patches_per_image > 1:
+        dataset = dataset.flat_map(
+            lambda path: tf.data.Dataset.from_tensors(path).repeat(config.patches_per_image)
+        )
+
+    # Load and preprocess images
     dataset = dataset.map(
         lambda path: load_and_preprocess_image(path, config),
         num_parallel_calls=config.parallel_reads
     )
 
-    # Set shape explicitly after loading and cropping
+    # Ensure shape consistency
     dataset = dataset.map(
         lambda x: tf.ensure_shape(x, [config.patch_size, config.patch_size, config.channels])
     )
 
-    # Apply augmentation for training
+    # Apply augmentation if training
     if is_training and config.augment_data:
         dataset = dataset.map(augment_patch, num_parallel_calls=tf.data.AUTOTUNE)
 
-    # Add noise to create (input, target) pairs directly (graph-compatible)
+    # Add noise to create training pairs
     dataset = dataset.map(
         lambda patch: add_noise_to_patch(patch, config),
         num_parallel_calls=tf.data.AUTOTUNE
     )
 
-    # Set shapes for the tuple
+    # Ensure final shape consistency
     dataset = dataset.map(
         lambda noisy, clean: (
             tf.ensure_shape(noisy, [config.patch_size, config.patch_size, config.channels]),
@@ -287,11 +302,13 @@ def create_dataset(directories: List[str], config: TrainingConfig, is_training: 
         )
     )
 
-    # Batch and prefetch
+    # Batching and prefetching
+    dataset = dataset.prefetch(config.batch_size * 2)
     dataset = dataset.batch(config.batch_size, drop_remainder=is_training)
-    dataset = dataset.prefetch(tf.data.AUTOTUNE)
+    dataset = dataset.prefetch(2)
 
     return dataset
+
 
 # ---------------------------------------------------------------------
 # METRICS
@@ -311,9 +328,121 @@ def psnr_metric(y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
     """
     return tf.reduce_mean(tf.image.psnr(y_pred, y_true, max_val=2.0))
 
+
 # ---------------------------------------------------------------------
-# MONITORING AND CALLBACKS WITH GRAPH MODE FIXES
+# MONITORING AND CALLBACKS WITH METRICS VISUALIZATION
 # ---------------------------------------------------------------------
+
+class MetricsVisualizationCallback(keras.callbacks.Callback):
+    """
+    Callback to visualize training and validation metrics (PSNR, MAE, MSE).
+    """
+
+    def __init__(self, config: TrainingConfig):
+        super().__init__()
+        self.config = config
+        self.output_dir = Path(config.output_dir) / config.experiment_name
+        self.visualization_dir = self.output_dir / "visualization_plots"
+        self.visualization_dir.mkdir(parents=True, exist_ok=True)
+
+        # Storage for metrics
+        self.train_metrics = {
+            'loss': [],
+            'mae': [],
+            'rmse': [],
+            'psnr_metric': []
+        }
+        self.val_metrics = {
+            'val_loss': [],
+            'val_mae': [],
+            'val_rmse': [],
+            'val_psnr_metric': []
+        }
+
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None):
+        """Update metrics and create visualization plots."""
+        if logs is None:
+            logs = {}
+
+        # Store training metrics
+        for key in self.train_metrics.keys():
+            if key in logs:
+                self.train_metrics[key].append(logs[key])
+
+        # Store validation metrics
+        for key in self.val_metrics.keys():
+            if key in logs:
+                self.val_metrics[key].append(logs[key])
+
+        # Create plots every few epochs
+        if (epoch + 1) % 5 == 0 or epoch == 0:
+            self._create_metrics_plots(epoch + 1)
+
+    def _create_metrics_plots(self, epoch: int):
+        """Create and save metrics visualization plots."""
+        epochs_range = range(1, len(self.train_metrics['loss']) + 1)
+
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        fig.suptitle(f'Training and Validation Metrics - Epoch {epoch}', fontsize=16)
+
+        # MSE (Loss) Plot
+        axes[0, 0].plot(epochs_range, self.train_metrics['loss'], 'b-', label='Training MSE', linewidth=2)
+        if self.val_metrics['val_loss']:
+            axes[0, 0].plot(epochs_range, self.val_metrics['val_loss'], 'r-', label='Validation MSE', linewidth=2)
+        axes[0, 0].set_title('Mean Squared Error (MSE)')
+        axes[0, 0].set_xlabel('Epoch')
+        axes[0, 0].set_ylabel('MSE')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+
+        # MAE Plot
+        axes[0, 1].plot(epochs_range, self.train_metrics['mae'], 'b-', label='Training MAE', linewidth=2)
+        if self.val_metrics['val_mae']:
+            axes[0, 1].plot(epochs_range, self.val_metrics['val_mae'], 'r-', label='Validation MAE', linewidth=2)
+        axes[0, 1].set_title('Mean Absolute Error (MAE)')
+        axes[0, 1].set_xlabel('Epoch')
+        axes[0, 1].set_ylabel('MAE')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True, alpha=0.3)
+
+        # RMSE Plot
+        axes[1, 0].plot(epochs_range, self.train_metrics['rmse'], 'b-', label='Training RMSE', linewidth=2)
+        if self.val_metrics['val_rmse']:
+            axes[1, 0].plot(epochs_range, self.val_metrics['val_rmse'], 'r-', label='Validation RMSE', linewidth=2)
+        axes[1, 0].set_title('Root Mean Squared Error (RMSE)')
+        axes[1, 0].set_xlabel('Epoch')
+        axes[1, 0].set_ylabel('RMSE')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True, alpha=0.3)
+
+        # PSNR Plot
+        axes[1, 1].plot(epochs_range, self.train_metrics['psnr_metric'], 'b-', label='Training PSNR', linewidth=2)
+        if self.val_metrics['val_psnr_metric']:
+            axes[1, 1].plot(epochs_range, self.val_metrics['val_psnr_metric'], 'r-', label='Validation PSNR',
+                            linewidth=2)
+        axes[1, 1].set_title('Peak Signal-to-Noise Ratio (PSNR)')
+        axes[1, 1].set_xlabel('Epoch')
+        axes[1, 1].set_ylabel('PSNR (dB)')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        save_path = self.visualization_dir / f"epoch_{epoch:03d}_metrics.png"
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        plt.clf()
+        gc.collect()
+
+        # Also save the latest metrics data
+        metrics_data = {
+            'epoch': epoch,
+            'train_metrics': self.train_metrics,
+            'val_metrics': self.val_metrics
+        }
+        metrics_file = self.visualization_dir / "latest_metrics.json"
+        with open(metrics_file, 'w') as f:
+            json.dump(metrics_data, f, indent=2, default=lambda x: float(x) if hasattr(x, 'item') else x)
+
 
 class StreamingResultMonitor(keras.callbacks.Callback):
     """
@@ -326,7 +455,7 @@ class StreamingResultMonitor(keras.callbacks.Callback):
         self.config = config
         self.monitor_freq = config.monitor_every_n_epochs
         self.output_dir = Path(config.output_dir) / config.experiment_name
-        self.results_dir = self.output_dir / "intermediate_results"
+        self.results_dir = self.output_dir / "visualization_plots"
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
         # Create a small validation dataset for monitoring
@@ -334,7 +463,7 @@ class StreamingResultMonitor(keras.callbacks.Callback):
 
     def _create_monitor_dataset(self, val_directories: List[str]):
         """Create a small dataset for consistent monitoring."""
-        # Get a few sample files for monitoring (without loading all into memory)
+        # Get sample files for monitoring (need 10 for visualization)
         monitor_files = []
         extensions_set = set(ext.lower() for ext in self.config.image_extensions)
         extensions_set.update(ext.upper() for ext in self.config.image_extensions)
@@ -348,9 +477,9 @@ class StreamingResultMonitor(keras.callbacks.Callback):
                 for file_path in dir_path.rglob("*"):
                     if file_path.is_file() and file_path.suffix in extensions_set:
                         monitor_files.append(str(file_path))
-                        if len(monitor_files) >= 4:  # Only need 4 files for monitoring
+                        if len(monitor_files) >= 10:  # Need 10 files for monitoring
                             break
-                if len(monitor_files) >= 4:
+                if len(monitor_files) >= 10:
                     break
             except Exception as e:
                 logger.error(f"Error getting monitor files from {directory}: {e}")
@@ -397,7 +526,7 @@ class StreamingResultMonitor(keras.callbacks.Callback):
 
                 # Compute metrics (TF ops) - FIXED: Use correct max_val for [-1, +1] range
                 mse_loss = tf.reduce_mean(tf.square(denoised_images - clean_images))
-                psnr = tf.reduce_mean(tf.image.psnr(denoised_images, clean_images, max_val=2.0))  # FIXED: max_val=2.0
+                psnr = tf.reduce_mean(tf.image.psnr(denoised_images, clean_images, max_val=2.0))
 
                 # Log and save metrics (calls .numpy()/float(), needs eager mode)
                 logger.info(f"Epoch {epoch_val} - Validation MSE: {mse_loss.numpy():.6f}, PSNR: {psnr.numpy():.2f} dB")
@@ -427,52 +556,69 @@ class StreamingResultMonitor(keras.callbacks.Callback):
         tf.py_function(func=_monitor_and_save, inp=[epoch + 1], Tout=[tf.int32])
 
     def _save_image_samples(self, epoch: int, noisy: tf.Tensor,
-                          clean: tf.Tensor, denoised: tf.Tensor):
-        """Save sample images for visual inspection."""
-        num_samples = min(4, noisy.shape[0])
-        fig, axes = plt.subplots(3, num_samples, figsize=(4 * num_samples, 12))
-        if num_samples == 1:
-            axes = axes.reshape(-1, 1)
+                            clean: tf.Tensor, denoised: tf.Tensor):
+        """Save sample images for visual inspection with 10 samples in 3x10 grid."""
+        num_samples = min(10, noisy.shape[0])
 
-        for i in range(num_samples):
-            # FIXED: Denormalize from [-1, +1] to [0, 1] for proper visualization
-            noisy_img = (noisy[i].numpy() + 1.0) / 2.0
-            clean_img = (clean[i].numpy() + 1.0) / 2.0
-            denoised_img = (denoised[i].numpy() + 1.0) / 2.0
+        # Create 3x10 grid: top row clean, middle row noisy, bottom row denoised
+        fig, axes = plt.subplots(3, 10, figsize=(25, 7.5))
+        fig.suptitle(f'Denoising Results - Epoch {epoch}', fontsize=20, y=0.98)
 
-            # Ensure values are in [0, 1] range after denormalization
-            noisy_img = np.clip(noisy_img, 0.0, 1.0)
-            clean_img = np.clip(clean_img, 0.0, 1.0)
-            denoised_img = np.clip(denoised_img, 0.0, 1.0)
+        for i in range(10):  # Always show 10 columns
+            if i < num_samples:
+                # FIXED: Denormalize from [-1, +1] to [0, 1] for proper visualization
+                clean_img = (clean[i].numpy() + 1.0) / 2.0
+                noisy_img = (noisy[i].numpy() + 1.0) / 2.0
+                denoised_img = (denoised[i].numpy() + 1.0) / 2.0
 
-            if noisy_img.shape[-1] == 1:
-                noisy_img, clean_img, denoised_img = map(lambda x: x.squeeze(-1), [noisy_img, clean_img, denoised_img])
-                cmap = 'gray'
+                # Ensure values are in [0, 1] range after denormalization
+                clean_img = np.clip(clean_img, 0.0, 1.0)
+                noisy_img = np.clip(noisy_img, 0.0, 1.0)
+                denoised_img = np.clip(denoised_img, 0.0, 1.0)
+
+                if clean_img.shape[-1] == 1:
+                    clean_img = clean_img.squeeze(-1)
+                    noisy_img = noisy_img.squeeze(-1)
+                    denoised_img = denoised_img.squeeze(-1)
+                    cmap = 'gray'
+                else:
+                    cmap = None
+
+                # Top row: Clean images
+                axes[0, i].imshow(clean_img, cmap=cmap, vmin=0, vmax=1)
+                if i == 0:
+                    axes[0, i].set_ylabel('Clean', fontsize=14, rotation=0, ha='right', va='center')
+                axes[0, i].set_title(f'Sample {i + 1}', fontsize=10)
+                axes[0, i].axis('off')
+
+                # Middle row: Noisy images
+                axes[1, i].imshow(noisy_img, cmap=cmap, vmin=0, vmax=1)
+                if i == 0:
+                    axes[1, i].set_ylabel('Noisy', fontsize=14, rotation=0, ha='right', va='center')
+                axes[1, i].axis('off')
+
+                # Bottom row: Denoised images
+                axes[2, i].imshow(denoised_img, cmap=cmap, vmin=0, vmax=1)
+                if i == 0:
+                    axes[2, i].set_ylabel('Denoised', fontsize=14, rotation=0, ha='right', va='center')
+                axes[2, i].axis('off')
             else:
-                cmap = None
-
-            # Now use correct vmin=0, vmax=1 since we denormalized
-            axes[0, i].imshow(noisy_img, cmap=cmap, vmin=0, vmax=1)
-            axes[0, i].set_title(f'Noisy {i+1}')
-            axes[0, i].axis('off')
-
-            axes[1, i].imshow(clean_img, cmap=cmap, vmin=0, vmax=1)
-            axes[1, i].set_title(f'Clean {i+1}')
-            axes[1, i].axis('off')
-
-            axes[2, i].imshow(denoised_img, cmap=cmap, vmin=0, vmax=1)
-            axes[2, i].set_title(f'Denoised {i+1}')
-            axes[2, i].axis('off')
+                # Hide unused subplots if we have fewer than 10 samples
+                axes[0, i].axis('off')
+                axes[1, i].axis('off')
+                axes[2, i].axis('off')
 
         plt.tight_layout()
+        plt.subplots_adjust(top=0.92, left=0.08, right=0.98)  # Adjust for labels and title
         save_path = self.results_dir / f"epoch_{epoch:03d}_samples.png"
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
         plt.clf()
         gc.collect()
 
+
 def create_callbacks(config: TrainingConfig, val_directories: List[str]) -> List[keras.callbacks.Callback]:
-    """Create training callbacks for generator-based training."""
+    """Create training callbacks for the refined training approach."""
     callbacks = []
 
     output_dir = Path(config.output_dir) / config.experiment_name
@@ -501,15 +647,15 @@ def create_callbacks(config: TrainingConfig, val_directories: List[str]) -> List
         )
     )
 
-    # NOTE: ReduceLROnPlateau callback removed because we're using a learning rate schedule
-    # The schedule (cosine decay, exponential decay, etc.) already handles LR changes
-    # ReduceLROnPlateau conflicts with LearningRateSchedule objects
-    logger.info("Using learning rate schedule - ReduceLROnPlateau callback disabled")
-
     # CSV logging
     csv_path = output_dir / "training_log.csv"
     callbacks.append(
         keras.callbacks.CSVLogger(str(csv_path), append=True)
+    )
+
+    # Metrics visualization callback (NEW)
+    callbacks.append(
+        MetricsVisualizationCallback(config)
     )
 
     # Streaming result monitoring with graph mode fixes
@@ -530,13 +676,14 @@ def create_callbacks(config: TrainingConfig, val_directories: List[str]) -> List
 
     return callbacks
 
+
 # ---------------------------------------------------------------------
 # TRAINING FUNCTION
 # ---------------------------------------------------------------------
 
 def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
     """
-    Train a bias-free CNN denoiser model with generator-based data loading (memory-efficient).
+    Train a bias-free CNN denoiser model with unified file list approach (FIXED sampling bias).
 
     Args:
         config: Training configuration
@@ -544,7 +691,7 @@ def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
     Returns:
         Trained Keras model
     """
-    logger.info("Starting generator-based bias-free CNN denoiser training")
+    logger.info("Starting refined bias-free CNN denoiser training with unified file list")
     logger.info(f"Experiment: {config.experiment_name}")
 
     # Create output directory and save config
@@ -567,7 +714,7 @@ def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
     logger.info(f"Training directories: {config.train_image_dirs}")
     logger.info(f"Validation directories: {config.val_image_dirs}")
 
-    # Count available files for logging and steps calculation (without loading into memory)
+    # Count available files for logging and steps calculation
     logger.info("Counting available files...")
     train_file_count = count_available_files(
         config.train_image_dirs,
@@ -588,8 +735,8 @@ def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
     logger.info(f"Found approximately {train_file_count} training files")
     logger.info(f"Found approximately {val_file_count} validation files")
 
-    # Create datasets using generator-based approach (memory-efficient)
-    logger.info("Creating generator-based datasets...")
+    # Create datasets using unified file list approach (FIXED)
+    logger.info("Creating datasets with unified file list approach...")
     train_dataset = create_dataset(config.train_image_dirs, config, is_training=True)
     val_dataset = create_dataset(config.val_image_dirs, config, is_training=False)
 
@@ -626,6 +773,8 @@ def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
     else:
         raise ValueError(f"Unknown model type: {config.model_type}")
 
+    model.summary()
+
     # Create optimizer and learning rate schedule
     lr_config = {
         'type': config.lr_schedule_type,
@@ -656,11 +805,11 @@ def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
 
     logger.info(f"Model compiled with {model.count_params():,} parameters")
 
-    # Create callbacks (using directories instead of file lists)
+    # Create callbacks (including new metrics visualization)
     callbacks = create_callbacks(config, config.val_image_dirs)
 
     # Train model
-    logger.info("Starting generator-based training...")
+    logger.info("Starting refined training with unified file sampling...")
     start_time = time.time()
 
     # Determine validation steps
@@ -695,13 +844,14 @@ def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
 
     return model
 
+
 # ---------------------------------------------------------------------
 # MAIN EXECUTION
 # ---------------------------------------------------------------------
 
 def main():
-    """Main training function with generator-based file discovery and memory-efficient processing."""
-    # Configuration for generator-based training
+    """Main training function with refined dataset creation and metrics visualization."""
+    # Configuration for refined training
     config = TrainingConfig(
         # Data paths
         train_image_dirs=[
@@ -722,13 +872,13 @@ def main():
         channels=1,  # 1 for grayscale, 3 for RGB
         batch_size=32,
         epochs=100,
-        patches_per_image=16,
+        patches_per_image=4,
 
         # File limits for manageable training
-        max_train_files=100000,      # Limit training files
-        max_val_files=1000,          # Limit validation files
-        parallel_reads=8,            # Parallel file processing
-        dataset_shuffle_buffer=1013, # Shuffle buffer size
+        max_train_files=10000,  # Limit training files
+        max_val_files=1000,  # Limit validation files
+        parallel_reads=8,  # Parallel file processing
+        dataset_shuffle_buffer=1013,  # Shuffle buffer size
 
         # Model configuration
         model_type='standard',  # 'light', 'standard', 'deep', or 'custom'
@@ -745,7 +895,7 @@ def main():
         warmup_epochs=5,
 
         # Monitoring
-        monitor_every_n_epochs=5,
+        monitor_every_n_epochs=1,
         save_training_images=True,
         validation_steps=200,  # Fixed number of validation steps
 
@@ -755,9 +905,8 @@ def main():
     )
 
     try:
-        # Train the model with generator-based data loading (memory-efficient)
         model = train_bfcnn_denoiser(config)
-        logger.info("Training completed successfully!")
+        logger.info("Refined training completed successfully!")
 
         # Print model summary
         model.summary()
@@ -765,6 +914,7 @@ def main():
     except Exception as e:
         logger.error(f"Training failed: {e}")
         raise
+
 
 # ---------------------------------------------------------------------
 
