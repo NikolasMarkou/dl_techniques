@@ -1,15 +1,17 @@
 """
-Bias-Free CNN Denoiser Model
+Bias-Free CNN Denoiser Model with Variants
 
 Implements a ResNet-style denoising CNN where all additive constants (bias terms)
 have been removed to enable better generalization across different noise levels.
+Provides multiple model variants (tiny, small, base, large, xlarge) for different
+computational requirements and performance targets.
 
 Based on "Robust and Interpretable Blind Image Denoising via Bias-Free
 Convolutional Neural Networks" (Mohan et al., ICLR 2020).
 """
 
 import keras
-from typing import Optional, Union, Tuple
+from typing import Optional, Union, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
 # local imports
@@ -18,6 +20,40 @@ from typing import Optional, Union, Tuple
 from ..utils.logger import logger
 from ..layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
 
+# ---------------------------------------------------------------------
+# Model Variant Configurations
+# ---------------------------------------------------------------------
+
+BFCNN_CONFIGS: Dict[str, Dict[str, Any]] = {
+    'tiny': {
+        'num_blocks': 2,
+        'filters': 32,
+        'description': 'Tiny BFCNN (~ResNet-5) for quick experiments and resource-constrained environments'
+    },
+    'small': {
+        'num_blocks': 5,
+        'filters': 48,
+        'description': 'Small BFCNN (~ResNet-10) with minimal capacity'
+    },
+    'base': {
+        'num_blocks': 12,
+        'filters': 64,
+        'description': 'Base BFCNN (~ResNet-25) with standard configuration'
+    },
+    'large': {
+        'num_blocks': 25,
+        'filters': 96,
+        'description': 'Large BFCNN (~ResNet-50) with high capacity'
+    },
+    'xlarge': {
+        'num_blocks': 50,
+        'filters': 128,
+        'description': 'Extra-Large BFCNN (~ResNet-100) for maximum performance'
+    }
+}
+
+# ---------------------------------------------------------------------
+# Core Model Creation Function
 # ---------------------------------------------------------------------
 
 def create_bfcnn_denoiser(
@@ -137,60 +173,51 @@ def create_bfcnn_denoiser(
     return model
 
 # ---------------------------------------------------------------------
-# Predefined model configurations
+# Variant Creation Functions
 # ---------------------------------------------------------------------
 
-def create_bfcnn_light(input_shape: Tuple[int, int, int]) -> keras.Model:
+def create_bfcnn_variant(
+        variant: str,
+        input_shape: Tuple[int, int, int],
+        **kwargs
+) -> keras.Model:
     """
-    Create a lightweight bias-free CNN (fewer blocks, good for quick experiments).
+    Create a BFCNN model with a specific variant configuration.
 
     Args:
+        variant: String, one of 'tiny', 'small', 'base', 'large', 'xlarge'.
         input_shape: Tuple of integers, shape of input images (height, width, channels).
+        **kwargs: Additional keyword arguments to override default parameters.
 
     Returns:
-        keras.Model: Lightweight BFCNN model with 4 blocks and 32 filters.
+        keras.Model: BFCNN model with the specified variant configuration.
+
+    Raises:
+        ValueError: If variant is not recognized.
+
+    Example:
+        >>> model = create_bfcnn_variant('base', (256, 256, 3))
+        >>> model.summary()
     """
+    if variant not in BFCNN_CONFIGS:
+        available_variants = list(BFCNN_CONFIGS.keys())
+        raise ValueError(f"Unknown variant '{variant}'. Available variants: {available_variants}")
+
+    config = BFCNN_CONFIGS[variant].copy()
+    description = config.pop('description')
+
+    # Override config with any provided kwargs
+    config.update(kwargs)
+
+    # Set model name if not provided
+    if 'model_name' not in config:
+        config['model_name'] = f'bfcnn_{variant}'
+
+    logger.info(f"Creating BFCNN variant '{variant}': {description}")
+
     return create_bfcnn_denoiser(
         input_shape=input_shape,
-        num_blocks=4,
-        filters=32,
-        model_name='bfcnn_light'
-    )
-
-
-def create_bfcnn_standard(input_shape: Tuple[int, int, int]) -> keras.Model:
-    """
-    Create a standard bias-free CNN (balanced performance and speed).
-
-    Args:
-        input_shape: Tuple of integers, shape of input images (height, width, channels).
-
-    Returns:
-        keras.Model: Standard BFCNN model with 8 blocks and 64 filters.
-    """
-    return create_bfcnn_denoiser(
-        input_shape=input_shape,
-        num_blocks=8,
-        filters=64,
-        model_name='bfcnn_standard'
-    )
-
-
-def create_bfcnn_deep(input_shape: Tuple[int, int, int]) -> keras.Model:
-    """
-    Create a deep bias-free CNN (more blocks for complex denoising).
-
-    Args:
-        input_shape: Tuple of integers, shape of input images (height, width, channels).
-
-    Returns:
-        keras.Model: Deep BFCNN model with 16 blocks and 128 filters.
-    """
-    return create_bfcnn_denoiser(
-        input_shape=input_shape,
-        num_blocks=16,
-        filters=128,
-        model_name='bfcnn_deep'
+        **config
     )
 
 # ---------------------------------------------------------------------

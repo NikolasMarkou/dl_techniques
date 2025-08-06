@@ -1,9 +1,11 @@
 """
-Bias-Free U-Net Model
+Bias-Free U-Net Model with Variants
 
 Implements a U-Net architecture where all additive constants (bias terms)
 have been removed to enable better generalization across different noise levels
-and improved scaling invariance properties.
+and improved scaling invariance properties. Provides multiple model variants
+(tiny, small, base, large, xlarge) for different computational requirements
+and performance targets.
 
 Based on the bias-free principles from "Robust and Interpretable Blind Image
 Denoising via Bias-Free Convolutional Neural Networks" (Mohan et al., ICLR 2020)
@@ -12,7 +14,7 @@ Biomedical Image Segmentation" (Ronneberger et al., MICCAI 2015).
 """
 
 import keras
-from typing import Optional, Union, Tuple, List
+from typing import Optional, Union, Tuple, List, Dict, Any
 
 # ---------------------------------------------------------------------
 # local imports
@@ -21,12 +23,50 @@ from typing import Optional, Union, Tuple, List
 from ..utils.logger import logger
 from ..layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
 
+# ---------------------------------------------------------------------
+# Model Variant Configurations
+# ---------------------------------------------------------------------
 
+BFUNET_CONFIGS: Dict[str, Dict[str, Any]] = {
+    'tiny': {
+        'depth': 3,
+        'initial_filters': 32,
+        'blocks_per_level': 1,
+        'description': 'Tiny BF-UNet (depth=3) for quick experiments and resource-constrained environments'
+    },
+    'small': {
+        'depth': 3,
+        'initial_filters': 48,
+        'blocks_per_level': 1,
+        'description': 'Small BF-UNet (depth=3) with minimal capacity'
+    },
+    'base': {
+        'depth': 4,
+        'initial_filters': 64,
+        'blocks_per_level': 2,
+        'description': 'Base BF-UNet (depth=4) with standard configuration'
+    },
+    'large': {
+        'depth': 4,
+        'initial_filters': 96,
+        'blocks_per_level': 2,
+        'description': 'Large BF-UNet (depth=4) with high capacity'
+    },
+    'xlarge': {
+        'depth': 5,
+        'initial_filters': 128,
+        'blocks_per_level': 3,
+        'description': 'Extra-Large BF-UNet (depth=5) for maximum performance'
+    }
+}
+
+# ---------------------------------------------------------------------
+# Core Model Creation Function
 # ---------------------------------------------------------------------
 
 def create_bias_free_unet(
         input_shape: Tuple[int, int, int],
-        depth: int = 3,
+        depth: int = 4,
         initial_filters: int = 64,
         filter_multiplier: int = 2,
         blocks_per_level: int = 2,
@@ -54,7 +94,7 @@ def create_bias_free_unet(
 
     Args:
         input_shape: Tuple of integers, shape of input images (height, width, channels).
-        depth: Integer, depth of the U-Net (number of downsampling levels). Defaults to 3.
+        depth: Integer, depth of the U-Net (number of downsampling levels). Defaults to 4.
         initial_filters: Integer, number of filters in the first level. Defaults to 64.
         filter_multiplier: Integer, multiplier for filters at each level. Defaults to 2.
         blocks_per_level: Integer, number of conv blocks per level. Defaults to 2.
@@ -70,7 +110,7 @@ def create_bias_free_unet(
         keras.Model: Bias-free U-Net model ready for training.
 
     Raises:
-        ValueError: If depth is less than 1, initial_filters is non-positive,
+        ValueError: If depth is less than 3, initial_filters is non-positive,
                    filter_multiplier is less than 1, or blocks_per_level is non-positive.
         TypeError: If input_shape is not a tuple of 3 integers.
 
@@ -91,8 +131,8 @@ def create_bias_free_unet(
     if not isinstance(input_shape, tuple) or len(input_shape) != 3:
         raise TypeError("input_shape must be a tuple of 3 integers (height, width, channels)")
 
-    if depth < 1:
-        raise ValueError(f"depth must be at least 1, got {depth}")
+    if depth < 3:
+        raise ValueError(f"depth must be at least 3, got {depth}")
 
     if initial_filters <= 0:
         raise ValueError(f"initial_filters must be positive, got {initial_filters}")
@@ -280,149 +320,62 @@ def create_bias_free_unet(
 
     return model
 
-
 # ---------------------------------------------------------------------
-# Predefined model configurations
-# ---------------------------------------------------------------------
-
-def create_bias_free_unet_light(input_shape: Tuple[int, int, int]) -> keras.Model:
-    """
-    Create a lightweight bias-free U-Net (shallow depth, fewer filters).
-
-    Args:
-        input_shape: Tuple of integers, shape of input images (height, width, channels).
-
-    Returns:
-        keras.Model: Lightweight bias-free U-Net with depth=2 and 32 initial filters.
-    """
-    return create_bias_free_unet(
-        input_shape=input_shape,
-        depth=2,
-        initial_filters=32,
-        blocks_per_level=1,
-        model_name='bias_free_unet_light'
-    )
-
-
-def create_bias_free_unet_standard(input_shape: Tuple[int, int, int]) -> keras.Model:
-    """
-    Create a standard bias-free U-Net (balanced performance and speed).
-
-    Args:
-        input_shape: Tuple of integers, shape of input images (height, width, channels).
-
-    Returns:
-        keras.Model: Standard bias-free U-Net with depth=3 and 64 initial filters.
-    """
-    return create_bias_free_unet(
-        input_shape=input_shape,
-        depth=3,
-        initial_filters=64,
-        blocks_per_level=2,
-        model_name='bias_free_unet_standard'
-    )
-
-
-def create_bias_free_unet_deep(input_shape: Tuple[int, int, int]) -> keras.Model:
-    """
-    Create a deep bias-free U-Net (more depth for complex tasks).
-
-    Args:
-        input_shape: Tuple of integers, shape of input images (height, width, channels).
-
-    Returns:
-        keras.Model: Deep bias-free U-Net with depth=4 and 64 initial filters.
-    """
-    return create_bias_free_unet(
-        input_shape=input_shape,
-        depth=4,
-        initial_filters=64,
-        blocks_per_level=2,
-        model_name='bias_free_unet_deep'
-    )
-
-
-def create_bias_free_unet_large(input_shape: Tuple[int, int, int]) -> keras.Model:
-    """
-    Create a large bias-free U-Net (high capacity for complex tasks).
-
-    Args:
-        input_shape: Tuple of integers, shape of input images (height, width, channels).
-
-    Returns:
-        keras.Model: Large bias-free U-Net with depth=4 and 128 initial filters.
-    """
-    return create_bias_free_unet(
-        input_shape=input_shape,
-        depth=4,
-        initial_filters=128,
-        blocks_per_level=3,
-        model_name='bias_free_unet_large'
-    )
-
-
-# ---------------------------------------------------------------------
-# Additional utility functions
+# Variant Creation Functions
 # ---------------------------------------------------------------------
 
-def create_bias_free_unet_segmentation(
+def create_bias_free_unet_variant(
+        variant: str,
         input_shape: Tuple[int, int, int],
-        num_classes: int,
-        depth: int = 3
+        **kwargs
 ) -> keras.Model:
     """
-    Create a bias-free U-Net specifically configured for segmentation tasks.
+    Create a bias-free U-Net model with a specific variant configuration.
 
     Args:
+        variant: String, one of 'tiny', 'small', 'base', 'large', 'xlarge'.
         input_shape: Tuple of integers, shape of input images (height, width, channels).
-        num_classes: Integer, number of segmentation classes.
-        depth: Integer, depth of the U-Net. Defaults to 3.
+        **kwargs: Additional keyword arguments to override default parameters.
 
     Returns:
-        keras.Model: Bias-free U-Net configured for segmentation with sigmoid/softmax output.
+        keras.Model: Bias-free U-Net model with the specified variant configuration.
+
+    Raises:
+        ValueError: If variant is not recognized.
+
+    Example:
+        >>> # Standard usage
+        >>> model = create_bias_free_unet_variant('base', (256, 256, 3))
+        >>> model.summary()
+        >>>
+        >>> # With custom parameters
+        >>> model = create_bias_free_unet_variant('large', (224, 224, 1),
+        ...                                     activation='gelu',
+        ...                                     use_residual_blocks=False)
+        >>>
+        >>> # All available variants
+        >>> for variant in ['tiny', 'small', 'base', 'large', 'xlarge']:
+        ...     model = create_bias_free_unet_variant(variant, (128, 128, 3))
     """
-    # Determine final activation based on number of classes
-    if num_classes == 1:
-        final_activation = 'sigmoid'  # Binary segmentation
-        output_channels = 1
-    else:
-        final_activation = 'softmax'  # Multi-class segmentation
-        output_channels = num_classes
+    if variant not in BFUNET_CONFIGS:
+        available_variants = list(BFUNET_CONFIGS.keys())
+        raise ValueError(f"Unknown variant '{variant}'. Available variants: {available_variants}")
 
-    # Override input shape for output channels
-    modified_input_shape = (input_shape[0], input_shape[1], input_shape[2])
+    config = BFUNET_CONFIGS[variant].copy()
+    description = config.pop('description')
 
-    model = create_bias_free_unet(
-        input_shape=modified_input_shape,
-        depth=depth,
-        initial_filters=64,
-        final_activation=final_activation,
-        model_name=f'bias_free_unet_segmentation_{num_classes}classes'
+    # Override config with any provided kwargs
+    config.update(kwargs)
+
+    # Set model name if not provided
+    if 'model_name' not in config:
+        config['model_name'] = f'bias_free_unet_{variant}'
+
+    logger.info(f"Creating bias-free U-Net variant '{variant}': {description}")
+
+    return create_bias_free_unet(
+        input_shape=input_shape,
+        **config
     )
-
-    # Modify the final layer to output correct number of classes
-    # Get all layers except the last one
-    x = model.layers[-2].output
-
-    # Create new final layer with correct number of output channels
-    outputs = BiasFreeConv2D(
-        filters=output_channels,
-        kernel_size=1,
-        activation=final_activation,
-        use_batch_norm=False,
-        name='segmentation_output'
-    )(x)
-
-    # Create new model with modified output
-    segmentation_model = keras.Model(
-        inputs=model.input,
-        outputs=outputs,
-        name=model.name
-    )
-
-    logger.info(f"Created bias-free U-Net for segmentation with {num_classes} classes")
-    logger.info(f"Final activation: {final_activation}, Output channels: {output_channels}")
-
-    return segmentation_model
 
 # ---------------------------------------------------------------------
