@@ -1,3 +1,52 @@
+"""
+Comprehensive Training Pipeline for Bias-Free U-Net (BFU-Net) Denoisers.
+
+This script implements a robust and highly configurable training pipeline for creating
+"universal" image denoisers, embodying the principles from the papers by Kadkhodaie &
+Simoncelli (2021) and Mohan et al. (2020). The ultimate goal is to train a single,
+bias-free neural network that can effectively remove Gaussian noise across a wide
+spectrum of noise levels.
+
+This trained denoiser is not merely a utility for cleaning images; its primary purpose
+is to serve as an "implicit prior" for natural images. The learned mapping from noisy
+to clean images implicitly captures the statistical regularities of the training data.
+This prior can then be leveraged to solve a variety of complex linear inverse
+problems, such as inpainting, super-resolution, and compressive sensing, as detailed
+in the Kadkhodaie & Simoncelli paper.
+
+The training methodology is central to creating such a powerful and generalizable model.
+
+---
+### Theoretical Foundation & Training Philosophy (from the papers)
+
+1.  **Bias-Free Architecture:** The Mohan et al. paper empirically and theoretically
+    demonstrates that removing all additive constants (bias terms in convolutions and
+    the beta parameter in Batch Normalization) is **critical**. This makes the network
+    architecture "bias-free" and ensures it is scale-invariant, allowing a model
+    trained on a limited noise range to generalize robustly to unseen noise levels.
+    This script is specifically designed to build and train such models.
+
+2.  **Universal Noise Range (Blind Denoising):** Instead of training for a single noise
+    level `σ`, the model is trained on images corrupted with noise levels sampled
+    continuously from a wide range (`[σ_min, σ_max]`). This forces the network to
+    learn to adapt its denoising strategy based on the input, creating a single
+    "universal" or "blind" denoiser. This script implements this via the
+    `noise_sigma_min` and `noise_sigma_max` parameters.
+
+3.  **Learning an Implicit Prior via MSE Loss:** The denoiser is trained to minimize the
+    **Mean Squared Error (MSE)** between its output and the original clean image.
+    According to the statistical result by Miyasawa (1961) cited in the paper, a
+    denoiser optimized for MSE implicitly computes the gradient of the log-probability
+    of the noisy data distribution. It is this learned gradient field that enables
+    the gradient ascent-style sampling for solving inverse problems.
+
+4.  **Large-Scale, Diverse Training Data:** To learn a truly general prior that
+    captures the "manifold of natural images," the denoiser must be exposed to a
+    vast and diverse dataset. This script is designed to handle multiple large-scale
+    image datasets simultaneously (e.g., DIV2K, COCO, Megadepth) to build a robust
+    and comprehensive prior.
+"""
+
 import gc
 import json
 import time
@@ -21,7 +70,6 @@ from dl_techniques.optimization import optimizer_builder, learning_rate_schedule
 from dl_techniques.models.bfunet_denoiser import (
     create_bfunet_denoiser, BFUNET_CONFIGS, create_bfunet_variant
 )
-
 
 # ---------------------------------------------------------------------
 # CONFIGURATION
@@ -994,6 +1042,13 @@ def parse_arguments() -> argparse.Namespace:
         help='Early stopping patience'
     )
 
+    parser.add_argument(
+        '--max-train-files',
+        type=int,
+        default=None,
+        help='Maximum number of files to read'
+    )
+
     return parser.parse_args()
 
 
@@ -1030,8 +1085,8 @@ def main():
         patches_per_image=args.patches_per_image,
 
         # File limits for manageable training
-        max_train_files=10000,
-        max_val_files=1000,
+        max_train_files=args.max_train_files,
+        max_val_files=10000,
         parallel_reads=8,
         dataset_shuffle_buffer=1013,
 
@@ -1052,7 +1107,7 @@ def main():
         # Monitoring
         monitor_every_n_epochs=args.monitor_every,
         save_training_images=True,
-        validation_steps=200,
+        validation_steps=500,
 
         # Output
         output_dir=args.output_dir,
