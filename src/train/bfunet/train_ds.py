@@ -909,20 +909,27 @@ class MetricsVisualizationCallback(keras.callbacks.Callback):
         if logs is None:
             logs = {}
 
-        # Store training metrics
+        # Store training metrics - only append if key exists in logs
         for key in self.train_metrics.keys():
             if key in logs:
                 self.train_metrics[key].append(logs[key])
+            # If this is the first time a metric is missing, pad with None or 0
+            elif len(self.train_metrics[key]) < len(self.train_metrics['loss']):
+                self.train_metrics[key].append(0.0)  # Use 0 as fallback
 
-        # Store validation metrics
+        # Store validation metrics - only append if key exists in logs
         for key in self.val_metrics.keys():
             if key in logs:
                 self.val_metrics[key].append(logs[key])
+            elif len(self.val_metrics[key]) < len(self.train_metrics['loss']):
+                self.val_metrics[key].append(0.0)  # Use 0 as fallback
 
-        # Store deep supervision metrics
+        # Store deep supervision metrics - only append if key exists in logs
         for key in self.ds_metrics.keys():
             if key in logs:
                 self.ds_metrics[key].append(logs[key])
+            elif len(self.ds_metrics[key]) < len(self.train_metrics['loss']):
+                self.ds_metrics[key].append(0.0)  # Use 0 as fallback
 
         # Create plots every few epochs
         if (epoch + 1) % 5 == 0 or epoch == 0:
@@ -931,6 +938,10 @@ class MetricsVisualizationCallback(keras.callbacks.Callback):
     def _create_metrics_plots(self, epoch: int):
         """Create and save metrics visualization plots."""
         try:
+            # Only proceed if we have loss data
+            if not self.train_metrics['loss']:
+                return
+
             epochs_range = range(1, len(self.train_metrics['loss']) + 1)
 
             # Create figure with additional subplot for deep supervision weights
@@ -939,7 +950,7 @@ class MetricsVisualizationCallback(keras.callbacks.Callback):
 
             # MSE (Loss) Plot
             axes[0, 0].plot(epochs_range, self.train_metrics['loss'], 'b-', label='Training MSE', linewidth=2)
-            if self.val_metrics['val_loss']:
+            if self.val_metrics['val_loss'] and len(self.val_metrics['val_loss']) == len(epochs_range):
                 axes[0, 0].plot(epochs_range, self.val_metrics['val_loss'], 'r-', label='Validation MSE', linewidth=2)
             axes[0, 0].set_title('Mean Squared Error (MSE)')
             axes[0, 0].set_xlabel('Epoch')
@@ -948,38 +959,60 @@ class MetricsVisualizationCallback(keras.callbacks.Callback):
             axes[0, 0].grid(True, alpha=0.3)
 
             # MAE Plot
-            axes[0, 1].plot(epochs_range, self.train_metrics['mae'], 'b-', label='Training MAE', linewidth=2)
-            if self.val_metrics['val_mae']:
-                axes[0, 1].plot(epochs_range, self.val_metrics['val_mae'], 'r-', label='Validation MAE', linewidth=2)
-            axes[0, 1].set_title('Mean Absolute Error (MAE)')
-            axes[0, 1].set_xlabel('Epoch')
-            axes[0, 1].set_ylabel('MAE')
-            axes[0, 1].legend()
-            axes[0, 1].grid(True, alpha=0.3)
+            if self.train_metrics['mae'] and len(self.train_metrics['mae']) == len(epochs_range):
+                axes[0, 1].plot(epochs_range, self.train_metrics['mae'], 'b-', label='Training MAE', linewidth=2)
+                if self.val_metrics['val_mae'] and len(self.val_metrics['val_mae']) == len(epochs_range):
+                    axes[0, 1].plot(epochs_range, self.val_metrics['val_mae'], 'r-', label='Validation MAE',
+                                    linewidth=2)
+                axes[0, 1].set_title('Mean Absolute Error (MAE)')
+                axes[0, 1].set_xlabel('Epoch')
+                axes[0, 1].set_ylabel('MAE')
+                axes[0, 1].legend()
+                axes[0, 1].grid(True, alpha=0.3)
+            else:
+                axes[0, 1].text(0.5, 0.5, 'MAE data\nnot available', ha='center', va='center',
+                                transform=axes[0, 1].transAxes)
+                axes[0, 1].set_title('Mean Absolute Error (MAE)')
 
             # RMSE Plot
-            axes[0, 2].plot(epochs_range, self.train_metrics['rmse'], 'b-', label='Training RMSE', linewidth=2)
-            if self.val_metrics['val_rmse']:
-                axes[0, 2].plot(epochs_range, self.val_metrics['val_rmse'], 'r-', label='Validation RMSE', linewidth=2)
-            axes[0, 2].set_title('Root Mean Squared Error (RMSE)')
-            axes[0, 2].set_xlabel('Epoch')
-            axes[0, 2].set_ylabel('RMSE')
-            axes[0, 2].legend()
-            axes[0, 2].grid(True, alpha=0.3)
+            if self.train_metrics['rmse'] and len(self.train_metrics['rmse']) == len(epochs_range):
+                axes[0, 2].plot(epochs_range, self.train_metrics['rmse'], 'b-', label='Training RMSE', linewidth=2)
+                if self.val_metrics['val_rmse'] and len(self.val_metrics['val_rmse']) == len(epochs_range):
+                    axes[0, 2].plot(epochs_range, self.val_metrics['val_rmse'], 'r-', label='Validation RMSE',
+                                    linewidth=2)
+                axes[0, 2].set_title('Root Mean Squared Error (RMSE)')
+                axes[0, 2].set_xlabel('Epoch')
+                axes[0, 2].set_ylabel('RMSE')
+                axes[0, 2].legend()
+                axes[0, 2].grid(True, alpha=0.3)
+            else:
+                axes[0, 2].text(0.5, 0.5, 'RMSE data\nnot available', ha='center', va='center',
+                                transform=axes[0, 2].transAxes)
+                axes[0, 2].set_title('Root Mean Squared Error (RMSE)')
 
             # PSNR Plot
-            axes[1, 0].plot(epochs_range, self.train_metrics['psnr_metric_primary_output'], 'b-', label='Training PSNR', linewidth=2)
-            if self.val_metrics['val_psnr_metric_primary_output']:
-                axes[1, 0].plot(epochs_range, self.val_metrics['val_psnr_metric_primary_output'], 'r-', label='Validation PSNR', linewidth=2)
-            axes[1, 0].set_title('Peak Signal-to-Noise Ratio (PSNR)')
-            axes[1, 0].set_xlabel('Epoch')
-            axes[1, 0].set_ylabel('PSNR (dB)')
-            axes[1, 0].legend()
-            axes[1, 0].grid(True, alpha=0.3)
+            if self.train_metrics['psnr_metric_primary_output'] and len(
+                    self.train_metrics['psnr_metric_primary_output']) == len(epochs_range):
+                axes[1, 0].plot(epochs_range, self.train_metrics['psnr_metric_primary_output'], 'b-',
+                                label='Training PSNR', linewidth=2)
+                if self.val_metrics['val_psnr_metric_primary_output'] and len(
+                        self.val_metrics['val_psnr_metric_primary_output']) == len(epochs_range):
+                    axes[1, 0].plot(epochs_range, self.val_metrics['val_psnr_metric_primary_output'], 'r-',
+                                    label='Validation PSNR', linewidth=2)
+                axes[1, 0].set_title('Peak Signal-to-Noise Ratio (PSNR)')
+                axes[1, 0].set_xlabel('Epoch')
+                axes[1, 0].set_ylabel('PSNR (dB)')
+                axes[1, 0].legend()
+                axes[1, 0].grid(True, alpha=0.3)
+            else:
+                axes[1, 0].text(0.5, 0.5, 'PSNR data\nnot available', ha='center', va='center',
+                                transform=axes[1, 0].transAxes)
+                axes[1, 0].set_title('Peak Signal-to-Noise Ratio (PSNR)')
 
             # Deep Supervision Primary Weight Plot
-            if self.ds_metrics['ds_weight_primary']:
-                axes[1, 1].plot(epochs_range, self.ds_metrics['ds_weight_primary'], 'g-', label='Primary Output Weight', linewidth=2)
+            if self.ds_metrics['ds_weight_primary'] and len(self.ds_metrics['ds_weight_primary']) == len(epochs_range):
+                axes[1, 1].plot(epochs_range, self.ds_metrics['ds_weight_primary'], 'g-', label='Primary Output Weight',
+                                linewidth=2)
                 axes[1, 1].set_title('Deep Supervision: Primary Output Weight')
                 axes[1, 1].set_xlabel('Epoch')
                 axes[1, 1].set_ylabel('Weight')
@@ -987,19 +1020,22 @@ class MetricsVisualizationCallback(keras.callbacks.Callback):
                 axes[1, 1].grid(True, alpha=0.3)
                 axes[1, 1].set_ylim(0, 1)
             else:
-                axes[1, 1].text(0.5, 0.5, 'Deep Supervision\nNot Available', ha='center', va='center', transform=axes[1, 1].transAxes)
-                axes[1, 1].set_title('Deep Supervision Weights')
+                axes[1, 1].text(0.5, 0.5, 'Deep Supervision\nPrimary Weight\nNot Available', ha='center', va='center',
+                                transform=axes[1, 1].transAxes)
+                axes[1, 1].set_title('Deep Supervision: Primary Weight')
 
             # Deep Supervision Mean Weight Plot
-            if self.ds_metrics['ds_weight_mean']:
-                axes[1, 2].plot(epochs_range, self.ds_metrics['ds_weight_mean'], 'purple', label='Mean Weight', linewidth=2)
+            if self.ds_metrics['ds_weight_mean'] and len(self.ds_metrics['ds_weight_mean']) == len(epochs_range):
+                axes[1, 2].plot(epochs_range, self.ds_metrics['ds_weight_mean'], 'purple', label='Mean Weight',
+                                linewidth=2)
                 axes[1, 2].set_title('Deep Supervision: Mean Output Weight')
                 axes[1, 2].set_xlabel('Epoch')
                 axes[1, 2].set_ylabel('Mean Weight')
                 axes[1, 2].legend()
                 axes[1, 2].grid(True, alpha=0.3)
             else:
-                axes[1, 2].text(0.5, 0.5, 'Deep Supervision\nMean Weights\nNot Available', ha='center', va='center', transform=axes[1, 2].transAxes)
+                axes[1, 2].text(0.5, 0.5, 'Deep Supervision\nMean Weights\nNot Available', ha='center', va='center',
+                                transform=axes[1, 2].transAxes)
                 axes[1, 2].set_title('DS Mean Weights')
 
             plt.tight_layout()
@@ -1009,16 +1045,19 @@ class MetricsVisualizationCallback(keras.callbacks.Callback):
             plt.clf()
             gc.collect()
 
-            # Save metrics data
+            # Save metrics data with safe conversion
             metrics_data = {
                 'epoch': epoch,
-                'train_metrics': self.train_metrics,
-                'val_metrics': self.val_metrics,
-                'ds_metrics': self.ds_metrics
+                'train_metrics': {k: [float(x) if hasattr(x, 'numpy') else float(x) for x in v] for k, v in
+                                  self.train_metrics.items()},
+                'val_metrics': {k: [float(x) if hasattr(x, 'numpy') else float(x) for x in v] for k, v in
+                                self.val_metrics.items()},
+                'ds_metrics': {k: [float(x) if hasattr(x, 'numpy') else float(x) for x in v] for k, v in
+                               self.ds_metrics.items()}
             }
             metrics_file = self.visualization_dir / "latest_metrics.json"
             with open(metrics_file, 'w') as f:
-                json.dump(metrics_data, f, indent=2, default=lambda x: float(x) if hasattr(x, 'item') else x)
+                json.dump(metrics_data, f, indent=2)
 
         except Exception as e:
             logger.warning(f"Failed to create metrics plots: {e}")
