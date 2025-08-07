@@ -58,7 +58,7 @@ from dl_techniques.optimization import optimizer_builder, learning_rate_schedule
 from dl_techniques.optimization.deep_supervision import schedule_builder as deep_supervision_schedule_builder
 from dl_techniques.models.bfunet_denoiser import (
     create_bfunet_denoiser, BFUNET_CONFIGS, create_bfunet_variant,
-    get_model_output_info
+    get_model_output_info,
 )
 
 # ---------------------------------------------------------------------
@@ -544,10 +544,12 @@ class DeepSupervisionModel(keras.Model):
         """Forward pass through base model."""
         return self.base_model(inputs, training=training)
 
-    def compute_deep_supervision_weights(self) -> Optional[tf.Tensor]:
+    def compute_deep_supervision_weights(self) -> tf.Tensor:
         """Compute current deep supervision weights based on training progress."""
         if self.ds_scheduler is None:
-            return None
+            # Equal weighting fallback when no scheduler is available
+            equal_weight = 1.0 / tf.cast(self.num_outputs, tf.float32)
+            return tf.fill([self.num_outputs], equal_weight)
 
         # Calculate training progress (0.0 to 1.0)
         progress = tf.cast(self.current_epoch, tf.float32) / tf.cast(self.total_epochs, tf.float32)
@@ -563,6 +565,9 @@ class DeepSupervisionModel(keras.Model):
             Tout=tf.float32
         )
         weights.set_shape([self.num_outputs])
+
+        # Convert to proper tensor to avoid EagerPyFunc issues
+        weights = tf.convert_to_tensor(weights)
 
         return weights
 
@@ -588,24 +593,22 @@ class DeepSupervisionModel(keras.Model):
                 # Single target, replicate for all outputs
                 y = [y for _ in range(len(predictions))]
 
-            # Compute deep supervision weights
-            ds_weights = self.compute_deep_supervision_weights()
-
             # Compute weighted loss for each output
             total_loss = 0.0
-            individual_losses = []
+
+            # Get deep supervision weights (or use equal weighting)
+            ds_weights = self.compute_deep_supervision_weights()
+            if ds_weights is None:
+                # Equal weighting fallback
+                equal_weight = 1.0 / tf.cast(self.num_outputs, tf.float32)
+                ds_weights = tf.fill([self.num_outputs], equal_weight)
 
             for i, (pred, target) in enumerate(zip(predictions, y)):
                 # Compute MSE loss for this output
                 mse_loss = tf.reduce_mean(tf.square(pred - target))
-                individual_losses.append(mse_loss)
 
-                # Apply deep supervision weight
-                if ds_weights is not None and i < len(ds_weights):
-                    weight = ds_weights[i]
-                else:
-                    weight = 1.0 / len(predictions)  # Equal weighting fallback
-
+                # Apply deep supervision weight (guaranteed to exist at index i)
+                weight = ds_weights[i]
                 total_loss += weight * mse_loss
 
             # Add regularization losses
@@ -633,10 +636,9 @@ class DeepSupervisionModel(keras.Model):
         results = {m.name: m.result() for m in self.metrics}
 
         # Add deep supervision info to logs
-        if ds_weights is not None:
-            results['ds_weight_primary'] = ds_weights[0]
-            if len(ds_weights) > 1:
-                results['ds_weight_mean'] = tf.reduce_mean(ds_weights)
+        results['ds_weight_primary'] = ds_weights[0]
+        if self.num_outputs > 1:
+            results['ds_weight_mean'] = tf.reduce_mean(ds_weights)
 
         return results
 
