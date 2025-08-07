@@ -58,8 +58,7 @@ from dl_techniques.optimization import optimizer_builder, learning_rate_schedule
 from dl_techniques.optimization.deep_supervision import schedule_builder as deep_supervision_schedule_builder
 from dl_techniques.models.bfunet_denoiser import (
     create_bfunet_denoiser, BFUNET_CONFIGS, create_bfunet_variant,
-    get_model_output_info, create_inference_model_from_training_model,
-    visualize_synthesis_process
+    get_model_output_info
 )
 
 # ---------------------------------------------------------------------
@@ -161,6 +160,80 @@ class TrainingConfig:
         if self.noise_distribution not in ['uniform', 'log_uniform']:
             raise ValueError(f"Invalid noise distribution: {self.noise_distribution}")
 
+
+# ---------------------------------------------------------------------
+# VISUALIZATION UTILITIES
+# ---------------------------------------------------------------------
+
+def visualize_synthesis_process(
+        final_samples: tf.Tensor,
+        intermediate_steps: List[tf.Tensor],
+        save_path: Path,
+        epoch: int
+) -> None:
+    """
+    Visualize the image synthesis process showing evolution from noise to natural images.
+
+    Args:
+        final_samples: Final generated samples
+        intermediate_steps: List of intermediate sampling steps
+        save_path: Path to save the visualization
+        epoch: Current training epoch
+    """
+    import gc
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    try:
+        num_samples = min(4, final_samples.shape[0])
+        num_steps = len(intermediate_steps)
+
+        # Create figure showing synthesis evolution
+        fig, axes = plt.subplots(num_samples, num_steps, figsize=(3 * num_steps, 3 * num_samples))
+        fig.suptitle(f'Deep Supervision Image Synthesis Evolution - Epoch {epoch}\n'
+                     f'(Random Noise → Natural Images via Implicit Prior)', fontsize=16, y=0.98)
+
+        if num_samples == 1:
+            axes = axes.reshape(1, -1)
+        if num_steps == 1:
+            axes = axes.reshape(-1, 1)
+
+        for sample_idx in range(num_samples):
+            for step_idx, step_data in enumerate(intermediate_steps):
+                img = step_data[sample_idx]
+
+                # Handle grayscale vs RGB
+                if img.shape[-1] == 1:
+                    img = img.squeeze(-1)
+                    cmap = 'gray'
+                else:
+                    cmap = None
+
+                # Ensure valid range
+                img = np.clip(img, 0.0, 1.0)
+
+                axes[sample_idx, step_idx].imshow(img, cmap=cmap, vmin=0, vmax=1)
+                axes[sample_idx, step_idx].axis('off')
+
+                # Add step label
+                if sample_idx == 0:
+                    step_num = step_idx * (200 // (num_steps - 1)) if step_idx < num_steps - 1 else 200
+                    axes[sample_idx, step_idx].set_title(f'Step {step_num}', fontsize=10)
+
+                # Add sample label
+                if step_idx == 0:
+                    axes[sample_idx, step_idx].set_ylabel(f'Sample {sample_idx + 1}',
+                                                          fontsize=12, rotation=0, ha='right', va='center')
+
+        plt.tight_layout()
+        plt.subplots_adjust(top=0.90, left=0.08)
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        plt.clf()
+        gc.collect()
+
+    except Exception as e:
+        logger.warning(f"Failed to visualize synthesis process: {e}")
 
 # ---------------------------------------------------------------------
 # DATASET BUILDER (Updated for Deep Supervision)
