@@ -1,27 +1,39 @@
 """
-Bias-Free U-Net Model with Variants
+Bias-Free U-Net Model with Deep Supervision and Variants
 
-Implements a U-Net architecture where all additive constants (bias terms)
-have been removed to enable better generalization across different noise levels
-and improved scaling invariance properties. Provides multiple model variants
-(tiny, small, base, large, xlarge) for different computational requirements
-and performance targets.
+Implements a U-Net architecture with deep supervision where all additive constants
+(bias terms) have been removed to enable better generalization across different
+noise levels and improved scaling invariance properties. The deep supervision
+outputs intermediate predictions at multiple scales during training, allowing
+for better gradient flow and more stable training.
+
+Deep supervision provides several benefits:
+- Better gradient flow to deeper layers during training
+- Multi-scale feature learning and supervision
+- More stable training for very deep networks
+- Curriculum learning capabilities through weight scheduling
+
+The model outputs multiple scales during training:
+- Output 0: Final inference output (highest resolution, primary output)
+- Output 1-N: Intermediate supervision outputs at progressively lower resolutions
 
 Based on the bias-free principles from "Robust and Interpretable Blind Image
 Denoising via Bias-Free Convolutional Neural Networks" (Mohan et al., ICLR 2020)
-applied to the U-Net architecture from "U-Net: Convolutional Networks for
-Biomedical Image Segmentation" (Ronneberger et al., MICCAI 2015).
+applied to the U-Net architecture with deep supervision.
 """
 
 import keras
+import tensorflow as tf
 from typing import Optional, Union, Tuple, List, Dict, Any
+from pathlib import Path
+
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
-from ..layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
+from dl_techniques.utils.logger import logger
+from dl_techniques.layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
 
 # ---------------------------------------------------------------------
 # Model Variant Configurations
@@ -77,20 +89,28 @@ def create_bfunet_denoiser(
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         use_residual_blocks: bool = True,
+        enable_deep_supervision: bool = False,
         model_name: str = 'bias_free_unet'
 ) -> keras.Model:
     """
-    Create a bias-free U-Net model with configurable depth.
+    Create a bias-free U-Net model with optional deep supervision.
 
-    This function creates a complete U-Net architecture using bias-free layers.
-    The model exhibits scaling-invariant properties: if the input is scaled by α,
-    the output is also scaled by α. The U-Net consists of an encoder (contracting)
-    path, a bottleneck, and a decoder (expanding) path with skip connections.
+    This function creates a complete U-Net architecture using bias-free layers with
+    deep supervision capabilities. The model exhibits scaling-invariant properties:
+    if the input is scaled by α, the output is also scaled by α.
+
+    During training with deep supervision enabled, the model outputs multiple scales:
+    - Output 0: Final inference output (full resolution)
+    - Output 1: Second-to-last decoder level output
+    - Output N: Deepest supervision level output
+
+    During inference, only the final output (index 0) is typically used.
 
     Architecture:
     - Encoder: Bias-free conv blocks + downsampling at each level
     - Bottleneck: Bias-free conv blocks at the lowest resolution
     - Decoder: Upsampling + skip connections + bias-free conv blocks
+    - Deep Supervision: Additional outputs at intermediate decoder levels
     - Skip connections preserve high-resolution features
 
     Args:
@@ -101,15 +121,18 @@ def create_bfunet_denoiser(
         blocks_per_level: Integer, number of conv blocks per level. Defaults to 2.
         kernel_size: Integer or tuple, size of convolutional kernels. Defaults to 3.
         initial_kernel_size: Integer or tuple, size of first convolutional kernels. Defaults to 5.
-        activation: String or callable, activation function. Defaults to 'relu'.
+        activation: String or callable, activation function. Defaults to 'leaky_relu'.
         final_activation: String or callable, final activation function. Defaults to 'linear'.
-        kernel_initializer: String or Initializer, weight initializer. Defaults to 'glorot_uniform'.
+        kernel_initializer: String or Initializer, weight initializer. Defaults to 'he_normal'.
         kernel_regularizer: String or Regularizer, weight regularizer. Defaults to None.
         use_residual_blocks: Boolean, whether to use residual blocks. Defaults to True.
+        enable_deep_supervision: Boolean, whether to add deep supervision outputs. Defaults to True.
         model_name: String, name for the model. Defaults to 'bias_free_unet'.
 
     Returns:
         keras.Model: Bias-free U-Net model ready for training.
+                    - If deep_supervision=False: Single output tensor
+                    - If deep_supervision=True: List of output tensors [final_output, intermediate_outputs...]
 
     Raises:
         ValueError: If depth is less than 3, initial_filters is non-positive,
@@ -117,16 +140,22 @@ def create_bfunet_denoiser(
         TypeError: If input_shape is not a tuple of 3 integers.
 
     Example:
-        >>> # Create standard bias-free U-Net
+        >>> # Create standard bias-free U-Net with deep supervision
         >>> model = create_bfunet_denoiser(
         ...     input_shape=(256, 256, 3),
         ...     depth=4,
-        ...     initial_filters=64
+        ...     initial_filters=64,
+        ...     enable_deep_supervision=True
         ... )
-        >>> model.compile(optimizer='adam', loss='mse')
+        >>> # Model outputs: [final_output, supervision_output_1, supervision_output_2, ...]
         >>>
-        >>> # Model exhibits scaling invariance
-        >>> # If input is scaled by α, output is also scaled by α
+        >>> # Create inference-only model (single output)
+        >>> inference_model = create_bfunet_denoiser(
+        ...     input_shape=(None, None, 3),  # Flexible spatial dimensions
+        ...     depth=4,
+        ...     initial_filters=64,
+        ...     enable_deep_supervision=False  # Single output for inference
+        ... )
     """
 
     # Input validation
@@ -151,8 +180,9 @@ def create_bfunet_denoiser(
     # Calculate filter sizes for each level
     filter_sizes = [initial_filters * (filter_multiplier ** i) for i in range(depth + 1)]
 
-    # Storage for skip connections
+    # Storage for skip connections and deep supervision outputs
     skip_connections: List[keras.layers.Layer] = []
+    deep_supervision_outputs: List[keras.layers.Layer] = []
 
     # =========================================================================
     # ENCODER PATH (Contracting)
@@ -245,10 +275,11 @@ def create_bfunet_denoiser(
             )(x)
 
     # =========================================================================
-    # DECODER PATH (Expanding)
+    # DECODER PATH (Expanding) with Deep Supervision
     # =========================================================================
 
     logger.info(f"Building decoder path with {depth} levels")
+    output_channels = input_shape[-1]
 
     for level in range(depth - 1, -1, -1):
         current_filters = filter_sizes[level]
@@ -304,32 +335,78 @@ def create_bfunet_denoiser(
                     name=f'decoder_level_{level}_conv_{block_idx}'
                 )(x)
 
+        # =====================================================================
+        # DEEP SUPERVISION OUTPUT (if enabled and not the final level)
+        # =====================================================================
+
+        if enable_deep_supervision and level > 0:  # Skip final level (it will be the main output)
+            # Create supervision output at current scale
+            supervision_output = BiasFreeConv2D(
+                filters=output_channels,
+                kernel_size=1,
+                activation=final_activation,
+                kernel_initializer=kernel_initializer,
+                kernel_regularizer=kernel_regularizer,
+                use_batch_norm=False,
+                name=f'supervision_output_level_{level}'
+            )(x)
+
+            deep_supervision_outputs.append(supervision_output)
+
+            logger.info(f"Added deep supervision output at level {level} "
+                       f"with shape: {supervision_output.shape}")
+
     # =========================================================================
-    # FINAL OUTPUT LAYER
+    # FINAL OUTPUT LAYER (Primary inference output)
     # =========================================================================
 
     # Final convolution to output channels (no batch norm, custom activation)
-    output_channels = input_shape[-1]
-    outputs = BiasFreeConv2D(
+    final_output = BiasFreeConv2D(
         filters=output_channels,
         kernel_size=1,
         activation=final_activation,
         kernel_initializer=kernel_initializer,
         kernel_regularizer=kernel_regularizer,
         use_batch_norm=False,
-        name='final_conv'
+        name='final_output'
     )(x)
 
-    # Create the model
-    model = keras.Model(
-        inputs=inputs,
-        outputs=outputs,
-        name=model_name
-    )
+    # =========================================================================
+    # MODEL CREATION
+    # =========================================================================
+
+    if enable_deep_supervision and deep_supervision_outputs:
+        # Return multiple outputs: [final_output, supervision_outputs...]
+        # The final output (index 0) is the primary inference output
+        # Supervision outputs (indices 1+) are for training only
+        all_outputs = [final_output] + deep_supervision_outputs
+
+        logger.info(f"Created deep supervision model with {len(all_outputs)} outputs:")
+        logger.info(f"  - Final output (index 0): {final_output.shape}")
+        for i, sup_output in enumerate(deep_supervision_outputs):
+            logger.info(f"  - Supervision output {i+1} (index {i+1}): {sup_output.shape}")
+
+        # Create model with multiple outputs
+        model = keras.Model(
+            inputs=inputs,
+            outputs=all_outputs,
+            name=model_name
+        )
+
+    else:
+        # Single output model (standard U-Net or inference model)
+        model = keras.Model(
+            inputs=inputs,
+            outputs=final_output,
+            name=model_name
+        )
+
+        logger.info(f"Created single-output model")
 
     logger.info(f"Created bias-free U-Net model '{model_name}' with depth {depth}")
     logger.info(f"Filter progression: {filter_sizes}")
     logger.info(f"Model input shape: {input_shape}, output channels: {output_channels}")
+    logger.info(f"Deep supervision enabled: {enable_deep_supervision}")
     logger.info(f"Total parameters: {model.count_params():,}")
 
     return model
@@ -341,6 +418,7 @@ def create_bfunet_denoiser(
 def create_bfunet_variant(
         variant: str,
         input_shape: Tuple[int, int, int],
+        enable_deep_supervision: bool = True,
         **kwargs
 ) -> keras.Model:
     """
@@ -349,6 +427,7 @@ def create_bfunet_variant(
     Args:
         variant: String, one of 'tiny', 'small', 'base', 'large', 'xlarge'.
         input_shape: Tuple of integers, shape of input images (height, width, channels).
+        enable_deep_supervision: Boolean, whether to enable deep supervision outputs.
         **kwargs: Additional keyword arguments to override default parameters.
 
     Returns:
@@ -358,18 +437,18 @@ def create_bfunet_variant(
         ValueError: If variant is not recognized.
 
     Example:
-        >>> # Standard usage
-        >>> model = create_bfunet_variant('base', (256, 256, 3))
+        >>> # Standard usage with deep supervision
+        >>> model = create_bfunet_variant('base', (256, 256, 3), enable_deep_supervision=True)
         >>> model.summary()
+        >>>
+        >>> # Inference model (single output)
+        >>> inference_model = create_bfunet_variant('base', (None, None, 3), enable_deep_supervision=False)
         >>>
         >>> # With custom parameters
         >>> model = create_bfunet_variant('large', (224, 224, 1),
+        ...                                     enable_deep_supervision=True,
         ...                                     activation='gelu',
         ...                                     use_residual_blocks=False)
-        >>>
-        >>> # All available variants
-        >>> for variant in ['tiny', 'small', 'base', 'large', 'xlarge']:
-        ...     model = create_bfunet_variant(variant, (128, 128, 3))
     """
     if variant not in BFUNET_CONFIGS:
         available_variants = list(BFUNET_CONFIGS.keys())
@@ -383,9 +462,14 @@ def create_bfunet_variant(
 
     # Set model name if not provided
     if 'model_name' not in config:
-        config['model_name'] = f'bias_free_unet_{variant}'
+        ds_suffix = '_ds' if enable_deep_supervision else ''
+        config['model_name'] = f'bias_free_unet_{variant}{ds_suffix}'
+
+    # Set deep supervision
+    config['enable_deep_supervision'] = enable_deep_supervision
 
     logger.info(f"Creating bias-free U-Net variant '{variant}': {description}")
+    logger.info(f"Deep supervision: {'enabled' if enable_deep_supervision else 'disabled'}")
 
     return create_bfunet_denoiser(
         input_shape=input_shape,
@@ -393,3 +477,85 @@ def create_bfunet_variant(
     )
 
 # ---------------------------------------------------------------------
+# Utility Functions for Deep Supervision
+# ---------------------------------------------------------------------
+
+def get_model_output_info(model: keras.Model) -> Dict[str, Any]:
+    """
+    Get information about model outputs for deep supervision models.
+
+    Args:
+        model: Keras model to analyze
+
+    Returns:
+        Dictionary containing output information:
+        - 'num_outputs': Number of outputs
+        - 'has_deep_supervision': Whether model has multiple outputs
+        - 'output_shapes': List of output shapes
+        - 'primary_output_index': Index of the primary inference output (always 0)
+
+    Example:
+        >>> model = create_bfunet_variant('base', (256, 256, 3), enable_deep_supervision=True)
+        >>> info = get_model_output_info(model)
+        >>> print(f"Number of outputs: {info['num_outputs']}")
+        >>> print(f"Primary output shape: {info['output_shapes'][info['primary_output_index']]}")
+    """
+    # Handle both single output and multi-output models
+    if isinstance(model.output, list):
+        num_outputs = len(model.output)
+        output_shapes = [output.shape for output in model.output]
+        has_deep_supervision = True
+    else:
+        num_outputs = 1
+        output_shapes = [model.output.shape]
+        has_deep_supervision = False
+
+    return {
+        'num_outputs': num_outputs,
+        'has_deep_supervision': has_deep_supervision,
+        'output_shapes': output_shapes,
+        'primary_output_index': 0  # Primary output is always at index 0
+    }
+
+def create_inference_model_from_training_model(training_model: keras.Model) -> keras.Model:
+    """
+    Create a single-output inference model from a multi-output training model.
+
+    Args:
+        training_model: Multi-output training model with deep supervision
+
+    Returns:
+        Single-output model using only the primary output (index 0)
+
+    Example:
+        >>> # Create training model with deep supervision
+        >>> training_model = create_bfunet_variant('base', (256, 256, 3), enable_deep_supervision=True)
+        >>>
+        >>> # Create inference model (single output)
+        >>> inference_model = create_inference_model_from_training_model(training_model)
+        >>>
+        >>> # Inference model accepts flexible input shapes
+        >>> inference_model = keras.Model(
+        ...     inputs=keras.Input(shape=(None, None, 3)),
+        ...     outputs=inference_model.layers[-1].output  # Get final layer output
+        ... )
+    """
+    model_info = get_model_output_info(training_model)
+
+    if not model_info['has_deep_supervision']:
+        logger.info("Model already has single output, returning as-is")
+        return training_model
+
+    # Extract only the primary output (index 0)
+    primary_output = training_model.output[model_info['primary_output_index']]
+
+    # Create new model with single output
+    inference_model = keras.Model(
+        inputs=training_model.input,
+        outputs=primary_output,
+        name=f"{training_model.name}_inference"
+    )
+
+    logger.info(f"Created inference model with single output shape: {primary_output.shape}")
+
+    return inference_model
