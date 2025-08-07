@@ -160,7 +160,6 @@ class TrainingConfig:
         if self.noise_distribution not in ['uniform', 'log_uniform']:
             raise ValueError(f"Invalid noise distribution: {self.noise_distribution}")
 
-
 # ---------------------------------------------------------------------
 # VISUALIZATION UTILITIES
 # ---------------------------------------------------------------------
@@ -470,6 +469,8 @@ def create_dataset_for_deep_supervision(
     # Ensure final shape consistency
     def ensure_shapes(noisy, targets_stacked):
         noisy = tf.ensure_shape(noisy, [config.patch_size, config.patch_size, config.channels])
+        # targets_stacked has shape [num_outputs, patch_size, patch_size, channels] for each sample
+        # After batching, it will be [batch_size, num_outputs, patch_size, patch_size, channels]
         targets_stacked = tf.ensure_shape(
             targets_stacked,
             [num_outputs, config.patch_size, config.patch_size, config.channels]
@@ -652,11 +653,11 @@ class DeepSupervisionModel(keras.Model):
         else:
             primary_pred = predictions
 
-        # Handle stacked targets format - get primary target (first one)
-        if len(y.shape) > 3 and y.shape[0] == self.num_outputs:
-            # y is stacked as [num_outputs, batch_size, height, width, channels]
-            # Get the first target (index 0)
-            primary_target = y[0]
+        # Handle stacked targets format - get primary target
+        # y has shape [batch_size, num_outputs, height, width, channels]
+        if len(y.shape) == 5 and y.shape[1] == self.num_outputs:
+            # Get the first target (primary output target) along axis=1
+            primary_target = y[:, 0, :, :, :]  # [batch_size, height, width, channels]
         elif isinstance(y, list):
             primary_target = y[0]
         else:
@@ -1377,7 +1378,7 @@ def train_bfunet_denoiser_with_deep_supervision(config: TrainingConfig) -> keras
         ]
     )
 
-    logger.info(f"Deep supervision model compiled with {ds_model.count_params():,} parameters")
+    logger.info(f"Deep supervision model compiled with {ds_model.base_model.count_params():,} parameters")
 
     # Create callbacks
     callbacks = create_callbacks(config, config.val_image_dirs, ds_model)
@@ -1702,7 +1703,7 @@ def main():
         # Log model information
         model_info = get_model_output_info(model.base_model)
         logger.info(f"Final model has {model_info['num_outputs']} outputs")
-        logger.info(f"Model parameters: {model.count_params():,}")
+        logger.info(f"Model parameters: {model.base_model.count_params():,}")
 
     except Exception as e:
         logger.error(f"Training failed: {e}")
