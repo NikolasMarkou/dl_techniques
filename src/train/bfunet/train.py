@@ -1315,7 +1315,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '--synthesis-samples',
         type=int,
-        default=4,
+        default=10,
         help='Number of images to synthesize'
     )
     parser.add_argument(
