@@ -540,6 +540,9 @@ class DeepSupervisionModel(keras.Model):
         self.current_epoch = tf.Variable(0, trainable=False, dtype=tf.int32)
         self.total_epochs = tf.Variable(config.epochs, trainable=False, dtype=tf.int32)
 
+        # Add loss tracker for proper loss reporting
+        self._loss_tracker = keras.metrics.Mean(name="loss")
+
     def call(self, inputs, training=None):
         """Forward pass through base model."""
         return self.base_model(inputs, training=training)
@@ -635,13 +638,11 @@ class DeepSupervisionModel(keras.Model):
         primary_target = y[0]
 
         # Update compiled metrics
-        for metric in self.compiled_metrics._metrics:
-            if metric.name == 'loss':
-                metric.update_state(total_loss)
-            elif 'psnr' in metric.name.lower():
-                metric.update_state(primary_target, primary_pred)
-            else:
-                metric.update_state(primary_target, primary_pred)
+        if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
+            self.compiled_metrics.update_state(primary_target, primary_pred)
+
+        # Update loss tracker with total weighted loss
+        self._loss_tracker.update_state(total_loss)
 
         # Create results dictionary
         results = {m.name: m.result() for m in self.metrics}
@@ -680,11 +681,11 @@ class DeepSupervisionModel(keras.Model):
         val_loss = tf.reduce_mean(tf.square(primary_pred - primary_target))
 
         # Update compiled metrics
-        for metric in self.compiled_metrics._metrics:
-            if metric.name == 'loss':
-                metric.update_state(val_loss)
-            else:
-                metric.update_state(primary_target, primary_pred)
+        if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
+            self.compiled_metrics.update_state(primary_target, primary_pred)
+
+        # Update loss tracker with validation loss
+        self._loss_tracker.update_state(val_loss)
 
         return {m.name: m.result() for m in self.metrics}
 
@@ -692,6 +693,26 @@ class DeepSupervisionModel(keras.Model):
         """Update current epoch for deep supervision scheduling."""
         self.current_epoch.assign(epoch)
 
+    @property
+    def metrics(self):
+        """Return all metrics including custom loss tracker."""
+        metrics = []
+        if hasattr(self, '_loss_tracker'):
+            metrics.append(self._loss_tracker)
+        if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
+            # Handle both new and old style compiled metrics
+            if hasattr(self.compiled_metrics, 'metrics'):
+                metrics.extend(self.compiled_metrics.metrics)
+            elif hasattr(self.compiled_metrics, '_metrics'):
+                metrics.extend(self.compiled_metrics._metrics)
+        return metrics
+
+    def reset_metrics(self):
+        """Reset all metrics."""
+        if hasattr(self, '_loss_tracker'):
+            self._loss_tracker.reset_state()
+        if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
+            self.compiled_metrics.reset_state()
 
 # ---------------------------------------------------------------------
 # IMAGE SYNTHESIS (Updated for Deep Supervision)
