@@ -63,12 +63,6 @@ from keras import ops
 from typing import Any, Optional, Union
 
 # ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from ..constraints.value_range_constraint import ValueRangeConstraint
-
-# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -142,7 +136,7 @@ class RBFLayer(keras.layers.Layer):
 
         # Initialize weights as None (will be created in build())
         self.centers = None
-        self.gamma = None
+        self.gamma_raw = None
         self._feature_dim = None  # Store dimensionality for scaling
 
     def build(self, input_shape):
@@ -172,17 +166,23 @@ class RBFLayer(keras.layers.Layer):
             trainable=True,
         )
 
-        # Create gamma (precision) parameter with non-negativity constraint
-        self.gamma = self.add_weight(
-            name='gamma',
+        # --- REVISED GAMMA DEFINITION ---
+        # We learn an unconstrained "raw" parameter...
+        # The initializer calculates the inverse of softplus to ensure that
+        # the effective gamma at the start of training is exactly `gamma_init`.
+        # The inverse of softplus(x) is log(exp(x) - 1).
+        gamma_raw_init = ops.log(ops.exp(ops.cast(self.gamma_init, self.compute_dtype)) - 1)
+
+        self.gamma_raw = self.add_weight(
+            name='gamma_raw',
             shape=(self.units,),
-            initializer=keras.initializers.Constant(self.gamma_init),
-            constraint=ValueRangeConstraint(min_value=1e-5, max_value=None, clip_gradients=False),
+            initializer=keras.initializers.Constant(gamma_raw_init),
             regularizer=keras.regularizers.L2(1e-5),
             trainable=self.trainable_gamma,
         )
 
         self.built = True
+        super().build(input_shape)
 
     def _compute_pairwise_distances(
             self,
@@ -219,35 +219,66 @@ class RBFLayer(keras.layers.Layer):
 
     def _compute_repulsion(self, centers):
         """
-        Compute the enhanced repulsion regularization term.
+        Computes the enhanced repulsion regularization term.
 
-        Features improved stability and scaling with input dimensionality.
+        This loss term encourages centers to stay at least `min_center_distance`
+        apart. The strength of the repulsion is scaled by the input dimensionality
+        to make the `repulsion_strength` hyperparameter more stable across
+        different datasets.
+
+        The repulsion is calculated as a mean over all pairs of distinct centers
+        to ensure the loss magnitude is independent of the number of units.
 
         Args:
-            centers: Tensor of shape (n_units, feature_dim)
+            centers: Tensor of shape (units, feature_dim) representing the centers.
 
         Returns:
-            Scalar tensor containing the total repulsion energy.
+            A scalar tensor representing the repulsion loss to be added.
         """
-        # Add safety margin to minimum distance
+        # Repulsion is not applicable if there is only one center.
+        if self.units < 2:
+            return ops.cast(0.0, self.compute_dtype)
+
+        # 1. Define the effective minimum distance with a safety margin
         effective_min_dist = self.min_center_distance * (1.0 + self.safety_margin)
 
-        # Compute pairwise distances with stability
-        distances = self._compute_pairwise_distances(centers, centers)
+        # 2. Compute pairwise squared distances between all centers
+        # We assume the helper function is renamed for clarity as suggested.
+        squared_distances = self._compute_pairwise_distances(centers, centers)
 
-        # Create mask to exclude self-distances (diagonal elements)
-        mask = ops.ones_like(distances) - ops.eye(self.units)
+        # 3. Get the actual Euclidean distances, which are needed for the formula.
+        # The squared_distances are guaranteed non-negative by the helper.
+        distances = ops.sqrt(squared_distances)
 
-        # Compute repulsion with improved formula
-        sqrt_dist = ops.sqrt(distances)
-        repulsion = ops.square(ops.maximum(0.0, effective_min_dist - sqrt_dist))
+        # 4. Compute the repulsion potential for each pair.
+        # Formula: max(0, d_min_eff - ||c_i - c_j||)^2
+        repulsion_potential = ops.square(
+            ops.maximum(0.0, effective_min_dist - distances)
+        )
 
-        # Scale repulsion by dimensionality
-        dim_scale = ops.cast(self._feature_dim, 'float32')
-        scaled_repulsion = self.repulsion_strength * dim_scale * \
-                           ops.mean(repulsion * mask)
+        # 5. Create a mask to exclude self-repulsion (diagonal elements).
+        mask = 1.0 - ops.eye(self.units, dtype=self.compute_dtype)
 
-        return scaled_repulsion
+        # 6. Apply the mask and compute the mean repulsion.
+        # We take the mean over all N*N pairs. The mask ensures diagonal elements
+        # (self-repulsion) are zero. This approach makes the loss term's
+        # magnitude independent of the number of units, which helps stabilize
+        # hyperparameter tuning of `repulsion_strength`.
+        mean_repulsion = ops.mean(repulsion_potential * mask)
+
+        # 7. Scale the final loss term by dimensionality and strength.
+        dim_scale = ops.cast(self._feature_dim, self.compute_dtype)
+        repulsion_loss = self.repulsion_strength * dim_scale * mean_repulsion
+
+        return repulsion_loss
+
+    @property
+    def gamma(self):
+        """
+        The effective positive gamma values, computed via softplus from the raw
+        trainable weights. This ensures gamma is always > 0.
+        """
+        return keras.activations.softplus(self.gamma_raw)
 
     def call(self, inputs, training=None):
         """

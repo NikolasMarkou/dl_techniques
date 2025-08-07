@@ -147,7 +147,7 @@ class BiasFreeConv2D(keras.layers.Layer):
             Output tensor after bias-free convolution, normalization and activation.
         """
         # Apply convolution (no bias)
-        x = self.conv(inputs)
+        x = self.conv(inputs, training=training)
 
         # Apply batch normalization if enabled (no center/beta)
         if self.batch_norm is not None:
@@ -337,7 +337,7 @@ class BiasFreeResidualBlock(keras.layers.Layer):
 
         # Shortcut path
         if self.shortcut_conv is not None:
-            shortcut = self.shortcut_conv(inputs)
+            shortcut = self.shortcut_conv(inputs, training=training)
         else:
             shortcut = inputs
 

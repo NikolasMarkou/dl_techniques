@@ -30,33 +30,33 @@ from ..layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
 BFUNET_CONFIGS: Dict[str, Dict[str, Any]] = {
     'tiny': {
         'depth': 3,
-        'initial_filters': 32,
-        'blocks_per_level': 1,
-        'description': 'Tiny BF-UNet (depth=3) for quick experiments and resource-constrained environments'
+        'initial_filters': 16,
+        'blocks_per_level': 2,
+        'description': 'Tiny BF-UNet (depth=3) for quick experiments.'
     },
     'small': {
         'depth': 3,
-        'initial_filters': 48,
-        'blocks_per_level': 1,
-        'description': 'Small BF-UNet (depth=3) with minimal capacity'
+        'initial_filters': 24,
+        'blocks_per_level': 2,
+        'description': 'Small BF-UNet (depth=3) with minimal capacity.'
     },
     'base': {
         'depth': 4,
-        'initial_filters': 64,
-        'blocks_per_level': 2,
-        'description': 'Base BF-UNet (depth=4) with standard configuration'
+        'initial_filters': 32,
+        'blocks_per_level': 3,
+        'description': 'Base BF-UNet (depth=4) with standard configuration.'
     },
     'large': {
         'depth': 4,
-        'initial_filters': 96,
-        'blocks_per_level': 2,
-        'description': 'Large BF-UNet (depth=4) with high capacity'
+        'initial_filters': 48,
+        'blocks_per_level': 4,
+        'description': 'Large BF-UNet (depth=4) with high capacity.'
     },
     'xlarge': {
         'depth': 5,
-        'initial_filters': 128,
-        'blocks_per_level': 3,
-        'description': 'Extra-Large BF-UNet (depth=5) for maximum performance'
+        'initial_filters': 64,
+        'blocks_per_level': 5,
+        'description': 'Extra-Large BF-UNet (depth=5) for maximum performance.'
     }
 }
 
@@ -71,9 +71,10 @@ def create_bfunet_denoiser(
         filter_multiplier: int = 2,
         blocks_per_level: int = 2,
         kernel_size: Union[int, Tuple[int, int]] = 3,
-        activation: Union[str, callable] = 'relu',
+        initial_kernel_size: Union[int, Tuple[int, int]] = 5,
+        activation: Union[str, callable] = 'leaky_relu',
         final_activation: Union[str, callable] = 'linear',
-        kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+        kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         use_residual_blocks: bool = True,
         model_name: str = 'bias_free_unet'
@@ -99,6 +100,7 @@ def create_bfunet_denoiser(
         filter_multiplier: Integer, multiplier for filters at each level. Defaults to 2.
         blocks_per_level: Integer, number of conv blocks per level. Defaults to 2.
         kernel_size: Integer or tuple, size of convolutional kernels. Defaults to 3.
+        initial_kernel_size: Integer or tuple, size of first convolutional kernels. Defaults to 5.
         activation: String or callable, activation function. Defaults to 'relu'.
         final_activation: String or callable, final activation function. Defaults to 'linear'.
         kernel_initializer: String or Initializer, weight initializer. Defaults to 'glorot_uniform'.
@@ -165,25 +167,37 @@ def create_bfunet_denoiser(
 
         # Convolution blocks at current resolution
         for block_idx in range(blocks_per_level):
-            if use_residual_blocks:
-                x = BiasFreeResidualBlock(
-                    filters=current_filters,
-                    kernel_size=kernel_size,
-                    activation=activation,
-                    kernel_initializer=kernel_initializer,
-                    kernel_regularizer=kernel_regularizer,
-                    name=f'encoder_level_{level}_residual_block_{block_idx}'
-                )(x)
-            else:
+            if level == 0 and block_idx == 0:
+                # first level
                 x = BiasFreeConv2D(
                     filters=current_filters,
-                    kernel_size=kernel_size,
+                    kernel_size=initial_kernel_size,
                     activation=activation,
                     kernel_initializer=kernel_initializer,
                     kernel_regularizer=kernel_regularizer,
                     use_batch_norm=True,
                     name=f'encoder_level_{level}_conv_{block_idx}'
                 )(x)
+            else:
+                if use_residual_blocks:
+                    x = BiasFreeResidualBlock(
+                        filters=current_filters,
+                        kernel_size=kernel_size,
+                        activation=activation,
+                        kernel_initializer=kernel_initializer,
+                        kernel_regularizer=kernel_regularizer,
+                        name=f'encoder_level_{level}_residual_block_{block_idx}'
+                    )(x)
+                else:
+                    x = BiasFreeConv2D(
+                        filters=current_filters,
+                        kernel_size=kernel_size,
+                        activation=activation,
+                        kernel_initializer=kernel_initializer,
+                        kernel_regularizer=kernel_regularizer,
+                        use_batch_norm=True,
+                        name=f'encoder_level_{level}_conv_{block_idx}'
+                    )(x)
 
         # Store skip connection before downsampling
         skip_connections.append(x)

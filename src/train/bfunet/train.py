@@ -566,35 +566,6 @@ def visualize_synthesis_process(
         plt.clf()
         gc.collect()
 
-        # Also save a summary figure with just the final results
-        summary_fig, summary_axes = plt.subplots(1, num_samples, figsize=(3 * num_samples, 3))
-        summary_fig.suptitle(f'Generated Images - Epoch {epoch}', fontsize=14, y=0.95)
-
-        if num_samples == 1:
-            summary_axes = [summary_axes]
-
-        for sample_idx in range(num_samples):
-            img = final_samples[sample_idx].numpy()
-
-            if img.shape[-1] == 1:
-                img = img.squeeze(-1)
-                cmap = 'gray'
-            else:
-                cmap = None
-
-            img = np.clip(img, 0.0, 1.0)
-
-            summary_axes[sample_idx].imshow(img, cmap=cmap, vmin=0, vmax=1)
-            summary_axes[sample_idx].axis('off')
-            summary_axes[sample_idx].set_title(f'Generated {sample_idx + 1}', fontsize=12)
-
-        plt.tight_layout()
-        summary_save_path = save_path.parent / f"epoch_{epoch:03d}_generated_final.png"
-        plt.savefig(summary_save_path, dpi=150, bbox_inches='tight')
-        plt.close(summary_fig)
-        plt.clf()
-        gc.collect()
-
     except Exception as e:
         logger.warning(f"Failed to visualize synthesis process: {e}")
 
@@ -1282,7 +1253,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '--monitor-every',
         type=int,
-        default=5,
+        default=1,
         help='Save intermediate results every N epochs'
     )
     parser.add_argument(
