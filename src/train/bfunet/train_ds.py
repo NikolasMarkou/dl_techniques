@@ -623,20 +623,43 @@ class DeepSupervisionModel(keras.Model):
         primary_pred = predictions[0]
         primary_target = y[0]
 
-        # Update metrics using the new recommended approach
-        for metric in self.metrics:
-            if metric.name == 'loss':
-                metric.update_state(total_loss)
-            elif hasattr(metric, 'update_state'):
-                # For other metrics (PSNR, MAE, etc.), use primary output
-                try:
-                    metric.update_state(primary_target, primary_pred)
-                except:
-                    # Skip metrics that can't handle these inputs
-                    pass
+        # Update loss tracker with total weighted loss
+        self._loss_tracker.update_state(total_loss)
 
-        # Create results dictionary
-        results = {m.name: m.result() for m in self.metrics}
+        # Update compiled metrics manually - this ensures MAE, RMSE, PSNR are calculated
+        if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
+            # Update each metric individually for better error handling
+            metrics_list = getattr(self.compiled_metrics, 'metrics', getattr(self.compiled_metrics, '_metrics', []))
+            for metric in metrics_list:
+                try:
+                    if hasattr(metric, 'update_state'):
+                        if 'psnr' in metric.name.lower():
+                            # PSNR expects (y_true, y_pred) format and values in [0,1]
+                            metric.update_state(primary_target, primary_pred)
+                        elif metric.name in ['mae', 'mean_absolute_error']:
+                            # MAE metric
+                            metric.update_state(primary_target, primary_pred)
+                        elif metric.name in ['rmse', 'root_mean_squared_error']:
+                            # RMSE metric
+                            metric.update_state(primary_target, primary_pred)
+                        else:
+                            # Other metrics
+                            metric.update_state(primary_target, primary_pred)
+                except Exception as e:
+                    logger.warning(f"Failed to update metric {getattr(metric, 'name', 'unknown')}: {e}")
+
+        # Create results dictionary - include all metrics
+        results = {}
+
+        # Add loss from our custom tracker
+        results['loss'] = self._loss_tracker.result()
+
+        # Add compiled metrics
+        if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
+            metrics_list = getattr(self.compiled_metrics, 'metrics', getattr(self.compiled_metrics, '_metrics', []))
+            for metric in metrics_list:
+                if hasattr(metric, 'name') and hasattr(metric, 'result'):
+                    results[metric.name] = metric.result()
 
         # Add deep supervision info to logs
         results['ds_weight_primary'] = ds_weights[0]
@@ -671,19 +694,41 @@ class DeepSupervisionModel(keras.Model):
         # Compute validation loss (MSE on primary output only)
         val_loss = tf.reduce_mean(tf.square(primary_pred - primary_target))
 
-        # Update metrics using the new recommended approach
-        for metric in self.metrics:
-            if metric.name == 'loss':
-                metric.update_state(val_loss)
-            elif hasattr(metric, 'update_state'):
-                # For other metrics, use primary output
-                try:
-                    metric.update_state(primary_target, primary_pred)
-                except:
-                    # Skip metrics that can't handle these inputs
-                    pass
+        # Update loss tracker with validation loss
+        self._loss_tracker.update_state(val_loss)
 
-        return {m.name: m.result() for m in self.metrics}
+        # Update compiled metrics manually
+        if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
+            metrics_list = getattr(self.compiled_metrics, 'metrics', getattr(self.compiled_metrics, '_metrics', []))
+            for metric in metrics_list:
+                try:
+                    if hasattr(metric, 'update_state'):
+                        if 'psnr' in metric.name.lower():
+                            metric.update_state(primary_target, primary_pred)
+                        elif metric.name in ['mae', 'mean_absolute_error']:
+                            metric.update_state(primary_target, primary_pred)
+                        elif metric.name in ['rmse', 'root_mean_squared_error']:
+                            metric.update_state(primary_target, primary_pred)
+                        else:
+                            metric.update_state(primary_target, primary_pred)
+                except Exception as e:
+                    logger.warning(f"Failed to update validation metric {getattr(metric, 'name', 'unknown')}: {e}")
+
+        # Create results dictionary
+        results = {}
+
+        # Add loss
+        results['loss'] = self._loss_tracker.result()
+
+        # Add compiled metrics with 'val_' prefix for validation
+        if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
+            metrics_list = getattr(self.compiled_metrics, 'metrics', getattr(self.compiled_metrics, '_metrics', []))
+            for metric in metrics_list:
+                if hasattr(metric, 'name') and hasattr(metric, 'result'):
+                    val_metric_name = f"val_{metric.name}" if not metric.name.startswith('val_') else metric.name
+                    results[val_metric_name] = metric.result()
+
+        return results
 
     def set_epoch(self, epoch: int):
         """Update current epoch for deep supervision scheduling."""
@@ -700,47 +745,42 @@ class DeepSupervisionModel(keras.Model):
 
         # Add compiled metrics if they exist
         if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
-            if hasattr(self.compiled_metrics, 'metrics'):
-                metrics.extend(self.compiled_metrics.metrics)
-            elif hasattr(self.compiled_metrics, '_metrics'):
-                metrics.extend(self.compiled_metrics._metrics)
+            metrics_list = getattr(self.compiled_metrics, 'metrics', getattr(self.compiled_metrics, '_metrics', []))
+            metrics.extend(metrics_list)
 
-        # Remove duplicates by name while preserving order
-        seen_names = set()
-        unique_metrics = []
-        for metric in metrics:
-            if hasattr(metric, 'name') and metric.name not in seen_names:
-                unique_metrics.append(metric)
-                seen_names.add(metric.name)
-
-        return unique_metrics
+        return metrics
 
     def reset_metrics(self):
         """Reset all metrics."""
+        # Reset custom loss tracker
         if hasattr(self, '_loss_tracker'):
             self._loss_tracker.reset_state()
 
+        # Reset compiled metrics
         if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
-            # Handle deprecated compiled metrics that don't have reset_state
+            # Try the new API first
             if hasattr(self.compiled_metrics, 'reset_state'):
-                self.compiled_metrics.reset_state()
-            elif hasattr(self.compiled_metrics, '_metrics'):
-                # For deprecated metrics, reset each metric individually
-                for metric in self.compiled_metrics._metrics:
-                    if hasattr(metric, 'reset_state'):
+                try:
+                    self.compiled_metrics.reset_state()
+                except:
+                    # Fallback to individual metric reset
+                    pass
+
+            # Reset individual metrics
+            metrics_list = getattr(self.compiled_metrics, 'metrics', getattr(self.compiled_metrics, '_metrics', []))
+            for metric in metrics_list:
+                if hasattr(metric, 'reset_state'):
+                    try:
                         metric.reset_state()
-            elif hasattr(self.compiled_metrics, 'metrics'):
-                # For newer metrics, reset each metric individually
-                for metric in self.compiled_metrics.metrics:
-                    if hasattr(metric, 'reset_state'):
-                        metric.reset_state()
+                    except Exception as e:
+                        logger.warning(f"Failed to reset metric {getattr(metric, 'name', 'unknown')}: {e}")
 
     def get_config(self):
         """Return the configuration of the model."""
         base_config = super().get_config()
         config = {
-            'base_model': self.base_model.get_config(),
-            'config': {
+            'base_model_config': self.base_model.get_config(),
+            'training_config': {
                 'enable_deep_supervision': self.config.enable_deep_supervision,
                 'deep_supervision_schedule': self.config.deep_supervision_schedule,
                 'deep_supervision_config': self.config.deep_supervision_config,
@@ -758,7 +798,7 @@ class DeepSupervisionModel(keras.Model):
         # the base model and config objects properly
         raise NotImplementedError(
             "DeepSupervisionModel.from_config() not implemented. "
-            "Please recreate the model using the constructor."
+            "Please recreate the model using the constructor with the original base_model and config."
         )
 
     def summary(self, *args, **kwargs):
@@ -769,32 +809,82 @@ class DeepSupervisionModel(keras.Model):
         """Count the total number of parameters in the base model."""
         return self.base_model.count_params()
 
+    def save_base_model(self, filepath, **kwargs):
+        """Save the underlying base model."""
+        return self.base_model.save(filepath, **kwargs)
+
+    def get_base_model(self):
+        """Get the underlying base model."""
+        return self.base_model
+
+    def get_weights(self):
+        """Get weights from the base model."""
+        return self.base_model.get_weights()
+
+    def set_weights(self, weights):
+        """Set weights to the base model."""
+        return self.base_model.set_weights(weights)
+
+    def trainable_weights(self):
+        """Get trainable weights from the base model."""
+        return self.base_model.trainable_weights
+
+    def non_trainable_weights(self):
+        """Get non-trainable weights from the base model."""
+        return self.base_model.non_trainable_weights
+
 # ---------------------------------------------------------------------
 # IMAGE SYNTHESIS (Updated for Deep Supervision)
 # ---------------------------------------------------------------------
 
+@tf.function
+def _sampling_step(denoiser, y, h_t, gamma_t):
+    """Single sampling step compiled with tf.function for speed."""
+    # Compute denoiser residual: d_t = D(y_t) - y_t
+    denoised = denoiser(y, training=False)
+    if isinstance(denoised, list):
+        denoised = denoised[0]  # Use primary output
+
+    d_t = denoised - y
+
+    # Generate fresh Gaussian noise
+    z_t = tf.random.normal(tf.shape(y))
+
+    # Update rule: y_{t+1} = y_t + h_t * d_t + γ_t * z_t
+    y_next = y + h_t * d_t + gamma_t * z_t
+
+    # Clip to valid [0, 1] range
+    y_next = tf.clip_by_value(y_next, 0.0, 1.0)
+
+    return y_next
+
+
 def unconditional_sampling_with_deep_supervision(
-    denoiser: keras.Model,
-    num_samples: int = 4,
-    image_shape: Tuple[int, int, int] = (64, 64, 1),
-    num_steps: int = 200,
-    initial_step_size: float = 0.1,
-    final_step_size: float = 1.0,
-    initial_noise_level: float = 0.5,
-    final_noise_level: float = 0.01,
-    seed: Optional[int] = None,
-    save_intermediate: bool = True
+        denoiser: keras.Model,
+        num_samples: int = 4,
+        image_shape: Tuple[int, int, int] = (64, 64, 1),
+        num_steps: int = 100,  # Reduced from 200 to 100
+        initial_step_size: float = 0.05,  # Reduced from 0.1
+        final_step_size: float = 0.8,  # Reduced from 1.0
+        initial_noise_level: float = 0.3,  # Reduced from 0.5
+        final_noise_level: float = 0.005,
+        seed: Optional[int] = None,
+        save_intermediate: bool = True
 ) -> Tuple[tf.Tensor, List[tf.Tensor]]:
     """
-    Unconditional image synthesis using denoiser's implicit prior (handles multi-output models).
+    Optimized unconditional image synthesis using denoiser's implicit prior.
 
-    For deep supervision models, uses only the primary output (index 0) for synthesis.
+    Optimizations:
+    - Compiled sampling step with tf.function
+    - Reduced default number of steps from 200 to 100
+    - Less frequent logging and intermediate saving
+    - Optimized tensor operations
 
     Args:
         denoiser: Trained bias-free denoiser model (single or multi-output)
         num_samples: Number of images to generate
         image_shape: Shape of generated images (height, width, channels)
-        num_steps: Number of sampling steps
+        num_steps: Number of sampling steps (reduced default: 100)
         initial_step_size: Initial step size h_0
         final_step_size: Final step size h_final
         initial_noise_level: Initial noise injection level γ_0
@@ -808,52 +898,46 @@ def unconditional_sampling_with_deep_supervision(
     if seed is not None:
         tf.random.set_seed(seed)
 
-    logger.info(f"Starting unconditional sampling with deep supervision model: {num_samples} samples, {num_steps} steps")
+    logger.info(f"Starting optimized sampling: {num_samples} samples, {num_steps} steps")
 
     # Initialize with random noise y_0
-    y = tf.random.normal([num_samples] + list(image_shape), mean=0.5, stddev=0.3)
+    y = tf.random.normal([num_samples] + list(image_shape), mean=0.5, stddev=0.25)
     y = tf.clip_by_value(y, 0.0, 1.0)
 
-    intermediate_steps = []
-
-    # Coarse-to-fine scheduling
+    # Pre-compute scheduling parameters (vectorized)
     step_sizes = tf.linspace(initial_step_size, final_step_size, num_steps)
     noise_levels = tf.linspace(initial_noise_level, final_noise_level, num_steps)
 
+    intermediate_steps = []
+
+    # Save initial state
+    if save_intermediate:
+        intermediate_steps.append(y.numpy().copy())
+
+    # Determine how often to save intermediate steps and log
+    save_interval = max(1, num_steps // 8)  # Save 8 intermediate steps max
+    log_interval = max(1, num_steps // 5)  # Log 5 times max
+
+    # Main sampling loop
     for t in range(num_steps):
-        # Current scheduling parameters
-        h_t = step_sizes[t]  # Step size (increases over time)
-        gamma_t = noise_levels[t]  # Noise level (decreases over time)
+        # Get current scheduling parameters
+        h_t = step_sizes[t]
+        gamma_t = noise_levels[t]
 
-        # Compute denoiser residual: d_t = D(y_t) - y_t
-        # For multi-output models, use only the primary output (index 0)
-        denoised = denoiser(y, training=False)
-        if isinstance(denoised, list):
-            denoised = denoised[0]  # Use primary output
+        # Perform sampling step (compiled for speed)
+        y = _sampling_step(denoiser, y, h_t, gamma_t)
 
-        d_t = denoised - y
-
-        # Generate fresh Gaussian noise
-        z_t = tf.random.normal(tf.shape(y))
-
-        # Update rule: y_{t+1} = y_t + h_t * d_t + γ_t * z_t
-        y = y + h_t * d_t + gamma_t * z_t
-
-        # Clip to valid [0, 1] range
-        y = tf.clip_by_value(y, 0.0, 1.0)
-
-        # Save intermediate steps for visualization
-        if save_intermediate and (t % (num_steps // 10) == 0 or t == num_steps - 1):
+        # Save intermediate steps less frequently
+        if save_intermediate and (t % save_interval == 0 or t == num_steps - 1):
             intermediate_steps.append(y.numpy().copy())
 
-        # Log progress
-        if t % (num_steps // 5) == 0:
+        # Log progress less frequently
+        if t % log_interval == 0 or t == num_steps - 1:
             mean_intensity = tf.reduce_mean(y)
-            std_intensity = tf.math.reduce_std(y)
-            logger.info(f"Step {t}/{num_steps}: mean={mean_intensity:.3f}, std={std_intensity:.3f}, "
-                       f"h_t={h_t:.4f}, γ_t={gamma_t:.4f}")
+            logger.info(f"Step {t}/{num_steps}: mean={mean_intensity:.3f}, "
+                        f"h_t={h_t:.4f}, γ_t={gamma_t:.4f}")
 
-    logger.info(f"Unconditional sampling completed. Generated {num_samples} samples.")
+    logger.info(f"Sampling completed in {num_steps} steps. Generated {num_samples} samples.")
 
     return y, intermediate_steps
 
