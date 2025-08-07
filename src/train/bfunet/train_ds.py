@@ -604,8 +604,19 @@ class DeepSupervisionModel(keras.Model):
                 ds_weights = tf.fill([self.num_outputs], equal_weight)
 
             for i, (pred, target) in enumerate(zip(predictions, y)):
+                # Resize target to match prediction's spatial dimensions
+                pred_shape = tf.shape(pred)
+                target_height, target_width = pred_shape[1], pred_shape[2]
+
+                # Resize target to match prediction size
+                resized_target = tf.image.resize(
+                    target,
+                    [target_height, target_width],
+                    method='bilinear'
+                )
+
                 # Compute MSE loss for this output
-                mse_loss = tf.reduce_mean(tf.square(pred - target))
+                mse_loss = tf.reduce_mean(tf.square(pred - resized_target))
 
                 # Apply deep supervision weight (guaranteed to exist at index i)
                 weight = ds_weights[i]
