@@ -612,7 +612,7 @@ class DeepSupervisionModel(keras.Model):
                 total_loss += weight * mse_loss
 
             # Add regularization losses (fixed for Keras 3.x)
-            regularization_losses = self.base_model.losses()
+            regularization_losses = self.base_model.losses
             if regularization_losses:
                 total_loss += tf.add_n(regularization_losses)
 
