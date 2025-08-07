@@ -129,7 +129,7 @@ class TrainingConfig:
 
     # === Image Synthesis Configuration ===
     enable_synthesis: bool = True  # Enable image synthesis during monitoring
-    synthesis_samples: int = 4  # Number of images to synthesize
+    synthesis_samples: int = 10  # Number of images to synthesize
     synthesis_steps: int = 200  # Number of synthesis iterations
     synthesis_initial_step_size: float = 0.05  # Initial gradient step size
     synthesis_final_step_size: float = 0.8  # Final gradient step size
