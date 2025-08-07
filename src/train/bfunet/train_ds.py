@@ -58,7 +58,8 @@ from dl_techniques.optimization import optimizer_builder, learning_rate_schedule
 from dl_techniques.optimization.deep_supervision import schedule_builder as deep_supervision_schedule_builder
 from dl_techniques.models.bfunet_denoiser import (
     create_bfunet_denoiser, BFUNET_CONFIGS, create_bfunet_variant,
-    get_model_output_info,
+    get_model_output_info, create_inference_model_from_training_model,
+    visualize_synthesis_process
 )
 
 # ---------------------------------------------------------------------
@@ -160,77 +161,6 @@ class TrainingConfig:
         if self.noise_distribution not in ['uniform', 'log_uniform']:
             raise ValueError(f"Invalid noise distribution: {self.noise_distribution}")
 
-
-# ---------------------------------------------------------------------
-# VISUALIZATION UTILITIES
-# ---------------------------------------------------------------------
-
-def visualize_synthesis_process(
-    final_samples: tf.Tensor,
-    intermediate_steps: List[tf.Tensor],
-    save_path: Path,
-    epoch: int
-) -> None:
-    """
-    Visualize the image synthesis process showing evolution from noise to natural images.
-
-    Args:
-        final_samples: Final generated samples
-        intermediate_steps: List of intermediate sampling steps
-        save_path: Path to save the visualization
-        epoch: Current training epoch
-    """
-
-    try:
-        num_samples = min(4, final_samples.shape[0])
-        num_steps = len(intermediate_steps)
-
-        # Create figure showing synthesis evolution
-        fig, axes = plt.subplots(num_samples, num_steps, figsize=(3 * num_steps, 3 * num_samples))
-        fig.suptitle(f'Deep Supervision Image Synthesis Evolution - Epoch {epoch}\n'
-                    f'(Random Noise → Natural Images via Implicit Prior)', fontsize=16, y=0.98)
-
-        if num_samples == 1:
-            axes = axes.reshape(1, -1)
-        if num_steps == 1:
-            axes = axes.reshape(-1, 1)
-
-        for sample_idx in range(num_samples):
-            for step_idx, step_data in enumerate(intermediate_steps):
-                img = step_data[sample_idx]
-
-                # Handle grayscale vs RGB
-                if img.shape[-1] == 1:
-                    img = img.squeeze(-1)
-                    cmap = 'gray'
-                else:
-                    cmap = None
-
-                # Ensure valid range
-                img = np.clip(img, 0.0, 1.0)
-
-                axes[sample_idx, step_idx].imshow(img, cmap=cmap, vmin=0, vmax=1)
-                axes[sample_idx, step_idx].axis('off')
-
-                # Add step label
-                if sample_idx == 0:
-                    step_num = step_idx * (200 // (num_steps - 1)) if step_idx < num_steps - 1 else 200
-                    axes[sample_idx, step_idx].set_title(f'Step {step_num}', fontsize=10)
-
-                # Add sample label
-                if step_idx == 0:
-                    axes[sample_idx, step_idx].set_ylabel(f'Sample {sample_idx + 1}',
-                                                         fontsize=12, rotation=0, ha='right', va='center')
-
-        plt.tight_layout()
-        plt.subplots_adjust(top=0.90, left=0.08)
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
-        plt.clf()
-        gc.collect()
-
-    except Exception as e:
-        logger.warning(f"Failed to visualize synthesis process: {e}")
 
 # ---------------------------------------------------------------------
 # DATASET BUILDER (Updated for Deep Supervision)
@@ -456,21 +386,22 @@ def create_dataset_for_deep_supervision(
         num_parallel_calls=tf.data.AUTOTUNE
     )
 
-    # For deep supervision: create multiple target outputs (all the same clean patch)
+    # For deep supervision: create multiple target outputs as a stacked tensor
     def create_multiple_targets(noisy, clean):
-        # Create a list of targets (one for each output)
-        # All targets are the same clean patch (deep supervision at different scales)
-        targets = [clean for _ in range(num_outputs)]
+        # Stack the clean target num_outputs times (all targets are the same clean patch)
+        targets = tf.stack([clean for _ in range(num_outputs)], axis=0)
         return noisy, targets
 
     dataset = dataset.map(create_multiple_targets, num_parallel_calls=tf.data.AUTOTUNE)
 
     # Ensure final shape consistency
-    def ensure_shapes(noisy, targets):
+    def ensure_shapes(noisy, targets_stacked):
         noisy = tf.ensure_shape(noisy, [config.patch_size, config.patch_size, config.channels])
-        targets = [tf.ensure_shape(target, [config.patch_size, config.patch_size, config.channels])
-                  for target in targets]
-        return noisy, targets
+        targets_stacked = tf.ensure_shape(
+            targets_stacked,
+            [num_outputs, config.patch_size, config.patch_size, config.channels]
+        )
+        return noisy, targets_stacked
 
     dataset = dataset.map(ensure_shapes, num_parallel_calls=tf.data.AUTOTUNE)
 
@@ -572,8 +503,16 @@ class DeepSupervisionModel(keras.Model):
             # Handle single vs multiple outputs
             if not isinstance(predictions, list):
                 predictions = [predictions]
-            if not isinstance(y, list):
-                y = [y]
+
+            # Handle stacked targets format
+            # y has shape [batch_size, num_outputs, height, width, channels]
+            # We need to convert this to a list of [batch_size, height, width, channels] tensors
+            if len(y.shape) == 5 and y.shape[1] == self.num_outputs:
+                # Unstack along the num_outputs dimension (axis=1)
+                y = tf.unstack(y, axis=1)
+            elif not isinstance(y, list):
+                # Single target, replicate for all outputs
+                y = [y for _ in range(len(predictions))]
 
             # Compute deep supervision weights
             ds_weights = self.compute_deep_supervision_weights()
@@ -640,7 +579,12 @@ class DeepSupervisionModel(keras.Model):
         else:
             primary_pred = predictions
 
-        if isinstance(y, list):
+        # Handle stacked targets format - get primary target (first one)
+        if len(y.shape) > 3 and y.shape[0] == self.num_outputs:
+            # y is stacked as [num_outputs, batch_size, height, width, channels]
+            # Get the first target (index 0)
+            primary_target = y[0]
+        elif isinstance(y, list):
             primary_target = y[0]
         else:
             primary_target = y
