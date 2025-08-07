@@ -699,20 +699,35 @@ class DeepSupervisionModel(keras.Model):
         metrics = []
         if hasattr(self, '_loss_tracker'):
             metrics.append(self._loss_tracker)
+
         if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
             # Handle both new and old style compiled metrics
             if hasattr(self.compiled_metrics, 'metrics'):
                 metrics.extend(self.compiled_metrics.metrics)
             elif hasattr(self.compiled_metrics, '_metrics'):
                 metrics.extend(self.compiled_metrics._metrics)
+
         return metrics
 
     def reset_metrics(self):
         """Reset all metrics."""
         if hasattr(self, '_loss_tracker'):
             self._loss_tracker.reset_state()
+
         if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
-            self.compiled_metrics.reset_state()
+            # Handle deprecated compiled metrics that don't have reset_state
+            if hasattr(self.compiled_metrics, 'reset_state'):
+                self.compiled_metrics.reset_state()
+            elif hasattr(self.compiled_metrics, '_metrics'):
+                # For deprecated metrics, reset each metric individually
+                for metric in self.compiled_metrics._metrics:
+                    if hasattr(metric, 'reset_state'):
+                        metric.reset_state()
+            elif hasattr(self.compiled_metrics, 'metrics'):
+                # For newer metrics, reset each metric individually
+                for metric in self.compiled_metrics.metrics:
+                    if hasattr(metric, 'reset_state'):
+                        metric.reset_state()
 
 # ---------------------------------------------------------------------
 # IMAGE SYNTHESIS (Updated for Deep Supervision)
