@@ -536,7 +536,7 @@ class DeepSupervisionModel(keras.Model):
             self.ds_scheduler = None
             logger.info("Deep supervision scheduler not created (single output or disabled)")
 
-        # Track training progress using simple Python variables
+        # Track training progress using simple Python variables (fixes device placement issues)
         self.current_epoch_value = 0
         self.total_epochs_value = config.epochs
 
@@ -589,7 +589,7 @@ class DeepSupervisionModel(keras.Model):
             # Compute weighted loss for each output
             total_loss = 0.0
 
-            # Get deep supervision weights (or use equal weighting)
+            # Get deep supervision weights
             ds_weights = self.compute_deep_supervision_weights()
 
             for i, (pred, target) in enumerate(zip(predictions, y)):
@@ -623,12 +623,17 @@ class DeepSupervisionModel(keras.Model):
         primary_pred = predictions[0]
         primary_target = y[0]
 
-        # Update compiled metrics
-        if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
-            self.compiled_metrics.update_state(primary_target, primary_pred)
-
-        # Update loss tracker with total weighted loss
-        self._loss_tracker.update_state(total_loss)
+        # Update metrics using the new recommended approach
+        for metric in self.metrics:
+            if metric.name == 'loss':
+                metric.update_state(total_loss)
+            elif hasattr(metric, 'update_state'):
+                # For other metrics (PSNR, MAE, etc.), use primary output
+                try:
+                    metric.update_state(primary_target, primary_pred)
+                except:
+                    # Skip metrics that can't handle these inputs
+                    pass
 
         # Create results dictionary
         results = {m.name: m.result() for m in self.metrics}
@@ -666,12 +671,17 @@ class DeepSupervisionModel(keras.Model):
         # Compute validation loss (MSE on primary output only)
         val_loss = tf.reduce_mean(tf.square(primary_pred - primary_target))
 
-        # Update compiled metrics
-        if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
-            self.compiled_metrics.update_state(primary_target, primary_pred)
-
-        # Update loss tracker with validation loss
-        self._loss_tracker.update_state(val_loss)
+        # Update metrics using the new recommended approach
+        for metric in self.metrics:
+            if metric.name == 'loss':
+                metric.update_state(val_loss)
+            elif hasattr(metric, 'update_state'):
+                # For other metrics, use primary output
+                try:
+                    metric.update_state(primary_target, primary_pred)
+                except:
+                    # Skip metrics that can't handle these inputs
+                    pass
 
         return {m.name: m.result() for m in self.metrics}
 
@@ -683,17 +693,27 @@ class DeepSupervisionModel(keras.Model):
     def metrics(self):
         """Return all metrics including custom loss tracker."""
         metrics = []
+
+        # Add our custom loss tracker first
         if hasattr(self, '_loss_tracker'):
             metrics.append(self._loss_tracker)
 
+        # Add compiled metrics if they exist
         if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
-            # Handle both new and old style compiled metrics
             if hasattr(self.compiled_metrics, 'metrics'):
                 metrics.extend(self.compiled_metrics.metrics)
             elif hasattr(self.compiled_metrics, '_metrics'):
                 metrics.extend(self.compiled_metrics._metrics)
 
-        return metrics
+        # Remove duplicates by name while preserving order
+        seen_names = set()
+        unique_metrics = []
+        for metric in metrics:
+            if hasattr(metric, 'name') and metric.name not in seen_names:
+                unique_metrics.append(metric)
+                seen_names.add(metric.name)
+
+        return unique_metrics
 
     def reset_metrics(self):
         """Reset all metrics."""
@@ -714,6 +734,40 @@ class DeepSupervisionModel(keras.Model):
                 for metric in self.compiled_metrics.metrics:
                     if hasattr(metric, 'reset_state'):
                         metric.reset_state()
+
+    def get_config(self):
+        """Return the configuration of the model."""
+        base_config = super().get_config()
+        config = {
+            'base_model': self.base_model.get_config(),
+            'config': {
+                'enable_deep_supervision': self.config.enable_deep_supervision,
+                'deep_supervision_schedule': self.config.deep_supervision_schedule,
+                'deep_supervision_config': self.config.deep_supervision_config,
+                'epochs': self.config.epochs,
+            },
+            'num_outputs': self.num_outputs,
+        }
+        base_config.update(config)
+        return base_config
+
+    @classmethod
+    def from_config(cls, config, custom_objects=None):
+        """Create a model from its configuration."""
+        # This is a simplified version - in practice you'd need to reconstruct
+        # the base model and config objects properly
+        raise NotImplementedError(
+            "DeepSupervisionModel.from_config() not implemented. "
+            "Please recreate the model using the constructor."
+        )
+
+    def summary(self, *args, **kwargs):
+        """Print a summary of the base model."""
+        return self.base_model.summary(*args, **kwargs)
+
+    def count_params(self):
+        """Count the total number of parameters in the base model."""
+        return self.base_model.count_params()
 
 # ---------------------------------------------------------------------
 # IMAGE SYNTHESIS (Updated for Deep Supervision)

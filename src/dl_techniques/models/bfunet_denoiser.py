@@ -377,14 +377,23 @@ def create_bfunet_denoiser(
 
     if enable_deep_supervision and deep_supervision_outputs:
         # Return multiple outputs: [final_output, supervision_outputs...]
+        # Order supervision outputs from shallowest to deepest (by resolution)
         # The final output (index 0) is the primary inference output
-        # Supervision outputs (indices 1+) are for training only
-        all_outputs = [final_output] + deep_supervision_outputs
+        # Supervision outputs (indices 1+) are ordered by decreasing resolution
+
+        # Reverse the supervision outputs so they go from shallow to deep
+        # deep_supervision_outputs was built as [level_3, level_2, level_1] (deep to shallow)
+        # We want [level_1, level_2, level_3] (shallow to deep)
+        ordered_supervision_outputs = list(reversed(deep_supervision_outputs))
+
+        all_outputs = [final_output] + ordered_supervision_outputs
 
         logger.info(f"Created deep supervision model with {len(all_outputs)} outputs:")
         logger.info(f"  - Final output (index 0): {final_output.shape}")
-        for i, sup_output in enumerate(deep_supervision_outputs):
-            logger.info(f"  - Supervision output {i+1} (index {i+1}): {sup_output.shape}")
+        for i, sup_output in enumerate(ordered_supervision_outputs):
+            # Calculate the actual level based on reversed order
+            level = i + 1  # levels 1, 2, 3 for indices 1, 2, 3
+            logger.info(f"  - Supervision output {i + 1} (index {i + 1}, level {level}): {sup_output.shape}")
 
         # Create model with multiple outputs
         model = keras.Model(
