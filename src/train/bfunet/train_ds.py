@@ -536,9 +536,9 @@ class DeepSupervisionModel(keras.Model):
             self.ds_scheduler = None
             logger.info("Deep supervision scheduler not created (single output or disabled)")
 
-        # Track training progress
-        self.current_epoch = tf.Variable(0, trainable=False, dtype=tf.int32)
-        self.total_epochs = tf.Variable(config.epochs, trainable=False, dtype=tf.int32)
+        # Track training progress using simple Python variables
+        self.current_epoch_value = 0
+        self.total_epochs_value = config.epochs
 
         # Add loss tracker for proper loss reporting
         self._loss_tracker = keras.metrics.Mean(name="loss")
@@ -554,23 +554,13 @@ class DeepSupervisionModel(keras.Model):
             equal_weight = 1.0 / tf.cast(self.num_outputs, tf.float32)
             return tf.fill([self.num_outputs], equal_weight)
 
-        # Calculate training progress (0.0 to 1.0)
-        progress = tf.cast(self.current_epoch, tf.float32) / tf.cast(self.total_epochs, tf.float32)
-        progress = tf.clip_by_value(progress, 0.0, 1.0)
+        # Calculate training progress (0.0 to 1.0) using Python variables
+        progress = self.current_epoch_value / max(1, self.total_epochs_value)
+        progress = max(0.0, min(1.0, progress))  # Clip to [0, 1]
 
-        # Get weights from scheduler (this runs in numpy, so we use py_function)
-        def get_weights(prog):
-            return self.ds_scheduler(prog.numpy()).astype(np.float32)
-
-        weights = tf.py_function(
-            func=get_weights,
-            inp=[progress],
-            Tout=tf.float32
-        )
-        weights.set_shape([self.num_outputs])
-
-        # Convert to proper tensor to avoid EagerPyFunc issues
-        weights = tf.convert_to_tensor(weights)
+        # Get weights from scheduler directly (no tf.py_function needed)
+        weights_np = self.ds_scheduler(progress).astype(np.float32)
+        weights = tf.constant(weights_np, dtype=tf.float32)
 
         return weights
 
@@ -601,10 +591,6 @@ class DeepSupervisionModel(keras.Model):
 
             # Get deep supervision weights (or use equal weighting)
             ds_weights = self.compute_deep_supervision_weights()
-            if ds_weights is None:
-                # Equal weighting fallback
-                equal_weight = 1.0 / tf.cast(self.num_outputs, tf.float32)
-                ds_weights = tf.fill([self.num_outputs], equal_weight)
 
             for i, (pred, target) in enumerate(zip(predictions, y)):
                 # Resize target to match prediction's spatial dimensions
@@ -621,7 +607,7 @@ class DeepSupervisionModel(keras.Model):
                 # Compute MSE loss for this output
                 mse_loss = tf.reduce_mean(tf.square(pred - resized_target))
 
-                # Apply deep supervision weight (guaranteed to exist at index i)
+                # Apply deep supervision weight
                 weight = ds_weights[i]
                 total_loss += weight * mse_loss
 
@@ -691,7 +677,7 @@ class DeepSupervisionModel(keras.Model):
 
     def set_epoch(self, epoch: int):
         """Update current epoch for deep supervision scheduling."""
-        self.current_epoch.assign(epoch)
+        self.current_epoch_value = epoch
 
     @property
     def metrics(self):
