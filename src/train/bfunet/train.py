@@ -110,7 +110,7 @@ class TrainingConfig:
     epochs: int = 100
     patches_per_image: int = 16  # Number of patches to extract per image
     augment_data: bool = True  # Apply data augmentation
-    normalize_input: bool = True  # Normalize input to [-1, 1]
+    normalize_input: bool = True  # Normalize input to [0, 1]
     steps_per_epoch: Optional[int] = None  # Manual override for steps per epoch
 
     # === Optimization Configuration ===
@@ -126,6 +126,15 @@ class TrainingConfig:
     save_best_only: bool = True  # Only save model if validation loss improves
     early_stopping_patience: int = 15  # Early stopping patience
     validation_steps: Optional[int] = 100  # Number of validation steps
+
+    # === Image Synthesis Configuration ===
+    enable_synthesis: bool = True  # Enable image synthesis during monitoring
+    synthesis_samples: int = 4  # Number of images to synthesize
+    synthesis_steps: int = 200  # Number of synthesis iterations
+    synthesis_initial_step_size: float = 0.05  # Initial gradient step size
+    synthesis_final_step_size: float = 0.8  # Final gradient step size
+    synthesis_initial_noise: float = 0.4  # Initial noise injection level
+    synthesis_final_noise: float = 0.005  # Final noise injection level
 
     # === Output Configuration ===
     output_dir: str = 'results'
@@ -169,7 +178,7 @@ def load_and_preprocess_image(image_path: tf.Tensor, config: TrainingConfig) -> 
         config: Training configuration
 
     Returns:
-        Preprocessed image patch as tensor
+        Preprocessed image patch as tensor normalized to [0, 1]
     """
     try:
         # Read image file
@@ -186,8 +195,8 @@ def load_and_preprocess_image(image_path: tf.Tensor, config: TrainingConfig) -> 
         # Convert to float32 and normalize if requested
         image = tf.cast(image, tf.float32)
         if config.normalize_input:
-            # Normalize from [0, 255] to [-1, +1] for bias-free networks
-            image = (image / 127.5) - 1.0
+            # Normalize from [0, 255] to [0, 1]
+            image = image / 255.0
 
         # Get image dimensions
         shape = tf.shape(image)
@@ -248,7 +257,7 @@ def add_noise_to_patch(patch: tf.Tensor, config: TrainingConfig) -> Tuple[tf.Ten
     Add Gaussian noise to a clean patch.
 
     Args:
-        patch: Clean patch tensor [height, width, channels]
+        patch: Clean patch tensor [height, width, channels] in [0, 1] range
         config: Training configuration
 
     Returns:
@@ -269,8 +278,8 @@ def add_noise_to_patch(patch: tf.Tensor, config: TrainingConfig) -> Tuple[tf.Ten
     noise = tf.random.normal(tf.shape(patch)) * noise_level
     noisy_patch = patch + noise
 
-    # Clip to valid range for [-1, 1] normalized input
-    noisy_patch = tf.clip_by_value(noisy_patch, -1.0, 1.0)
+    # Clip to valid range for [0, 1] normalized input
+    noisy_patch = tf.clip_by_value(noisy_patch, 0.0, 1.0)
 
     return noisy_patch, patch
 
@@ -393,16 +402,201 @@ def create_dataset(directories: List[str], config: TrainingConfig, is_training: 
 def psnr_metric(y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
     """
     PSNR (Peak Signal-to-Noise Ratio) metric for image denoising.
-    Updated for [-1, +1] normalization range.
+    Updated for [0, 1] normalization range.
 
     Args:
-        y_true: Ground truth images
-        y_pred: Predicted/denoised images
+        y_true: Ground truth images in [0, 1] range
+        y_pred: Predicted/denoised images in [0, 1] range
 
     Returns:
         Mean PSNR value across the batch
     """
-    return tf.reduce_mean(tf.image.psnr(y_pred, y_true, max_val=2.0))
+    return tf.reduce_mean(tf.image.psnr(y_pred, y_true, max_val=1.0))
+
+
+# ---------------------------------------------------------------------
+# IMAGE SYNTHESIS USING IMPLICIT PRIOR
+# ---------------------------------------------------------------------
+
+def unconditional_sampling(
+    denoiser: keras.Model,
+    num_samples: int = 4,
+    image_shape: Tuple[int, int, int] = (64, 64, 1),
+    num_steps: int = 200,
+    initial_step_size: float = 0.1,
+    final_step_size: float = 1.0,
+    initial_noise_level: float = 0.5,
+    final_noise_level: float = 0.01,
+    seed: Optional[int] = None,
+    save_intermediate: bool = True
+) -> Tuple[tf.Tensor, List[tf.Tensor]]:
+    """
+    Unconditional image synthesis using the denoiser's implicit prior.
+
+    Implements Algorithm 1: Unconditional Sampling from the Kadkhodaie & Simoncelli paper.
+    This performs stochastic coarse-to-fine gradient ascent to generate natural images
+    from random noise using the learned implicit prior.
+
+    Args:
+        denoiser: Trained bias-free denoiser model
+        num_samples: Number of images to generate
+        image_shape: Shape of generated images (height, width, channels)
+        num_steps: Number of sampling steps
+        initial_step_size: Initial step size h_0
+        final_step_size: Final step size h_final
+        initial_noise_level: Initial noise injection level γ_0
+        final_noise_level: Final noise injection level γ_final
+        seed: Random seed for reproducibility
+        save_intermediate: Whether to save intermediate steps
+
+    Returns:
+        Tuple of (final_samples, intermediate_steps)
+    """
+    if seed is not None:
+        tf.random.set_seed(seed)
+
+    logger.info(f"Starting unconditional sampling: {num_samples} samples, {num_steps} steps")
+
+    # Initialize with random noise y_0
+    # Start with high noise level to be far from natural image manifold
+    y = tf.random.normal([num_samples] + list(image_shape), mean=0.5, stddev=0.3)
+    y = tf.clip_by_value(y, 0.0, 1.0)
+
+    intermediate_steps = []
+
+    # Coarse-to-fine scheduling
+    step_sizes = tf.linspace(initial_step_size, final_step_size, num_steps)
+    noise_levels = tf.linspace(initial_noise_level, final_noise_level, num_steps)
+
+    for t in range(num_steps):
+        # Current scheduling parameters
+        h_t = step_sizes[t]  # Step size (increases over time)
+        gamma_t = noise_levels[t]  # Noise level (decreases over time)
+
+        # Compute denoiser residual: d_t = D(y_t) - y_t
+        # This is proportional to ∇_y log p(y_t) according to Miyasawa's theorem
+        denoised = denoiser(y, training=False)
+        d_t = denoised - y
+
+        # Generate fresh Gaussian noise
+        z_t = tf.random.normal(tf.shape(y))
+
+        # Update rule: y_{t+1} = y_t + h_t * d_t + γ_t * z_t
+        y = y + h_t * d_t + gamma_t * z_t
+
+        # Clip to valid [0, 1] range
+        y = tf.clip_by_value(y, 0.0, 1.0)
+
+        # Save intermediate steps for visualization
+        if save_intermediate and (t % (num_steps // 10) == 0 or t == num_steps - 1):
+            intermediate_steps.append(y.numpy().copy())
+
+        # Log progress
+        if t % (num_steps // 5) == 0:
+            mean_intensity = tf.reduce_mean(y)
+            std_intensity = tf.math.reduce_std(y)
+            logger.info(f"Step {t}/{num_steps}: mean={mean_intensity:.3f}, std={std_intensity:.3f}, "
+                       f"h_t={h_t:.4f}, γ_t={gamma_t:.4f}")
+
+    logger.info(f"Unconditional sampling completed. Generated {num_samples} samples.")
+
+    return y, intermediate_steps
+
+
+def visualize_synthesis_process(
+    final_samples: tf.Tensor,
+    intermediate_steps: List[tf.Tensor],
+    save_path: Path,
+    epoch: int
+) -> None:
+    """
+    Visualize the image synthesis process showing evolution from noise to natural images.
+
+    Args:
+        final_samples: Final generated samples
+        intermediate_steps: List of intermediate sampling steps
+        save_path: Path to save the visualization
+        epoch: Current training epoch
+    """
+    try:
+        num_samples = min(4, final_samples.shape[0])
+        num_steps = len(intermediate_steps)
+
+        # Create figure showing synthesis evolution
+        fig, axes = plt.subplots(num_samples, num_steps, figsize=(3 * num_steps, 3 * num_samples))
+        fig.suptitle(f'Image Synthesis Evolution - Epoch {epoch}\n'
+                    f'(Random Noise → Natural Images via Implicit Prior)', fontsize=16, y=0.98)
+
+        if num_samples == 1:
+            axes = axes.reshape(1, -1)
+        if num_steps == 1:
+            axes = axes.reshape(-1, 1)
+
+        for sample_idx in range(num_samples):
+            for step_idx, step_data in enumerate(intermediate_steps):
+                img = step_data[sample_idx]
+
+                # Handle grayscale vs RGB
+                if img.shape[-1] == 1:
+                    img = img.squeeze(-1)
+                    cmap = 'gray'
+                else:
+                    cmap = None
+
+                # Ensure valid range
+                img = np.clip(img, 0.0, 1.0)
+
+                axes[sample_idx, step_idx].imshow(img, cmap=cmap, vmin=0, vmax=1)
+                axes[sample_idx, step_idx].axis('off')
+
+                # Add step label
+                if sample_idx == 0:
+                    step_num = step_idx * (200 // (num_steps - 1)) if step_idx < num_steps - 1 else 200
+                    axes[sample_idx, step_idx].set_title(f'Step {step_num}', fontsize=10)
+
+                # Add sample label
+                if step_idx == 0:
+                    axes[sample_idx, step_idx].set_ylabel(f'Sample {sample_idx + 1}',
+                                                         fontsize=12, rotation=0, ha='right', va='center')
+
+        plt.tight_layout()
+        plt.subplots_adjust(top=0.90, left=0.08)
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        plt.clf()
+        gc.collect()
+
+        # Also save a summary figure with just the final results
+        summary_fig, summary_axes = plt.subplots(1, num_samples, figsize=(3 * num_samples, 3))
+        summary_fig.suptitle(f'Generated Images - Epoch {epoch}', fontsize=14, y=0.95)
+
+        if num_samples == 1:
+            summary_axes = [summary_axes]
+
+        for sample_idx in range(num_samples):
+            img = final_samples[sample_idx].numpy()
+
+            if img.shape[-1] == 1:
+                img = img.squeeze(-1)
+                cmap = 'gray'
+            else:
+                cmap = None
+
+            img = np.clip(img, 0.0, 1.0)
+
+            summary_axes[sample_idx].imshow(img, cmap=cmap, vmin=0, vmax=1)
+            summary_axes[sample_idx].axis('off')
+            summary_axes[sample_idx].set_title(f'Generated {sample_idx + 1}', fontsize=12)
+
+        plt.tight_layout()
+        summary_save_path = save_path.parent / f"epoch_{epoch:03d}_generated_final.png"
+        plt.savefig(summary_save_path, dpi=150, bbox_inches='tight')
+        plt.close(summary_fig)
+        plt.clf()
+        gc.collect()
+
+    except Exception as e:
+        logger.warning(f"Failed to visualize synthesis process: {e}")
 
 
 # ---------------------------------------------------------------------
@@ -601,12 +795,68 @@ class StreamingResultMonitor(keras.callbacks.Callback):
                         denoised_images
                     )
 
-                # Compute metrics - corrected for [-1, +1] range
+                # Compute metrics - corrected for [0, 1] range
                 mse_loss = tf.reduce_mean(tf.square(denoised_images - clean_images))
-                psnr = tf.reduce_mean(tf.image.psnr(denoised_images, clean_images, max_val=2.0))
+                psnr = tf.reduce_mean(tf.image.psnr(denoised_images, clean_images, max_val=1.0))
 
                 logger.info(f"Epoch {epoch_val} - Validation MSE: {mse_loss.numpy():.6f}, PSNR: {psnr.numpy():.2f} dB")
 
+                # === NEW: IMAGE SYNTHESIS USING IMPLICIT PRIOR ===
+                if self.config.enable_synthesis:
+                    logger.info(f"Generating synthetic images using implicit prior...")
+                    try:
+                        # Generate images using the denoiser's implicit prior
+                        synthesis_shape = (self.config.patch_size, self.config.patch_size, self.config.channels)
+                        generated_samples, intermediate_steps = unconditional_sampling(
+                            denoiser=self.model,
+                            num_samples=self.config.synthesis_samples,
+                            image_shape=synthesis_shape,
+                            num_steps=self.config.synthesis_steps,
+                            initial_step_size=self.config.synthesis_initial_step_size,
+                            final_step_size=self.config.synthesis_final_step_size,
+                            initial_noise_level=self.config.synthesis_initial_noise,
+                            final_noise_level=self.config.synthesis_final_noise,
+                            seed=epoch_val,  # Use epoch as seed for reproducibility
+                            save_intermediate=True
+                        )
+
+                        # Visualize synthesis process
+                        synthesis_save_path = self.results_dir / f"epoch_{epoch_val:03d}_synthesis.png"
+                        visualize_synthesis_process(
+                            final_samples=generated_samples,
+                            intermediate_steps=intermediate_steps,
+                            save_path=synthesis_save_path,
+                            epoch=epoch_val
+                        )
+
+                        # Compute synthesis quality metrics
+                        generated_mean = tf.reduce_mean(generated_samples)
+                        generated_std = tf.math.reduce_std(generated_samples)
+                        generated_range = tf.reduce_max(generated_samples) - tf.reduce_min(generated_samples)
+
+                        logger.info(f"Generated images - Mean: {generated_mean:.3f}, "
+                                   f"Std: {generated_std:.3f}, Range: {generated_range:.3f}")
+
+                        # Save synthesis metrics
+                        synthesis_metrics = {
+                            'epoch': epoch_val,
+                            'synthesis_mean': float(generated_mean),
+                            'synthesis_std': float(generated_std),
+                            'synthesis_range': float(generated_range),
+                            'num_synthesis_steps': self.config.synthesis_steps,
+                            'num_samples': self.config.synthesis_samples,
+                            'timestamp': datetime.now().isoformat()
+                        }
+                        synthesis_metrics_file = self.results_dir / f"epoch_{epoch_val:03d}_synthesis_metrics.json"
+                        with open(synthesis_metrics_file, 'w') as f:
+                            json.dump(synthesis_metrics, f, indent=2)
+
+                    except Exception as synthesis_error:
+                        logger.warning(f"Image synthesis failed at epoch {epoch_val}: {synthesis_error}")
+                else:
+                    logger.info("Image synthesis disabled in configuration")
+
+                # Save denoising metrics
                 metrics = {
                     'epoch': epoch_val,
                     'val_mse': float(mse_loss),
@@ -640,10 +890,10 @@ class StreamingResultMonitor(keras.callbacks.Callback):
 
             for i in range(10):
                 if i < num_samples:
-                    # Denormalize from [-1, +1] to [0, 1] for visualization
-                    clean_img = (clean[i].numpy() + 1.0) / 2.0
-                    noisy_img = (noisy[i].numpy() + 1.0) / 2.0
-                    denoised_img = (denoised[i].numpy() + 1.0) / 2.0
+                    # Images are already in [0, 1] range, no need for denormalization
+                    clean_img = clean[i].numpy()
+                    noisy_img = noisy[i].numpy()
+                    denoised_img = denoised[i].numpy()
 
                     # Ensure values are in [0, 1] range
                     clean_img = np.clip(clean_img, 0.0, 1.0)
@@ -1049,6 +1299,32 @@ def parse_arguments() -> argparse.Namespace:
         help='Maximum number of files to read'
     )
 
+    # Synthesis parameters
+    parser.add_argument(
+        '--enable-synthesis',
+        action='store_true',
+        default=True,
+        help='Enable image synthesis during monitoring'
+    )
+    parser.add_argument(
+        '--no-synthesis',
+        dest='enable_synthesis',
+        action='store_false',
+        help='Disable image synthesis during monitoring'
+    )
+    parser.add_argument(
+        '--synthesis-samples',
+        type=int,
+        default=4,
+        help='Number of images to synthesize'
+    )
+    parser.add_argument(
+        '--synthesis-steps',
+        type=int,
+        default=200,
+        help='Number of synthesis iteration steps'
+    )
+
     return parser.parse_args()
 
 
@@ -1109,6 +1385,11 @@ def main():
         save_training_images=True,
         validation_steps=500,
 
+        # Image Synthesis
+        enable_synthesis=args.enable_synthesis,
+        synthesis_samples=args.synthesis_samples,
+        synthesis_steps=args.synthesis_steps,
+
         # Output
         output_dir=args.output_dir,
         experiment_name=args.experiment_name
@@ -1122,7 +1403,15 @@ def main():
     logger.info(f"  Learning Rate: {config.learning_rate}")
     logger.info(f"  Patch Size: {config.patch_size}")
     logger.info(f"  Channels: {config.channels}")
+    logger.info(f"  Input Normalization: [0, 1] range")
     logger.info(f"  Noise Range: [{config.noise_sigma_min}, {config.noise_sigma_max}]")
+    logger.info(f"  Monitor Every: {config.monitor_every_n_epochs} epochs")
+    logger.info(f"  Image Synthesis: {'Enabled' if config.enable_synthesis else 'Disabled'}")
+    if config.enable_synthesis:
+        logger.info(f"    - Synthesis Samples: {config.synthesis_samples}")
+        logger.info(f"    - Synthesis Steps: {config.synthesis_steps}")
+        logger.info(f"    - Step Size Range: [{config.synthesis_initial_step_size}, {config.synthesis_final_step_size}]")
+        logger.info(f"    - Noise Range: [{config.synthesis_final_noise}, {config.synthesis_initial_noise}]")
     logger.info(f"  Output Directory: {config.output_dir}")
     logger.info(f"  Experiment Name: {config.experiment_name}")
 
