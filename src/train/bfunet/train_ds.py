@@ -611,9 +611,10 @@ class DeepSupervisionModel(keras.Model):
                 weight = ds_weights[i]
                 total_loss += weight * mse_loss
 
-            # Add regularization losses
-            if self.losses:
-                total_loss += tf.add_n(self.losses)
+            # Add regularization losses (fixed for Keras 3.x)
+            regularization_losses = self.losses
+            if regularization_losses:
+                total_loss += tf.add_n(regularization_losses)
 
         # Compute gradients and update weights
         gradients = tape.gradient(total_loss, self.trainable_variables)
