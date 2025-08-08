@@ -26,6 +26,7 @@ Key Features:
 - Comprehensive monitoring and visualization
 - Flexible model variants (tiny, small, base, large, xlarge)
 - Robust training with early stopping and checkpointing
+- Symlink-safe dataset loading for compatibility with TensorFlow
 
 Training Philosophy:
 1. **Bias-Free Architecture**: Scale-invariant network without additive constants
@@ -231,7 +232,7 @@ def visualize_synthesis_process(
         logger.warning(f"Failed to visualize synthesis process: {e}")
 
 # ---------------------------------------------------------------------
-# DATASET BUILDER (Updated for Deep Supervision)
+# DATASET BUILDER (Fixed for Symlink Compatibility)
 # ---------------------------------------------------------------------
 
 def load_and_preprocess_image(image_path: tf.Tensor, config: TrainingConfig) -> tf.Tensor:
@@ -359,62 +360,60 @@ def create_dataset_for_deep_supervision(
 ) -> tf.data.Dataset:
     """
     Create a dataset for deep supervision training.
-    Uses tf.data.Dataset.list_files for memory efficiency and scalability.
-    Includes pre-validation of file patterns to prevent TensorFlow errors.
+    Uses tf.data.Dataset.from_tensor_slices for reliability and compatibility.
+    Resolves symbolic links to their real paths to ensure compatibility with
+    TensorFlow's file system backend.
     """
     logger.info(f"Creating {'training' if is_training else 'validation'} dataset for deep supervision")
     logger.info(f"Number of outputs: {num_outputs}")
 
-    # Use a set to avoid duplicate patterns
-    valid_file_patterns = set()
+    all_file_paths = []
+    extensions_set = {ext.lower() for ext in config.image_extensions}
+    # Add uppercase extensions for case-insensitive matching
+    extensions_set.update({ext.upper() for ext in config.image_extensions})
 
     for directory in directories:
-        dir_path = Path(directory)
-        if not dir_path.is_dir():
+        # Resolve the directory to its real, physical path to handle symbolic links
+        try:
+            dir_path = Path(directory).resolve(strict=True)
+            logger.info(f"Resolved directory: {directory} -> {dir_path}")
+        except FileNotFoundError:
             logger.warning(f"Directory not found, skipping: {directory}")
             continue
 
-        found_in_dir = False
-        for ext in config.image_extensions:
-            # Check for lowercase
-            pattern_lower = str(dir_path / "**" / f"*{ext.lower()}")
-            # Use glob to check if at least one file exists for this pattern
-            if next(dir_path.rglob(f"*{ext.lower()}"), None):
-                valid_file_patterns.add(pattern_lower)
-                found_in_dir = True
+        # Use the original, proven Path.rglob which works correctly with symlinks
+        try:
+            found_files = 0
+            for file_path in dir_path.rglob("*"):
+                if file_path.is_file() and file_path.suffix in extensions_set:
+                    all_file_paths.append(str(file_path))
+                    found_files += 1
+            logger.info(f"Found {found_files} files in {dir_path}")
+        except Exception as e:
+            logger.warning(f"Error scanning directory {dir_path}: {e}")
+            continue
 
-            # Check for uppercase
-            pattern_upper = str(dir_path / "**" / f"*{ext.upper()}")
-            if next(dir_path.rglob(f"*{ext.upper()}"), None):
-                valid_file_patterns.add(pattern_upper)
-                found_in_dir = True
-
-        if not found_in_dir:
-            logger.warning(f"No images with extensions {config.image_extensions} found in directory: {directory}")
-
-    if not valid_file_patterns:
-        # This will now give a much clearer error message
+    if not all_file_paths:
         raise ValueError(f"No image files found across all specified directories: {directories}")
 
-    logger.info(f"Using {len(valid_file_patterns)} valid file patterns for dataset creation.")
-
-    # Convert set to list for tf.data.Dataset.list_files
-    file_patterns_list = list(valid_file_patterns)
-
-    # Use tf.data.Dataset.list_files for scalability. Pre-validation ensures success.
-    dataset = tf.data.Dataset.list_files(file_patterns_list, shuffle=is_training)
+    logger.info(f"Found a total of {len(all_file_paths)} files.")
 
     # Apply file limits if specified
     limit = config.max_train_files if is_training else config.max_val_files
-    if limit:
+    if limit and limit < len(all_file_paths):
         logger.info(f"Limiting to {limit} files as per configuration.")
-        dataset = dataset.take(limit)
+        # Shuffle before limiting to get a random subset
+        np.random.shuffle(all_file_paths)
+        all_file_paths = all_file_paths[:limit]
+
+    # Create dataset from the list of absolute, resolved paths.
+    # This is safe because TensorFlow will now receive concrete paths, not patterns.
+    dataset = tf.data.Dataset.from_tensor_slices(all_file_paths)
 
     # Apply dataset transformations
     if is_training:
-        # Shuffle the file paths *before* processing for better randomness
         dataset = dataset.shuffle(
-            buffer_size=config.dataset_shuffle_buffer,
+            buffer_size=min(config.dataset_shuffle_buffer, len(all_file_paths)),
             reshuffle_each_iteration=True
         )
         dataset = dataset.repeat()
@@ -1112,8 +1111,9 @@ class StreamingResultMonitor(keras.callbacks.Callback):
         extensions_set.update(ext.upper() for ext in self.config.image_extensions)
 
         for directory in val_directories:
-            dir_path = Path(directory)
-            if not dir_path.exists():
+            try:
+                dir_path = Path(directory).resolve(strict=True)
+            except FileNotFoundError:
                 continue
 
             try:
@@ -1125,7 +1125,7 @@ class StreamingResultMonitor(keras.callbacks.Callback):
                 if len(monitor_files) >= 10:
                     break
             except Exception as e:
-                logger.error(f"Error getting monitor files from {directory}: {e}")
+                logger.error(f"Error getting monitor files from {dir_path}: {e}")
                 continue
 
         if not monitor_files:
@@ -1438,32 +1438,6 @@ def train_bfunet_denoiser_with_deep_supervision(config: TrainingConfig) -> keras
         if not Path(directory).exists():
             logger.warning(f"Validation directory does not exist: {directory}")
 
-    # Count available files
-    logger.info("Counting available files...")
-    try:
-        train_file_count = count_available_files(
-            config.train_image_dirs,
-            config.image_extensions,
-            config.max_train_files
-        )
-        val_file_count = count_available_files(
-            config.val_image_dirs,
-            config.image_extensions,
-            config.max_val_files
-        )
-    except Exception as e:
-        logger.warning(f"Error counting files: {e}")
-        train_file_count = 1000  # Fallback estimate
-        val_file_count = 100
-
-    if train_file_count == 0:
-        raise ValueError("No training files found!")
-    if val_file_count == 0:
-        raise ValueError("No validation files found!")
-
-    logger.info(f"Found approximately {train_file_count} training files")
-    logger.info(f"Found approximately {val_file_count} validation files")
-
     # Create base model
     logger.info(f"Creating {config.model_type} model...")
     input_shape = (config.patch_size, config.patch_size, config.channels)
@@ -1492,10 +1466,22 @@ def train_bfunet_denoiser_with_deep_supervision(config: TrainingConfig) -> keras
         config.val_image_dirs, config, num_outputs, is_training=False
     )
 
-    # Calculate steps per epoch
+    # Calculate steps per epoch with improved logic
     if config.steps_per_epoch is not None:
         steps_per_epoch = config.steps_per_epoch
     else:
+        # If a max file limit is set, use it for an accurate estimate
+        if config.max_train_files:
+            train_file_count = config.max_train_files
+        else:
+            # Otherwise, use a large, reasonable default or a quick estimate
+            # This avoids a slow startup count on millions of files
+            logger.warning("`max_train_files` not set. Performing a full file count to determine steps_per_epoch. This might be slow.")
+            logger.warning("For faster startup, please provide `--steps-per-epoch` or `--max-train-files`.")
+            train_file_count = count_available_files(
+                config.train_image_dirs, config.image_extensions, None
+            )
+
         total_patches = train_file_count * config.patches_per_image
         steps_per_epoch = max(100, total_patches // config.batch_size)
 
@@ -1750,6 +1736,12 @@ def parse_arguments() -> argparse.Namespace:
 
     # Other parameters
     parser.add_argument(
+        '--steps-per-epoch',
+        type=int,
+        default=None,
+        help='Manual override for steps per epoch (avoids slow file counting)'
+    )
+    parser.add_argument(
         '--patches-per-image',
         type=int,
         default=4,
@@ -1806,6 +1798,7 @@ def main():
         batch_size=args.batch_size,
         epochs=args.epochs,
         patches_per_image=args.patches_per_image,
+        steps_per_epoch=args.steps_per_epoch,
 
         # File limits for manageable training
         max_train_files=args.max_train_files,
