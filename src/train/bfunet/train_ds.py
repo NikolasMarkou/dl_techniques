@@ -359,7 +359,6 @@ def create_dataset_for_deep_supervision(
 ) -> tf.data.Dataset:
     """
     Create a dataset for deep supervision training with multiple target outputs.
-    Fixed for better scalability using tf.data.Dataset.list_files.
 
     Args:
         directories: List of directories containing images
@@ -375,38 +374,46 @@ def create_dataset_for_deep_supervision(
     logger.info(f"Creating {'training' if is_training else 'validation'} dataset for deep supervision")
     logger.info(f"Number of outputs: {num_outputs}")
 
-    # Create file patterns for tf.data.Dataset.list_files (more scalable)
-    file_patterns = []
+    # Build a unified file list from all directories (original working approach)
+    all_file_paths = []
+    extensions_set = {ext.lower() for ext in config.image_extensions}
+    extensions_set.update({ext.upper() for ext in config.image_extensions})
+
     for directory in directories:
         dir_path = Path(directory)
         if not dir_path.is_dir():
             logger.warning(f"Directory not found, skipping: {directory}")
             continue
 
-        # Add patterns for all supported extensions
-        for ext in config.image_extensions:
-            pattern = str(dir_path / "**" / f"*{ext}")
-            file_patterns.append(pattern)
-            # Also add uppercase variants
-            pattern_upper = str(dir_path / "**" / f"*{ext.upper()}")
-            file_patterns.append(pattern_upper)
+        # Recursively find all image files
+        try:
+            for file_path in dir_path.rglob("*"):
+                if file_path.is_file() and file_path.suffix in extensions_set:
+                    all_file_paths.append(str(file_path))
+        except Exception as e:
+            logger.warning(f"Error scanning directory {directory}: {e}")
+            continue
 
-    if not file_patterns:
-        raise ValueError(f"No valid directories found: {directories}")
+    if not all_file_paths:
+        raise ValueError(f"No image files found in directories: {directories}")
 
-    # Create dataset from file patterns (more memory efficient than loading all paths)
-    dataset = tf.data.Dataset.list_files(file_patterns, shuffle=is_training)
+    logger.info(f"Found a total of {len(all_file_paths)} files.")
 
-    # Apply file limits if specified (take after shuffle for better randomness)
+    # Apply file limits if specified
     limit = config.max_train_files if is_training else config.max_val_files
-    if limit:
+    if limit and limit < len(all_file_paths):
         logger.info(f"Limiting to {limit} files as per configuration.")
-        dataset = dataset.take(limit)
+        # Shuffle before limiting to get a random subset
+        np.random.shuffle(all_file_paths)
+        all_file_paths = all_file_paths[:limit]
+
+    # Create dataset from the unified list of paths
+    dataset = tf.data.Dataset.from_tensor_slices(all_file_paths)
 
     # Apply dataset transformations
     if is_training:
         dataset = dataset.shuffle(
-            buffer_size=min(config.dataset_shuffle_buffer, 10000),
+            buffer_size=min(config.dataset_shuffle_buffer, len(all_file_paths)),
             reshuffle_each_iteration=True
         )
         dataset = dataset.repeat()  # Repeat indefinitely for training
