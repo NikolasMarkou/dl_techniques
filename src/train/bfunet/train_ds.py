@@ -1635,17 +1635,27 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    # Data paths (Fixed: No longer hardcoded)
+    # Data paths (with defaults from original script)
     parser.add_argument(
         '--train-dirs',
         nargs='+',  # Allows multiple directories
-        required=True,
+        default=[
+            '/media/arxwn/data0_4tb/datasets/Megadepth',
+            '/media/arxwn/data0_4tb/datasets/div2k/train',
+            '/media/arxwn/data0_4tb/datasets/WFLW/images',
+            '/media/arxwn/data0_4tb/datasets/bdd_data/train',
+            '/media/arxwn/data0_4tb/datasets/COCO/train2017',
+            '/media/arxwn/data0_4tb/datasets/VGG-Face2/data/train'
+        ],
         help='List of directories containing training images.'
     )
     parser.add_argument(
         '--val-dirs',
         nargs='+',
-        required=True,
+        default=[
+            '/media/arxwn/data0_4tb/datasets/div2k/validation',
+            '/media/arxwn/data0_4tb/datasets/COCO/val2017',
+        ],
         help='List of directories containing validation images.'
     )
 
