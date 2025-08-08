@@ -340,6 +340,15 @@ def create_bfunet_denoiser(
         # =====================================================================
 
         if enable_deep_supervision and level > 0:  # Skip final level (it will be the main output)
+            x = BiasFreeConv2D(
+                filters=initial_filters,
+                kernel_size=1,
+                activation=activation,
+                kernel_initializer=kernel_initializer,
+                kernel_regularizer=kernel_regularizer,
+                use_batch_norm=False,
+                name=f'supervision_intermediate_level_{level}'
+            )(x)
             # Create supervision output at current scale
             supervision_output = BiasFreeConv2D(
                 filters=output_channels,

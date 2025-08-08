@@ -102,7 +102,7 @@ class TrainingConfig:
 
     # === Training Configuration ===
     batch_size: int = 32
-    epochs: int = 100
+    epochs: int = 200
     patches_per_image: int = 16  # Number of patches to extract per image
     augment_data: bool = True  # Apply data augmentation
     normalize_input: bool = True  # Normalize input to [0, 1]
@@ -119,7 +119,7 @@ class TrainingConfig:
     # === Monitoring Configuration ===
     monitor_every_n_epochs: int = 5  # Save intermediate results every N epochs
     save_best_only: bool = True  # Only save model if validation loss improves
-    early_stopping_patience: int = 15  # Early stopping patience
+    early_stopping_patience: int = 50  # Early stopping patience
     validation_steps: Optional[int] = 100  # Number of validation steps
 
     # === Image Synthesis Configuration ===
