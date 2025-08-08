@@ -360,27 +360,49 @@ def create_dataset_for_deep_supervision(
     """
     Create a dataset for deep supervision training.
     Uses tf.data.Dataset.list_files for memory efficiency and scalability.
+    Includes pre-validation of file patterns to prevent TensorFlow errors.
     """
     logger.info(f"Creating {'training' if is_training else 'validation'} dataset for deep supervision")
     logger.info(f"Number of outputs: {num_outputs}")
 
-    # Create file patterns for all directories and extensions
-    file_patterns = []
+    # Use a set to avoid duplicate patterns
+    valid_file_patterns = set()
+
     for directory in directories:
         dir_path = Path(directory)
         if not dir_path.is_dir():
             logger.warning(f"Directory not found, skipping: {directory}")
             continue
+
+        found_in_dir = False
         for ext in config.image_extensions:
-            # Add patterns for both lowercase and uppercase extensions for robustness
-            file_patterns.append(str(dir_path / "**" / f"*{ext.lower()}"))
-            file_patterns.append(str(dir_path / "**" / f"*{ext.upper()}"))
+            # Check for lowercase
+            pattern_lower = str(dir_path / "**" / f"*{ext.lower()}")
+            # Use glob to check if at least one file exists for this pattern
+            if next(dir_path.rglob(f"*{ext.lower()}"), None):
+                valid_file_patterns.add(pattern_lower)
+                found_in_dir = True
 
-    if not file_patterns:
-        raise ValueError(f"No valid directories or file patterns found from: {directories}")
+            # Check for uppercase
+            pattern_upper = str(dir_path / "**" / f"*{ext.upper()}")
+            if next(dir_path.rglob(f"*{ext.upper()}"), None):
+                valid_file_patterns.add(pattern_upper)
+                found_in_dir = True
 
-    # Use tf.data.Dataset.list_files for scalability. It does not load all paths into memory.
-    dataset = tf.data.Dataset.list_files(file_patterns, shuffle=is_training)
+        if not found_in_dir:
+            logger.warning(f"No images with extensions {config.image_extensions} found in directory: {directory}")
+
+    if not valid_file_patterns:
+        # This will now give a much clearer error message
+        raise ValueError(f"No image files found across all specified directories: {directories}")
+
+    logger.info(f"Using {len(valid_file_patterns)} valid file patterns for dataset creation.")
+
+    # Convert set to list for tf.data.Dataset.list_files
+    file_patterns_list = list(valid_file_patterns)
+
+    # Use tf.data.Dataset.list_files for scalability. Pre-validation ensures success.
+    dataset = tf.data.Dataset.list_files(file_patterns_list, shuffle=is_training)
 
     # Apply file limits if specified
     limit = config.max_train_files if is_training else config.max_val_files
