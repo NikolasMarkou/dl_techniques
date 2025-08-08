@@ -358,71 +358,48 @@ def create_dataset_for_deep_supervision(
     is_training: bool = True
 ) -> tf.data.Dataset:
     """
-    Create a dataset for deep supervision training with multiple target outputs.
-
-    Args:
-        directories: List of directories containing images
-        config: Training configuration
-        num_outputs: Number of model outputs (for deep supervision)
-        is_training: Whether this is a training dataset
-
-    Returns:
-        Configured tf.data.Dataset that returns (inputs, targets) where:
-        - inputs: noisy patches
-        - targets: list of clean patches (one for each output)
+    Create a dataset for deep supervision training.
+    Uses tf.data.Dataset.list_files for memory efficiency and scalability.
     """
     logger.info(f"Creating {'training' if is_training else 'validation'} dataset for deep supervision")
     logger.info(f"Number of outputs: {num_outputs}")
 
-    # Build a unified file list from all directories (original working approach)
-    all_file_paths = []
-    extensions_set = {ext.lower() for ext in config.image_extensions}
-    extensions_set.update({ext.upper() for ext in config.image_extensions})
-
+    # Create file patterns for all directories and extensions
+    file_patterns = []
     for directory in directories:
         dir_path = Path(directory)
         if not dir_path.is_dir():
             logger.warning(f"Directory not found, skipping: {directory}")
             continue
+        for ext in config.image_extensions:
+            # Add patterns for both lowercase and uppercase extensions for robustness
+            file_patterns.append(str(dir_path / "**" / f"*{ext.lower()}"))
+            file_patterns.append(str(dir_path / "**" / f"*{ext.upper()}"))
 
-        # Recursively find all image files
-        try:
-            for file_path in dir_path.rglob("*"):
-                if file_path.is_file() and file_path.suffix in extensions_set:
-                    all_file_paths.append(str(file_path))
-        except Exception as e:
-            logger.warning(f"Error scanning directory {directory}: {e}")
-            continue
+    if not file_patterns:
+        raise ValueError(f"No valid directories or file patterns found from: {directories}")
 
-    if not all_file_paths:
-        raise ValueError(f"No image files found in directories: {directories}")
-
-    logger.info(f"Found a total of {len(all_file_paths)} files.")
+    # Use tf.data.Dataset.list_files for scalability. It does not load all paths into memory.
+    dataset = tf.data.Dataset.list_files(file_patterns, shuffle=is_training)
 
     # Apply file limits if specified
     limit = config.max_train_files if is_training else config.max_val_files
-    if limit and limit < len(all_file_paths):
+    if limit:
         logger.info(f"Limiting to {limit} files as per configuration.")
-        # Shuffle before limiting to get a random subset
-        np.random.shuffle(all_file_paths)
-        all_file_paths = all_file_paths[:limit]
-
-    # Create dataset from the unified list of paths
-    dataset = tf.data.Dataset.from_tensor_slices(all_file_paths)
+        dataset = dataset.take(limit)
 
     # Apply dataset transformations
     if is_training:
+        # Shuffle the file paths *before* processing for better randomness
         dataset = dataset.shuffle(
-            buffer_size=min(config.dataset_shuffle_buffer, len(all_file_paths)),
+            buffer_size=config.dataset_shuffle_buffer,
             reshuffle_each_iteration=True
         )
-        dataset = dataset.repeat()  # Repeat indefinitely for training
+        dataset = dataset.repeat()
 
-    # For validation, repeat to avoid OutOfRangeError
     if not is_training:
         dataset = dataset.repeat()
 
-    # Duplicate paths for multiple patches per image if training
     if is_training and config.patches_per_image > 1:
         dataset = dataset.flat_map(
             lambda path: tf.data.Dataset.from_tensors(path).repeat(config.patches_per_image)
@@ -474,7 +451,6 @@ def create_dataset_for_deep_supervision(
     dataset = dataset.map(ensure_shapes, num_parallel_calls=tf.data.AUTOTUNE)
 
     # Batching and prefetching
-    dataset = dataset.prefetch(config.batch_size * 2)
     dataset = dataset.batch(config.batch_size, drop_remainder=is_training)
     dataset = dataset.prefetch(tf.data.AUTOTUNE)
 
@@ -704,14 +680,20 @@ class DeepSupervisionModel(keras.Model):
         return metrics
 
     def reset_metrics(self):
-        """Reset all metrics."""
+        """Reset all metrics, including the custom loss tracker and compiled metrics."""
         # Reset custom loss tracker
         if hasattr(self, '_loss_tracker'):
             self._loss_tracker.reset_state()
 
-        # Reset compiled metrics
+        # Reset compiled metrics by iterating through them individually.
+        # This is the robust way to handle it, especially with custom train_steps.
         if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
-            self.compiled_metrics.reset_state()
+            # The 'metrics' attribute holds the list of actual metric objects.
+            # We add a fallback to '_metrics' for compatibility across Keras versions.
+            metrics_list = getattr(self.compiled_metrics, 'metrics', getattr(self.compiled_metrics, '_metrics', []))
+            for metric in metrics_list:
+                if hasattr(metric, 'reset_state'):
+                    metric.reset_state()
 
     def get_config(self):
         """Return the configuration of the model."""
