@@ -55,7 +55,7 @@ from pathlib import Path
 from datetime import datetime
 import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
-from typing import Tuple, List, Optional, Dict, Any, Union, Callable
+from typing import Tuple, List, Optional, Dict, Any, Union
 
 # Local imports
 from dl_techniques.utils.logger import logger
@@ -201,7 +201,7 @@ class TrainingConfig:
     validation_steps: Optional[int] = 100
 
     # === Image Synthesis Configuration ===
-    enable_synthesis: bool = True
+    enable_synthesis: bool = False
     synthesis_samples: int = 10
     synthesis_steps: int = 200
     synthesis_initial_step_size: float = 0.05
@@ -879,12 +879,58 @@ class MetricsVisualizationCallback(keras.callbacks.Callback):
         self.visualization_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize storage for metrics tracking
+        # Handle both single-output and multi-output model metric naming
         self.train_metrics: Dict[str, List[float]] = {
-            'loss': [], 'mae': [], 'rmse': [], 'primary_psnr': []
+            'loss': [],
+            'mae': [],
+            'rmse': [],
+            'primary_psnr': [],
+            # Multi-output variants
+            'final_output_mae': [],
+            'final_output_rmse': [],
+            'final_output_primary_psnr': []
         }
         self.val_metrics: Dict[str, List[float]] = {
-            'val_loss': [], 'val_mae': [], 'val_rmse': [], 'val_primary_psnr': []
+            'val_loss': [],
+            'val_mae': [],
+            'val_rmse': [],
+            'val_primary_psnr': [],
+            # Multi-output variants
+            'val_final_output_mae': [],
+            'val_final_output_rmse': [],
+            'val_final_output_primary_psnr': []
         }
+
+        # Track all available metrics dynamically
+        self.available_metrics: set = set()
+
+        logger.info(f"Metrics visualization callback initialized. Expected metrics:")
+        logger.info(f"  Training: {list(self.train_metrics.keys())}")
+        logger.info(f"  Validation: {list(self.val_metrics.keys())}")
+
+    def on_train_begin(self, logs: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Log available metrics at the start of training for debugging.
+
+        Args:
+            logs: Training logs dictionary
+        """
+        if logs:
+            self.available_metrics.update(logs.keys())
+            logger.info(f"Available metrics at training start: {sorted(logs.keys())}")
+
+    def on_epoch_begin(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Track available metrics at epoch start.
+
+        Args:
+            epoch: Current epoch number
+            logs: Training logs dictionary
+        """
+        if logs:
+            self.available_metrics.update(logs.keys())
+            if epoch == 0:  # Log once at first epoch
+                logger.info(f"Available metrics at epoch begin: {sorted(logs.keys())}")
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
         """
@@ -893,23 +939,77 @@ class MetricsVisualizationCallback(keras.callbacks.Callback):
         Args:
             epoch: Current epoch number (0-indexed)
             logs: Dictionary of metric values from training
+
+        Note:
+            Robust metric collection that handles both single-output and multi-output
+            model naming conventions. Collects all available metrics dynamically.
         """
         if logs is None:
             logs = {}
 
-        # Store training metrics
-        for key in self.train_metrics.keys():
-            if key in logs:
-                self.train_metrics[key].append(float(logs[key]))
+        # Update available metrics set
+        self.available_metrics.update(logs.keys())
 
-        # Store validation metrics
-        for key in self.val_metrics.keys():
-            if key in logs:
-                self.val_metrics[key].append(float(logs[key]))
+        # Store all metrics that match our expected patterns
+        all_expected_metrics = list(self.train_metrics.keys()) + list(self.val_metrics.keys())
+
+        for metric_name, metric_value in logs.items():
+            try:
+                converted_value = float(metric_value)
+
+                # Store training metrics
+                if metric_name in self.train_metrics:
+                    self.train_metrics[metric_name].append(converted_value)
+
+                # Store validation metrics
+                elif metric_name in self.val_metrics:
+                    self.val_metrics[metric_name].append(converted_value)
+
+                # Handle validation metrics that might not have 'val_' prefix in our keys
+                # but do in the actual logs (e.g., val_final_output_mae)
+                elif metric_name.startswith('val_'):
+                    # Extract base name (e.g., 'val_final_output_mae' -> 'final_output_mae')
+                    base_name = metric_name[4:]  # Remove 'val_' prefix
+                    expected_key = f'val_{base_name}'
+                    if expected_key in self.val_metrics:
+                        self.val_metrics[expected_key].append(converted_value)
+
+            except (ValueError, TypeError) as e:
+                logger.debug(f"Failed to convert metric {metric_name}={metric_value}: {e}")
+
+        # Log metrics collection status for debugging
+        if (epoch + 1) % 5 == 0:  # Log every 5 epochs
+            collected_train = [k for k, v in self.train_metrics.items() if v]
+            collected_val = [k for k, v in self.val_metrics.items() if v]
+            logger.debug(f"Epoch {epoch + 1}: Collected train metrics: {collected_train}")
+            logger.debug(f"Epoch {epoch + 1}: Collected val metrics: {collected_val}")
 
         # Create visualization plots every 5 epochs or at start
         if (epoch + 1) % 5 == 0 or epoch == 0:
             self._create_metrics_plots(epoch + 1)
+
+    def _get_metric_data(self, metric_type: str, metrics_dict: Dict[str, List[float]]) -> Tuple[List[float], str]:
+        """
+        Get metric data with fallback for different naming conventions.
+
+        Args:
+            metric_type: Base metric type ('mae', 'rmse', 'primary_psnr')
+            metrics_dict: Dictionary of metrics to search in
+
+        Returns:
+            Tuple of (metric_data_list, actual_metric_name)
+        """
+        # For multi-output models, try prefixed version first
+        prefixed_name = f'final_output_{metric_type}'
+        if prefixed_name in metrics_dict and metrics_dict[prefixed_name]:
+            return metrics_dict[prefixed_name], prefixed_name
+
+        # Fallback to base name
+        if metric_type in metrics_dict and metrics_dict[metric_type]:
+            return metrics_dict[metric_type], metric_type
+
+        # Return empty list if not found
+        return [], f"{metric_type} (not found)"
 
     def _create_metrics_plots(self, epoch: int) -> None:
         """
@@ -920,11 +1020,11 @@ class MetricsVisualizationCallback(keras.callbacks.Callback):
 
         Note:
             Robust plotting that handles missing or incomplete metrics data.
-            Only plots metrics that have sufficient data points.
+            Automatically detects multi-output vs single-output metric naming.
         """
         try:
-            # Check if we have any training data to plot
-            if not self.train_metrics['loss']:
+            # Check if we have any training loss data to plot
+            if not self.train_metrics.get('loss', []):
                 logger.debug("No training loss data available for plotting")
                 return
 
@@ -935,23 +1035,23 @@ class MetricsVisualizationCallback(keras.callbacks.Callback):
             fig, axes = plt.subplots(2, 2, figsize=(15, 12))
             fig.suptitle(f'Training and Validation Metrics - Epoch {epoch}', fontsize=16)
 
-            # Helper function to safely plot metrics
-            def safe_plot_metric(ax, train_key, val_key, title, ylabel, train_label, val_label):
-                """Safely plot training and validation metrics, handling missing data."""
+            # Helper function to safely plot metrics with smart name detection
+            def safe_plot_metric(ax, train_type, val_type, title, ylabel, train_label, val_label):
+                """Safely plot training and validation metrics with automatic name detection."""
                 plots_added = False
 
-                # Plot training metric if available and same length as epochs
-                if (train_key in self.train_metrics and
-                    len(self.train_metrics[train_key]) == num_epochs):
-                    ax.plot(epochs_range, self.train_metrics[train_key], 'b-',
-                           label=train_label, linewidth=2)
+                # Get training metric data
+                train_data, train_name = self._get_metric_data(train_type, self.train_metrics)
+                if train_data and len(train_data) == num_epochs:
+                    ax.plot(epochs_range, train_data, 'b-',
+                           label=f'{train_label} ({train_name})', linewidth=2)
                     plots_added = True
 
-                # Plot validation metric if available and same length as epochs
-                if (val_key in self.val_metrics and
-                    len(self.val_metrics[val_key]) == num_epochs):
-                    ax.plot(epochs_range, self.val_metrics[val_key], 'r-',
-                           label=val_label, linewidth=2)
+                # Get validation metric data
+                val_data, val_name = self._get_metric_data(val_type, self.val_metrics)
+                if val_data and len(val_data) == num_epochs:
+                    ax.plot(epochs_range, val_data, 'r-',
+                           label=f'{val_label} ({val_name})', linewidth=2)
                     plots_added = True
 
                 ax.set_title(title)
@@ -963,13 +1063,24 @@ class MetricsVisualizationCallback(keras.callbacks.Callback):
 
                 return plots_added
 
-            # Plot each metric safely
-            safe_plot_metric(
-                axes[0, 0], 'loss', 'val_loss',
-                'Mean Squared Error (MSE)', 'MSE',
-                'Training MSE', 'Validation MSE'
-            )
+            # Plot MSE Loss (handled separately since it's always 'loss')
+            axes[0, 0].set_title('Mean Squared Error (MSE)')
+            axes[0, 0].set_xlabel('Epoch')
+            axes[0, 0].set_ylabel('MSE')
 
+            if self.train_metrics['loss'] and len(self.train_metrics['loss']) == num_epochs:
+                axes[0, 0].plot(epochs_range, self.train_metrics['loss'], 'b-',
+                               label='Training MSE', linewidth=2)
+
+            if (self.val_metrics.get('val_loss', []) and
+                len(self.val_metrics['val_loss']) == num_epochs):
+                axes[0, 0].plot(epochs_range, self.val_metrics['val_loss'], 'r-',
+                               label='Validation MSE', linewidth=2)
+
+            axes[0, 0].legend()
+            axes[0, 0].grid(True, alpha=0.3)
+
+            # Plot other metrics with smart detection
             safe_plot_metric(
                 axes[0, 1], 'mae', 'val_mae',
                 'Mean Absolute Error (MAE)', 'MAE',
@@ -995,15 +1106,20 @@ class MetricsVisualizationCallback(keras.callbacks.Callback):
             plt.clf()
             gc.collect()
 
-            # Save metrics data as JSON for post-processing
+            # Save comprehensive metrics data as JSON
+            # Include diagnostic information about available metrics
+            available_train_metrics = {k: len(v) for k, v in self.train_metrics.items() if v}
+            available_val_metrics = {k: len(v) for k, v in self.val_metrics.items() if v}
+
             metrics_data = {
                 'epoch': epoch,
                 'train_metrics': self.train_metrics,
                 'val_metrics': self.val_metrics,
-                'data_lengths': {
-                    'train_loss': len(self.train_metrics.get('loss', [])),
-                    'val_loss': len(self.val_metrics.get('val_loss', [])),
-                    'expected_epochs': num_epochs
+                'diagnostics': {
+                    'expected_epochs': num_epochs,
+                    'available_train_metrics': available_train_metrics,
+                    'available_val_metrics': available_val_metrics,
+                    'all_available_metrics': sorted(list(self.available_metrics))
                 }
             }
             metrics_file = self.visualization_dir / "latest_metrics.json"
@@ -1011,8 +1127,13 @@ class MetricsVisualizationCallback(keras.callbacks.Callback):
                 json.dump(metrics_data, f, indent=2,
                          default=lambda x: float(x) if hasattr(x, 'item') else x)
 
+            logger.info(f"Metrics plot saved with {len(available_train_metrics)} training and {len(available_val_metrics)} validation metrics")
+
         except Exception as e:
             logger.warning(f"Failed to create metrics plots: {e}")
+            logger.debug(f"Available metrics: {sorted(list(self.available_metrics))}")
+            logger.debug(f"Train metrics with data: {[k for k, v in self.train_metrics.items() if v]}")
+            logger.debug(f"Val metrics with data: {[k for k, v in self.val_metrics.items() if v]}")
 
 
 class StreamingResultMonitor(keras.callbacks.Callback):
@@ -1506,9 +1627,6 @@ def train_bfunet_denoiser(config: TrainingConfig) -> keras.Model:
         pipeline automatically creates matching ground truth tensors through
         bilinear interpolation to ensure perfect structural alignment.
     """
-    logger.info("=" * 70)
-    logger.info("=== STARTING BIAS-FREE U-NET DENOISER TRAINING PIPELINE ===")
-    logger.info("=" * 70)
     logger.info(f"Experiment: {config.experiment_name}")
     logger.info(f"Deep Supervision: {'ENABLED' if config.enable_deep_supervision else 'DISABLED'}")
     if config.enable_deep_supervision:
@@ -1674,10 +1792,6 @@ def train_bfunet_denoiser(config: TrainingConfig) -> keras.Model:
     # === 8. Callback Setup and Training Execution ===
     callbacks = create_callbacks(config, config.val_image_dirs, num_outputs)
 
-    logger.info("=" * 70)
-    logger.info(f"=== STARTING TRAINING FOR {config.epochs} EPOCHS ===")
-    logger.info("=" * 70)
-
     start_time = time.time()
     validation_steps = config.validation_steps or max(50, steps_per_epoch // 20)
 
@@ -1746,10 +1860,6 @@ def train_bfunet_denoiser(config: TrainingConfig) -> keras.Model:
 
     # Final cleanup
     gc.collect()
-
-    logger.info("=" * 70)
-    logger.info("=== TRAINING PIPELINE COMPLETED SUCCESSFULLY ===")
-    logger.info("=" * 70)
 
     return model
 
@@ -1850,7 +1960,7 @@ def parse_arguments() -> argparse.Namespace:
         help='Disable image synthesis during monitoring'
     )
     parser.add_argument(
-        '--synthesis-samples', type=int, default=10,
+        '--synthesis-samples', type=int, default=4,
         help='Number of images to synthesize'
     )
     parser.add_argument(
