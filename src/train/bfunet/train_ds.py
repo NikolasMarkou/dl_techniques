@@ -560,74 +560,51 @@ class DeepSupervisionModel(keras.Model):
         x, y = data
 
         with tf.GradientTape() as tape:
-            # Forward pass
+            # ... (no changes to the forward pass and loss calculation) ...
             predictions = self(x, training=True)
-
-            # Handle single vs multiple outputs
             if not isinstance(predictions, list):
                 predictions = [predictions]
-
-            # Handle stacked targets format
-            # y has shape [batch_size, num_outputs, height, width, channels]
-            # We need to convert this to a list of [batch_size, height, width, channels] tensors
             if len(y.shape) == 5 and y.shape[1] == self.num_outputs:
-                # Unstack along the num_outputs dimension (axis=1)
                 y = tf.unstack(y, axis=1)
             elif not isinstance(y, list):
-                # Single target, replicate for all outputs
                 y = [y for _ in range(len(predictions))]
 
-            # Compute weighted loss for each output
             total_loss = 0.0
-
-            # Get deep supervision weights
             ds_weights = self.compute_deep_supervision_weights()
 
             for i, (pred, target) in enumerate(zip(predictions, y)):
-                # Resize target to match prediction's spatial dimensions
                 pred_shape = tf.shape(pred)
                 target_height, target_width = pred_shape[1], pred_shape[2]
-
-                # Resize target to match prediction size
-                resized_target = tf.image.resize(
-                    target,
-                    [target_height, target_width],
-                    method='bilinear'
-                )
-
-                # Compute MSE loss for this output
+                resized_target = tf.image.resize(target, [target_height, target_width], method='bilinear')
                 mse_loss = tf.reduce_mean(tf.square(pred - resized_target))
-
-                # Apply deep supervision weight
                 weight = ds_weights[i]
                 total_loss += weight * mse_loss
 
-            # Add regularization losses (fixed for Keras 3.x)
             regularization_losses = self.base_model.losses
             if regularization_losses:
                 total_loss += tf.add_n(regularization_losses)
 
-        # Compute gradients and update weights
         gradients = tape.gradient(total_loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
 
-        # Update metrics (using primary output - index 0)
         primary_pred = predictions[0]
         primary_target = y[0]
-
-        # Update loss tracker with total weighted loss
         self._loss_tracker.update_state(total_loss)
 
-        # Simplified metric updates using compiled_metrics
         if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
             self.compiled_metrics.update_state(primary_target, primary_pred)
 
+        # --- START MINIMAL FIX ---
         # Create results dictionary - include all metrics
         results = {'loss': self._loss_tracker.result()}
 
-        # Add compiled metrics results
+        # Manually gather results from each metric
         if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
-            results.update(self.compiled_metrics.result())
+            metrics_list = getattr(self.compiled_metrics, 'metrics', getattr(self.compiled_metrics, '_metrics', []))
+            for metric in metrics_list:
+                if hasattr(metric, 'name') and hasattr(metric, 'result'):
+                    results[metric.name] = metric.result()
+        # --- END MINIMAL FIX ---
 
         # Add deep supervision info to logs
         results['ds_weight_primary'] = ds_weights[0]
@@ -640,43 +617,37 @@ class DeepSupervisionModel(keras.Model):
         """Custom validation step using primary output only."""
         x, y = data
 
-        # Forward pass
         predictions = self(x, training=False)
-
-        # Handle single vs multiple outputs - use primary output for validation
         if isinstance(predictions, list):
             primary_pred = predictions[0]
         else:
             primary_pred = predictions
 
-        # Handle stacked targets format - get primary target
-        # y has shape [batch_size, num_outputs, height, width, channels]
         if len(y.shape) == 5 and y.shape[1] == self.num_outputs:
-            # Get the first target (primary output target) along axis=1
-            primary_target = y[:, 0, :, :, :]  # [batch_size, height, width, channels]
+            primary_target = y[:, 0, :, :, :]
         elif isinstance(y, list):
             primary_target = y[0]
         else:
             primary_target = y
 
-        # Compute validation loss (MSE on primary output only)
         val_loss = tf.reduce_mean(tf.square(primary_pred - primary_target))
-
-        # Update loss tracker with validation loss
         self._loss_tracker.update_state(val_loss)
 
-        # Update compiled metrics
         if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
             self.compiled_metrics.update_state(primary_target, primary_pred)
 
+        # --- START MINIMAL FIX ---
         # Create results dictionary
         results = {'loss': self._loss_tracker.result()}
 
-        # Add compiled metrics with 'val_' prefix for validation
+        # Manually gather results and add 'val_' prefix
         if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
-            for metric_name, metric_result in self.compiled_metrics.result().items():
-                val_metric_name = f"val_{metric_name}" if not metric_name.startswith('val_') else metric_name
-                results[val_metric_name] = metric_result
+            metrics_list = getattr(self.compiled_metrics, 'metrics', getattr(self.compiled_metrics, '_metrics', []))
+            for metric in metrics_list:
+                if hasattr(metric, 'name') and hasattr(metric, 'result'):
+                    val_metric_name = f"val_{metric.name}" if not metric.name.startswith('val_') else metric.name
+                    results[val_metric_name] = metric.result()
+        # --- END MINIMAL FIX ---
 
         return results
 
