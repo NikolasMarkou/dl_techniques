@@ -42,9 +42,9 @@ import keras
 import argparse
 import numpy as np
 import tensorflow as tf
+import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime
-import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any
 
@@ -179,10 +179,6 @@ def visualize_synthesis_process(
         save_path: Path to save the visualization
         epoch: Current training epoch
     """
-    import gc
-    import numpy as np
-    import matplotlib.pyplot as plt
-
     try:
         num_samples = min(4, final_samples.shape[0])
         num_steps = len(intermediate_steps)
@@ -363,6 +359,7 @@ def create_dataset_for_deep_supervision(
 ) -> tf.data.Dataset:
     """
     Create a dataset for deep supervision training with multiple target outputs.
+    Fixed for better scalability using tf.data.Dataset.list_files.
 
     Args:
         directories: List of directories containing images
@@ -378,46 +375,38 @@ def create_dataset_for_deep_supervision(
     logger.info(f"Creating {'training' if is_training else 'validation'} dataset for deep supervision")
     logger.info(f"Number of outputs: {num_outputs}")
 
-    # Build a unified file list from all directories
-    all_file_paths = []
-    extensions_set = {ext.lower() for ext in config.image_extensions}
-    extensions_set.update({ext.upper() for ext in config.image_extensions})
-
+    # Create file patterns for tf.data.Dataset.list_files (more scalable)
+    file_patterns = []
     for directory in directories:
         dir_path = Path(directory)
         if not dir_path.is_dir():
             logger.warning(f"Directory not found, skipping: {directory}")
             continue
 
-        # Recursively find all image files
-        try:
-            for file_path in dir_path.rglob("*"):
-                if file_path.is_file() and file_path.suffix in extensions_set:
-                    all_file_paths.append(str(file_path))
-        except Exception as e:
-            logger.warning(f"Error scanning directory {directory}: {e}")
-            continue
+        # Add patterns for all supported extensions
+        for ext in config.image_extensions:
+            pattern = str(dir_path / "**" / f"*{ext}")
+            file_patterns.append(pattern)
+            # Also add uppercase variants
+            pattern_upper = str(dir_path / "**" / f"*{ext.upper()}")
+            file_patterns.append(pattern_upper)
 
-    if not all_file_paths:
-        raise ValueError(f"No image files found in directories: {directories}")
+    if not file_patterns:
+        raise ValueError(f"No valid directories found: {directories}")
 
-    logger.info(f"Found a total of {len(all_file_paths)} files.")
+    # Create dataset from file patterns (more memory efficient than loading all paths)
+    dataset = tf.data.Dataset.list_files(file_patterns, shuffle=is_training)
 
-    # Apply file limits if specified
+    # Apply file limits if specified (take after shuffle for better randomness)
     limit = config.max_train_files if is_training else config.max_val_files
-    if limit and limit < len(all_file_paths):
+    if limit:
         logger.info(f"Limiting to {limit} files as per configuration.")
-        # Shuffle before limiting to get a random subset
-        np.random.shuffle(all_file_paths)
-        all_file_paths = all_file_paths[:limit]
-
-    # Create dataset from the unified list of paths
-    dataset = tf.data.Dataset.from_tensor_slices(all_file_paths)
+        dataset = dataset.take(limit)
 
     # Apply dataset transformations
     if is_training:
         dataset = dataset.shuffle(
-            buffer_size=min(config.dataset_shuffle_buffer, len(all_file_paths)),
+            buffer_size=min(config.dataset_shuffle_buffer, 10000),
             reshuffle_each_iteration=True
         )
         dataset = dataset.repeat()  # Repeat indefinitely for training
@@ -458,10 +447,10 @@ def create_dataset_for_deep_supervision(
         num_parallel_calls=tf.data.AUTOTUNE
     )
 
-    # For deep supervision: create multiple target outputs as a stacked tensor
+    # For deep supervision: create multiple target outputs using tf.tile (more memory efficient)
     def create_multiple_targets(noisy, clean):
-        # Stack the clean target num_outputs times (all targets are the same clean patch)
-        targets = tf.stack([clean for _ in range(num_outputs)], axis=0)
+        # Use tf.tile instead of stacking individual targets for better memory efficiency
+        targets = tf.tile(tf.expand_dims(clean, 0), [num_outputs, 1, 1, 1])
         return noisy, targets
 
     dataset = dataset.map(create_multiple_targets, num_parallel_calls=tf.data.AUTOTUNE)
@@ -469,8 +458,6 @@ def create_dataset_for_deep_supervision(
     # Ensure final shape consistency
     def ensure_shapes(noisy, targets_stacked):
         noisy = tf.ensure_shape(noisy, [config.patch_size, config.patch_size, config.channels])
-        # targets_stacked has shape [num_outputs, patch_size, patch_size, channels] for each sample
-        # After batching, it will be [batch_size, num_outputs, patch_size, patch_size, channels]
         targets_stacked = tf.ensure_shape(
             targets_stacked,
             [num_outputs, config.patch_size, config.patch_size, config.channels]
@@ -627,40 +614,16 @@ class DeepSupervisionModel(keras.Model):
         # Update loss tracker with total weighted loss
         self._loss_tracker.update_state(total_loss)
 
-        # Update compiled metrics manually - this ensures MAE, RMSE, PSNR are calculated
+        # Simplified metric updates using compiled_metrics
         if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
-            # Update each metric individually for better error handling
-            metrics_list = getattr(self.compiled_metrics, 'metrics', getattr(self.compiled_metrics, '_metrics', []))
-            for metric in metrics_list:
-                try:
-                    if hasattr(metric, 'update_state'):
-                        if 'psnr' in metric.name.lower():
-                            # PSNR expects (y_true, y_pred) format and values in [0,1]
-                            metric.update_state(primary_target, primary_pred)
-                        elif metric.name in ['mae', 'mean_absolute_error']:
-                            # MAE metric
-                            metric.update_state(primary_target, primary_pred)
-                        elif metric.name in ['rmse', 'root_mean_squared_error']:
-                            # RMSE metric
-                            metric.update_state(primary_target, primary_pred)
-                        else:
-                            # Other metrics
-                            metric.update_state(primary_target, primary_pred)
-                except Exception as e:
-                    logger.warning(f"Failed to update metric {getattr(metric, 'name', 'unknown')}: {e}")
+            self.compiled_metrics.update_state(primary_target, primary_pred)
 
         # Create results dictionary - include all metrics
-        results = {}
+        results = {'loss': self._loss_tracker.result()}
 
-        # Add loss from our custom tracker
-        results['loss'] = self._loss_tracker.result()
-
-        # Add compiled metrics
+        # Add compiled metrics results
         if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
-            metrics_list = getattr(self.compiled_metrics, 'metrics', getattr(self.compiled_metrics, '_metrics', []))
-            for metric in metrics_list:
-                if hasattr(metric, 'name') and hasattr(metric, 'result'):
-                    results[metric.name] = metric.result()
+            results.update(self.compiled_metrics.result())
 
         # Add deep supervision info to logs
         results['ds_weight_primary'] = ds_weights[0]
@@ -698,36 +661,18 @@ class DeepSupervisionModel(keras.Model):
         # Update loss tracker with validation loss
         self._loss_tracker.update_state(val_loss)
 
-        # Update compiled metrics manually
+        # Update compiled metrics
         if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
-            metrics_list = getattr(self.compiled_metrics, 'metrics', getattr(self.compiled_metrics, '_metrics', []))
-            for metric in metrics_list:
-                try:
-                    if hasattr(metric, 'update_state'):
-                        if 'psnr' in metric.name.lower():
-                            metric.update_state(primary_target, primary_pred)
-                        elif metric.name in ['mae', 'mean_absolute_error']:
-                            metric.update_state(primary_target, primary_pred)
-                        elif metric.name in ['rmse', 'root_mean_squared_error']:
-                            metric.update_state(primary_target, primary_pred)
-                        else:
-                            metric.update_state(primary_target, primary_pred)
-                except Exception as e:
-                    logger.warning(f"Failed to update validation metric {getattr(metric, 'name', 'unknown')}: {e}")
+            self.compiled_metrics.update_state(primary_target, primary_pred)
 
         # Create results dictionary
-        results = {}
-
-        # Add loss
-        results['loss'] = self._loss_tracker.result()
+        results = {'loss': self._loss_tracker.result()}
 
         # Add compiled metrics with 'val_' prefix for validation
         if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
-            metrics_list = getattr(self.compiled_metrics, 'metrics', getattr(self.compiled_metrics, '_metrics', []))
-            for metric in metrics_list:
-                if hasattr(metric, 'name') and hasattr(metric, 'result'):
-                    val_metric_name = f"val_{metric.name}" if not metric.name.startswith('val_') else metric.name
-                    results[val_metric_name] = metric.result()
+            for metric_name, metric_result in self.compiled_metrics.result().items():
+                val_metric_name = f"val_{metric_name}" if not metric_name.startswith('val_') else metric_name
+                results[val_metric_name] = metric_result
 
         return results
 
@@ -759,22 +704,7 @@ class DeepSupervisionModel(keras.Model):
 
         # Reset compiled metrics
         if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
-            # Try the new API first
-            if hasattr(self.compiled_metrics, 'reset_state'):
-                try:
-                    self.compiled_metrics.reset_state()
-                except:
-                    # Fallback to individual metric reset
-                    pass
-
-            # Reset individual metrics
-            metrics_list = getattr(self.compiled_metrics, 'metrics', getattr(self.compiled_metrics, '_metrics', []))
-            for metric in metrics_list:
-                if hasattr(metric, 'reset_state'):
-                    try:
-                        metric.reset_state()
-                    except Exception as e:
-                        logger.warning(f"Failed to reset metric {getattr(metric, 'name', 'unknown')}: {e}")
+            self.compiled_metrics.reset_state()
 
     def get_config(self):
         """Return the configuration of the model."""
@@ -794,12 +724,20 @@ class DeepSupervisionModel(keras.Model):
 
     @classmethod
     def from_config(cls, config, custom_objects=None):
-        """Create a model from its configuration."""
-        # This is a simplified version - in practice you'd need to reconstruct
-        # the base model and config objects properly
+        """
+        Loading a DeepSupervisionModel from config is not supported.
+
+        This is because the model requires the original `base_model` and `TrainingConfig`
+        objects for instantiation, which are not fully serializable in this context.
+
+        To reuse a model, please save the weights of the base model and reconstruct
+        the DeepSupervisionModel wrapper manually. The training pipeline automatically
+        saves a clean, single-output inference model for deployment.
+        """
         raise NotImplementedError(
-            "DeepSupervisionModel.from_config() not implemented. "
-            "Please recreate the model using the constructor with the original base_model and config."
+            "DeepSupervisionModel.from_config() is not implemented. "
+            "Please reconstruct the model using its constructor with the original base_model and config. "
+            "For inference, use the saved single-output model created during training."
         )
 
     def summary(self, *args, **kwargs):
@@ -874,12 +812,6 @@ def unconditional_sampling_with_deep_supervision(
 ) -> Tuple[tf.Tensor, List[tf.Tensor]]:
     """
     Optimized unconditional image synthesis using denoiser's implicit prior.
-
-    Optimizations:
-    - Compiled sampling step with tf.function
-    - Reduced default number of steps from 200 to 100
-    - Less frequent logging and intermediate saving
-    - Optimized tensor operations
 
     Args:
         denoiser: Trained bias-free denoiser model (single or multi-output)
@@ -1149,7 +1081,7 @@ class MetricsVisualizationCallback(keras.callbacks.Callback):
 
 
 class StreamingResultMonitor(keras.callbacks.Callback):
-    """Memory-efficient monitoring using streaming data (updated for deep supervision)."""
+    """Memory-efficient monitoring using streaming data (fixed: removed tf.py_function wrapper)."""
 
     def __init__(self, config: TrainingConfig, val_directories: List[str]):
         super().__init__()
@@ -1204,99 +1136,97 @@ class StreamingResultMonitor(keras.callbacks.Callback):
             self.test_batch = None
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None):
-        """Save intermediate results every N epochs."""
+        """Save intermediate results every N epochs. Fixed: removed tf.py_function wrapper."""
         if (epoch + 1) % self.monitor_freq != 0 or self.test_batch is None:
             return
 
-        def _monitor_and_save(epoch_numpy):
-            epoch_val = int(epoch_numpy)
-            logger.info(f"Saving intermediate results for epoch {epoch_val}")
+        # Call the monitoring logic directly as a Python function (no tf.py_function wrapper)
+        self._monitor_and_save(epoch + 1)
 
-            try:
-                # Add noise
-                noisy_images, clean_images = add_noise_to_patch(self.test_batch, self.config)
+    def _monitor_and_save(self, epoch_val: int):
+        """The actual monitoring logic."""
+        logger.info(f"Saving intermediate results for epoch {epoch_val}")
 
-                # Get model predictions (handle multi-output)
-                model_outputs = self.model(noisy_images, training=False)
+        try:
+            # Add noise
+            noisy_images, clean_images = add_noise_to_patch(self.test_batch, self.config)
 
-                # Use primary output (index 0) for visualization and metrics
-                if isinstance(model_outputs, list):
-                    denoised_images = model_outputs[0]  # Primary output
-                else:
-                    denoised_images = model_outputs
+            # Get model predictions (handle multi-output)
+            model_outputs = self.model(noisy_images, training=False)
 
-                # Save sample images
-                if self.config.save_training_images:
-                    self._save_image_samples(
-                        epoch_val,
-                        noisy_images,
-                        clean_images,
-                        denoised_images
+            # Use primary output (index 0) for visualization and metrics
+            if isinstance(model_outputs, list):
+                denoised_images = model_outputs[0]  # Primary output
+            else:
+                denoised_images = model_outputs
+
+            # Save sample images
+            if self.config.save_training_images:
+                self._save_image_samples(
+                    epoch_val,
+                    noisy_images,
+                    clean_images,
+                    denoised_images
+                )
+
+            # Compute metrics using primary output
+            mse_loss = tf.reduce_mean(tf.square(denoised_images - clean_images))
+            psnr = tf.reduce_mean(tf.image.psnr(denoised_images, clean_images, max_val=1.0))
+
+            logger.info(f"Epoch {epoch_val} - Primary Output MSE: {mse_loss.numpy():.6f}, PSNR: {psnr.numpy():.2f} dB")
+
+            # Image synthesis using implicit prior
+            if self.config.enable_synthesis:
+                logger.info(f"Generating synthetic images using implicit prior...")
+                try:
+                    synthesis_shape = (self.config.patch_size, self.config.patch_size, self.config.channels)
+                    generated_samples, intermediate_steps = unconditional_sampling_with_deep_supervision(
+                        denoiser=self.model,
+                        num_samples=self.config.synthesis_samples,
+                        image_shape=synthesis_shape,
+                        num_steps=self.config.synthesis_steps,
+                        initial_step_size=self.config.synthesis_initial_step_size,
+                        final_step_size=self.config.synthesis_final_step_size,
+                        initial_noise_level=self.config.synthesis_initial_noise,
+                        final_noise_level=self.config.synthesis_final_noise,
+                        seed=epoch_val,
+                        save_intermediate=True
                     )
 
-                # Compute metrics using primary output
-                mse_loss = tf.reduce_mean(tf.square(denoised_images - clean_images))
-                psnr = tf.reduce_mean(tf.image.psnr(denoised_images, clean_images, max_val=1.0))
+                    # Visualize synthesis process
+                    synthesis_save_path = self.results_dir / f"epoch_{epoch_val:03d}_synthesis.png"
+                    visualize_synthesis_process(
+                        final_samples=generated_samples,
+                        intermediate_steps=intermediate_steps,
+                        save_path=synthesis_save_path,
+                        epoch=epoch_val
+                    )
 
-                logger.info(f"Epoch {epoch_val} - Primary Output MSE: {mse_loss.numpy():.6f}, PSNR: {psnr.numpy():.2f} dB")
+                    # Log synthesis metrics
+                    generated_mean = tf.reduce_mean(generated_samples)
+                    generated_std = tf.math.reduce_std(generated_samples)
+                    logger.info(f"Generated images - Mean: {generated_mean:.3f}, Std: {generated_std:.3f}")
 
-                # Image synthesis using implicit prior
-                if self.config.enable_synthesis:
-                    logger.info(f"Generating synthetic images using implicit prior...")
-                    try:
-                        synthesis_shape = (self.config.patch_size, self.config.patch_size, self.config.channels)
-                        generated_samples, intermediate_steps = unconditional_sampling_with_deep_supervision(
-                            denoiser=self.model,
-                            num_samples=self.config.synthesis_samples,
-                            image_shape=synthesis_shape,
-                            num_steps=self.config.synthesis_steps,
-                            initial_step_size=self.config.synthesis_initial_step_size,
-                            final_step_size=self.config.synthesis_final_step_size,
-                            initial_noise_level=self.config.synthesis_initial_noise,
-                            final_noise_level=self.config.synthesis_final_noise,
-                            seed=epoch_val,
-                            save_intermediate=True
-                        )
+                except Exception as synthesis_error:
+                    logger.warning(f"Image synthesis failed at epoch {epoch_val}: {synthesis_error}")
 
-                        # Visualize synthesis process
-                        synthesis_save_path = self.results_dir / f"epoch_{epoch_val:03d}_synthesis.png"
-                        visualize_synthesis_process(
-                            final_samples=generated_samples,
-                            intermediate_steps=intermediate_steps,
-                            save_path=synthesis_save_path,
-                            epoch=epoch_val
-                        )
+            # Save metrics
+            metrics = {
+                'epoch': epoch_val,
+                'val_mse': float(mse_loss),
+                'val_psnr': float(psnr),
+                'timestamp': datetime.now().isoformat()
+            }
+            metrics_file = self.results_dir / f"epoch_{epoch_val:03d}_metrics.json"
+            with open(metrics_file, 'w') as f:
+                json.dump(metrics, f, indent=2)
 
-                        # Log synthesis metrics
-                        generated_mean = tf.reduce_mean(generated_samples)
-                        generated_std = tf.math.reduce_std(generated_samples)
-                        logger.info(f"Generated images - Mean: {generated_mean:.3f}, Std: {generated_std:.3f}")
+            # Force garbage collection
+            del noisy_images, clean_images, denoised_images
+            gc.collect()
 
-                    except Exception as synthesis_error:
-                        logger.warning(f"Image synthesis failed at epoch {epoch_val}: {synthesis_error}")
-
-                # Save metrics
-                metrics = {
-                    'epoch': epoch_val,
-                    'val_mse': float(mse_loss),
-                    'val_psnr': float(psnr),
-                    'timestamp': datetime.now().isoformat()
-                }
-                metrics_file = self.results_dir / f"epoch_{epoch_val:03d}_metrics.json"
-                with open(metrics_file, 'w') as f:
-                    json.dump(metrics, f, indent=2)
-
-                # Force garbage collection
-                del noisy_images, clean_images, denoised_images
-                gc.collect()
-
-            except Exception as e:
-                tf.print(f"Error during monitoring callback at epoch {epoch_val}: {e}")
-
-            return 0
-
-        # Wrap in tf.py_function
-        tf.py_function(func=_monitor_and_save, inp=[epoch + 1], Tout=[tf.int32])
+        except Exception as e:
+            logger.error(f"Error during monitoring callback at epoch {epoch_val}: {e}")
 
     def _save_image_samples(self, epoch: int, noisy: tf.Tensor,
                             clean: tf.Tensor, denoised: tf.Tensor):
@@ -1695,7 +1625,7 @@ def train_bfunet_denoiser_with_deep_supervision(config: TrainingConfig) -> keras
 
 
 # ---------------------------------------------------------------------
-# ARGUMENT PARSING (Updated for Deep Supervision)
+# ARGUMENT PARSING (Fixed: Added dataset path arguments)
 # ---------------------------------------------------------------------
 
 def parse_arguments() -> argparse.Namespace:
@@ -1703,6 +1633,20 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description='Train Bias-Free U-Net Denoiser with Deep Supervision',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    # Data paths (Fixed: No longer hardcoded)
+    parser.add_argument(
+        '--train-dirs',
+        nargs='+',  # Allows multiple directories
+        required=True,
+        help='List of directories containing training images.'
+    )
+    parser.add_argument(
+        '--val-dirs',
+        nargs='+',
+        required=True,
+        help='List of directories containing validation images.'
     )
 
     # Training parameters
@@ -1829,21 +1773,11 @@ def main():
     # Parse command line arguments
     args = parse_arguments()
 
-    # Configuration for training with deep supervision
+    # Configuration for training with deep supervision (Fixed: Uses command line paths)
     config = TrainingConfig(
-        # Data paths - modify these for your setup
-        train_image_dirs=[
-            '/media/arxwn/data0_4tb/datasets/Megadepth',
-            '/media/arxwn/data0_4tb/datasets/div2k/train',
-            '/media/arxwn/data0_4tb/datasets/WFLW/images',
-            '/media/arxwn/data0_4tb/datasets/bdd_data/train',
-            '/media/arxwn/data0_4tb/datasets/COCO/train2017',
-            '/media/arxwn/data0_4tb/datasets/VGG-Face2/data/train'
-        ],
-        val_image_dirs=[
-            '/media/arxwn/data0_4tb/datasets/div2k/validation',
-            '/media/arxwn/data0_4tb/datasets/COCO/val2017',
-        ],
+        # Data paths from command line arguments
+        train_image_dirs=args.train_dirs,
+        val_image_dirs=args.val_dirs,
 
         # Training parameters from arguments
         patch_size=args.patch_size,
@@ -1908,6 +1842,8 @@ def main():
     logger.info(f"  Image Synthesis: {'Enabled' if config.enable_synthesis else 'Disabled'}")
     logger.info(f"  Output Directory: {config.output_dir}")
     logger.info(f"  Experiment Name: {config.experiment_name}")
+    logger.info(f"  Training Directories: {config.train_image_dirs}")
+    logger.info(f"  Validation Directories: {config.val_image_dirs}")
 
     try:
         model = train_bfunet_denoiser_with_deep_supervision(config)
