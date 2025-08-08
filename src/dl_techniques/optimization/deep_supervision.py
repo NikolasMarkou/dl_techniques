@@ -95,8 +95,9 @@ class ScheduleType(str, Enum):
 # ---------------------------------------------------------------------
 
 def schedule_builder(
-    config: Dict[str, Union[str, Dict[str, Union[float, str]]]],
-    no_outputs: int
+        config: Dict[str, Union[str, Dict[str, Union[float, str]]]],
+        no_outputs: int,
+        invert_order: bool = False  # New parameter to invert weight order
 ) -> Callable[[float], np.ndarray]:
     """Build a deep supervision weight scheduler from configuration.
 
@@ -104,10 +105,14 @@ def schedule_builder(
     training progress stages. The weights determine the contribution of each scale
     to the final loss during training.
 
-    In the context of U-Net architecture:
+    In the context of U-Net architecture (default order):
     - Output 0: Final inference output (highest resolution)
     - Output (no_outputs-1): Deepest scale in the network (lowest resolution)
     - Outputs in between: Intermediate scales
+
+    When invert_order=True, the indexing is reversed:
+    - Output 0: Deepest scale in the network (lowest resolution)
+    - Output (no_outputs-1): Final inference output (highest resolution)
 
     Args:
         config: Configuration dictionary containing the schedule type and parameters.
@@ -117,6 +122,9 @@ def schedule_builder(
                 - config: Dictionary with schedule-specific parameters
         no_outputs: Number of outputs (scales) for which weights must be generated.
             Must be a positive integer.
+        invert_order: If True, inverts the weight order so that output 0 corresponds
+            to the deepest layer and output (no_outputs-1) to the shallowest.
+            Defaults to False.
 
     Returns:
         A function that takes a float percentage (0.0 to 1.0) representing training
@@ -128,24 +136,25 @@ def schedule_builder(
         TypeError: If config is not a dictionary or contains invalid types.
 
     Example:
-        >>> # Linear transition from deep to shallow focus
+        >>> # Linear transition with default order
         >>> config = {"type": "linear_low_to_high", "config": {}}
-        >>> weight_scheduler = schedule_builder(config, 5)
+        >>> weight_scheduler = schedule_builder(config, 5, invert_order=False)
         >>> weights_at_50_percent = weight_scheduler(0.5)  # Returns weights for 5 outputs
         >>>
-        >>> # Get weights at different training stages
-        >>> early_weights = weight_scheduler(0.1)   # Favor deep outputs
-        >>> mid_weights = weight_scheduler(0.5)     # Balanced
-        >>> late_weights = weight_scheduler(0.9)    # Favor shallow outputs
+        >>> # Linear transition with inverted order
+        >>> inverted_scheduler = schedule_builder(config, 5, invert_order=True)
+        >>> inverted_weights = inverted_scheduler(0.5)  # Same logic, inverted array
         >>>
-        >>> # All weight arrays sum to 1.0
-        >>> assert np.allclose(np.sum(early_weights), 1.0)
+        >>> # Verify inversion relationship
+        >>> assert np.allclose(weights_at_50_percent, inverted_weights[::-1])
     """
     # Validate input arguments
     if not isinstance(config, dict):
         raise TypeError("config must be a dictionary")
     if not isinstance(no_outputs, int) or no_outputs <= 0:
         raise ValueError(f"no_outputs must be a positive integer, got {no_outputs}")
+    if not isinstance(invert_order, bool):
+        raise TypeError("invert_order must be a boolean")
 
     # Extract and validate schedule type
     schedule_type = config.get(TYPE_STR)
@@ -163,24 +172,26 @@ def schedule_builder(
 
     logger.info(
         f"Building deep supervision schedule: [{schedule_type}] for {no_outputs} outputs, "
-        f"params: [{schedule_params}]"
+        f"params: [{schedule_params}], invert_order: {invert_order}"
     )
 
-    # Create and return the appropriate schedule function
+    # Create the appropriate schedule function
+    scheduler = None
+
     if schedule_type == ScheduleType.CONSTANT_EQUAL:
-        return lambda progress: constant_equal_schedule(progress, no_outputs)
+        scheduler = lambda progress: constant_equal_schedule(progress, no_outputs)
 
     elif schedule_type == ScheduleType.CONSTANT_LOW_TO_HIGH:
-        return lambda progress: constant_low_to_high_schedule(progress, no_outputs)
+        scheduler = lambda progress: constant_low_to_high_schedule(progress, no_outputs)
 
     elif schedule_type == ScheduleType.CONSTANT_HIGH_TO_LOW:
-        return lambda progress: constant_high_to_low_schedule(progress, no_outputs)
+        scheduler = lambda progress: constant_high_to_low_schedule(progress, no_outputs)
 
     elif schedule_type == ScheduleType.LINEAR_LOW_TO_HIGH:
-        return lambda progress: linear_low_to_high_schedule(progress, no_outputs)
+        scheduler = lambda progress: linear_low_to_high_schedule(progress, no_outputs)
 
     elif schedule_type == ScheduleType.NON_LINEAR_LOW_TO_HIGH:
-        return lambda progress: non_linear_low_to_high_schedule(progress, no_outputs)
+        scheduler = lambda progress: non_linear_low_to_high_schedule(progress, no_outputs)
 
     elif schedule_type == ScheduleType.CUSTOM_SIGMOID_LOW_TO_HIGH:
         # Extract and validate parameters for custom sigmoid
@@ -188,12 +199,12 @@ def schedule_builder(
         x0 = schedule_params.get('x0', 0.5)
         transition_point = schedule_params.get('transition_point', 0.25)
 
-        return lambda progress: custom_sigmoid_low_to_high_schedule(
+        scheduler = lambda progress: custom_sigmoid_low_to_high_schedule(
             progress, no_outputs, k, x0, transition_point
         )
 
     elif schedule_type == ScheduleType.SCALE_BY_SCALE_LOW_TO_HIGH:
-        return lambda progress: scale_by_scale_low_to_high_schedule(
+        scheduler = lambda progress: scale_by_scale_low_to_high_schedule(
             progress, no_outputs
         )
 
@@ -202,7 +213,7 @@ def schedule_builder(
         frequency = schedule_params.get('frequency', 3.0)
         final_ratio = schedule_params.get('final_ratio', 0.8)
 
-        return lambda progress: cosine_annealing_schedule(
+        scheduler = lambda progress: cosine_annealing_schedule(
             progress, no_outputs, frequency, final_ratio
         )
 
@@ -211,7 +222,7 @@ def schedule_builder(
         max_active_outputs = schedule_params.get('max_active_outputs', no_outputs)
         activation_strategy = schedule_params.get('activation_strategy', 'linear')
 
-        return lambda progress: curriculum_schedule(
+        scheduler = lambda progress: curriculum_schedule(
             progress, no_outputs, max_active_outputs, activation_strategy
         )
 
@@ -220,6 +231,12 @@ def schedule_builder(
             f"Unknown deep supervision schedule_type: [{schedule_type}]. "
             f"Supported types: {[t.value for t in ScheduleType]}"
         )
+
+    # Apply weight order inversion if requested
+    if invert_order:
+        return lambda progress: scheduler(progress)[::-1]
+    else:
+        return scheduler
 
 # ---------------------------------------------------------------------
 
