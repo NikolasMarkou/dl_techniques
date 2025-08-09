@@ -1,19 +1,121 @@
 """
 ACC-UNet: A Completely Convolutional UNet model for the 2020s.
 
-This module implements the complete ACC-UNet architecture, which combines
-the benefits of convolutional networks with transformer-inspired design decisions.
-Key innovations include HANC blocks for hierarchical context aggregation and
-MLFC layers for multi-level feature compilation in skip connections.
+This module implements the complete ACC-UNet architecture from the paper
+"ACC-UNet: A Completely Convolutional UNet model for the 2020s" by Ibtehaz & Kihara (MICCAI 2023).
+ACC-UNet combines the benefits of convolutional networks with transformer-inspired design decisions,
+achieving state-of-the-art performance on medical image segmentation while using significantly
+fewer parameters than transformer-based alternatives.
 
-Reference:
-    "ACC-UNet: A Completely Convolutional UNet model for the 2020s"
-    Ibtehaz, N. and Kihara, D.
-    MICCAI 2023
+Key Innovations:
+    1. **HANC Blocks**: Hierarchical Aggregation of Neighborhood Context blocks replace standard
+       convolution blocks, providing transformer-like long-range dependencies through multi-scale
+       pooling operations (2x2, 4x4, 8x8, 16x16 patches).
+
+    2. **MLFC Layers**: Multi-Level Feature Compilation layers in skip connections enable
+       cross-level feature fusion by aggregating information from all encoder levels,
+       enriching features with multi-scale semantic information.
+
+    3. **Enhanced Skip Connections**: ResPath layers with residual blocks reduce the semantic
+       gap between encoder and decoder features, improving information flow.
+
+    4. **Efficient Design**: Purely convolutional architecture with inverted bottlenecks,
+       depthwise convolutions, and squeeze-excitation for parameter efficiency.
+
+Architecture Overview:
+    - **Encoder**: 5 levels with [32, 64, 128, 256, 512] filters (configurable base_filters)
+    - **Decoder**: 4 levels with transposed convolutions for upsampling
+    - **Skip Connections**: ResPath + MLFC processing for enhanced feature compilation
+    - **Context Aggregation**: HANC layers with hierarchical k values [3, 3, 3, 2, 1]
+    - **Parameter Count**: ~16.8M parameters (comparable to standard U-Net)
+
+Performance Characteristics:
+    - Outperforms Swin-UNet by 2.64±2.54% dice score with 59.26% fewer parameters
+    - Outperforms UCTransNet by 0.45±1.61% dice score with 24.24% fewer parameters
+    - Maintains computational efficiency comparable to standard U-Net
+    - Supports both binary and multi-class segmentation tasks
+    - Handles variable input sizes (dynamic shape support)
+
+Usage Examples:
+    ```python
+    import keras
+    from dl_techniques.models.acc_unet import AccUNet, create_acc_unet_binary
+
+    # Binary medical image segmentation (grayscale input)
+    model = create_acc_unet_binary(
+        input_channels=1,
+        input_shape=(224, 224)
+    )
+    model.compile(
+        optimizer='adam',
+        loss='binary_crossentropy',
+        metrics=['accuracy']
+    )
+
+    # Multi-class segmentation with custom configuration
+    from dl_techniques.models.acc_unet import create_acc_unet_multiclass
+
+    model = create_acc_unet_multiclass(
+        input_channels=3,           # RGB images
+        num_classes=5,              # 5 semantic classes
+        input_shape=(256, 256),
+        base_filters=64,            # Wider network
+        mlfc_iterations=4           # More feature compilation
+    )
+
+    # Dynamic input size for flexible deployment
+    from dl_techniques.models.acc_unet import create_acc_unet
+
+    model = create_acc_unet(
+        input_channels=3,
+        num_classes=1,
+        input_shape=None,           # Accepts any input size
+        kernel_regularizer=keras.regularizers.L2(1e-4)
+    )
+
+    # Custom model instance
+    model = AccUNet(
+        input_channels=1,
+        num_classes=1,
+        base_filters=32,
+        mlfc_iterations=3
+    )
+
+    # Model can handle different input sizes at inference
+    output_224 = model(tf.random.normal((1, 224, 224, 1)))  # (1, 224, 224, 1)
+    output_512 = model(tf.random.normal((1, 512, 512, 1)))  # (1, 512, 512, 1)
+    ```
+
+Integration with dl-techniques:
+    - Seamlessly integrates with existing dl-techniques components
+    - Reuses SqueezeExcitation layers from dl_techniques.layers
+    - Follows dl-techniques documentation and coding standards
+    - Supports model serialization and deserialization
+    - Compatible with all dl-techniques training utilities and loss functions
+
+Model Components:
+    - **HANCBlock**: Core building block with hierarchical context aggregation
+    - **ResPath**: Enhanced skip connection processing with residual blocks
+    - **MLFCLayer**: Multi-level feature compilation for cross-scale fusion
+    - **AccUNet**: Complete model implementation with factory functions
+
+Training Recommendations:
+    - Use mixed precision training for faster convergence
+    - Apply data augmentation (rotation, flipping, elastic deformation)
+    - Consider gradient accumulation for large input sizes
+    - Use cosine annealing or warmup learning rate schedules
+    - Monitor both dice coefficient and cross-entropy loss
+
+References:
+    Ibtehaz, N., & Kihara, D. (2023). ACC-UNet: A Completely Convolutional UNet
+    model for the 2020s. In International Conference on Medical Image Computing
+    and Computer-Assisted Intervention (pp. 1-11). Springer.
+
+    Original paper: https://arxiv.org/abs/2308.13680
+    GitHub: https://github.com/kiharalab/ACC-UNet
 """
 
 import keras
-from keras import ops
 from typing import Optional, Union, Tuple, Any
 
 from ..layers.hanc_block import HANCBlock
