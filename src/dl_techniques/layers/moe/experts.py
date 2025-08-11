@@ -6,15 +6,11 @@ in MoE layers, including Feed-Forward Networks (FFN), Attention experts,
 and Convolutional experts.
 """
 
-from typing import Optional, Union, Tuple, Any, Dict
-from abc import ABC, abstractmethod
-
 import keras
-import keras.ops as ops
+from keras import ops
+from abc import ABC, abstractmethod
+from typing import Optional, Union, Tuple, Any, Dict
 from keras import layers, initializers, regularizers, activations
-
-from dl_techniques.utils.logger import logger
-
 
 class BaseExpert(layers.Layer, ABC):
     """

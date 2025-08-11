@@ -93,16 +93,6 @@ class TestPixelShuffle:
         computed_shape = layer.compute_output_shape(input_shape)
         assert computed_shape == expected_shape
 
-    def test_call_method_fails_due_to_assert_equal_bug(self, default_input):
-        """
-        Confirms that the call() method fails due to a bug in the source code.
-        The source code uses `ops.assert_equal`, which does not exist.
-        This test verifies that an AttributeError is raised for any valid input.
-        """
-        layer = PixelShuffle(scale_factor=2)
-        with pytest.raises(AttributeError, match="'keras.api.ops' has no attribute 'assert_equal'"):
-            layer(default_input)
-
     def test_serialization_config(self):
         """Test that get_config and from_config work correctly."""
         layer = PixelShuffle(scale_factor=4, validate_spatial_dims=False, name="serial_test")
@@ -112,32 +102,3 @@ class TestPixelShuffle:
         assert recreated_layer.scale_factor == layer.scale_factor
         assert recreated_layer.name == layer.name
         assert recreated_layer.validate_spatial_dims == layer.validate_spatial_dims
-
-    def test_model_predict_fails_on_call_bug(self, default_input):
-        """
-        Tests that integrating the layer in a model fails as expected
-        during predict() due to the bug in the call() method.
-        """
-        input_shape = default_input.shape[1:]
-        inputs = keras.Input(shape=input_shape)
-        # The bug exists regardless of scale_factor
-        x = PixelShuffle(scale_factor=2, name="pixel_shuffle")(inputs)
-        # The model construction itself is fine, the error is at runtime
-        cls_token = x[:, 0, :]
-        outputs = keras.layers.Dense(10)(cls_token)
-        model = keras.Model(inputs=inputs, outputs=outputs)
-
-        # model.predict() will trigger the layer's call() method and fail.
-        with pytest.raises(AttributeError, match="'keras.api.ops' has no attribute 'assert_equal'"):
-            model.predict(default_input, verbose=0)
-
-    def test_gradient_flow_fails_on_call_bug(self, default_input):
-        """Test that attempting to compute gradients fails due to the bug in call()."""
-        layer = PixelShuffle(scale_factor=2)
-        test_input_var = tf.Variable(default_input)
-
-        with pytest.raises(AttributeError, match="'keras.api.ops' has no attribute 'assert_equal'"):
-            with tf.GradientTape() as tape:
-                output = layer(test_input_var)
-                loss = ops.mean(output**2)
-            tape.gradient(loss, test_input_var)

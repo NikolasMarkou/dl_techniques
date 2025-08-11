@@ -6,15 +6,15 @@ including expert utilization analysis, routing visualization, performance profil
 and debugging utilities.
 """
 
-from typing import Dict, List, Tuple, Optional, Any, Union
 import time
 import json
-from dataclasses import dataclass, asdict
-from collections import defaultdict
-
-import numpy as np
 import keras
+import numpy as np
 from keras import ops
+from collections import defaultdict
+from dataclasses import dataclass, asdict
+from typing import Dict, List, Tuple, Optional, Any, Union
+
 
 from .layer import MixtureOfExperts, MoEConfig
 from dl_techniques.utils.logger import logger

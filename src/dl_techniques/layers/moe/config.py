@@ -5,12 +5,9 @@ This module provides comprehensive configuration dataclasses for MoE components,
 enabling flexible and reproducible model architectures.
 """
 
-from dataclasses import dataclass, field
-from typing import Optional, Union, Dict, Any, List, Literal
 import keras
-
-from dl_techniques.utils.logger import logger
-
+from dataclasses import dataclass, field
+from typing import Optional, Union, Dict, Any, Literal
 
 @dataclass
 class ExpertConfig:

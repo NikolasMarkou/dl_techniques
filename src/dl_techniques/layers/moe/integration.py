@@ -6,17 +6,17 @@ dl_techniques components, including optimizer integration, analyzer hooks,
 and model conversion utilities.
 """
 
-from typing import Dict, List, Tuple, Optional, Any, Union, Callable
-import warnings
-from dataclasses import dataclass
-
 import keras
-import keras.ops as ops
+import warnings
 import numpy as np
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Any, Callable
 
 from .layer import (
-    MixtureOfExperts, MoEConfig, ExpertConfig, GatingConfig,
-    create_ffn_moe, create_attention_moe, create_conv_moe
+    MixtureOfExperts, MoEConfig,
+    ExpertConfig, GatingConfig,
+    create_ffn_moe, create_attention_moe,
+    create_conv_moe
 )
 from dl_techniques.utils.logger import logger
 

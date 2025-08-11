@@ -5,20 +5,19 @@ This module provides the core MoE layer that combines expert networks and
 gating mechanisms to create sparse, scalable neural network architectures.
 """
 
-from typing import Optional, Union, Tuple, Any, Dict, List
 import math
-
 import keras
-import keras.ops as ops
-from keras import layers
+from keras import ops
+from typing import Optional, Union, Tuple, Any, Dict, List
 
-from dl_techniques.layers.moe.config import MoEConfig, ExpertConfig, GatingConfig
-from dl_techniques.layers.moe.experts import BaseExpert, create_expert
-from dl_techniques.layers.moe.gating import BaseGating, create_gating, compute_auxiliary_loss, compute_z_loss
+from .experts import BaseExpert, create_expert
+from .config import MoEConfig, ExpertConfig, GatingConfig
+from .gating import BaseGating, create_gating, compute_auxiliary_loss, compute_z_loss
+
 from dl_techniques.utils.logger import logger
 
 
-class MixtureOfExperts(layers.Layer):
+class MixtureOfExperts(keras.layers.Layer):
     """
     Mixture of Experts (MoE) layer for sparse neural networks.
 

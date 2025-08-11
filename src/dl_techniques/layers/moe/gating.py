@@ -6,13 +6,12 @@ inputs are distributed to expert networks, including linear gating, cosine
 similarity gating, and SoftMoE approaches.
 """
 
-from typing import Optional, Union, Tuple, Any, Dict
-from abc import ABC, abstractmethod
 
 import keras
-import keras.ops as ops
+from keras import ops
+from abc import ABC, abstractmethod
 from keras import layers, initializers
-
+from typing import Optional, Union, Tuple, Any, Dict
 
 
 class BaseGating(layers.Layer, ABC):

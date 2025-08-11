@@ -514,7 +514,7 @@ class TestOrthoBlock:
 
         # Check that sublayers have appropriate names
         assert "ortho_dense" in layer.dense.name
-        assert "band_rms" in layer.norm.name
+        assert "norm_rms" in layer.norm.name
         assert "constrained_scale" in layer.constrained_scale.name
 
 # Additional utility functions for testing
