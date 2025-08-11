@@ -118,10 +118,15 @@ References:
 import keras
 from typing import Optional, Union, Tuple, Any
 
-from ..layers.hanc_block import HANCBlock
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from ..layers.res_path import ResPath
 from ..layers.mlfc_layer import MLFCLayer
+from ..layers.hanc_block import HANCBlock
 
+# ---------------------------------------------------------------------
 
 class AccUNet(keras.Model):
     """
@@ -484,6 +489,7 @@ class AccUNet(keras.Model):
         """Create model from configuration."""
         return cls(**config)
 
+# ---------------------------------------------------------------------
 
 def create_acc_unet(
         input_channels: int,
@@ -547,6 +553,7 @@ def create_acc_unet(
 
     return model
 
+# ---------------------------------------------------------------------
 
 def create_acc_unet_binary(
         input_channels: int = 3,
@@ -574,6 +581,7 @@ def create_acc_unet_binary(
         **kwargs
     )
 
+# ---------------------------------------------------------------------
 
 def create_acc_unet_multiclass(
         input_channels: int,
@@ -605,3 +613,5 @@ def create_acc_unet_multiclass(
         input_shape=input_shape,
         **kwargs
     )
+
+# ---------------------------------------------------------------------
