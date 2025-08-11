@@ -459,7 +459,7 @@ def main():
     parser = argparse.ArgumentParser(description='Train a Variational Autoencoder (VAE) on image data.')
     parser.add_argument('--dataset', type=str, default='mnist',
                         choices=['mnist', 'cifar10'], help='Dataset to use')
-    parser.add_argument('--epochs', type=int, default=100,
+    parser.add_argument('--epochs', type=int, default=10,
                         help='Number of training epochs')
     parser.add_argument('--batch-size', type=int, default=128,
                         help='Training batch size')

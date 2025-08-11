@@ -1,5 +1,5 @@
 """
-ResNet-based Variational Autoencoder (VAE) Implementation
+Variational Autoencoder (VAE) Implementation
 ========================================================
 
 This module implements a ResNet-based Variational Autoencoder (VAE) using Keras 3.8.0,
@@ -59,16 +59,16 @@ Usage Example:
 """
 
 import keras
-from keras import ops
 import tensorflow as tf
+from keras import ops, layers
 from typing import Optional, Tuple, Union, Dict, Any, List
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.sampling import Sampling
+from ..utils.logger import logger
+from ..layers.sampling import Sampling
 
 # ---------------------------------------------------------------------
 
@@ -119,6 +119,9 @@ class VAE(keras.Model):
             input_shape=(28, 28, 1)
         )
 
+        # Must be built before use
+        vae.build((None, 28, 28, 1))
+
         # Compile the model
         vae.compile(optimizer='adam')
 
@@ -142,10 +145,9 @@ class VAE(keras.Model):
             use_batch_norm=True
         )
 
-        # Compile with custom optimizer
-        vae.compile(
-            optimizer=keras.optimizers.Adam(learning_rate=0.001)
-        )
+        # Build and compile
+        vae.build((None, 64, 64, 3))
+        vae.compile(optimizer=keras.optimizers.Adam(learning_rate=0.001))
         ```
 
         Using the model for generation:
@@ -167,7 +169,7 @@ class VAE(keras.Model):
         latent_dim: int,
         depths: int = 3,
         steps_per_depth: int = 2,
-        filters: List[int] = None,
+        filters: Optional[List[int]] = None,
         kl_loss_weight: float = 0.01,
         input_shape: Optional[Tuple[int, int, int]] = None,
         kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
@@ -191,12 +193,14 @@ class VAE(keras.Model):
             raise ValueError(f"steps_per_depth must be positive, got {steps_per_depth}")
         if not (0.0 <= dropout_rate < 1.0):
             raise ValueError(f"dropout_rate must be in [0, 1), got {dropout_rate}")
+        if filters is None and depths > 0:
+            filters = [32 * (2 ** i) for i in range(depths)]
 
         # Store configuration
         self.latent_dim = latent_dim
         self.depths = depths
         self.steps_per_depth = steps_per_depth
-        self.filters = filters or [32, 64, 128]
+        self.filters = filters if filters is not None else [32 * (2 ** i) for i in range(depths)]
         self.kl_loss_weight = kl_loss_weight
         self._input_shape = input_shape
         self.final_activation = final_activation
@@ -211,12 +215,12 @@ class VAE(keras.Model):
         if len(self.filters) != self.depths:
             raise ValueError(f"Filters array length {len(self.filters)} must equal depths {self.depths}")
 
-        # Components to be built
+        # Components to be built in build() - FOLLOW GUIDE RULE 1
         self.encoder = None
         self.decoder = None
         self.sampling_layer = None
 
-        # Shape tracking
+        # Shape tracking for serialization - FOLLOW GUIDE BEST PRACTICE
         self._build_input_shape = None
 
         # Metrics
@@ -224,34 +228,42 @@ class VAE(keras.Model):
         self.kl_loss_tracker = keras.metrics.Mean(name="kl_loss")
         self.reconstruction_loss_tracker = keras.metrics.Mean(name="reconstruction_loss")
 
-        # Build if input shape provided
-        if input_shape is not None:
-            if len(input_shape) != 3:
-                raise ValueError("Input shape must be (height, width, channels)")
-            self.build(input_shape=input_shape)
-
+        # CRITICAL: Never call build() in __init__ - FOLLOW GUIDE RULE 1
+        # The parent model or explicit build() call should handle this
         logger.info(f"Initialized ResnetVAE with latent_dim={latent_dim}")
 
-    def build(self, input_shape: Tuple[int, int, int]) -> None:
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Build the ResNet VAE architecture.
 
         Args:
-            input_shape: Tuple representing (height, width, channels) of input.
+            input_shape: Tuple representing (batch_size, height, width, channels) of input.
+                        The batch dimension can be None.
         """
+        # FOLLOW GUIDE RULE 2: Guard against double building
+        if self.built:
+            return
+
+        # Extract shape without batch dimension for internal use
+        if input_shape[0] is None:
+            actual_input_shape = input_shape[1:]
+        else:
+            actual_input_shape = input_shape
+
+        # Store build input shape for serialization - FOLLOW GUIDE BEST PRACTICE
         self._build_input_shape = input_shape
-        self._input_shape = input_shape
+        self._input_shape = actual_input_shape
 
-        # Build encoder
-        self._build_encoder(input_shape)
-
-        # Build sampling layer
-        self.sampling_layer = Sampling(seed=42, name="resnet_vae_sampling")
-
-        # Build decoder
+        # FOLLOW GUIDE RULE 2: Build all components first
+        self._build_encoder(actual_input_shape)
         self._build_decoder()
 
-        super().build(input_shape=(None,) + input_shape)
+        # Build sampling layer explicitly - FOLLOW GUIDE BEST PRACTICE
+        self.sampling_layer = Sampling(seed=42, name="resnet_vae_sampling")
+        # Note: Sampling layer will be built automatically when called
+
+        # FOLLOW GUIDE RULE 2: Build parent last
+        super().build(input_shape)
         logger.info("ResnetVAE built successfully")
 
     def _build_encoder(self, input_shape: Tuple[int, int, int]) -> None:
@@ -265,7 +277,7 @@ class VAE(keras.Model):
         x = x_input
 
         # Initial conv layer
-        x = keras.layers.Conv2D(
+        x = layers.Conv2D(
             filters=self.filters[0],
             kernel_size=3,
             strides=1,
@@ -277,13 +289,13 @@ class VAE(keras.Model):
         )(x)
 
         if self.use_batch_norm:
-            x = keras.layers.BatchNormalization(center=self.use_bias)(x)
-        x = keras.layers.Activation(self.activation)(x)
+            x = layers.BatchNormalization(center=self.use_bias)(x)
+        x = layers.Activation(self.activation)(x)
 
         # Encoder blocks with downsampling
         for depth in range(self.depths):
             # First layer in each depth does downsampling
-            x = keras.layers.Conv2D(
+            x = layers.Conv2D(
                 filters=self.filters[depth],
                 kernel_size=2,
                 strides=2,
@@ -295,14 +307,14 @@ class VAE(keras.Model):
             )(x)
 
             if self.use_batch_norm:
-                x = keras.layers.BatchNormalization(center=self.use_bias)(x)
-            x = keras.layers.Activation(self.activation)(x)
+                x = layers.BatchNormalization(center=self.use_bias)(x)
+            x = layers.Activation(self.activation)(x)
 
             # Additional layers at this depth
             for step in range(self.steps_per_depth - 1):
                 residual = x
 
-                x = keras.layers.Conv2D(
+                x = layers.Conv2D(
                     filters=self.filters[depth],
                     kernel_size=3,
                     strides=1,
@@ -314,13 +326,13 @@ class VAE(keras.Model):
                 )(x)
 
                 if self.use_batch_norm:
-                    x = keras.layers.BatchNormalization(center=self.use_bias)(x)
-                x = keras.layers.Activation(self.activation)(x)
+                    x = layers.BatchNormalization(center=self.use_bias)(x)
+                x = layers.Activation(self.activation)(x)
 
                 if self.dropout_rate > 0:
-                    x = keras.layers.Dropout(self.dropout_rate)(x)
+                    x = layers.Dropout(self.dropout_rate)(x)
 
-                x = keras.layers.Conv2D(
+                x = layers.Conv2D(
                     filters=self.filters[depth],
                     kernel_size=1,
                     strides=1,
@@ -331,14 +343,14 @@ class VAE(keras.Model):
                     name=f"encoder_conv_{depth}_{step}_1"
                 )(x)
 
-                x = keras.layers.Activation(self.activation)(x)
+                x = layers.Activation(self.activation)(x)
 
                 # Residual connection
-                x = keras.layers.Add()([x, residual])
+                x = layers.Add()([x, residual])
 
-        x = keras.layers.Flatten()(x)
+        x = layers.Flatten()(x)
 
-        z_mean = keras.layers.Dense(
+        z_mean = layers.Dense(
             units=self.latent_dim,
             use_bias=self.use_bias,
             kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.01),
@@ -347,7 +359,7 @@ class VAE(keras.Model):
             name="encoder_latent_mean"
         )(x)
 
-        z_log_var = keras.layers.Dense(
+        z_log_var = layers.Dense(
             units=self.latent_dim,
             use_bias=self.use_bias,
             kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.01),
@@ -356,6 +368,7 @@ class VAE(keras.Model):
             name="encoder_latent_var"
         )(x)
 
+        # Create functional model - builds automatically
         self.encoder = keras.Model(
             inputs=x_input,
             outputs=[z_mean, z_log_var],
@@ -375,7 +388,7 @@ class VAE(keras.Model):
         z_input = keras.Input(shape=(self.latent_dim,), name="decoder_input")
 
         # Project latent to feature map
-        x = keras.layers.Dense(
+        x = layers.Dense(
             units=feature_height * feature_width * self.filters[-1],
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
@@ -383,18 +396,18 @@ class VAE(keras.Model):
             name="decoder_projection"
         )(z_input)
 
-        x = keras.layers.Reshape((feature_height, feature_width, self.filters[-1]))(x)
+        x = layers.Reshape((feature_height, feature_width, self.filters[-1]))(x)
 
         # Decoder blocks with upsampling
         for depth in range(self.depths - 1, -1, -1):
             # Upsample
-            x = keras.layers.UpSampling2D(
+            x = layers.UpSampling2D(
                 size=(2, 2),
                 name=f"decoder_upsample_{depth}",
                 interpolation="nearest")(x)
 
             # Convolution after upsampling
-            x = keras.layers.Conv2D(
+            x = layers.Conv2D(
                 filters=self.filters[depth],
                 kernel_size=3,
                 strides=1,
@@ -406,14 +419,14 @@ class VAE(keras.Model):
             )(x)
 
             if self.use_batch_norm:
-                x = keras.layers.BatchNormalization(center=self.use_bias)(x)
-            x = keras.layers.Activation(self.activation)(x)
+                x = layers.BatchNormalization(center=self.use_bias)(x)
+            x = layers.Activation(self.activation)(x)
 
             # Additional layers at this depth
             for step in range(self.steps_per_depth - 1):
                 residual = x
 
-                x = keras.layers.Conv2D(
+                x = layers.Conv2D(
                     filters=self.filters[depth],
                     kernel_size=3,
                     strides=1,
@@ -425,13 +438,13 @@ class VAE(keras.Model):
                 )(x)
 
                 if self.use_batch_norm:
-                    x = keras.layers.BatchNormalization(center=self.use_bias)(x)
-                x = keras.layers.Activation(self.activation)(x)
+                    x = layers.BatchNormalization(center=self.use_bias)(x)
+                x = layers.Activation(self.activation)(x)
 
                 if self.dropout_rate > 0:
-                    x = keras.layers.Dropout(self.dropout_rate)(x)
+                    x = layers.Dropout(self.dropout_rate)(x)
 
-                x = keras.layers.Conv2D(
+                x = layers.Conv2D(
                     filters=self.filters[depth],
                     kernel_size=1,
                     strides=1,
@@ -442,13 +455,13 @@ class VAE(keras.Model):
                     name=f"decoder_conv_{depth}_{step}_1"
                 )(x)
 
-                x = keras.layers.Activation(self.activation)(x)
+                x = layers.Activation(self.activation)(x)
 
                 # Residual connection
-                x = keras.layers.Add()([x, residual])
+                x = layers.Add()([x, residual])
 
         # Final output layer
-        x = keras.layers.Conv2D(
+        x = layers.Conv2D(
             filters=self._input_shape[-1],
             kernel_size=1,
             strides=1,
@@ -465,13 +478,14 @@ class VAE(keras.Model):
         if x.shape[1:] != self._input_shape:
             # Resize to exact input shape if needed
             target_height, target_width = self._input_shape[:2]
-            x = keras.layers.Resizing(
+            x = layers.Resizing(
                 height=target_height,
                 width=target_width,
                 interpolation="bilinear",
                 name="decoder_resize"
             )(x)
 
+        # Create functional model - builds automatically
         self.decoder = keras.Model(inputs=z_input, outputs=x, name="decoder")
 
     @property
@@ -525,11 +539,11 @@ class VAE(keras.Model):
             Tuple of (z_mean, z_log_var) tensors.
         """
         if not self.built:
-            # Build with proper shape - remove batch dimension if present
+            # Build with proper shape - FOLLOW GUIDE BEST PRACTICE
             if len(inputs.shape) == 4:
-                build_shape = inputs.shape[1:]
+                build_shape = (None,) + inputs.shape[1:]
             else:
-                build_shape = inputs.shape
+                build_shape = (None,) + inputs.shape
             self.build(input_shape=build_shape)
 
         # Unpack the list of two tensors directly
@@ -771,6 +785,27 @@ class VAE(keras.Model):
         })
         return config
 
+    def get_build_config(self) -> Dict[str, Any]:
+        """
+        Get build configuration for serialization - FOLLOW GUIDE BEST PRACTICE.
+
+        Returns:
+            Dictionary containing build configuration.
+        """
+        return {
+            "input_shape": self._build_input_shape,
+        }
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """
+        Build from configuration - FOLLOW GUIDE BEST PRACTICE.
+
+        Args:
+            config: Dictionary containing build configuration.
+        """
+        if config.get('input_shape') is not None:
+            self.build(config['input_shape'])
+
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "VAE":
         """
@@ -805,7 +840,7 @@ class VAE(keras.Model):
 
 
 # ---------------------------------------------------------------------
-# Factory Functions
+# Factory Functions - FOLLOW GUIDE BEST PRACTICES
 # ---------------------------------------------------------------------
 
 def create_vae(
@@ -815,10 +850,11 @@ def create_vae(
     **kwargs
 ) -> VAE:
     """
-    Create and compile a ResNet VAE model.
+    Create and compile a ResNet VAE model following dl-techniques best practices.
 
     This factory function creates a VAE with sensible defaults for stability
-    and compiles it with the specified optimizer.
+    and compiles it with the specified optimizer. It follows the model lifecycle
+    from the guide: create → build → compile → validate.
 
     Args:
         input_shape: Tuple representing (height, width, channels) of input.
@@ -858,21 +894,21 @@ def create_vae(
         if key not in kwargs:
             kwargs[key] = value
 
-    # Create the model
+    # STEP 1: Create the model - FOLLOW GUIDE LIFECYCLE
     model = VAE(
         latent_dim=latent_dim,
         input_shape=input_shape,
         **kwargs
     )
 
-    # Compile the model
+    # STEP 2: Build the model explicitly - FOLLOW GUIDE BEST PRACTICE
+    batch_input_shape = (None,) + input_shape
+    model.build(batch_input_shape)
+
+    # STEP 3: Compile the model - FOLLOW GUIDE LIFECYCLE
     model.compile(optimizer=optimizer)
 
-    # Ensure model is built and test it
-    if not model.built:
-        model.build(input_shape)
-
-    # Test the model to ensure it works
+    # STEP 4: Validate the model works - FOLLOW GUIDE BEST PRACTICE
     test_input = keras.random.normal((2,) + input_shape)  # Use batch size 2 for testing
     test_output = model(test_input, training=False)
 
@@ -886,3 +922,96 @@ def create_vae(
     logger.info(f"Model parameters: {model.count_params():,}")
 
     return model
+
+
+def build_and_initialize_vae(
+    model: VAE,
+    input_shape: Tuple[int, int, int],
+    compile_config: Optional[Dict[str, Any]] = None
+) -> VAE:
+    """
+    Build and initialize VAE model following dl-techniques best practices.
+
+    Args:
+        model: VAE model instance.
+        input_shape: Tuple representing (height, width, channels) of input.
+        compile_config: Optional compilation configuration.
+
+    Returns:
+        Built and compiled VAE model.
+    """
+    # FOLLOW GUIDE LIFECYCLE - Build model with proper input shape
+    batch_input_shape = (None,) + input_shape
+    model.build(batch_input_shape)
+
+    logger.info(f"VAE built with input shape: {batch_input_shape}")
+    logger.info(f"VAE has {model.count_params()} parameters")
+
+    # Compile if configuration provided
+    if compile_config:
+        model.compile(**compile_config)
+        logger.info("VAE compiled successfully")
+
+    return model
+
+
+def save_vae_with_config(
+    model: VAE,
+    filepath: str,
+    config: Optional[Dict[str, Any]] = None
+) -> None:
+    """
+    Save VAE model with configuration following dl-techniques best practices.
+
+    Args:
+        model: VAE model to save.
+        filepath: Path to save model (should end with .keras).
+        config: Optional additional configuration to save.
+    """
+    # Save the main model
+    model.save(filepath)
+    logger.info(f"VAE saved to {filepath}")
+
+    # Save additional configuration if provided
+    if config:
+        config_path = filepath.replace('.keras', '_config.json')
+        import json
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+        logger.info(f"Configuration saved to {config_path}")
+
+
+def load_vae_with_custom_objects(
+    filepath: str,
+    custom_objects: Optional[Dict[str, Any]] = None
+) -> VAE:
+    """
+    Load VAE model with proper custom objects following dl-techniques best practices.
+
+    Args:
+        filepath: Path to saved model.
+        custom_objects: Optional additional custom objects.
+
+    Returns:
+        Loaded VAE model.
+    """
+    # Default custom objects for VAE
+    default_custom_objects = {
+        'VAE': VAE,
+        'Sampling': Sampling,  # Make sure to include custom layers
+    }
+
+    if custom_objects:
+        default_custom_objects.update(custom_objects)
+
+    try:
+        model = keras.models.load_model(
+            filepath,
+            custom_objects=default_custom_objects
+        )
+        logger.info(f"VAE loaded successfully from {filepath}")
+        return model
+
+    except Exception as e:
+        logger.error(f"Failed to load VAE model: {e}")
+        raise
