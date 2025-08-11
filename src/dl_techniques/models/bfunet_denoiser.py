@@ -437,7 +437,7 @@ def create_bfunet_denoiser(
 def create_bfunet_variant(
         variant: str,
         input_shape: Tuple[int, int, int],
-        enable_deep_supervision: bool = True,
+        enable_deep_supervision: bool = False,
         **kwargs
 ) -> keras.Model:
     """
