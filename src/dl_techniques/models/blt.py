@@ -1,9 +1,173 @@
+"""
+Byte Latent Transformer (BLT): Patches Scale Better Than Tokens
+
+This module implements the Byte Latent Transformer (BLT), a revolutionary byte-level
+large language model architecture that, for the first time, matches tokenization-based
+LLM performance at scale while achieving significant improvements in inference efficiency
+and robustness.
+
+Architecture Overview
+====================
+
+BLT introduces a paradigm shift from fixed-vocabulary tokenization to dynamic, learnable
+byte grouping through three core innovations:
+
+1. **Dynamic Entropy-Based Patching**: Instead of static tokens, BLT segments bytes into
+   patches based on the entropy of next-byte predictions, allocating more compute where
+   data complexity demands it. This allows for contextual groupings with uniform
+   information density.
+
+2. **Hierarchical Processing Architecture**:
+   - **Local Encoder**: Lightweight transformer that efficiently maps byte sequences
+     into expressive patch representations using cross-attention pooling
+   - **Global Latent Transformer**: Computationally intensive autoregressive model
+     operating on patch representations (consumes bulk of FLOPs)
+   - **Local Decoder**: Lightweight transformer decoding patch representations back
+     to raw bytes using cross-attention mechanisms
+
+3. **Enhanced Byte Representations**: Incorporates hash n-gram embeddings (n=3-8) to
+   capture contextual byte patterns and improve representation quality.
+
+Key Technical Innovations
+========================
+
+**Dynamic Patching Schemes**:
+- Entropy-based patching using small byte-level language models
+- Global and approximate monotonic constraints for patch boundary detection
+- Incremental patching capability for autoregressive generation
+- Context-aware patch size adaptation
+
+**Cross-Attention Architecture**:
+- Perceiver-style cross-attention in encoder (patches query, bytes as keys/values)
+- Reverse cross-attention in decoder (bytes query, patches as keys/values)
+- Masked attention ensuring patches only attend to constituent bytes
+
+**Byte-Level Enhancements**:
+- Rolling polynomial hash functions for n-gram embedding lookup
+- Multi-scale byte context incorporation (3-8 gram embeddings)
+- UTF-8 aware processing for language-agnostic capabilities
+
+Performance Characteristics
+==========================
+
+**Efficiency Gains**:
+- Up to 50% reduction in inference FLOPs compared to tokenization-based models
+- Simultaneous scaling of model and patch size within fixed inference budgets
+- Dynamic compute allocation based on prediction complexity
+
+**Quality Improvements**:
+- Matches Llama 3 training flop-controlled performance up to 8B parameters
+- Superior scaling trends in fixed-inference budget scenarios
+- Enhanced performance on structured and repetitive content
+
+**Robustness Advantages**:
+- Significantly improved noise robustness (8+ point advantage on corrupted inputs)
+- Enhanced character-level manipulation capabilities (99.9% on spelling tasks)
+- Better multilingual performance, especially for low-resource languages
+- Superior orthographic and phonological understanding
+
+Scaling Properties
+=================
+
+**Training Scale**: Successfully scaled to 8B parameters on 4T bytes of training data,
+demonstrating the first flop-controlled scaling study of byte-level models at this scale.
+
+**Inference Scaling**: Introduces new scaling dimension where both model size and patch
+size can increase simultaneously while maintaining constant inference budget.
+
+**Crossover Points**: BLT surpasses BPE models beyond compute-optimal training regimes,
+typically at 2-3x compute-optimal budgets.
+
+Implementation Details
+=====================
+
+**Entropy Model**: Small transformer (14 layers, 512 hidden dim, 100M parameters) with
+sliding window attention for entropy computation and patch boundary identification.
+
+**Hash Embeddings**: 500K hash functions with rolling polynomial hashing for efficient
+n-gram lookup without explicit vocabulary storage.
+
+**Attention Mechanisms**:
+- Block-causal attention in global transformer
+- Local windowed attention in byte-level components
+- Cross-attention with query masking for patch-byte interactions
+
+Applications and Use Cases
+=========================
+
+**Ideal For**:
+- Language-agnostic text processing
+- Robust text understanding in noisy environments
+- Character-level text manipulation tasks
+- Multilingual applications with diverse scripts
+- Long-context processing with variable complexity
+- Applications requiring tokenizer-free processing
+
+**Research Applications**:
+- Investigating compute-efficient architectures
+- Studying hierarchical text representations
+- Developing robust NLP systems
+- Multilingual model development
+
+Limitations and Considerations
+============================
+
+- Requires careful hyperparameter tuning for entropy thresholds
+- Implementation complexity higher than standard transformers
+- May require specialized optimization for deployment efficiency
+- Entropy model training adds preprocessing overhead
+
+References
+==========
+
+Based on "Byte Latent Transformer: Patches Scale Better Than Tokens"
+by Pagnoni et al. (2024), introducing the first byte-level architecture
+to match token-based performance at scale.
+
+arXiv:2412.09871v1 [cs.CL] 13 Dec 2024
+https://github.com/facebookresearch/blt
+
+Example Usage
+=============
+
+```python
+from dl_techniques.models.blt import create_blt_model
+
+# Create base BLT model
+model = create_blt_model(
+    vocab_size=260,
+    local_dim=512,
+    global_dim=768,
+    num_local_layers=6,
+    num_global_layers=12,
+    max_sequence_length=2048,
+    entropy_threshold=1.5
+)
+
+# Generate text
+generated = model.generate(
+    prompt="The future of language models",
+    max_new_tokens=100,
+    temperature=0.8,
+    do_sample=True
+)
+
+# Fine-tune on domain-specific data
+model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
+model.fit(training_data, epochs=3, batch_size=8)
+```
+
+The BLT architecture represents a fundamental advancement in language modeling,
+offering a scalable, robust, and efficient alternative to tokenization-based
+approaches while maintaining competitive performance across diverse tasks.
+"""
+
 import keras
 from keras import ops
 from typing import Optional, Union, Dict, Any
 
 # ---------------------------------------------------------------------
-# loca imports
+# local imports
 # ---------------------------------------------------------------------
 
 from ..utils.logger import logger

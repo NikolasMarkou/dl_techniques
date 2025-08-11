@@ -1,3 +1,219 @@
+"""
+Byte Latent Transformer (BLT) Core Layer Components
+
+This module implements the fundamental building blocks of the Byte Latent Transformer
+architecture, providing a tokenization-free approach to language modeling that operates
+directly on raw UTF-8 bytes with dynamic compute allocation.
+
+Architecture Components Overview
+================================
+
+The BLT architecture consists of seven core layer components that work together to
+achieve efficient byte-level language modeling:
+
+1. **ByteTokenizer**: Converts raw text to byte token sequences and back
+2. **EntropyModel**: Small causal transformer for computing next-byte entropy
+3. **DynamicPatcher**: Segments bytes into patches based on entropy thresholds
+4. **PatchPooling**: Reduces byte sequences to patch representations
+5. **LocalEncoder**: Processes bytes within their patches with causal attention
+6. **GlobalTransformer**: Models long-range dependencies across patch representations
+7. **LocalDecoder**: Generates next-byte predictions with global context
+
+Technical Innovation: Dynamic Patching
+=====================================
+
+Unlike traditional tokenization with fixed vocabularies, BLT uses entropy-driven
+dynamic patching that:
+
+- **Adapts to Content Complexity**: High-entropy regions (unpredictable) get more
+  compute via new patch boundaries, while low-entropy regions (predictable) are
+  grouped into larger patches
+
+- **Preserves Byte-Level Information**: No information loss through heuristic
+  tokenization, maintaining access to character-level patterns
+
+- **Enables Flexible Scaling**: Patch size can be adjusted independently of model
+  size, allowing simultaneous scaling of both dimensions
+
+Hierarchical Processing Pipeline
+===============================
+
+The BLT processing pipeline follows this flow:
+
+```
+Raw Text → ByteTokenizer → Byte Tokens
+                              ↓
+EntropyModel → Entropy Values → DynamicPatcher → Patch Boundaries
+                                                      ↓
+Byte Tokens + Patch IDs → LocalEncoder → Patch Representations
+                                              ↓
+                          GlobalTransformer → Contextual Patches
+                                              ↓
+Byte Tokens + Global Context → LocalDecoder → Next-Byte Logits
+```
+
+Key Technical Features
+=====================
+
+**Entropy-Based Segmentation**:
+- Uses Shannon entropy H(x_i) = -Σ p(x_i|context) * log(p(x_i|context))
+- Global threshold: H(x_t) > θ_g creates new patch boundary
+- Approximate monotonic: H(x_t) - H(x_t-1) > θ_r for trend breaks
+
+**Cross-Attention Mechanisms**:
+- Encoder: Patches query, bytes provide keys/values for pooling
+- Decoder: Bytes query, patches provide keys/values for context
+- Masked attention ensures bytes only attend to their patch context
+
+**Hash N-gram Embeddings**:
+- Rolling polynomial hash for n-grams (n=3-8): Hash(g_i,n) = Σ b_i * a^j
+- 500K hash functions map arbitrary n-grams to embedding space
+- Captures multi-scale byte context without explicit vocabulary
+
+**Causal Attention Patterns**:
+- Local models use windowed causal attention within patches
+- Global model uses standard causal attention across patches
+- Maintains autoregressive properties for generation
+
+Performance Characteristics
+==========================
+
+**Computational Efficiency**:
+- Reduces inference FLOPs by up to 50% through larger patch sizes
+- Dynamic compute allocation: O(patches) vs O(tokens) complexity
+- Lightweight local models (6-8 layers) vs heavy global model (12+ layers)
+
+**Memory Efficiency**:
+- No large embedding matrices for fixed vocabularies
+- Hash embeddings provide compact n-gram representation
+- Variable-length patches reduce sequence processing overhead
+
+**Scaling Properties**:
+- Enables simultaneous model and patch size scaling
+- Better scaling trends beyond compute-optimal training regimes
+- Crossover points typically at 2-3x compute-optimal budgets
+
+Robustness Advantages
+====================
+
+**Noise Resilience**:
+- Direct byte processing handles character-level corruptions
+- 8+ point advantage on noisy input benchmarks
+- Maintains performance with case changes, character drops, repetitions
+
+**Linguistic Capabilities**:
+- 99.9% accuracy on character manipulation tasks
+- Superior orthographic and phonological understanding
+- Better multilingual performance, especially low-resource languages
+
+**Long-tail Generalization**:
+- No out-of-vocabulary issues with fixed tokenizers
+- Handles arbitrary character sequences and scripts
+- Improved performance on rare byte combinations
+
+Implementation Details
+=====================
+
+**Layer Architecture**:
+- All transformers use SwiGLU activations and RMSNorm
+- RoPE positional embeddings in self-attention layers
+- Flash Attention for standard masks, Flex Attention for dynamic masks
+
+**Training Considerations**:
+- Entropy model requires separate pre-training on byte sequences
+- Patch-aware batching to maintain consistent compute per batch
+- Gradient accumulation across variable patch sizes
+
+**Memory Management**:
+- Efficient cross-attention implementation with patch masking
+- Dynamic tensor shapes handled through careful padding strategies
+- Context length normalization to maintain fair comparisons
+
+Usage Patterns
+==============
+
+**Research Applications**:
+```python
+# Study entropy-based segmentation
+entropy_model = EntropyModel(vocab_size=260, hidden_dim=256)
+patcher = DynamicPatcher(entropy_threshold=1.5)
+
+# Analyze dynamic patching behavior
+entropy = entropy_model(byte_tokens)
+patch_lengths = patcher(entropy)
+```
+
+**Production Deployment**:
+```python
+# Create efficient BLT model
+encoder = LocalEncoder(local_dim=512, global_dim=768)
+global_transformer = GlobalTransformer(global_dim=768, num_layers=12)
+decoder = LocalDecoder(vocab_size=260, local_dim=512)
+
+# Process with automatic patching
+patches = encoder(tokens, patch_ids)
+context = global_transformer(patches)
+logits = decoder(tokens, context, patch_ids)
+```
+
+**Custom Patching Strategies**:
+```python
+# Implement custom pooling method
+pooling = PatchPooling(
+    pooling_method='attention',
+    output_dim=768,
+    num_queries=4
+)
+
+# Use with different entropy thresholds
+patcher = DynamicPatcher(entropy_threshold=2.0)  # Larger patches
+```
+
+Integration with dl-techniques Framework
+=======================================
+
+These layers integrate seamlessly with the broader dl-techniques ecosystem:
+
+- **Optimizers**: Use with advanced scheduling from `optimization` module
+- **Regularizers**: Apply weight decay and dropout from `regularizers`
+- **Losses**: Compatible with standard language modeling objectives
+- **Metrics**: Works with perplexity and custom byte-level metrics
+
+The modular design allows for easy experimentation with different:
+- Entropy models and thresholds
+- Pooling strategies for patch creation
+- Cross-attention mechanisms
+- Local vs global architecture balance
+
+Future Extensions
+=================
+
+The layer design supports extension for:
+- **Multimodal Processing**: Extend entropy models to handle image/audio bytes
+- **Sparse Attention**: Implement more efficient attention patterns
+- **Adaptive Thresholding**: Learn entropy thresholds during training
+- **Hierarchical Patches**: Multi-level patch hierarchies for longer contexts
+
+References
+==========
+
+Implementation based on:
+"Byte Latent Transformer: Patches Scale Better Than Tokens"
+Pagnoni et al., 2024
+arXiv:2412.09871v1 [cs.CL]
+
+Key innovations:
+- Dynamic entropy-based patching algorithm
+- Hierarchical byte-patch-global processing
+- Cross-attention pooling mechanisms
+- Hash n-gram embeddings for byte context
+
+These layers represent a fundamental shift from tokenization-based language
+modeling toward more flexible, robust, and efficient byte-level processing
+that maintains competitive performance while offering significant advantages
+in efficiency, robustness, and multilingual capabilities.
+"""
+
 import keras
 from keras import ops
 from typing import Optional, Dict, Any, List, Tuple
