@@ -6,12 +6,12 @@ covering initialization, forward pass, training, serialization,
 model integration, and edge cases.
 """
 
+import os
+import keras
 import pytest
+import tempfile
 import numpy as np
 import tensorflow as tf
-import keras
-import tempfile
-import os
 from typing import Tuple
 
 from dl_techniques.layers.sampling import Sampling

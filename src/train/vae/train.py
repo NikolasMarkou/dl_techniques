@@ -457,15 +457,22 @@ def train_model(args: argparse.Namespace):
 
 def main():
     parser = argparse.ArgumentParser(description='Train a Variational Autoencoder (VAE) on image data.')
-    parser.add_argument('--dataset', type=str, default='mnist', choices=['mnist', 'cifar10'], help='Dataset to use')
-    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--batch-size', type=int, default=128, help='Training batch size')
+    parser.add_argument('--dataset', type=str, default='mnist',
+                        choices=['mnist', 'cifar10'], help='Dataset to use')
+    parser.add_argument('--epochs', type=int, default=100,
+                        help='Number of training epochs')
+    parser.add_argument('--batch-size', type=int, default=128,
+                        help='Training batch size')
     parser.add_argument('--latent-dim', type=int, default=2,
                         help='Dimensionality of the latent space (use 2 for visualization)')
-    parser.add_argument('--optimizer', type=str, default='adam', help='Optimizer to use')
-    parser.add_argument('--learning-rate', type=float, default=1e-3, help='Initial learning rate')
-    parser.add_argument('--patience', type=int, default=10, help='Early stopping patience')
-    parser.add_argument('--viz-frequency', type=int, default=5, help='Frequency of visualization callbacks (in epochs)')
+    parser.add_argument('--optimizer', type=str, default='adam',
+                        help='Optimizer to use')
+    parser.add_argument('--learning-rate', type=float, default=1e-3,
+                        help='Initial learning rate')
+    parser.add_argument('--patience', type=int, default=10,
+                        help='Early stopping patience')
+    parser.add_argument('--viz-frequency', type=int, default=5,
+                        help='Frequency of visualization callbacks (in epochs)')
     args = parser.parse_args()
 
     try:
