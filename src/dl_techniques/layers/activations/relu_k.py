@@ -1,7 +1,51 @@
-"""ReLU-k activation layer implementation for Keras 3.x.
+"""ReLU-k activation layer
 
-This module implements the ReLU-k activation function, which applies
-a power transformation to the standard ReLU activation.
+This layer applies a powered ReLU activation function, providing more
+expressiveness than standard ReLU while maintaining computational
+efficiency and preserving non-linearity.
+
+The ReLU-k activation is defined as:
+    `f(x) = max(0, x)^k`
+
+Where `k` is a positive integer power parameter. When `k=1`, this layer is
+equivalent to the standard `keras.layers.ReLU`. Higher values of `k` create
+more aggressive non-linearities that can help with gradient flow in
+certain network architectures.
+
+Args:
+    k (int): Power exponent for the ReLU function. Must be a positive
+        integer. Defaults to `3`.
+    **kwargs: Additional keyword arguments passed to the `Layer` parent
+        class, such as `name`, `dtype`, `trainable`, etc.
+
+Input shape:
+    Arbitrary. Use the keyword argument `input_shape` (tuple of integers,
+    does not include the batch axis) when using this layer as the first
+    layer in a model.
+
+Output shape:
+    Same shape as the input.
+
+Example:
+```python
+import keras
+import numpy as np
+
+# Create a ReLU-k layer with k=2
+layer = ReLUK(k=2)
+input_data = np.array([-2.0, -1.0, 0.0, 1.0, 2.0, 3.0])
+
+# Apply the layer
+output = layer(input_data)
+# output will be [0., 0., 0., 1., 4., 9.]
+```
+
+Note:
+    - For `k=1`, this layer is equivalent to `keras.layers.ReLU`.
+    - Higher `k` values may cause vanishing gradients for small positive
+      inputs (x < 1) or exploding gradients for large positive inputs (x > 1).
+    - Consider the range of your input values and network stability when
+      choosing `k`.
 """
 
 import keras
