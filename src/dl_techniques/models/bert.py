@@ -1,346 +1,92 @@
-"""
-Custom BERT Model with Configurable Normalization
-
-This module implements a custom BERT model with configurable normalization layers,
-designed to integrate with the dl_techniques library. The model supports different
-normalization techniques including BandRMS, RMSNorm, and LayerNorm.
-
-The implementation follows Keras best practices with proper serialization support,
-backend-agnostic operations, and comprehensive configuration management.
-
-Example usage:
-    ```python
-    from dl_techniques.models.custom_bert import CustomBertModel
-    from dl_techniques.layers.norms.band_rms import BandRMS
-
-    # Create normalization factory
-    def norm_factory():
-        return BandRMS(max_band_width=0.2, axis=-1)
-
-    # Build model
-    model = CustomBertModel(
-        vocab_size=30522,
-        hidden_size=768,
-        num_layers=12,
-        num_heads=12,
-        normalization_factory=norm_factory,
-        num_classes=3
-    )
-
-    # Compile and use
-    model.compile(
-        optimizer='adamw',
-        loss='categorical_crossentropy',
-        metrics=['accuracy']
-    )
-    ```
-"""
 
 import keras
-from keras import ops
 from dataclasses import dataclass
-from typing import Dict, Any, Optional, Callable, Union
+from typing import Optional, Union, Any, Dict, Tuple
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
+from ..utils.logger import logger
+from ..layers.transformer import TransformerLayer
 
-from ..layers.norms.band_rms import BandRMS
-from ..layers.norms.rms_norm import RMSNorm
-from ..layers.attention.multi_head_attention import MultiHeadAttention
-
-
-# ---------------------------------------------------------------------
-# CONFIGURATION
-# ---------------------------------------------------------------------
 
 @dataclass
 class BertConfig:
-    """
-    Configuration class for Custom BERT model.
+    """Configuration class for BERT model.
 
-    Args:
-        vocab_size: Size of vocabulary.
-        hidden_size: Hidden size of transformer layers.
+    Attributes:
+        vocab_size: Size of the vocabulary.
+        hidden_size: Hidden size of the transformer layers.
         num_layers: Number of transformer layers.
         num_heads: Number of attention heads.
-        intermediate_size: Size of intermediate (feed-forward) layer.
-        max_position_embeddings: Maximum position embeddings.
-        type_vocab_size: Vocabulary size for token types.
-        dropout_rate: Dropout rate.
-        attention_dropout_rate: Attention dropout rate.
-        activation: Activation function for feed-forward layers.
-        layer_norm_epsilon: Epsilon for layer normalization.
-        initializer_range: Range for weight initialization.
-        use_bias: Whether to use bias in linear layers.
-        num_classes: Number of output classes (for classification head).
+        intermediate_size: Size of the intermediate layer in the FFN.
+        hidden_act: Activation function for the FFN.
+        hidden_dropout_prob: Dropout probability for hidden layers.
+        attention_probs_dropout_prob: Dropout probability for attention weights.
+        max_position_embeddings: Maximum sequence length for positional embeddings.
+        type_vocab_size: Size of the token type vocabulary.
+        initializer_range: Standard deviation for weight initialization.
+        layer_norm_eps: Epsilon for layer normalization.
+        pad_token_id: ID of the padding token.
+        position_embedding_type: Type of position embedding ('absolute' or 'relative').
+        use_cache: Whether to use caching in attention layers.
+        classifier_dropout: Dropout probability for classification head.
+        normalization_type: Type of normalization ('layer_norm', 'rms_norm', etc.).
+        normalization_position: Position of normalization ('pre' or 'post').
+        attention_type: Type of attention mechanism.
+        ffn_type: Type of feed-forward network.
     """
     vocab_size: int = 30522
     hidden_size: int = 768
     num_layers: int = 12
     num_heads: int = 12
     intermediate_size: int = 3072
+    hidden_act: str = "gelu"
+    hidden_dropout_prob: float = 0.1
+    attention_probs_dropout_prob: float = 0.1
     max_position_embeddings: int = 512
     type_vocab_size: int = 2
-    dropout_rate: float = 0.1
-    attention_dropout_rate: float = 0.1
-    activation: str = 'gelu'
-    layer_norm_epsilon: float = 1e-12
     initializer_range: float = 0.02
-    use_bias: bool = True
-    num_classes: int = 2
+    layer_norm_eps: float = 1e-12
+    pad_token_id: int = 0
+    position_embedding_type: str = "absolute"
+    use_cache: bool = True
+    classifier_dropout: Optional[float] = None
+    normalization_type: str = "layer_norm"
+    normalization_position: str = "post"
+    attention_type: str = "multi_head_attention"
+    ffn_type: str = "mlp"
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert config to dictionary."""
+        return {k: v for k, v in self.__dict__.items()}
 
-# ---------------------------------------------------------------------
-# NORMALIZATION FACTORY
-# ---------------------------------------------------------------------
+    @classmethod
+    def from_dict(cls, config_dict: Dict[str, Any]) -> 'BertConfig':
+        """Create config from dictionary."""
+        return cls(**config_dict)
 
-def create_normalization_factory(
-    norm_type: str = 'layer_norm',
-    norm_params: Optional[Dict[str, Any]] = None
-) -> Callable[[], keras.layers.Layer]:
-    """
-    Create a normalization factory function.
-
-    Args:
-        norm_type: Type of normalization ('band_rms', 'rms_norm', 'layer_norm').
-        norm_params: Parameters for the normalization layer.
-
-    Returns:
-        Factory function that creates normalization layers.
-    """
-    if norm_params is None:
-        norm_params = {}
-
-    def factory():
-        if norm_type == 'band_rms':
-            return BandRMS(
-                axis=-1,
-                max_band_width=norm_params.get('max_band_width', 0.1),
-                epsilon=norm_params.get('epsilon', 1e-7),
-                **{k: v for k, v in norm_params.items()
-                   if k not in ['max_band_width', 'epsilon']}
-            )
-        elif norm_type == 'rms_norm':
-            return RMSNorm(
-                axis=-1,
-                epsilon=norm_params.get('epsilon', 1e-6),
-                **{k: v for k, v in norm_params.items() if k != 'epsilon'}
-            )
-        elif norm_type == 'layer_norm':
-            return keras.layers.LayerNormalization(
-                axis=-1,
-                epsilon=norm_params.get('epsilon', 1e-12),
-                **{k: v for k, v in norm_params.items() if k != 'epsilon'}
-            )
-        else:
-            raise ValueError(f"Unknown normalization type: {norm_type}")
-
-    return factory
-
-
-# Multi-head attention implementation is now imported from:
-# dl_techniques.layers.multi_head_attention
-
-
-# ---------------------------------------------------------------------
-# BERT TRANSFORMER LAYER
-# ---------------------------------------------------------------------
-
-@keras.saving.register_keras_serializable()
-class BertTransformerLayer(keras.layers.Layer):
-    """
-    BERT transformer layer with configurable normalization.
-
-    This layer implements a standard transformer encoder block with:
-    - Multi-head self-attention
-    - Feed-forward network
-    - Residual connections
-    - Configurable normalization
-
-    Args:
-        hidden_size: Hidden size of the layer.
-        num_heads: Number of attention heads.
-        intermediate_size: Size of the intermediate (feed-forward) layer.
-        normalization_factory: Factory function to create normalization layers.
-        dropout_rate: Dropout rate.
-        attention_dropout_rate: Attention-specific dropout rate.
-        activation: Activation function for feed-forward network.
-        use_bias: Whether to use bias in linear layers.
-        kernel_initializer: Initializer for kernel weights.
-        bias_initializer: Initializer for bias weights.
-        **kwargs: Additional keyword arguments for the Layer base class.
-    """
-
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        intermediate_size: int,
-        normalization_factory: Callable[[], keras.layers.Layer],
-        dropout_rate: float = 0.1,
-        attention_dropout_rate: float = 0.1,
-        activation: str = 'gelu',
-        use_bias: bool = True,
-        kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-        bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-        **kwargs
-    ):
-        super().__init__(**kwargs)
-        self.hidden_size = hidden_size
-        self.num_heads = num_heads
-        self.intermediate_size = intermediate_size
-        self.normalization_factory = normalization_factory
-        self.dropout_rate = dropout_rate
-        self.attention_dropout_rate = attention_dropout_rate
-        self.activation = activation
-        self.use_bias = use_bias
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.bias_initializer = keras.initializers.get(bias_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-
-        # Initialize layers to None - will be created in build()
-        self.attention = None
-        self.attention_norm = None
-        self.intermediate = None
-        self.output = None
-        self.output_norm = None
-        self.dropout = None
-
-        # Store build input shape for serialization
-        self._build_input_shape = None
-
-    def build(self, input_shape):
-        """Build the transformer layer components."""
-        self._build_input_shape = input_shape
-
-        # Multi-head attention using existing implementation
-        self.attention = MultiHeadAttention(
-            embed_dim=self.hidden_size,
-            num_heads=self.num_heads,
-            dropout_rate=self.attention_dropout_rate,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            use_bias=self.use_bias,
-            name='attention'
-        )
-
-        # Attention layer normalization
-        self.attention_norm = self.normalization_factory()
-        self.attention_norm._name = 'attention_norm'
-
-        # Feed-forward network
-        self.intermediate = keras.layers.Dense(
-            self.intermediate_size,
-            activation=self.activation,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            name='intermediate'
-        )
-
-        self.output = keras.layers.Dense(
-            self.hidden_size,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            name='output'
-        )
-
-        # Output layer normalization
-        self.output_norm = self.normalization_factory()
-        self.output_norm._name = 'output_norm'
-
-        # Dropout
-        self.dropout = keras.layers.Dropout(self.dropout_rate)
-
-        super().build(input_shape)
-
-    def call(self, inputs, attention_mask=None, training=None):
-        """
-        Forward pass of the transformer layer.
-
-        Args:
-            inputs: Input tensor of shape [batch_size, seq_length, hidden_size]
-            attention_mask: Optional attention mask
-            training: Boolean indicating training mode
-
-        Returns:
-            Output tensor of shape [batch_size, seq_length, hidden_size]
-        """
-        # Multi-head attention with residual connection
-        attention_output = self.attention(
-            inputs, attention_mask=attention_mask, training=training
-        )
-        attention_output = self.dropout(attention_output, training=training)
-        attention_output = self.attention_norm(attention_output + inputs)
-
-        # Feed-forward network with residual connection
-        intermediate_output = self.intermediate(attention_output)
-        layer_output = self.output(intermediate_output)
-        layer_output = self.dropout(layer_output, training=training)
-        layer_output = self.output_norm(layer_output + attention_output)
-
-        return layer_output
-
-    def compute_output_shape(self, input_shape):
-        """Compute the output shape of the layer."""
-        return input_shape
-
-    def get_config(self):
-        """Get layer configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            'hidden_size': self.hidden_size,
-            'num_heads': self.num_heads,
-            'intermediate_size': self.intermediate_size,
-            'dropout_rate': self.dropout_rate,
-            'attention_dropout_rate': self.attention_dropout_rate,
-            'activation': self.activation,
-            'use_bias': self.use_bias,
-            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
-            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
-        })
-        return config
-
-    def get_build_config(self):
-        """Get build configuration."""
-        return {'input_shape': self._build_input_shape}
-
-    def build_from_config(self, config):
-        """Build from configuration."""
-        if config.get('input_shape') is not None:
-            self.build(config['input_shape'])
-
-
-# ---------------------------------------------------------------------
-# BERT EMBEDDINGS LAYER
-# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class BertEmbeddings(keras.layers.Layer):
-    """
-    BERT embeddings layer combining word, position, and token type embeddings.
+    """BERT embeddings layer combining word, position, and token type embeddings.
+
+    This layer combines three types of embeddings:
+    - Word embeddings: Map token IDs to dense vectors
+    - Position embeddings: Add positional information to tokens
+    - Token type embeddings: Distinguish between different segments
 
     Args:
         config: BERT configuration object.
-        normalization_factory: Factory function to create normalization layers.
         **kwargs: Additional keyword arguments for the Layer base class.
     """
 
     def __init__(
         self,
         config: BertConfig,
-        normalization_factory: Callable[[], keras.layers.Layer],
-        **kwargs
-    ):
+        **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self.config = config
-        self.normalization_factory = normalization_factory
 
-        # Initialize layers to None - will be created in build()
+        # Initialize embeddings to None - will be created in build()
         self.word_embeddings = None
         self.position_embeddings = None
         self.token_type_embeddings = None
@@ -350,8 +96,40 @@ class BertEmbeddings(keras.layers.Layer):
         # Store build input shape for serialization
         self._build_input_shape = None
 
-    def build(self, input_shape):
-        """Build the embedding layers."""
+    def _create_normalization_layer(self, name: str) -> keras.layers.Layer:
+        """Create a normalization layer based on the configuration.
+
+        Args:
+            name: Name for the normalization layer.
+
+        Returns:
+            A normalization layer instance.
+        """
+        if self.config.normalization_type == 'layer_norm':
+            return keras.layers.LayerNormalization(
+                epsilon=self.config.layer_norm_eps,
+                name=name
+            )
+        elif self.config.normalization_type == 'rms_norm':
+            from dl_techniques.layers.norms.rms_norm import RMSNorm
+            return RMSNorm(epsilon=self.config.layer_norm_eps, name=name)
+        elif self.config.normalization_type == 'band_rms':
+            from dl_techniques.layers.norms.band_rms import BandRMS
+            return BandRMS(epsilon=self.config.layer_norm_eps, name=name)
+        elif self.config.normalization_type == 'batch_norm':
+            return keras.layers.BatchNormalization(
+                epsilon=self.config.layer_norm_eps,
+                name=name
+            )
+        else:
+            raise ValueError(f"Unknown normalization type: {self.config.normalization_type}")
+
+    def build(self, input_shape: Tuple[int, ...]) -> None:
+        """Build the embeddings layer.
+
+        Args:
+            input_shape: Shape of input tensor.
+        """
         self._build_input_shape = input_shape
 
         # Word embeddings
@@ -361,7 +139,8 @@ class BertEmbeddings(keras.layers.Layer):
             embeddings_initializer=keras.initializers.TruncatedNormal(
                 stddev=self.config.initializer_range
             ),
-            name='word_embeddings'
+            mask_zero=True,
+            name="word_embeddings"
         )
 
         # Position embeddings
@@ -371,7 +150,7 @@ class BertEmbeddings(keras.layers.Layer):
             embeddings_initializer=keras.initializers.TruncatedNormal(
                 stddev=self.config.initializer_range
             ),
-            name='position_embeddings'
+            name="position_embeddings"
         )
 
         # Token type embeddings
@@ -381,377 +160,480 @@ class BertEmbeddings(keras.layers.Layer):
             embeddings_initializer=keras.initializers.TruncatedNormal(
                 stddev=self.config.initializer_range
             ),
-            name='token_type_embeddings'
+            name="token_type_embeddings"
         )
 
         # Layer normalization and dropout
-        self.layer_norm = self.normalization_factory()
-        self.layer_norm._name = 'layer_norm'
-        self.dropout = keras.layers.Dropout(self.config.dropout_rate)
+        self.layer_norm = self._create_normalization_layer("layer_norm")
+        self.dropout = keras.layers.Dropout(
+            rate=self.config.hidden_dropout_prob,
+            name="dropout"
+        )
 
         super().build(input_shape)
 
-    def call(self, inputs, training=None):
-        """
-        Forward pass of the embeddings layer.
+    def call(
+        self,
+        input_ids: keras.KerasTensor,
+        token_type_ids: Optional[keras.KerasTensor] = None,
+        position_ids: Optional[keras.KerasTensor] = None,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """Apply embeddings to input tokens.
 
         Args:
-            inputs: Dictionary containing input_ids, token_type_ids, and position_ids
-            training: Boolean indicating training mode
+            input_ids: Token IDs of shape (batch_size, seq_length).
+            token_type_ids: Token type IDs of shape (batch_size, seq_length).
+            position_ids: Position IDs of shape (batch_size, seq_length).
+            training: Whether the layer is in training mode.
 
         Returns:
-            Embedded input tensor
+            Embedded tokens of shape (batch_size, seq_length, hidden_size).
         """
-        if isinstance(inputs, dict):
-            input_ids = inputs['input_ids']
-            token_type_ids = inputs.get('token_type_ids', None)
-            position_ids = inputs.get('position_ids', None)
-        else:
-            input_ids = inputs
-            token_type_ids = None
-            position_ids = None
+        input_shape = keras.ops.shape(input_ids)
+        batch_size = input_shape[0]
+        seq_length = input_shape[1]
 
-        seq_length = ops.shape(input_ids)[1]
-
-        # Word embeddings
-        word_embeddings = self.word_embeddings(input_ids)
-
-        # Position embeddings
+        # Create position IDs if not provided
         if position_ids is None:
-            position_ids = ops.arange(seq_length)[None, :]
-        position_embeddings = self.position_embeddings(position_ids)
+            position_ids = keras.ops.arange(seq_length, dtype="int32")
+            position_ids = keras.ops.expand_dims(position_ids, axis=0)
+            position_ids = keras.ops.broadcast_to(position_ids, (batch_size, seq_length))
 
-        # Token type embeddings
+        # Create token type IDs if not provided
         if token_type_ids is None:
-            token_type_ids = ops.zeros_like(input_ids)
-        token_type_embeddings = self.token_type_embeddings(token_type_ids)
+            token_type_ids = keras.ops.zeros_like(input_ids, dtype="int32")
 
-        # Combine embeddings
-        embeddings = word_embeddings + position_embeddings + token_type_embeddings
+        # Apply embeddings
+        word_embeds = self.word_embeddings(input_ids)
+        position_embeds = self.position_embeddings(position_ids)
+        token_type_embeds = self.token_type_embeddings(token_type_ids)
 
-        # Layer normalization and dropout
-        embeddings = self.layer_norm(embeddings)
+        # Sum all embeddings
+        embeddings = word_embeds + position_embeds + token_type_embeds
+
+        # Apply layer normalization and dropout
+        embeddings = self.layer_norm(embeddings, training=training)
         embeddings = self.dropout(embeddings, training=training)
 
         return embeddings
 
-    def compute_output_shape(self, input_shape):
-        """Compute the output shape of the layer."""
-        if isinstance(input_shape, dict):
-            batch_size = input_shape['input_ids'][0]
-            seq_length = input_shape['input_ids'][1]
-        else:
-            batch_size = input_shape[0]
-            seq_length = input_shape[1]
+    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+        """Compute output shape.
 
-        return (batch_size, seq_length, self.config.hidden_size)
+        Args:
+            input_shape: Shape of input tensor.
 
-    def get_config(self):
-        """Get layer configuration for serialization."""
+        Returns:
+            Output shape tuple.
+        """
+        return (*input_shape, self.config.hidden_size)
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get layer configuration.
+
+        Returns:
+            Configuration dictionary.
+        """
         config = super().get_config()
         config.update({
-            'config': {
-                'vocab_size': self.config.vocab_size,
-                'hidden_size': self.config.hidden_size,
-                'max_position_embeddings': self.config.max_position_embeddings,
-                'type_vocab_size': self.config.type_vocab_size,
-                'dropout_rate': self.config.dropout_rate,
-                'initializer_range': self.config.initializer_range,
-            }
+            'config': self.config.to_dict(),
         })
         return config
 
-    def get_build_config(self):
-        """Get build configuration."""
-        return {'input_shape': self._build_input_shape}
+    def get_build_config(self) -> Dict[str, Any]:
+        """Get build configuration.
 
-    def build_from_config(self, config):
-        """Build from configuration."""
+        Returns:
+            Build configuration dictionary.
+        """
+        return {
+            'input_shape': self._build_input_shape,
+        }
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Build layer from configuration.
+
+        Args:
+            config: Build configuration dictionary.
+        """
         if config.get('input_shape') is not None:
             self.build(config['input_shape'])
 
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> 'BertEmbeddings':
+        """Create layer from configuration.
 
-# ---------------------------------------------------------------------
-# CUSTOM BERT MODEL
-# ---------------------------------------------------------------------
+        Args:
+            config: Layer configuration dictionary.
+
+        Returns:
+            BertEmbeddings layer instance.
+        """
+        bert_config = BertConfig.from_dict(config['config'])
+        return cls(config=bert_config)
+
 
 @keras.saving.register_keras_serializable()
 class CustomBertModel(keras.Model):
-    """
-    Custom BERT model with configurable normalization.
+    """Custom BERT model using existing TransformerEncoderLayer.
 
-    This model implements the BERT architecture with the ability to use different
-    normalization techniques including BandRMS, RMSNorm, and LayerNorm.
+    This implementation leverages the existing TransformerEncoderLayer from
+    dl-techniques instead of implementing a custom transformer layer.
 
     Args:
         config: BERT configuration object.
-        normalization_factory: Factory function to create normalization layers.
-        add_pooling_layer: Whether to add pooling layer for classification.
+        add_pooling_layer: Whether to add a pooling layer for classification.
         **kwargs: Additional keyword arguments for the Model base class.
-
-    Example:
-        ```python
-        from dl_techniques.models.custom_bert import CustomBertModel, BertConfig
-        from dl_techniques.layers.norms.band_rms import BandRMS
-
-        # Create configuration
-        config = BertConfig(
-            vocab_size=30522,
-            hidden_size=768,
-            num_layers=12,
-            num_heads=12,
-            num_classes=3
-        )
-
-        # Create normalization factory
-        def norm_factory():
-            return BandRMS(max_band_width=0.2, axis=-1)
-
-        # Build model
-        model = CustomBertModel(
-            config=config,
-            normalization_factory=norm_factory,
-            add_pooling_layer=True
-        )
-
-        # Compile
-        model.compile(
-            optimizer='adamw',
-            loss='categorical_crossentropy',
-            metrics=['accuracy']
-        )
-        ```
     """
 
     def __init__(
         self,
         config: BertConfig,
-        normalization_factory: Callable[[], keras.layers.Layer],
         add_pooling_layer: bool = True,
-        **kwargs
-    ):
+        **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
+
         self.config = config
-        self.normalization_factory = normalization_factory
         self.add_pooling_layer = add_pooling_layer
 
-        # Build embeddings
-        self.embeddings = BertEmbeddings(
-            config=config,
-            normalization_factory=normalization_factory,
-            name='embeddings'
-        )
+        # Initialize layers to None - will be created in build()
+        self.embeddings = None
+        self.encoder_layers = []
+        self.pooler = None
 
-        # Build transformer layers
-        self.transformer_layers = []
-        for i in range(config.num_layers):
-            layer = BertTransformerLayer(
-                hidden_size=config.hidden_size,
-                num_heads=config.num_heads,
-                intermediate_size=config.intermediate_size,
-                normalization_factory=normalization_factory,
-                dropout_rate=config.dropout_rate,
-                attention_dropout_rate=config.attention_dropout_rate,
-                activation=config.activation,
-                use_bias=config.use_bias,
-                kernel_initializer=keras.initializers.TruncatedNormal(
-                    stddev=config.initializer_range
-                ),
-                name=f'transformer_layer_{i}'
-            )
-            self.transformer_layers.append(layer)
+        # Store build input shape for serialization
+        self._build_input_shape = None
 
-        # Build pooling and classification layers
-        if add_pooling_layer:
-            self.pooler = keras.layers.Dense(
-                config.hidden_size,
-                activation='tanh',
-                use_bias=config.use_bias,
-                kernel_initializer=keras.initializers.TruncatedNormal(
-                    stddev=config.initializer_range
-                ),
-                name='pooler'
-            )
-
-            self.classifier_dropout = keras.layers.Dropout(config.dropout_rate)
-
-            self.classifier = keras.layers.Dense(
-                config.num_classes,
-                activation='softmax',
-                use_bias=config.use_bias,
-                kernel_initializer=keras.initializers.TruncatedNormal(
-                    stddev=config.initializer_range
-                ),
-                name='classifier'
-            )
-
-    def call(self, inputs, attention_mask=None, training=None):
-        """
-        Forward pass of the BERT model.
+    def build(self, input_shape: Union[Tuple[int, ...], Dict[str, Tuple[int, ...]]]) -> None:
+        """Build the BERT model.
 
         Args:
-            inputs: Input dictionary containing input_ids, token_type_ids, etc.
-                   or tensor of input_ids.
-            attention_mask: Optional attention mask.
-            training: Boolean indicating training mode.
+            input_shape: Shape of input tensor(s).
+        """
+        self._build_input_shape = input_shape
+
+        # Handle different input shape formats
+        if isinstance(input_shape, dict):
+            # Multiple inputs
+            input_ids_shape = input_shape.get('input_ids', input_shape.get('inputs', (None, None)))
+        else:
+            # Single input
+            input_ids_shape = input_shape
+
+        # Create embeddings layer
+        self.embeddings = BertEmbeddings(
+            config=self.config,
+            name="embeddings"
+        )
+        self.embeddings.build(input_ids_shape)
+
+        # Create transformer encoder layers using existing TransformerEncoderLayer
+        self.encoder_layers = []
+        for i in range(self.config.num_layers):
+            layer = TransformerLayer(
+                hidden_size=self.config.hidden_size,
+                num_heads=self.config.num_heads,
+                intermediate_size=self.config.intermediate_size,
+                normalization_type=self.config.normalization_type,
+                normalization_position=self.config.normalization_position,
+                attention_type=self.config.attention_type,
+                ffn_type=self.config.ffn_type,
+                dropout_rate=self.config.hidden_dropout_prob,
+                attention_dropout_rate=self.config.attention_probs_dropout_prob,
+                activation=self.config.hidden_act,
+                use_bias=True,
+                kernel_initializer=keras.initializers.TruncatedNormal(
+                    stddev=self.config.initializer_range
+                ),
+                bias_initializer="zeros",
+                name=f"encoder_layer_{i}"
+            )
+
+            # Build the transformer layer with embeddings output shape
+            embeddings_output_shape = (*input_ids_shape, self.config.hidden_size)
+            layer.build(embeddings_output_shape)
+
+            self.encoder_layers.append(layer)
+
+        # Create pooler if needed
+        if self.add_pooling_layer:
+            self.pooler = keras.layers.Dense(
+                units=self.config.hidden_size,
+                activation="tanh",
+                kernel_initializer=keras.initializers.TruncatedNormal(
+                    stddev=self.config.initializer_range
+                ),
+                name="pooler"
+            )
+
+        super().build(input_shape)
+
+    def call(
+        self,
+        inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
+        attention_mask: Optional[keras.KerasTensor] = None,
+        token_type_ids: Optional[keras.KerasTensor] = None,
+        position_ids: Optional[keras.KerasTensor] = None,
+        training: Optional[bool] = None,
+        return_dict: bool = False
+    ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
+        """Forward pass of the BERT model.
+
+        Args:
+            inputs: Input token IDs or dictionary of inputs.
+            attention_mask: Attention mask to avoid performing attention on padding tokens.
+            token_type_ids: Token type IDs for distinguishing sequences.
+            position_ids: Position IDs for positional embeddings.
+            training: Whether the model is in training mode.
+            return_dict: Whether to return outputs as a dictionary.
 
         Returns:
-            Model outputs (logits if classification head is added).
+            Model outputs (last hidden states and optionally pooled output).
         """
         # Handle different input formats
         if isinstance(inputs, dict):
-            input_ids = inputs['input_ids']
-            if attention_mask is None:
-                attention_mask = inputs.get('attention_mask', None)
-            embedding_inputs = inputs
+            input_ids = inputs["input_ids"]
+            attention_mask = inputs.get("attention_mask", attention_mask)
+            token_type_ids = inputs.get("token_type_ids", token_type_ids)
+            position_ids = inputs.get("position_ids", position_ids)
         else:
             input_ids = inputs
-            embedding_inputs = {'input_ids': input_ids}
 
-        # Embeddings
-        hidden_states = self.embeddings(embedding_inputs, training=training)
+        # Get embeddings
+        embedding_output = self.embeddings(
+            input_ids=input_ids,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            training=training
+        )
 
-        # Transformer layers
-        for layer in self.transformer_layers:
-            hidden_states = layer(
+        # Pass through encoder layers
+        hidden_states = embedding_output
+        for encoder_layer in self.encoder_layers:
+            hidden_states = encoder_layer(
                 hidden_states,
                 attention_mask=attention_mask,
                 training=training
             )
 
-        # Pooling and classification
-        if self.add_pooling_layer:
-            # Use [CLS] token (first token) for classification
-            pooled_output = hidden_states[:, 0, :]
-            pooled_output = self.pooler(pooled_output)
-            pooled_output = self.classifier_dropout(pooled_output, training=training)
-            logits = self.classifier(pooled_output)
-            return logits
-        else:
-            return hidden_states
+        # Get sequence output
+        sequence_output = hidden_states
 
-    def get_config(self):
-        """Get model configuration for serialization."""
-        config = {
-            'config': {
-                'vocab_size': self.config.vocab_size,
-                'hidden_size': self.config.hidden_size,
-                'num_layers': self.config.num_layers,
-                'num_heads': self.config.num_heads,
-                'intermediate_size': self.config.intermediate_size,
-                'max_position_embeddings': self.config.max_position_embeddings,
-                'type_vocab_size': self.config.type_vocab_size,
-                'dropout_rate': self.config.dropout_rate,
-                'attention_dropout_rate': self.config.attention_dropout_rate,
-                'activation': self.config.activation,
-                'layer_norm_epsilon': self.config.layer_norm_epsilon,
-                'initializer_range': self.config.initializer_range,
-                'use_bias': self.config.use_bias,
-                'num_classes': self.config.num_classes,
-            },
+        # Get pooled output if pooler is available
+        pooled_output = None
+        if self.pooler is not None:
+            # Pool the first token (CLS token)
+            first_token_tensor = sequence_output[:, 0]  # Shape: (batch_size, hidden_size)
+            pooled_output = self.pooler(first_token_tensor)
+
+        if return_dict:
+            outputs = {
+                "last_hidden_state": sequence_output,
+            }
+            if pooled_output is not None:
+                outputs["pooler_output"] = pooled_output
+            return outputs
+        else:
+            if pooled_output is not None:
+                return sequence_output, pooled_output
+            else:
+                return sequence_output
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get model configuration.
+
+        Returns:
+            Configuration dictionary.
+        """
+        config = super().get_config()
+        config.update({
+            'config': self.config.to_dict(),
             'add_pooling_layer': self.add_pooling_layer,
-        }
+        })
         return config
 
+    def get_build_config(self) -> Dict[str, Any]:
+        """Get build configuration.
+
+        Returns:
+            Build configuration dictionary.
+        """
+        return {
+            'input_shape': self._build_input_shape,
+        }
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Build model from configuration.
+
+        Args:
+            config: Build configuration dictionary.
+        """
+        if config.get('input_shape') is not None:
+            self.build(config['input_shape'])
+
     @classmethod
-    def from_config(cls, config, custom_objects=None):
-        """Create model from configuration."""
-        bert_config = BertConfig(**config['config'])
+    def from_config(cls, config: Dict[str, Any]) -> 'CustomBertModel':
+        """Create model from configuration.
 
-        # Default normalization factory (LayerNorm)
-        def default_norm_factory():
-            return keras.layers.LayerNormalization(
-                epsilon=bert_config.layer_norm_epsilon,
-                axis=-1
-            )
+        Args:
+            config: Model configuration dictionary.
 
+        Returns:
+            CustomBertModel instance.
+        """
+        bert_config = BertConfig.from_dict(config['config'])
         return cls(
             config=bert_config,
-            normalization_factory=default_norm_factory,
             add_pooling_layer=config.get('add_pooling_layer', True)
         )
 
 
-# ---------------------------------------------------------------------
-# CONVENIENCE FUNCTIONS
-# ---------------------------------------------------------------------
-
 def create_bert_for_classification(
-    num_classes: int,
-    normalization_type: str = 'layer_norm',
-    normalization_params: Optional[Dict[str, Any]] = None,
-    bert_config: Optional[BertConfig] = None,
-    **kwargs
-) -> CustomBertModel:
-    """
-    Create a BERT model for classification tasks.
+    config: BertConfig,
+    num_labels: int,
+    classifier_dropout: Optional[float] = None
+) -> keras.Model:
+    """Create a BERT model for sequence classification.
 
     Args:
-        num_classes: Number of output classes.
-        normalization_type: Type of normalization to use.
-        normalization_params: Parameters for normalization layer.
-        bert_config: BERT configuration. If None, uses default.
-        **kwargs: Additional arguments for BertConfig.
+        config: BERT configuration object.
+        num_labels: Number of classification labels.
+        classifier_dropout: Dropout rate for the classifier.
 
     Returns:
-        Configured BERT model for classification.
+        BERT model with classification head.
     """
-    if bert_config is None:
-        bert_config = BertConfig(num_classes=num_classes, **kwargs)
-    else:
-        bert_config.num_classes = num_classes
+    # Create base BERT model
+    bert = CustomBertModel(config=config, add_pooling_layer=True)
 
-    # Create normalization factory
-    normalization_factory = create_normalization_factory(
-        norm_type=normalization_type,
-        norm_params=normalization_params or {}
+    # Define inputs
+    input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
+    attention_mask = keras.Input(shape=(None,), dtype="int32", name="attention_mask")
+    token_type_ids = keras.Input(shape=(None,), dtype="int32", name="token_type_ids")
+
+    # Get BERT outputs
+    bert_outputs = bert(
+        inputs={
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "token_type_ids": token_type_ids,
+        },
+        return_dict=True
     )
 
-    # Create model
-    model = CustomBertModel(
-        config=bert_config,
-        normalization_factory=normalization_factory,
-        add_pooling_layer=True
+    # Classification head
+    pooled_output = bert_outputs["pooler_output"]
+
+    # Apply classifier dropout
+    if classifier_dropout is None:
+        classifier_dropout = config.classifier_dropout or config.hidden_dropout_prob
+
+    if classifier_dropout > 0.0:
+        pooled_output = keras.layers.Dropout(classifier_dropout)(pooled_output)
+
+    # Final classification layer
+    logits = keras.layers.Dense(
+        units=num_labels,
+        kernel_initializer=keras.initializers.TruncatedNormal(
+            stddev=config.initializer_range
+        ),
+        name="classifier"
+    )(pooled_output)
+
+    # Create the final model
+    model = keras.Model(
+        inputs=[input_ids, attention_mask, token_type_ids],
+        outputs=logits,
+        name="bert_for_classification"
     )
 
     return model
 
-# ---------------------------------------------------------------------
 
 def create_bert_for_sequence_output(
-    normalization_type: str = 'layer_norm',
-    normalization_params: Optional[Dict[str, Any]] = None,
-    bert_config: Optional[BertConfig] = None,
-    **kwargs
-) -> CustomBertModel:
-    """
-    Create a BERT model for sequence-to-sequence tasks.
+    config: BertConfig
+) -> keras.Model:
+    """Create a BERT model that outputs sequence-level representations.
 
     Args:
-        normalization_type: Type of normalization to use.
-        normalization_params: Parameters for normalization layer.
-        bert_config: BERT configuration. If None, uses default.
-        **kwargs: Additional arguments for BertConfig.
+        config: BERT configuration object.
 
     Returns:
-        Configured BERT model for sequence output.
+        BERT model for sequence output tasks.
     """
-    if bert_config is None:
-        bert_config = BertConfig(**kwargs)
+    # Create base BERT model
+    bert = CustomBertModel(config=config, add_pooling_layer=False)
 
-    # Create normalization factory
-    normalization_factory = create_normalization_factory(
-        norm_type=normalization_type,
-        norm_params=normalization_params or {}
+    # Define inputs
+    input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
+    attention_mask = keras.Input(shape=(None,), dtype="int32", name="attention_mask")
+    token_type_ids = keras.Input(shape=(None,), dtype="int32", name="token_type_ids")
+
+    # Get BERT outputs
+    sequence_output = bert(
+        inputs={
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "token_type_ids": token_type_ids,
+        }
     )
 
-    # Create model
-    model = CustomBertModel(
-        config=bert_config,
-        normalization_factory=normalization_factory,
-        add_pooling_layer=False
+    # Create the final model
+    model = keras.Model(
+        inputs=[input_ids, attention_mask, token_type_ids],
+        outputs=sequence_output,
+        name="bert_for_sequence_output"
     )
 
     return model
 
-# ---------------------------------------------------------------------
+
+# Convenience functions for common BERT configurations
+def create_bert_base_uncased() -> BertConfig:
+    """Create configuration for BERT-base-uncased."""
+    return BertConfig(
+        vocab_size=30522,
+        hidden_size=768,
+        num_layers=12,
+        num_heads=12,
+        intermediate_size=3072,
+    )
+
+
+def create_bert_large_uncased() -> BertConfig:
+    """Create configuration for BERT-large-uncased."""
+    return BertConfig(
+        vocab_size=30522,
+        hidden_size=1024,
+        num_layers=24,
+        num_heads=16,
+        intermediate_size=4096,
+    )
+
+
+def create_bert_with_rms_norm(
+    size: str = "base",
+    normalization_position: str = "pre"
+) -> BertConfig:
+    """Create BERT configuration with RMS normalization.
+
+    Args:
+        size: Model size ('base' or 'large').
+        normalization_position: Position of normalization ('pre' or 'post').
+
+    Returns:
+        BERT configuration with RMS normalization.
+    """
+    if size == "base":
+        config = create_bert_base_uncased()
+    elif size == "large":
+        config = create_bert_large_uncased()
+    else:
+        raise ValueError(f"Unsupported size: {size}")
+
+    config.normalization_type = "rms_norm"
+    config.normalization_position = normalization_position
+
+    return config

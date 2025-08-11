@@ -156,12 +156,8 @@ from typing import Optional, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from ..layers.blt import (
-    ByteTokenizer
-)
+from ..layers.blt import ByteTokenizer
 from ..layers.bl_hrm import ByteLatentReasoningCore
-
-# ---------------------------------------------------------------------
 
 # ---------------------------------------------------------------------
 
