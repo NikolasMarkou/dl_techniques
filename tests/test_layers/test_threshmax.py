@@ -16,7 +16,7 @@ import numpy as np
 import keras
 from typing import Dict, Any, Tuple
 
-from dl_techniques.layers.activations.threshmax import ThreshMax, thresh_max, create_thresh_max
+from dl_techniques.layers.activations.thresh_max import ThreshMax, thresh_max, create_thresh_max
 
 
 # Test fixtures

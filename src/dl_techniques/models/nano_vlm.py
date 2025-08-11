@@ -7,9 +7,9 @@ from typing import Dict, Optional, Tuple, Union, Any, List
 # ---------------------------------------------------------------------
 
 from ..utils.logger import logger
+from ..layers.transformer import TransformerLayer
 from ..layers.vision_transformer_siglip import SigLIPVisionTransformer
 from ..layers.modality_projection import ModalityProjection
-from ..layers.transformer_encoder import TransformerEncoderLayer
 
 # ---------------------------------------------------------------------
 
@@ -189,7 +189,7 @@ class NanoVLM(keras.Model):
         self.decoder_layers = []
 
         for i in range(self.language_config['num_layers']):
-            decoder_layer = TransformerEncoderLayer(
+            decoder_layer = TransformerLayer(
                 hidden_size=self.language_config['hidden_dim'],
                 num_heads=self.language_config['num_heads'],
                 intermediate_size=self.language_config['mlp_dim'],

@@ -222,8 +222,8 @@ from typing import Optional, Dict, Any, List, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from .transformer import TransformerLayer
 from .positional_embedding import PositionalEmbedding
-from .transformer_encoder import TransformerEncoderLayer
 from .attention.multi_head_attention import MultiHeadAttention
 
 # ---------------------------------------------------------------------
@@ -409,7 +409,7 @@ class EntropyModel(keras.layers.Layer):
 
         # Transformer layers
         for i in range(self.num_layers):
-            layer = TransformerEncoderLayer(
+            layer = TransformerLayer(
                 hidden_size=self.hidden_dim,
                 num_heads=self.num_heads,
                 intermediate_size=self.hidden_dim * 4,
@@ -977,7 +977,7 @@ class LocalEncoder(keras.layers.Layer):
 
         # Local transformer layers (causal attention)
         for i in range(self.num_local_layers):
-            layer = TransformerEncoderLayer(
+            layer = TransformerLayer(
                 hidden_size=self.local_dim,
                 num_heads=self.num_heads_local,
                 intermediate_size=self.local_dim * 4,
@@ -1114,7 +1114,7 @@ class GlobalTransformer(keras.layers.Layer):
 
         # Global transformer layers
         for i in range(self.num_global_layers):
-            layer = TransformerEncoderLayer(
+            layer = TransformerLayer(
                 hidden_size=self.global_dim,
                 num_heads=self.num_heads_global,
                 intermediate_size=self.global_dim * 4,
@@ -1252,7 +1252,7 @@ class LocalDecoder(keras.layers.Layer):
         # Decoder transformer layers with cross-attention
         for i in range(self.num_local_layers):
             # Self-attention layer
-            decoder_layer = TransformerEncoderLayer(
+            decoder_layer = TransformerLayer(
                 hidden_size=self.local_dim,
                 num_heads=self.num_heads_local,
                 intermediate_size=self.local_dim * 4,

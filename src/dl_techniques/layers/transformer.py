@@ -1,8 +1,8 @@
 """
-This module provides a `TransformerEncoderLayer`, a highly configurable and generic
+This module provides a `TransformerLayer`, a highly configurable and generic
 implementation of the fundamental building block of Transformer-based neural networks.
 
-This layer encapsulates the two primary sub-layers of a standard Transformer encoder:
+This layer encapsulates the two primary sub-layers of a standard Transformer:
 a configurable multi-head attention mechanism and a position-wise feed-forward network. Both
 sub-layers are wrapped with residual connections and normalization, which are crucial
 for enabling the training of very deep networks.
@@ -89,11 +89,11 @@ from .attention.group_query_attention import GroupedQueryAttention
 
 
 @keras.saving.register_keras_serializable()
-class TransformerEncoderLayer(keras.layers.Layer):
+class TransformerLayer(keras.layers.Layer):
     """
-    Generic transformer encoder layer with configurable attention, normalization and FFN.
+    Generic transformer layer with configurable attention, normalization and FFN.
 
-    This layer implements a standard transformer encoder block with:
+    This layer implements a standard transformer block with:
     - Configurable multi-head attention mechanisms
     - Configurable feed-forward network
     - Residual connections
@@ -154,7 +154,7 @@ class TransformerEncoderLayer(keras.layers.Layer):
         ```python
         # Standard multi-head attention
         inputs = keras.Input(shape=(128, 768))
-        layer = TransformerEncoderLayer(
+        layer = TransformerLayer(
             hidden_size=768,
             num_heads=12,
             intermediate_size=3072,
@@ -165,7 +165,7 @@ class TransformerEncoderLayer(keras.layers.Layer):
         outputs = layer(inputs)
 
         # Window attention
-        layer = TransformerEncoderLayer(
+        layer = TransformerLayer(
             hidden_size=768,
             num_heads=12,
             intermediate_size=3072,
@@ -174,7 +174,7 @@ class TransformerEncoderLayer(keras.layers.Layer):
         )
 
         # Grouped query attention
-        layer = TransformerEncoderLayer(
+        layer = TransformerLayer(
             hidden_size=768,
             num_heads=12,
             intermediate_size=3072,

@@ -5,11 +5,11 @@ import keras
 import tempfile
 import os
 
-from dl_techniques.layers.transformer_encoder import TransformerEncoderLayer
+from dl_techniques.layers.transformer import TransformerLayer
 
 
-class TestTransformerEncoderLayer:
-    """Test suite for TransformerEncoderLayer implementation."""
+class TestTransformerLayer:
+    """Test suite for TransformerLayer implementation."""
 
     @pytest.fixture
     def input_tensor(self):
@@ -24,7 +24,7 @@ class TestTransformerEncoderLayer:
     @pytest.fixture
     def layer_instance(self):
         """Create a default layer instance for testing."""
-        return TransformerEncoderLayer(
+        return TransformerLayer(
             hidden_size=768,
             num_heads=12,
             intermediate_size=3072
@@ -33,7 +33,7 @@ class TestTransformerEncoderLayer:
     @pytest.fixture
     def small_layer_instance(self):
         """Create a smaller layer instance for faster tests."""
-        return TransformerEncoderLayer(
+        return TransformerLayer(
             hidden_size=64,
             num_heads=8,
             intermediate_size=256
@@ -43,7 +43,7 @@ class TestTransformerEncoderLayer:
 
     def test_initialization_defaults(self):
         """Test initialization with default parameters."""
-        layer = TransformerEncoderLayer(
+        layer = TransformerLayer(
             hidden_size=768,
             num_heads=12,
             intermediate_size=3072
@@ -74,7 +74,7 @@ class TestTransformerEncoderLayer:
         """Test initialization with custom parameters."""
         custom_regularizer = keras.regularizers.L2(1e-4)
 
-        layer = TransformerEncoderLayer(
+        layer = TransformerLayer(
             hidden_size=512,
             num_heads=8,
             intermediate_size=2048,
@@ -122,7 +122,7 @@ class TestTransformerEncoderLayer:
         attention_types = ['multi_head_attention', 'window_attention', 'group_query_attention']
 
         for attention_type in attention_types:
-            layer = TransformerEncoderLayer(
+            layer = TransformerLayer(
                 hidden_size=64,
                 num_heads=4,
                 intermediate_size=256,
@@ -133,7 +133,7 @@ class TestTransformerEncoderLayer:
     def test_initialization_attention_type_with_specific_params(self):
         """Test initialization with attention-specific parameters."""
         # Test window_attention with custom window_size
-        layer_window = TransformerEncoderLayer(
+        layer_window = TransformerLayer(
             hidden_size=64,
             num_heads=4,
             intermediate_size=256,
@@ -144,7 +144,7 @@ class TestTransformerEncoderLayer:
         assert layer_window.window_size == 32
 
         # Test group_query_attention with custom n_kv_head
-        layer_gqa = TransformerEncoderLayer(
+        layer_gqa = TransformerLayer(
             hidden_size=64,
             num_heads=8,
             intermediate_size=256,
@@ -155,7 +155,7 @@ class TestTransformerEncoderLayer:
         assert layer_gqa.n_kv_head == 2
 
         # Test group_query_attention with default n_kv_head (should equal num_heads)
-        layer_gqa_default = TransformerEncoderLayer(
+        layer_gqa_default = TransformerLayer(
             hidden_size=64,
             num_heads=8,
             intermediate_size=256,
@@ -169,7 +169,7 @@ class TestTransformerEncoderLayer:
         basic_norm_types = ['layer_norm', 'batch_norm']
 
         for norm_type in basic_norm_types:
-            layer = TransformerEncoderLayer(
+            layer = TransformerLayer(
                 hidden_size=64,
                 num_heads=4,
                 intermediate_size=256,
@@ -179,7 +179,7 @@ class TestTransformerEncoderLayer:
 
         # Test with optional types if available
         try:
-            layer = TransformerEncoderLayer(
+            layer = TransformerLayer(
                 hidden_size=64,
                 num_heads=4,
                 intermediate_size=256,
@@ -191,7 +191,7 @@ class TestTransformerEncoderLayer:
             pass
 
         try:
-            layer = TransformerEncoderLayer(
+            layer = TransformerLayer(
                 hidden_size=64,
                 num_heads=4,
                 intermediate_size=256,
@@ -207,7 +207,7 @@ class TestTransformerEncoderLayer:
         positions = ['post', 'pre']
 
         for position in positions:
-            layer = TransformerEncoderLayer(
+            layer = TransformerLayer(
                 hidden_size=64,
                 num_heads=4,
                 intermediate_size=256,
@@ -221,7 +221,7 @@ class TestTransformerEncoderLayer:
 
         for ffn_type in ffn_types:
             try:
-                layer = TransformerEncoderLayer(
+                layer = TransformerLayer(
                     hidden_size=64,
                     num_heads=4,
                     intermediate_size=256,
@@ -236,59 +236,59 @@ class TestTransformerEncoderLayer:
         """Test that invalid parameters raise appropriate errors."""
         # Negative hidden_size
         with pytest.raises(ValueError, match="hidden_size must be positive"):
-            TransformerEncoderLayer(hidden_size=-768, num_heads=12, intermediate_size=3072)
+            TransformerLayer(hidden_size=-768, num_heads=12, intermediate_size=3072)
 
         # Zero hidden_size
         with pytest.raises(ValueError, match="hidden_size must be positive"):
-            TransformerEncoderLayer(hidden_size=0, num_heads=12, intermediate_size=3072)
+            TransformerLayer(hidden_size=0, num_heads=12, intermediate_size=3072)
 
         # Negative num_heads
         with pytest.raises(ValueError, match="num_heads must be positive"):
-            TransformerEncoderLayer(hidden_size=768, num_heads=-12, intermediate_size=3072)
+            TransformerLayer(hidden_size=768, num_heads=-12, intermediate_size=3072)
 
         # Hidden size not divisible by num_heads
         with pytest.raises(ValueError, match="hidden_size.*must be divisible by num_heads"):
-            TransformerEncoderLayer(hidden_size=100, num_heads=12, intermediate_size=3072)
+            TransformerLayer(hidden_size=100, num_heads=12, intermediate_size=3072)
 
         # Negative intermediate_size
         with pytest.raises(ValueError, match="intermediate_size must be positive"):
-            TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=-3072)
+            TransformerLayer(hidden_size=768, num_heads=12, intermediate_size=-3072)
 
         # Invalid dropout rates
         with pytest.raises(ValueError, match="dropout_rate must be between 0 and 1"):
-            TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072, dropout_rate=1.5)
+            TransformerLayer(hidden_size=768, num_heads=12, intermediate_size=3072, dropout_rate=1.5)
 
         with pytest.raises(ValueError, match="attention_dropout_rate must be between 0 and 1"):
-            TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072, attention_dropout_rate=-0.1)
+            TransformerLayer(hidden_size=768, num_heads=12, intermediate_size=3072, attention_dropout_rate=-0.1)
 
         # NEW: Invalid attention type
         with pytest.raises(ValueError, match="attention_type must be one of"):
-            TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
-                                    attention_type='invalid_attention')
+            TransformerLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
+                             attention_type='invalid_attention')
 
         # Invalid normalization type
         with pytest.raises(ValueError, match="normalization_type must be one of"):
-            TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
-                                    normalization_type='invalid_type')
+            TransformerLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
+                             normalization_type='invalid_type')
 
         # Invalid normalization position
         with pytest.raises(ValueError, match="normalization_position must be one of"):
-            TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
-                                    normalization_position='invalid_position')
+            TransformerLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
+                             normalization_position='invalid_position')
 
         # Invalid FFN type
         with pytest.raises(ValueError, match="ffn_type must be one of"):
-            TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
-                                    ffn_type='invalid_ffn')
+            TransformerLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
+                             ffn_type='invalid_ffn')
 
         # NEW: Invalid window_size
         with pytest.raises(ValueError, match="window_size must be positive"):
-            TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
-                                    window_size=-8)
+            TransformerLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
+                             window_size=-8)
 
         with pytest.raises(ValueError, match="window_size must be positive"):
-            TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
-                                    window_size=0)
+            TransformerLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
+                             window_size=0)
 
     # ===== BUILD PROCESS TESTS =====
 
@@ -322,7 +322,7 @@ class TestTransformerEncoderLayer:
 
         for attention_type in attention_types:
             try:
-                layer = TransformerEncoderLayer(
+                layer = TransformerLayer(
                     hidden_size=64,
                     num_heads=4,
                     intermediate_size=256,
@@ -359,7 +359,7 @@ class TestTransformerEncoderLayer:
 
         for input_shape in test_shapes:
             hidden_size = input_shape[-1]
-            layer = TransformerEncoderLayer(
+            layer = TransformerLayer(
                 hidden_size=hidden_size,
                 num_heads=8 if hidden_size >= 128 else 4,
                 intermediate_size=hidden_size * 4
@@ -374,7 +374,7 @@ class TestTransformerEncoderLayer:
 
     def test_build_invalid_input_shape(self):
         """Test building with invalid input shapes."""
-        layer = TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072)
+        layer = TransformerLayer(hidden_size=768, num_heads=12, intermediate_size=3072)
 
         # Wrong number of dimensions
         with pytest.raises(ValueError, match="Expected 3D input shape"):
@@ -395,7 +395,7 @@ class TestTransformerEncoderLayer:
         ]
 
         for hidden_size, num_heads, intermediate_size in test_configs:
-            layer = TransformerEncoderLayer(
+            layer = TransformerLayer(
                 hidden_size=hidden_size,
                 num_heads=num_heads,
                 intermediate_size=intermediate_size
@@ -417,7 +417,7 @@ class TestTransformerEncoderLayer:
 
     def test_compute_output_shape_with_none_dimensions(self):
         """Test compute_output_shape with None dimensions."""
-        layer = TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072)
+        layer = TransformerLayer(hidden_size=768, num_heads=12, intermediate_size=3072)
 
         test_shapes = [
             (None, 128, 768),
@@ -447,7 +447,7 @@ class TestTransformerEncoderLayer:
 
         for attention_type in attention_types:
             try:
-                layer = TransformerEncoderLayer(
+                layer = TransformerLayer(
                     hidden_size=64,
                     num_heads=4,
                     intermediate_size=256,
@@ -472,7 +472,7 @@ class TestTransformerEncoderLayer:
         positions = ['post', 'pre']
 
         for position in positions:
-            layer = TransformerEncoderLayer(
+            layer = TransformerLayer(
                 hidden_size=64,
                 num_heads=4,
                 intermediate_size=256,
@@ -492,7 +492,7 @@ class TestTransformerEncoderLayer:
 
         for ffn_type in ffn_types:
             try:
-                layer = TransformerEncoderLayer(
+                layer = TransformerLayer(
                     hidden_size=64,
                     num_heads=4,
                     intermediate_size=256,
@@ -534,7 +534,7 @@ class TestTransformerEncoderLayer:
 
         for config in test_configs:
             try:
-                layer = TransformerEncoderLayer(
+                layer = TransformerLayer(
                     hidden_size=64,
                     num_heads=4,
                     intermediate_size=256,
@@ -594,7 +594,7 @@ class TestTransformerEncoderLayer:
         basic_norm_types = ['layer_norm', 'batch_norm']
 
         for norm_type in basic_norm_types:
-            layer = TransformerEncoderLayer(
+            layer = TransformerLayer(
                 hidden_size=64,
                 num_heads=4,
                 intermediate_size=256,
@@ -610,7 +610,7 @@ class TestTransformerEncoderLayer:
         # Test with optional types if available
         for norm_type in ['rms_norm', 'band_rms']:
             try:
-                layer = TransformerEncoderLayer(
+                layer = TransformerLayer(
                     hidden_size=64,
                     num_heads=4,
                     intermediate_size=256,
@@ -635,7 +635,7 @@ class TestTransformerEncoderLayer:
 
         for attention_type in attention_types_to_test:
             try:
-                layer = TransformerEncoderLayer(
+                layer = TransformerLayer(
                     hidden_size=64,
                     num_heads=4,
                     intermediate_size=256,
@@ -669,7 +669,7 @@ class TestTransformerEncoderLayer:
 
         for window_size in window_sizes:
             try:
-                layer = TransformerEncoderLayer(
+                layer = TransformerLayer(
                     hidden_size=64,
                     num_heads=4,
                     intermediate_size=256,
@@ -702,7 +702,7 @@ class TestTransformerEncoderLayer:
 
         for n_kv_head in n_kv_head_values:
             try:
-                layer = TransformerEncoderLayer(
+                layer = TransformerLayer(
                     hidden_size=64,
                     num_heads=4,
                     intermediate_size=256,
@@ -730,7 +730,7 @@ class TestTransformerEncoderLayer:
 
     def test_attention_layer_creation_error(self):
         """Test error handling in attention layer creation."""
-        layer = TransformerEncoderLayer(
+        layer = TransformerLayer(
             hidden_size=64,
             num_heads=4,
             intermediate_size=256
@@ -752,7 +752,7 @@ class TestTransformerEncoderLayer:
     def test_serialization_basic(self):
         """Test basic serialization and deserialization."""
         # Create and build layer
-        original_layer = TransformerEncoderLayer(
+        original_layer = TransformerLayer(
             hidden_size=128,
             num_heads=8,
             intermediate_size=512,
@@ -772,7 +772,7 @@ class TestTransformerEncoderLayer:
         config = original_layer.get_config()
         build_config = original_layer.get_build_config()
 
-        new_layer = TransformerEncoderLayer.from_config(config)
+        new_layer = TransformerLayer.from_config(config)
         new_layer.build_from_config(build_config)
 
         # Check configuration matches
@@ -802,13 +802,13 @@ class TestTransformerEncoderLayer:
                     'n_kv_head': 2  # For group query attention
                 }
 
-                original_layer = TransformerEncoderLayer(**config_params)
+                original_layer = TransformerLayer(**config_params)
 
                 # Get config
                 config = original_layer.get_config()
 
                 # Recreate layer
-                new_layer = TransformerEncoderLayer.from_config(config)
+                new_layer = TransformerLayer.from_config(config)
 
                 # Check attention-specific parameters match
                 assert new_layer.attention_type == original_layer.attention_type
@@ -824,7 +824,7 @@ class TestTransformerEncoderLayer:
         custom_regularizer = keras.regularizers.L2(1e-4)
 
         # Use a normalization type that's always available
-        original_layer = TransformerEncoderLayer(
+        original_layer = TransformerLayer(
             hidden_size=256,
             num_heads=16,
             intermediate_size=1024,
@@ -851,7 +851,7 @@ class TestTransformerEncoderLayer:
 
         # Recreate layer
         try:
-            new_layer = TransformerEncoderLayer.from_config(config)
+            new_layer = TransformerLayer.from_config(config)
 
             # Check all parameters match
             assert new_layer.hidden_size == original_layer.hidden_size
@@ -877,7 +877,7 @@ class TestTransformerEncoderLayer:
 
     def test_ffn_layer_creation_error(self):
         """Test error handling in FFN layer creation."""
-        layer = TransformerEncoderLayer(
+        layer = TransformerLayer(
             hidden_size=64,
             num_heads=4,
             intermediate_size=256
@@ -900,7 +900,7 @@ class TestTransformerEncoderLayer:
         """Test the layer in a simple model context."""
         # Create a simple model with the custom layer
         inputs = keras.Input(shape=(16, 64))
-        x = TransformerEncoderLayer(
+        x = TransformerLayer(
             hidden_size=64,
             num_heads=4,
             intermediate_size=256,
@@ -931,7 +931,7 @@ class TestTransformerEncoderLayer:
             try:
                 # Create model with specific attention type
                 inputs = keras.Input(shape=(16, 64))
-                x = TransformerEncoderLayer(
+                x = TransformerLayer(
                     hidden_size=64,
                     num_heads=4,
                     intermediate_size=256,
@@ -957,7 +957,7 @@ class TestTransformerEncoderLayer:
         """Test multiple layers stacked in a model."""
         # Create model with multiple transformer layers using different configurations
         inputs = keras.Input(shape=(16, 64))
-        x = TransformerEncoderLayer(
+        x = TransformerLayer(
             hidden_size=64,
             num_heads=4,
             intermediate_size=256,
@@ -968,7 +968,7 @@ class TestTransformerEncoderLayer:
         )(inputs)
 
         try:
-            x = TransformerEncoderLayer(
+            x = TransformerLayer(
                 hidden_size=64,
                 num_heads=4,
                 intermediate_size=256,
@@ -980,7 +980,7 @@ class TestTransformerEncoderLayer:
             )(x)
         except (ImportError, AttributeError, ValueError):
             # Window attention not available, use standard attention
-            x = TransformerEncoderLayer(
+            x = TransformerLayer(
                 hidden_size=64,
                 num_heads=4,
                 intermediate_size=256,
@@ -1006,7 +1006,7 @@ class TestTransformerEncoderLayer:
         """Test saving and loading a model with the custom layer."""
         # Create model with custom layer
         inputs = keras.Input(shape=(16, 64))
-        x = TransformerEncoderLayer(
+        x = TransformerLayer(
             hidden_size=64,
             num_heads=4,
             intermediate_size=256,
@@ -1034,7 +1034,7 @@ class TestTransformerEncoderLayer:
             # Load model
             loaded_model = keras.models.load_model(
                 model_path,
-                custom_objects={'TransformerEncoderLayer': TransformerEncoderLayer}
+                custom_objects={'TransformerLayer': TransformerLayer}
             )
 
             # Generate prediction with loaded model
@@ -1045,7 +1045,7 @@ class TestTransformerEncoderLayer:
 
             # Check layer type is preserved
             transformer_layer = loaded_model.get_layer('transformer_layer')
-            assert isinstance(transformer_layer, TransformerEncoderLayer)
+            assert isinstance(transformer_layer, TransformerLayer)
 
             # Check that configuration is preserved
             assert transformer_layer.attention_type == 'multi_head_attention'  # NEW
@@ -1060,7 +1060,7 @@ class TestTransformerEncoderLayer:
             try:
                 # Create model with specific attention type
                 inputs = keras.Input(shape=(16, 64))
-                x = TransformerEncoderLayer(
+                x = TransformerLayer(
                     hidden_size=64,
                     num_heads=4,
                     intermediate_size=256,
@@ -1087,7 +1087,7 @@ class TestTransformerEncoderLayer:
                     # Load model
                     loaded_model = keras.models.load_model(
                         model_path,
-                        custom_objects={'TransformerEncoderLayer': TransformerEncoderLayer}
+                        custom_objects={'TransformerLayer': TransformerLayer}
                     )
 
                     # Generate prediction with loaded model
@@ -1098,7 +1098,7 @@ class TestTransformerEncoderLayer:
 
                     # Check layer configuration is preserved
                     transformer_layer = loaded_model.get_layer(f'transformer_{attention_type}')
-                    assert isinstance(transformer_layer, TransformerEncoderLayer)
+                    assert isinstance(transformer_layer, TransformerLayer)
                     assert transformer_layer.attention_type == attention_type
 
             except (ImportError, AttributeError, ValueError):
@@ -1132,7 +1132,7 @@ class TestTransformerEncoderLayer:
 
         for attention_type in attention_types:
             try:
-                layer = TransformerEncoderLayer(
+                layer = TransformerLayer(
                     hidden_size=64,
                     num_heads=4,
                     intermediate_size=256,
@@ -1165,7 +1165,7 @@ class TestTransformerEncoderLayer:
         positions = ['post', 'pre']
 
         for position in positions:
-            layer = TransformerEncoderLayer(
+            layer = TransformerLayer(
                 hidden_size=64,
                 num_heads=4,
                 intermediate_size=256,
@@ -1189,7 +1189,7 @@ class TestTransformerEncoderLayer:
 
     def test_gradient_flow_with_regularization(self, small_input_tensor):
         """Test gradient flow with regularization."""
-        layer = TransformerEncoderLayer(
+        layer = TransformerLayer(
             hidden_size=64,
             num_heads=4,
             intermediate_size=256,
@@ -1210,7 +1210,7 @@ class TestTransformerEncoderLayer:
         # Create model
         model = keras.Sequential([
             keras.layers.InputLayer(input_shape=(16, 64)),
-            TransformerEncoderLayer(
+            TransformerLayer(
                 hidden_size=64,
                 num_heads=4,
                 intermediate_size=256,
@@ -1254,7 +1254,7 @@ class TestTransformerEncoderLayer:
                 # Create model
                 model = keras.Sequential([
                     keras.layers.InputLayer(input_shape=(16, 64)),
-                    TransformerEncoderLayer(
+                    TransformerLayer(
                         hidden_size=64,
                         num_heads=4,
                         intermediate_size=256,
@@ -1297,7 +1297,7 @@ class TestTransformerEncoderLayer:
 
     def test_numerical_stability(self):
         """Test layer stability with extreme input values."""
-        layer = TransformerEncoderLayer(
+        layer = TransformerLayer(
             hidden_size=64,
             num_heads=4,
             intermediate_size=256
@@ -1321,7 +1321,7 @@ class TestTransformerEncoderLayer:
 
     def test_different_sequence_lengths(self):
         """Test layer with different sequence lengths."""
-        layer = TransformerEncoderLayer(
+        layer = TransformerLayer(
             hidden_size=64,
             num_heads=4,
             intermediate_size=256
@@ -1346,7 +1346,7 @@ class TestTransformerEncoderLayer:
 
         for attention_type in attention_types:
             try:
-                layer = TransformerEncoderLayer(
+                layer = TransformerLayer(
                     hidden_size=64,
                     num_heads=4,
                     intermediate_size=256,
@@ -1371,7 +1371,7 @@ class TestTransformerEncoderLayer:
 
     def test_dropout_behavior(self):
         """Test dropout behavior during training vs inference."""
-        layer = TransformerEncoderLayer(
+        layer = TransformerLayer(
             hidden_size=64,
             num_heads=4,
             intermediate_size=256,
@@ -1397,7 +1397,7 @@ class TestTransformerEncoderLayer:
 
     def test_normalization_layer_creation(self):
         """Test creation of different normalization layers."""
-        layer = TransformerEncoderLayer(
+        layer = TransformerLayer(
             hidden_size=64,
             num_heads=4,
             intermediate_size=256
@@ -1427,7 +1427,7 @@ class TestTransformerEncoderLayer:
 
     def test_normalization_layer_creation_error(self):
         """Test error handling in normalization layer creation."""
-        layer = TransformerEncoderLayer(
+        layer = TransformerLayer(
             hidden_size=64,
             num_heads=4,
             intermediate_size=256
@@ -1449,7 +1449,7 @@ class TestTransformerEncoderLayer:
 
     def test_attention_mask_shapes(self, small_input_tensor):
         """Test different attention mask shapes."""
-        layer = TransformerEncoderLayer(
+        layer = TransformerLayer(
             hidden_size=64,
             num_heads=4,
             intermediate_size=256
@@ -1486,7 +1486,7 @@ class TestTransformerEncoderLayer:
 
         for attention_type in attention_types:
             try:
-                layer = TransformerEncoderLayer(
+                layer = TransformerLayer(
                     hidden_size=64,
                     num_heads=4,
                     intermediate_size=256,
@@ -1510,7 +1510,7 @@ class TestTransformerEncoderLayer:
     def test_normalization_position_behavior(self, small_input_tensor):
         """Test that pre-norm and post-norm produce different outputs."""
         # Create two identical layers except for normalization position
-        layer_post = TransformerEncoderLayer(
+        layer_post = TransformerLayer(
             hidden_size=64,
             num_heads=4,
             intermediate_size=256,
@@ -1519,7 +1519,7 @@ class TestTransformerEncoderLayer:
             attention_dropout_rate=0.0
         )
 
-        layer_pre = TransformerEncoderLayer(
+        layer_pre = TransformerLayer(
             hidden_size=64,
             num_heads=4,
             intermediate_size=256,
@@ -1543,7 +1543,7 @@ class TestTransformerEncoderLayer:
 
         for ffn_type in ffn_types_to_test:
             try:
-                layer = TransformerEncoderLayer(
+                layer = TransformerLayer(
                     hidden_size=64,
                     num_heads=4,
                     intermediate_size=256,

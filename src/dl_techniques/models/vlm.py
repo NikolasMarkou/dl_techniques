@@ -17,11 +17,11 @@ from typing import Dict, Optional, Tuple, Any
 from ..utils.logger import logger
 from ..layers.norms.rms_norm import RMSNorm
 from ..layers.ffn.swiglu_ffn import SwiGLUFFN
+from ..layers.transformer import TransformerLayer
 from ..layers.tokenizers.bpe import TokenEmbedding
 from ..layers.patch_embedding import PatchEmbedding2D
 from ..layers.positional_embedding import PositionalEmbedding
 from ..layers.vision_transformer import VisionTransformerLayer
-from ..layers.transformer_encoder import TransformerEncoderLayer
 from ..layers.attention.multi_head_attention import MultiHeadAttention
 from ..layers.geometric.shared_weights_cross_attention import SharedWeightsCrossAttention
 
@@ -250,7 +250,7 @@ class TextEncoder(keras.layers.Layer):
 
         # Transformer layers
         for i in range(self.num_layers):
-            transformer_layer = TransformerEncoderLayer(
+            transformer_layer = TransformerLayer(
                 hidden_size=self.embed_dim,
                 num_heads=self.num_heads,
                 intermediate_size=self.intermediate_size,

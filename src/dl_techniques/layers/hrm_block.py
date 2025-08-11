@@ -37,12 +37,12 @@ from typing import Optional, Union
 
 from .norms.rms_norm import RMSNorm
 from .ffn.swiglu_ffn import SwiGLUFFN
-from .transformer_encoder import TransformerEncoderLayer
+from .transformer import TransformerLayer
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class HierarchicalReasoningBlock(TransformerEncoderLayer):
+class HierarchicalReasoningBlock(TransformerLayer):
     """
     Post-normalization transformer block for HRM.
 
