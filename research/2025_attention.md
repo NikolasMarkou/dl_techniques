@@ -105,57 +105,57 @@ class GroupedQueryAttention(layers.Layer):
         self.n_head = config.n_head
         self.n_kv_head = config.n_kv_head
         self.head_dim = self.d_model // self.n_head
-        
+
         # Critical: Ensure dimensions align
         assert self.d_model % self.n_head == 0
         assert self.n_head % self.n_kv_head == 0
         self.n_group = self.n_head // self.n_kv_head
-        
+
         # Weight matrices - note the different sizes
         self.w_q = layers.Dense(self.n_head * self.head_dim, use_bias=False)
-        self.w_k = layers.Dense(self.n_kv_head * self.head_dim, use_bias=False) 
+        self.w_k = layers.Dense(self.n_kv_head * self.head_dim, use_bias=False)
         self.w_v = layers.Dense(self.n_kv_head * self.head_dim, use_bias=False)
         self.w_o = layers.Dense(self.d_model, use_bias=False)
-        
-        self.attention_dropout = layers.Dropout(config.attention_dropout)
-        
+
+        self.attention_dropout = layers.Dropout(config.dropout_rate)
+
     def call(self, x, training=None, mask=None):
         B, T, C = ops.shape(x)
-        
+
         # Project to Q, K, V
         q = self.w_q(x)  # (B, T, n_head * head_dim)
         k = self.w_k(x)  # (B, T, n_kv_head * head_dim) 
         v = self.w_v(x)  # (B, T, n_kv_head * head_dim)
-        
+
         # Reshape for multi-head attention
         q = ops.reshape(q, (B, T, self.n_head, self.head_dim))
         k = ops.reshape(k, (B, T, self.n_kv_head, self.head_dim))
         v = ops.reshape(v, (B, T, self.n_kv_head, self.head_dim))
-        
+
         # Transpose to (B, num_heads, T, head_dim)
         q = ops.transpose(q, (0, 2, 1, 3))
-        k = ops.transpose(k, (0, 2, 1, 3))  
+        k = ops.transpose(k, (0, 2, 1, 3))
         v = ops.transpose(v, (0, 2, 1, 3))
-        
+
         # Key insight: Repeat K,V for each group
         k = ops.repeat(k, self.n_group, axis=1)  # (B, n_head, T, head_dim)
         v = ops.repeat(v, self.n_group, axis=1)  # (B, n_head, T, head_dim)
-        
+
         # Standard scaled dot-product attention
         scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2)))
         scores = scores / ops.sqrt(ops.cast(self.head_dim, scores.dtype))
-        
+
         # Apply causal mask
         if mask is not None:
             scores = ops.where(mask, -1e9, scores)
-            
+
         weights = ops.softmax(scores, axis=-1)
         weights = self.attention_dropout(weights, training=training)
-        
+
         out = ops.matmul(weights, v)  # (B, n_head, T, head_dim)
         out = ops.transpose(out, (0, 2, 1, 3))  # (B, T, n_head, head_dim)
         out = ops.reshape(out, (B, T, C))
-        
+
         return self.w_o(out)
 ```
 
@@ -362,7 +362,7 @@ class FlashGroupedQueryAttention(layers.Layer):
         super().__init__(**kwargs)
         self.config = config
         self.head_dim = config.d_model // config.n_head
-        
+
         # Import FlashAttention if available
         try:
             from flash_attn import flash_attn_func
@@ -371,22 +371,22 @@ class FlashGroupedQueryAttention(layers.Layer):
         except ImportError:
             print("FlashAttention not available, falling back to standard attention")
             self.use_flash = False
-            
+
     def call(self, x, training=None, mask=None):
         if self.use_flash and mask is None:  # FlashAttention with causal mask
             # FlashAttention expects (batch, seq_len, num_heads, head_dim)
-            q = ops.reshape(self.w_q(x), (B, T, self.n_head, self.head_dim))  
+            q = ops.reshape(self.w_q(x), (B, T, self.n_head, self.head_dim))
             k = ops.reshape(self.w_k(x), (B, T, self.n_kv_head, self.head_dim))
             v = ops.reshape(self.w_v(x), (B, T, self.n_kv_head, self.head_dim))
-            
+
             # Use FlashAttention kernel
             out = self.flash_attn_func(
                 q, k, v,
-                dropout_p=self.config.attention_dropout if training else 0.0,
+                dropout_p=self.config.dropout_rate if training else 0.0,
                 causal=True,  # Autoregressive mask
                 softmax_scale=1.0 / math.sqrt(self.head_dim)
             )
-            
+
             out = ops.reshape(out, (B, T, self.config.d_model))
             return self.w_o(out)
         else:

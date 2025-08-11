@@ -6,7 +6,6 @@ This implementation follows modern transformer architecture best practices with:
 - Grouped Query Attention (GQA) for memory efficiency
 - RoPE positional embeddings for better length extrapolation
 - SwiGLU FFN for improved performance
-- Stochastic Depth for regularization
 - Pre-layer normalization for training stability
 
 The model implements the contrastive learning framework that learns joint representations
@@ -37,7 +36,7 @@ References:
 """
 
 import keras
-from keras import layers, ops
+from keras import layers, ops, initializers
 from dataclasses import dataclass
 from typing import Optional, Any, Dict, Union, Tuple
 
@@ -46,10 +45,7 @@ from typing import Optional, Any, Dict, Union, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.ffn.swiglu_ffn import SwiGLUFFN
-from dl_techniques.layers.norms.rms_norm import RMSNorm
-from dl_techniques.layers.stochastic_depth import StochasticDepth
-from dl_techniques.layers.attention.group_query_attention import GroupedQueryAttention
+from dl_techniques.layers.transformer import TransformerLayer
 
 # ---------------------------------------------------------------------
 
@@ -86,9 +82,8 @@ class CLIPConfig:
             ffn_multiple_of: Round FFN hidden dim to multiple of this value
 
         Regularization:
-            dropout_prob: General dropout probability
-            attention_dropout: Dropout probability for attention weights
-            stochastic_depth_prob: Maximum stochastic depth drop rate
+            dropout_rate: General dropout probability
+            attention_dropout_rate: Dropout probability for attention weights
 
         Normalization:
             rms_norm_eps: Epsilon value for RMSNorm numerical stability
@@ -124,9 +119,8 @@ class CLIPConfig:
     ffn_multiple_of: int = 256
 
     # Regularization
-    dropout_prob: float = 0.0
-    attention_dropout: float = 0.0
-    stochastic_depth_prob: float = 0.1
+    dropout_rate: float = 0.0
+    attention_dropout_rate: float = 0.0
 
     # Normalization
     rms_norm_eps: float = 1e-6
@@ -188,12 +182,10 @@ class CLIPConfig:
             )
 
         # Dropout validation
-        if not 0.0 <= self.dropout_prob <= 1.0:
-            raise ValueError(f"dropout_prob must be in [0, 1], got {self.dropout_prob}")
-        if not 0.0 <= self.attention_dropout <= 1.0:
-            raise ValueError(f"attention_dropout must be in [0, 1], got {self.attention_dropout}")
-        if not 0.0 <= self.stochastic_depth_prob <= 1.0:
-            raise ValueError(f"stochastic_depth_prob must be in [0, 1], got {self.stochastic_depth_prob}")
+        if not 0.0 <= self.dropout_rate <= 1.0:
+            raise ValueError(f"dropout_rate must be in [0, 1], got {self.dropout_rate}")
+        if not 0.0 <= self.attention_dropout_rate <= 1.0:
+            raise ValueError(f"attention_dropout_rate must be in [0, 1], got {self.attention_dropout_rate}")
 
         # Other validation
         if self.rms_norm_eps <= 0.0:
@@ -201,172 +193,35 @@ class CLIPConfig:
         if not 0.0 <= self.rope_percentage <= 1.0:
             raise ValueError(f"rope_percentage must be in [0, 1], got {self.rope_percentage}")
 
-# ---------------------------------------------------------------------
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert configuration to dictionary for serialization."""
+        return {
+            'image_size': self.image_size,
+            'patch_size': self.patch_size,
+            'vision_layers': self.vision_layers,
+            'vision_width': self.vision_width,
+            'vision_heads': self.vision_heads,
+            'vision_kv_heads': self.vision_kv_heads,
+            'vocab_size': self.vocab_size,
+            'context_length': self.context_length,
+            'text_layers': self.text_layers,
+            'text_width': self.text_width,
+            'text_heads': self.text_heads,
+            'text_kv_heads': self.text_kv_heads,
+            'embed_dim': self.embed_dim,
+            'ffn_expansion_factor': self.ffn_expansion_factor,
+            'ffn_multiple_of': self.ffn_multiple_of,
+            'dropout_rate': self.dropout_rate,
+            'attention_dropout_rate': self.attention_dropout_rate,
+            'rms_norm_eps': self.rms_norm_eps,
+            'rope_percentage': self.rope_percentage,
+            'logit_scale_init': self.logit_scale_init,
+        }
 
-
-@keras.saving.register_keras_serializable()
-class TransformerBlock(layers.Layer):
-    """
-    Transformer block with modern architecture improvements.
-
-    Features:
-    - Pre-layer normalization with RMSNorm
-    - Grouped Query Attention for memory efficiency
-    - SwiGLU FFN for better performance
-    - Stochastic depth for regularization
-    - Residual connections around each sub-layer
-    """
-
-    def __init__(
-        self,
-        d_model: int,
-        n_head: int,
-        n_kv_head: int,
-        max_seq_len: int,
-        layer_idx: int,
-        total_layers: int,
-        ffn_expansion_factor: int = 4,
-        ffn_multiple_of: int = 256,
-        attention_dropout: float = 0.0,
-        dropout_prob: float = 0.0,
-        stochastic_depth_prob: float = 0.1,
-        rms_norm_eps: float = 1e-6,
-        rope_percentage: float = 0.5,
-        **kwargs: Any
-    ) -> None:
-        super().__init__(**kwargs)
-
-        self.d_model = d_model
-        self.n_head = n_head
-        self.n_kv_head = n_kv_head
-        self.max_seq_len = max_seq_len
-        self.layer_idx = layer_idx
-        self.total_layers = total_layers
-        self.ffn_expansion_factor = ffn_expansion_factor
-        self.ffn_multiple_of = ffn_multiple_of
-        self.attention_dropout = attention_dropout
-        self.dropout_prob = dropout_prob
-        self.stochastic_depth_prob = stochastic_depth_prob
-        self.rms_norm_eps = rms_norm_eps
-        self.rope_percentage = rope_percentage
-
-        # Will be initialized in build()
-        self.attention_norm = None
-        self.attention = None
-        self.ffn_norm = None
-        self.ffn = None
-        self.attn_stochastic_depth = None
-        self.ffn_stochastic_depth = None
-        self._build_input_shape = None
-
-    def build(self, input_shape) -> None:
-        """Build the transformer block components."""
-        self._build_input_shape = input_shape
-
-        # Linear scaling of stochastic depth rate
-        depth_rate = self.stochastic_depth_prob * self.layer_idx / max(1, self.total_layers - 1)
-
-        # Pre-attention normalization
-        self.attention_norm = RMSNorm(
-            epsilon=self.rms_norm_eps,
-            name='attention_norm'
-        )
-
-        # Grouped Query Attention
-        self.attention = GroupedQueryAttention(
-            d_model=self.d_model,
-            n_head=self.n_head,
-            n_kv_head=self.n_kv_head,
-            max_seq_len=self.max_seq_len,
-            attention_dropout=self.attention_dropout,
-            rope_percentage=self.rope_percentage,
-            name='attention'
-        )
-
-        # Pre-FFN normalization
-        self.ffn_norm = RMSNorm(
-            epsilon=self.rms_norm_eps,
-            name='ffn_norm'
-        )
-
-        # SwiGLU Feed-Forward Network
-        self.ffn = SwiGLUFFN(
-            d_model=self.d_model,
-            ffn_expansion_factor=self.ffn_expansion_factor,
-            ffn_multiple_of=self.ffn_multiple_of,
-            dropout_rate=self.dropout_prob,
-            name='ffn'
-        )
-
-        # Stochastic depth for regularization
-        self.attn_stochastic_depth = StochasticDepth(
-            drop_rate=depth_rate,
-            name='attn_stochastic_depth'
-        )
-        self.ffn_stochastic_depth = StochasticDepth(
-            drop_rate=depth_rate,
-            name='ffn_stochastic_depth'
-        )
-
-        # Build sublayers
-        self.attention_norm.build(input_shape)
-        self.attention.build(input_shape)
-        self.ffn_norm.build(input_shape)
-        self.ffn.build(input_shape)
-
-        super().build(input_shape)
-
-    def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None,
-        mask: Optional[keras.KerasTensor] = None
-    ) -> keras.KerasTensor:
-        """Apply transformer block processing."""
-        x = inputs
-
-        # Pre-norm attention with residual connection and stochastic depth
-        attn_input = self.attention_norm(x, training=training)
-        attn_output = self.attention(attn_input, training=training, mask=mask)
-        attn_output = self.attn_stochastic_depth(attn_output, training=training)
-        x = x + attn_output
-
-        # Pre-norm FFN with residual connection and stochastic depth
-        ffn_input = self.ffn_norm(x, training=training)
-        ffn_output = self.ffn(ffn_input, training=training)
-        ffn_output = self.ffn_stochastic_depth(ffn_output, training=training)
-        x = x + ffn_output
-
-        return x
-
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            "d_model": self.d_model,
-            "n_head": self.n_head,
-            "n_kv_head": self.n_kv_head,
-            "max_seq_len": self.max_seq_len,
-            "layer_idx": self.layer_idx,
-            "total_layers": self.total_layers,
-            "ffn_expansion_factor": self.ffn_expansion_factor,
-            "ffn_multiple_of": self.ffn_multiple_of,
-            "attention_dropout": self.attention_dropout,
-            "dropout_prob": self.dropout_prob,
-            "stochastic_depth_prob": self.stochastic_depth_prob,
-            "rms_norm_eps": self.rms_norm_eps,
-            "rope_percentage": self.rope_percentage,
-        })
-        return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration for serialization."""
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build layer from configuration."""
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
+    @classmethod
+    def from_dict(cls, config_dict: Dict[str, Any]) -> 'CLIPConfig':
+        """Create configuration from dictionary."""
+        return cls(**config_dict)
 
 # ---------------------------------------------------------------------
 
@@ -378,6 +233,26 @@ class VisionTransformer(layers.Layer):
 
     Converts input images to patch embeddings and processes them through
     a stack of transformer blocks with a learnable class token.
+
+    Args:
+        config: CLIP configuration containing vision transformer parameters
+        **kwargs: Additional keyword arguments for the Layer base class
+
+    Input shape:
+        4D tensor with shape: `(batch_size, height, width, channels)`
+
+    Output shape:
+        2D tensor with shape: `(batch_size, embed_dim)`
+
+    Example:
+        ```python
+        config = CLIPConfig(vision_width=768, vision_layers=12)
+        vision_encoder = VisionTransformer(config)
+
+        # Process batch of images
+        images = keras.ops.random.normal((32, 224, 224, 3))
+        features = vision_encoder(images)  # Shape: (32, 768)
+        ```
     """
 
     def __init__(
@@ -399,73 +274,67 @@ class VisionTransformer(layers.Layer):
         self.num_patches = config.num_patches
         self.seq_len = config.vision_seq_len
 
-        # Will be initialized in build()
-        self.patch_embedding = None
+        # Layers will be created in build()
+        self.patch_conv = None
         self.class_token = None
-        self.transformer_blocks = None
-        self.final_norm = None
+        self.transformer_layers = []
+
+        # Store build input shape for serialization
         self._build_input_shape = None
 
-    def build(self, input_shape) -> None:
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the vision transformer components."""
+        if self.built:
+            return
+
         self._build_input_shape = input_shape
 
-        # Calculate patch embedding input size
-        patch_dim = self.patch_size * self.patch_size * input_shape[-1]
-
-        # Patch embedding projection
-        self.patch_embedding = layers.Dense(
-            self.vision_width,
+        # Patch embedding using Conv2D - create in build(), not call()
+        self.patch_conv = layers.Conv2D(
+            filters=self.vision_width,
+            kernel_size=self.patch_size,
+            strides=self.patch_size,
             use_bias=False,
-            name='patch_embedding'
+            kernel_initializer=initializers.TruncatedNormal(stddev=0.02),
+            name='patch_conv'
         )
 
-        # Class token
+        # Class token - create as managed weight
         self.class_token = self.add_weight(
             name='class_token',
             shape=(1, 1, self.vision_width),
-            initializer=keras.initializers.TruncatedNormal(stddev=0.02),
+            initializer=initializers.TruncatedNormal(stddev=0.02),
             trainable=True
         )
 
-        # Transformer blocks
-        self.transformer_blocks = []
+        # Transformer layers using dl-techniques TransformerLayer
+        self.transformer_layers = []
+
         for i in range(self.vision_layers):
-            block = TransformerBlock(
-                d_model=self.vision_width,
-                n_head=self.vision_heads,
+            transformer_layer = TransformerLayer(
+                hidden_size=self.vision_width,
+                num_heads=self.vision_heads,
+                intermediate_size=int(self.vision_width * self.config.ffn_expansion_factor),
+                attention_type='group_query_attention',
+                normalization_type='rms_norm',
+                normalization_position='pre',
+                ffn_type='swiglu',
+                dropout_rate=self.config.dropout_rate,
+                attention_dropout_rate=self.config.attention_dropout_rate,
                 n_kv_head=self.vision_kv_heads,
-                max_seq_len=self.seq_len,
-                layer_idx=i,
-                total_layers=self.vision_layers,
                 ffn_expansion_factor=self.config.ffn_expansion_factor,
                 ffn_multiple_of=self.config.ffn_multiple_of,
-                attention_dropout=self.config.attention_dropout,
-                dropout_prob=self.config.dropout_prob,
-                stochastic_depth_prob=self.config.stochastic_depth_prob,
-                rms_norm_eps=self.config.rms_norm_eps,
-                rope_percentage=self.config.rope_percentage,
-                name=f'transformer_block_{i}'
+                name=f'transformer_layer_{i}'
             )
-            self.transformer_blocks.append(block)
+            self.transformer_layers.append(transformer_layer)
 
-        # Final layer norm
-        self.final_norm = RMSNorm(
-            epsilon=self.config.rms_norm_eps,
-            name='final_norm'
-        )
+        # Build patch convolution
+        self.patch_conv.build(input_shape)
 
-        # Build sublayers
-        # Patch embedding expects flattened patches
-        patch_input_shape = (input_shape[0], self.num_patches, patch_dim)
-        self.patch_embedding.build(patch_input_shape)
-
-        # Transformer blocks expect (batch, seq_len, d_model)
+        # Build transformer layers
         transformer_input_shape = (input_shape[0], self.seq_len, self.vision_width)
-        for block in self.transformer_blocks:
-            block.build(transformer_input_shape)
-
-        self.final_norm.build(transformer_input_shape)
+        for transformer_layer in self.transformer_layers:
+            transformer_layer.build(transformer_input_shape)
 
         super().build(input_shape)
 
@@ -477,15 +346,8 @@ class VisionTransformer(layers.Layer):
         """Process images through vision transformer."""
         batch_size = ops.shape(inputs)[0]
 
-        # Convert to patches and flatten
-        # Use conv2d to extract patches more efficiently
-        patches = layers.Conv2D(
-            filters=self.vision_width,
-            kernel_size=self.patch_size,
-            strides=self.patch_size,
-            use_bias=False,
-            name='patch_conv'
-        )(inputs)
+        # Convert to patches using pre-built conv layer
+        patches = self.patch_conv(inputs)
 
         # Reshape to sequence format
         patches = ops.reshape(patches, (batch_size, self.num_patches, self.vision_width))
@@ -494,26 +356,22 @@ class VisionTransformer(layers.Layer):
         class_tokens = ops.broadcast_to(self.class_token, (batch_size, 1, self.vision_width))
         x = ops.concatenate([class_tokens, patches], axis=1)
 
-        # Apply transformer blocks
-        for block in self.transformer_blocks:
-            x = block(x, training=training)
+        # Apply transformer layers
+        for transformer_layer in self.transformer_layers:
+            x = transformer_layer(x, training=training)
 
-        # Apply final normalization
-        x = self.final_norm(x, training=training)
+        # Return class token embedding (already normalized by final layer)
+        return x[:, 0]  # Shape: (batch_size, vision_width)
 
-        # Return class token embedding
-        return x[:, 0]  # (batch_size, vision_width)
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Compute the output shape of the layer."""
+        return (input_shape[0], self.vision_width)
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization."""
         config = super().get_config()
         config.update({
-            "image_size": self.image_size,
-            "patch_size": self.patch_size,
-            "vision_width": self.vision_width,
-            "vision_layers": self.vision_layers,
-            "vision_heads": self.vision_heads,
-            "vision_kv_heads": self.vision_kv_heads,
+            "config": self.config.to_dict(),
         })
         return config
 
@@ -526,6 +384,12 @@ class VisionTransformer(layers.Layer):
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
 
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> 'VisionTransformer':
+        """Create layer from configuration."""
+        clip_config = CLIPConfig.from_dict(config['config'])
+        return cls(clip_config)
+
 # ---------------------------------------------------------------------
 
 
@@ -536,6 +400,26 @@ class TextTransformer(layers.Layer):
 
     Processes tokenized text through embedding layer and transformer blocks,
     extracting the final token representation for each sequence.
+
+    Args:
+        config: CLIP configuration containing text transformer parameters
+        **kwargs: Additional keyword arguments for the Layer base class
+
+    Input shape:
+        2D tensor with shape: `(batch_size, sequence_length)`
+
+    Output shape:
+        2D tensor with shape: `(batch_size, text_width)`
+
+    Example:
+        ```python
+        config = CLIPConfig(text_width=512, text_layers=12)
+        text_encoder = TextTransformer(config)
+
+        # Process batch of tokenized text
+        text_tokens = keras.ops.random.uniform((32, 77), 0, 49408, dtype='int32')
+        features = text_encoder(text_tokens)  # Shape: (32, 512)
+        ```
     """
 
     def __init__(
@@ -553,60 +437,56 @@ class TextTransformer(layers.Layer):
         self.text_heads = config.text_heads
         self.text_kv_heads = config.text_kv_heads
 
-        # Will be initialized in build()
+        # Layers will be created in build()
         self.token_embedding = None
-        self.transformer_blocks = None
-        self.final_norm = None
+        self.transformer_layers = []
+
+        # Store build input shape for serialization
         self._build_input_shape = None
 
-    def build(self, input_shape) -> None:
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the text transformer components."""
+        if self.built:
+            return
+
         self._build_input_shape = input_shape
 
         # Token embeddings
         self.token_embedding = layers.Embedding(
             self.vocab_size,
             self.text_width,
-            embeddings_initializer=keras.initializers.TruncatedNormal(stddev=0.02),
+            embeddings_initializer=initializers.TruncatedNormal(stddev=0.02),
             name='token_embedding'
         )
 
-        # Transformer blocks
-        self.transformer_blocks = []
+        # Transformer layers using dl-techniques TransformerLayer
+        self.transformer_layers = []
+
         for i in range(self.text_layers):
-            block = TransformerBlock(
-                d_model=self.text_width,
-                n_head=self.text_heads,
+            transformer_layer = TransformerLayer(
+                hidden_size=self.text_width,
+                num_heads=self.text_heads,
+                intermediate_size=int(self.text_width * self.config.ffn_expansion_factor),
+                attention_type='group_query_attention',
+                normalization_type='rms_norm',
+                normalization_position='pre',
+                ffn_type='swiglu',
+                dropout_rate=self.config.dropout_rate,
+                attention_dropout_rate=self.config.attention_dropout_rate,
                 n_kv_head=self.text_kv_heads,
-                max_seq_len=self.context_length,
-                layer_idx=i,
-                total_layers=self.text_layers,
                 ffn_expansion_factor=self.config.ffn_expansion_factor,
                 ffn_multiple_of=self.config.ffn_multiple_of,
-                attention_dropout=self.config.attention_dropout,
-                dropout_prob=self.config.dropout_prob,
-                stochastic_depth_prob=self.config.stochastic_depth_prob,
-                rms_norm_eps=self.config.rms_norm_eps,
-                rope_percentage=self.config.rope_percentage,
-                name=f'transformer_block_{i}'
+                name=f'transformer_layer_{i}'
             )
-            self.transformer_blocks.append(block)
-
-        # Final layer norm
-        self.final_norm = RMSNorm(
-            epsilon=self.config.rms_norm_eps,
-            name='final_norm'
-        )
+            self.transformer_layers.append(transformer_layer)
 
         # Build sublayers
         self.token_embedding.build(input_shape)
 
         # Transformer input shape after embedding
         transformer_input_shape = (input_shape[0], input_shape[1], self.text_width)
-        for block in self.transformer_blocks:
-            block.build(transformer_input_shape)
-
-        self.final_norm.build(transformer_input_shape)
+        for transformer_layer in self.transformer_layers:
+            transformer_layer.build(transformer_input_shape)
 
         super().build(input_shape)
 
@@ -616,43 +496,44 @@ class TextTransformer(layers.Layer):
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Process text tokens through text transformer."""
-        seq_len = ops.shape(inputs)[1]
-
         # Token embeddings
         x = self.token_embedding(inputs)
 
-        # Create causal mask for autoregressive attention
-        mask = ops.triu(ops.ones((seq_len, seq_len), dtype='bool'), k=1)
-        mask = ops.expand_dims(ops.expand_dims(mask, 0), 0)  # (1, 1, seq_len, seq_len)
-
-        # Apply transformer blocks
-        for block in self.transformer_blocks:
-            x = block(x, training=training, mask=mask)
-
-        # Apply final normalization
-        x = self.final_norm(x, training=training)
+        # Apply transformer layers
+        for transformer_layer in self.transformer_layers:
+            x = transformer_layer(x, training=training)
 
         # Extract text features from the last non-padding token
         # Assumes padding token ID is 0
         sequence_lengths = ops.sum(ops.cast(inputs != 0, 'int32'), axis=1)
-        sequence_lengths = ops.clip(sequence_lengths - 1, 0, seq_len - 1)
 
-        # Gather embeddings at sequence end positions
-        batch_indices = ops.arange(ops.shape(x)[0])
-        text_features = x[batch_indices, sequence_lengths]
+        # Get the actual sequence length from the input tensor's shape
+        current_seq_len = ops.shape(x)[1]
+        last_token_indices = ops.clip(sequence_lengths - 1, 0, current_seq_len - 1)
+
+        # Gather embeddings at sequence end positions. The standard advanced
+        # indexing `x[ops.arange(batch_size), last_token_indices]` is not
+        # supported by all Keras backends (e.g., TensorFlow).
+        # A backend-agnostic way is to use `one_hot` and `matmul`.
+        one_hot_indices = ops.one_hot(
+            last_token_indices, num_classes=current_seq_len, dtype=x.dtype
+        )
+        # Reshape for matmul: (batch_size, 1, seq_len) @ (batch_size, seq_len, width)
+        reshaped_indices = ops.expand_dims(one_hot_indices, axis=1)
+        # Squeeze to get (batch_size, width)
+        text_features = ops.squeeze(ops.matmul(reshaped_indices, x), axis=1)
 
         return text_features
+
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Compute the output shape of the layer."""
+        return (input_shape[0], self.text_width)
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization."""
         config = super().get_config()
         config.update({
-            "vocab_size": self.vocab_size,
-            "context_length": self.context_length,
-            "text_width": self.text_width,
-            "text_layers": self.text_layers,
-            "text_heads": self.text_heads,
-            "text_kv_heads": self.text_kv_heads,
+            "config": self.config.to_dict(),
         })
         return config
 
@@ -665,6 +546,12 @@ class TextTransformer(layers.Layer):
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
 
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> 'TextTransformer':
+        """Create layer from configuration."""
+        clip_config = CLIPConfig.from_dict(config['config'])
+        return cls(clip_config)
+
 # ---------------------------------------------------------------------
 
 
@@ -675,6 +562,40 @@ class CLIPModel(keras.Model):
 
     Implements the complete CLIP architecture with separate vision and text encoders
     that project to a shared embedding space for contrastive learning.
+
+    Args:
+        config: CLIP configuration containing model parameters
+        **kwargs: Additional keyword arguments for the Model base class
+
+    Input shape:
+        Dictionary with keys:
+        - 'image': 4D tensor with shape `(batch_size, height, width, channels)`
+        - 'text': 2D tensor with shape `(batch_size, sequence_length)`
+
+    Output shape:
+        Dictionary with keys:
+        - 'image_features': 2D tensor with shape `(batch_size, embed_dim)`
+        - 'text_features': 2D tensor with shape `(batch_size, embed_dim)`
+        - 'logits_per_image': 2D tensor with shape `(batch_size, batch_size)`
+        - 'logits_per_text': 2D tensor with shape `(batch_size, batch_size)`
+        - 'logit_scale': Scalar tensor
+
+    Example:
+        ```python
+        config = CLIPConfig()
+        model = CLIPModel(config)
+
+        # Prepare inputs
+        images = keras.ops.random.normal((32, 224, 224, 3))
+        text_tokens = keras.ops.random.uniform((32, 77), 0, 49408, dtype='int32')
+
+        # Forward pass
+        outputs = model({'image': images, 'text': text_tokens})
+
+        # Extract features
+        image_features = outputs['image_features']  # Shape: (32, 512)
+        text_features = outputs['text_features']    # Shape: (32, 512)
+        ```
     """
 
     def __init__(
@@ -687,33 +608,41 @@ class CLIPModel(keras.Model):
         self.config = config
         self.embed_dim = config.embed_dim
 
-        # Will be initialized in build()
+        # Components will be created in build()
         self.vision_encoder = None
         self.text_encoder = None
         self.vision_projection = None
         self.text_projection = None
         self.logit_scale = None
 
+        # Store build input shape for serialization
+        self._build_input_shape = None
+
         logger.info(f"CLIPModel initialized with embed_dim={self.embed_dim}")
 
-    def build(self, input_shape) -> None:
+    def build(self, input_shape: Union[Dict[str, Tuple[Optional[int], ...]], Tuple[Tuple[Optional[int], ...], ...], Tuple[Optional[int], ...]]) -> None:
         """Build the CLIP model components."""
-        # Vision encoder
-        self.vision_encoder = VisionTransformer(self.config, name='vision_encoder')
+        if self.built:
+            return
 
-        # Text encoder
+        self._build_input_shape = input_shape
+
+        # Create encoders
+        self.vision_encoder = VisionTransformer(self.config, name='vision_encoder')
         self.text_encoder = TextTransformer(self.config, name='text_encoder')
 
         # Projection layers to shared embedding space
         self.vision_projection = layers.Dense(
             self.embed_dim,
             use_bias=False,
+            kernel_initializer=initializers.TruncatedNormal(stddev=0.02),
             name='vision_projection'
         )
 
         self.text_projection = layers.Dense(
             self.embed_dim,
             use_bias=False,
+            kernel_initializer=initializers.TruncatedNormal(stddev=0.02),
             name='text_projection'
         )
 
@@ -721,26 +650,28 @@ class CLIPModel(keras.Model):
         self.logit_scale = self.add_weight(
             name='logit_scale',
             shape=(),
-            initializer=keras.initializers.Constant(self.config.logit_scale_init),
+            initializer=initializers.Constant(self.config.logit_scale_init),
             trainable=True
         )
 
-        # Build encoders with appropriate input shapes
+        # Build sub-components with appropriate input shapes
         if isinstance(input_shape, dict):
             if 'image' in input_shape:
-                self.vision_encoder.build(input_shape['image'])
-                self.vision_projection.build((input_shape['image'][0], self.config.vision_width))
+                image_shape = input_shape['image']
+                self.vision_encoder.build(image_shape)
+                self.vision_projection.build((image_shape[0], self.config.vision_width))
             if 'text' in input_shape:
-                self.text_encoder.build(input_shape['text'])
-                self.text_projection.build((input_shape['text'][0], self.config.text_width))
+                text_shape = input_shape['text']
+                self.text_encoder.build(text_shape)
+                self.text_projection.build((text_shape[0], self.config.text_width))
         else:
-            # Assume tuple format (image_shape, text_shape)
-            if len(input_shape) >= 1:
-                self.vision_encoder.build(input_shape[0])
-                self.vision_projection.build((input_shape[0][0], self.config.vision_width))
+            # Handle tuple format (image_shape, text_shape) for backwards compatibility
             if len(input_shape) >= 2:
-                self.text_encoder.build(input_shape[1])
-                self.text_projection.build((input_shape[1][0], self.config.text_width))
+                image_shape, text_shape = input_shape[0], input_shape[1]
+                self.vision_encoder.build(image_shape)
+                self.text_encoder.build(text_shape)
+                self.vision_projection.build((image_shape[0], self.config.vision_width))
+                self.text_projection.build((text_shape[0], self.config.text_width))
 
         super().build(input_shape)
 
@@ -749,7 +680,16 @@ class CLIPModel(keras.Model):
         images: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Encode images to shared embedding space."""
+        """
+        Encode images to shared embedding space.
+
+        Args:
+            images: Input images tensor with shape (batch_size, height, width, channels)
+            training: Whether in training mode
+
+        Returns:
+            L2-normalized image features with shape (batch_size, embed_dim)
+        """
         # Get image features from vision encoder
         image_features = self.vision_encoder(images, training=training)
 
@@ -766,7 +706,16 @@ class CLIPModel(keras.Model):
         text_ids: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Encode text to shared embedding space."""
+        """
+        Encode text to shared embedding space.
+
+        Args:
+            text_ids: Input text token IDs with shape (batch_size, sequence_length)
+            training: Whether in training mode
+
+        Returns:
+            L2-normalized text features with shape (batch_size, embed_dim)
+        """
         # Get text features from text encoder
         text_features = self.text_encoder(text_ids, training=training)
 
@@ -823,36 +772,25 @@ class CLIPModel(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
-        return {
-            'config': {
-                'image_size': self.config.image_size,
-                'patch_size': self.config.patch_size,
-                'vision_layers': self.config.vision_layers,
-                'vision_width': self.config.vision_width,
-                'vision_heads': self.config.vision_heads,
-                'vision_kv_heads': self.config.vision_kv_heads,
-                'vocab_size': self.config.vocab_size,
-                'context_length': self.config.context_length,
-                'text_layers': self.config.text_layers,
-                'text_width': self.config.text_width,
-                'text_heads': self.config.text_heads,
-                'text_kv_heads': self.config.text_kv_heads,
-                'embed_dim': self.config.embed_dim,
-                'ffn_expansion_factor': self.config.ffn_expansion_factor,
-                'ffn_multiple_of': self.config.ffn_multiple_of,
-                'dropout_prob': self.config.dropout_prob,
-                'attention_dropout': self.config.attention_dropout,
-                'stochastic_depth_prob': self.config.stochastic_depth_prob,
-                'rms_norm_eps': self.config.rms_norm_eps,
-                'rope_percentage': self.config.rope_percentage,
-                'logit_scale_init': self.config.logit_scale_init,
-            }
-        }
+        config = super().get_config()
+        config.update({
+            'config': self.config.to_dict(),
+        })
+        return config
+
+    def get_build_config(self) -> Dict[str, Any]:
+        """Get build configuration for serialization."""
+        return {"input_shape": self._build_input_shape}
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Build model from configuration."""
+        if config.get("input_shape") is not None:
+            self.build(config["input_shape"])
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'CLIPModel':
         """Create model from configuration."""
-        clip_config = CLIPConfig(**config['config'])
+        clip_config = CLIPConfig.from_dict(config['config'])
         return cls(clip_config)
 
 # ---------------------------------------------------------------------
@@ -892,6 +830,31 @@ def create_clip_model(
 
     Returns:
         Configured CLIP model
+
+    Example:
+        ```python
+        # Create a standard CLIP model
+        model = create_clip_model(
+            image_size=224,
+            vision_layers=12,
+            vision_width=768,
+            text_layers=12,
+            text_width=512,
+            embed_dim=512
+        )
+
+        # Build model with input shapes
+        model.build({
+            'image': (None, 224, 224, 3),
+            'text': (None, 77)
+        })
+
+        # Compile for training
+        model.compile(
+            optimizer='adam',
+            loss='sparse_categorical_crossentropy'
+        )
+        ```
     """
     config = CLIPConfig(
         image_size=image_size,
@@ -927,6 +890,18 @@ def create_clip_variant(variant: str = "ViT-B/16") -> CLIPModel:
 
     Returns:
         Configured CLIP model with modern architecture improvements
+
+    Example:
+        ```python
+        # Create a ViT-B/16 variant
+        model = create_clip_variant("ViT-B/16")
+
+        # Build and compile
+        model.build({
+            'image': (None, 224, 224, 3),
+            'text': (None, 77)
+        })
+        ```
     """
     variant_configs = {
         "ViT-B/32": {
@@ -939,6 +914,7 @@ def create_clip_variant(variant: str = "ViT-B/16") -> CLIPModel:
             "text_layers": 12,
             "text_width": 512,
             "text_heads": 8,
+            "text_kv_heads": 8,
             "embed_dim": 512,
         },
         "ViT-B/16": {
@@ -951,6 +927,7 @@ def create_clip_variant(variant: str = "ViT-B/16") -> CLIPModel:
             "text_layers": 12,
             "text_width": 512,
             "text_heads": 8,
+            "text_kv_heads": 8,
             "embed_dim": 512,
         },
         "ViT-L/14": {
@@ -963,6 +940,7 @@ def create_clip_variant(variant: str = "ViT-B/16") -> CLIPModel:
             "text_layers": 12,
             "text_width": 768,
             "text_heads": 12,
+            "text_kv_heads": 12,
             "embed_dim": 768,
         },
         "ViT-H/14": {
@@ -974,7 +952,8 @@ def create_clip_variant(variant: str = "ViT-B/16") -> CLIPModel:
             "vision_kv_heads": 4,
             "text_layers": 12,
             "text_width": 1024,
-            "text_headers": 16,
+            "text_heads": 16,
+            "text_kv_heads": 16,
             "embed_dim": 1024,
         },
     }
@@ -985,6 +964,9 @@ def create_clip_variant(variant: str = "ViT-B/16") -> CLIPModel:
         )
 
     config_dict = variant_configs[variant]
+    # Ensure text_kv_heads is set for standard MHA by default
+    config_dict.setdefault("text_kv_heads", config_dict["text_heads"])
+
     logger.info(f"Creating CLIP {variant} variant with modern improvements")
 
     return create_clip_model(**config_dict)

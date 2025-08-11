@@ -11,8 +11,8 @@ from typing import Tuple, Dict, Any, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.transformer import TransformerLayer
 from dl_techniques.models.vit import ViT, create_vision_transformer
-from dl_techniques.layers.vision_transformer import VisionTransformerLayer
 
 # ---------------------------------------------------------------------
 
@@ -178,7 +178,7 @@ def validate_model_loading(model_path: str, test_input: tf.Tensor, original_outp
         # Define custom objects for loading
         custom_objects = {
             "ViT": ViT,
-            "VisionTransformerLayer": VisionTransformerLayer
+            "TransformerLayer": TransformerLayer
         }
 
         # Load the model
@@ -324,7 +324,7 @@ def train_model(args: argparse.Namespace):
             is_loading_valid = validate_model_loading(best_model_path, test_sample, pre_save_output)
 
             if is_loading_valid:
-                custom_objects = {"ViT": ViT, "VisionTransformerLayer": VisionTransformerLayer}
+                custom_objects = {"ViT": ViT, "TransformerLayer": TransformerLayer}
                 best_model = keras.models.load_model(best_model_path, custom_objects=custom_objects)
                 logger.info("Successfully loaded best model from checkpoint")
             else:

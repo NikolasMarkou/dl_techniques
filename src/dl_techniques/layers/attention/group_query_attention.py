@@ -47,7 +47,7 @@ References:
 """
 
 import keras
-from keras import layers, ops
+from keras import ops
 from typing import Optional, Any, Dict
 
 # ---------------------------------------------------------------------
@@ -61,7 +61,7 @@ from ..rotary_position_embedding import RotaryPositionEmbedding
 
 
 @keras.saving.register_keras_serializable()
-class GroupedQueryAttention(layers.Layer):
+class GroupedQueryAttention(keras.layers.Layer):
     """
     Grouped Query Attention layer with rotary position embeddings.
 
@@ -78,7 +78,7 @@ class GroupedQueryAttention(layers.Layer):
             Number of key-value heads. Must divide n_head evenly.
         max_seq_len: int
             Maximum sequence length for positional embeddings.
-        attention_dropout: float, default=0.0
+        dropout_rate: float, default=0.0
             Dropout rate applied to attention weights.
         rope_percentage: float, default=1.0
             Fraction of head dimensions to apply rotary embeddings to.
@@ -122,8 +122,8 @@ class GroupedQueryAttention(layers.Layer):
             d_model: int,
             n_head: int,
             n_kv_head: int,
-            max_seq_len: int,
-            attention_dropout: float = 0.0,
+            max_seq_len: int = 2048,
+            dropout_rate: float = 0.0,
             rope_percentage: float = 1.0,
             use_bias: bool = False,
             **kwargs: Any
@@ -131,13 +131,13 @@ class GroupedQueryAttention(layers.Layer):
         super().__init__(**kwargs)
 
         # Validate inputs
-        self._validate_inputs(d_model, n_head, n_kv_head, attention_dropout, rope_percentage)
+        self._validate_inputs(d_model, n_head, n_kv_head, dropout_rate, rope_percentage)
 
         self.d_model = d_model
         self.n_head = n_head
         self.n_kv_head = n_kv_head
         self.max_seq_len = max_seq_len
-        self.attention_dropout = attention_dropout
+        self.dropout_rate = dropout_rate
         self.rope_percentage = rope_percentage
         self.use_bias = use_bias
 
@@ -162,7 +162,7 @@ class GroupedQueryAttention(layers.Layer):
             d_model: int,
             n_head: int,
             n_kv_head: int,
-            attention_dropout: float,
+            dropout_rate: float,
             rope_percentage: float
     ) -> None:
         """Validate initialization parameters."""
@@ -176,8 +176,8 @@ class GroupedQueryAttention(layers.Layer):
             raise ValueError(f"d_model ({d_model}) must be divisible by n_head ({n_head})")
         if n_head % n_kv_head != 0:
             raise ValueError(f"n_head ({n_head}) must be divisible by n_kv_head ({n_kv_head})")
-        if not 0.0 <= attention_dropout <= 1.0:
-            raise ValueError(f"attention_dropout must be in [0, 1], got {attention_dropout}")
+        if not 0.0 <= dropout_rate <= 1.0:
+            raise ValueError(f"attention_dropout must be in [0, 1], got {dropout_rate}")
         if not 0.0 < rope_percentage <= 1.0:
             raise ValueError(f"rope_percentage must be in (0, 1], got {rope_percentage}")
 
@@ -186,35 +186,35 @@ class GroupedQueryAttention(layers.Layer):
         self._build_input_shape = input_shape
 
         # Query projection: maps to n_head * head_dim
-        self.w_q = layers.Dense(
+        self.w_q = keras.layers.Dense(
             self.n_head * self.head_dim,
             use_bias=self.use_bias,
             name='w_q'
         )
 
         # Key projection: maps to n_kv_head * head_dim (fewer heads)
-        self.w_k = layers.Dense(
+        self.w_k = keras.layers.Dense(
             self.n_kv_head * self.head_dim,
             use_bias=self.use_bias,
             name='w_k'
         )
 
         # Value projection: maps to n_kv_head * head_dim (fewer heads)
-        self.w_v = layers.Dense(
+        self.w_v = keras.layers.Dense(
             self.n_kv_head * self.head_dim,
             use_bias=self.use_bias,
             name='w_v'
         )
 
         # Output projection: maps back to d_model
-        self.w_o = layers.Dense(
+        self.w_o = keras.layers.Dense(
             self.d_model,
             use_bias=self.use_bias,
             name='w_o'
         )
 
         # Attention dropout
-        self.dropout = layers.Dropout(self.attention_dropout)
+        self.dropout = keras.layers.Dropout(self.dropout_rate)
 
         # Rotary position embeddings
         self.rope = RotaryPositionEmbedding(
@@ -332,7 +332,7 @@ class GroupedQueryAttention(layers.Layer):
             "n_head": self.n_head,
             "n_kv_head": self.n_kv_head,
             "max_seq_len": self.max_seq_len,
-            "attention_dropout": self.attention_dropout,
+            "dropout_rate": self.dropout_rate,
             "rope_percentage": self.rope_percentage,
             "use_bias": self.use_bias,
         })

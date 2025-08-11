@@ -341,11 +341,8 @@ class TransformerLayer(keras.layers.Layer):
                 'd_model': self.hidden_size,
                 'n_head': self.num_heads,
                 'n_kv_head': self.n_kv_head,
-                'dropout': self.attention_dropout_rate,
+                'dropout_rate': self.attention_dropout_rate,
                 'use_bias': self.use_bias,
-                'kernel_initializer': self.kernel_initializer,
-                'bias_initializer': self.bias_initializer,
-                'kernel_regularizer': self.kernel_regularizer,
                 'name': name
             }
         else:

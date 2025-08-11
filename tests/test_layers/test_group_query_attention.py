@@ -52,7 +52,7 @@ class TestGroupedQueryAttention:
         assert layer.n_head == 8
         assert layer.n_kv_head == 2
         assert layer.max_seq_len == 128
-        assert layer.attention_dropout == 0.0
+        assert layer.dropout_rate == 0.0
         assert layer.rope_percentage == 1.0
         assert layer.use_bias is False
 
@@ -67,7 +67,7 @@ class TestGroupedQueryAttention:
             n_head=12,
             n_kv_head=4,
             max_seq_len=256,
-            attention_dropout=0.1,
+            dropout_rate=0.1,
             rope_percentage=0.5,
             use_bias=True
         )
@@ -76,7 +76,7 @@ class TestGroupedQueryAttention:
         assert layer.n_head == 12
         assert layer.n_kv_head == 4
         assert layer.max_seq_len == 256
-        assert layer.attention_dropout == 0.1
+        assert layer.dropout_rate == 0.1
         assert layer.rope_percentage == 0.5
         assert layer.use_bias is True
         assert layer.head_dim == 64  # 768 // 12
@@ -99,7 +99,7 @@ class TestGroupedQueryAttention:
         # Invalid dropout rate
         with pytest.raises(ValueError, match="attention_dropout must be in"):
             GroupedQueryAttention(
-                d_model=512, n_head=8, n_kv_head=2, max_seq_len=128, attention_dropout=1.5
+                d_model=512, n_head=8, n_kv_head=2, max_seq_len=128, dropout_rate=1.5
             )
 
         # Invalid rope_percentage (too high)
@@ -224,7 +224,7 @@ class TestGroupedQueryAttention:
 
         # With dropout > 0, outputs might be different
         layer_with_dropout = GroupedQueryAttention(
-            d_model=512, n_head=8, n_kv_head=2, max_seq_len=128, attention_dropout=0.5
+            d_model=512, n_head=8, n_kv_head=2, max_seq_len=128, dropout_rate=0.5
         )
 
         train_out = layer_with_dropout(input_tensor, training=True)
@@ -610,7 +610,7 @@ class TestGroupedQueryAttention:
         """Test that layer behavior is consistent and deterministic."""
         # Create layer with attention_dropout=0 to ensure deterministic behavior
         layer = GroupedQueryAttention(
-            d_model=256, n_head=4, n_kv_head=2, max_seq_len=64, attention_dropout=0.0
+            d_model=256, n_head=4, n_kv_head=2, max_seq_len=64, dropout_rate=0.0
         )
 
         # Use completely fixed inputs
