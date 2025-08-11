@@ -7,6 +7,9 @@ feature extraction, and transfer learning.
 
 The model supports different scales and configurations similar to the original
 "An Image is Worth 16x16 Words" paper and its variants.
+
+This implementation uses the generic TransformerLayer from dl-techniques.layers.transformer
+for maximum flexibility and consistency with the framework.
 """
 
 import keras
@@ -19,9 +22,9 @@ from typing import Optional, Tuple, Dict, Any, Union
 
 from ..utils.logger import logger
 from ..layers.norms.rms_norm import RMSNorm
+from ..layers.transformer import TransformerLayer
 from ..layers.patch_embedding import PatchEmbedding2D
 from ..layers.positional_embedding import PositionalEmbedding
-from ..layers.vision_transformer import VisionTransformerLayer
 
 # ---------------------------------------------------------------------
 
@@ -33,6 +36,9 @@ class ViT(keras.Model):
     This model implements the complete Vision Transformer architecture with support
     for different scales and configurations. It can be used for classification,
     feature extraction, and other vision tasks.
+
+    The model uses the generic TransformerLayer from dl-techniques for maximum
+    flexibility and consistency with the framework standards.
 
     Args:
         input_shape: Input image shape (height, width, channels).
@@ -46,11 +52,51 @@ class ViT(keras.Model):
         pos_dropout_rate: Dropout rate for positional embeddings.
         kernel_initializer: Weight initializer for all layers.
         kernel_regularizer: Weight regularizer for all layers.
+        bias_initializer: Bias initializer for all layers.
+        bias_regularizer: Bias regularizer for all layers.
         norm_type: Type of normalization ('layer' or 'rms').
+        normalization_position: Position of normalization ('pre' or 'post').
+        ffn_type: Type of feed-forward network ('mlp', 'swiglu', etc.).
+        activation: Activation function for feed-forward networks.
         name: Model name.
 
-    Returns:
-        Model outputs depend on include_top and pooling settings.
+    Input shape:
+        4D tensor with shape: `(batch_size, height, width, channels)`
+
+    Output shape:
+        - If `include_top=True`: `(batch_size, num_classes)`
+        - If `include_top=False` and `pooling='cls'`: `(batch_size, embed_dim)`
+        - If `include_top=False` and `pooling='mean'`: `(batch_size, embed_dim)`
+        - If `include_top=False` and `pooling='max'`: `(batch_size, embed_dim)`
+        - If `include_top=False` and `pooling=None`: `(batch_size, seq_len, embed_dim)`
+
+    Example:
+        ```python
+        # Create ViT-Base for ImageNet classification
+        model = ViT(
+            input_shape=(224, 224, 3),
+            num_classes=1000,
+            scale='base'
+        )
+
+        # Create feature extractor
+        feature_model = ViT(
+            input_shape=(224, 224, 3),
+            scale='base',
+            include_top=False,
+            pooling='cls'
+        )
+
+        # Custom configuration with different transformer settings
+        custom_model = ViT(
+            input_shape=(384, 384, 3),
+            num_classes=10,
+            scale='small',
+            normalization_position='pre',
+            ffn_type='swiglu',
+            activation='gelu'
+        )
+        ```
     """
 
     # Scale configurations: [embed_dim, num_heads, num_layers, mlp_ratio]
@@ -73,9 +119,14 @@ class ViT(keras.Model):
         dropout_rate: float = 0.0,
         attention_dropout_rate: float = 0.0,
         pos_dropout_rate: float = 0.0,
-        kernel_initializer: str = "he_normal",
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         norm_type: str = "layer",
+        normalization_position: str = "post",
+        ffn_type: str = "mlp",
+        activation: Union[str, callable] = "gelu",
         name: Optional[str] = None,
         **kwargs: Any
     ) -> None:
@@ -120,9 +171,14 @@ class ViT(keras.Model):
         self.dropout_rate = float(dropout_rate)
         self.attention_dropout_rate = float(attention_dropout_rate)
         self.pos_dropout_rate = float(pos_dropout_rate)
-        self.kernel_initializer = str(kernel_initializer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = kernel_regularizer
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.bias_regularizer = bias_regularizer
         self.norm_type = str(norm_type)
+        self.normalization_position = str(normalization_position)
+        self.ffn_type = str(ffn_type)
+        self.activation = activation
 
         # Validate inputs
         if scale not in self.SCALE_CONFIGS:
@@ -135,8 +191,17 @@ class ViT(keras.Model):
                 f"Unsupported pooling: {pooling}. Choose from [None, 'cls', 'mean', 'max']"
             )
 
+        if norm_type not in ["layer", "rms"]:
+            raise ValueError(f"Unsupported norm_type: {norm_type}. Choose from ['layer', 'rms']")
+
+        if normalization_position not in ["pre", "post"]:
+            raise ValueError(f"Unsupported normalization_position: {normalization_position}. Choose from ['pre', 'post']")
+
         # Get model configuration
         self.embed_dim, self.num_heads, self.num_layers, self.mlp_ratio = self.SCALE_CONFIGS[scale]
+
+        # Calculate intermediate size for transformer layers
+        self.intermediate_size = int(self.embed_dim * self.mlp_ratio)
 
         # Calculate number of patches
         self.num_patches = (img_h // patch_h) * (img_w // patch_w)
@@ -150,7 +215,7 @@ class ViT(keras.Model):
         self.patch_embed = None
         self.cls_token = None
         self.pos_embed = None
-        self.transformer_layers = None
+        self.transformer_layers = []
         self.norm = None
         self.head_dropout = None
         self.head = None
@@ -158,23 +223,20 @@ class ViT(keras.Model):
 
         # Store build state for serialization
         self._build_input_shape = None
-        self._layers_built = False
 
         logger.info(f"Created VisionTransformer-{scale} with {self.embed_dim}d, {self.num_heads}h, {self.num_layers}L")
         logger.info(f"Image shape: {self.input_shape_config}, Patch size: {self.patch_size}, Num patches: {self.num_patches}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the model layers."""
-        if self._layers_built:
+        if self.built:
             return
 
         self._build_input_shape = input_shape
-        self._build_layers()
-        self._layers_built = True
-        super().build(input_shape)
 
-    def _build_layers(self) -> None:
-        """Initialize all model layers."""
+        # Map norm_type to TransformerLayer's normalization_type
+        transformer_norm_type = "layer_norm" if self.norm_type == "layer" else "rms_norm"
+
         # Patch embedding layer
         self.patch_embed = PatchEmbedding2D(
             patch_size=self.patch_size,
@@ -203,21 +265,34 @@ class ViT(keras.Model):
             dropout=self.pos_dropout_rate,
             name="pos_embed"
         )
+        # Build positional embedding
+        pos_input_shape = (None, self.max_seq_len, self.embed_dim)
+        self.pos_embed.build(pos_input_shape)
 
-        # Transformer layers
+        # Transformer layers using the generic TransformerLayer
         self.transformer_layers = []
         for i in range(self.num_layers):
-            layer = VisionTransformerLayer(
-                embed_dim=self.embed_dim,
+            layer = TransformerLayer(
+                hidden_size=self.embed_dim,
                 num_heads=self.num_heads,
-                mlp_ratio=self.mlp_ratio,
+                intermediate_size=self.intermediate_size,
+                attention_type="multi_head_attention",
+                normalization_type=transformer_norm_type,
+                normalization_position=self.normalization_position,
+                ffn_type=self.ffn_type,
                 dropout_rate=self.dropout_rate,
                 attention_dropout_rate=self.attention_dropout_rate,
+                activation=self.activation,
+                use_bias=True,
                 kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
-                norm_type=self.norm_type,
+                bias_regularizer=self.bias_regularizer,
                 name=f"transformer_layer_{i}"
             )
+            # Build transformer layer
+            transformer_input_shape = (None, self.max_seq_len, self.embed_dim)
+            layer.build(transformer_input_shape)
             self.transformer_layers.append(layer)
 
         # Final normalization
@@ -226,25 +301,38 @@ class ViT(keras.Model):
         else:
             self.norm = keras.layers.LayerNormalization(epsilon=1e-6, name="norm")
 
+        # Build final norm layer
+        norm_input_shape = (None, self.max_seq_len, self.embed_dim)
+        self.norm.build(norm_input_shape)
+
         # Classification head (if include_top)
         if self.include_top:
             if self.dropout_rate > 0.0:
                 self.head_dropout = keras.layers.Dropout(self.dropout_rate, name="head_dropout")
-            else:
-                self.head_dropout = None
 
             self.head = keras.layers.Dense(
                 self.num_classes,
                 kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
+                bias_regularizer=self.bias_regularizer,
                 name="head"
             )
+            # Build head layer
+            head_input_shape = (None, self.embed_dim)
+            self.head.build(head_input_shape)
 
         # Global pooling layers (if needed)
         if self.pooling == "mean":
             self.global_pool = keras.layers.GlobalAveragePooling1D(name="global_avg_pool")
         elif self.pooling == "max":
             self.global_pool = keras.layers.GlobalMaxPooling1D(name="global_max_pool")
+
+        if self.global_pool is not None:
+            pool_input_shape = (None, self.max_seq_len, self.embed_dim)
+            self.global_pool.build(pool_input_shape)
+
+        super().build(input_shape)
 
     def call(
         self,
@@ -336,9 +424,14 @@ class ViT(keras.Model):
             "dropout_rate": self.dropout_rate,
             "attention_dropout_rate": self.attention_dropout_rate,
             "pos_dropout_rate": self.pos_dropout_rate,
-            "kernel_initializer": self.kernel_initializer,
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
             "norm_type": self.norm_type,
+            "normalization_position": self.normalization_position,
+            "ffn_type": self.ffn_type,
+            "activation": self.activation,
         })
         return config
 
@@ -382,7 +475,12 @@ class ViT(keras.Model):
             pos_dropout_rate=self.pos_dropout_rate,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
+            bias_initializer=self.bias_initializer,
+            bias_regularizer=self.bias_regularizer,
             norm_type=self.norm_type,
+            normalization_position=self.normalization_position,
+            ffn_type=self.ffn_type,
+            activation=self.activation,
             name=f"{self.name}_feature_extractor"
         )
 
@@ -398,14 +496,18 @@ class ViT(keras.Model):
         logger.info(f"Number of Heads: {self.num_heads}")
         logger.info(f"Number of Layers: {self.num_layers}")
         logger.info(f"MLP Ratio: {self.mlp_ratio}")
+        logger.info(f"Intermediate Size: {self.intermediate_size}")
         logger.info(f"Dropout Rate: {self.dropout_rate}")
         logger.info(f"Attention Dropout Rate: {self.attention_dropout_rate}")
         logger.info(f"Positional Dropout Rate: {self.pos_dropout_rate}")
         logger.info(f"Normalization Type: {self.norm_type}")
+        logger.info(f"Normalization Position: {self.normalization_position}")
+        logger.info(f"FFN Type: {self.ffn_type}")
+        logger.info(f"Activation: {self.activation}")
         logger.info(f"Include Top: {self.include_top}")
         logger.info(f"Pooling: {self.pooling}")
         logger.info(f"Number of Classes: {self.num_classes}")
-        if self._layers_built:
+        if self.built:
             logger.info(f"Total Parameters: {self.count_params():,}")
 
         # Additional safety information
@@ -425,9 +527,14 @@ def create_vision_transformer(
     dropout_rate: float = 0.0,
     attention_dropout_rate: float = 0.0,
     pos_dropout_rate: float = 0.0,
-    kernel_initializer: str = "he_normal",
+    kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
     kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+    bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+    bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
     norm_type: str = "layer",
+    normalization_position: str = "post",
+    ffn_type: str = "mlp",
+    activation: Union[str, callable] = "gelu",
     **kwargs: Any
 ) -> ViT:
     """Create a Vision Transformer model with specified configuration.
@@ -444,7 +551,12 @@ def create_vision_transformer(
         pos_dropout_rate: Dropout rate for positional embeddings.
         kernel_initializer: Weight initializer for all layers.
         kernel_regularizer: Weight regularizer for all layers.
+        bias_initializer: Bias initializer for all layers.
+        bias_regularizer: Bias regularizer for all layers.
         norm_type: Type of normalization ('layer' or 'rms').
+        normalization_position: Position of normalization ('pre' or 'post').
+        ffn_type: Type of feed-forward network ('mlp', 'swiglu', etc.).
+        activation: Activation function for feed-forward networks.
         **kwargs: Additional arguments for ViT.
 
     Returns:
@@ -497,7 +609,12 @@ def create_vision_transformer(
         pos_dropout_rate=pos_dropout_rate,
         kernel_initializer=kernel_initializer,
         kernel_regularizer=kernel_regularizer,
+        bias_initializer=bias_initializer,
+        bias_regularizer=bias_regularizer,
         norm_type=norm_type,
+        normalization_position=normalization_position,
+        ffn_type=ffn_type,
+        activation=activation,
         **kwargs
     )
 
