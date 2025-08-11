@@ -3,13 +3,13 @@ This module provides a `TransformerEncoderLayer`, a highly configurable and gene
 implementation of the fundamental building block of Transformer-based neural networks.
 
 This layer encapsulates the two primary sub-layers of a standard Transformer encoder:
-a multi-head self-attention mechanism and a position-wise feed-forward network. Both
+a configurable multi-head attention mechanism and a position-wise feed-forward network. Both
 sub-layers are wrapped with residual connections and normalization, which are crucial
 for enabling the training of very deep networks.
 
 A key feature of this implementation is its flexibility. It is designed to serve as a
 versatile component for research and development, allowing for easy experimentation
-with different normalization techniques and feed-forward network architectures.
+with different attention mechanisms, normalization techniques and feed-forward network architectures.
 
 Architectural Design (Configurable Normalization):
 
@@ -27,12 +27,19 @@ This implementation supports both "post-normalization" (Post-LN) and "pre-normal
 The full flow through the layer depends on normalization position:
 
 **Post-LN Flow:**
-1.  **Self-Attention Block:** MultiHeadAttention(x) -> Add residual -> LayerNorm
+1.  **Self-Attention Block:** Attention(x) -> Add residual -> LayerNorm
 2.  **Feed-Forward Block:** FFN(attn_out) -> Add residual -> LayerNorm
 
 **Pre-LN Flow:**
-1.  **Self-Attention Block:** LayerNorm(x) -> MultiHeadAttention -> Add residual
+1.  **Self-Attention Block:** LayerNorm(x) -> Attention -> Add residual
 2.  **Feed-Forward Block:** LayerNorm(attn_out) -> FFN -> Add residual
+
+**Attention Mechanism Options:**
+The attention mechanism can be one of several configurable architectures:
+- 'multi_head_attention': Standard multi-head self-attention (default)
+- 'window_attention': Windowed attention for efficient processing
+- 'group_query_attention': Grouped query attention for reduced parameters
+- Custom attention layers can be easily added
 
 **Feed-Forward Network Options:**
 The FFN can be one of several configurable architectures:
@@ -46,6 +53,7 @@ The FFN can be one of several configurable architectures:
 Configurable Components:
 
 Major strengths of this layer include:
+- `attention_type`: Choose from various attention mechanisms
 - `normalization_type`: Easily swap normalization functions (layer_norm, rms_norm, etc.)
 - `normalization_position`: Choose between post-LN and pre-LN architectures
 - `ffn_type`: Choose from various feed-forward architectures for different use cases
@@ -74,16 +82,19 @@ from .ffn.swiglu_ffn import SwiGLUFFN
 from .ffn.diff_ffn import DifferentialFFN
 from .ffn.residual_block import ResidualBlock
 
+from .attention.window_attention import WindowAttention
+from .attention.group_query_attention import GroupedQueryAttention
+
 # ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
 class TransformerEncoderLayer(keras.layers.Layer):
     """
-    Generic transformer encoder layer with configurable normalization and FFN.
+    Generic transformer encoder layer with configurable attention, normalization and FFN.
 
     This layer implements a standard transformer encoder block with:
-    - Multi-head self-attention
+    - Configurable multi-head attention mechanisms
     - Configurable feed-forward network
     - Residual connections
     - Configurable normalization
@@ -92,6 +103,11 @@ class TransformerEncoderLayer(keras.layers.Layer):
         hidden_size: Integer, hidden size of the layer.
         num_heads: Integer, number of attention heads.
         intermediate_size: Integer, size of the intermediate (feed-forward) layer.
+        attention_type: String, type of attention mechanism to use.
+            Available options:
+            - 'multi_head_attention': Standard multi-head self-attention (default)
+            - 'window_attention': Windowed attention for efficient processing
+            - 'group_query_attention': Grouped query attention for reduced parameters
         normalization_type: String, type of normalization to use.
             Available options:
             - 'layer_norm': Standard layer normalization (default)
@@ -123,6 +139,9 @@ class TransformerEncoderLayer(keras.layers.Layer):
         bias_regularizer: Optional regularizer for bias weights.
         ffn_expansion_factor: Integer, expansion factor for SwiGLU FFN. Defaults to 4.
         ffn_multiple_of: Integer, multiple constraint for SwiGLU FFN. Defaults to 256.
+        window_size: Integer, window size for window attention. Defaults to 8.
+        n_kv_head: Integer, number of key-value heads for grouped query attention.
+            Defaults to None (uses num_heads).
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
@@ -132,18 +151,37 @@ class TransformerEncoderLayer(keras.layers.Layer):
         3D tensor with shape: `(batch_size, sequence_length, hidden_size)`
 
     Example:
-        >>> inputs = keras.Input(shape=(128, 768))
-        >>> layer = TransformerEncoderLayer(
-        ...     hidden_size=768,
-        ...     num_heads=12,
-        ...     intermediate_size=3072,
-        ...     normalization_type='layer_norm',
-        ...     normalization_position='pre',
-        ...     ffn_type='swiglu'
-        ... )
-        >>> outputs = layer(inputs)
-        >>> print(outputs.shape)
-        (None, 128, 768)
+        ```python
+        # Standard multi-head attention
+        inputs = keras.Input(shape=(128, 768))
+        layer = TransformerEncoderLayer(
+            hidden_size=768,
+            num_heads=12,
+            intermediate_size=3072,
+            attention_type='multi_head_attention',
+            normalization_position='pre',
+            ffn_type='swiglu'
+        )
+        outputs = layer(inputs)
+
+        # Window attention
+        layer = TransformerEncoderLayer(
+            hidden_size=768,
+            num_heads=12,
+            intermediate_size=3072,
+            attention_type='window_attention',
+            window_size=16
+        )
+
+        # Grouped query attention
+        layer = TransformerEncoderLayer(
+            hidden_size=768,
+            num_heads=12,
+            intermediate_size=3072,
+            attention_type='group_query_attention',
+            n_kv_head=4
+        )
+        ```
     """
 
     def __init__(
@@ -151,6 +189,7 @@ class TransformerEncoderLayer(keras.layers.Layer):
             hidden_size: int,
             num_heads: int,
             intermediate_size: int,
+            attention_type: str = 'multi_head_attention',
             normalization_type: str = 'layer_norm',
             normalization_position: str = 'post',
             ffn_type: str = 'mlp',
@@ -164,6 +203,8 @@ class TransformerEncoderLayer(keras.layers.Layer):
             bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             ffn_expansion_factor: int = 4,
             ffn_multiple_of: int = 256,
+            window_size: int = 8,
+            n_kv_head: Optional[int] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -184,6 +225,10 @@ class TransformerEncoderLayer(keras.layers.Layer):
         if not (0.0 <= attention_dropout_rate <= 1.0):
             raise ValueError(f"attention_dropout_rate must be between 0 and 1, got {attention_dropout_rate}")
 
+        valid_attention_types = ['multi_head_attention', 'window_attention', 'group_query_attention']
+        if attention_type not in valid_attention_types:
+            raise ValueError(f"attention_type must be one of {valid_attention_types}, got {attention_type}")
+
         valid_norm_types = ['layer_norm', 'rms_norm', 'batch_norm', 'band_rms']
         if normalization_type not in valid_norm_types:
             raise ValueError(f"normalization_type must be one of {valid_norm_types}, got {normalization_type}")
@@ -196,10 +241,14 @@ class TransformerEncoderLayer(keras.layers.Layer):
         if ffn_type not in valid_ffn_types:
             raise ValueError(f"ffn_type must be one of {valid_ffn_types}, got {ffn_type}")
 
+        if window_size <= 0:
+            raise ValueError(f"window_size must be positive, got {window_size}")
+
         # Store configuration parameters
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.intermediate_size = intermediate_size
+        self.attention_type = attention_type
         self.normalization_type = normalization_type
         self.normalization_position = normalization_position
         self.ffn_type = ffn_type
@@ -213,6 +262,8 @@ class TransformerEncoderLayer(keras.layers.Layer):
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.ffn_expansion_factor = ffn_expansion_factor
         self.ffn_multiple_of = ffn_multiple_of
+        self.window_size = window_size
+        self.n_kv_head = n_kv_head if n_kv_head is not None else num_heads
 
         # Initialize layers to None - will be created in build()
         self.attention = None
@@ -250,6 +301,88 @@ class TransformerEncoderLayer(keras.layers.Layer):
             )
         else:
             raise ValueError(f"Unknown normalization type: {self.normalization_type}")
+
+    def _get_attention_params(self, attention_type: str, name: str) -> Dict[str, Any]:
+        """Get parameters for attention layer creation based on type.
+
+        Args:
+            attention_type: Type of attention layer.
+            name: Name for the layer.
+
+        Returns:
+            Dictionary of parameters for the specific attention type.
+        """
+        if attention_type == 'multi_head_attention':
+            # Standard Keras MultiHeadAttention parameters
+            return {
+                'num_heads': self.num_heads,
+                'key_dim': self.hidden_size // self.num_heads,
+                'dropout': self.attention_dropout_rate,
+                'use_bias': self.use_bias,
+                'kernel_initializer': self.kernel_initializer,
+                'bias_initializer': self.bias_initializer,
+                'name': name
+            }
+        elif attention_type == 'window_attention':
+            # WindowAttention parameters
+            return {
+                'dim': self.hidden_size,
+                'window_size': self.window_size,
+                'num_heads': self.num_heads,
+                'use_bias': self.use_bias,
+                'kernel_initializer': self.kernel_initializer,
+                'bias_initializer': self.bias_initializer,
+                'kernel_regularizer': self.kernel_regularizer,
+                'name': name
+            }
+        elif attention_type == 'group_query_attention':
+            # GroupedQueryAttention parameters
+            return {
+                'd_model': self.hidden_size,
+                'n_head': self.num_heads,
+                'n_kv_head': self.n_kv_head,
+                'dropout': self.attention_dropout_rate,
+                'use_bias': self.use_bias,
+                'kernel_initializer': self.kernel_initializer,
+                'bias_initializer': self.bias_initializer,
+                'kernel_regularizer': self.kernel_regularizer,
+                'name': name
+            }
+        else:
+            raise ValueError(f"Unknown attention type: {attention_type}")
+
+    def _create_attention_layer(self, name: str) -> keras.layers.Layer:
+        """Create an attention layer based on the specified type.
+
+        Args:
+            name: Name for the attention layer.
+
+        Returns:
+            An attention layer instance.
+        """
+        # Get parameters for this attention type
+        params = self._get_attention_params(self.attention_type, name)
+
+        try:
+            if self.attention_type == 'multi_head_attention':
+                return keras.layers.MultiHeadAttention(**params)
+            elif self.attention_type == 'window_attention':
+                return WindowAttention(**params)
+            elif self.attention_type == 'group_query_attention':
+                return GroupedQueryAttention(**params)
+            else:
+                raise ValueError(f"Unknown attention type: {self.attention_type}")
+        except (TypeError, ValueError) as e:
+            # Log the issue and provide helpful error message
+            logger.warning(f"Failed to create {self.attention_type} layer: {e}")
+            logger.warning(f"Attempted parameters: {list(params.keys())}")
+
+            # If creation fails, provide a more informative error
+            raise ValueError(
+                f"Failed to create {self.attention_type} layer. "
+                f"This might be due to parameter incompatibility or missing dependencies. "
+                f"Original error: {e}"
+            )
 
     def _get_ffn_params(self, ffn_type: str, name: str) -> Dict[str, Any]:
         """Get parameters for FFN layer creation based on type.
@@ -391,16 +524,8 @@ class TransformerEncoderLayer(keras.layers.Layer):
                 f"Input feature dimension ({input_shape[-1]}) must match hidden_size ({self.hidden_size})"
             )
 
-        # Multi-head attention
-        self.attention = keras.layers.MultiHeadAttention(
-            num_heads=self.num_heads,
-            key_dim=self.hidden_size // self.num_heads,
-            dropout=self.attention_dropout_rate,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            name='attention'
-        )
+        # Configurable attention layer
+        self.attention = self._create_attention_layer('attention')
 
         # Attention layer normalization
         self.attention_norm = self._create_normalization_layer('attention_norm')
@@ -419,7 +544,13 @@ class TransformerEncoderLayer(keras.layers.Layer):
         )
 
         # Build sublayers
-        self.attention.build(query_shape=input_shape, value_shape=input_shape)
+        # For different attention types, we need to handle the build call appropriately
+        if self.attention_type == 'multi_head_attention':
+            self.attention.build(query_shape=input_shape, value_shape=input_shape)
+        else:
+            # For custom attention layers, just pass the input shape
+            self.attention.build(input_shape)
+
         self.attention_norm.build(input_shape)
         self.ffn_layer.build(input_shape)
         self.output_norm.build(input_shape)
@@ -464,13 +595,20 @@ class TransformerEncoderLayer(keras.layers.Layer):
             # Post-normalization: SubLayer(x) -> Add residual -> Normalize
 
             # Multi-head attention with residual connection
-            attention_output = self.attention(
-                query=inputs,
-                value=inputs,  # value = query for self-attention
-                key=inputs,  # key = query for self-attention
-                attention_mask=processed_mask,
-                training=training
-            )
+            if self.attention_type == 'multi_head_attention':
+                # Standard Keras MultiHeadAttention call
+                attention_output = self.attention(
+                    query=inputs,
+                    value=inputs,  # value = query for self-attention
+                    key=inputs,  # key = query for self-attention
+                    attention_mask=processed_mask,
+                    training=training
+                )
+            else:
+                # Custom attention layers (window_attention, group_query_attention, etc.)
+                # These typically just take inputs and optional training
+                attention_output = self.attention(inputs, training=training)
+
             attention_output = self.attention_dropout(attention_output, training=training)
             attention_output = self.attention_norm(attention_output + inputs, training=training)
 
@@ -484,13 +622,20 @@ class TransformerEncoderLayer(keras.layers.Layer):
 
             # Multi-head attention with residual connection
             normalized_inputs = self.attention_norm(inputs, training=training)
-            attention_output = self.attention(
-                query=normalized_inputs,
-                value=normalized_inputs,  # value = query for self-attention
-                key=normalized_inputs,  # key = query for self-attention
-                attention_mask=processed_mask,
-                training=training
-            )
+
+            if self.attention_type == 'multi_head_attention':
+                # Standard Keras MultiHeadAttention call
+                attention_output = self.attention(
+                    query=normalized_inputs,
+                    value=normalized_inputs,  # value = query for self-attention
+                    key=normalized_inputs,  # key = query for self-attention
+                    attention_mask=processed_mask,
+                    training=training
+                )
+            else:
+                # Custom attention layers
+                attention_output = self.attention(normalized_inputs, training=training)
+
             attention_output = self.attention_dropout(attention_output, training=training)
             attention_output = attention_output + inputs  # Add residual
 
@@ -528,6 +673,7 @@ class TransformerEncoderLayer(keras.layers.Layer):
             'hidden_size': self.hidden_size,
             'num_heads': self.num_heads,
             'intermediate_size': self.intermediate_size,
+            'attention_type': self.attention_type,
             'normalization_type': self.normalization_type,
             'normalization_position': self.normalization_position,
             'ffn_type': self.ffn_type,
@@ -541,6 +687,8 @@ class TransformerEncoderLayer(keras.layers.Layer):
             'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
             'ffn_expansion_factor': self.ffn_expansion_factor,
             'ffn_multiple_of': self.ffn_multiple_of,
+            'window_size': self.window_size,
+            'n_kv_head': self.n_kv_head,
         })
         return config
 

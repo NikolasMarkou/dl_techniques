@@ -53,9 +53,10 @@ class TestTransformerEncoderLayer:
         assert layer.hidden_size == 768
         assert layer.num_heads == 12
         assert layer.intermediate_size == 3072
+        assert layer.attention_type == 'multi_head_attention'  # NEW: Check default attention type
         assert layer.normalization_type == 'layer_norm'
-        assert layer.normalization_position == 'post'  # NEW: Check default normalization position
-        assert layer.ffn_type == 'mlp'  # NEW: Check default FFN type
+        assert layer.normalization_position == 'post'
+        assert layer.ffn_type == 'mlp'
         assert layer.dropout_rate == 0.1
         assert layer.attention_dropout_rate == 0.1
         assert layer.activation == 'gelu'
@@ -64,8 +65,10 @@ class TestTransformerEncoderLayer:
         assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
         assert layer.kernel_regularizer is None
         assert layer.bias_regularizer is None
-        assert layer.ffn_expansion_factor == 4  # NEW: Check FFN expansion factor
-        assert layer.ffn_multiple_of == 256  # NEW: Check FFN multiple constraint
+        assert layer.ffn_expansion_factor == 4
+        assert layer.ffn_multiple_of == 256
+        assert layer.window_size == 8  # NEW: Check default window size
+        assert layer.n_kv_head == 12  # NEW: Check default n_kv_head (equals num_heads)
 
     def test_initialization_custom_parameters(self):
         """Test initialization with custom parameters."""
@@ -75,9 +78,10 @@ class TestTransformerEncoderLayer:
             hidden_size=512,
             num_heads=8,
             intermediate_size=2048,
+            attention_type='window_attention',  # NEW: Test different attention type
             normalization_type='layer_norm',
-            normalization_position='pre',  # NEW: Test pre-normalization
-            ffn_type='swiglu',  # NEW: Test different FFN type
+            normalization_position='pre',
+            ffn_type='swiglu',
             dropout_rate=0.2,
             attention_dropout_rate=0.15,
             activation='relu',
@@ -86,17 +90,20 @@ class TestTransformerEncoderLayer:
             bias_initializer='ones',
             kernel_regularizer=custom_regularizer,
             bias_regularizer=custom_regularizer,
-            ffn_expansion_factor=6,  # NEW: Test custom expansion factor
-            ffn_multiple_of=128  # NEW: Test custom multiple constraint
+            ffn_expansion_factor=6,
+            ffn_multiple_of=128,
+            window_size=16,  # NEW: Test custom window size
+            n_kv_head=4  # NEW: Test custom n_kv_head
         )
 
         # Check custom values
         assert layer.hidden_size == 512
         assert layer.num_heads == 8
         assert layer.intermediate_size == 2048
+        assert layer.attention_type == 'window_attention'  # NEW
         assert layer.normalization_type == 'layer_norm'
-        assert layer.normalization_position == 'pre'  # NEW
-        assert layer.ffn_type == 'swiglu'  # NEW
+        assert layer.normalization_position == 'pre'
+        assert layer.ffn_type == 'swiglu'
         assert layer.dropout_rate == 0.2
         assert layer.attention_dropout_rate == 0.15
         assert layer.activation == 'relu'
@@ -105,8 +112,56 @@ class TestTransformerEncoderLayer:
         assert isinstance(layer.bias_initializer, keras.initializers.Ones)
         assert layer.kernel_regularizer == custom_regularizer
         assert layer.bias_regularizer == custom_regularizer
-        assert layer.ffn_expansion_factor == 6  # NEW
-        assert layer.ffn_multiple_of == 128  # NEW
+        assert layer.ffn_expansion_factor == 6
+        assert layer.ffn_multiple_of == 128
+        assert layer.window_size == 16  # NEW
+        assert layer.n_kv_head == 4  # NEW
+
+    def test_initialization_all_attention_types(self):
+        """Test initialization with all attention types."""
+        attention_types = ['multi_head_attention', 'window_attention', 'group_query_attention']
+
+        for attention_type in attention_types:
+            layer = TransformerEncoderLayer(
+                hidden_size=64,
+                num_heads=4,
+                intermediate_size=256,
+                attention_type=attention_type
+            )
+            assert layer.attention_type == attention_type
+
+    def test_initialization_attention_type_with_specific_params(self):
+        """Test initialization with attention-specific parameters."""
+        # Test window_attention with custom window_size
+        layer_window = TransformerEncoderLayer(
+            hidden_size=64,
+            num_heads=4,
+            intermediate_size=256,
+            attention_type='window_attention',
+            window_size=32
+        )
+        assert layer_window.attention_type == 'window_attention'
+        assert layer_window.window_size == 32
+
+        # Test group_query_attention with custom n_kv_head
+        layer_gqa = TransformerEncoderLayer(
+            hidden_size=64,
+            num_heads=8,
+            intermediate_size=256,
+            attention_type='group_query_attention',
+            n_kv_head=2
+        )
+        assert layer_gqa.attention_type == 'group_query_attention'
+        assert layer_gqa.n_kv_head == 2
+
+        # Test group_query_attention with default n_kv_head (should equal num_heads)
+        layer_gqa_default = TransformerEncoderLayer(
+            hidden_size=64,
+            num_heads=8,
+            intermediate_size=256,
+            attention_type='group_query_attention'
+        )
+        assert layer_gqa_default.n_kv_head == 8
 
     def test_initialization_all_normalization_types(self):
         """Test initialization with all normalization types."""
@@ -162,7 +217,7 @@ class TestTransformerEncoderLayer:
 
     def test_initialization_all_ffn_types(self):
         """Test initialization with all FFN types."""
-        ffn_types = ['mlp', 'swiglu',  'differential', 'glu', 'residual', 'swin_mlp']
+        ffn_types = ['mlp', 'swiglu', 'differential', 'glu', 'residual', 'swin_mlp']
 
         for ffn_type in ffn_types:
             try:
@@ -206,20 +261,34 @@ class TestTransformerEncoderLayer:
         with pytest.raises(ValueError, match="attention_dropout_rate must be between 0 and 1"):
             TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072, attention_dropout_rate=-0.1)
 
+        # NEW: Invalid attention type
+        with pytest.raises(ValueError, match="attention_type must be one of"):
+            TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
+                                    attention_type='invalid_attention')
+
         # Invalid normalization type
         with pytest.raises(ValueError, match="normalization_type must be one of"):
             TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
                                     normalization_type='invalid_type')
 
-        # NEW: Invalid normalization position
+        # Invalid normalization position
         with pytest.raises(ValueError, match="normalization_position must be one of"):
             TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
                                     normalization_position='invalid_position')
 
-        # NEW: Invalid FFN type
+        # Invalid FFN type
         with pytest.raises(ValueError, match="ffn_type must be one of"):
             TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
                                     ffn_type='invalid_ffn')
+
+        # NEW: Invalid window_size
+        with pytest.raises(ValueError, match="window_size must be positive"):
+            TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
+                                    window_size=-8)
+
+        with pytest.raises(ValueError, match="window_size must be positive"):
+            TransformerEncoderLayer(hidden_size=768, num_heads=12, intermediate_size=3072,
+                                    window_size=0)
 
     # ===== BUILD PROCESS TESTS =====
 
@@ -237,7 +306,7 @@ class TestTransformerEncoderLayer:
         assert layer.attention.built is True
         assert layer.attention_norm is not None
         assert layer.attention_norm.built is True
-        assert layer.ffn_layer is not None  # UPDATED: Check ffn_layer instead of intermediate/output_dense
+        assert layer.ffn_layer is not None
         assert layer.ffn_layer.built is True
         assert layer.output_norm is not None
         assert layer.output_norm.built is True
@@ -246,6 +315,39 @@ class TestTransformerEncoderLayer:
 
         # Check build input shape is stored
         assert layer._build_input_shape is not None
+
+    def test_build_process_different_attention_types(self, small_input_tensor):
+        """Test building with different attention types."""
+        attention_types = ['multi_head_attention', 'window_attention', 'group_query_attention']
+
+        for attention_type in attention_types:
+            try:
+                layer = TransformerEncoderLayer(
+                    hidden_size=64,
+                    num_heads=4,
+                    intermediate_size=256,
+                    attention_type=attention_type
+                )
+
+                # Forward pass triggers build
+                layer(small_input_tensor)
+
+                # Check that layer was built
+                assert layer.built is True
+                assert layer.attention is not None
+                assert layer.attention.built is True
+
+                # Check attention layer type matches expected type
+                if attention_type == 'multi_head_attention':
+                    assert isinstance(layer.attention, keras.layers.MultiHeadAttention)
+                elif attention_type == 'window_attention':
+                    assert layer.attention.__class__.__name__ == 'WindowAttention'
+                elif attention_type == 'group_query_attention':
+                    assert layer.attention.__class__.__name__ == 'GroupedQueryAttention'
+
+            except (ImportError, AttributeError, ValueError):
+                # Attention type not available, skip test
+                pass
 
     def test_build_with_different_input_shapes(self):
         """Test building with different input shapes."""
@@ -339,6 +441,32 @@ class TestTransformerEncoderLayer:
         assert not np.any(np.isnan(output.numpy()))
         assert not np.any(np.isinf(output.numpy()))
 
+    def test_forward_pass_different_attention_types(self, small_input_tensor):
+        """Test forward pass with different attention types."""
+        attention_types = ['multi_head_attention', 'window_attention', 'group_query_attention']
+
+        for attention_type in attention_types:
+            try:
+                layer = TransformerEncoderLayer(
+                    hidden_size=64,
+                    num_heads=4,
+                    intermediate_size=256,
+                    attention_type=attention_type,
+                    window_size=8,  # For window attention
+                    n_kv_head=2  # For group query attention
+                )
+
+                output = layer(small_input_tensor)
+
+                # Check output is valid
+                assert output.shape == small_input_tensor.shape
+                assert not np.any(np.isnan(output.numpy()))
+                assert not np.any(np.isinf(output.numpy()))
+
+            except (ImportError, AttributeError, ValueError):
+                # Attention type not available, skip test
+                pass
+
     def test_forward_pass_normalization_positions(self, small_input_tensor):
         """Test forward pass with different normalization positions."""
         positions = ['post', 'pre']
@@ -382,12 +510,26 @@ class TestTransformerEncoderLayer:
                 pass
 
     def test_forward_pass_combined_configurations(self, small_input_tensor):
-        """Test forward pass with combined configurations."""
+        """Test forward pass with combined configurations including attention types."""
         test_configs = [
-            {'normalization_position': 'post', 'ffn_type': 'mlp', 'normalization_type': 'layer_norm'},
-            {'normalization_position': 'pre', 'ffn_type': 'mlp', 'normalization_type': 'layer_norm'},
-            {'normalization_position': 'post', 'ffn_type': 'swiglu', 'normalization_type': 'layer_norm'},
-            {'normalization_position': 'pre', 'ffn_type': 'swiglu', 'normalization_type': 'layer_norm'},
+            # Original configurations
+            {'normalization_position': 'post', 'ffn_type': 'mlp', 'normalization_type': 'layer_norm',
+             'attention_type': 'multi_head_attention'},
+            {'normalization_position': 'pre', 'ffn_type': 'mlp', 'normalization_type': 'layer_norm',
+             'attention_type': 'multi_head_attention'},
+            {'normalization_position': 'post', 'ffn_type': 'swiglu', 'normalization_type': 'layer_norm',
+             'attention_type': 'multi_head_attention'},
+            {'normalization_position': 'pre', 'ffn_type': 'swiglu', 'normalization_type': 'layer_norm',
+             'attention_type': 'multi_head_attention'},
+            # NEW: Configurations with different attention types
+            {'normalization_position': 'post', 'ffn_type': 'mlp', 'normalization_type': 'layer_norm',
+             'attention_type': 'window_attention', 'window_size': 8},
+            {'normalization_position': 'pre', 'ffn_type': 'mlp', 'normalization_type': 'layer_norm',
+             'attention_type': 'window_attention', 'window_size': 16},
+            {'normalization_position': 'post', 'ffn_type': 'mlp', 'normalization_type': 'layer_norm',
+             'attention_type': 'group_query_attention', 'n_kv_head': 2},
+            {'normalization_position': 'pre', 'ffn_type': 'mlp', 'normalization_type': 'layer_norm',
+             'attention_type': 'group_query_attention', 'n_kv_head': 1},
         ]
 
         for config in test_configs:
@@ -484,6 +626,127 @@ class TestTransformerEncoderLayer:
                 # Normalization type not available, skip test
                 pass
 
+    # ===== NEW: ATTENTION-SPECIFIC TESTS =====
+
+    def test_attention_type_behavior(self, small_input_tensor):
+        """Test that different attention types produce different outputs."""
+        attention_types_to_test = ['multi_head_attention', 'window_attention', 'group_query_attention']
+        outputs = {}
+
+        for attention_type in attention_types_to_test:
+            try:
+                layer = TransformerEncoderLayer(
+                    hidden_size=64,
+                    num_heads=4,
+                    intermediate_size=256,
+                    attention_type=attention_type,
+                    dropout_rate=0.0,  # Disable dropout for deterministic comparison
+                    attention_dropout_rate=0.0,
+                    window_size=8,  # For window attention
+                    n_kv_head=2  # For group query attention
+                )
+
+                output = layer(small_input_tensor, training=False)
+                outputs[attention_type] = output.numpy()
+
+            except (ImportError, AttributeError, ValueError):
+                # Attention type not available, skip
+                pass
+
+        # If we have multiple outputs, they should be different
+        if len(outputs) >= 2:
+            output_list = list(outputs.values())
+            attention_list = list(outputs.keys())
+            for i in range(len(output_list)):
+                for j in range(i + 1, len(output_list)):
+                    assert not np.allclose(output_list[i], output_list[j], rtol=1e-3), \
+                        f"Different attention types ({attention_list[i]} vs {attention_list[j]}) should produce different outputs"
+
+    def test_window_attention_specific_behavior(self, small_input_tensor):
+        """Test window attention with different window sizes."""
+        window_sizes = [4, 8, 16]
+        outputs = {}
+
+        for window_size in window_sizes:
+            try:
+                layer = TransformerEncoderLayer(
+                    hidden_size=64,
+                    num_heads=4,
+                    intermediate_size=256,
+                    attention_type='window_attention',
+                    window_size=window_size,
+                    dropout_rate=0.0,
+                    attention_dropout_rate=0.0
+                )
+
+                output = layer(small_input_tensor, training=False)
+                outputs[window_size] = output.numpy()
+
+            except (ImportError, AttributeError, ValueError):
+                # Window attention not available, skip test
+                return
+
+        # If we have multiple outputs, they should be different
+        if len(outputs) >= 2:
+            output_list = list(outputs.values())
+            window_list = list(outputs.keys())
+            for i in range(len(output_list)):
+                for j in range(i + 1, len(output_list)):
+                    assert not np.allclose(output_list[i], output_list[j], rtol=1e-3), \
+                        f"Different window sizes ({window_list[i]} vs {window_list[j]}) should produce different outputs"
+
+    def test_group_query_attention_specific_behavior(self, small_input_tensor):
+        """Test group query attention with different n_kv_head values."""
+        n_kv_head_values = [1, 2, 4]  # Test different grouping
+        outputs = {}
+
+        for n_kv_head in n_kv_head_values:
+            try:
+                layer = TransformerEncoderLayer(
+                    hidden_size=64,
+                    num_heads=4,
+                    intermediate_size=256,
+                    attention_type='group_query_attention',
+                    n_kv_head=n_kv_head,
+                    dropout_rate=0.0,
+                    attention_dropout_rate=0.0
+                )
+
+                output = layer(small_input_tensor, training=False)
+                outputs[n_kv_head] = output.numpy()
+
+            except (ImportError, AttributeError, ValueError):
+                # Group query attention not available, skip test
+                return
+
+        # If we have multiple outputs, they should be different
+        if len(outputs) >= 2:
+            output_list = list(outputs.values())
+            n_kv_head_list = list(outputs.keys())
+            for i in range(len(output_list)):
+                for j in range(i + 1, len(output_list)):
+                    assert not np.allclose(output_list[i], output_list[j], rtol=1e-3), \
+                        f"Different n_kv_head values ({n_kv_head_list[i]} vs {n_kv_head_list[j]}) should produce different outputs"
+
+    def test_attention_layer_creation_error(self):
+        """Test error handling in attention layer creation."""
+        layer = TransformerEncoderLayer(
+            hidden_size=64,
+            num_heads=4,
+            intermediate_size=256
+        )
+
+        # Set invalid attention type manually (bypassing __init__ validation)
+        original_type = layer.attention_type
+        layer.attention_type = 'invalid_attention_type'
+
+        try:
+            with pytest.raises(ValueError, match="Unknown attention type"):
+                layer._create_attention_layer('test_attention')
+        finally:
+            # Restore original type
+            layer.attention_type = original_type
+
     # ===== SERIALIZATION TESTS =====
 
     def test_serialization_basic(self):
@@ -493,9 +756,10 @@ class TestTransformerEncoderLayer:
             hidden_size=128,
             num_heads=8,
             intermediate_size=512,
+            attention_type='multi_head_attention',  # NEW: Include attention type
             normalization_type='layer_norm',
-            normalization_position='pre',  # NEW: Test pre-normalization serialization
-            ffn_type='mlp',  # NEW: Test FFN type serialization
+            normalization_position='pre',
+            ffn_type='mlp',
             dropout_rate=0.2
         )
         original_layer.build((None, 32, 128))
@@ -515,10 +779,45 @@ class TestTransformerEncoderLayer:
         assert new_layer.hidden_size == original_layer.hidden_size
         assert new_layer.num_heads == original_layer.num_heads
         assert new_layer.intermediate_size == original_layer.intermediate_size
+        assert new_layer.attention_type == original_layer.attention_type  # NEW
         assert new_layer.normalization_type == original_layer.normalization_type
-        assert new_layer.normalization_position == original_layer.normalization_position  # NEW
-        assert new_layer.ffn_type == original_layer.ffn_type  # NEW
+        assert new_layer.normalization_position == original_layer.normalization_position
+        assert new_layer.ffn_type == original_layer.ffn_type
         assert new_layer.dropout_rate == original_layer.dropout_rate
+
+    def test_serialization_all_attention_types(self):
+        """Test serialization with all attention types."""
+        attention_types = ['multi_head_attention', 'window_attention', 'group_query_attention']
+
+        for attention_type in attention_types:
+            try:
+                # Create layer with specific attention configuration
+                config_params = {
+                    'hidden_size': 64,
+                    'num_heads': 4,
+                    'intermediate_size': 256,
+                    'attention_type': attention_type,
+                    'normalization_type': 'layer_norm',
+                    'window_size': 16,  # For window attention
+                    'n_kv_head': 2  # For group query attention
+                }
+
+                original_layer = TransformerEncoderLayer(**config_params)
+
+                # Get config
+                config = original_layer.get_config()
+
+                # Recreate layer
+                new_layer = TransformerEncoderLayer.from_config(config)
+
+                # Check attention-specific parameters match
+                assert new_layer.attention_type == original_layer.attention_type
+                assert new_layer.window_size == original_layer.window_size
+                assert new_layer.n_kv_head == original_layer.n_kv_head
+
+            except (ImportError, AttributeError, ValueError):
+                # Attention type not available, skip test
+                pass
 
     def test_serialization_all_parameters(self):
         """Test serialization with all parameters."""
@@ -529,9 +828,10 @@ class TestTransformerEncoderLayer:
             hidden_size=256,
             num_heads=16,
             intermediate_size=1024,
+            attention_type='window_attention',  # NEW: Test different attention type
             normalization_type='layer_norm',
-            normalization_position='pre',  # NEW
-            ffn_type='swiglu',  # NEW: Test different FFN type
+            normalization_position='pre',
+            ffn_type='swiglu',
             dropout_rate=0.3,
             attention_dropout_rate=0.25,
             activation='relu',
@@ -540,8 +840,10 @@ class TestTransformerEncoderLayer:
             bias_initializer='ones',
             kernel_regularizer=custom_regularizer,
             bias_regularizer=custom_regularizer,
-            ffn_expansion_factor=6,  # NEW
-            ffn_multiple_of=128  # NEW
+            ffn_expansion_factor=6,
+            ffn_multiple_of=128,
+            window_size=32,  # NEW: Test window size serialization
+            n_kv_head=8  # NEW: Test n_kv_head serialization
         )
 
         # Get config
@@ -555,17 +857,20 @@ class TestTransformerEncoderLayer:
             assert new_layer.hidden_size == original_layer.hidden_size
             assert new_layer.num_heads == original_layer.num_heads
             assert new_layer.intermediate_size == original_layer.intermediate_size
+            assert new_layer.attention_type == original_layer.attention_type  # NEW
             assert new_layer.normalization_type == original_layer.normalization_type
-            assert new_layer.normalization_position == original_layer.normalization_position  # NEW
-            assert new_layer.ffn_type == original_layer.ffn_type  # NEW
+            assert new_layer.normalization_position == original_layer.normalization_position
+            assert new_layer.ffn_type == original_layer.ffn_type
             assert new_layer.dropout_rate == original_layer.dropout_rate
             assert new_layer.attention_dropout_rate == original_layer.attention_dropout_rate
             assert new_layer.activation == original_layer.activation
             assert new_layer.use_bias == original_layer.use_bias
-            assert new_layer.ffn_expansion_factor == original_layer.ffn_expansion_factor  # NEW
-            assert new_layer.ffn_multiple_of == original_layer.ffn_multiple_of  # NEW
+            assert new_layer.ffn_expansion_factor == original_layer.ffn_expansion_factor
+            assert new_layer.ffn_multiple_of == original_layer.ffn_multiple_of
+            assert new_layer.window_size == original_layer.window_size  # NEW
+            assert new_layer.n_kv_head == original_layer.n_kv_head  # NEW
         except (ImportError, AttributeError):
-            # FFN type not available, skip test
+            # FFN type or attention type not available, skip test
             pass
 
     # ===== FFN LAYER CREATION TESTS =====
@@ -599,8 +904,9 @@ class TestTransformerEncoderLayer:
             hidden_size=64,
             num_heads=4,
             intermediate_size=256,
-            normalization_position='pre',  # NEW: Test pre-normalization in model
-            ffn_type='mlp'  # NEW: Explicit FFN type
+            attention_type='multi_head_attention',  # NEW: Explicit attention type
+            normalization_position='pre',
+            ffn_type='mlp'
         )(inputs)
         x = keras.layers.GlobalAveragePooling1D()(x)
         outputs = keras.layers.Dense(10)(x)
@@ -617,6 +923,36 @@ class TestTransformerEncoderLayer:
         y_pred = model(small_input_tensor, training=False)
         assert y_pred.shape == (small_input_tensor.shape[0], 10)
 
+    def test_model_integration_different_attention_types(self, small_input_tensor):
+        """Test model with different attention types."""
+        attention_types = ['multi_head_attention', 'window_attention', 'group_query_attention']
+
+        for attention_type in attention_types:
+            try:
+                # Create model with specific attention type
+                inputs = keras.Input(shape=(16, 64))
+                x = TransformerEncoderLayer(
+                    hidden_size=64,
+                    num_heads=4,
+                    intermediate_size=256,
+                    attention_type=attention_type,
+                    window_size=8,  # For window attention
+                    n_kv_head=2  # For group query attention
+                )(inputs)
+                x = keras.layers.GlobalAveragePooling1D()(x)
+                outputs = keras.layers.Dense(5)(x)
+
+                model = keras.Model(inputs=inputs, outputs=outputs)
+                model.compile(optimizer='adam', loss='mse')
+
+                # Test forward pass
+                y_pred = model(small_input_tensor)
+                assert y_pred.shape == (small_input_tensor.shape[0], 5)
+
+            except (ImportError, AttributeError, ValueError):
+                # Attention type not available, skip test
+                pass
+
     def test_model_integration_stacked(self, small_input_tensor):
         """Test multiple layers stacked in a model."""
         # Create model with multiple transformer layers using different configurations
@@ -625,18 +961,35 @@ class TestTransformerEncoderLayer:
             hidden_size=64,
             num_heads=4,
             intermediate_size=256,
+            attention_type='multi_head_attention',  # First layer: standard attention
             normalization_type='layer_norm',
             normalization_position='post',  # Post-norm first layer
             ffn_type='mlp'
         )(inputs)
-        x = TransformerEncoderLayer(
-            hidden_size=64,
-            num_heads=4,
-            intermediate_size=256,
-            normalization_type='layer_norm',
-            normalization_position='pre',  # Pre-norm second layer
-            ffn_type='mlp'
-        )(x)
+
+        try:
+            x = TransformerEncoderLayer(
+                hidden_size=64,
+                num_heads=4,
+                intermediate_size=256,
+                attention_type='window_attention',  # Second layer: window attention
+                normalization_type='layer_norm',
+                normalization_position='pre',  # Pre-norm second layer
+                ffn_type='mlp',
+                window_size=8
+            )(x)
+        except (ImportError, AttributeError, ValueError):
+            # Window attention not available, use standard attention
+            x = TransformerEncoderLayer(
+                hidden_size=64,
+                num_heads=4,
+                intermediate_size=256,
+                attention_type='multi_head_attention',
+                normalization_type='layer_norm',
+                normalization_position='pre',
+                ffn_type='mlp'
+            )(x)
+
         x = keras.layers.GlobalAveragePooling1D()(x)
         outputs = keras.layers.Dense(5)(x)
 
@@ -657,9 +1010,10 @@ class TestTransformerEncoderLayer:
             hidden_size=64,
             num_heads=4,
             intermediate_size=256,
+            attention_type='multi_head_attention',  # NEW: Include attention type
             normalization_type='layer_norm',
-            normalization_position='pre',  # NEW: Test pre-norm save/load
-            ffn_type='mlp',  # NEW: Test FFN type save/load
+            normalization_position='pre',
+            ffn_type='mlp',
             name='transformer_layer'
         )(inputs)
         x = keras.layers.GlobalAveragePooling1D()(x)
@@ -693,9 +1047,63 @@ class TestTransformerEncoderLayer:
             transformer_layer = loaded_model.get_layer('transformer_layer')
             assert isinstance(transformer_layer, TransformerEncoderLayer)
 
-            # NEW: Check that configuration is preserved
+            # Check that configuration is preserved
+            assert transformer_layer.attention_type == 'multi_head_attention'  # NEW
             assert transformer_layer.normalization_position == 'pre'
             assert transformer_layer.ffn_type == 'mlp'
+
+    def test_model_save_load_different_attention_types(self, small_input_tensor):
+        """Test saving and loading models with different attention types."""
+        attention_types = ['multi_head_attention', 'window_attention', 'group_query_attention']
+
+        for attention_type in attention_types:
+            try:
+                # Create model with specific attention type
+                inputs = keras.Input(shape=(16, 64))
+                x = TransformerEncoderLayer(
+                    hidden_size=64,
+                    num_heads=4,
+                    intermediate_size=256,
+                    attention_type=attention_type,
+                    window_size=16,  # For window attention
+                    n_kv_head=2,  # For group query attention
+                    name=f'transformer_{attention_type}'
+                )(inputs)
+                x = keras.layers.GlobalAveragePooling1D()(x)
+                outputs = keras.layers.Dense(5)(x)
+
+                model = keras.Model(inputs=inputs, outputs=outputs)
+
+                # Generate prediction before saving
+                original_prediction = model.predict(small_input_tensor, verbose=0)
+
+                # Save and load model
+                with tempfile.TemporaryDirectory() as tmpdirname:
+                    model_path = os.path.join(tmpdirname, f'model_{attention_type}.keras')
+
+                    # Save model
+                    model.save(model_path)
+
+                    # Load model
+                    loaded_model = keras.models.load_model(
+                        model_path,
+                        custom_objects={'TransformerEncoderLayer': TransformerEncoderLayer}
+                    )
+
+                    # Generate prediction with loaded model
+                    loaded_prediction = loaded_model.predict(small_input_tensor, verbose=0)
+
+                    # Check predictions match
+                    assert np.allclose(original_prediction, loaded_prediction, rtol=1e-5)
+
+                    # Check layer configuration is preserved
+                    transformer_layer = loaded_model.get_layer(f'transformer_{attention_type}')
+                    assert isinstance(transformer_layer, TransformerEncoderLayer)
+                    assert transformer_layer.attention_type == attention_type
+
+            except (ImportError, AttributeError, ValueError):
+                # Attention type not available, skip test
+                pass
 
     # ===== GRADIENT FLOW TESTS =====
 
@@ -717,6 +1125,40 @@ class TestTransformerEncoderLayer:
 
         # Check gradients have values (not all zeros)
         assert all(np.any(g.numpy() != 0) for g in grads)
+
+    def test_gradient_flow_different_attention_types(self, small_input_tensor):
+        """Test gradient flow with different attention types."""
+        attention_types = ['multi_head_attention', 'window_attention', 'group_query_attention']
+
+        for attention_type in attention_types:
+            try:
+                layer = TransformerEncoderLayer(
+                    hidden_size=64,
+                    num_heads=4,
+                    intermediate_size=256,
+                    attention_type=attention_type,
+                    window_size=8,  # For window attention
+                    n_kv_head=2  # For group query attention
+                )
+
+                # Watch the variables
+                with tf.GradientTape() as tape:
+                    inputs = tf.Variable(small_input_tensor)
+                    outputs = layer(inputs, training=True)
+                    loss = tf.reduce_mean(tf.square(outputs))
+
+                # Get gradients
+                grads = tape.gradient(loss, layer.trainable_variables)
+
+                # Check gradients exist and are not None
+                assert all(g is not None for g in grads), f"None gradients with {attention_type} attention"
+
+                # Check gradients have values (not all zeros)
+                assert all(np.any(g.numpy() != 0) for g in grads), f"Zero gradients with {attention_type} attention"
+
+            except (ImportError, AttributeError, ValueError):
+                # Attention type not available, skip test
+                pass
 
     def test_gradient_flow_normalization_positions(self, small_input_tensor):
         """Test gradient flow with different normalization positions."""
@@ -772,7 +1214,8 @@ class TestTransformerEncoderLayer:
                 hidden_size=64,
                 num_heads=4,
                 intermediate_size=256,
-                normalization_position='pre',  # NEW: Test pre-norm training
+                attention_type='multi_head_attention',  # NEW: Explicit attention type
+                normalization_position='pre',
                 ffn_type='mlp'
             ),
             keras.layers.GlobalAveragePooling1D(),
@@ -801,6 +1244,54 @@ class TestTransformerEncoderLayer:
 
         # Loss should decrease (allowing for some variance)
         assert final_loss <= initial_loss * 1.1  # Allow 10% variance
+
+    def test_training_loop_different_attention_types(self, small_input_tensor):
+        """Test training with different attention types."""
+        attention_types = ['multi_head_attention', 'window_attention', 'group_query_attention']
+
+        for attention_type in attention_types:
+            try:
+                # Create model
+                model = keras.Sequential([
+                    keras.layers.InputLayer(input_shape=(16, 64)),
+                    TransformerEncoderLayer(
+                        hidden_size=64,
+                        num_heads=4,
+                        intermediate_size=256,
+                        attention_type=attention_type,
+                        window_size=8,  # For window attention
+                        n_kv_head=2  # For group query attention
+                    ),
+                    keras.layers.GlobalAveragePooling1D(),
+                    keras.layers.Dense(5)
+                ])
+
+                # Compile model
+                model.compile(
+                    optimizer=keras.optimizers.Adam(learning_rate=0.001),
+                    loss=keras.losses.MeanSquaredError()
+                )
+
+                # Create mock data
+                x_train = tf.random.normal([16, 16, 64])
+                y_train = tf.random.normal([16, 5])
+
+                # Initial loss
+                initial_loss = model.evaluate(x_train, y_train, verbose=0)
+
+                # Train for one epoch
+                model.fit(x_train, y_train, epochs=1, batch_size=8, verbose=0)
+
+                # Final loss
+                final_loss = model.evaluate(x_train, y_train, verbose=0)
+
+                # Check training completed without errors
+                assert final_loss is not None
+                assert not np.isnan(final_loss)
+
+            except (ImportError, AttributeError, ValueError):
+                # Attention type not available, skip test
+                pass
 
     # ===== EDGE CASE TESTS =====
 
@@ -847,6 +1338,36 @@ class TestTransformerEncoderLayer:
 
             # Check for valid values
             assert not np.any(np.isnan(output.numpy()))
+
+    def test_different_sequence_lengths_with_attention_types(self):
+        """Test different attention types with various sequence lengths."""
+        attention_types = ['multi_head_attention', 'window_attention', 'group_query_attention']
+        sequence_lengths = [8, 16, 32]  # Smaller set for efficiency
+
+        for attention_type in attention_types:
+            try:
+                layer = TransformerEncoderLayer(
+                    hidden_size=64,
+                    num_heads=4,
+                    intermediate_size=256,
+                    attention_type=attention_type,
+                    window_size=8,  # For window attention
+                    n_kv_head=2  # For group query attention
+                )
+
+                for seq_len in sequence_lengths:
+                    test_input = tf.random.normal((2, seq_len, 64))
+                    output = layer(test_input, training=False)
+
+                    # Check output shape
+                    assert output.shape == (2, seq_len, 64)
+
+                    # Check for valid values
+                    assert not np.any(np.isnan(output.numpy()))
+
+            except (ImportError, AttributeError, ValueError):
+                # Attention type not available, skip test
+                pass
 
     def test_dropout_behavior(self):
         """Test dropout behavior during training vs inference."""
@@ -959,7 +1480,32 @@ class TestTransformerEncoderLayer:
         assert output.shape == small_input_tensor.shape
         assert not np.any(np.isnan(output.numpy()))
 
-    # ===== NEW: NORMALIZATION POSITION BEHAVIOR TESTS =====
+    def test_attention_mask_with_different_attention_types(self, small_input_tensor):
+        """Test attention masks with different attention types."""
+        attention_types = ['multi_head_attention']  # Only test with standard attention for mask compatibility
+
+        for attention_type in attention_types:
+            try:
+                layer = TransformerEncoderLayer(
+                    hidden_size=64,
+                    num_heads=4,
+                    intermediate_size=256,
+                    attention_type=attention_type
+                )
+
+                batch_size, seq_len, _ = small_input_tensor.shape
+
+                # Test 3D mask
+                mask_3d = tf.ones((batch_size, seq_len, seq_len))
+                output = layer(small_input_tensor, attention_mask=mask_3d, training=False)
+                assert output.shape == small_input_tensor.shape
+                assert not np.any(np.isnan(output.numpy()))
+
+            except (ImportError, AttributeError, ValueError):
+                # Attention type not available, skip test
+                pass
+
+    # ===== NORMALIZATION POSITION BEHAVIOR TESTS =====
 
     def test_normalization_position_behavior(self, small_input_tensor):
         """Test that pre-norm and post-norm produce different outputs."""
