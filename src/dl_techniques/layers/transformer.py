@@ -11,6 +11,8 @@ A key feature of this implementation is its flexibility. It is designed to serve
 versatile component for research and development, allowing for easy experimentation
 with different attention mechanisms, normalization techniques and feed-forward network architectures.
 
+Enhanced with configurable Stochastic Depth for improved training of deep networks.
+
 Architectural Design (Configurable Normalization):
 
 This implementation supports both "post-normalization" (Post-LN) and "pre-normalization"
@@ -27,12 +29,12 @@ This implementation supports both "post-normalization" (Post-LN) and "pre-normal
 The full flow through the layer depends on normalization position:
 
 **Post-LN Flow:**
-1.  **Self-Attention Block:** Attention(x) -> Add residual -> LayerNorm
-2.  **Feed-Forward Block:** FFN(attn_out) -> Add residual -> LayerNorm
+1.  **Self-Attention Block:** Attention(x) -> StochasticDepth -> Add residual -> LayerNorm
+2.  **Feed-Forward Block:** FFN(attn_out) -> StochasticDepth -> Add residual -> LayerNorm
 
 **Pre-LN Flow:**
-1.  **Self-Attention Block:** LayerNorm(x) -> Attention -> Add residual
-2.  **Feed-Forward Block:** LayerNorm(attn_out) -> FFN -> Add residual
+1.  **Self-Attention Block:** LayerNorm(x) -> Attention -> StochasticDepth -> Add residual
+2.  **Feed-Forward Block:** LayerNorm(attn_out) -> FFN -> StochasticDepth -> Add residual
 
 **Attention Mechanism Options:**
 The attention mechanism can be one of several configurable architectures:
@@ -57,6 +59,8 @@ Major strengths of this layer include:
 - `normalization_type`: Easily swap normalization functions (layer_norm, rms_norm, etc.)
 - `normalization_position`: Choose between post-LN and pre-LN architectures
 - `ffn_type`: Choose from various feed-forward architectures for different use cases
+- `use_stochastic_depth`: Enable stochastic depth regularization for deep networks
+- `stochastic_depth_rate`: Control the drop path rate for stochastic depth
 - Full parameter control for both attention and FFN components
 
 This configurability makes the layer an excellent tool for architectural experimentation
@@ -85,19 +89,22 @@ from .ffn.residual_block import ResidualBlock
 from .attention.window_attention import WindowAttention
 from .attention.group_query_attention import GroupedQueryAttention
 
+from .stochastic_depth import StochasticDepth
+
 # ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
 class TransformerLayer(keras.layers.Layer):
     """
-    Generic transformer layer with configurable attention, normalization and FFN.
+    Generic transformer layer with configurable attention, normalization, FFN, and stochastic depth.
 
     This layer implements a standard transformer block with:
     - Configurable multi-head attention mechanisms
     - Configurable feed-forward network
     - Residual connections
     - Configurable normalization
+    - Optional stochastic depth regularization
 
     Args:
         hidden_size: Integer, hidden size of the layer.
@@ -128,6 +135,10 @@ class TransformerLayer(keras.layers.Layer):
             - 'swin_mlp': Swin Transformer MLP variant
         dropout_rate: Float, dropout rate. Defaults to 0.1.
         attention_dropout_rate: Float, attention-specific dropout rate. Defaults to 0.1.
+        use_stochastic_depth: Boolean, whether to use stochastic depth regularization.
+            Defaults to False.
+        stochastic_depth_rate: Float, drop path rate for stochastic depth.
+            Only used when use_stochastic_depth=True. Defaults to 0.1.
         activation: String or callable, activation function for feed-forward network.
             Defaults to 'gelu'.
         use_bias: Boolean, whether to use bias in linear layers. Defaults to True.
@@ -152,7 +163,7 @@ class TransformerLayer(keras.layers.Layer):
 
     Example:
         ```python
-        # Standard multi-head attention
+        # Standard multi-head attention with stochastic depth
         inputs = keras.Input(shape=(128, 768))
         layer = TransformerLayer(
             hidden_size=768,
@@ -160,26 +171,29 @@ class TransformerLayer(keras.layers.Layer):
             intermediate_size=3072,
             attention_type='multi_head_attention',
             normalization_position='pre',
-            ffn_type='swiglu'
+            ffn_type='swiglu',
+            use_stochastic_depth=True,
+            stochastic_depth_rate=0.1
         )
         outputs = layer(inputs)
 
-        # Window attention
+        # Window attention without stochastic depth
         layer = TransformerLayer(
             hidden_size=768,
             num_heads=12,
             intermediate_size=3072,
             attention_type='window_attention',
-            window_size=16
+            window_size=16,
+            use_stochastic_depth=False
         )
 
-        # Grouped query attention
+        # Deep network with higher stochastic depth rate
         layer = TransformerLayer(
             hidden_size=768,
             num_heads=12,
             intermediate_size=3072,
-            attention_type='group_query_attention',
-            n_kv_head=4
+            use_stochastic_depth=True,
+            stochastic_depth_rate=0.3  # Higher rate for deeper networks
         )
         ```
     """
@@ -195,6 +209,8 @@ class TransformerLayer(keras.layers.Layer):
             ffn_type: str = 'mlp',
             dropout_rate: float = 0.1,
             attention_dropout_rate: float = 0.1,
+            use_stochastic_depth: bool = False,
+            stochastic_depth_rate: float = 0.1,
             activation: Union[str, callable] = 'gelu',
             use_bias: bool = True,
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
@@ -224,6 +240,8 @@ class TransformerLayer(keras.layers.Layer):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
         if not (0.0 <= attention_dropout_rate <= 1.0):
             raise ValueError(f"attention_dropout_rate must be between 0 and 1, got {attention_dropout_rate}")
+        if not (0.0 <= stochastic_depth_rate <= 1.0):
+            raise ValueError(f"stochastic_depth_rate must be between 0 and 1, got {stochastic_depth_rate}")
 
         valid_attention_types = ['multi_head_attention', 'window_attention', 'group_query_attention']
         if attention_type not in valid_attention_types:
@@ -254,6 +272,8 @@ class TransformerLayer(keras.layers.Layer):
         self.ffn_type = ffn_type
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
+        self.use_stochastic_depth = use_stochastic_depth
+        self.stochastic_depth_rate = stochastic_depth_rate
         self.activation = activation
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -272,6 +292,8 @@ class TransformerLayer(keras.layers.Layer):
         self.output_norm = None
         self.dropout = None
         self.attention_dropout = None
+        self.attention_stochastic_depth = None
+        self.ffn_stochastic_depth = None
 
         # Store build input shape for serialization
         self._build_input_shape = None
@@ -540,6 +562,17 @@ class TransformerLayer(keras.layers.Layer):
             name='attention_dropout'
         )
 
+        # Stochastic depth layers (if enabled)
+        if self.use_stochastic_depth:
+            self.attention_stochastic_depth = StochasticDepth(
+                drop_path_rate=self.stochastic_depth_rate,
+                name='attention_stochastic_depth'
+            )
+            self.ffn_stochastic_depth = StochasticDepth(
+                drop_path_rate=self.stochastic_depth_rate,
+                name='ffn_stochastic_depth'
+            )
+
         # Build sublayers
         # For different attention types, we need to handle the build call appropriately
         if self.attention_type == 'multi_head_attention':
@@ -551,6 +584,11 @@ class TransformerLayer(keras.layers.Layer):
         self.attention_norm.build(input_shape)
         self.ffn_layer.build(input_shape)
         self.output_norm.build(input_shape)
+
+        # Build stochastic depth layers if enabled
+        if self.use_stochastic_depth:
+            self.attention_stochastic_depth.build(input_shape)
+            self.ffn_stochastic_depth.build(input_shape)
 
         super().build(input_shape)
 
@@ -589,7 +627,7 @@ class TransformerLayer(keras.layers.Layer):
                 processed_mask = None
 
         if self.normalization_position == 'post':
-            # Post-normalization: SubLayer(x) -> Add residual -> Normalize
+            # Post-normalization: SubLayer(x) -> StochasticDepth -> Add residual -> Normalize
 
             # Multi-head attention with residual connection
             if self.attention_type == 'multi_head_attention':
@@ -607,15 +645,24 @@ class TransformerLayer(keras.layers.Layer):
                 attention_output = self.attention(inputs, training=training)
 
             attention_output = self.attention_dropout(attention_output, training=training)
+
+            # Apply stochastic depth if enabled
+            if self.use_stochastic_depth:
+                attention_output = self.attention_stochastic_depth(attention_output, training=training)
+
             attention_output = self.attention_norm(attention_output + inputs, training=training)
 
             # Feed-forward network with residual connection
             ffn_output = self.ffn_layer(attention_output, training=training)
 
+            # Apply stochastic depth if enabled
+            if self.use_stochastic_depth:
+                ffn_output = self.ffn_stochastic_depth(ffn_output, training=training)
+
             layer_output = self.output_norm(ffn_output + attention_output, training=training)
 
         else:  # pre-normalization
-            # Pre-normalization: Normalize -> SubLayer(x) -> Add residual
+            # Pre-normalization: Normalize -> SubLayer(x) -> StochasticDepth -> Add residual
 
             # Multi-head attention with residual connection
             normalized_inputs = self.attention_norm(inputs, training=training)
@@ -634,11 +681,20 @@ class TransformerLayer(keras.layers.Layer):
                 attention_output = self.attention(normalized_inputs, training=training)
 
             attention_output = self.attention_dropout(attention_output, training=training)
+
+            # Apply stochastic depth if enabled
+            if self.use_stochastic_depth:
+                attention_output = self.attention_stochastic_depth(attention_output, training=training)
+
             attention_output = attention_output + inputs  # Add residual
 
             # Feed-forward network with residual connection
             normalized_attention = self.output_norm(attention_output, training=training)
             ffn_output = self.ffn_layer(normalized_attention, training=training)
+
+            # Apply stochastic depth if enabled
+            if self.use_stochastic_depth:
+                ffn_output = self.ffn_stochastic_depth(ffn_output, training=training)
 
             layer_output = ffn_output + attention_output  # Add residual
 
@@ -676,6 +732,8 @@ class TransformerLayer(keras.layers.Layer):
             'ffn_type': self.ffn_type,
             'dropout_rate': self.dropout_rate,
             'attention_dropout_rate': self.attention_dropout_rate,
+            'use_stochastic_depth': self.use_stochastic_depth,
+            'stochastic_depth_rate': self.stochastic_depth_rate,
             'activation': self.activation,
             'use_bias': self.use_bias,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
