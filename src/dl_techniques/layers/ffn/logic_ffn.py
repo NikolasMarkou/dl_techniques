@@ -1,3 +1,53 @@
+"""
+This module provides the implementation of `LogicFFN`, a custom Keras 3 layer
+designed to integrate principles of soft logical reasoning into deep learning
+models. It is intended to be used as a powerful, drop-in replacement for standard
+Feed-Forward Network (FFN) or Multi-Layer Perceptron (MLP) blocks, especially
+within architectures like the Transformer.
+
+The core idea is to move beyond simple non-linear transformations (like ReLU or GELU)
+and instead force the network to perform explicit, differentiable logical operations
+on its input features. This provides a strong inductive bias for tasks that may
+benefit from structured, logical reasoning.
+
+Core Concepts:
+-------------
+The `LogicFFN` layer operates through a sequence of carefully designed steps:
+
+1.  **Input Projection & Soft-Bits:**
+    Inputs are first linearly projected into a higher-dimensional "logic space"
+    with two distinct operands (`a` and `b`). A sigmoid activation function is
+    then applied to transform these operands into "soft-bits"—continuous values
+    between 0 and 1 that approximate binary logic.
+
+2.  **Soft Logic Operations:**
+    Three fundamental logic operations are computed in parallel using their
+    probabilistic (or "soft") counterparts:
+    - **AND:** `a * b`
+    - **OR:** `a + b - a * b`
+    - **XOR:** `(a - b)^2`
+
+3.  **Dynamic Gating Mechanism:**
+    A key innovation of this layer is its dynamic gating mechanism. A separate
+    projection from the original input learns a set of weights for the three
+    logic operations. A temperature-scaled softmax is applied to these weights,
+    creating a dynamic probability distribution that determines the importance
+    of each logic operation for every token in the sequence. This allows the
+    model to adapt its reasoning strategy based on the input.
+
+4.  **Weighted Combination and Output:**
+    The results of the three logic operations are combined via a weighted sum
+    using the learned gates. This aggregated tensor, which now contains a
+    logically-processed representation of the input, is then projected back to
+    the desired output dimension.
+
+Key Components:
+---------------
+- `LogicFFN(keras.layers.Layer)`: The main class implementing the logic-based
+  feed-forward network. It is fully serializable and compatible with the
+  Keras 3 API.
+"""
+
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
 from keras import layers, ops, initializers, regularizers
@@ -180,7 +230,9 @@ class LogicFFN(layers.Layer):
         # Build sublayers
         self.logic_projection.build(input_shape)
         self.gate_projection.build(input_shape)
-        self.output_projection.build(input_shape[:-1] + (self.logic_dim,))
+        # FIX: Ensure shape is a tuple for concatenation, making it robust
+        # for deserialization where input_shape can be a list.
+        self.output_projection.build(tuple(input_shape[:-1]) + (self.logic_dim,))
 
         super().build(input_shape)
 
