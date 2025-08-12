@@ -1,11 +1,3 @@
-"""
-Vision Language Model (VLM) Implementation using dl_techniques components.
-
-This module implements a comprehensive Vision Language Model that can handle
-various multimodal tasks such as image captioning, visual question answering,
-and image-text matching.
-"""
-
 import keras
 from keras import ops, layers
 from typing import Dict, Optional, Tuple, Any

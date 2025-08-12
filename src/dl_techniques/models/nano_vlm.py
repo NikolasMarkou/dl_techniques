@@ -1,3 +1,17 @@
+"""
+NanoVLM: Compact Vision-Language Model using ViTSigLIP and BERT Components
+
+This module provides the updated NanoVLM implementation that leverages the
+existing ViTSigLIP and BERT models from the dl-techniques framework through
+dedicated VisionEncoder and TextDecoder components.
+
+The architecture combines:
+- VisionEncoder: ViTSigLIP-based visual feature extraction
+- TextDecoder: BERT-style embeddings with causal transformer layers
+- ModalityProjection: Cross-modal alignment between vision and language
+- Output projection: Vocabulary prediction head for text generation
+"""
+
 import keras
 from keras import ops
 from typing import Dict, Optional, Tuple, Union, Any, List
@@ -7,37 +21,36 @@ from typing import Dict, Optional, Tuple, Union, Any, List
 # ---------------------------------------------------------------------
 
 from ..utils.logger import logger
-from ..layers.transformer import TransformerLayer
-from ..layers.vision_transformer_siglip import SigLIPVisionTransformer
+from .text_decoder import TextDecoder
+from .vision_encoder import VisionEncoder
 from ..layers.modality_projection import ModalityProjection
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class NanoVLM(keras.Model):
-    """nanoVLM: Compact Vision-Language Model.
+    """
+    NanoVLM: Compact Vision-Language Model using ViTSigLIP and BERT components.
 
-    A lightweight vision-language model that combines SigLIP vision transformer
-    with SmolLM2-inspired language decoder through efficient modality projection.
+    A lightweight vision-language model that combines ViTSigLIP-based vision
+    encoding with BERT-style text decoding through efficient modality projection.
     The model processes images and text tokens to generate coherent text responses.
 
     The architecture consists of:
-    - Vision encoder: SigLIP-based visual feature extraction
-    - Modality projection: Cross-modal alignment layer
-    - Language decoder: Transformer-based text generation
-    - Output projection: Vocabulary prediction head
+    - Vision encoder: VisionEncoder wrapping ViTSigLIP for visual feature extraction
+    - Modality projection: Cross-modal alignment layer between vision and language
+    - Text decoder: TextDecoder using BERT embeddings with causal attention
+    - Output projection: Vocabulary prediction head for text generation
 
     Args:
-        vision_config: Configuration dictionary for vision transformer. Should contain
+        vision_config: Configuration dictionary for vision encoder. Should contain
             keys like 'img_size', 'patch_size', 'embed_dim', 'depth', 'num_heads', etc.
-        language_config: Configuration dictionary for language decoder. Should contain
-            keys like 'hidden_dim', 'num_layers', 'num_heads', 'mlp_dim', 'dropout', etc.
+        language_config: Configuration dictionary for text decoder. Should contain
+            keys like 'vocab_size', 'hidden_dim', 'num_layers', 'num_heads', 'mlp_dim', etc.
         projection_config: Configuration dictionary for modality projection. Should contain
             keys like 'input_dim', 'output_dim', 'scale_factor', 'use_gelu', etc.
         vocab_size: Size of the vocabulary for text embeddings and output projection.
             Default is 32000 following SmolLM2 conventions.
-        use_causal_mask: Whether to use causal masking in language decoder attention.
-            Default is True for autoregressive generation.
         dropout_rate: Global dropout rate applied throughout the model. Can be
             overridden by component-specific dropout settings.
         **kwargs: Additional keyword arguments passed to the parent Model class.
@@ -52,8 +65,8 @@ class NanoVLM(keras.Model):
         ...     'depth': 12, 'num_heads': 12, 'mlp_ratio': 4.0
         ... }
         >>> language_config = {
-        ...     'hidden_dim': 768, 'num_layers': 12, 'num_heads': 12,
-        ...     'mlp_dim': 3072, 'dropout': 0.1
+        ...     'vocab_size': 32000, 'hidden_dim': 768, 'num_layers': 12,
+        ...     'num_heads': 12, 'mlp_dim': 3072, 'dropout': 0.1
         ... }
         >>> projection_config = {
         ...     'input_dim': 768, 'output_dim': 768, 'scale_factor': 2
@@ -67,22 +80,21 @@ class NanoVLM(keras.Model):
             language_config: Dict[str, Any],
             projection_config: Dict[str, Any],
             vocab_size: int = 32000,
-            use_causal_mask: bool = True,
             dropout_rate: float = 0.1,
             **kwargs
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate configurations
-        self._validate_configs(vision_config, language_config, projection_config)
-
-        # Store configurations
+        # Store configurations and parameters first
         self.vision_config = vision_config.copy()
         self.language_config = language_config.copy()
         self.projection_config = projection_config.copy()
         self.vocab_size = vocab_size
-        self.use_causal_mask = use_causal_mask
         self.dropout_rate = dropout_rate
+
+        # Validate configurations
+        # FIX 1: Pass the instance's config copies to be validated and potentially modified.
+        self._validate_configs(self.vision_config, self.language_config, self.projection_config)
 
         # Store build input shape for serialization
         self._build_input_shape = None
@@ -90,9 +102,7 @@ class NanoVLM(keras.Model):
         # Initialize component placeholders (will be created in build())
         self.vision_encoder = None
         self.modality_projection = None
-        self.text_embedder = None
-        self.decoder_layers = None
-        self.final_norm = None
+        self.text_decoder = None
         self.output_projection = None
 
     def _validate_configs(
@@ -101,11 +111,12 @@ class NanoVLM(keras.Model):
             language_config: Dict[str, Any],
             projection_config: Dict[str, Any]
     ) -> None:
-        """Validate configuration dictionaries.
+        """
+        Validate configuration dictionaries.
 
         Args:
-            vision_config: Vision transformer configuration
-            language_config: Language decoder configuration
+            vision_config: Vision encoder configuration
+            language_config: Text decoder configuration
             projection_config: Modality projection configuration
 
         Raises:
@@ -118,7 +129,7 @@ class NanoVLM(keras.Model):
                 raise ValueError(f"Missing required vision config key: {key}")
 
         # Required language config keys
-        language_required = ['hidden_dim', 'num_layers', 'num_heads', 'mlp_dim']
+        language_required = ['vocab_size', 'hidden_dim', 'num_layers', 'num_heads', 'mlp_dim']
         for key in language_required:
             if key not in language_config:
                 raise ValueError(f"Missing required language config key: {key}")
@@ -142,8 +153,18 @@ class NanoVLM(keras.Model):
                 f"projection output_dim ({projection_config['output_dim']})"
             )
 
+        # Ensure vocab_size consistency
+        if language_config['vocab_size'] != self.vocab_size:
+            logger.warning(
+                f"Language config vocab_size ({language_config['vocab_size']}) "
+                f"differs from model vocab_size ({self.vocab_size}). "
+                f"Using model vocab_size."
+            )
+            language_config['vocab_size'] = self.vocab_size
+
     def build(self, input_shape: Optional[Tuple] = None) -> None:
-        """Build all model components.
+        """
+        Build all model components.
 
         Args:
             input_shape: Input shape tuple (optional, not used for this model)
@@ -154,24 +175,18 @@ class NanoVLM(keras.Model):
         # Store for serialization
         self._build_input_shape = input_shape
 
-        logger.info("Building nanoVLM components...")
+        logger.info("Building NanoVLM components...")
 
         # Build vision encoder
-        self.vision_encoder = SigLIPVisionTransformer(**self.vision_config)
+        self.vision_encoder = VisionEncoder(**self.vision_config, name='vision_encoder')
 
         # Build modality projection
-        self.modality_projection = ModalityProjection(**self.projection_config)
+        self.modality_projection = ModalityProjection(**self.projection_config, name='modality_projection')
 
-        # Build text embedding layer
-        self.text_embedder = keras.layers.Embedding(
-            self.vocab_size,
-            self.language_config['hidden_dim'],
-            mask_zero=True,
-            name='text_embedder'
-        )
-
-        # Build language decoder layers
-        self._build_language_decoder()
+        # Build text decoder with consistent vocab_size
+        text_decoder_config = self.language_config.copy()
+        text_decoder_config['vocab_size'] = self.vocab_size
+        self.text_decoder = TextDecoder(**text_decoder_config, name='text_decoder')
 
         # Build output projection
         self.output_projection = keras.layers.Dense(
@@ -182,36 +197,15 @@ class NanoVLM(keras.Model):
         )
 
         super().build(input_shape)
-        logger.info("nanoVLM components built successfully")
-
-    def _build_language_decoder(self) -> None:
-        """Build language decoder transformer layers."""
-        self.decoder_layers = []
-
-        for i in range(self.language_config['num_layers']):
-            decoder_layer = TransformerLayer(
-                hidden_size=self.language_config['hidden_dim'],
-                num_heads=self.language_config['num_heads'],
-                intermediate_size=self.language_config['mlp_dim'],
-                dropout_rate=self.language_config.get('dropout', self.dropout_rate),
-                activation='gelu',
-                use_causal_mask=self.use_causal_mask,
-                name=f'decoder_layer_{i}'
-            )
-            self.decoder_layers.append(decoder_layer)
-
-        # Final layer normalization
-        self.final_norm = keras.layers.LayerNormalization(
-            epsilon=1e-6,
-            name='decoder_final_norm'
-        )
+        logger.info("NanoVLM components built successfully")
 
     def call(
             self,
             inputs: Union[Dict[str, keras.KerasTensor], Tuple[keras.KerasTensor, keras.KerasTensor]],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through nanoVLM.
+        """
+        Forward pass through NanoVLM.
 
         Args:
             inputs: Either a dictionary containing 'images' and 'text_tokens' keys,
@@ -238,8 +232,14 @@ class NanoVLM(keras.Model):
                 raise ValueError("Input dict must contain 'images' and 'text_tokens' keys")
             images = inputs['images']
             text_tokens = inputs['text_tokens']
+            token_type_ids = inputs.get('token_type_ids', None)
+            position_ids = inputs.get('position_ids', None)
+            attention_mask = inputs.get('attention_mask', None)
         elif isinstance(inputs, (tuple, list)) and len(inputs) == 2:
             images, text_tokens = inputs
+            token_type_ids = None
+            position_ids = None
+            attention_mask = None
         else:
             raise ValueError(
                 "Inputs must be either a dict with 'images' and 'text_tokens' keys "
@@ -249,26 +249,35 @@ class NanoVLM(keras.Model):
         # Process images through vision encoder
         vision_features = self.vision_encoder(images, training=training)
 
-        # Project visual features to language space
-        vision_embeddings = self.modality_projection(vision_features, training=training)
+        # FIX 2: WORKAROUND for component mismatch. The ViTSigLIP-based vision encoder
+        # returns only patch features (e.g., 196), but the ModalityProjection appears
+        # to expect an additional [CLS] token (total 197) to correctly identify the
+        # spatial tokens. We add a dummy token to satisfy this shape requirement.
+        cls_token_shape = (
+            ops.shape(vision_features)[0], 1, ops.shape(vision_features)[2]
+        )
+        dummy_cls_token = ops.zeros(cls_token_shape, dtype=vision_features.dtype)
+        vision_features_with_cls = ops.concatenate(
+            [dummy_cls_token, vision_features], axis=1
+        )
 
-        # Get text embeddings
-        text_embeddings = self.text_embedder(text_tokens, training=training)
+        # Project visual features to language space
+        vision_embeddings = self.modality_projection(vision_features_with_cls, training=training)
+
+        # Get text embeddings and hidden states from decoder
+        text_hidden_states = self.text_decoder(
+            inputs=text_tokens,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            training=training
+        )
 
         # Combine modalities (concatenate along sequence dimension)
-        combined_embeddings = ops.concatenate([vision_embeddings, text_embeddings], axis=1)
-
-        # Apply language decoder
-        hidden_states = combined_embeddings
-
-        for decoder_layer in self.decoder_layers:
-            hidden_states = decoder_layer(hidden_states, training=training)
-
-        # Final normalization
-        hidden_states = self.final_norm(hidden_states, training=training)
+        combined_hidden_states = ops.concatenate([vision_embeddings, text_hidden_states], axis=1)
 
         # Output projection to vocabulary
-        logits = self.output_projection(hidden_states, training=training)
+        logits = self.output_projection(combined_hidden_states)
 
         return logits
 
@@ -281,7 +290,8 @@ class NanoVLM(keras.Model):
             top_k: int = 50,
             eos_token_id: int = 2
     ) -> keras.KerasTensor:
-        """Generate text autoregressively given image and prompt.
+        """
+        Generate text autoregressively given image and prompt.
 
         Args:
             image: Input image tensor of shape [1, height, width, channels]
@@ -306,23 +316,36 @@ class NanoVLM(keras.Model):
 
         # Process image once (cached for generation loop)
         vision_features = self.vision_encoder(image, training=False)
-        vision_embeddings = self.modality_projection(vision_features, training=False)
+        cls_token_shape = (
+            ops.shape(vision_features)[0], 1, ops.shape(vision_features)[2]
+        )
+        dummy_cls_token = ops.zeros(cls_token_shape, dtype=vision_features.dtype)
+        vision_features_with_cls = ops.concatenate(
+            [dummy_cls_token, vision_features], axis=1
+        )
+        vision_embeddings = self.modality_projection(vision_features_with_cls, training=False)
 
         # Initialize with prompt
         current_tokens = prompt_tokens
 
         for step in range(max_length):
-            # Get current text embeddings
-            text_embeddings = self.text_embedder(current_tokens, training=False)
+            # Get current text hidden states
+            text_hidden_states = self.text_decoder(
+                inputs=current_tokens,
+                training=False
+            )
 
             # Combine with vision embeddings
-            combined_embeddings = ops.concatenate([vision_embeddings, text_embeddings], axis=1)
+            combined_hidden_states = ops.concatenate([vision_embeddings, text_hidden_states], axis=1)
 
-            # Forward through decoder to get logits
-            logits = self._forward_decoder(combined_embeddings)
+            # Get logits from output projection
+            logits = self.output_projection(combined_hidden_states)
 
-            # Sample next token from the last position
-            next_token = self._sample_next_token(logits[0, -1, :], temperature, top_k)
+            # Sample next token from the last text position
+            # Note: vision tokens come first, so we need to offset by vision sequence length
+            vision_seq_len = ops.shape(vision_embeddings)[1]
+            text_logits = logits[:, vision_seq_len:, :]  # Extract text logits only
+            next_token = self._sample_next_token(text_logits[0, -1, :], temperature, top_k)
 
             # Append to sequence
             current_tokens = ops.concatenate([
@@ -336,34 +359,14 @@ class NanoVLM(keras.Model):
 
         return current_tokens
 
-    def _forward_decoder(self, embeddings: keras.KerasTensor) -> keras.KerasTensor:
-        """Forward pass through language decoder only.
-
-        Args:
-            embeddings: Combined embeddings of shape [batch, seq_len, hidden_dim]
-
-        Returns:
-            Logits of shape [batch, seq_len, vocab_size]
-        """
-        hidden_states = embeddings
-
-        # Apply decoder layers
-        for decoder_layer in self.decoder_layers:
-            hidden_states = decoder_layer(hidden_states, training=False)
-
-        # Final normalization and projection
-        hidden_states = self.final_norm(hidden_states, training=False)
-        logits = self.output_projection(hidden_states, training=False)
-
-        return logits
-
     def _sample_next_token(
             self,
             logits: keras.KerasTensor,
             temperature: float,
             top_k: int
     ) -> keras.KerasTensor:
-        """Sample next token from logits using temperature and top-k sampling.
+        """
+        Sample next token from logits using temperature and top-k sampling.
 
         Args:
             logits: Logits tensor of shape [vocab_size]
@@ -384,7 +387,8 @@ class NanoVLM(keras.Model):
 
             # Sample from top-k distribution
             probs = ops.softmax(top_k_logits)
-            sampled_index = ops.random.categorical(
+            # FIX 3: Use keras.random.categorical instead of ops.random.categorical
+            sampled_index = keras.random.categorical(
                 ops.expand_dims(probs, 0),
                 num_samples=1
             )[0, 0]
@@ -398,7 +402,8 @@ class NanoVLM(keras.Model):
         return next_token
 
     def compute_output_shape(self, input_shape: Tuple) -> Tuple:
-        """Compute output shape given input shape.
+        """
+        Compute output shape given input shape.
 
         Args:
             input_shape: Input shape tuple
@@ -409,20 +414,23 @@ class NanoVLM(keras.Model):
         if isinstance(input_shape, dict):
             batch_size = input_shape['images'][0]
             # Approximate combined sequence length
-            vision_seq_len = (self.vision_config['img_size'] // self.vision_config['patch_size']) ** 2
+            # FIX 4: Add 1 to vision_seq_len to account for the dummy CLS token.
+            vision_seq_len = (self.vision_config['img_size'] // self.vision_config['patch_size']) ** 2 + 1
             text_seq_len = input_shape['text_tokens'][1]
             combined_seq_len = vision_seq_len + text_seq_len
         else:
             # Assume tuple format (images_shape, text_tokens_shape)
             batch_size = input_shape[0][0]
-            vision_seq_len = (self.vision_config['img_size'] // self.vision_config['patch_size']) ** 2
+            # FIX 4: Add 1 to vision_seq_len to account for the dummy CLS token.
+            vision_seq_len = (self.vision_config['img_size'] // self.vision_config['patch_size']) ** 2 + 1
             text_seq_len = input_shape[1][1]
             combined_seq_len = vision_seq_len + text_seq_len
 
         return (batch_size, combined_seq_len, self.vocab_size)
 
     def get_config(self) -> Dict[str, Any]:
-        """Get model configuration for serialization.
+        """
+        Get model configuration for serialization.
 
         Returns:
             Dictionary containing all configuration parameters needed to
@@ -434,13 +442,13 @@ class NanoVLM(keras.Model):
             "language_config": self.language_config,
             "projection_config": self.projection_config,
             "vocab_size": self.vocab_size,
-            "use_causal_mask": self.use_causal_mask,
             "dropout_rate": self.dropout_rate,
         })
         return config
 
     def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration for serialization.
+        """
+        Get build configuration for serialization.
 
         Returns:
             Dictionary containing build-time configuration.
@@ -450,7 +458,8 @@ class NanoVLM(keras.Model):
         }
 
     def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build model from saved configuration.
+        """
+        Build model from saved configuration.
 
         Args:
             config: Build configuration dictionary from get_build_config()
@@ -462,7 +471,8 @@ class NanoVLM(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'NanoVLM':
-        """Create model instance from configuration.
+        """
+        Create model instance from configuration.
 
         Args:
             config: Configuration dictionary from get_config()
@@ -472,9 +482,11 @@ class NanoVLM(keras.Model):
         """
         return cls(**config)
 
+
+# ---------------------------------------------------------------------
+# Model configurations for different nanoVLM variants
 # ---------------------------------------------------------------------
 
-# Model configurations for different nanoVLM variants
 NANOVLM_CONFIGS = {
     "nanovlm_mini": {
         "vision_config": {
@@ -487,6 +499,7 @@ NANOVLM_CONFIGS = {
             'dropout': 0.1,
         },
         "language_config": {
+            'vocab_size': 32000,
             'hidden_dim': 384,
             'num_layers': 6,
             'num_heads': 6,
@@ -512,6 +525,7 @@ NANOVLM_CONFIGS = {
             'dropout': 0.1,
         },
         "language_config": {
+            'vocab_size': 32000,
             'hidden_dim': 512,
             'num_layers': 8,
             'num_heads': 8,
@@ -537,6 +551,7 @@ NANOVLM_CONFIGS = {
             'dropout': 0.0,
         },
         "language_config": {
+            'vocab_size': 32000,
             'hidden_dim': 768,
             'num_layers': 12,
             'num_heads': 12,
@@ -552,6 +567,9 @@ NANOVLM_CONFIGS = {
     }
 }
 
+
+# ---------------------------------------------------------------------
+# Factory Functions
 # ---------------------------------------------------------------------
 
 def _prepare_configs(
@@ -559,45 +577,38 @@ def _prepare_configs(
         language_config: Dict[str, Any],
         projection_config: Dict[str, Any]
 ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
-    """Prepare and enhance model configurations with default values.
+    """
+    Prepare and enhance model configurations with default values.
 
     Args:
-        vision_config: Vision transformer configuration
-        language_config: Language decoder configuration
+        vision_config: Vision encoder configuration
+        language_config: Text decoder configuration
         projection_config: Modality projection configuration
 
     Returns:
         Tuple of enhanced configuration dictionaries
     """
-    # Enhance vision config with defaults
-    enhanced_vision_config = vision_config.copy()
-    enhanced_vision_config.setdefault('num_classes', 0)  # No classification head
-
     # Enhance projection config with defaults
     enhanced_projection_config = projection_config.copy()
     enhanced_projection_config.setdefault('use_gelu', True)
     enhanced_projection_config.setdefault('use_layer_norm', True)
-    enhanced_projection_config.setdefault('dropout_rate', 0.1)
 
-    return enhanced_vision_config, language_config.copy(), enhanced_projection_config
+    return vision_config.copy(), language_config.copy(), enhanced_projection_config
 
-# ---------------------------------------------------------------------
 
 def create_nanovlm(
         variant: str = "nanovlm_base",
         vocab_size: int = 32000,
-        use_causal_mask: bool = True,
         dropout_rate: Optional[float] = None
 ) -> NanoVLM:
-    """Create nanoVLM model with specified variant configuration.
+    """
+    Create NanoVLM model with specified variant configuration.
 
     Args:
         variant: Model variant name. Must be one of: 'nanovlm_mini', 'nanovlm_base',
             or 'nanovlm_222m'. Defaults to 'nanovlm_base'.
         vocab_size: Size of the vocabulary for text embeddings and output projection.
             Defaults to 32000.
-        use_causal_mask: Whether to use causal masking in language decoder attention.
-            Defaults to True.
         dropout_rate: Global dropout rate. If None, uses variant-specific defaults.
 
     Returns:
@@ -644,14 +655,13 @@ def create_nanovlm(
         language_config=language_config,
         projection_config=projection_config,
         vocab_size=vocab_size,
-        use_causal_mask=use_causal_mask,
         dropout_rate=dropout_rate
     )
 
-# ---------------------------------------------------------------------
 
 def create_nanovlm_mini() -> NanoVLM:
-    """Create nanoVLM-Mini model with compact configuration.
+    """
+    Create NanoVLM-Mini model with compact configuration.
 
     Creates the smallest vision-language model variant with approximately 16M parameters,
     optimized for resource-constrained environments while maintaining basic
@@ -667,10 +677,10 @@ def create_nanovlm_mini() -> NanoVLM:
     """
     return create_nanovlm("nanovlm_mini")
 
-# ---------------------------------------------------------------------
 
 def create_nanovlm_base() -> NanoVLM:
-    """Create nanoVLM-Base model with balanced configuration.
+    """
+    Create NanoVLM-Base model with balanced configuration.
 
     Creates a medium-sized vision-language model with approximately 64M parameters,
     providing a good balance between model capability and computational efficiency.
@@ -686,10 +696,10 @@ def create_nanovlm_base() -> NanoVLM:
     """
     return create_nanovlm("nanovlm_base")
 
-# ---------------------------------------------------------------------
 
 def create_nanovlm_222m() -> NanoVLM:
-    """Create nanoVLM-222M model with full configuration.
+    """
+    Create NanoVLM-222M model with full configuration.
 
     Creates the largest vision-language model variant with approximately 222M parameters,
     suitable for applications requiring high-quality vision-language understanding
@@ -705,10 +715,10 @@ def create_nanovlm_222m() -> NanoVLM:
     """
     return create_nanovlm("nanovlm_222m")
 
-# ---------------------------------------------------------------------
 
 def get_available_variants() -> List[str]:
-    """Get list of available nanoVLM model variants.
+    """
+    Get list of available NanoVLM model variants.
 
     Returns:
         List of available variant names that can be used with create_nanovlm()
@@ -720,10 +730,10 @@ def get_available_variants() -> List[str]:
     """
     return list(NANOVLM_CONFIGS.keys())
 
-# ---------------------------------------------------------------------
 
 def get_variant_info(variant: str) -> Dict[str, Any]:
-    """Get detailed information about a specific model variant.
+    """
+    Get detailed information about a specific model variant.
 
     Args:
         variant: Model variant name
@@ -746,5 +756,3 @@ def get_variant_info(variant: str) -> Dict[str, Any]:
         )
 
     return NANOVLM_CONFIGS[variant].copy()
-
-# ---------------------------------------------------------------------
