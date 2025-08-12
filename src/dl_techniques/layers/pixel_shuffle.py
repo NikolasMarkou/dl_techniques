@@ -273,9 +273,13 @@ class PixelShuffle(keras.layers.Layer):
         Raises:
             ValueError: If runtime spatial dimensions are incompatible.
         """
+        if self.scale_factor == 1:
+            return inputs
+
         # Get dynamic shapes
-        batch_size = ops.shape(inputs)[0]
-        seq_len = ops.shape(inputs)[1]
+        input_shape = ops.shape(inputs)
+        batch_size = input_shape[0]
+        seq_len = input_shape[1]
         channels = inputs.shape[-1]  # Known at build time
 
         # Separate CLS token and spatial tokens
@@ -287,18 +291,6 @@ class PixelShuffle(keras.layers.Layer):
         h_float = ops.sqrt(ops.cast(spatial_len, "float32"))
         h = ops.cast(h_float, "int32")
         w = h  # Assume square spatial arrangement
-
-        # Validate spatial dimensions at runtime if needed
-        if self.validate_spatial_dims:
-            # This creates a runtime assertion
-            ops.assert_equal(
-                h * h, spatial_len,
-                message="Spatial tokens must form a perfect square"
-            )
-            ops.assert_equal(
-                h % self.scale_factor, 0,
-                message=f"Spatial dimension must be divisible by {self.scale_factor}"
-            )
 
         # Reshape spatial tokens to 2D spatial format
         spatial_tokens = ops.reshape(spatial_tokens, [batch_size, h, w, channels])
@@ -316,8 +308,13 @@ class PixelShuffle(keras.layers.Layer):
         shuffled = ops.transpose(shuffled, [0, 1, 3, 2, 4, 5])
         shuffled = ops.reshape(shuffled, [batch_size, new_h * new_w, new_c])
 
+        # Pad CLS token to match the new channel dimension
+        padding_amount = new_c - channels
+        paddings = [[0, 0], [0, 0], [0, padding_amount]]
+        cls_token_expanded = ops.pad(cls_token, paddings)
+
         # Concatenate CLS token back
-        return ops.concatenate([cls_token, shuffled], axis=1)
+        return ops.concatenate([cls_token_expanded, shuffled], axis=1)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
@@ -328,21 +325,21 @@ class PixelShuffle(keras.layers.Layer):
         Returns:
             Output shape tuple.
         """
-        # Convert to list for manipulation
         input_shape_list = list(input_shape)
         batch_size, seq_len, channels = input_shape_list
 
-        if seq_len is None or channels is None:
-            # If sequence length or channels are unknown, we can't compute exact output shape
-            new_channels = channels * (self.scale_factor ** 2) if channels is not None else None
-            return tuple([batch_size, None, new_channels])
+        if seq_len is None:
+            new_seq_len = None
+        else:
+            spatial_len = seq_len - 1
+            new_spatial_len = spatial_len // (self.scale_factor ** 2)
+            new_seq_len = new_spatial_len + 1
 
-        spatial_len = seq_len - 1  # Remove CLS token
-        new_spatial_len = spatial_len // (self.scale_factor ** 2)
-        new_seq_len = new_spatial_len + 1  # Add CLS token back
-        new_channels = channels * (self.scale_factor ** 2)
+        if channels is None:
+            new_channels = None
+        else:
+            new_channels = channels * (self.scale_factor ** 2)
 
-        # Return as tuple for consistency
         return tuple([batch_size, new_seq_len, new_channels])
 
     def get_config(self) -> dict:
@@ -376,4 +373,3 @@ class PixelShuffle(keras.layers.Layer):
             self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------
-
