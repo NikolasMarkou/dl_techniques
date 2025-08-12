@@ -40,12 +40,6 @@ The `LogicFFN` layer operates through a sequence of carefully designed steps:
     using the learned gates. This aggregated tensor, which now contains a
     logically-processed representation of the input, is then projected back to
     the desired output dimension.
-
-Key Components:
----------------
-- `LogicFFN(keras.layers.Layer)`: The main class implementing the logic-based
-  feed-forward network. It is fully serializable and compatible with the
-  Keras 3 API.
 """
 
 import keras

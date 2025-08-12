@@ -1,5 +1,5 @@
 """
-Dynamic Tanh (DyT) Layer Implementation for Keras 3.x
+Dynamic Tanh (DyT) Layer Implementation
 
 Based on the paper:
 "Transformers without Normalization" by Jiachen Zhu, Xinlei Chen, Kaiming He, Yann LeCun, and Zhuang Liu

@@ -22,7 +22,7 @@ class TestTimeSeriesConfig:
         config = TimeSeriesConfig()
 
         # Check default values
-        assert config.n_samples == 1000
+        assert config.n_samples == 5000
         assert config.random_seed == 42
         assert config.default_noise_level == 0.1
         assert len(config.seasonal_periods) > 0

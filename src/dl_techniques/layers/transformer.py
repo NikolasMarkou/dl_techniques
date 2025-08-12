@@ -81,6 +81,7 @@ from ..utils.logger import logger
 
 from .norms.rms_norm import RMSNorm
 from .norms.band_rms import BandRMS
+from .dynamic_tanh import DynamicTanh
 
 from .ffn.mlp import MLPBlock
 from .ffn.glu_ffn import GLUFFN
@@ -99,10 +100,10 @@ from .stochastic_depth import StochasticDepth
 # Type definitions for enhanced type safety
 # ---------------------------------------------------------------------
 
+AttentionType = Literal['multi_head_attention', 'window_attention', 'group_query_attention', 'differential_attention']
+NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'dynamic_tanh']
 NormalizationPosition = Literal['post', 'pre']
 FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'residual', 'swin_mlp']
-NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms']
-AttentionType = Literal['multi_head_attention', 'window_attention', 'group_query_attention', 'differential_attention']
 
 # ---------------------------------------------------------------------
 
@@ -138,6 +139,7 @@ class TransformerLayer(keras.layers.Layer):
             - 'batch_norm': Batch normalization
             - 'rms_norm': Root Mean Square normalization
             - 'band_rms': Band-constrained RMS normalization
+            - 'dynamic_tanh': Dynamic Tanh normalization (DyT) for normalization-free transformers
         normalization_position: NormalizationPosition, position of normalization layers.
             Available options:
             - 'post': Post-normalization (original Transformer, default)
@@ -174,6 +176,10 @@ class TransformerLayer(keras.layers.Layer):
             Defaults to None (uses num_heads).
         lambda_init: Float, initial lambda value for differential attention.
             Only used when attention_type='differential_attention'. Defaults to 0.8.
+        attention_norm_alpha: Float, initial alpha value for DynamicTanh in attention normalization.
+            Only used when normalization_type='dynamic_tanh'. Defaults to 0.7.
+        ffn_norm_alpha: Float, initial alpha value for DynamicTanh in FFN normalization.
+            Only used when normalization_type='dynamic_tanh'. Defaults to 0.15.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
@@ -234,6 +240,20 @@ class TransformerLayer(keras.layers.Layer):
         )
         # When calling, provide layer_idx for optimal lambda computation
         outputs = layer(inputs, layer_idx=2)  # For 3rd layer (0-indexed)
+
+        # Dynamic Tanh normalization for normalization-free transformers
+        layer = TransformerLayer(
+            hidden_size=768,
+            num_heads=12,
+            intermediate_size=3072,
+            attention_type='multi_head_attention',
+            normalization_type='dynamic_tanh',
+            attention_norm_alpha=0.8,  # Higher alpha for attention normalization
+            ffn_norm_alpha=0.2,        # Lower alpha for FFN normalization
+            ffn_type='swiglu',
+            use_stochastic_depth=True,
+            stochastic_depth_rate=0.1
+        )
         ```
     """
 
@@ -263,6 +283,8 @@ class TransformerLayer(keras.layers.Layer):
             window_size: int = 8,
             n_kv_head: Optional[int] = None,
             lambda_init: float = 0.8,
+            attention_norm_alpha: float = 0.7,
+            ffn_norm_alpha: float = 0.15,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -290,7 +312,7 @@ class TransformerLayer(keras.layers.Layer):
         if attention_type not in valid_attention_types:
             raise ValueError(f"attention_type must be one of {valid_attention_types}, got {attention_type}")
 
-        valid_norm_types = ['layer_norm', 'rms_norm', 'batch_norm', 'band_rms']
+        valid_norm_types = ['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'dynamic_tanh']
         if normalization_type not in valid_norm_types:
             raise ValueError(f"normalization_type must be one of {valid_norm_types}, got {normalization_type}")
 
@@ -330,6 +352,8 @@ class TransformerLayer(keras.layers.Layer):
         self.window_size = window_size
         self.n_kv_head = n_kv_head if n_kv_head is not None else num_heads
         self.lambda_init = lambda_init
+        self.attention_norm_alpha = attention_norm_alpha
+        self.ffn_norm_alpha = ffn_norm_alpha
 
         # Initialize layers to None - will be created in build()
         self.attention = None
@@ -344,11 +368,13 @@ class TransformerLayer(keras.layers.Layer):
         # Store build input shape for serialization
         self._build_input_shape = None
 
-    def _create_normalization_layer(self, name: str) -> keras.layers.Layer:
+    def _create_normalization_layer(self, name: str, layer_type: str = 'attention') -> keras.layers.Layer:
         """Create a normalization layer based on the specified type.
 
         Args:
             name: Name for the normalization layer.
+            layer_type: Type of layer this normalization is for ('attention' or 'ffn').
+                This affects the alpha initialization for DynamicTanh layers.
 
         Returns:
             A normalization layer instance.
@@ -365,6 +391,17 @@ class TransformerLayer(keras.layers.Layer):
         elif self.normalization_type == 'batch_norm':
             return keras.layers.BatchNormalization(
                 epsilon=1e-12,
+                name=name
+            )
+        elif self.normalization_type == 'dynamic_tanh':
+            # Use different alpha initialization based on layer type
+            alpha_value = self.attention_norm_alpha if layer_type == 'attention' else self.ffn_norm_alpha
+            return DynamicTanh(
+                alpha_init_value=alpha_value,
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                bias_regularizer=self.bias_regularizer,
                 name=name
             )
         else:
@@ -651,13 +688,13 @@ class TransformerLayer(keras.layers.Layer):
         self.attention = self._create_attention_layer('attention')
 
         # Attention layer normalization
-        self.attention_norm = self._create_normalization_layer('attention_norm')
+        self.attention_norm = self._create_normalization_layer('attention_norm', 'attention')
 
         # Feed-forward network (configurable)
         self.ffn_layer = self._create_ffn_layer('ffn')
 
         # Output layer normalization
-        self.output_norm = self._create_normalization_layer('output_norm')
+        self.output_norm = self._create_normalization_layer('output_norm', 'ffn')
 
         # Dropout layers
         self.dropout = keras.layers.Dropout(self.dropout_rate, name='dropout')
@@ -869,6 +906,9 @@ class TransformerLayer(keras.layers.Layer):
             'ffn_multiple_of': self.ffn_multiple_of,
             'window_size': self.window_size,
             'n_kv_head': self.n_kv_head,
+            'lambda_init': self.lambda_init,
+            'attention_norm_alpha': self.attention_norm_alpha,
+            'ffn_norm_alpha': self.ffn_norm_alpha,
         })
         return config
 

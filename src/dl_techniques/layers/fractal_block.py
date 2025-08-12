@@ -157,7 +157,6 @@ class FractalBlock(keras.layers.Layer):
             if isinstance(self.block_class, str):
                 # Import the class dynamically
                 if self.block_class == "ConvBlock":
-                    from dl_techniques.layers.convblock import ConvBlock
                     block_cls = ConvBlock
                 else:
                     # For other classes, try to get from keras.layers first

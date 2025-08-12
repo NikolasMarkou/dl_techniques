@@ -13,9 +13,6 @@ The layer is registered as a Keras serializable object, allowing models that
 use it to be saved and loaded seamlessly using `keras.models.save_model` and
 `keras.models.load_model`.
 
-Classes:
-    ResidualBlock: A Keras layer implementing a residual block with dense layers.
-
 Example:
     >>> import keras
     >>> import numpy as np
