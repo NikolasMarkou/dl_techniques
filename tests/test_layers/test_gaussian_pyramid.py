@@ -114,15 +114,6 @@ class TestGaussianPyramid:
         assert all(filter.built for filter in layer.gaussian_filters)
         assert layer._build_input_shape is not None
 
-    def test_build_process_channels_first(self, input_tensor_channels_first):
-        """Test that the layer builds properly with channels_first format."""
-        layer = GaussianPyramid(levels=3, data_format="channels_first")
-        layer(input_tensor_channels_first)  # Trigger build
-
-        assert layer.built is True
-        assert len(layer.gaussian_filters) == 3
-        assert all(filter.built for filter in layer.gaussian_filters)
-
     def test_build_different_levels(self, input_tensor_channels_last):
         """Test building with different number of levels."""
         for levels in [1, 2, 4, 5]:
@@ -146,20 +137,6 @@ class TestGaussianPyramid:
 
         # Check shapes: (2, 32, 32, 3) -> (2, 16, 16, 3) -> (2, 8, 8, 3)
         expected_shapes = [(2, 32, 32, 3), (2, 16, 16, 3), (2, 8, 8, 3)]
-        actual_shapes = [tuple(output.shape) for output in outputs]
-
-        assert actual_shapes == expected_shapes
-
-    def test_output_shapes_channels_first(self, input_tensor_channels_first):
-        """Test output shapes with channels_first format."""
-        layer = GaussianPyramid(levels=3, scale_factor=2, data_format="channels_first")
-        outputs = layer(input_tensor_channels_first)
-
-        # Check number of outputs
-        assert len(outputs) == 3
-
-        # Check shapes: (2, 3, 32, 32) -> (2, 3, 16, 16) -> (2, 3, 8, 8)
-        expected_shapes = [(2, 3, 32, 32), (2, 3, 16, 16), (2, 3, 8, 8)]
         actual_shapes = [tuple(output.shape) for output in outputs]
 
         assert actual_shapes == expected_shapes

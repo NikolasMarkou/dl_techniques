@@ -368,7 +368,7 @@ class TestGroupedQueryAttention:
 
         expected_keys = {
             'd_model', 'n_head', 'n_kv_head', 'max_seq_len',
-            'attention_dropout', 'rope_percentage', 'use_bias'
+            'dropout_rate', 'rope_percentage', 'use_bias'
         }
 
         # Check all expected keys are present
@@ -379,7 +379,7 @@ class TestGroupedQueryAttention:
         assert config['n_head'] == 8
         assert config['n_kv_head'] == 2
         assert config['max_seq_len'] == 128
-        assert config['attention_dropout'] == 0.0
+        assert config['dropout_rate'] == 0.0
         assert config['rope_percentage'] == 1.0
         assert config['use_bias'] is False
 

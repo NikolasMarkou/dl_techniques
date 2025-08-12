@@ -1,5 +1,4 @@
 import keras
-import numpy as np
 from keras import ops
 from typing import Tuple, Union, Optional, Sequence
 
@@ -9,7 +8,6 @@ from typing import Tuple, Union, Optional, Sequence
 
 from ..utils.logger import logger
 from .gaussian_filter import GaussianFilter
-
 
 # ---------------------------------------------------------------------
 
