@@ -116,12 +116,12 @@ class MobileMQA(keras.layers.Layer):
             "kernel_regularizer": self.kernel_regularizer
         }
 
-        self.q_proj = layers.Dense(self.dim, **dense_config)
-        self.kv_proj = layers.Dense(2 * self.dim, **dense_config)
-        self.o_proj = layers.Dense(self.dim, **dense_config)
+        self.q_proj = keras.layers.Dense(self.dim, **dense_config)
+        self.kv_proj = keras.layers.Dense(2 * self.dim, **dense_config)
+        self.o_proj = keras.layers.Dense(self.dim, **dense_config)
 
         if self.use_downsampling:
-            self.downsample = layers.DepthwiseConv2D(
+            self.downsample = keras.layers.DepthwiseConv2D(
                 3,
                 strides=2,
                 padding='same',
