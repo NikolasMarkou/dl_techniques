@@ -90,11 +90,11 @@ class WindowAttention(keras.layers.Layer):
         ValueError: If dropout rates are not between 0.0 and 1.0.
 
     Input shape:
-        A 3D tensor with shape: `(batch_size, num_windows, dim)`
-        where num_windows = window_size * window_size
+        A 3D tensor with shape: `(batch_size, num_tokens_in_window, dim)`
+        where num_tokens_in_window = window_size * window_size
 
     Output shape:
-        A 3D tensor with shape: `(batch_size, num_windows, dim)`
+        A 3D tensor with shape: `(batch_size, num_tokens_in_window, dim)`
 
     Example:
         >>> # Create a window attention layer
@@ -262,6 +262,18 @@ class WindowAttention(keras.layers.Layer):
         B = ops.shape(x)[0]
         N = ops.shape(x)[1]
         C = ops.shape(x)[2]
+
+        # ----------------- DEBUG FIX: START -----------------
+        # Validate that the input sequence length matches the window size squared.
+        # This is a critical assumption for the relative position bias to work correctly.
+        expected_n = self.window_size * self.window_size
+        if N != expected_n:
+            raise ValueError(
+                f"Input sequence length ({N}) does not match the square of the window_size "
+                f"({self.window_size}^2 = {expected_n}). WindowAttention requires "
+                f"the input to be a single window of tokens."
+            )
+        # ----------------- DEBUG FIX: END -------------------
 
         # Generate qkv matrices
         qkv = self.qkv(x)  # (B, N, 3*C)

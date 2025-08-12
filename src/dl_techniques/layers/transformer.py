@@ -41,6 +41,7 @@ The attention mechanism can be one of several configurable architectures:
 - 'multi_head_attention': Standard multi-head self-attention (default)
 - 'window_attention': Windowed attention for efficient processing
 - 'group_query_attention': Grouped query attention for reduced parameters
+- 'differential_attention': Differential attention with noise cancellation
 - Custom attention layers can be easily added
 
 **Feed-Forward Network Options:**
@@ -56,9 +57,11 @@ Configurable Components:
 
 Major strengths of this layer include:
 - `attention_type`: Choose from various attention mechanisms
+- `attention_args`: Dictionary of custom arguments for attention layer
 - `normalization_type`: Easily swap normalization functions (layer_norm, rms_norm, etc.)
 - `normalization_position`: Choose between post-LN and pre-LN architectures
 - `ffn_type`: Choose from various feed-forward architectures for different use cases
+- `ffn_args`: Dictionary of custom arguments for FFN layer
 - `use_stochastic_depth`: Enable stochastic depth regularization for deep networks
 - `stochastic_depth_rate`: Control the drop path rate for stochastic depth
 - Full parameter control for both attention and FFN components
@@ -68,7 +71,7 @@ and for building custom Transformer variants.
 """
 
 import keras
-from typing import Optional, Union, Any, Dict, Tuple
+from typing import Optional, Union, Any, Dict, Tuple, Literal
 
 # ---------------------------------------------------------------------
 # local imports
@@ -88,8 +91,18 @@ from .ffn.residual_block import ResidualBlock
 
 from .attention.window_attention import WindowAttention
 from .attention.group_query_attention import GroupedQueryAttention
+from .attention.differential_attention import DifferentialMultiHeadAttention
 
 from .stochastic_depth import StochasticDepth
+
+# ---------------------------------------------------------------------
+# Type definitions for enhanced type safety
+# ---------------------------------------------------------------------
+
+NormalizationPosition = Literal['post', 'pre']
+FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'residual', 'swin_mlp']
+NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms']
+AttentionType = Literal['multi_head_attention', 'window_attention', 'group_query_attention', 'differential_attention']
 
 # ---------------------------------------------------------------------
 
@@ -105,27 +118,31 @@ class TransformerLayer(keras.layers.Layer):
     - Residual connections
     - Configurable normalization
     - Optional stochastic depth regularization
+    - Enhanced parameter control through argument dictionaries
 
     Args:
         hidden_size: Integer, hidden size of the layer.
         num_heads: Integer, number of attention heads.
         intermediate_size: Integer, size of the intermediate (feed-forward) layer.
-        attention_type: String, type of attention mechanism to use.
+        attention_type: AttentionType, type of attention mechanism to use.
             Available options:
             - 'multi_head_attention': Standard multi-head self-attention (default)
             - 'window_attention': Windowed attention for efficient processing
             - 'group_query_attention': Grouped query attention for reduced parameters
-        normalization_type: String, type of normalization to use.
+            - 'differential_attention': Differential attention for noise cancellation
+        attention_args: Optional dictionary of custom arguments for attention layer.
+            These will override default parameters for the specific attention type.
+        normalization_type: NormalizationType, type of normalization to use.
             Available options:
             - 'layer_norm': Standard layer normalization (default)
             - 'batch_norm': Batch normalization
             - 'rms_norm': Root Mean Square normalization
             - 'band_rms': Band-constrained RMS normalization
-        normalization_position: String, position of normalization layers.
+        normalization_position: NormalizationPosition, position of normalization layers.
             Available options:
             - 'post': Post-normalization (original Transformer, default)
             - 'pre': Pre-normalization (often more stable for deep networks)
-        ffn_type: String, type of feed-forward network to use.
+        ffn_type: FFNType, type of feed-forward network to use.
             Available options:
             - 'mlp': Standard MLP with intermediate expansion (default)
             - 'swiglu': SwiGLU activation with gating mechanism
@@ -133,6 +150,8 @@ class TransformerLayer(keras.layers.Layer):
             - 'glu': Gated Linear Unit with sigmoid gating
             - 'residual': Residual block with skip connections
             - 'swin_mlp': Swin Transformer MLP variant
+        ffn_args: Optional dictionary of custom arguments for FFN layer.
+            These will override default parameters for the specific FFN type.
         dropout_rate: Float, dropout rate. Defaults to 0.1.
         attention_dropout_rate: Float, attention-specific dropout rate. Defaults to 0.1.
         use_stochastic_depth: Boolean, whether to use stochastic depth regularization.
@@ -153,6 +172,8 @@ class TransformerLayer(keras.layers.Layer):
         window_size: Integer, window size for window attention. Defaults to 8.
         n_kv_head: Integer, number of key-value heads for grouped query attention.
             Defaults to None (uses num_heads).
+        lambda_init: Float, initial lambda value for differential attention.
+            Only used when attention_type='differential_attention'. Defaults to 0.8.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
@@ -163,13 +184,14 @@ class TransformerLayer(keras.layers.Layer):
 
     Example:
         ```python
-        # Standard multi-head attention with stochastic depth
+        # Standard multi-head attention with custom dropout
         inputs = keras.Input(shape=(128, 768))
         layer = TransformerLayer(
             hidden_size=768,
             num_heads=12,
             intermediate_size=3072,
             attention_type='multi_head_attention',
+            attention_args={'dropout': 0.2},  # Custom attention dropout
             normalization_position='pre',
             ffn_type='swiglu',
             use_stochastic_depth=True,
@@ -177,24 +199,41 @@ class TransformerLayer(keras.layers.Layer):
         )
         outputs = layer(inputs)
 
-        # Window attention without stochastic depth
+        # Window attention with custom window size and FFN parameters
         layer = TransformerLayer(
             hidden_size=768,
             num_heads=12,
             intermediate_size=3072,
             attention_type='window_attention',
-            window_size=16,
+            attention_args={'window_size': 16, 'use_bias': False},
+            ffn_type='differential',
+            ffn_args={'branch_activation': 'swish', 'dropout_rate': 0.15},
             use_stochastic_depth=False
         )
 
-        # Deep network with higher stochastic depth rate
+        # Grouped query attention with custom key-value heads
         layer = TransformerLayer(
             hidden_size=768,
             num_heads=12,
             intermediate_size=3072,
-            use_stochastic_depth=True,
-            stochastic_depth_rate=0.3  # Higher rate for deeper networks
+            attention_type='group_query_attention',
+            attention_args={'n_kv_head': 4, 'rope_theta': 50000.0},
+            ffn_type='swiglu',
+            ffn_args={'ffn_expansion_factor': 8, 'ffn_multiple_of': 512}
         )
+
+        # Differential attention for noise cancellation
+        layer = TransformerLayer(
+            hidden_size=768,
+            num_heads=12,
+            intermediate_size=3072,
+            attention_type='differential_attention',
+            attention_args={'lambda_init': 0.6, 'head_dim': 64},
+            ffn_type='swiglu',
+            normalization_position='pre'
+        )
+        # When calling, provide layer_idx for optimal lambda computation
+        outputs = layer(inputs, layer_idx=2)  # For 3rd layer (0-indexed)
         ```
     """
 
@@ -203,10 +242,12 @@ class TransformerLayer(keras.layers.Layer):
             hidden_size: int,
             num_heads: int,
             intermediate_size: int,
-            attention_type: str = 'multi_head_attention',
-            normalization_type: str = 'layer_norm',
-            normalization_position: str = 'post',
-            ffn_type: str = 'mlp',
+            attention_type: AttentionType = 'multi_head_attention',
+            attention_args: Optional[Dict[str, Any]] = None,
+            normalization_type: NormalizationType = 'layer_norm',
+            normalization_position: NormalizationPosition = 'post',
+            ffn_type: FFNType = 'mlp',
+            ffn_args: Optional[Dict[str, Any]] = None,
             dropout_rate: float = 0.1,
             attention_dropout_rate: float = 0.1,
             use_stochastic_depth: bool = False,
@@ -221,6 +262,7 @@ class TransformerLayer(keras.layers.Layer):
             ffn_multiple_of: int = 256,
             window_size: int = 8,
             n_kv_head: Optional[int] = None,
+            lambda_init: float = 0.8,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -243,7 +285,8 @@ class TransformerLayer(keras.layers.Layer):
         if not (0.0 <= stochastic_depth_rate <= 1.0):
             raise ValueError(f"stochastic_depth_rate must be between 0 and 1, got {stochastic_depth_rate}")
 
-        valid_attention_types = ['multi_head_attention', 'window_attention', 'group_query_attention']
+        # Type validation using Literal types (will be enforced by type checkers)
+        valid_attention_types = ['multi_head_attention', 'window_attention', 'group_query_attention', 'differential_attention']
         if attention_type not in valid_attention_types:
             raise ValueError(f"attention_type must be one of {valid_attention_types}, got {attention_type}")
 
@@ -267,9 +310,11 @@ class TransformerLayer(keras.layers.Layer):
         self.num_heads = num_heads
         self.intermediate_size = intermediate_size
         self.attention_type = attention_type
+        self.attention_args = attention_args or {}
         self.normalization_type = normalization_type
         self.normalization_position = normalization_position
         self.ffn_type = ffn_type
+        self.ffn_args = ffn_args or {}
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
         self.use_stochastic_depth = use_stochastic_depth
@@ -284,6 +329,7 @@ class TransformerLayer(keras.layers.Layer):
         self.ffn_multiple_of = ffn_multiple_of
         self.window_size = window_size
         self.n_kv_head = n_kv_head if n_kv_head is not None else num_heads
+        self.lambda_init = lambda_init
 
         # Initialize layers to None - will be created in build()
         self.attention = None
@@ -324,15 +370,15 @@ class TransformerLayer(keras.layers.Layer):
         else:
             raise ValueError(f"Unknown normalization type: {self.normalization_type}")
 
-    def _get_attention_params(self, attention_type: str, name: str) -> Dict[str, Any]:
-        """Get parameters for attention layer creation based on type.
+    def _get_default_attention_params(self, attention_type: AttentionType, name: str) -> Dict[str, Any]:
+        """Get default parameters for attention layer creation based on type.
 
         Args:
             attention_type: Type of attention layer.
             name: Name for the layer.
 
         Returns:
-            Dictionary of parameters for the specific attention type.
+            Dictionary of default parameters for the specific attention type.
         """
         if attention_type == 'multi_head_attention':
             # Standard Keras MultiHeadAttention parameters
@@ -366,8 +412,41 @@ class TransformerLayer(keras.layers.Layer):
                 'use_bias': self.use_bias,
                 'name': name
             }
+        elif attention_type == 'differential_attention':
+            # DifferentialMultiHeadAttention parameters
+            return {
+                'dim': self.hidden_size,
+                'num_heads': self.num_heads,
+                'head_dim': self.hidden_size // self.num_heads,
+                'dropout': self.dropout_rate,
+                'attention_dropout': self.attention_dropout_rate,
+                'lambda_init': self.lambda_init,
+                'kernel_initializer': self.kernel_initializer,
+                'kernel_regularizer': self.kernel_regularizer,
+                'bias_initializer': self.bias_initializer,
+                'bias_regularizer': self.bias_regularizer,
+                'name': name
+            }
         else:
             raise ValueError(f"Unknown attention type: {attention_type}")
+
+    def _get_attention_params(self, attention_type: AttentionType, name: str) -> Dict[str, Any]:
+        """Get parameters for attention layer creation, merging defaults with custom args.
+
+        Args:
+            attention_type: Type of attention layer.
+            name: Name for the layer.
+
+        Returns:
+            Dictionary of parameters for the specific attention type.
+        """
+        # Get default parameters
+        default_params = self._get_default_attention_params(attention_type, name)
+
+        # Merge with custom arguments, giving priority to custom args
+        merged_params = {**default_params, **self.attention_args}
+
+        return merged_params
 
     def _create_attention_layer(self, name: str) -> keras.layers.Layer:
         """Create an attention layer based on the specified type.
@@ -378,7 +457,7 @@ class TransformerLayer(keras.layers.Layer):
         Returns:
             An attention layer instance.
         """
-        # Get parameters for this attention type
+        # Get parameters for this attention type (defaults + custom args)
         params = self._get_attention_params(self.attention_type, name)
 
         try:
@@ -388,32 +467,37 @@ class TransformerLayer(keras.layers.Layer):
                 return WindowAttention(**params)
             elif self.attention_type == 'group_query_attention':
                 return GroupedQueryAttention(**params)
+            elif self.attention_type == 'differential_attention':
+                return DifferentialMultiHeadAttention(**params)
             else:
                 raise ValueError(f"Unknown attention type: {self.attention_type}")
         except (TypeError, ValueError) as e:
             # Log the issue and provide helpful error message
             logger.warning(f"Failed to create {self.attention_type} layer: {e}")
             logger.warning(f"Attempted parameters: {list(params.keys())}")
+            logger.warning(f"Default params: {list(self._get_default_attention_params(self.attention_type, name).keys())}")
+            logger.warning(f"Custom args: {list(self.attention_args.keys())}")
 
             # If creation fails, provide a more informative error
             raise ValueError(
                 f"Failed to create {self.attention_type} layer. "
                 f"This might be due to parameter incompatibility or missing dependencies. "
+                f"Custom args provided: {list(self.attention_args.keys())}. "
                 f"Original error: {e}"
             )
 
-    def _get_ffn_params(self, ffn_type: str, name: str) -> Dict[str, Any]:
-        """Get parameters for FFN layer creation based on type.
+    def _get_default_ffn_params(self, ffn_type: FFNType, name: str) -> Dict[str, Any]:
+        """Get default parameters for FFN layer creation based on type.
 
         Args:
             ffn_type: Type of FFN layer.
             name: Name for the layer.
 
         Returns:
-            Dictionary of parameters for the specific FFN type.
+            Dictionary of default parameters for the specific FFN type.
         """
         if ffn_type == 'mlp':
-            # MLPBlock parameters (known to work except bias_regularizer)
+            # MLPBlock parameters
             return {
                 'hidden_dim': self.intermediate_size,
                 'output_dim': self.hidden_size,
@@ -426,7 +510,7 @@ class TransformerLayer(keras.layers.Layer):
                 'name': name
             }
         elif ffn_type == 'swiglu':
-            # SwiGLUFFN - be very conservative, only pass core parameters
+            # SwiGLUFFN parameters
             return {
                 'd_model': self.hidden_size,
                 'ffn_expansion_factor': self.ffn_expansion_factor,
@@ -486,6 +570,24 @@ class TransformerLayer(keras.layers.Layer):
         else:
             raise ValueError(f"Unknown FFN type: {ffn_type}")
 
+    def _get_ffn_params(self, ffn_type: FFNType, name: str) -> Dict[str, Any]:
+        """Get parameters for FFN layer creation, merging defaults with custom args.
+
+        Args:
+            ffn_type: Type of FFN layer.
+            name: Name for the layer.
+
+        Returns:
+            Dictionary of parameters for the specific FFN type.
+        """
+        # Get default parameters
+        default_params = self._get_default_ffn_params(ffn_type, name)
+
+        # Merge with custom arguments, giving priority to custom args
+        merged_params = {**default_params, **self.ffn_args}
+
+        return merged_params
+
     def _create_ffn_layer(self, name: str) -> keras.layers.Layer:
         """Create a feed-forward network layer based on the specified type.
 
@@ -495,7 +597,7 @@ class TransformerLayer(keras.layers.Layer):
         Returns:
             An FFN layer instance.
         """
-        # Get parameters for this FFN type
+        # Get parameters for this FFN type (defaults + custom args)
         params = self._get_ffn_params(self.ffn_type, name)
 
         try:
@@ -517,11 +619,14 @@ class TransformerLayer(keras.layers.Layer):
             # Log the issue and provide helpful error message
             logger.warning(f"Failed to create {self.ffn_type} layer: {e}")
             logger.warning(f"Attempted parameters: {list(params.keys())}")
+            logger.warning(f"Default params: {list(self._get_default_ffn_params(self.ffn_type, name).keys())}")
+            logger.warning(f"Custom args: {list(self.ffn_args.keys())}")
 
             # If creation fails, provide a more informative error
             raise ValueError(
                 f"Failed to create {self.ffn_type} layer. "
                 f"This might be due to parameter incompatibility or missing dependencies. "
+                f"Custom args provided: {list(self.ffn_args.keys())}. "
                 f"Original error: {e}"
             )
 
@@ -595,6 +700,7 @@ class TransformerLayer(keras.layers.Layer):
             self,
             inputs: Any,
             attention_mask: Optional[Any] = None,
+            layer_idx: int = 0,
             training: Optional[bool] = None
     ) -> Any:
         """
@@ -606,6 +712,8 @@ class TransformerLayer(keras.layers.Layer):
                 - 2D tensor of shape (batch_size, seq_length) for padding mask
                 - 3D tensor of shape (batch_size, seq_length, seq_length) for attention mask
                 - 4D tensor of shape (batch_size, num_heads, seq_length, seq_length) for full mask
+            layer_idx: Layer index for differential attention (used to compute lambda parameter).
+                Only relevant when attention_type='differential_attention'.
             training: Boolean indicating training mode
 
         Returns:
@@ -636,6 +744,14 @@ class TransformerLayer(keras.layers.Layer):
                     value=inputs,  # value = query for self-attention
                     key=inputs,  # key = query for self-attention
                     attention_mask=processed_mask,
+                    training=training
+                )
+            elif self.attention_type == 'differential_attention':
+                # Differential attention with layer index
+                attention_output = self.attention(
+                    inputs,
+                    mask=processed_mask,
+                    layer_idx=layer_idx,
                     training=training
                 )
             else:
@@ -673,6 +789,14 @@ class TransformerLayer(keras.layers.Layer):
                     value=normalized_inputs,  # value = query for self-attention
                     key=normalized_inputs,  # key = query for self-attention
                     attention_mask=processed_mask,
+                    training=training
+                )
+            elif self.attention_type == 'differential_attention':
+                # Differential attention with layer index
+                attention_output = self.attention(
+                    normalized_inputs,
+                    mask=processed_mask,
+                    layer_idx=layer_idx,
                     training=training
                 )
             else:
@@ -726,9 +850,11 @@ class TransformerLayer(keras.layers.Layer):
             'num_heads': self.num_heads,
             'intermediate_size': self.intermediate_size,
             'attention_type': self.attention_type,
+            'attention_args': self.attention_args,
             'normalization_type': self.normalization_type,
             'normalization_position': self.normalization_position,
             'ffn_type': self.ffn_type,
+            'ffn_args': self.ffn_args,
             'dropout_rate': self.dropout_rate,
             'attention_dropout_rate': self.attention_dropout_rate,
             'use_stochastic_depth': self.use_stochastic_depth,
