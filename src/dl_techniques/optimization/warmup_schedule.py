@@ -66,7 +66,7 @@ from dl_techniques.utils.logger import logger
 # main classes
 # ---------------------------------------------------------------------
 
-
+@keras.saving.register_keras_serializable()
 class WarmupSchedule(keras.optimizers.schedules.LearningRateSchedule):
     """Learning rate schedule with linear warmup followed by primary schedule.
 

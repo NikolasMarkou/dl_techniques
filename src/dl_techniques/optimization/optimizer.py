@@ -30,7 +30,7 @@ Each optimizer supports gradient clipping options:
 
 import keras
 from enum import Enum
-from typing import Dict, Union, Optional, Any
+from typing import Dict, Union, Any
 
 from keras.api.optimizers import Optimizer
 from keras.api.optimizers.schedules import LearningRateSchedule
