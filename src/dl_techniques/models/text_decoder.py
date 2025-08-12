@@ -120,10 +120,50 @@ class TextDecoder(keras.layers.Layer):
         # Validate configuration
         self._validate_config()
 
-        # Initialize sublayers (will be created in build())
-        self.embeddings = None
-        self.decoder_layers: List[TransformerLayer] = []
-        self.final_norm = None
+        # FIX: Instantiate sublayers in __init__ for proper serialization
+        bert_config = BertConfig(
+            vocab_size=self.vocab_size,
+            hidden_size=self.hidden_dim,
+            num_heads=self.num_heads,
+            max_position_embeddings=self.max_position_embeddings,
+            type_vocab_size=self.type_vocab_size,
+            hidden_dropout_prob=self.dropout,
+            initializer_range=self.initializer_range,
+            layer_norm_eps=self.layer_norm_eps,
+            normalization_type=self.normalization_type
+        )
+        self.embeddings = BertEmbeddings(
+            config=bert_config,
+            name='embeddings'
+        )
+
+        self.decoder_layers = [
+            TransformerLayer(
+                hidden_size=self.hidden_dim,
+                num_heads=self.num_heads,
+                intermediate_size=self.mlp_dim,
+                normalization_type=self.normalization_type,
+                normalization_position=self.normalization_position,
+                attention_type=self.attention_type,
+                ffn_type=self.ffn_type,
+                dropout_rate=self.dropout,
+                attention_dropout_rate=self.dropout,
+                activation=self.activation,
+                use_bias=self.use_bias,
+                kernel_initializer=keras.initializers.TruncatedNormal(
+                    stddev=self.initializer_range
+                ),
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=keras.regularizers.get(self.kernel_regularizer),
+                bias_regularizer=keras.regularizers.get(self.bias_regularizer),
+                name=f'decoder_layer_{i}'
+            ) for i in range(self.num_layers)
+        ]
+
+        self.final_norm = keras.layers.LayerNormalization(
+            epsilon=self.layer_norm_eps,
+            name='final_norm'
+        )
 
         # Store build input shape for serialization
         self._build_input_shape = None
@@ -162,7 +202,6 @@ class TextDecoder(keras.layers.Layer):
 
         self._build_input_shape = input_shape
 
-        # Validate input shape
         if len(input_shape) != 2:
             raise ValueError(
                 f"Expected 2D input shape (batch_size, seq_length), "
@@ -170,69 +209,6 @@ class TextDecoder(keras.layers.Layer):
             )
 
         logger.info(f"Building TextDecoder with input_shape: {input_shape}")
-
-        # Create BERT configuration for embeddings
-        bert_config = BertConfig(
-            vocab_size=self.vocab_size,
-            hidden_size=self.hidden_dim,
-            max_position_embeddings=self.max_position_embeddings,
-            type_vocab_size=self.type_vocab_size,
-            hidden_dropout_prob=self.dropout,
-            initializer_range=self.initializer_range,
-            layer_norm_eps=self.layer_norm_eps,
-            normalization_type=self.normalization_type
-        )
-
-        # Create BERT embeddings
-        self.embeddings = BertEmbeddings(
-            config=bert_config,
-            name='embeddings'
-        )
-
-        # Build embeddings
-        self.embeddings.build(input_shape)
-
-        # Create causal transformer decoder layers
-        self.decoder_layers = []
-        embeddings_output_shape = (*input_shape, self.hidden_dim)
-
-        for i in range(self.num_layers):
-            decoder_layer = TransformerLayer(
-                hidden_size=self.hidden_dim,
-                num_heads=self.num_heads,
-                intermediate_size=self.mlp_dim,
-                normalization_type=self.normalization_type,
-                normalization_position=self.normalization_position,
-                attention_type=self.attention_type,
-                ffn_type=self.ffn_type,
-                dropout_rate=self.dropout,
-                attention_dropout_rate=self.dropout,
-                activation=self.activation,
-                use_bias=self.use_bias,
-                kernel_initializer=keras.initializers.TruncatedNormal(
-                    stddev=self.initializer_range
-                ),
-                bias_initializer=self.bias_initializer,
-                kernel_regularizer=keras.regularizers.get(self.kernel_regularizer),
-                bias_regularizer=keras.regularizers.get(self.bias_regularizer),
-                name=f'decoder_layer_{i}'
-            )
-
-            # Build decoder layer
-            decoder_layer.build(embeddings_output_shape)
-            self.decoder_layers.append(decoder_layer)
-
-            logger.info(f"Built decoder layer {i + 1}/{self.num_layers}")
-
-        # Create final layer normalization
-        self.final_norm = keras.layers.LayerNormalization(
-            epsilon=self.layer_norm_eps,
-            name='final_norm'
-        )
-
-        # Build final norm
-        self.final_norm.build(embeddings_output_shape)
-
         super().build(input_shape)
         logger.info("TextDecoder built successfully")
 
@@ -257,7 +233,6 @@ class TextDecoder(keras.layers.Layer):
         Returns:
             Hidden states of shape [batch_size, seq_length, hidden_dim]
         """
-        # Get embeddings (word + position + token type)
         embeddings = self.embeddings(
             input_ids=inputs,
             token_type_ids=token_type_ids,
@@ -265,9 +240,7 @@ class TextDecoder(keras.layers.Layer):
             training=training
         )
 
-        # Apply decoder layers with causal attention
         hidden_states = embeddings
-
         for decoder_layer in self.decoder_layers:
             hidden_states = decoder_layer(
                 hidden_states,
@@ -275,7 +248,6 @@ class TextDecoder(keras.layers.Layer):
                 training=training
             )
 
-        # Apply final normalization
         hidden_states = self.final_norm(hidden_states, training=training)
 
         return hidden_states

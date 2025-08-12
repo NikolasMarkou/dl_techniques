@@ -137,11 +137,30 @@ class ModalityProjection(keras.layers.Layer):
         self.projection_kernel_regularizer = keras.regularizers.get(projection_kernel_regularizer)
         self.projection_bias_regularizer = keras.regularizers.get(projection_bias_regularizer)
 
-        # Initialize sublayers to None - will be created in build()
-        self.pixel_shuffle = None
-        self.projection_dense = None
+        # FIX: Instantiate sublayers in __init__ for proper serialization
+        self.pixel_shuffle = PixelShuffle(
+            scale_factor=self.scale_factor,
+            name='pixel_shuffle'
+        )
+        self.projection_dense = keras.layers.Dense(
+            units=self.output_dim,
+            kernel_initializer=self.projection_kernel_initializer,
+            bias_initializer=self.projection_bias_initializer,
+            kernel_regularizer=self.projection_kernel_regularizer,
+            bias_regularizer=self.projection_bias_regularizer,
+            name='projection_dense'
+        )
         self.projection_activation = None
+        if self.use_gelu:
+            self.projection_activation = keras.layers.Activation('gelu', name='projection_gelu')
+
         self.projection_norm = None
+        if self.use_layer_norm:
+            self.projection_norm = keras.layers.LayerNormalization(
+                axis=-1,
+                epsilon=1e-6,
+                name='projection_norm'
+            )
 
         # Store build information for serialization
         self._build_input_shape = None
@@ -177,52 +196,11 @@ class ModalityProjection(keras.layers.Layer):
                 f"specified input_dim ({self.input_dim})"
             )
 
-        # Create pixel shuffle layer for token reduction
-        # Assuming PixelShuffle layer exists in the project
-        self.pixel_shuffle = PixelShuffle(scale_factor=self.scale_factor)
-
-        # Calculate expected input dimension after pixel shuffle
-        shuffled_dim = self.input_dim * (self.scale_factor ** 2)
-
-        # Build projection dense layer
-        self.projection_dense = keras.layers.Dense(
-            units=self.output_dim,
-            kernel_initializer=self.projection_kernel_initializer,
-            bias_initializer=self.projection_bias_initializer,
-            kernel_regularizer=self.projection_kernel_regularizer,
-            bias_regularizer=self.projection_bias_regularizer,
-            name='projection_dense'
-        )
-
-        # Build optional activation layer
-        if self.use_gelu:
-            self.projection_activation = keras.layers.Activation('gelu', name='projection_gelu')
-
-        # Build optional normalization layer
-        if self.use_layer_norm:
-            self.projection_norm = keras.layers.LayerNormalization(
-                axis=-1,
-                epsilon=1e-6,
-                name='projection_norm'
-            )
-
-        # Build sublayers with appropriate shapes
-        pixel_shuffle_output_shape = self.pixel_shuffle.compute_output_shape(input_shape)
-        self.projection_dense.build(pixel_shuffle_output_shape)
-
-        if self.projection_activation is not None:
-            dense_output_shape = self.projection_dense.compute_output_shape(pixel_shuffle_output_shape)
-            self.projection_activation.build(dense_output_shape)
-
-        if self.projection_norm is not None:
-            if self.projection_activation is not None:
-                activation_output_shape = dense_output_shape
-            else:
-                activation_output_shape = self.projection_dense.compute_output_shape(pixel_shuffle_output_shape)
-            self.projection_norm.build(activation_output_shape)
-
+        # The layers are now created in __init__, so we just call super().build()
+        # Keras will handle building the sub-layers.
         super().build(input_shape)
 
+        pixel_shuffle_output_shape = self.pixel_shuffle.compute_output_shape(input_shape)
         logger.debug(
             f"Built ModalityProjection with input_shape={input_shape}, "
             f"pixel_shuffle_output_shape={pixel_shuffle_output_shape}"
@@ -243,7 +221,7 @@ class ModalityProjection(keras.layers.Layer):
 
         Returns:
             Projected features of shape [batch_size, reduced_tokens, output_dim]
-            where reduced_tokens = num_tokens / (scale_factor ** 2).
+            where reduced_tokens = 1 + (num_tokens-1) / (scale_factor ** 2).
         """
         # Apply pixel shuffle to reduce number of tokens
         x = self.pixel_shuffle(inputs)
@@ -270,17 +248,13 @@ class ModalityProjection(keras.layers.Layer):
         Returns:
             Output shape tuple.
         """
-        # Convert to list for consistent manipulation
-        input_shape_list = list(input_shape)
-
         # Get pixel shuffle output shape
-        shuffled_shape = self.pixel_shuffle.compute_output_shape(tuple(input_shape_list))
+        shuffled_shape = self.pixel_shuffle.compute_output_shape(input_shape)
         shuffled_shape_list = list(shuffled_shape)
 
         # Update last dimension with output_dim
         output_shape_list = shuffled_shape_list[:-1] + [self.output_dim]
 
-        # Return as tuple for consistency
         return tuple(output_shape_list)
 
     def get_config(self) -> Dict[str, Any]:

@@ -413,18 +413,22 @@ class NanoVLM(keras.Model):
         """
         if isinstance(input_shape, dict):
             batch_size = input_shape['images'][0]
-            # Approximate combined sequence length
-            # FIX 4: Add 1 to vision_seq_len to account for the dummy CLS token.
-            vision_seq_len = (self.vision_config['img_size'] // self.vision_config['patch_size']) ** 2 + 1
             text_seq_len = input_shape['text_tokens'][1]
-            combined_seq_len = vision_seq_len + text_seq_len
         else:
             # Assume tuple format (images_shape, text_tokens_shape)
             batch_size = input_shape[0][0]
-            # FIX 4: Add 1 to vision_seq_len to account for the dummy CLS token.
-            vision_seq_len = (self.vision_config['img_size'] // self.vision_config['patch_size']) ** 2 + 1
             text_seq_len = input_shape[1][1]
-            combined_seq_len = vision_seq_len + text_seq_len
+
+        if batch_size is None or text_seq_len is None:
+            return (batch_size, None, self.vocab_size)
+
+        # FIX: Correctly calculate vision sequence length after projection
+        vision_patches = (self.vision_config['img_size'] // self.vision_config['patch_size']) ** 2
+        scale_factor = self.projection_config.get('scale_factor', 1)
+        shuffled_vision_patches = vision_patches // (scale_factor ** 2)
+        projected_vision_seq_len = shuffled_vision_patches + 1 # Add 1 for the dummy CLS token
+
+        combined_seq_len = projected_vision_seq_len + text_seq_len
 
         return (batch_size, combined_seq_len, self.vocab_size)
 

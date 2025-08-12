@@ -96,8 +96,23 @@ class VisionEncoder(keras.layers.Layer):
         # Computed properties
         self.num_patches = (img_size // patch_size) ** 2
 
-        # Initialize vision transformer (will be created in build())
-        self.vision_transformer = None
+        # FIX: Instantiate vision transformer in __init__ for correct serialization
+        self.vision_transformer = ViTSigLIP(
+            img_size=self.img_size,
+            patch_size=self.patch_size,
+            embed_dim=self.embed_dim,
+            depth=self.depth,
+            num_heads=self.num_heads,
+            mlp_ratio=self.mlp_ratio,
+            dropout=self.dropout,
+            activation=self.activation,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+            name='vit_siglip'
+        )
 
         # Store build input shape for serialization
         self._build_input_shape = None
@@ -128,34 +143,15 @@ class VisionEncoder(keras.layers.Layer):
             )
 
         if input_shape[1] != self.img_size or input_shape[2] != self.img_size:
-            raise ValueError(
-                f"Input image size {input_shape[1:3]} must match "
-                f"configured img_size ({self.img_size})"
+            logger.warning(
+                f"Input image size {input_shape[1:3]} does not match "
+                f"configured img_size ({self.img_size}). This is allowed but may lead to "
+                f"unexpected behavior if positional embeddings are not interpolated."
             )
 
         logger.info(f"Building VisionEncoder with input_shape: {input_shape}")
 
-        # Create ViTSigLIP model
-        self.vision_transformer = ViTSigLIP(
-            img_size=self.img_size,
-            patch_size=self.patch_size,
-            embed_dim=self.embed_dim,
-            depth=self.depth,
-            num_heads=self.num_heads,
-            mlp_ratio=self.mlp_ratio,
-            dropout=self.dropout,
-            activation=self.activation,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name='vit_siglip'
-        )
-
-        # Build the vision transformer
-        self.vision_transformer.build(input_shape)
-
+        # Let Keras handle building the sub-layer
         super().build(input_shape)
         logger.info("VisionEncoder built successfully")
 
