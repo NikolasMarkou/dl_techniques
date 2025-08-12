@@ -93,70 +93,50 @@ class NBeatsBlock(keras.layers.Layer):
         self._build_input_shape = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer weights with performance optimizations.
-
-        Args:
-            input_shape: Shape of the input tensor.
-        """
+        """Build the layer weights and explicitly build all sub-layers."""
         self._build_input_shape = input_shape
 
         # Validate input shape
         if len(input_shape) != 2:
             raise ValueError(f"Expected 2D input shape, got {len(input_shape)}D: {input_shape}")
 
-        # Four fully connected layers with improved initialization
+        # --- Instantiate all sub-layers ---
         self.dense1 = keras.layers.Dense(
-            self.units,
-            use_bias=self.use_bias,
-            activation=self.activation,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name='dense1'
+            self.units, use_bias=self.use_bias, activation=self.activation,
+            kernel_initializer=self.kernel_initializer, kernel_regularizer=self.kernel_regularizer, name='dense1'
         )
         self.dense2 = keras.layers.Dense(
-            self.units,
-            use_bias=self.use_bias,
-            activation=self.activation,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name='dense2'
+            self.units, use_bias=self.use_bias, activation=self.activation,
+            kernel_initializer=self.kernel_initializer, kernel_regularizer=self.kernel_regularizer, name='dense2'
         )
         self.dense3 = keras.layers.Dense(
-            self.units,
-            use_bias=self.use_bias,
-            activation=self.activation,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name='dense3'
+            self.units, use_bias=self.use_bias, activation=self.activation,
+            kernel_initializer=self.kernel_initializer, kernel_regularizer=self.kernel_regularizer, name='dense3'
         )
         self.dense4 = keras.layers.Dense(
-            self.units,
-            use_bias=self.use_bias,
-            activation=self.activation,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name='dense4'
+            self.units, use_bias=self.use_bias, activation=self.activation,
+            kernel_initializer=self.kernel_initializer, kernel_regularizer=self.kernel_regularizer, name='dense4'
         )
-
         self.theta_backcast = keras.layers.Dense(
-            self.thetas_dim,
-            activation='linear',
-            use_bias=False,
-            # Use the initializer from the constructor
-            kernel_initializer=self.theta_initializer,
-            kernel_regularizer=self.theta_regularizer,
-            name='theta_backcast'
+            self.thetas_dim, activation='linear', use_bias=False,
+            kernel_initializer=self.theta_initializer, kernel_regularizer=self.theta_regularizer, name='theta_backcast'
         )
         self.theta_forecast = keras.layers.Dense(
-            self.thetas_dim,
-            activation='linear',
-            use_bias=False,
-            # Use the initializer from the constructor
-            kernel_initializer=self.theta_initializer,
-            kernel_regularizer=self.theta_regularizer,
-            name='theta_forecast'
+            self.thetas_dim, activation='linear', use_bias=False,
+            kernel_initializer=self.theta_initializer, kernel_regularizer=self.theta_regularizer, name='theta_forecast'
         )
 
+        # --- Manually build all sub-layers with their expected input shapes ---
+        self.dense1.build(input_shape)
+        # The subsequent dense layers take the output of the previous one as input
+        dense_stack_shape = (input_shape[0], self.units)
+        self.dense2.build(dense_stack_shape)
+        self.dense3.build(dense_stack_shape)
+        self.dense4.build(dense_stack_shape)
+        self.theta_backcast.build(dense_stack_shape)
+        self.theta_forecast.build(dense_stack_shape)
+
+        # Call the parent's build method at the very end
         super().build(input_shape)
 
     def call(self, inputs, training: Optional[bool] = None) -> Tuple[
@@ -302,33 +282,26 @@ class GenericBlock(NBeatsBlock):
         self.forecast_basis = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the generic block with improved initialization.
-
-        Args:
-            input_shape: Shape of the input tensor.
-        """
-        super().build(input_shape)
-
-        # Learnable transformations from theta to backcast/forecast
-        # Use orthogonal initialization for better gradient flow
+        """Build the generic block and its sub-layers."""
+        # --- Instantiate sub-layers specific to this class ---
         orthogonal_init = keras.initializers.Orthogonal(gain=0.1)
-
         self.backcast_basis = keras.layers.Dense(
-            self.backcast_length,
-            activation='linear',
-            use_bias=False,
-            kernel_initializer=orthogonal_init,
-            kernel_regularizer=self.basis_regularizer,
-            name='backcast_basis'
+            self.backcast_length, activation='linear', use_bias=False,
+            kernel_initializer=orthogonal_init, kernel_regularizer=self.basis_regularizer, name='backcast_basis'
         )
         self.forecast_basis = keras.layers.Dense(
-            self.forecast_length,
-            activation='linear',
-            use_bias=False,
-            kernel_initializer=orthogonal_init,
-            kernel_regularizer=self.basis_regularizer,
-            name='forecast_basis'
+            self.forecast_length, activation='linear', use_bias=False,
+            kernel_initializer=orthogonal_init, kernel_regularizer=self.basis_regularizer, name='forecast_basis'
         )
+
+        # --- Manually build these sub-layers ---
+        # Their input is theta, which has shape (batch_size, thetas_dim)
+        theta_shape = (input_shape[0], self.thetas_dim)
+        self.backcast_basis.build(theta_shape)
+        self.forecast_basis.build(theta_shape)
+
+        # Call the parent's build method LAST
+        super().build(input_shape)
 
     def _generate_backcast(self, theta) -> keras.KerasTensor:
         """Generate backcast using learnable basis functions.
@@ -390,19 +363,14 @@ class TrendBlock(NBeatsBlock):
         self.forecast_basis_matrix = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the trend block with corrected basis functions.
-
-        Args:
-            input_shape: Shape of the input tensor.
-        """
-        super().build(input_shape)
-
-        # Validate theta dimension for polynomial basis
+        """Build the trend block with corrected basis functions."""
+        # Create subclass-specific components first
         if self.thetas_dim < 1:
             raise ValueError(f"thetas_dim must be at least 1 for TrendBlock, got {self.thetas_dim}")
-
-        # Create corrected polynomial basis matrices
         self._create_polynomial_basis()
+
+        # Call parent's build method last
+        super().build(input_shape)
 
     def _create_polynomial_basis(self) -> None:
         """Create mathematically correct polynomial basis matrices with continuity."""
@@ -528,19 +496,14 @@ class SeasonalityBlock(NBeatsBlock):
         self.forecast_basis_matrix = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the seasonality block with corrected basis functions.
-
-        Args:
-            input_shape: Shape of the input tensor.
-        """
-        super().build(input_shape)
-
-        # Validate theta dimension for Fourier basis
+        """Build the seasonality block with corrected basis functions."""
+        # Create subclass-specific components first
         if self.thetas_dim < 2:
             logger.warning(f"thetas_dim ({self.thetas_dim}) < 2 for SeasonalityBlock. Consider using even numbers.")
-
-        # Create corrected Fourier basis matrices
         self._create_fourier_basis()
+
+        # Call parent's build method last
+        super().build(input_shape)
 
     def _create_fourier_basis(self) -> None:
         """Create mathematically correct Fourier basis matrices with continuity."""
