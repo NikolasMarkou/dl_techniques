@@ -21,16 +21,18 @@ from ..layers.transformer import TransformerLayer
 from ..layers.tokenizers.bpe import TokenEmbedding
 from ..layers.patch_embedding import PatchEmbedding2D
 from ..layers.positional_embedding import PositionalEmbedding
-from ..layers.vision_transformer import VisionTransformerLayer
 from ..layers.attention.multi_head_attention import MultiHeadAttention
-from ..layers.geometric.shared_weights_cross_attention import SharedWeightsCrossAttention
+from ..layers.attention.shared_weights_cross_attention import SharedWeightsCrossAttention
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class VisionEncoder(keras.layers.Layer):
     """
-    Vision encoder using Vision Transformer architecture.
+    Vision encoder using Vision Transformer architecture with TransformerLayer.
+
+    This encoder processes images through patch embeddings and transformer layers
+    to produce visual feature representations.
 
     Args:
         image_size: Input image size as (height, width).
@@ -42,6 +44,13 @@ class VisionEncoder(keras.layers.Layer):
         dropout_rate: Dropout rate.
         layer_norm_epsilon: Layer normalization epsilon.
         use_cls_token: Whether to use a classification token.
+        attention_type: Type of attention mechanism to use.
+        normalization_type: Type of normalization to use.
+        ffn_type: Type of feed-forward network to use.
+        kernel_initializer: Initializer for kernel weights.
+        bias_initializer: Initializer for bias weights.
+        kernel_regularizer: Optional regularizer for kernel weights.
+        bias_regularizer: Optional regularizer for bias weights.
         **kwargs: Additional keyword arguments.
     """
 
@@ -56,9 +65,26 @@ class VisionEncoder(keras.layers.Layer):
             dropout_rate: float = 0.1,
             layer_norm_epsilon: float = 1e-6,
             use_cls_token: bool = True,
+            attention_type: str = 'multi_head_attention',
+            normalization_type: str = 'layer_norm',
+            ffn_type: str = 'mlp',
+            kernel_initializer: str = 'glorot_uniform',
+            bias_initializer: str = 'zeros',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs
-    ):
+    ) -> None:
         super().__init__(**kwargs)
+
+        # Validate inputs
+        if embed_dim <= 0:
+            raise ValueError(f"embed_dim must be positive, got {embed_dim}")
+        if num_heads <= 0 or embed_dim % num_heads != 0:
+            raise ValueError(f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})")
+        if num_layers <= 0:
+            raise ValueError(f"num_layers must be positive, got {num_layers}")
+
+        # Store configuration
         self.image_size = image_size
         self.patch_size = patch_size
         self.embed_dim = embed_dim
@@ -68,11 +94,19 @@ class VisionEncoder(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.layer_norm_epsilon = layer_norm_epsilon
         self.use_cls_token = use_cls_token
+        self.attention_type = attention_type
+        self.normalization_type = normalization_type
+        self.ffn_type = ffn_type
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Calculate number of patches
         self.num_patches = (image_size[0] // patch_size[0]) * (image_size[1] // patch_size[1])
+        self.intermediate_size = int(embed_dim * mlp_ratio)
 
-        # Components will be initialized in build()
+        # Components will be initialized in build() - DO NOT build here
         self.patch_embedding = None
         self.cls_token = None
         self.position_embedding = None
@@ -80,12 +114,28 @@ class VisionEncoder(keras.layers.Layer):
         self.layer_norm = None
         self.dropout = None
 
-    def build(self, input_shape):
+        # Store build input shape for serialization
+        self._build_input_shape = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the vision encoder layers."""
+        if self.built:
+            return
+
+        self._build_input_shape = input_shape
+
+        # Validate input shape
+        if len(input_shape) != 4:
+            raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D: {input_shape}")
+
         # Patch embedding
         self.patch_embedding = PatchEmbedding2D(
             patch_size=self.patch_size,
             embed_dim=self.embed_dim,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="patch_embedding"
         )
 
@@ -108,29 +158,68 @@ class VisionEncoder(keras.layers.Layer):
         )
 
         # Transformer layers
+        self.transformer_layers = []
         for i in range(self.num_layers):
-            transformer_layer = VisionTransformerLayer(
-                embed_dim=self.embed_dim,
+            transformer_layer = TransformerLayer(
+                hidden_size=self.embed_dim,
                 num_heads=self.num_heads,
-                mlp_ratio=self.mlp_ratio,
+                intermediate_size=self.intermediate_size,
+                attention_type=self.attention_type,
+                normalization_type=self.normalization_type,
+                ffn_type=self.ffn_type,
                 dropout_rate=self.dropout_rate,
-                layer_norm_epsilon=self.layer_norm_epsilon,
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                bias_regularizer=self.bias_regularizer,
                 name=f"transformer_layer_{i}"
             )
             self.transformer_layers.append(transformer_layer)
 
         # Final layer norm
-        self.layer_norm = RMSNorm(
-            epsilon=self.layer_norm_epsilon,
-            name="final_layer_norm"
-        )
+        if self.normalization_type == 'rms_norm':
+            self.layer_norm = RMSNorm(
+                epsilon=self.layer_norm_epsilon,
+                name="final_layer_norm"
+            )
+        else:
+            self.layer_norm = layers.LayerNormalization(
+                epsilon=self.layer_norm_epsilon,
+                name="final_layer_norm"
+            )
 
         # Dropout
         self.dropout = layers.Dropout(self.dropout_rate, name="dropout")
 
+        # Build all sublayers - CRITICAL: Build children before parent
+        self.patch_embedding.build(input_shape)
+
+        # Calculate patch embedding output shape
+        patch_output_shape = self.patch_embedding.compute_output_shape(input_shape)
+
+        # Add CLS token dimension if used
+        if self.use_cls_token:
+            seq_shape = (patch_output_shape[0], patch_output_shape[1] + 1, patch_output_shape[2])
+        else:
+            seq_shape = patch_output_shape
+
+        self.position_embedding.build(seq_shape)
+
+        # Build transformer layers
+        current_shape = seq_shape
+        for transformer_layer in self.transformer_layers:
+            transformer_layer.build(current_shape)
+            current_shape = transformer_layer.compute_output_shape(current_shape)
+
+        self.layer_norm.build(current_shape)
+
         super().build(input_shape)
 
-    def call(self, inputs, training=None):
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """
         Forward pass of the vision encoder.
 
@@ -159,12 +248,17 @@ class VisionEncoder(keras.layers.Layer):
             x = transformer_layer(x, training=training)
 
         # Final layer norm and dropout
-        x = self.layer_norm(x)
+        x = self.layer_norm(x, training=training)
         x = self.dropout(x, training=training)
 
         return x
 
-    def get_config(self):
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Compute the output shape of the layer."""
+        seq_len = self.num_patches + (1 if self.use_cls_token else 0)
+        return (input_shape[0], seq_len, self.embed_dim)
+
+    def get_config(self) -> Dict[str, Any]:
         """Get layer configuration."""
         config = super().get_config()
         config.update({
@@ -177,14 +271,35 @@ class VisionEncoder(keras.layers.Layer):
             "dropout_rate": self.dropout_rate,
             "layer_norm_epsilon": self.layer_norm_epsilon,
             "use_cls_token": self.use_cls_token,
+            "attention_type": self.attention_type,
+            "normalization_type": self.normalization_type,
+            "ffn_type": self.ffn_type,
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+    def get_build_config(self) -> Dict[str, Any]:
+        """Get build configuration."""
+        return {
+            'input_shape': self._build_input_shape,
+        }
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Build from configuration."""
+        if config.get('input_shape') is not None:
+            self.build(config['input_shape'])
 
 
 @keras.saving.register_keras_serializable()
 class TextEncoder(keras.layers.Layer):
     """
-    Text encoder using Transformer architecture.
+    Text encoder using Transformer architecture with TransformerLayer.
+
+    This encoder processes text tokens through embeddings and transformer layers
+    to produce textual feature representations.
 
     Args:
         vocab_size: Size of the vocabulary.
@@ -196,6 +311,13 @@ class TextEncoder(keras.layers.Layer):
         dropout_rate: Dropout rate.
         layer_norm_epsilon: Layer normalization epsilon.
         use_causal_mask: Whether to use causal masking.
+        attention_type: Type of attention mechanism to use.
+        normalization_type: Type of normalization to use.
+        ffn_type: Type of feed-forward network to use.
+        kernel_initializer: Initializer for kernel weights.
+        bias_initializer: Initializer for bias weights.
+        kernel_regularizer: Optional regularizer for kernel weights.
+        bias_regularizer: Optional regularizer for bias weights.
         **kwargs: Additional keyword arguments.
     """
 
@@ -210,9 +332,28 @@ class TextEncoder(keras.layers.Layer):
             dropout_rate: float = 0.1,
             layer_norm_epsilon: float = 1e-6,
             use_causal_mask: bool = True,
+            attention_type: str = 'multi_head_attention',
+            normalization_type: str = 'layer_norm',
+            ffn_type: str = 'mlp',
+            kernel_initializer: str = 'glorot_uniform',
+            bias_initializer: str = 'zeros',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs
-    ):
+    ) -> None:
         super().__init__(**kwargs)
+
+        # Validate inputs
+        if vocab_size <= 0:
+            raise ValueError(f"vocab_size must be positive, got {vocab_size}")
+        if embed_dim <= 0:
+            raise ValueError(f"embed_dim must be positive, got {embed_dim}")
+        if num_heads <= 0 or embed_dim % num_heads != 0:
+            raise ValueError(f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})")
+        if num_layers <= 0:
+            raise ValueError(f"num_layers must be positive, got {num_layers}")
+
+        # Store configuration
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
         self.max_seq_len = max_seq_len
@@ -222,16 +363,35 @@ class TextEncoder(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.layer_norm_epsilon = layer_norm_epsilon
         self.use_causal_mask = use_causal_mask
+        self.attention_type = attention_type
+        self.normalization_type = normalization_type
+        self.ffn_type = ffn_type
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # Components will be initialized in build()
+        # Components will be initialized in build() - DO NOT build here
         self.token_embedding = None
         self.position_embedding = None
         self.transformer_layers = []
         self.layer_norm = None
         self.dropout = None
 
-    def build(self, input_shape):
+        # Store build input shape for serialization
+        self._build_input_shape = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the text encoder layers."""
+        if self.built:
+            return
+
+        self._build_input_shape = input_shape
+
+        # Validate input shape
+        if len(input_shape) != 2:
+            raise ValueError(f"Expected 2D input shape, got {len(input_shape)}D: {input_shape}")
+
         # Token embedding
         self.token_embedding = TokenEmbedding(
             vocab_size=self.vocab_size,
@@ -249,30 +409,63 @@ class TextEncoder(keras.layers.Layer):
         )
 
         # Transformer layers
+        self.transformer_layers = []
         for i in range(self.num_layers):
             transformer_layer = TransformerLayer(
                 hidden_size=self.embed_dim,
                 num_heads=self.num_heads,
                 intermediate_size=self.intermediate_size,
+                attention_type=self.attention_type,
+                normalization_type=self.normalization_type,
+                ffn_type=self.ffn_type,
                 dropout_rate=self.dropout_rate,
-                layer_norm_epsilon=self.layer_norm_epsilon,
-                use_causal_mask=self.use_causal_mask,
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                bias_regularizer=self.bias_regularizer,
                 name=f"transformer_layer_{i}"
             )
             self.transformer_layers.append(transformer_layer)
 
         # Final layer norm
-        self.layer_norm = RMSNorm(
-            epsilon=self.layer_norm_epsilon,
-            name="final_layer_norm"
-        )
+        if self.normalization_type == 'rms_norm':
+            self.layer_norm = RMSNorm(
+                epsilon=self.layer_norm_epsilon,
+                name="final_layer_norm"
+            )
+        else:
+            self.layer_norm = layers.LayerNormalization(
+                epsilon=self.layer_norm_epsilon,
+                name="final_layer_norm"
+            )
 
         # Dropout
         self.dropout = layers.Dropout(self.dropout_rate, name="dropout")
 
+        # Build all sublayers - CRITICAL: Build children before parent
+        self.token_embedding.build(input_shape)
+
+        # Calculate token embedding output shape
+        token_output_shape = (input_shape[0], input_shape[1], self.embed_dim)
+
+        self.position_embedding.build(token_output_shape)
+
+        # Build transformer layers
+        current_shape = token_output_shape
+        for transformer_layer in self.transformer_layers:
+            transformer_layer.build(current_shape)
+            current_shape = transformer_layer.compute_output_shape(current_shape)
+
+        self.layer_norm.build(current_shape)
+
         super().build(input_shape)
 
-    def call(self, inputs, attention_mask=None, training=None):
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        attention_mask: Optional[keras.KerasTensor] = None,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """
         Forward pass of the text encoder.
 
@@ -295,12 +488,16 @@ class TextEncoder(keras.layers.Layer):
             x = transformer_layer(x, attention_mask=attention_mask, training=training)
 
         # Final layer norm and dropout
-        x = self.layer_norm(x)
+        x = self.layer_norm(x, training=training)
         x = self.dropout(x, training=training)
 
         return x
 
-    def get_config(self):
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Compute the output shape of the layer."""
+        return (input_shape[0], input_shape[1], self.embed_dim)
+
+    def get_config(self) -> Dict[str, Any]:
         """Get layer configuration."""
         config = super().get_config()
         config.update({
@@ -313,15 +510,35 @@ class TextEncoder(keras.layers.Layer):
             "dropout_rate": self.dropout_rate,
             "layer_norm_epsilon": self.layer_norm_epsilon,
             "use_causal_mask": self.use_causal_mask,
+            "attention_type": self.attention_type,
+            "normalization_type": self.normalization_type,
+            "ffn_type": self.ffn_type,
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
 
-# ---------------------------------------------------------------------
+    def get_build_config(self) -> Dict[str, Any]:
+        """Get build configuration."""
+        return {
+            'input_shape': self._build_input_shape,
+        }
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Build from configuration."""
+        if config.get('input_shape') is not None:
+            self.build(config['input_shape'])
+
 
 @keras.saving.register_keras_serializable()
 class CrossModalFusion(keras.layers.Layer):
     """
     Cross-modal fusion layer using cross-attention mechanisms.
+
+    This layer enables interaction between vision and text features through
+    cross-attention and feed-forward processing.
 
     Args:
         embed_dim: Embedding dimension.
@@ -329,6 +546,10 @@ class CrossModalFusion(keras.layers.Layer):
         num_fusion_layers: Number of cross-attention layers.
         dropout_rate: Dropout rate.
         use_shared_weights: Whether to use shared weights cross-attention.
+        kernel_initializer: Initializer for kernel weights.
+        bias_initializer: Initializer for bias weights.
+        kernel_regularizer: Optional regularizer for kernel weights.
+        bias_regularizer: Optional regularizer for bias weights.
         **kwargs: Additional keyword arguments.
     """
 
@@ -339,16 +560,34 @@ class CrossModalFusion(keras.layers.Layer):
             num_fusion_layers: int = 6,
             dropout_rate: float = 0.1,
             use_shared_weights: bool = True,
+            kernel_initializer: str = 'glorot_uniform',
+            bias_initializer: str = 'zeros',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs
-    ):
+    ) -> None:
         super().__init__(**kwargs)
+
+        # Validate inputs
+        if embed_dim <= 0:
+            raise ValueError(f"embed_dim must be positive, got {embed_dim}")
+        if num_heads <= 0 or embed_dim % num_heads != 0:
+            raise ValueError(f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})")
+        if num_fusion_layers <= 0:
+            raise ValueError(f"num_fusion_layers must be positive, got {num_fusion_layers}")
+
+        # Store configuration
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.num_fusion_layers = num_fusion_layers
         self.dropout_rate = dropout_rate
         self.use_shared_weights = use_shared_weights
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # Components will be initialized in build()
+        # Components will be initialized in build() - DO NOT build here
         self.vision_to_text_layers = []
         self.text_to_vision_layers = []
         self.vision_ffn_layers = []
@@ -356,21 +595,49 @@ class CrossModalFusion(keras.layers.Layer):
         self.vision_norm_layers = []
         self.text_norm_layers = []
 
-    def build(self, input_shape):
+        # Store build input shape for serialization
+        self._build_input_shape = None
+
+    def build(self, input_shape: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]) -> None:
         """Build the cross-modal fusion layers."""
+        if self.built:
+            return
+
+        self._build_input_shape = input_shape
+
+        # Validate input shapes (expecting tuple of two shapes)
+        if not isinstance(input_shape, (tuple, list)) or len(input_shape) != 2:
+            raise ValueError(f"Expected two input shapes, got: {input_shape}")
+
+        vision_shape, text_shape = input_shape
+
+        if len(vision_shape) != 3 or len(text_shape) != 3:
+            raise ValueError(f"Expected 3D shapes, got vision: {vision_shape}, text: {text_shape}")
+
+        if vision_shape[-1] != self.embed_dim or text_shape[-1] != self.embed_dim:
+            raise ValueError(f"Feature dimensions must match embed_dim ({self.embed_dim})")
+
+        # Initialize layers
+        self.vision_to_text_layers = []
+        self.text_to_vision_layers = []
+        self.vision_ffn_layers = []
+        self.text_ffn_layers = []
+        self.vision_norm_layers = []
+        self.text_norm_layers = []
+
         for i in range(self.num_fusion_layers):
             # Cross-attention layers
             if self.use_shared_weights:
                 v2t_attention = SharedWeightsCrossAttention(
                     dim=self.embed_dim,
                     num_heads=self.num_heads,
-                    dropout=self.dropout_rate,
+                    dropout_rate=self.dropout_rate,
                     name=f"vision_to_text_attention_{i}"
                 )
                 t2v_attention = SharedWeightsCrossAttention(
                     dim=self.embed_dim,
                     num_heads=self.num_heads,
-                    dropout=self.dropout_rate,
+                    dropout_rate=self.dropout_rate,
                     name=f"text_to_vision_attention_{i}"
                 )
             else:
@@ -378,12 +645,20 @@ class CrossModalFusion(keras.layers.Layer):
                     embed_dim=self.embed_dim,
                     num_heads=self.num_heads,
                     dropout_rate=self.dropout_rate,
+                    kernel_initializer=self.kernel_initializer,
+                    bias_initializer=self.bias_initializer,
+                    kernel_regularizer=self.kernel_regularizer,
+                    bias_regularizer=self.bias_regularizer,
                     name=f"vision_to_text_attention_{i}"
                 )
                 t2v_attention = MultiHeadAttention(
                     embed_dim=self.embed_dim,
                     num_heads=self.num_heads,
                     dropout_rate=self.dropout_rate,
+                    kernel_initializer=self.kernel_initializer,
+                    bias_initializer=self.bias_initializer,
+                    kernel_regularizer=self.kernel_regularizer,
+                    bias_regularizer=self.bias_regularizer,
                     name=f"text_to_vision_attention_{i}"
                 )
 
@@ -410,9 +685,31 @@ class CrossModalFusion(keras.layers.Layer):
             self.vision_norm_layers.append(vision_norm)
             self.text_norm_layers.append(text_norm)
 
+        # Build all sublayers - CRITICAL: Build children before parent
+        for i in range(self.num_fusion_layers):
+            if self.use_shared_weights:
+                # SharedWeightsCrossAttention expects (query_shape, key_value_shape)
+                self.vision_to_text_layers[i].build((vision_shape, text_shape))
+                self.text_to_vision_layers[i].build((text_shape, vision_shape))
+            else:
+                # MultiHeadAttention build
+                self.vision_to_text_layers[i].build(vision_shape)
+                self.text_to_vision_layers[i].build(text_shape)
+
+            self.vision_ffn_layers[i].build(vision_shape)
+            self.text_ffn_layers[i].build(text_shape)
+            self.vision_norm_layers[i].build(vision_shape)
+            self.text_norm_layers[i].build(text_shape)
+
         super().build(input_shape)
 
-    def call(self, vision_features, text_features, attention_mask=None, training=None):
+    def call(
+        self,
+        vision_features: keras.KerasTensor,
+        text_features: keras.KerasTensor,
+        attention_mask: Optional[keras.KerasTensor] = None,
+        training: Optional[bool] = None
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
         Forward pass of the cross-modal fusion.
 
@@ -450,8 +747,8 @@ class CrossModalFusion(keras.layers.Layer):
                 )
 
             # Residual connection and normalization
-            v_features = self.vision_norm_layers[i](v_features + v_attended)
-            t_features = self.text_norm_layers[i](t_features + t_attended)
+            v_features = self.vision_norm_layers[i](v_features + v_attended, training=training)
+            t_features = self.text_norm_layers[i](t_features + t_attended, training=training)
 
             # FFN
             v_ffn_out = self.vision_ffn_layers[i](v_features, training=training)
@@ -463,7 +760,15 @@ class CrossModalFusion(keras.layers.Layer):
 
         return v_features, t_features
 
-    def get_config(self):
+    def compute_output_shape(
+        self,
+        input_shape: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]
+    ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
+        """Compute the output shape of the layer."""
+        vision_shape, text_shape = input_shape
+        return vision_shape, text_shape
+
+    def get_config(self) -> Dict[str, Any]:
         """Get layer configuration."""
         config = super().get_config()
         config.update({
@@ -472,10 +777,24 @@ class CrossModalFusion(keras.layers.Layer):
             "num_fusion_layers": self.num_fusion_layers,
             "dropout_rate": self.dropout_rate,
             "use_shared_weights": self.use_shared_weights,
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
 
-# ---------------------------------------------------------------------
+    def get_build_config(self) -> Dict[str, Any]:
+        """Get build configuration."""
+        return {
+            'input_shape': self._build_input_shape,
+        }
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Build from configuration."""
+        if config.get('input_shape') is not None:
+            self.build(config['input_shape'])
+
 
 @keras.saving.register_keras_serializable()
 class VisionLanguageModel(keras.Model):
@@ -483,12 +802,13 @@ class VisionLanguageModel(keras.Model):
     Vision Language Model for multimodal tasks.
 
     This model combines vision and text encoders with cross-modal fusion
-    to handle various vision-language tasks.
+    to handle various vision-language tasks such as image captioning,
+    visual question answering, and image-text matching.
 
     Args:
-        vision_config: Configuration for the vision encoder.
-        text_config: Configuration for the text encoder.
-        fusion_config: Configuration for cross-modal fusion.
+        vision_config: Configuration dictionary for the vision encoder.
+        text_config: Configuration dictionary for the text encoder.
+        fusion_config: Optional configuration dictionary for cross-modal fusion.
         **kwargs: Additional keyword arguments.
     """
 
@@ -498,37 +818,99 @@ class VisionLanguageModel(keras.Model):
             text_config: Dict[str, Any],
             fusion_config: Optional[Dict[str, Any]] = None,
             **kwargs
-    ):
+    ) -> None:
         super().__init__(**kwargs)
+
+        # Validate configurations
+        if not isinstance(vision_config, dict):
+            raise ValueError("vision_config must be a dictionary")
+        if not isinstance(text_config, dict):
+            raise ValueError("text_config must be a dictionary")
+        if fusion_config is not None and not isinstance(fusion_config, dict):
+            raise ValueError("fusion_config must be a dictionary or None")
+
+        # Store configurations
         self.vision_config = vision_config
         self.text_config = text_config
         self.fusion_config = fusion_config or {}
 
+        # Initialize encoders - DO NOT build here
+        self.vision_encoder = None
+        self.text_encoder = None
+        self.cross_modal_fusion = None
+        self.vision_projection = None
+        self.text_projection = None
+
+        # Store build input shape for serialization
+        self._build_input_shape = None
+
+        logger.info("VisionLanguageModel initialized successfully")
+
+    def build(self, input_shape: Dict[str, Tuple[Optional[int], ...]]) -> None:
+        """Build the vision language model."""
+        if self.built:
+            return
+
+        self._build_input_shape = input_shape
+
+        # Validate input shape
+        if not isinstance(input_shape, dict):
+            raise ValueError("input_shape must be a dictionary with 'images' and 'text_tokens' keys")
+        if 'images' not in input_shape or 'text_tokens' not in input_shape:
+            raise ValueError("input_shape must contain 'images' and 'text_tokens' keys")
+
+        images_shape = input_shape['images']
+        text_tokens_shape = input_shape['text_tokens']
+
         # Initialize encoders
-        self.vision_encoder = VisionEncoder(**vision_config)
-        self.text_encoder = TextEncoder(**text_config)
+        self.vision_encoder = VisionEncoder(**self.vision_config)
+        self.text_encoder = TextEncoder(**self.text_config)
 
         # Initialize fusion layer if specified
-        if fusion_config:
-            self.cross_modal_fusion = CrossModalFusion(**fusion_config)
-        else:
-            self.cross_modal_fusion = None
+        if self.fusion_config:
+            self.cross_modal_fusion = CrossModalFusion(**self.fusion_config)
 
         # Projection layers for similarity computation
+        vision_embed_dim = self.vision_config.get("embed_dim", 768)
+        text_embed_dim = self.text_config.get("embed_dim", 768)
+
         self.vision_projection = layers.Dense(
-            vision_config.get("embed_dim", 768),
+            vision_embed_dim,
             name="vision_projection",
             kernel_initializer="glorot_normal"
         )
         self.text_projection = layers.Dense(
-            text_config.get("embed_dim", 768),
+            text_embed_dim,
             name="text_projection",
             kernel_initializer="glorot_normal"
         )
 
-        logger.info("VisionLanguageModel initialized successfully")
+        # Build all sublayers - CRITICAL: Build children before parent
+        self.vision_encoder.build(images_shape)
+        self.text_encoder.build(text_tokens_shape)
 
-    def call(self, inputs, training=None):
+        # Get encoder output shapes
+        vision_output_shape = self.vision_encoder.compute_output_shape(images_shape)
+        text_output_shape = self.text_encoder.compute_output_shape(text_tokens_shape)
+
+        if self.cross_modal_fusion is not None:
+            fusion_input_shape = (vision_output_shape, text_output_shape)
+            self.cross_modal_fusion.build(fusion_input_shape)
+
+        # Build projection layers
+        vision_global_shape = (vision_output_shape[0], vision_output_shape[2])  # (batch, embed_dim)
+        text_global_shape = (text_output_shape[0], text_output_shape[2])  # (batch, embed_dim)
+
+        self.vision_projection.build(vision_global_shape)
+        self.text_projection.build(text_global_shape)
+
+        super().build(input_shape)
+
+    def call(
+        self,
+        inputs: Dict[str, keras.KerasTensor],
+        training: Optional[bool] = None
+    ) -> Dict[str, keras.KerasTensor]:
         """
         Forward pass of the vision language model.
 
@@ -578,8 +960,8 @@ class VisionLanguageModel(keras.Model):
             text_global = ops.mean(fused_text, axis=1)  # Simple mean pooling
 
         # Project to common space for similarity computation
-        vision_projected = self.vision_projection(vision_global)
-        text_projected = self.text_projection(text_global)
+        vision_projected = self.vision_projection(vision_global, training=training)
+        text_projected = self.text_projection(text_global, training=training)
 
         # Normalize for cosine similarity
         vision_projected = ops.l2_normalize(vision_projected, axis=-1)
@@ -598,7 +980,7 @@ class VisionLanguageModel(keras.Model):
             "similarity_matrix": similarity_matrix,
         }
 
-    def get_config(self):
+    def get_config(self) -> Dict[str, Any]:
         """Get model configuration."""
         config = super().get_config()
         config.update({
@@ -608,11 +990,25 @@ class VisionLanguageModel(keras.Model):
         })
         return config
 
+    def get_build_config(self) -> Dict[str, Any]:
+        """Get build configuration."""
+        return {
+            'input_shape': self._build_input_shape,
+        }
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Build from configuration."""
+        if config.get('input_shape') is not None:
+            self.build(config['input_shape'])
+
     @classmethod
-    def from_config(cls, config):
+    def from_config(cls, config: Dict[str, Any]) -> 'VisionLanguageModel':
         """Create model from configuration."""
         return cls(**config)
 
+
+# ---------------------------------------------------------------------
+# Factory Functions
 # ---------------------------------------------------------------------
 
 def create_vlm_for_image_captioning(
@@ -640,6 +1036,9 @@ def create_vlm_for_image_captioning(
         "mlp_ratio": 4.0,
         "dropout_rate": 0.1,
         "use_cls_token": True,
+        "attention_type": "multi_head_attention",
+        "normalization_type": "layer_norm",
+        "ffn_type": "mlp",
     }
 
     text_config = {
@@ -651,6 +1050,9 @@ def create_vlm_for_image_captioning(
         "intermediate_size": 3072,
         "dropout_rate": 0.1,
         "use_causal_mask": True,  # For autoregressive generation
+        "attention_type": "multi_head_attention",
+        "normalization_type": "layer_norm",
+        "ffn_type": "mlp",
     }
 
     fusion_config = {
@@ -668,7 +1070,6 @@ def create_vlm_for_image_captioning(
         name="image_captioning_vlm"
     )
 
-# ---------------------------------------------------------------------
 
 def create_vlm_for_vqa(
         image_size: Tuple[int, int] = (224, 224),
@@ -695,6 +1096,9 @@ def create_vlm_for_vqa(
         "mlp_ratio": 4.0,
         "dropout_rate": 0.1,
         "use_cls_token": True,
+        "attention_type": "multi_head_attention",
+        "normalization_type": "layer_norm",
+        "ffn_type": "mlp",
     }
 
     text_config = {
@@ -706,6 +1110,9 @@ def create_vlm_for_vqa(
         "intermediate_size": 3072,
         "dropout_rate": 0.1,
         "use_causal_mask": False,  # Bidirectional for understanding questions
+        "attention_type": "multi_head_attention",
+        "normalization_type": "layer_norm",
+        "ffn_type": "mlp",
     }
 
     fusion_config = {
@@ -723,7 +1130,6 @@ def create_vlm_for_vqa(
         name="vqa_vlm"
     )
 
-# ---------------------------------------------------------------------
 
 def create_clip_style_vlm(
         image_size: Tuple[int, int] = (224, 224),
@@ -750,6 +1156,9 @@ def create_clip_style_vlm(
         "mlp_ratio": 4.0,
         "dropout_rate": 0.0,  # No dropout for contrastive learning
         "use_cls_token": True,
+        "attention_type": "multi_head_attention",
+        "normalization_type": "layer_norm",
+        "ffn_type": "mlp",
     }
 
     text_config = {
@@ -761,6 +1170,9 @@ def create_clip_style_vlm(
         "intermediate_size": 3072,
         "dropout_rate": 0.0,  # No dropout for contrastive learning
         "use_causal_mask": False,  # Bidirectional for text understanding
+        "attention_type": "multi_head_attention",
+        "normalization_type": "layer_norm",
+        "ffn_type": "mlp",
     }
 
     # No cross-modal fusion for CLIP-style architecture
@@ -770,5 +1182,3 @@ def create_clip_style_vlm(
         fusion_config=None,
         name="clip_style_vlm"
     )
-
-# ---------------------------------------------------------------------

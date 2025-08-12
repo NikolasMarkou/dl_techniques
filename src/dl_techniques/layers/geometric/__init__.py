@@ -50,10 +50,6 @@ Key Layers:
         Cross-attention mechanisms for different input modalities. Enables fusion
         of heterogeneous data types (vision, text, sensors).
 
-    SharedWeightsCrossAttention:
-        Efficient cross-attention between modalities with shared parameters.
-        Optimized for multi-modal learning and sensor fusion applications.
-
     SupernodePooling:
         Graph-based message passing pooling for point clouds. Aggregates local
         neighborhoods using spatial relationships and learned embeddings.
@@ -170,7 +166,6 @@ from .continuous_rope import ContinuousRoPE, apply_rope
 from .anchor_attention import AnchorAttention
 from .perceiver_attention import PerceiverAttention
 from .perceiver_block import PerceiverBlock
-from .shared_weights_cross_attention import SharedWeightsCrossAttention
 from .supernode_pooling import SupernodePooling
 from .rope_utilities import (
     apply_rope_to_attention,
@@ -190,7 +185,6 @@ __all__ = [
     "AnchorAttention",
     "PerceiverAttention",
     "PerceiverBlock",
-    "SharedWeightsCrossAttention",
 
     # Pooling and aggregation
     "SupernodePooling",

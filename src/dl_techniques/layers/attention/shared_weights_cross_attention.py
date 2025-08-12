@@ -2,10 +2,9 @@
 
 import keras
 from keras import ops
-from typing import Optional, Any, Dict, List, Tuple
+from typing import Any
 
-from dl_techniques.utils.logger import logger
-
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class SharedWeightsCrossAttention(keras.layers.Layer):
@@ -27,7 +26,7 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
     Args:
         dim: Integer, input/output dimension of the attention layer.
         num_heads: Integer, number of attention heads. Defaults to 8.
-        dropout: Float, dropout rate for attention weights. Defaults to 0.0.
+        dropout_rate: Float, dropout rate for attention weights. Defaults to 0.0.
         use_bias: Boolean, whether to use bias in linear projections. Defaults to True.
         kernel_initializer: Initializer for the kernel weights.
         bias_initializer: Initializer for the bias vector.
@@ -84,7 +83,7 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             self,
             dim: int,
             num_heads: int = 8,
-            dropout: float = 0.0,
+            dropout_rate: float = 0.0,
             use_bias: bool = True,
             kernel_initializer: str = "glorot_uniform",
             bias_initializer: str = "zeros",
@@ -98,7 +97,7 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        self.dropout_rate = dropout
+        self.dropout_rate = dropout_rate
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
@@ -166,7 +165,7 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         if len(split_sizes) not in [2, 4]:
             raise ValueError("split_sizes must have length 2 or 4")
 
-        batch_size, total_seq_len, _ = x.shape
+        _, total_seq_len, _ = x.shape
 
         # Verify split sizes sum to total sequence length
         if sum(split_sizes) != total_seq_len:
@@ -175,7 +174,8 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
 
         # Compute Q, K, V for all tokens
         qkv = self.qkv_dense(x)  # (batch_size, total_seq_len, dim * 3)
-        qkv = ops.reshape(qkv, (batch_size, total_seq_len, 3, self.num_heads, self.head_dim))
+        # Use -1 for the batch dimension to be compatible with symbolic Keras tensors
+        qkv = ops.reshape(qkv, (-1, total_seq_len, 3, self.num_heads, self.head_dim))
         qkv = ops.transpose(qkv, (2, 0, 3, 1, 4))  # (3, batch_size, num_heads, total_seq_len, head_dim)
 
         q, k, v = qkv[0], qkv[1], qkv[2]
@@ -235,9 +235,10 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             combined_out = ops.concatenate([attn_out_a, attn_out_b], axis=2)
 
         # Reshape and project
-        batch_size, num_heads, total_seq_len, head_dim = combined_out.shape
+        _, _, total_seq_len, _ = combined_out.shape
         combined_out = ops.transpose(combined_out, (0, 2, 1, 3))
-        combined_out = ops.reshape(combined_out, (batch_size, total_seq_len, self.dim))
+        # Use -1 for the batch dimension to be compatible with symbolic Keras tensors
+        combined_out = ops.reshape(combined_out, (-1, total_seq_len, self.dim))
 
         return self.proj_dense(combined_out)
 
@@ -277,9 +278,10 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         combined_out = ops.concatenate([attn_out_a, attn_out_b], axis=2)
 
         # Reshape and project
-        batch_size, num_heads, total_seq_len, head_dim = combined_out.shape
+        _, _, total_seq_len, _ = combined_out.shape
         combined_out = ops.transpose(combined_out, (0, 2, 1, 3))
-        combined_out = ops.reshape(combined_out, (batch_size, total_seq_len, self.dim))
+        # Use -1 for the batch dimension to be compatible with symbolic Keras tensors
+        combined_out = ops.reshape(combined_out, (-1, total_seq_len, self.dim))
 
         return self.proj_dense(combined_out)
 
@@ -293,7 +295,7 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         config.update({
             "dim": self.dim,
             "num_heads": self.num_heads,
-            "dropout": self.dropout_rate,
+            "dropout_rate": self.dropout_rate,
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
@@ -308,3 +310,5 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         """Build from configuration."""
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
+
+# ---------------------------------------------------------------------
