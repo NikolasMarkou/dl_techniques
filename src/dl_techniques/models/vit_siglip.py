@@ -49,7 +49,7 @@ from ..layers.positional_embedding import PositionalEmbedding
 # ---------------------------------------------------------------------
 
 @dataclass
-class SigLIPVisionTransformerConfig:
+class ViTSigLIPConfig:
     """Configuration for SigLIP Vision Transformer model."""
     img_size: int = 224
     patch_size: int = 16
@@ -92,13 +92,13 @@ class SigLIPVisionTransformerConfig:
         }
 
     @classmethod
-    def from_dict(cls, config_dict: Dict[str, Any]) -> 'SigLIPVisionTransformerConfig':
+    def from_dict(cls, config_dict: Dict[str, Any]) -> 'ViTSigLIP':
         """Create configuration from dictionary."""
         return cls(**config_dict)
 
 
 @keras.saving.register_keras_serializable()
-class SigLIPVisionTransformer(keras.Model):
+class ViTSigLIP(keras.Model):
     """SigLIP Vision Transformer Model
 
     Complete Vision Transformer model following SigLIP architecture with
@@ -128,7 +128,7 @@ class SigLIPVisionTransformer(keras.Model):
 
     Examples:
         >>> # Create and use the model
-        >>> model = SigLIPVisionTransformer(
+        >>> model = ViTSigLIP(
         ...     img_size=224,
         ...     patch_size=16,
         ...     embed_dim=768,
@@ -147,7 +147,7 @@ class SigLIPVisionTransformer(keras.Model):
         >>> patch_features = model.get_patch_tokens(outputs)  # Shape: (batch, num_patches, embed_dim)
 
         >>> # Advanced configuration
-        >>> model = SigLIPVisionTransformer(
+        >>> model = ViTSigLIP(
         ...     embed_dim=512,
         ...     depth=8,
         ...     attention_type='window_attention',
@@ -219,7 +219,7 @@ class SigLIPVisionTransformer(keras.Model):
         # Store build input shape for serialization - following the "Managed State" principle
         self._build_input_shape = None
 
-        logger.info(f"Initialized SigLIPVisionTransformer with {self.num_patches} patches, "
+        logger.info(f"Initialized ViTSigLIP with {self.num_patches} patches, "
                     f"{self.depth} transformer blocks, and {embed_dim} embedding dimension")
 
     def _validate_config(
@@ -445,8 +445,9 @@ class SigLIPVisionTransformer(keras.Model):
         for block in self.transformer_blocks:
             x = block(x, training=training)
 
-        # Final normalization
-        x = self.norm(x, training=training)
+        # Final normalization. Only needed for pre-norm, as post-norm blocks already output normalized tensors.
+        if self.normalization_position == 'pre':
+            x = self.norm(x, training=training)
 
         return x
 
@@ -539,7 +540,7 @@ class SigLIPVisionTransformer(keras.Model):
             self.build(config["input_shape"])
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> 'SigLIPVisionTransformer':
+    def from_config(cls, config: Dict[str, Any]) -> 'ViTSigLIP':
         """Create model from configuration.
 
         Args:
@@ -552,9 +553,9 @@ class SigLIPVisionTransformer(keras.Model):
 
 
 def create_siglip_vit(
-        config: Optional[SigLIPVisionTransformerConfig] = None,
+        config: Optional[ViTSigLIPConfig] = None,
         **kwargs
-) -> SigLIPVisionTransformer:
+) -> ViTSigLIP:
     """Factory function to create SigLIP Vision Transformer model.
 
     Args:
@@ -565,16 +566,16 @@ def create_siglip_vit(
         SigLIPVisionTransformer model instance.
     """
     if config is None:
-        config = SigLIPVisionTransformerConfig()
+        config = ViTSigLIPConfig()
 
     # Override config with kwargs
     config_dict = config.to_dict()
     config_dict.update(kwargs)
 
-    return SigLIPVisionTransformer(**config_dict)
+    return ViTSigLIP(**config_dict)
 
 
-def create_siglip_vit_base(**kwargs) -> SigLIPVisionTransformer:
+def create_siglip_vit_base(**kwargs) -> ViTSigLIP:
     """Create SigLIP ViT-Base model configuration.
 
     Args:
@@ -583,7 +584,7 @@ def create_siglip_vit_base(**kwargs) -> SigLIPVisionTransformer:
     Returns:
         SigLIPVisionTransformer with Base configuration.
     """
-    config = SigLIPVisionTransformerConfig(
+    config = ViTSigLIPConfig(
         embed_dim=768,
         depth=12,
         num_heads=12,
@@ -591,7 +592,7 @@ def create_siglip_vit_base(**kwargs) -> SigLIPVisionTransformer:
     return create_siglip_vit(config, **kwargs)
 
 
-def create_siglip_vit_large(**kwargs) -> SigLIPVisionTransformer:
+def create_siglip_vit_large(**kwargs) -> ViTSigLIP:
     """Create SigLIP ViT-Large model configuration.
 
     Args:
@@ -600,7 +601,7 @@ def create_siglip_vit_large(**kwargs) -> SigLIPVisionTransformer:
     Returns:
         SigLIPVisionTransformer with Large configuration.
     """
-    config = SigLIPVisionTransformerConfig(
+    config = ViTSigLIPConfig(
         embed_dim=1024,
         depth=24,
         num_heads=16,
@@ -608,7 +609,7 @@ def create_siglip_vit_large(**kwargs) -> SigLIPVisionTransformer:
     return create_siglip_vit(config, **kwargs)
 
 
-def create_siglip_vit_small(**kwargs) -> SigLIPVisionTransformer:
+def create_siglip_vit_small(**kwargs) -> ViTSigLIP:
     """Create SigLIP ViT-Small model configuration.
 
     Args:
@@ -617,7 +618,7 @@ def create_siglip_vit_small(**kwargs) -> SigLIPVisionTransformer:
     Returns:
         SigLIPVisionTransformer with Small configuration.
     """
-    config = SigLIPVisionTransformerConfig(
+    config = ViTSigLIPConfig(
         embed_dim=384,
         depth=12,
         num_heads=6,
@@ -626,10 +627,10 @@ def create_siglip_vit_small(**kwargs) -> SigLIPVisionTransformer:
 
 
 def build_and_initialize_siglip_vit(
-        model: SigLIPVisionTransformer,
+        model: ViTSigLIP,
         input_shape: Tuple[int, int, int],
         compile_config: Optional[Dict[str, Any]] = None
-) -> SigLIPVisionTransformer:
+) -> ViTSigLIP:
     """Build and initialize SigLIP Vision Transformer model.
 
     Args:
