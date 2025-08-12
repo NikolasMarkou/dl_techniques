@@ -2,7 +2,7 @@ import keras
 import numpy as np
 from keras import ops
 from abc import abstractmethod
-from typing import Optional, Any, Tuple, Union, Dict
+from typing import Optional, Any, Tuple, Union
 
 # ---------------------------------------------------------------------
 # local imports
@@ -138,14 +138,12 @@ class NBeatsBlock(keras.layers.Layer):
             name='dense4'
         )
 
-        # Theta layers with improved initialization for numerical stability
-        theta_init = keras.initializers.TruncatedNormal(mean=0.0, stddev=0.1)
-
         self.theta_backcast = keras.layers.Dense(
             self.thetas_dim,
             activation='linear',
             use_bias=False,
-            kernel_initializer=theta_init,
+            # Use the initializer from the constructor
+            kernel_initializer=self.theta_initializer,
             kernel_regularizer=self.theta_regularizer,
             name='theta_backcast'
         )
@@ -153,7 +151,8 @@ class NBeatsBlock(keras.layers.Layer):
             self.thetas_dim,
             activation='linear',
             use_bias=False,
-            kernel_initializer=theta_init,
+            # Use the initializer from the constructor
+            kernel_initializer=self.theta_initializer,
             kernel_regularizer=self.theta_regularizer,
             name='theta_forecast'
         )
