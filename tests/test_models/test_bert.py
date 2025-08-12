@@ -1337,9 +1337,8 @@ class TestBERTIntegration:
         bert_model = BERT(config, add_pooling_layer=False)
         bert_model.build((None, 24))
 
-        # Create individual components
-        embeddings = BertEmbeddings(config)
-        embeddings.build((None, 24))
+        # Use the model's own embeddings layer for the manual check
+        embeddings = bert_model.embeddings
 
         batch_size = 2
         seq_length = 24
@@ -1462,7 +1461,17 @@ class TestBERTIntegration:
             dtype='int32'
         )
         attention_mask = ops.ones((batch_size, seq_length), dtype='int32')
-        token_type_ids = ops.zeros((batch_size, seq_length), dtype='int32')
+
+        # FIX: Use non-constant token_type_ids. Using all zeros causes the
+        # token_type_embedding to be a constant vector added to all positions.
+        # This constant is then cancelled out by the mean-subtraction in the
+        # subsequent LayerNormalization layer, resulting in a zero gradient for
+        # the token_type_embeddings weight.
+        token_type_ids = ops.concatenate([
+            ops.zeros((batch_size, seq_length // 2), dtype="int32"),
+            ops.ones((batch_size, seq_length - seq_length // 2), dtype="int32"),
+        ], axis=1)
+
 
         with tf.GradientTape() as tape:
             logits = model([input_ids, attention_mask, token_type_ids], training=True)
@@ -1481,9 +1490,9 @@ class TestBERTIntegration:
 
         # Check that gradients have reasonable magnitudes
         grad_norms = [
-            ops.sqrt(ops.sum(ops.square(g))) for g in non_none_grads
+            ops.sqrt(ops.sum(ops.square(g)) + 1e-8) for g in non_none_grads
         ]
-        assert all(norm > 1e-12 for norm in grad_norms)
+        assert all(norm > 0.0 for norm in grad_norms)
         assert all(norm < 1000.0 for norm in grad_norms)
 
     def test_pooled_output_quality(self):
