@@ -351,7 +351,6 @@ class TransformerLayer(keras.layers.Layer):
                 'dim': self.hidden_size,
                 'window_size': self.window_size,
                 'num_heads': self.num_heads,
-                'use_bias': self.use_bias,
                 'kernel_initializer': self.kernel_initializer,
                 'bias_initializer': self.bias_initializer,
                 'kernel_regularizer': self.kernel_regularizer,
