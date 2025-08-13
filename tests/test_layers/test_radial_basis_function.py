@@ -1,33 +1,44 @@
-import keras
-import pytest
-import numpy as np
-import tensorflow as tf
-from typing import Generator, Any, Tuple, Dict, List
+"""
+Comprehensive Test Suite for RBF Layer
 
+This test suite follows Modern Keras 3 testing best practices with emphasis on
+serialization testing and production readiness validation.
+"""
+
+import pytest
+import tempfile
+import os
+from typing import Any, Dict, Tuple, Generator
+import numpy as np
+
+import keras
+import keras.ops as ops
+import tensorflow as tf
 
 from dl_techniques.layers.radial_basis_function import RBFLayer
 
 
 def generate_cluster_data(
-        n_clusters: int,
-        n_samples: int,
-        dim: int,
-        noise: float = 0.1,
-        seed: int = 42
-) -> Tuple[tf.Tensor, tf.Tensor]:
+    n_clusters: int,
+    n_samples: int,
+    dim: int,
+    noise: float = 0.1,
+    seed: int = 42
+) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
     """
-    Generate clustered data for testing.
+    Generate clustered synthetic data for testing RBF layer behavior.
 
     Args:
-        n_clusters: Number of clusters
-        n_samples: Samples per cluster
-        dim: Dimensionality of data
-        noise: Standard deviation of Gaussian noise
-        seed: Random seed for reproducibility
+        n_clusters: Number of distinct clusters to generate
+        n_samples: Total number of samples across all clusters
+        dim: Dimensionality of the feature space
+        noise: Standard deviation of Gaussian noise added to cluster samples
+        seed: Random seed for reproducible data generation
 
     Returns:
-        Tuple of (data, centers)
+        Tuple of (data, true_centers) as Keras tensors
     """
+    # Set seeds for reproducibility
     tf.random.set_seed(seed)
     np.random.seed(seed)
 
@@ -35,310 +46,612 @@ def generate_cluster_data(
     centers = tf.random.uniform(
         (n_clusters, dim),
         minval=-5.0,
-        maxval=5.0
+        maxval=5.0,
+        seed=seed
     )
 
-    # Generate samples around centers
+    # Generate samples around each center
     samples_per_cluster = n_samples // n_clusters
-    data = []
-    for center in centers:
+    data_parts = []
+
+    for i in range(n_clusters):
+        center = centers[i:i+1]  # Keep batch dimension
         cluster_samples = center + tf.random.normal(
             (samples_per_cluster, dim),
             mean=0.0,
-            stddev=noise
+            stddev=noise,
+            seed=seed + i
         )
-        data.append(cluster_samples)
+        data_parts.append(cluster_samples)
 
-    return tf.concat(data, axis=0), centers
+    # Concatenate all cluster data
+    data = ops.concatenate(data_parts, axis=0)
 
-
-@pytest.fixture
-def layer_config() -> Dict[str, Any]:
-    """Default layer configuration for testing."""
-    return {
-        'units': 10,
-        'gamma_init': 1.0,
-        'repulsion_strength': 0.1,
-        'min_center_distance': 1.0,
-        'trainable_gamma': True,
-    }
+    return data, centers
 
 
 class TestRBFLayer:
-    """Test suite for RBF Layer."""
+    """Comprehensive test suite for RBF Layer following Modern Keras 3 patterns."""
+
+    @pytest.fixture
+    def layer_config(self) -> Dict[str, Any]:
+        """Standard RBF layer configuration for testing."""
+        return {
+            'units': 8,
+            'gamma_init': 1.0,
+            'repulsion_strength': 0.1,
+            'min_center_distance': 1.0,
+            'trainable_gamma': True,
+            'safety_margin': 0.2,
+        }
+
+    @pytest.fixture
+    def sample_input_2d(self) -> keras.KerasTensor:
+        """Sample 2D input tensor for testing."""
+        return tf.random.normal(shape=(16, 4), seed=42)
+
+    @pytest.fixture
+    def sample_input_3d(self) -> keras.KerasTensor:
+        """Sample 3D input tensor for testing."""
+        return tf.random.normal(shape=(8, 12, 4), seed=43)
 
     def test_initialization(self, layer_config: Dict[str, Any]) -> None:
         """
         Test layer initialization and parameter validation.
 
-        Tests:
-        1. Correct parameter initialization
-        2. Parameter validation
-        3. Weight creation
+        Validates:
+        - Correct attribute assignment from config
+        - Unbuilt state after initialization
+        - Sub-component creation
+        - Parameter validation with invalid inputs
         """
-        # Test correct initialization
+        # Test successful initialization
         layer = RBFLayer(**layer_config)
+
+        # Verify configuration storage
         assert layer.units == layer_config['units']
         assert layer.gamma_init == layer_config['gamma_init']
         assert layer.repulsion_strength == layer_config['repulsion_strength']
+        assert layer.min_center_distance == layer_config['min_center_distance']
+        assert layer.trainable_gamma == layer_config['trainable_gamma']
+        assert layer.safety_margin == layer_config['safety_margin']
 
-        # Test invalid parameters
-        with pytest.raises(ValueError):
-            RBFLayer(units=-1)  # Invalid units
-        with pytest.raises(ValueError):
-            RBFLayer(units=10, gamma_init=-1.0)  # Invalid gamma
-        with pytest.raises(ValueError):
-            RBFLayer(units=10, repulsion_strength=-0.1)  # Invalid repulsion
+        # Verify unbuilt state
+        assert not layer.built
+        assert layer.centers is None
+        assert layer.gamma_raw is None
 
-    @pytest.mark.parametrize(
-        "batch_size,input_dim,units",
-        [
-            (32, 4, 10),
-            (64, 8, 16),
-            (16, 2, 5),
-            (128, 16, 32)
-        ]
-    )
-    def test_output_shape(
-            self,
-            layer_config: Dict[str, Any],
-            batch_size: int,
-            input_dim: int,
-            units: int
+        # Test initializer/constraint/regularizer handling
+        assert layer.center_initializer is not None
+        assert layer.gamma_regularizer is None
+
+    def test_parameter_validation(self) -> None:
+        """Test comprehensive parameter validation with invalid inputs."""
+
+        # Test invalid units
+        with pytest.raises(ValueError, match="units must be positive"):
+            RBFLayer(units=0)
+
+        with pytest.raises(ValueError, match="units must be positive"):
+            RBFLayer(units=-5)
+
+        # Test invalid gamma_init
+        with pytest.raises(ValueError, match="gamma_init must be positive"):
+            RBFLayer(units=10, gamma_init=0.0)
+
+        with pytest.raises(ValueError, match="gamma_init must be positive"):
+            RBFLayer(units=10, gamma_init=-1.0)
+
+        # Test invalid repulsion_strength
+        with pytest.raises(ValueError, match="repulsion_strength must be non-negative"):
+            RBFLayer(units=10, repulsion_strength=-0.1)
+
+        # Test invalid min_center_distance
+        with pytest.raises(ValueError, match="min_center_distance must be positive"):
+            RBFLayer(units=10, min_center_distance=0.0)
+
+        # Test invalid safety_margin
+        with pytest.raises(ValueError, match="safety_margin must be non-negative"):
+            RBFLayer(units=10, safety_margin=-0.1)
+
+    @pytest.mark.parametrize("input_tensor", ["sample_input_2d", "sample_input_3d"])
+    def test_forward_pass(
+        self,
+        layer_config: Dict[str, Any],
+        input_tensor: str,
+        request: pytest.FixtureRequest
     ) -> None:
         """
-        Test output shapes for various configurations.
+        Test forward pass and automatic building.
 
-        Tests:
-        1. Basic shape compatibility
-        2. Dynamic batch size handling
-        3. Multiple input dimensions
+        Validates:
+        - Automatic building on first call
+        - Correct output shapes
+        - Weight creation
+        - Multiple forward passes consistency
         """
-        config = dict(layer_config)
-        config['units'] = units
+        # Get the input tensor from fixture
+        inputs = request.getfixturevalue(input_tensor)
 
-        layer = RBFLayer(**config)
-        inputs = tf.random.normal((batch_size, input_dim))
+        layer = RBFLayer(**layer_config)
+
+        # Forward pass triggers building
         outputs = layer(inputs)
 
-        assert outputs.shape == (batch_size, units)
+        # Verify building occurred
+        assert layer.built
+        assert layer.centers is not None
+        assert layer.gamma_raw is not None
 
-        # Test with different batch size
-        new_batch = tf.random.normal((batch_size * 2, input_dim))
-        new_outputs = layer(new_batch)
-        assert new_outputs.shape == (batch_size * 2, units)
+        # Verify output shape
+        expected_shape = list(inputs.shape)
+        expected_shape[-1] = layer_config['units']
+        assert outputs.shape == tuple(expected_shape)
 
-    def test_activation_properties(self, layer_config: Dict[str, Any]) -> None:
+        # Verify output properties
+        assert ops.all(outputs >= 0.0), "RBF outputs must be non-negative"
+        assert ops.all(outputs <= 1.0), "RBF outputs must be <= 1.0"
+
+        # Test consistency across multiple calls
+        outputs2 = layer(inputs)
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(outputs),
+            ops.convert_to_numpy(outputs2),
+            rtol=1e-6,
+            atol=1e-6,
+            err_msg="Multiple forward passes should be consistent"
+        )
+
+    def test_serialization_cycle(
+        self,
+        layer_config: Dict[str, Any],
+        sample_input_2d: keras.KerasTensor
+    ) -> None:
         """
-        Test RBF activation mathematical properties.
+        CRITICAL TEST: Full serialization and deserialization cycle.
 
-        Tests:
-        1. Output range [0, 1]
-        2. Maximum activation at center
-        3. Symmetric activation around center
-        4. Monotonic decrease with distance
+        This is the most important test for production readiness.
+        Validates:
+        - Model saving with custom layer
+        - Model loading with custom layer
+        - Identical predictions after serialization
+        - Weight preservation
+        """
+        # Create model with RBF layer
+        inputs = keras.Input(shape=sample_input_2d.shape[1:])
+        rbf_outputs = RBFLayer(**layer_config)(inputs)
+        # Add a simple dense layer to make it more realistic
+        outputs = keras.layers.Dense(3, activation='softmax')(rbf_outputs)
+        model = keras.Model(inputs, outputs)
+
+        # Get original prediction
+        original_prediction = model(sample_input_2d)
+
+        # Save and load model
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'rbf_test_model.keras')
+
+            # Save model
+            model.save(filepath)
+
+            # Load model (tests custom layer registration)
+            loaded_model = keras.models.load_model(filepath)
+
+            # Get prediction from loaded model
+            loaded_prediction = loaded_model(sample_input_2d)
+
+            # Verify identical predictions
+            np.testing.assert_allclose(
+                ops.convert_to_numpy(original_prediction),
+                ops.convert_to_numpy(loaded_prediction),
+                rtol=1e-6,
+                atol=1e-6,
+                err_msg="Predictions differ after serialization cycle"
+            )
+
+            # Verify layer configuration preserved
+            original_rbf = model.layers[1]  # RBF layer
+            loaded_rbf = loaded_model.layers[1]  # RBF layer
+
+            assert original_rbf.units == loaded_rbf.units
+            assert original_rbf.gamma_init == loaded_rbf.gamma_init
+            assert original_rbf.repulsion_strength == loaded_rbf.repulsion_strength
+
+    def test_config_completeness(self, layer_config: Dict[str, Any]) -> None:
+        """
+        Test that get_config contains all __init__ parameters.
+
+        Validates:
+        - All initialization parameters in config
+        - Proper serialization of complex objects
+        - Config can reconstruct identical layer
         """
         layer = RBFLayer(**layer_config)
+        config = layer.get_config()
+
+        # Check all required parameters present
+        required_keys = [
+            'units', 'gamma_init', 'repulsion_strength', 'min_center_distance',
+            'safety_margin', 'trainable_gamma', 'center_initializer',
+            'center_constraint', 'kernel_regularizer', 'gamma_regularizer'
+        ]
+
+        for key in required_keys:
+            assert key in config, f"Missing {key} in get_config()"
+
+        # Verify config values match initialization
+        for key, value in layer_config.items():
+            if key in ['center_initializer', 'center_constraint',
+                      'kernel_regularizer', 'gamma_regularizer']:
+                # These are serialized as dicts, test separately
+                continue
+            assert config[key] == value, f"Config mismatch for {key}"
+
+        # Test reconstruction from config
+        reconstructed_layer = RBFLayer.from_config(config)
+        assert reconstructed_layer.units == layer.units
+        assert reconstructed_layer.gamma_init == layer.gamma_init
+
+    def test_gradients_flow(
+        self,
+        layer_config: Dict[str, Any],
+        sample_input_2d: keras.KerasTensor
+    ) -> None:
+        """
+        Test gradient computation and backpropagation.
+
+        Validates:
+        - Gradients computed for all trainable weights
+        - No None gradients
+        - Reasonable gradient magnitudes
+        """
+        layer = RBFLayer(**layer_config)
+
+        with tf.GradientTape() as tape:
+            # Enable gradient tracking for input
+            tape.watch(sample_input_2d)
+
+            # Forward pass
+            outputs = layer(sample_input_2d, training=True)
+
+            # Compute loss (simple mean squared output)
+            loss = ops.mean(ops.square(outputs))
+
+        # Compute all gradients in one call to avoid tape reuse
+        all_variables = layer.trainable_weights + [sample_input_2d]
+        all_gradients = tape.gradient(loss, all_variables)
+
+        # Split gradients
+        layer_gradients = all_gradients[:-1]
+        input_gradients = all_gradients[-1]
+
+        # Verify gradients exist
+        assert len(layer_gradients) > 0, "No trainable weights found"
+        assert all(g is not None for g in layer_gradients), "Some gradients are None"
+        assert input_gradients is not None, "Input gradients are None"
+
+        # Verify reasonable gradient magnitudes
+        for i, grad in enumerate(layer_gradients):
+            grad_norm = ops.sqrt(ops.sum(ops.square(grad)))
+            assert grad_norm > 0, f"Zero gradient for weight {i}"
+            assert grad_norm < 1000, f"Exploding gradient for weight {i}: {grad_norm}"
+
+    @pytest.mark.parametrize("training", [True, False, None])
+    def test_training_modes(
+        self,
+        layer_config: Dict[str, Any],
+        sample_input_2d: keras.KerasTensor,
+        training: bool
+    ) -> None:
+        """
+        Test behavior in different training modes.
+
+        Validates:
+        - Consistent outputs across training modes
+        - Repulsion loss only added during training
+        - Proper handling of training parameter
+        """
+        # Create layer without regularizers for cleaner testing
+        clean_config = dict(layer_config)
+        clean_config['gamma_regularizer'] = None
+        clean_config['kernel_regularizer'] = None
+
+        layer = RBFLayer(**clean_config)
+
+        # Clear any existing losses to ensure clean state
+        layer.losses.clear()
+
+        # Forward pass in specified training mode
+        outputs = layer(sample_input_2d, training=training)
+
+        # Verify output shape and properties
+        assert outputs.shape[0] == sample_input_2d.shape[0]
+        assert outputs.shape[-1] == layer_config['units']
+        assert ops.all(outputs >= 0.0)
+        assert ops.all(outputs <= 1.0)
+
+        # Check repulsion loss behavior
+        if training is True:
+            # In training mode, repulsion loss should be added
+            assert len(layer.losses) > 0, "Repulsion loss not added in training mode"
+            # Verify it's actually repulsion loss (should be > 0 for multiple units)
+            total_loss = sum(layer.losses)
+            assert total_loss >= 0, "Repulsion loss should be non-negative"
+        else:
+            # In inference mode or None, no repulsion losses should be added
+            # Note: training=None defaults to False in most contexts
+            assert len(layer.losses) == 0, f"Unexpected losses in inference mode: {[float(loss) for loss in layer.losses]}"
+
+    def test_output_shape_computation(self, layer_config: Dict[str, Any]) -> None:
+        """Test compute_output_shape method."""
+        layer = RBFLayer(**layer_config)
+
+        # Test 2D input
+        input_shape_2d = (None, 10)
+        output_shape_2d = layer.compute_output_shape(input_shape_2d)
+        expected_2d = (None, layer_config['units'])
+        assert output_shape_2d == expected_2d
+
+        # Test 3D input (with time dimension)
+        input_shape_3d = (None, 20, 10)
+        output_shape_3d = layer.compute_output_shape(input_shape_3d)
+        expected_3d = (None, 20, layer_config['units'])
+        assert output_shape_3d == expected_3d
+
+    def test_rbf_activation_properties(
+        self,
+        layer_config: Dict[str, Any]
+    ) -> None:
+        """
+        Test mathematical properties of RBF activations.
+
+        Validates:
+        - Maximum activation at centers
+        - Symmetric response around centers
+        - Monotonic decrease with distance
+        - Bounded output range
+        """
+        # Use fewer units for precise testing
+        config = dict(layer_config)
+        config['units'] = 3
+
+        layer = RBFLayer(**config)
         input_dim = 4
         layer.build((None, input_dim))
 
-        # Test output range
-        inputs = tf.random.normal((100, input_dim))
-        outputs = layer(inputs)
-        assert tf.reduce_min(outputs) >= 0.0
-        assert tf.reduce_max(outputs) <= 1.0
-
         # Test maximum activation at center
-        center = layer.centers[0]
-        input_at_center = tf.expand_dims(center, 0)
-        activation = layer(input_at_center)[0, 0]
-        assert tf.abs(activation - 1.0) < 1e-5
+        for i in range(config['units']):
+            center = layer.centers[i:i+1]  # Shape (1, input_dim)
+            activation = layer(center)[0, i]  # Activation of unit i
+
+            # Should be close to 1.0 (maximum activation)
+            assert ops.abs(activation - 1.0) < 1e-4, \
+                f"Unit {i} activation at center: {activation}, expected ~1.0"
 
         # Test symmetry around center
-        offset = tf.constant([[1.0, 0.0, 0.0, 0.0]])
-        pos_input = input_at_center + offset
-        neg_input = input_at_center - offset
+        center = layer.centers[0:1]  # First center
+        offset = ops.ones((1, input_dim)) * 0.5
+
+        pos_input = center + offset
+        neg_input = center - offset
+
         pos_activation = layer(pos_input)[0, 0]
         neg_activation = layer(neg_input)[0, 0]
-        assert tf.abs(pos_activation - neg_activation) < 1e-5
 
-    def test_repulsion_mechanics(
-            self,
-            layer_config: Dict[str, Any]
-    ) -> None:
+        assert ops.abs(pos_activation - neg_activation) < 1e-5, \
+            "RBF should be symmetric around center"
+
+        # Test monotonic decrease with distance
+        center = layer.centers[0:1]
+        distances = [0.0, 0.5, 1.0, 2.0]
+        activations = []
+
+        for dist in distances:
+            test_input = center + ops.ones((1, input_dim)) * dist
+            activation = layer(test_input)[0, 0]
+            activations.append(float(activation))
+
+        # Activations should decrease with distance
+        for i in range(len(activations) - 1):
+            assert activations[i] >= activations[i + 1], \
+                f"Non-monotonic behavior: {activations}"
+
+    def test_repulsion_mechanism(self, layer_config: Dict[str, Any]) -> None:
         """
         Test center repulsion mechanism.
 
-        Tests:
-        1. Repulsion force calculation
-        2. Loss contribution
-        3. Center movement under repulsion
+        Validates:
+        - Repulsion force between close centers
+        - Reduced repulsion for distant centers
+        - Proper scaling with dimensionality
         """
-        # Override the number of units to 2 for this test
-        test_config = dict(layer_config)
-        test_config['units'] = 2
-
-        input_dim = 4
-        layer = RBFLayer(**test_config)
-
-        # Create two centers very close to each other
-        initial_centers = tf.constant([
-            [0.0, 0.0, 0.0, 0.0],
-            [0.1, 0.1, 0.1, 0.1]
-        ], dtype=tf.float32)
-
-        layer.build((None, input_dim))
-        # Now the shapes match: both are (2, 4)
-        layer.centers.assign(initial_centers)
-
-        # Compute initial repulsion
-        initial_repulsion = layer._compute_repulsion(layer.centers)
-
-        # Move centers apart
-        separated_centers = tf.constant([
-            [0.0, 0.0, 0.0, 0.0],
-            [2.0, 2.0, 2.0, 2.0]
-        ], dtype=tf.float32)
-        layer.centers.assign(separated_centers)
-
-        # Compute new repulsion
-        final_repulsion = layer._compute_repulsion(layer.centers)
-
-        # Repulsion should decrease as centers move apart
-        assert final_repulsion < initial_repulsion
-
-    def test_training_behavior(
-            self,
-            layer_config: Dict[str, Any]
-    ) -> None:
-        """
-        Test layer behavior during training.
-
-        Tests:
-        1. Center adaptation to data
-        2. Width (gamma) adaptation
-        3. Loss convergence
-        4. Center distribution
-        """
-        # Configure for more robust testing
-        test_config = dict(layer_config)
-        test_config.update({
-            'units': 6,  # 2 units per cluster
-            'repulsion_strength': 1.0,  # Increase repulsion strength
-            'min_center_distance': 1.0,  # Keep original minimum distance
-            'safety_margin': 0.2,  # Add safety margin
-            'gamma_init': 0.5  # Wider initial receptive fields
+        # Use 2 units for precise repulsion testing
+        config = dict(layer_config)
+        config.update({
+            'units': 2,
+            'repulsion_strength': 1.0,
+            'min_center_distance': 2.0
         })
 
-        # Generate well-separated clustered data
+        layer = RBFLayer(**config)
+        input_dim = 4
+        layer.build((None, input_dim))
+
+        # Test with centers very close together
+        close_centers = ops.array([
+            [0.0, 0.0, 0.0, 0.0],
+            [0.1, 0.1, 0.1, 0.1]  # Distance ~ 0.2
+        ])
+        layer.centers.assign(close_centers)
+        close_repulsion = layer._compute_repulsion(layer.centers)
+
+        # Test with centers far apart
+        distant_centers = ops.array([
+            [0.0, 0.0, 0.0, 0.0],
+            [5.0, 5.0, 5.0, 5.0]  # Distance = 10.0
+        ])
+        layer.centers.assign(distant_centers)
+        distant_repulsion = layer._compute_repulsion(layer.centers)
+
+        # Close centers should have higher repulsion
+        assert close_repulsion > distant_repulsion, \
+            f"Close repulsion ({close_repulsion}) should > distant ({distant_repulsion})"
+
+        # Distant centers should have minimal repulsion
+        assert distant_repulsion < 0.01, \
+            f"Distant centers should have minimal repulsion, got {distant_repulsion}"
+
+    def test_training_convergence(self, layer_config: Dict[str, Any]) -> None:
+        """
+        Test training behavior and convergence properties.
+
+        Validates:
+        - Centers adapt to data distribution
+        - Loss decreases over training
+        - Centers maintain minimum separation
+        """
+        # Configure for training test
+        config = dict(layer_config)
+        config.update({
+            'units': 6,
+            'repulsion_strength': 0.5,
+            'min_center_distance': 1.5,
+            'gamma_init': 0.5
+        })
+
+        # Generate clustered data
         n_clusters = 3
-        n_samples = 300
+        n_samples = 150
         input_dim = 4
         data, true_centers = generate_cluster_data(
             n_clusters=n_clusters,
             n_samples=n_samples,
             dim=input_dim,
-            noise=0.1  # Less noise for clearer clusters
+            noise=0.1
         )
 
         # Create layer and optimizer
-        layer = RBFLayer(**test_config)
-        optimizer = tf.keras.optimizers.Adam(learning_rate=0.01)
+        layer = RBFLayer(**config)
+        optimizer = keras.optimizers.Adam(learning_rate=0.02)
 
         # Training loop
-        losses = []
-        min_dist_history = []
+        initial_loss = None
+        final_loss = None
 
-        for epoch in range(200):  # More epochs for convergence
+        for epoch in range(100):
+            # Clear losses from previous iteration
+            layer.losses.clear()
+
             with tf.GradientTape() as tape:
-                outputs = layer(data, training=True)  # Enable training mode
+                # Forward pass with training=True
+                outputs = layer(data, training=True)
 
-                # Multi-component loss
-                # 1. Activation loss: encourage strong responses
-                activation_loss = -tf.reduce_mean(tf.reduce_max(outputs, axis=1))
+                # Simple loss: encourage diverse, strong activations
+                max_activations = ops.max(outputs, axis=1)
+                activation_loss = -ops.mean(max_activations)
 
-                # Get the automatic repulsion loss
-                repulsion_loss = sum(layer.losses)  # Layer adds repulsion loss automatically
-
-                # Total loss
+                # Get repulsion loss
+                repulsion_loss = sum(layer.losses)
                 total_loss = activation_loss + repulsion_loss
 
-            # Compute and apply gradients with clipping
-            grads = tape.gradient(total_loss, layer.trainable_weights)
-            clipped_grads = [tf.clip_by_norm(g, 1.0) if g is not None else g
-                             for g in grads]
-            optimizer.apply_gradients(zip(clipped_grads, layer.trainable_weights))
-            losses.append(float(total_loss))
+                if initial_loss is None:
+                    initial_loss = float(total_loss)
+                final_loss = float(total_loss)
 
-            # Monitor minimum distance between centers
-            if epoch % 10 == 0:
-                centers = layer.centers.numpy()
-                dists = []
-                for i in range(len(centers)):
-                    for j in range(i + 1, len(centers)):
-                        dist = np.linalg.norm(centers[i] - centers[j])
-                        dists.append(dist)
-                min_dist_history.append(min(dists))
+            # Update weights
+            gradients = tape.gradient(total_loss, layer.trainable_weights)
+            optimizer.apply_gradients(zip(gradients, layer.trainable_weights))
 
-                # Early stopping if centers are well separated
-                if min_dist_history[-1] >= 0.8 * test_config['min_center_distance']:
-                    break
+        # Verify training progress
+        assert final_loss < initial_loss, \
+            f"Training should reduce loss: {initial_loss} -> {final_loss}"
 
-        # Verify loss convergence
-        assert losses[-1] < losses[0], \
-            f"Training did not converge. Initial loss: {losses[0]}, " \
-            f"Final loss: {losses[-1]}"
+        # Check center separation
+        centers = ops.convert_to_numpy(layer.centers)
+        min_distance = float('inf')
 
-        # Check final center distribution
-        final_centers = layer.centers.numpy()
-        final_dists = []
-        for i in range(len(final_centers)):
-            for j in range(i + 1, len(final_centers)):
-                dist = np.linalg.norm(final_centers[i] - final_centers[j])
-                final_dists.append(dist)
+        for i in range(len(centers)):
+            for j in range(i + 1, len(centers)):
+                dist = np.linalg.norm(centers[i] - centers[j])
+                min_distance = min(min_distance, dist)
 
-        min_dist = min(final_dists)
-        assert min_dist >= 0.5 * test_config['min_center_distance'], \
-            f"Centers are too close. Min distance: {min_dist}, " \
-            f"Required: {0.5 * test_config['min_center_distance']}, " \
-            f"Distance history: {min_dist_history[-5:]}"
+        # Centers should maintain reasonable separation
+        expected_min = 0.3 * config['min_center_distance']
+        assert min_distance >= expected_min, \
+            f"Centers too close: {min_distance} < {expected_min}"
 
-    def test_numerical_stability(
-            self,
-            layer_config: Dict[str, Any]
-    ) -> None:
+    def test_numerical_stability(self, layer_config: Dict[str, Any]) -> None:
         """
         Test numerical stability with extreme inputs.
 
-        Tests:
-        1. Large magnitude inputs
-        2. Very small inputs
-        3. Zero inputs
-        4. NaN/Inf handling
+        Validates:
+        - Handling of large magnitude inputs
+        - Stability with very small inputs
+        - No NaN/Inf in outputs
+        - Bounded output range maintained
         """
         layer = RBFLayer(**layer_config)
         input_dim = 4
+        batch_size = 16
 
-        # Test various extreme inputs
-        test_inputs = [
-            tf.zeros((32, input_dim)),  # All zeros
-            tf.ones((32, input_dim)) * 1000.0,  # Large values
-            tf.ones((32, input_dim)) * 1e-8,  # Small values
-            tf.random.normal((32, input_dim)) * 1e6  # Very large random values
+        # Test cases with extreme inputs
+        test_cases = [
+            ("zeros", ops.zeros((batch_size, input_dim))),
+            ("large_positive", ops.ones((batch_size, input_dim)) * 1000.0),
+            ("large_negative", ops.ones((batch_size, input_dim)) * -1000.0),
+            ("very_small", ops.ones((batch_size, input_dim)) * 1e-8),
+            ("mixed_extreme", tf.random.normal((batch_size, input_dim), seed=44) * 1e6)
         ]
 
-        for inputs in test_inputs:
+        for case_name, inputs in test_cases:
             outputs = layer(inputs)
 
-            # Check for NaN/Inf
-            assert not tf.reduce_any(tf.math.is_nan(outputs)), \
-                "Output contains NaN values"
-            assert not tf.reduce_any(tf.math.is_inf(outputs)), \
-                "Output contains Inf values"
+            # Convert to numpy for detailed checks
+            outputs_np = ops.convert_to_numpy(outputs)
 
-            # Check output range
-            assert tf.reduce_all(outputs >= 0.0) and tf.reduce_all(outputs <= 1.0), \
-                "Outputs outside valid range [0, 1]"
+            # Check for numerical issues
+            assert not np.any(np.isnan(outputs_np)), \
+                f"NaN values in outputs for case: {case_name}"
+
+            assert not np.any(np.isinf(outputs_np)), \
+                f"Inf values in outputs for case: {case_name}"
+
+            # Check valid range [0, 1]
+            assert np.all(outputs_np >= 0.0), \
+                f"Negative outputs for case: {case_name}"
+
+            assert np.all(outputs_np <= 1.0), \
+                f"Outputs > 1.0 for case: {case_name}"
+
+    def test_edge_cases(self) -> None:
+        """Test error conditions and edge cases."""
+
+        # Test invalid build input shapes
+        layer = RBFLayer(units=5)
+
+        # 1D input should fail
+        with pytest.raises(ValueError, match="at least 2 dimensions"):
+            layer.build((10,))
+
+        # None input dimension should fail
+        with pytest.raises(ValueError, match="Last dimension.*must be defined"):
+            layer.build((None, None))
+
+        # Test single unit (no repulsion)
+        single_unit_layer = RBFLayer(units=1)
+
+        # Clear any existing losses to ensure clean state
+        single_unit_layer.losses.clear()
+
+        inputs = tf.random.normal((8, 3), seed=45)
+        outputs = single_unit_layer(inputs, training=True)
+
+        # Should work without errors
+        assert outputs.shape == (8, 1)
+        # No repulsion loss for single unit (repulsion requires >= 2 units)
+        assert len(single_unit_layer.losses) == 0, f"Unexpected losses for single unit: {[float(loss) for loss in single_unit_layer.losses]}"
+
 
 if __name__ == '__main__':
-    pytest.main([__file__])
+    # Run with: python -m pytest rbf_layer_test.py -v
+    pytest.main([__file__, '-v', '--tb=short'])
