@@ -40,7 +40,7 @@ se_block = SqueezeExcitation(
 """
 
 import keras
-from keras import layers, activations, ops
+from keras import layers, activations, ops, initializers, regularizers
 from typing import Dict, Optional, Tuple, Union, Callable, Any
 
 # ---------------------------------------------------------------------
@@ -54,27 +54,52 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class SqueezeExcitation(layers.Layer):
-    """Squeeze-and-Excitation block for channel-wise feature recalibration.
+    """
+    Squeeze-and-Excitation block for channel-wise feature recalibration.
 
     This layer implements the Squeeze-and-Excitation mechanism that adaptively
     recalibrates channel-wise feature responses by explicitly modeling
-    interdependencies between channels.
+    interdependencies between channels. The SE block enhances the representational
+    power of a network by enabling it to perform feature recalibration, through
+    which it can learn to use global information to selectively emphasise
+    informative features and suppress less useful ones.
+
+    The SE block operates by:
+    1. **Squeeze**: Global information embedding via global average pooling
+    2. **Excitation**: Adaptive recalibration via a bottleneck transformation
+    3. **Scale**: Feature recalibration through channel-wise multiplication
+
+    Mathematical formulation:
+        Given input X ∈ R^(H×W×C), the SE block computes:
+
+        z = GlobalAvgPool(X)  # Shape: (1, 1, C)
+        s = σ(W₂ · δ(W₁ · z))  # Shape: (1, 1, C)
+        output = X ⊙ s  # Element-wise multiplication
+
+    Where δ is the reduction activation, σ is sigmoid, W₁ reduces channels by
+    reduction_ratio, and W₂ restores original channel count.
 
     Args:
         reduction_ratio: Float between 0 and 1, determining the bottleneck width.
+            Controls the capacity and computational cost of the SE block.
+            Smaller values create tighter bottlenecks. Must be positive.
             Defaults to 0.25.
-        kernel_initializer: Initializer for the kernel weights matrix.
-            Defaults to "glorot_normal".
-        kernel_regularizer: Optional regularizer function applied to kernel weights.
+        activation: Activation function for the reduction layer. Can be string
+            identifier ('relu', 'swish', 'gelu') or callable. The final
+            activation is always sigmoid. Defaults to 'relu'.
+        use_bias: Boolean, whether convolution layers use bias vectors.
+            Defaults to False as recommended in the original paper.
+        kernel_initializer: Initializer for convolution kernel weights.
+            Accepts string names ('glorot_normal', 'he_normal') or Initializer
+            instances. Defaults to 'glorot_normal'.
+        kernel_regularizer: Optional regularizer applied to kernel weights.
+            Accepts string names ('l1', 'l2') or Regularizer instances.
             Defaults to None.
-        activation: Activation function to use after reduction convolution.
-            Can be a string identifier or a callable. Defaults to "relu".
-        use_bias: Boolean, whether the layer uses a bias vector.
-            Defaults to False.
-        **kwargs: Additional keyword arguments for the base Layer class.
-
-    Raises:
-        ValueError: If reduction_ratio is not in the range (0, 1].
+        bias_initializer: Initializer for bias vectors (if use_bias=True).
+            Defaults to 'zeros'.
+        bias_regularizer: Optional regularizer applied to bias vectors.
+            Defaults to None.
+        **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
         4D tensor with shape: ``(batch_size, height, width, channels)``
@@ -83,161 +108,221 @@ class SqueezeExcitation(layers.Layer):
         4D tensor with shape: ``(batch_size, height, width, channels)``
         Same shape as input.
 
+    Attributes:
+        global_pool: GlobalAveragePooling2D layer for squeeze operation.
+        conv_reduce: Conv2D layer for channel dimensionality reduction.
+        conv_restore: Conv2D layer for channel dimensionality restoration.
+        reduction_activation: Activation function applied after reduction.
+
     Example:
-        >>> inputs = keras.Input(shape=(32, 32, 64))
-        >>> se_layer = SqueezeExcitation(reduction_ratio=0.25)
-        >>> outputs = se_layer(inputs)
-        >>> print(outputs.shape)
-        (None, 32, 32, 64)
+        ```python
+        # Basic usage
+        inputs = keras.Input(shape=(32, 32, 64))
+        se_layer = SqueezeExcitation(reduction_ratio=0.25)
+        outputs = se_layer(inputs)
+        print(outputs.shape)  # (None, 32, 32, 64)
+
+        # Advanced configuration
+        se_layer = SqueezeExcitation(
+            reduction_ratio=0.125,  # Tighter bottleneck
+            activation='swish',
+            kernel_initializer='he_normal',
+            kernel_regularizer=keras.regularizers.L2(1e-4)
+        )
+
+        # In a model
+        inputs = keras.Input(shape=(224, 224, 3))
+        x = keras.layers.Conv2D(64, 3, activation='relu')(inputs)
+        x = SqueezeExcitation(reduction_ratio=0.25)(x)
+        outputs = keras.layers.GlobalAveragePooling2D()(x)
+        model = keras.Model(inputs, outputs)
+        ```
+
+    References:
+        - Squeeze-and-Excitation Networks, Hu et al., 2018
+        - https://arxiv.org/abs/1709.01507
+
+    Raises:
+        ValueError: If reduction_ratio is not in the range (0, 1].
+
+    Note:
+        The layer requires input shape information to determine bottleneck
+        dimensions, so sub-layers are created during the build phase.
+        The original paper recommends reduction_ratio=0.25 for most cases.
     """
 
     def __init__(
-            self,
-            reduction_ratio: float = 0.25,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_normal",
-            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            activation: Union[str, Callable] = "relu",
-            use_bias: bool = False,
-            **kwargs: Any
+        self,
+        reduction_ratio: float = 0.25,
+        activation: Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = 'relu',
+        use_bias: bool = False,
+        kernel_initializer: Union[str, initializers.Initializer] = 'glorot_normal',
+        kernel_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
+        bias_initializer: Union[str, initializers.Initializer] = 'zeros',
+        bias_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
+        **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
+        # Validate inputs
         if not 0 < reduction_ratio <= 1.0:
             raise ValueError(
                 f"reduction_ratio must be in range (0, 1], got {reduction_ratio}"
             )
 
-        # Store configuration parameters
+        # Store ALL configuration parameters
         self.reduction_ratio = reduction_ratio
+        self.activation = activation
         self.use_bias = use_bias
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-        self.activation = activations.get(activation)
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.bias_initializer = initializers.get(bias_initializer)
+        self.bias_regularizer = regularizers.get(bias_regularizer)
 
-        # Layer components (initialized in build)
-        self.input_channels: int = -1
-        self.bottleneck_channels: int = -1
-        self.global_pool: Optional[layers.Layer] = None
+        # Get activation function
+        self.reduction_activation = activations.get(activation)
+
+        # Sub-layers (created in build due to shape dependency)
+        self.input_channels: Optional[int] = None
+        self.bottleneck_channels: Optional[int] = None
+        self.global_pool: Optional[layers.GlobalAveragePooling2D] = None
         self.conv_reduce: Optional[layers.Conv2D] = None
         self.conv_restore: Optional[layers.Conv2D] = None
 
-        # Store build input shape for serialization
-        self._build_input_shape: Optional[Tuple[int, ...]] = None
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build the layer and create all sub-layers.
 
-    def build(self, input_shape: Tuple[int, ...]) -> None:
-        """Builds the layer with given input shape.
+        This method creates sub-layers based on input shape since the SE block
+        needs to know the number of input channels to create the bottleneck.
 
         Args:
-            input_shape: Tuple of integers defining the input shape.
+            input_shape: Shape of the input tensor.
                 Expected format: (batch_size, height, width, channels)
+
+        Raises:
+            ValueError: If input_shape doesn't have channel dimension.
         """
-        # Store input shape for serialization
-        self._build_input_shape = input_shape
+        if len(input_shape) != 4:
+            raise ValueError(
+                f"Expected 4D input shape (batch, height, width, channels), "
+                f"got {len(input_shape)}D: {input_shape}"
+            )
 
         self.input_channels = input_shape[-1]
+        if self.input_channels is None:
+            raise ValueError("Last dimension (channels) of input must be defined")
+
+        # Calculate bottleneck channels
         self.bottleneck_channels = max(1, int(round(
             self.input_channels * self.reduction_ratio
         )))
 
-        logger.info(f"Building SqueezeExcitation layer: "
-                   f"input_channels={self.input_channels}, "
-                   f"bottleneck_channels={self.bottleneck_channels}")
+        logger.info(
+            f"Building SqueezeExcitation: input_channels={self.input_channels}, "
+            f"bottleneck_channels={self.bottleneck_channels}"
+        )
 
-        # Global pooling for squeeze operation
-        self.global_pool = layers.GlobalAveragePooling2D(keepdims=True)
+        # CREATE all sub-layers
+        self.global_pool = layers.GlobalAveragePooling2D(
+            keepdims=True,
+            name='global_pool'
+        )
 
-        # Channel reduction convolution
         self.conv_reduce = layers.Conv2D(
             filters=self.bottleneck_channels,
-            kernel_size=(1, 1),
+            kernel_size=1,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            name="conv_reduce"
+            bias_initializer=self.bias_initializer,
+            bias_regularizer=self.bias_regularizer,
+            name='conv_reduce'
         )
 
-        # Channel restoration convolution
         self.conv_restore = layers.Conv2D(
             filters=self.input_channels,
-            kernel_size=(1, 1),
+            kernel_size=1,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            name="conv_restore"
+            bias_initializer=self.bias_initializer,
+            bias_regularizer=self.bias_regularizer,
+            name='conv_restore'
         )
 
+        # BUILD sub-layers explicitly for robust serialization
+        # Compute intermediate shapes for building
+        pooled_shape = (input_shape[0], 1, 1, input_shape[-1])
+
+        self.global_pool.build(input_shape)
+        self.conv_reduce.build(pooled_shape)
+
+        reduced_shape = (pooled_shape[0], 1, 1, self.bottleneck_channels)
+        self.conv_restore.build(reduced_shape)
+
+        # Call parent build
         super().build(input_shape)
 
     def call(
-            self,
-            inputs: keras.KerasTensor,
-            training: Optional[bool] = None
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass of the layer.
+        """
+        Forward pass of the SE block.
 
         Args:
             inputs: Input tensor with shape (batch_size, height, width, channels).
-            training: Boolean indicating whether in training mode.
+            training: Boolean indicating whether the layer should behave in
+                training mode (applying dropout) or inference mode.
 
         Returns:
             Output tensor after applying SE operations with same shape as input.
         """
-        # Squeeze operation - global average pooling
-        x = self.global_pool(inputs)
+        # Squeeze: Global average pooling to capture channel statistics
+        squeezed = self.global_pool(inputs)
 
-        # Excitation operation
-        x = self.conv_reduce(x, training=training)
-        x = self.activation(x)
-        x = self.conv_restore(x, training=training)
-        x = activations.sigmoid(x)
+        # Excitation: Two-step channel recalibration
+        # Step 1: Dimensionality reduction with activation
+        excited = self.conv_reduce(squeezed, training=training)
+        excited = self.reduction_activation(excited)
 
-        # Scale original inputs by attention weights
-        return ops.multiply(inputs, x)
+        # Step 2: Dimensionality restoration with sigmoid gating
+        excited = self.conv_restore(excited, training=training)
+        attention_weights = activations.sigmoid(excited)
 
-    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
-        """Compute the output shape of the layer.
+        # Scale: Apply learned attention weights to original features
+        return ops.multiply(inputs, attention_weights)
+
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape of the layer.
 
         Args:
-            input_shape: Shape of the input tensor.
+            input_shape: Shape tuple of the input tensor.
 
         Returns:
-            Output shape tuple (same as input shape).
+            Output shape tuple (same as input shape for SE blocks).
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Returns the config of the layer.
+        """
+        Return layer configuration for serialization.
 
         Returns:
-            Dictionary containing the layer configuration.
+            Dictionary containing all configuration parameters needed to
+            reconstruct the layer.
         """
         config = super().get_config()
         config.update({
-            "reduction_ratio": self.reduction_ratio,
-            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
-            "activation": activations.serialize(self.activation),
-            "use_bias": self.use_bias,
+            'reduction_ratio': self.reduction_ratio,
+            'activation': activations.serialize(self.reduction_activation),
+            'use_bias': self.use_bias,
+            'kernel_initializer': initializers.serialize(self.kernel_initializer),
+            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
+            'bias_initializer': initializers.serialize(self.bias_initializer),
+            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the build configuration for serialization.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a build configuration.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
-# ---------------------------------------------------------------------
