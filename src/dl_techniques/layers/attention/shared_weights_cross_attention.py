@@ -2,7 +2,7 @@
 
 import keras
 from keras import ops
-from typing import Any
+from typing import Any, List, Union, Tuple, Optional
 
 # ---------------------------------------------------------------------
 
@@ -24,12 +24,18 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
     data types need to exchange information efficiently.
 
     Args:
-        dim: Integer, input/output dimension of the attention layer.
-        num_heads: Integer, number of attention heads. Defaults to 8.
-        dropout_rate: Float, dropout rate for attention weights. Defaults to 0.0.
+        dim: Integer, input/output dimension of the attention layer. Must be positive
+            and divisible by num_heads.
+        num_heads: Integer, number of attention heads. Must be positive. Defaults to 8.
+        dropout_rate: Float, dropout rate for attention weights. Must be between 0 and 1.
+            Defaults to 0.0.
         use_bias: Boolean, whether to use bias in linear projections. Defaults to True.
-        kernel_initializer: Initializer for the kernel weights.
-        bias_initializer: Initializer for the bias vector.
+        kernel_initializer: String or initializer instance for kernel weights.
+            Defaults to 'glorot_uniform'.
+        bias_initializer: String or initializer instance for bias weights.
+            Defaults to 'zeros'.
+        kernel_regularizer: Optional regularizer for kernel weights. Defaults to None.
+        bias_regularizer: Optional regularizer for bias weights. Defaults to None.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
@@ -50,33 +56,40 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
     Returns:
         Output tensor with cross-attended features, same shape as input.
 
+    Raises:
+        ValueError: If dim is not divisible by num_heads.
+        ValueError: If dim or num_heads are not positive.
+        ValueError: If dropout_rate is not between 0 and 1.
+
     Example:
-        >>> # Multi-modal cross-attention (surface and volume data)
-        >>> surface_features = keras.random.normal((2, 100, 256))  # Surface data
-        >>> volume_features = keras.random.normal((2, 150, 256))   # Volume data
-        >>>
-        >>> # Concatenate modalities
-        >>> combined = ops.concatenate([surface_features, volume_features], axis=1)
-        >>>
-        >>> cross_attn = SharedWeightsCrossAttention(dim=256, num_heads=8)
-        >>>
-        >>> # Cross-attention between modalities
-        >>> output = cross_attn(combined, split_sizes=[100, 150])
-        >>> print(output.shape)  # (2, 250, 256)
-        >>>
-        >>> # With anchor-query structure
-        >>> surface_anchors = keras.random.normal((2, 50, 256))
-        >>> surface_queries = keras.random.normal((2, 50, 256))
-        >>> volume_anchors = keras.random.normal((2, 75, 256))
-        >>> volume_queries = keras.random.normal((2, 75, 256))
-        >>>
-        >>> combined_aq = ops.concatenate([
-        ...     surface_anchors, surface_queries,
-        ...     volume_anchors, volume_queries
-        ... ], axis=1)
-        >>>
-        >>> output_aq = cross_attn(combined_aq, split_sizes=[50, 50, 75, 75])
-        >>> print(output_aq.shape)  # (2, 250, 256)
+        ```python
+        # Multi-modal cross-attention (surface and volume data)
+        surface_features = keras.random.normal((2, 100, 256))  # Surface data
+        volume_features = keras.random.normal((2, 150, 256))   # Volume data
+
+        # Concatenate modalities
+        combined = ops.concatenate([surface_features, volume_features], axis=1)
+
+        cross_attn = SharedWeightsCrossAttention(dim=256, num_heads=8)
+
+        # Cross-attention between modalities
+        output = cross_attn(combined, split_sizes=[100, 150])
+        print(output.shape)  # (2, 250, 256)
+
+        # With anchor-query structure
+        surface_anchors = keras.random.normal((2, 50, 256))
+        surface_queries = keras.random.normal((2, 50, 256))
+        volume_anchors = keras.random.normal((2, 75, 256))
+        volume_queries = keras.random.normal((2, 75, 256))
+
+        combined_aq = ops.concatenate([
+            surface_anchors, surface_queries,
+            volume_anchors, volume_queries
+        ], axis=1)
+
+        output_aq = cross_attn(combined_aq, split_sizes=[50, 50, 75, 75])
+        print(output_aq.shape)  # (2, 250, 256)
+        ```
     """
 
     def __init__(
@@ -85,15 +98,25 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             num_heads: int = 8,
             dropout_rate: float = 0.0,
             use_bias: bool = True,
-            kernel_initializer: str = "glorot_uniform",
-            bias_initializer: str = "zeros",
+            kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+            bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
+        # Validate inputs
+        if dim <= 0:
+            raise ValueError(f"dim must be positive, got {dim}")
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
         if dim % num_heads != 0:
             raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
 
+        # Store all configuration
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -101,22 +124,45 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Scale factor for attention scores
         self.scale = 1.0 / ops.sqrt(float(self.head_dim))
 
-        # Store build information
-        self._build_input_shape = None
+        # CREATE all sub-layers in __init__ (they are unbuilt)
+        self.qkv_dense = keras.layers.Dense(
+            self.dim * 3,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+            name="qkv"
+        )
 
-        # Will be created in build()
-        self.qkv_dense = None
-        self.proj_dense = None
-        self.dropout_layer = None
+        self.proj_dense = keras.layers.Dense(
+            self.dim,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+            name="proj"
+        )
 
-    def build(self, input_shape):
-        """Build the layer weights."""
-        self._build_input_shape = input_shape
+        # Conditionally create dropout layer
+        if self.dropout_rate > 0.0:
+            self.dropout_layer = keras.layers.Dropout(self.dropout_rate, name="dropout")
+        else:
+            self.dropout_layer = None
 
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build the layer and all its sub-layers.
+
+        CRITICAL: Explicitly build each sub-layer for robust serialization.
+        """
         if len(input_shape) != 3:
             raise ValueError(f"Input must be 3D, got shape {input_shape}")
 
@@ -124,31 +170,24 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             raise ValueError(f"Last dimension of input ({input_shape[-1]}) "
                              f"must match dim ({self.dim})")
 
-        # Shared QKV projection for all modalities
-        self.qkv_dense = keras.layers.Dense(
-            self.dim * 3,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            name="qkv"
-        )
+        # Build sub-layers explicitly for robust serialization
+        self.qkv_dense.build(input_shape)
+        self.proj_dense.build(input_shape)
 
-        # Output projection
-        self.proj_dense = keras.layers.Dense(
-            self.dim,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            name="proj"
-        )
+        if self.dropout_layer is not None:
+            # Dropout layer needs to be built with attention weights shape
+            # For simplicity, we'll let it build automatically during call
+            pass
 
-        # Dropout layer
-        if self.dropout_rate > 0.0:
-            self.dropout_layer = keras.layers.Dropout(self.dropout_rate)
-
+        # Always call parent build at the end
         super().build(input_shape)
 
-    def call(self, x, split_sizes, training=None):
+    def call(
+        self,
+        x: keras.KerasTensor,
+        split_sizes: Union[List[int], Tuple[int, ...]],
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """Apply shared weights cross-attention.
 
         Args:
@@ -187,7 +226,14 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             # Four splits: anchors and queries for two modalities
             return self._anchor_query_attention(q, k, v, split_sizes, training)
 
-    def _two_modality_attention(self, q, k, v, split_sizes, training):
+    def _two_modality_attention(
+        self,
+        q: keras.KerasTensor,
+        k: keras.KerasTensor,
+        v: keras.KerasTensor,
+        split_sizes: Union[List[int], Tuple[int, ...]],
+        training: Optional[bool]
+    ) -> keras.KerasTensor:
         """Cross-attention between two modalities."""
         mod_a_len, mod_b_len = split_sizes
 
@@ -242,7 +288,14 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
 
         return self.proj_dense(combined_out)
 
-    def _anchor_query_attention(self, q, k, v, split_sizes, training):
+    def _anchor_query_attention(
+        self,
+        q: keras.KerasTensor,
+        k: keras.KerasTensor,
+        v: keras.KerasTensor,
+        split_sizes: Union[List[int], Tuple[int, ...]],
+        training: Optional[bool]
+    ) -> keras.KerasTensor:
         """Attention with anchor-query structure for two modalities."""
         mod_a_anchor, mod_a_query, mod_b_anchor, mod_b_query = split_sizes
 
@@ -285,12 +338,12 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
 
         return self.proj_dense(combined_out)
 
-    def compute_output_shape(self, input_shape):
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer."""
         return input_shape
 
-    def get_config(self):
-        """Returns the layer configuration."""
+    def get_config(self) -> dict[str, Any]:
+        """Returns the layer configuration for serialization."""
         config = super().get_config()
         config.update({
             "dim": self.dim,
@@ -299,16 +352,9 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-    def get_build_config(self):
-        """Get build configuration."""
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config):
-        """Build from configuration."""
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------
