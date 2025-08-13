@@ -1,50 +1,5 @@
-"""
-This module provides the implementation of `CountingFFN`, a custom Keras 3 layer
-designed to explicitly model and integrate counting mechanisms within a sequence.
-It offers a powerful alternative to standard Feed-Forward Network (FFN) blocks,
-especially for tasks where sequence-level enumeration, frequency, or positional
-awareness is a critical component.
-
-The core idea is to equip the network with the ability to identify specific
-features or "events" at each position in the sequence, aggregate their counts
-across a defined scope, and then fuse this count-based information back into the
-token representations. This provides a strong inductive bias for tasks that
-benefit from understanding "how many" of something has occurred.
-
-Core Concepts:
--------------
-The `CountingFFN` layer operates through a sequence of carefully designed steps:
-
-1.  **Feature Identification & Soft Event Creation:**
-    An input projection combined with a sigmoid activation function identifies
-    "countable" features. This transforms each token's representation into a
-    vector of "soft events"—continuous values between 0 and 1 that represent the
-    probability of an event's occurrence at that position.
-
-2.  **Scoped Event Aggregation:**
-    The soft events are aggregated according to a specified `counting_scope`,
-    which determines the context for the count:
-    - **global:** A sum across the entire sequence, providing each token with a
-      global count of all events.
-    - **causal:** A cumulative sum from the beginning of the sequence to the
-      current token, modeling a forward-looking count.
-    - **local:** A bidirectional cumulative sum, capturing counts from both the
-      start of the sequence and the end, providing rich local context.
-
-3.  **Count Information Transformation:**
-    The aggregated count vectors are passed through a non-linear transformation
-    (a dense layer with configurable activation) to process and enrich the raw
-    count information, preparing it for integration.
-
-4.  **Gated Integration:**
-    A dynamic gating mechanism, controlled by another projection from the original
-    input, learns to blend the original token representation with the newly
-    computed count-based information. This allows the model to adaptively decide
-    how much counting information to incorporate for each token.
-"""
-
 import keras
-from typing import Literal, Tuple, Optional, Union
+from typing import Literal, Tuple, Optional, Union, Any, Dict
 
 # ---------------------------------------------------------------------
 # local imports
@@ -73,14 +28,18 @@ class CountingFFN(keras.layers.Layer):
                    both directions.
     3.  The aggregated counts are transformed into a feature-rich representation
         using a configurable activation function.
-    4.  A learned gate blends the original input with the transformed count
-        information, allowing the model to adaptively use this new feature.
+    4.  A learned gate controls the integration of count information:
+        - If output_dim == input_dim: Performs residual-style blending between
+          the original input and transformed counts.
+        - If output_dim != input_dim: Gates the transformed counts directly
+          (no residual connection possible due to dimension mismatch).
 
     Args:
-        output_dim: Integer, the final output dimension of the layer. For use in
-            residual architectures, this should match the input dimension.
+        output_dim: Integer, the final output dimension of the layer. For residual
+            architectures, this should match the input dimension to enable
+            residual-style blending. Must be positive.
         count_dim: Integer, the intermediate dimension for the counting projection.
-            Controls the complexity of features that can be counted.
+            Controls the complexity of features that can be counted. Must be positive.
         counting_scope: String, the scope of counting. Must be one of
             'global', 'local', or 'causal'. Defaults to 'local'.
         activation: String name of activation function or activation function to use
@@ -101,38 +60,52 @@ class CountingFFN(keras.layers.Layer):
     Output shape:
         3D tensor with shape: `(batch_size, sequence_length, output_dim)`
 
+    Raises:
+        ValueError: If output_dim or count_dim is not positive.
+        ValueError: If counting_scope is not one of 'global', 'local', 'causal'.
+
     Example:
         ```python
-        # Basic usage with causal counting and default GELU activation
-        layer = CountingFFN(output_dim=768, count_dim=128, counting_scope='causal')
+        # Residual-style usage (output_dim matches input_dim for blending)
+        input_dim = 768
+        inputs = keras.Input(shape=(128, input_dim))
+        counted_features = CountingFFN(
+            output_dim=input_dim,  # Same as input for residual blending
+            count_dim=128,
+            counting_scope='causal',
+            activation='gelu'
+        )(inputs)
 
-        # Advanced configuration with ReLU activation and regularization
+        # Dimension-changing usage (no residual blending)
+        projection_layer = CountingFFN(
+            output_dim=512,  # Different from input_dim
+            count_dim=64,
+            counting_scope='local',
+            activation='swish'
+        )(inputs)  # Input: 768-dim, Output: 512-dim
+
+        # Different counting scopes for different use cases
+        global_counts = CountingFFN(
+            output_dim=256,
+            count_dim=32,
+            counting_scope='global'  # Each token sees global sequence counts
+        )(inputs)
+
+        causal_counts = CountingFFN(
+            output_dim=256,
+            count_dim=32,
+            counting_scope='causal'  # For autoregressive models
+        )(inputs)
+
+        # Advanced configuration with regularization
         layer = CountingFFN(
             output_dim=512,
-            count_dim=64,
+            count_dim=128,
             counting_scope='local',
             activation='relu',
             use_bias=False,
-            kernel_regularizer='l2'
+            kernel_regularizer=keras.regularizers.L2(1e-4)
         )
-
-        # Using Swish activation for smoother gradients
-        layer = CountingFFN(
-            output_dim=768,
-            count_dim=128,
-            activation='swish'
-        )
-
-        # In a transformer-style model
-        input_dim = 768
-        inputs = keras.Input(shape=(128, input_dim))
-        # output_dim must match input_dim for the residual connection
-        counted_features = CountingFFN(
-            output_dim=input_dim,
-            count_dim=128,
-            activation='gelu'
-        )(inputs)
-        model = keras.Model(inputs, counted_features)
         ```
 
     Note:
@@ -140,8 +113,8 @@ class CountingFFN(keras.layers.Layer):
         of feature frequency, enumeration, or relative positioning within a
         sequence. The `counting_scope` parameter is crucial for tailoring the
         layer's behavior to the specific task (e.g., 'causal' for auto-regressive
-        models). The activation function choice can significantly impact the
-        layer's ability to learn complex count transformations.
+        models). When output_dim matches input_dim, the layer performs residual-style
+        blending; otherwise, it acts as a dimension-changing transformation layer.
     """
 
     def __init__(
@@ -155,16 +128,22 @@ class CountingFFN(keras.layers.Layer):
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
 
+        # Validate inputs
+        if output_dim <= 0:
+            raise ValueError(f"output_dim must be positive, got {output_dim}")
+        if count_dim <= 0:
+            raise ValueError(f"count_dim must be positive, got {count_dim}")
         if counting_scope not in ["global", "local", "causal"]:
             raise ValueError(
                 f"counting_scope must be one of 'global', 'local', 'causal', "
                 f"but got {counting_scope}"
             )
 
+        # Store configuration parameters
         self.output_dim = output_dim
         self.count_dim = count_dim
         self.counting_scope = counting_scope
@@ -175,42 +154,10 @@ class CountingFFN(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # Store original activation name/function for serialization
+        # Store original activation for serialization
         self._activation_identifier = activation
 
-        # Layers will be initialized in build()
-        self.key_projection = None
-        self.count_transform = None
-        self.gate = None
-        self._build_input_shape = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the Counting FFN sublayers."""
-        if self.built:
-            return
-
-        self._build_input_shape = input_shape
-
-        # Validate input shape
-        if len(input_shape) < 2:
-            raise ValueError(
-                f"Input must be at least 2D, got {len(input_shape)}D: {input_shape}"
-            )
-        input_dim = input_shape[-1]
-        if input_dim is None:
-            raise ValueError("Input feature dimension must be specified")
-
-        logger.info(
-            f"Building CountingFFN: input_dim={input_dim}, output_dim={self.output_dim}, "
-            f"count_dim={self.count_dim}, counting_scope='{self.counting_scope}', "
-            f"activation='{self._activation_identifier}'"
-        )
-        if self.output_dim != input_dim:
-            logger.warning(
-                f"output_dim ({self.output_dim}) does not match input_dim ({input_dim}). "
-                "The layer will not perform a residual-style blend."
-            )
-
+        # CREATE all sub-layers in __init__ following modern Keras 3 pattern
         # Layer to identify "countable events"
         self.key_projection = keras.layers.Dense(
             self.count_dim,
@@ -224,9 +171,10 @@ class CountingFFN(keras.layers.Layer):
         )
 
         # Layer to transform aggregated counts with configurable activation
-        count_input_dim = self.count_dim
-        if self.counting_scope == "local":
-            count_input_dim *= 2  # Forward and backward counts are concatenated
+        # Note: The actual input dimension is determined dynamically based on counting_scope
+        # For 'local' scope, we concatenate forward and backward counts (2 * count_dim)
+        # For 'global' and 'causal' scopes, it's just count_dim
+        count_transform_input_dim = self.count_dim * 2 if self.counting_scope == "local" else self.count_dim
 
         self.count_transform = keras.layers.Dense(
             self.output_dim,
@@ -251,11 +199,52 @@ class CountingFFN(keras.layers.Layer):
             name="gate",
         )
 
-        # Build sublayers with their respective input shapes
-        self.key_projection.build(input_shape)
-        self.gate.build(input_shape)
-        self.count_transform.build(tuple(input_shape[:-1]) + (count_input_dim,))
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build the Counting FFN and all its sub-layers.
 
+        CRITICAL: Explicitly build each sub-layer for robust serialization.
+        """
+        if self.built:
+            return
+
+        # Validate input shape
+        if len(input_shape) < 2:
+            raise ValueError(
+                f"Input must be at least 2D, got {len(input_shape)}D: {input_shape}"
+            )
+        input_dim = input_shape[-1]
+        if input_dim is None:
+            raise ValueError("Input feature dimension must be specified")
+
+        logger.info(
+            f"Building CountingFFN: input_dim={input_dim}, output_dim={self.output_dim}, "
+            f"count_dim={self.count_dim}, counting_scope='{self.counting_scope}', "
+            f"activation='{self._activation_identifier}'"
+        )
+
+        if self.output_dim != input_dim:
+            logger.warning(
+                f"output_dim ({self.output_dim}) does not match input_dim ({input_dim}). "
+                "The layer will use gated count transformation instead of residual-style blending."
+            )
+
+        # Build sub-layers in computational order for robust serialization
+        # 1. Build key projection (takes original input)
+        self.key_projection.build(input_shape)
+
+        # 2. Build gate (takes original input)
+        self.gate.build(input_shape)
+
+        # 3. Build count transform (takes aggregated counts)
+        count_input_dim = self.count_dim
+        if self.counting_scope == "local":
+            count_input_dim *= 2  # Forward and backward counts are concatenated
+
+        count_transform_input_shape = tuple(input_shape[:-1]) + (count_input_dim,)
+        self.count_transform.build(count_transform_input_shape)
+
+        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -308,9 +297,18 @@ class CountingFFN(keras.layers.Layer):
         # Shape: (batch, seq, output_dim)
         gate_values = self.gate(inputs, training=training)
 
-        # 5. Blend the original input with the count information
-        # The gate decides how much count information to let through
-        output = (gate_values * transformed_counts) + ((1 - gate_values) * inputs)
+        # 5. Blend the count information based on dimensions compatibility
+        input_dim = keras.ops.shape(inputs)[-1]
+
+        if self.output_dim == input_dim:
+            # When dimensions match, perform residual-style blending with original input
+            # The gate decides how much count information vs original input to use
+            output = (gate_values * transformed_counts) + ((1 - gate_values) * inputs)
+        else:
+            # When dimensions don't match, we can't blend with original input
+            # Instead, gate controls how much of the transformed counts to use
+            # Gate of 1.0 = full transformed counts, gate of 0.0 = zeros
+            output = gate_values * transformed_counts
 
         return output
 
@@ -326,7 +324,7 @@ class CountingFFN(keras.layers.Layer):
         """
         return tuple(input_shape[:-1]) + (self.output_dim,)
 
-    def get_config(self) -> dict:
+    def get_config(self) -> Dict[str, Any]:
         """
         Returns the layer configuration for serialization.
 
@@ -346,26 +344,3 @@ class CountingFFN(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-    def get_build_config(self) -> dict:
-        """
-        Get build configuration for proper serialization.
-
-        Returns:
-            Dictionary containing build configuration.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: dict) -> None:
-        """
-        Build the layer from a configuration.
-
-        Args:
-            config: Dictionary containing build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
-# ---------------------------------------------------------------------
