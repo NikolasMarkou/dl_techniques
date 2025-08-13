@@ -8,11 +8,11 @@ serialization testing and production readiness validation.
 import pytest
 import tempfile
 import os
-from typing import Any, Dict, Tuple, Generator
+from typing import Any, Dict, Tuple
 import numpy as np
 
 import keras
-import keras.ops as ops
+from keras import ops
 import tensorflow as tf
 
 from dl_techniques.layers.radial_basis_function import RBFLayer
