@@ -469,7 +469,6 @@ class TestYOLOv12SegmentationHead:
         expected_shape = (2, 512, 512, 2)
         assert output.shape == expected_shape
 
-    @pytest.mark.xfail(reason="Serialization fails due to a presumed bug in the external SqueezeExcitation layer, not in the head itself.")
     def test_serialization_cycle(self, layer_config, sample_features):
         """CRITICAL TEST: Full serialization cycle following modern patterns."""
         # Create model with custom layer
