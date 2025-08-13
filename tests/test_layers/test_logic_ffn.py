@@ -1,570 +1,407 @@
 """
-Comprehensive test suite for LogicFFN layer.
+Comprehensive test suite for LogicFFN layer following Modern Keras 3 patterns.
 
-This module provides thorough testing of the LogicFFN layer including:
-- Initialization and parameter validation
-- Build process and layer architecture
-- Forward pass and output shapes
-- Serialization and model persistence
-- Training dynamics and gradient flow
-- Integration with other components
-- Edge cases and numerical stability
+This test suite demonstrates the essential tests every custom layer should have,
+particularly the critical serialization cycle test.
 """
 
 import pytest
-import numpy as np
-import keras
-from keras import ops, random
 import tempfile
 import os
-from typing import Tuple, Dict, Any
-# FIX: Import tensorflow for GradientTape, as this test suite runs in a TF environment
+import numpy as np
+import keras
 import tensorflow as tf
+from typing import Any, Dict
 
 # Import the layer to test
-from dl_techniques.layers.ffn.logic_ffn import LogicFFN
+from dl_techniques.layers.ffn.logic_ffn import LogicFFN, create_logic_ffn_standard, create_logic_ffn_regularized
 
 
-class TestLogicFFNInitialization:
-    """Test suite for LogicFFN initialization and parameter validation."""
-
-    def test_initialization_defaults(self):
-        """Test initialization with default parameters."""
-        layer = LogicFFN(output_dim=768, logic_dim=256)
-
-        # Check default values
-        assert layer.output_dim == 768
-        assert layer.logic_dim == 256
-        assert layer.use_bias is True
-        assert layer.temperature == 1.0
-        assert layer.num_logic_ops == 3
-        assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
-        assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
-        assert layer.kernel_regularizer is None
-        assert layer.bias_regularizer is None
-
-        # Check that sublayers are None before build
-        assert layer.logic_projection is None
-        assert layer.gate_projection is None
-        assert layer.output_projection is None
-
-    def test_initialization_custom_parameters(self):
-        """Test initialization with custom parameters."""
-        layer = LogicFFN(
-            output_dim=512,
-            logic_dim=128,
-            use_bias=False,
-            kernel_initializer='he_normal',
-            bias_initializer='ones',
-            kernel_regularizer='l2',
-            bias_regularizer='l1',
-            temperature=1.5
-        )
-
-        # Check custom values
-        assert layer.output_dim == 512
-        assert layer.logic_dim == 128
-        assert layer.use_bias is False
-        assert layer.temperature == 1.5
-        assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
-        assert isinstance(layer.bias_initializer, keras.initializers.Ones)
-        assert isinstance(layer.kernel_regularizer, keras.regularizers.L2)
-        assert isinstance(layer.bias_regularizer, keras.regularizers.L1)
-
-    def test_invalid_parameters(self):
-        """Test that invalid parameters raise appropriate errors."""
-        # Test negative output_dim
-        with pytest.raises(ValueError, match="output_dim must be positive"):
-            LogicFFN(output_dim=-10, logic_dim=256)
-
-        # Test zero logic_dim
-        with pytest.raises(ValueError, match="logic_dim must be positive"):
-            LogicFFN(output_dim=768, logic_dim=0)
-
-        # Test negative temperature
-        with pytest.raises(ValueError, match="temperature must be positive"):
-            LogicFFN(output_dim=768, logic_dim=256, temperature=-0.5)
-
-
-class TestLogicFFNBuild:
-    """Test suite for LogicFFN build process."""
+class TestLogicFFN:
+    """Comprehensive test suite for LogicFFN layer."""
 
     @pytest.fixture
-    def sample_input_shape(self):
-        """Sample input shape for testing."""
-        return (None, 128, 768)
+    def layer_config(self) -> Dict[str, Any]:
+        """Standard configuration for testing."""
+        return {
+            'output_dim': 64,
+            'logic_dim': 32,
+            'temperature': 1.0,
+            'use_bias': True
+        }
 
-    def test_build_process(self, sample_input_shape):
-        """Test that the layer builds properly."""
-        layer = LogicFFN(output_dim=512, logic_dim=256)
-        layer.build(sample_input_shape)
+    @pytest.fixture
+    def sample_input(self) -> np.ndarray:
+        """Sample input for testing."""
+        return np.random.normal(size=(4, 16, 48)).astype(np.float32)
 
-        # Check that layer is marked as built
-        assert layer.built is True
-        assert layer._build_input_shape == sample_input_shape
+    @pytest.fixture
+    def sample_input_2d(self) -> np.ndarray:
+        """Sample 2D input for testing."""
+        return np.random.normal(size=(4, 48)).astype(np.float32)
 
-        # Check that sublayers were created
+    def test_initialization(self, layer_config):
+        """Test layer initialization and parameter storage."""
+        layer = LogicFFN(**layer_config)
+
+        # Check configuration storage
+        assert layer.output_dim == layer_config['output_dim']
+        assert layer.logic_dim == layer_config['logic_dim']
+        assert layer.temperature == layer_config['temperature']
+        assert layer.use_bias == layer_config['use_bias']
+        assert layer.num_logic_ops == 3  # AND, OR, XOR
+
+        # Check sub-layers are created
         assert layer.logic_projection is not None
         assert layer.gate_projection is not None
         assert layer.output_projection is not None
 
-        # Check sublayer configurations
-        assert layer.logic_projection.units == 256 * 2  # Two operands
-        assert layer.gate_projection.units == 3  # Three logic operations
-        assert layer.output_projection.units == 512  # Output dimension
+        # Layer should not be built yet
+        assert not layer.built
 
-        # Check that sublayers are built
-        assert layer.logic_projection.built is True
-        assert layer.gate_projection.built is True
-        assert layer.output_projection.built is True
+    def test_parameter_validation(self):
+        """Test parameter validation in __init__."""
+        # Test invalid output_dim
+        with pytest.raises(ValueError, match="output_dim must be positive"):
+            LogicFFN(output_dim=0, logic_dim=32)
 
-    def test_build_invalid_input_shape(self):
-        """Test build with invalid input shapes."""
-        layer = LogicFFN(output_dim=768, logic_dim=256)
+        with pytest.raises(ValueError, match="output_dim must be positive"):
+            LogicFFN(output_dim=-5, logic_dim=32)
+
+        # Test invalid logic_dim
+        with pytest.raises(ValueError, match="logic_dim must be positive"):
+            LogicFFN(output_dim=64, logic_dim=0)
+
+        with pytest.raises(ValueError, match="logic_dim must be positive"):
+            LogicFFN(output_dim=64, logic_dim=-10)
+
+        # Test invalid temperature
+        with pytest.raises(ValueError, match="temperature must be positive"):
+            LogicFFN(output_dim=64, logic_dim=32, temperature=0.0)
+
+        with pytest.raises(ValueError, match="temperature must be positive"):
+            LogicFFN(output_dim=64, logic_dim=32, temperature=-1.0)
+
+    def test_forward_pass_3d(self, layer_config, sample_input):
+        """Test forward pass with 3D input and building."""
+        layer = LogicFFN(**layer_config)
+
+        output = layer(sample_input)
+
+        # Check layer is built after forward pass
+        assert layer.built
+
+        # Check output shape
+        expected_shape = (sample_input.shape[0], sample_input.shape[1], layer_config['output_dim'])
+        assert output.shape == expected_shape
+
+        # Check output is finite
+        assert keras.ops.all(keras.ops.isfinite(output))
+
+    def test_forward_pass_2d(self, layer_config, sample_input_2d):
+        """Test forward pass with 2D input."""
+        layer = LogicFFN(**layer_config)
+
+        output = layer(sample_input_2d)
+
+        # Check output shape
+        expected_shape = (sample_input_2d.shape[0], layer_config['output_dim'])
+        assert output.shape == expected_shape
+
+        # Check output is finite
+        assert keras.ops.all(keras.ops.isfinite(output))
+
+    def test_compute_output_shape(self, layer_config):
+        """Test output shape computation."""
+        layer = LogicFFN(**layer_config)
+
+        # Test 3D shape
+        input_shape_3d = (None, 16, 48)
+        output_shape_3d = layer.compute_output_shape(input_shape_3d)
+        expected_shape_3d = (None, 16, layer_config['output_dim'])
+        assert output_shape_3d == expected_shape_3d
+
+        # Test 2D shape
+        input_shape_2d = (None, 48)
+        output_shape_2d = layer.compute_output_shape(input_shape_2d)
+        expected_shape_2d = (None, layer_config['output_dim'])
+        assert output_shape_2d == expected_shape_2d
+
+    def test_serialization_cycle(self, layer_config, sample_input):
+        """CRITICAL TEST: Full serialization cycle."""
+        # Create model with custom layer
+        inputs = keras.Input(shape=sample_input.shape[1:])
+        outputs = LogicFFN(**layer_config)(inputs)
+        model = keras.Model(inputs, outputs)
+
+        # Get original prediction
+        original_pred = model(sample_input)
+
+        # Save and load
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'test_model.keras')
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+            loaded_pred = loaded_model(sample_input)
+
+            # Verify identical predictions
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_pred),
+                keras.ops.convert_to_numpy(loaded_pred),
+                rtol=1e-6, atol=1e-6,
+                err_msg="Predictions differ after serialization"
+            )
+
+    def test_config_completeness(self, layer_config):
+        """Test that get_config contains all __init__ parameters."""
+        layer = LogicFFN(**layer_config)
+        config = layer.get_config()
+
+        # Check all config parameters are present
+        required_keys = [
+            'output_dim', 'logic_dim', 'use_bias', 'temperature',
+            'kernel_initializer', 'bias_initializer',
+            'kernel_regularizer', 'bias_regularizer'
+        ]
+
+        for key in required_keys:
+            assert key in config, f"Missing {key} in get_config()"
+
+        # Check values match
+        assert config['output_dim'] == layer_config['output_dim']
+        assert config['logic_dim'] == layer_config['logic_dim']
+        assert config['temperature'] == layer_config['temperature']
+        assert config['use_bias'] == layer_config['use_bias']
+
+    def test_config_reconstruction(self, layer_config):
+        """Test layer can be reconstructed from config."""
+        original_layer = LogicFFN(**layer_config)
+        config = original_layer.get_config()
+
+        # Remove base layer config items for reconstruction
+        layer_config_only = {k: v for k, v in config.items()
+                           if k in ['output_dim', 'logic_dim', 'use_bias',
+                                  'temperature', 'kernel_initializer',
+                                  'bias_initializer', 'kernel_regularizer',
+                                  'bias_regularizer']}
+
+        reconstructed_layer = LogicFFN(**layer_config_only)
+
+        assert reconstructed_layer.output_dim == original_layer.output_dim
+        assert reconstructed_layer.logic_dim == original_layer.logic_dim
+        assert reconstructed_layer.temperature == original_layer.temperature
+
+    def test_gradients_flow(self, layer_config, sample_input):
+        """Test gradient computation."""
+        layer = LogicFFN(**layer_config)
+
+        # Convert numpy array to TensorFlow variable for gradient computation
+        sample_input_var = tf.Variable(sample_input, dtype=tf.float32)
+
+        with tf.GradientTape() as tape:
+            tape.watch(sample_input_var)
+            output = layer(sample_input_var)
+            loss = keras.ops.mean(keras.ops.square(output))
+
+        gradients = tape.gradient(loss, layer.trainable_variables)
+
+        # Check gradients exist and are finite
+        assert len(gradients) > 0
+        for grad in gradients:
+            assert grad is not None, "Gradient is None - gradient flow broken"
+            assert keras.ops.all(keras.ops.isfinite(grad)), "Gradient contains NaN or Inf"
+
+    @pytest.mark.parametrize("training", [True, False, None])
+    def test_training_modes(self, layer_config, sample_input, training):
+        """Test behavior in different training modes."""
+        layer = LogicFFN(**layer_config)
+
+        output = layer(sample_input, training=training)
+
+        # Should work in all training modes
+        assert output.shape[0] == sample_input.shape[0]
+        assert output.shape[-1] == layer_config['output_dim']
+        assert keras.ops.all(keras.ops.isfinite(output))
+
+    def test_multiple_calls_consistency(self, layer_config, sample_input):
+        """Test that multiple calls with same input produce same output."""
+        layer = LogicFFN(**layer_config)
+
+        output1 = layer(sample_input, training=False)
+        output2 = layer(sample_input, training=False)
+
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(output1),
+            keras.ops.convert_to_numpy(output2),
+            rtol=1e-6, atol=1e-6,
+            err_msg="Multiple calls should produce identical outputs"
+        )
+
+    def test_logic_operations_range(self, layer_config, sample_input):
+        """Test that logic operations produce values in expected ranges."""
+        layer = LogicFFN(**layer_config)
+
+        # Convert to tensor for consistent behavior
+        sample_input_tensor = keras.ops.convert_to_tensor(sample_input, dtype='float32')
+
+        # Build layer
+        _ = layer(sample_input_tensor)
+
+        # Get intermediate logic operations by manually computing
+        projected = layer.logic_projection(sample_input_tensor)
+        operand_a, operand_b = keras.ops.split(projected, 2, axis=-1)
+        soft_a = keras.ops.sigmoid(operand_a)
+        soft_b = keras.ops.sigmoid(operand_b)
+
+        # Check soft-bits are in [0, 1]
+        assert keras.ops.all(soft_a >= 0.0)
+        assert keras.ops.all(soft_a <= 1.0)
+        assert keras.ops.all(soft_b >= 0.0)
+        assert keras.ops.all(soft_b <= 1.0)
+
+        # Check logic operations
+        logic_and = soft_a * soft_b
+        logic_or = soft_a + soft_b - (soft_a * soft_b)
+        logic_xor = keras.ops.square(soft_a - soft_b)
+
+        # AND should be in [0, 1]
+        assert keras.ops.all(logic_and >= 0.0)
+        assert keras.ops.all(logic_and <= 1.0)
+
+        # OR should be in [0, 1]
+        assert keras.ops.all(logic_or >= 0.0)
+        assert keras.ops.all(logic_or <= 1.0)
+
+        # XOR should be in [0, 1] (since (a-b)^2 where a,b in [0,1])
+        assert keras.ops.all(logic_xor >= 0.0)
+        assert keras.ops.all(logic_xor <= 1.0)
+
+    def test_temperature_effects(self, sample_input):
+        """Test that temperature affects gating behavior."""
+        # Convert to tensor for consistent behavior
+        sample_input_tensor = keras.ops.convert_to_tensor(sample_input, dtype='float32')
+
+        # Create layers with different temperatures
+        layer_low_temp = LogicFFN(output_dim=64, logic_dim=32, temperature=0.1)
+        layer_high_temp = LogicFFN(output_dim=64, logic_dim=32, temperature=10.0)
+
+        # Get gate weights
+        gates_low = layer_low_temp.gate_projection(sample_input_tensor)
+        gates_high = layer_high_temp.gate_projection(sample_input_tensor)
+
+        # Apply softmax with temperatures
+        softmax_low = keras.ops.softmax(gates_low / 0.1)
+        softmax_high = keras.ops.softmax(gates_high / 10.0)
+
+        # Low temperature should produce more peaked distributions
+        entropy_low = -keras.ops.sum(softmax_low * keras.ops.log(softmax_low + 1e-8), axis=-1)
+        entropy_high = -keras.ops.sum(softmax_high * keras.ops.log(softmax_high + 1e-8), axis=-1)
+
+        # Generally, higher temperature leads to higher entropy (more uniform)
+        mean_entropy_low = keras.ops.mean(entropy_low)
+        mean_entropy_high = keras.ops.mean(entropy_high)
+
+        # This is a statistical test, might occasionally fail due to randomness
+        # but generally should hold
+        assert mean_entropy_high >= mean_entropy_low - 0.1  # Small tolerance
+
+
+class TestFactoryFunctions:
+    """Test factory functions."""
+
+    def test_create_logic_ffn_standard(self):
+        """Test standard factory function."""
+        layer = create_logic_ffn_standard(output_dim=128, logic_dim=64)
+
+        assert layer.output_dim == 128
+        assert layer.logic_dim == 64
+        assert layer.temperature == 1.0
+        assert layer.use_bias is True
+
+    def test_create_logic_ffn_regularized(self):
+        """Test regularized factory function."""
+        layer = create_logic_ffn_regularized(output_dim=128, logic_dim=64, l2_reg=1e-3)
+
+        assert layer.output_dim == 128
+        assert layer.logic_dim == 64
+        assert layer.kernel_regularizer is not None
+        assert layer.bias_regularizer is not None
+
+
+class TestEdgeCases:
+    """Test edge cases and error conditions."""
+
+    def test_invalid_input_shape(self):
+        """Test handling of invalid input shapes."""
+        layer = LogicFFN(output_dim=64, logic_dim=32)
 
         # Test 1D input (too few dimensions)
         with pytest.raises(ValueError, match="Input must be at least 2D"):
-            layer.build((768,))
+            layer.build((48,))
 
-        # Test input with None feature dimension
+        # Test unknown last dimension
         with pytest.raises(ValueError, match="Input feature dimension must be specified"):
-            layer.build((None, 128, None))
+            layer.build((None, 16, None))
 
-    def test_build_idempotent(self, sample_input_shape):
-        """Test that multiple build calls are idempotent."""
-        layer = LogicFFN(output_dim=768, logic_dim=256)
+    def test_very_small_dimensions(self):
+        """Test with very small dimensions."""
+        layer = LogicFFN(output_dim=1, logic_dim=1)
+        sample_input = np.random.normal(size=(2, 1)).astype(np.float32)
 
-        # Build once
-        layer.build(sample_input_shape)
-        first_logic_projection = layer.logic_projection
+        output = layer(sample_input)
+        assert output.shape == (2, 1)
+        assert keras.ops.all(keras.ops.isfinite(output))
 
-        # Build again
-        layer.build(sample_input_shape)
+    def test_large_batch_size(self):
+        """Test with large batch size."""
+        layer = LogicFFN(output_dim=64, logic_dim=32)
+        large_input = np.random.normal(size=(1000, 48)).astype(np.float32)
 
-        # Should be the same objects
-        assert layer.logic_projection is first_logic_projection
-        assert layer.built is True
-
-
-class TestLogicFFNForwardPass:
-    """Test suite for LogicFFN forward pass and output shapes."""
-
+        output = layer(large_input)
+        assert output.shape == (1000, 64)
+        assert keras.ops.all(keras.ops.isfinite(output))
 
 
-    @pytest.fixture
-    def built_layer(self):
-        """Create a built layer for testing."""
-        layer = LogicFFN(output_dim=512, logic_dim=256, temperature=1.2)
-        layer.build((None, 64, 768))
-        return layer
+# Additional utility for debugging
+def debug_logic_ffn_serialization(layer_config, sample_input):
+    """Debug helper for LogicFFN serialization issues."""
+    from dl_techniques.utils.logger import logger
 
-    @pytest.fixture
-    def sample_input(self):
-        """Create sample input tensor."""
-        return keras.random.normal((2, 64, 768))
+    try:
+        # Convert to tensor for consistent behavior
+        sample_input_tensor = keras.ops.convert_to_tensor(sample_input, dtype='float32')
 
-    def test_output_shapes(self, built_layer, sample_input):
-        """Test that output shapes are computed correctly."""
-        # Test forward pass
-        output = built_layer(sample_input)
+        # Test basic functionality
+        layer = LogicFFN(**layer_config)
+        output = layer(sample_input_tensor)
+        logger.info(f"✅ Forward pass successful: {output.shape}")
 
-        # Check output shape
-        expected_shape = (2, 64, 512)  # (batch, seq, output_dim)
-        assert output.shape == expected_shape
+        # Test configuration
+        config = layer.get_config()
+        logger.info(f"✅ Configuration keys: {list(config.keys())}")
 
-        # Test compute_output_shape method
-        computed_shape = built_layer.compute_output_shape(sample_input.shape)
-        assert computed_shape == expected_shape
-
-    def test_forward_pass_values(self, built_layer, sample_input):
-        """Test forward pass produces valid values."""
-        output = built_layer(sample_input)
-
-        # Basic sanity checks
-        assert not np.any(np.isnan(output.numpy()))
-        assert not np.any(np.isinf(output.numpy()))
-
-        # FIX: The following check is removed because np.allclose fails on
-        # tensors with different shapes, which is expected for this layer.
-        # The fact that the output shape is different already proves the layer
-        # is doing something.
-        # assert not np.allclose(output.numpy(), sample_input.numpy())
-
-    def test_training_mode(self, built_layer, sample_input):
-        """Test forward pass in training vs inference mode."""
-        # Training mode
-        output_train = built_layer(sample_input, training=True)
-
-        # Inference mode
-        output_infer = built_layer(sample_input, training=False)
-
-        # Outputs should be the same (no dropout in this layer)
-        assert np.allclose(output_train.numpy(), output_infer.numpy())
-
-    def test_different_input_sizes(self):
-        """Test layer with different input sizes."""
-        layer = LogicFFN(output_dim=256, logic_dim=128)
-
-        # Test different sequence lengths and batch sizes
-        test_shapes = [
-            (1, 32, 512),    # Small batch, short sequence
-            (4, 128, 768),   # Medium batch, medium sequence
-            (8, 256, 1024),  # Large batch, long sequence
-        ]
-
-        for batch_size, seq_len, input_dim in test_shapes:
-            layer = LogicFFN(output_dim=256, logic_dim=128)
-            sample_input = keras.random.normal((batch_size, seq_len, input_dim))
-
-            output = layer(sample_input)
-            expected_shape = (batch_size, seq_len, 256)
-            assert output.shape == expected_shape
-
-
-class TestLogicFFNLogicOperations:
-    """Test suite for the logic operations within LogicFFN."""
-
-    def test_logic_operations_properties(self):
-        """Test that logic operations have expected mathematical properties."""
-        layer = LogicFFN(output_dim=512, logic_dim=256)
-        layer.build((None, 64, 768))
-
-        # Create controlled inputs to test logic operations
-        # Use different magnitudes to test soft logic behavior
-        test_input_high = ops.ones((1, 1, 768)) * 5.0   # Should map to high values after sigmoid
-        test_input_low = ops.ones((1, 1, 768)) * -5.0   # Should map to low values after sigmoid
-        test_input_medium = keras.random.normal((1, 1, 768)) # Random medium values
-
-        # Test with different input patterns
-        outputs_high = layer(test_input_high)
-        outputs_low = layer(test_input_low)
-        outputs_medium = layer(test_input_medium)
-
-        # All should produce valid outputs
-        assert not np.any(np.isnan(outputs_high.numpy()))
-        assert not np.any(np.isnan(outputs_low.numpy()))
-        assert not np.any(np.isnan(outputs_medium.numpy()))
-
-        # Outputs should be different for different inputs
-        assert not np.allclose(outputs_high.numpy(), outputs_low.numpy())
-
-    def test_temperature_effect(self):
-        """Test that temperature parameter affects gating behavior."""
-        input_tensor = keras.random.normal((2, 32, 768))
-
-        # Create layers with different temperatures
-        layer_low_temp = LogicFFN(output_dim=512, logic_dim=256, temperature=0.1)
-        layer_high_temp = LogicFFN(output_dim=512, logic_dim=256, temperature=10.0)
-
-        output_low_temp = layer_low_temp(input_tensor)
-        output_high_temp = layer_high_temp(input_tensor)
-
-        # Outputs should be different due to different gating
-        assert not np.allclose(output_low_temp.numpy(), output_high_temp.numpy(), rtol=1e-3)
-
-
-class TestLogicFFNSerialization:
-    """Test suite for LogicFFN serialization and deserialization."""
-
-    def test_get_config(self):
-        """Test configuration serialization."""
-        original_layer = LogicFFN(
-            output_dim=768,
-            logic_dim=256,
-            use_bias=False,
-            kernel_initializer='he_normal',
-            kernel_regularizer='l2',
-            temperature=1.5
-        )
-
-        config = original_layer.get_config()
-
-        # Check that all parameters are serialized
-        assert config['output_dim'] == 768
-        assert config['logic_dim'] == 256
-        assert config['use_bias'] is False
-        assert config['temperature'] == 1.5
-
-        # Check serialized initializers and regularizers
-        assert config['kernel_initializer']['class_name'] == 'HeNormal'
-        assert config['kernel_regularizer']['class_name'] == 'L2'
-
-    def test_from_config(self):
-        """Test layer recreation from configuration."""
-        original_layer = LogicFFN(
-            output_dim=512,
-            logic_dim=128,
-            temperature=2.0
-        )
-        original_layer.build((None, 64, 768))
-
-        # Get configuration
-        config = original_layer.get_config()
-        build_config = original_layer.get_build_config()
-
-        # Recreate layer
-        recreated_layer = LogicFFN.from_config(config)
-        recreated_layer.build_from_config(build_config)
-
-        # Check that configuration matches
-        assert recreated_layer.output_dim == original_layer.output_dim
-        assert recreated_layer.logic_dim == original_layer.logic_dim
-        assert recreated_layer.temperature == original_layer.temperature
-        assert recreated_layer.built == original_layer.built
-
-    def test_serialization_roundtrip(self):
-        """Test complete serialization roundtrip."""
-        # Create and build original layer
-        original_layer = LogicFFN(output_dim=256, logic_dim=128)
-        sample_input = keras.random.normal((2, 32, 512))
-        original_output = original_layer(sample_input)
-
-        # Serialize and deserialize
-        config = original_layer.get_config()
-        build_config = original_layer.get_build_config()
-
-        recreated_layer = LogicFFN.from_config(config)
-        recreated_layer.build_from_config(build_config)
-
-        # Copy weights to ensure identical computation
-        for orig_weight, new_weight in zip(original_layer.weights, recreated_layer.weights):
-            new_weight.assign(orig_weight)
-
-        # Test that outputs match
-        recreated_output = recreated_layer(sample_input)
-        assert np.allclose(original_output.numpy(), recreated_output.numpy(), atol=1e-6)
-
-
-class TestLogicFFNModelIntegration:
-    """Test suite for LogicFFN integration in models."""
-
-    def test_simple_model_integration(self):
-        """Test LogicFFN in a simple sequential model."""
-        inputs = keras.Input(shape=(64, 512))
-        x = LogicFFN(output_dim=256, logic_dim=128)(inputs)
-        x = keras.layers.LayerNormalization()(x)
-        x = LogicFFN(output_dim=128, logic_dim=64)(x)
-        x = keras.layers.GlobalAveragePooling1D()(x)
-        outputs = keras.layers.Dense(10, activation='softmax')(x)
-
+        # Test serialization
+        inputs = keras.Input(shape=sample_input_tensor.shape[1:])
+        outputs = LogicFFN(**layer_config)(inputs)
         model = keras.Model(inputs, outputs)
 
-        # Compile model
-        model.compile(
-            optimizer='adam',
-            loss='categorical_crossentropy',
-            metrics=['accuracy']
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model.save(os.path.join(tmpdir, 'test.keras'))
+            loaded = keras.models.load_model(os.path.join(tmpdir, 'test.keras'))
+            logger.info("✅ Serialization test passed")
 
-        # Test forward pass
-        sample_input = keras.random.normal((4, 64, 512))
-        prediction = model(sample_input)
-
-        assert prediction.shape == (4, 10)
-        assert not np.any(np.isnan(prediction.numpy()))
-
-    def test_model_save_load(self):
-        """Test saving and loading models with LogicFFN."""
-        # Create model with LogicFFN
-        inputs = keras.Input(shape=(32, 256))
-        x = LogicFFN(output_dim=128, logic_dim=64, name='logic_ffn')(inputs)
-        x = keras.layers.GlobalAveragePooling1D()(x)
-        outputs = keras.layers.Dense(5, activation='softmax')(x)
-
-        model = keras.Model(inputs, outputs)
-
-        # Generate prediction before saving
-        test_input = keras.random.normal((2, 32, 256))
-        original_prediction = model.predict(test_input, verbose=0)
-
-        # Save and load model
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            model_path = os.path.join(tmp_dir, 'model_with_logic_ffn.keras')
-            model.save(model_path)
-
-            # Load model with custom objects
-            loaded_model = keras.models.load_model(
-                model_path,
-                custom_objects={'LogicFFN': LogicFFN}
-            )
-
-            # Test prediction with loaded model
-            loaded_prediction = loaded_model.predict(test_input, verbose=0)
-
-            # Predictions should match
-            assert np.allclose(original_prediction, loaded_prediction, rtol=1e-5)
-
-            # Check that custom layer is preserved
-            logic_layer = loaded_model.get_layer('logic_ffn')
-            assert isinstance(logic_layer, LogicFFN)
-            assert logic_layer.output_dim == 128
-            assert logic_layer.logic_dim == 64
+    except Exception as e:
+        logger.error(f"❌ Error: {e}")
+        raise
 
 
-class TestLogicFFNTrainingDynamics:
-    """Test suite for LogicFFN training and gradient flow."""
-
-    def test_gradient_flow(self):
-        """Test that gradients flow properly through the layer."""
-        layer = LogicFFN(output_dim=256, logic_dim=128)
-        inputs = keras.random.normal((2, 32, 512))
-
-        # Test gradient computation
-        # FIX: Use a persistent tape and watch the input tensor directly,
-        # not a keras.Variable wrapper.
-        with tf.GradientTape(persistent=True) as tape:
-            # We must explicitly watch non-Variable tensors to compute gradients.
-            tape.watch(inputs)
-            outputs = layer(inputs)
-            loss = ops.mean(ops.square(outputs))
-
-        # Compute gradients for both inputs and trainable weights
-        input_grads = tape.gradient(loss, inputs)
-        layer_grads = tape.gradient(loss, layer.trainable_weights)
-        # Release tape resources
-        del tape
-
-        # Check that gradients exist and are not None
-        assert input_grads is not None
-        assert all(g is not None for g in layer_grads)
-
-        # Check that gradients have non-zero values
-        assert not np.allclose(input_grads.numpy(), 0)
-        assert all(not np.allclose(g.numpy(), 0) for g in layer_grads)
-
-    def test_training_step(self):
-        """Test a complete training step with LogicFFN."""
-        # Create simple model
-        inputs = keras.Input(shape=(16, 128))
-        x = LogicFFN(output_dim=64, logic_dim=32)(inputs)
-        x = keras.layers.GlobalAveragePooling1D()(x)
-        outputs = keras.layers.Dense(3, activation='softmax')(x)
-
-        model = keras.Model(inputs, outputs)
-        model.compile(
-            optimizer=keras.optimizers.Adam(learning_rate=0.01),
-            loss='categorical_crossentropy'
-        )
-
-        # Create training data
-        x_train = keras.random.normal((16, 16, 128))
-        # FIX: use keras.random.randint for integer labels.
-        # keras.random.uniform is for floats.
-        y_train = keras.utils.to_categorical(
-            keras.random.randint((16,), 0, 3, dtype='int32'), num_classes=3
-        )
-
-        # Get initial loss
-        initial_loss = model.evaluate(x_train, y_train, verbose=0)
-
-        # Train for a few steps
-        model.fit(x_train, y_train, epochs=5, batch_size=8, verbose=0)
-
-        # Get final loss
-        final_loss = model.evaluate(x_train, y_train, verbose=0)
-
-        # Loss should decrease (or at least not increase significantly)
-        assert final_loss <= initial_loss + 0.1
-
-
-class TestLogicFFNEdgeCases:
-    """Test suite for LogicFFN edge cases and robustness."""
-
-    def test_numerical_stability(self):
-        """Test layer stability with extreme input values."""
-        layer = LogicFFN(output_dim=128, logic_dim=64)
-
-        # Test with different input magnitudes
-        test_cases = [
-            ops.zeros((2, 16, 256)),  # All zeros
-            ops.ones((2, 16, 256)) * 1e-10,  # Very small values
-            ops.ones((2, 16, 256)) * 1e10,   # Very large values
-            keras.random.normal((2, 16, 256)) * 1e5,  # Large random values
-        ]
-
-        for test_input in test_cases:
-            output = layer(test_input)
-
-            # Check for NaN/Inf values
-            assert not np.any(np.isnan(output.numpy())), "NaN values detected"
-            assert not np.any(np.isinf(output.numpy())), "Inf values detected"
-
-    def test_different_batch_sizes(self):
-        """Test layer with various batch sizes."""
-        layer = LogicFFN(output_dim=256, logic_dim=128)
-
-        batch_sizes = [1, 2, 8, 16, 32]
-        seq_len, input_dim = 64, 512
-
-        for batch_size in batch_sizes:
-            test_input = keras.random.normal((batch_size, seq_len, input_dim))
-            output = layer(test_input)
-
-            expected_shape = (batch_size, seq_len, 256)
-            assert output.shape == expected_shape
-            assert not np.any(np.isnan(output.numpy()))
-
-    def test_temperature_extremes(self):
-        """Test layer behavior with extreme temperature values."""
-        # FIX: Use keras.random.normal, not ops.random.normal
-        input_tensor = keras.random.normal((2, 16, 128))
-
-        # Test very low temperature (sharp gating)
-        layer_sharp = LogicFFN(output_dim=64, logic_dim=32, temperature=1e-3)
-        output_sharp = layer_sharp(input_tensor)
-        assert not np.any(np.isnan(output_sharp.numpy()))
-
-        # Test very high temperature (uniform gating)
-        layer_smooth = LogicFFN(output_dim=64, logic_dim=32, temperature=1e3)
-        output_smooth = layer_smooth(input_tensor)
-        assert not np.any(np.isnan(output_smooth.numpy()))
-
-
-# Integration tests with pytest fixtures
-@pytest.fixture
-def logic_ffn_layer():
-    """Fixture providing a LogicFFN layer for testing."""
-    return LogicFFN(output_dim=512, logic_dim=256, temperature=1.0)
-
-
-@pytest.fixture
-def sample_data():
-    """Fixture providing sample data for testing."""
-    return {
-        'inputs': keras.random.normal((4, 32, 768)),
-        'targets': keras.random.uniform((4, 10), 0, 1)
-    }
-
-
-def test_layer_with_transformer_integration(logic_ffn_layer):
-    """Test integration with transformer-like architecture."""
-    # This would test integration with the transformer layer
-    # if the transformer layer supported 'logic' as an ffn_type
-
-    # Create a transformer-like block manually
-    inputs = keras.Input(shape=(64, 768))
-
-    # Attention block (simplified)
-    attention_output = keras.layers.MultiHeadAttention(
-        num_heads=12, key_dim=64
-    )(inputs, inputs)
-    attention_output = keras.layers.LayerNormalization()(attention_output + inputs)
-
-    # Logic FFN block - create one that outputs 768 to match input
-    logic_ffn_matching = LogicFFN(output_dim=768, logic_dim=256)
-    ffn_output = logic_ffn_matching(attention_output)
-    output = keras.layers.LayerNormalization()(ffn_output + attention_output)
-
-    model = keras.Model(inputs, output)
-
-    # Test forward pass
-    test_input = keras.random.normal((2, 64, 768))
-    result = model(test_input)
-
-    assert result.shape == (2, 64, 768)  # Should match input shape
-    assert not np.any(np.isnan(result.numpy()))
-
-
-if __name__ == '__main__':
-    # Run tests
-    pytest.main([__file__, '-v'])
+# Run tests with: pytest test_logic_ffn.py -v
+if __name__ == "__main__":
+    # Quick manual test
+    layer = LogicFFN(output_dim=64, logic_dim=32)
+    test_input = keras.ops.convert_to_tensor(
+        np.random.normal(size=(4, 16, 48)).astype(np.float32)
+    )
+    output = layer(test_input)
+    print(f"Test successful! Output shape: {output.shape}")

@@ -44,7 +44,7 @@ The `LogicFFN` layer operates through a sequence of carefully designed steps:
 
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
-from keras import layers, ops, initializers, regularizers
+import numpy as np
 
 # ---------------------------------------------------------------------
 # local imports
@@ -55,7 +55,7 @@ from dl_techniques.utils.logger import logger
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class LogicFFN(layers.Layer):
+class LogicFFN(keras.layers.Layer):
     """
     Logic-based Feed-Forward Network using learnable soft logic operations.
 
@@ -72,9 +72,9 @@ class LogicFFN(layers.Layer):
     5. Combining results and projecting back to output dimension
 
     Args:
-        output_dim: Integer, the final output dimension of the layer.
+        output_dim: Integer, the final output dimension of the layer. Must be positive.
         logic_dim: Integer, the intermediate dimension for logic operations.
-            Controls the complexity of logical reasoning.
+            Controls the complexity of logical reasoning. Must be positive.
         use_bias: Boolean, whether to use bias terms in dense layers.
             Defaults to True.
         kernel_initializer: String or initializer instance for kernel weights.
@@ -84,7 +84,7 @@ class LogicFFN(layers.Layer):
         kernel_regularizer: Optional regularizer for kernel weights.
         bias_regularizer: Optional regularizer for bias weights.
         temperature: Float, temperature parameter for softmax gating.
-            Higher values make gating more uniform. Defaults to 1.0.
+            Higher values make gating more uniform. Must be positive. Defaults to 1.0.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
@@ -93,17 +93,27 @@ class LogicFFN(layers.Layer):
     Output shape:
         3D tensor with shape: `(batch_size, sequence_length, output_dim)`
 
+    Attributes:
+        logic_projection: Dense layer projecting input to logic space with 2 operands.
+        gate_projection: Dense layer learning weights for logic operation gating.
+        output_projection: Dense layer projecting combined logic results to output.
+        num_logic_ops: Number of logic operations (always 3: AND, OR, XOR).
+
     Example:
         ```python
         # Basic usage
         layer = LogicFFN(output_dim=768, logic_dim=256)
 
-        # Advanced configuration
+        inputs = keras.Input(shape=(128, 768))
+        outputs = layer(inputs)
+        print(outputs.shape)  # (None, 128, 768)
+
+        # Advanced configuration with regularization
         layer = LogicFFN(
             output_dim=768,
             logic_dim=256,
             use_bias=False,
-            kernel_regularizer='l2',
+            kernel_regularizer=keras.regularizers.L2(1e-4),
             temperature=1.5
         )
 
@@ -113,10 +123,15 @@ class LogicFFN(layers.Layer):
         model = keras.Model(inputs, x)
         ```
 
+    Raises:
+        ValueError: If output_dim, logic_dim, or temperature are not positive.
+
     Note:
         This layer is particularly effective for tasks requiring explicit
         logical reasoning over input features. The logic_dim parameter
         controls the complexity of logical operations that can be learned.
+        Higher logic_dim allows for more complex logical patterns but increases
+        computational cost.
     """
 
     def __init__(
@@ -124,10 +139,10 @@ class LogicFFN(layers.Layer):
             output_dim: int,
             logic_dim: int,
             use_bias: bool = True,
-            kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
-            bias_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+            bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
             temperature: float = 1.0,
             **kwargs: Any
     ) -> None:
@@ -141,39 +156,73 @@ class LogicFFN(layers.Layer):
         if temperature <= 0:
             raise ValueError(f"temperature must be positive, got {temperature}")
 
-        # Store configuration
+        # Store ALL configuration parameters
         self.output_dim = output_dim
         self.logic_dim = logic_dim
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.temperature = temperature
 
         # Number of logic operations: AND, OR, XOR
         self.num_logic_ops = 3
 
-        # Initialize sublayers to None - will be created in build()
-        self.logic_projection = None
-        self.gate_projection = None
-        self.output_projection = None
+        # CREATE all sub-layers in __init__ - Modern Keras 3 pattern
+        self.logic_projection = keras.layers.Dense(
+            units=self.logic_dim * 2,  # Two operands for logic operations
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+            name='logic_projection'
+        )
 
-        # Store build input shape for serialization
-        self._build_input_shape = None
+        self.gate_projection = keras.layers.Dense(
+            units=self.num_logic_ops,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+            name='gate_projection'
+        )
+
+        self.output_projection = keras.layers.Dense(
+            units=self.output_dim,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+            name='output_projection'
+        )
+
+        logger.info(
+            f"Created LogicFFN: output_dim={self.output_dim}, "
+            f"logic_dim={self.logic_dim}, temperature={self.temperature}"
+        )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the logic FFN sublayers.
+        Build the layer and all its sub-layers.
+
+        For robust serialization, explicitly build each sub-layer
+        following the Modern Keras 3 pattern.
 
         Args:
             input_shape: Shape tuple of input tensor.
+
+        Raises:
+            ValueError: If input shape is invalid.
         """
         if self.built:
             return
 
-        # Store for serialization
-        self._build_input_shape = input_shape
+        # Ensure input_shape is a tuple for consistent handling
+        input_shape = tuple(input_shape)
 
         # Validate input shape
         if len(input_shape) < 2:
@@ -185,50 +234,22 @@ class LogicFFN(layers.Layer):
         if input_dim is None:
             raise ValueError("Input feature dimension must be specified")
 
-        logger.info(
-            f"Building LogicFFN: input_dim={input_dim}, "
-            f"logic_dim={self.logic_dim}, output_dim={self.output_dim}"
-        )
-
-        # Create projection layers
-        self.logic_projection = layers.Dense(
-            units=self.logic_dim * 2,  # Two operands for logic operations
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name='logic_projection'
-        )
-
-        self.gate_projection = layers.Dense(
-            units=self.num_logic_ops,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name='gate_projection'
-        )
-
-        self.output_projection = layers.Dense(
-            units=self.output_dim,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name='output_projection'
-        )
-
-        # Build sublayers
+        # Explicitly build sub-layers in computational order
         self.logic_projection.build(input_shape)
         self.gate_projection.build(input_shape)
-        # FIX: Ensure shape is a tuple for concatenation, making it robust
-        # for deserialization where input_shape can be a list.
-        self.output_projection.build(tuple(input_shape[:-1]) + (self.logic_dim,))
 
+        # Output projection takes logic_dim as input
+        # Ensure consistent tuple creation
+        logic_output_shape = tuple(list(input_shape[:-1]) + [self.logic_dim])
+        self.output_projection.build(logic_output_shape)
+
+        # Always call parent build at the end
         super().build(input_shape)
+
+        logger.info(
+            f"Built LogicFFN: input_dim={input_dim}, "
+            f"logic_dim={self.logic_dim}, output_dim={self.output_dim}"
+        )
 
     def call(
             self,
@@ -247,12 +268,12 @@ class LogicFFN(layers.Layer):
         """
         # Step 1: Project to logic space and split into two operands
         projected = self.logic_projection(inputs, training=training)
-        operand_a, operand_b = ops.split(projected, 2, axis=-1)
+        operand_a, operand_b = keras.ops.split(projected, 2, axis=-1)
 
         # Step 2: Convert to soft-bits using sigmoid activation
         # This creates continuous approximations of binary values
-        soft_a = ops.sigmoid(operand_a)
-        soft_b = ops.sigmoid(operand_b)
+        soft_a = keras.ops.sigmoid(operand_a)
+        soft_b = keras.ops.sigmoid(operand_b)
 
         # Step 3: Perform logic operations using soft logic
         # AND operation: element-wise multiplication
@@ -262,24 +283,24 @@ class LogicFFN(layers.Layer):
         logic_or = soft_a + soft_b - (soft_a * soft_b)
 
         # XOR operation: (a - b)^2 gives high values when a and b differ
-        logic_xor = ops.square(soft_a - soft_b)
+        logic_xor = keras.ops.square(soft_a - soft_b)
 
         # Step 4: Stack logic operation results
         # Shape: (batch_size, sequence_length, num_logic_ops, logic_dim)
-        logic_results = ops.stack([logic_and, logic_or, logic_xor], axis=-2)
+        logic_results = keras.ops.stack([logic_and, logic_or, logic_xor], axis=-2)
 
         # Step 5: Learn dynamic gates to weight logic operations
         gate_weights = self.gate_projection(inputs, training=training)
         # Apply temperature scaling and softmax for smooth gating
-        gate_weights = ops.softmax(gate_weights / self.temperature, axis=-1)
+        gate_weights = keras.ops.softmax(gate_weights / self.temperature, axis=-1)
 
         # Step 6: Apply gates to combine logic operations
         # Expand dimensions for broadcasting: (batch, seq, num_ops, 1)
-        expanded_gates = ops.expand_dims(gate_weights, axis=-1)
+        expanded_gates = keras.ops.expand_dims(gate_weights, axis=-1)
 
         # Weighted combination of logic operations
         # Shape: (batch_size, sequence_length, logic_dim)
-        combined_logic = ops.sum(logic_results * expanded_gates, axis=-2)
+        combined_logic = keras.ops.sum(logic_results * expanded_gates, axis=-2)
 
         # Step 7: Project back to output dimension
         output = self.output_projection(combined_logic, training=training)
@@ -294,55 +315,78 @@ class LogicFFN(layers.Layer):
             input_shape: Shape tuple of input tensor.
 
         Returns:
-            Output shape tuple.
+            Output shape tuple with last dimension changed to output_dim.
         """
-        # Convert to list for manipulation
-        input_shape_list = list(input_shape)
-
         # Replace last dimension with output_dim
-        output_shape_list = input_shape_list[:-1] + [self.output_dim]
-
+        output_shape_list = list(input_shape)
+        output_shape_list[-1] = self.output_dim
         return tuple(output_shape_list)
 
     def get_config(self) -> Dict[str, Any]:
         """
         Get layer configuration for serialization.
 
+        Returns ALL initialization parameters to ensure proper reconstruction.
+
         Returns:
-            Dictionary containing layer configuration.
+            Dictionary containing complete layer configuration.
         """
         config = super().get_config()
         config.update({
             'output_dim': self.output_dim,
             'logic_dim': self.logic_dim,
             'use_bias': self.use_bias,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
             'temperature': self.temperature,
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """
-        Get build configuration for serialization.
-
-        Returns:
-            Dictionary containing build configuration.
-        """
-        return {
-            'input_shape': self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """
-        Build layer from configuration.
-
-        Args:
-            config: Dictionary containing build configuration.
-        """
-        if config.get('input_shape') is not None:
-            self.build(config['input_shape'])
 
 # ---------------------------------------------------------------------
+# Factory functions for common configurations
+# ---------------------------------------------------------------------
+
+def create_logic_ffn_standard(output_dim: int, logic_dim: int) -> LogicFFN:
+    """
+    Create a standard LogicFFN layer with recommended settings.
+
+    Args:
+        output_dim: Output dimension.
+        logic_dim: Logic operation dimension.
+
+    Returns:
+        Configured LogicFFN layer.
+    """
+    return LogicFFN(
+        output_dim=output_dim,
+        logic_dim=logic_dim,
+        temperature=1.0
+    )
+
+
+def create_logic_ffn_regularized(
+    output_dim: int,
+    logic_dim: int,
+    l2_reg: float = 1e-4
+) -> LogicFFN:
+    """
+    Create a LogicFFN layer with L2 regularization.
+
+    Args:
+        output_dim: Output dimension.
+        logic_dim: Logic operation dimension.
+        l2_reg: L2 regularization strength.
+
+    Returns:
+        Configured LogicFFN layer with regularization.
+    """
+    return LogicFFN(
+        output_dim=output_dim,
+        logic_dim=logic_dim,
+        kernel_regularizer=keras.regularizers.L2(l2_reg),
+        bias_regularizer=keras.regularizers.L2(l2_reg),
+        temperature=1.0
+    )
