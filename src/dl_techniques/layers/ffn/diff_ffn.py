@@ -41,8 +41,6 @@ This layer is particularly useful in models requiring:
 """
 
 import keras
-from keras.api.regularizers import Regularizer
-from keras.api.initializers import Initializer
 from typing import Callable, Optional, Union, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -56,106 +54,161 @@ from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraint
 
 @keras.saving.register_keras_serializable()
 class DifferentialFFN(keras.layers.Layer):
-    """Differential Feed-Forward Network layer that implements a gating mechanism with separate positive and negative pathways.
+    """
+    Differential Feed-Forward Network layer implementing dual-pathway processing.
 
-    This layer creates a specialized feed-forward network architecture with dual pathways:
-    1. A positive branch with: Dense → Normalization → Activation → Sigmoid Gate
-    2. A negative branch with: Dense → Normalization → Activation → Sigmoid Gate
+    This layer creates a specialized feed-forward network architecture with dual pathways
+    that process information through separate positive and negative branches. Each branch
+    consists of: Dense → LayerNormalization → Activation → Dense(gate). The final output
+    is computed as the difference between these gated pathways (positive - negative),
+    which is then normalized and projected to the output dimension.
 
-    The final output is computed as the difference between these gated pathways (positive - negative),
-    which is then normalized and projected to the output dimension. This differential architecture
-    enables the network to learn more nuanced representations by explicitly modeling positive and
-    negative contributions separately, similar to how biological neural systems use excitatory and
-    inhibitory signals.
+    This differential architecture enables the network to learn nuanced representations
+    by explicitly modeling positive and negative contributions separately, similar to how
+    biological neural systems use excitatory and inhibitory signals.
+
+    Mathematical formulation:
+        pos_branch = gate_activation(Dense(branch_activation(LayerNorm(Dense(x)))))
+        neg_branch = gate_activation(Dense(branch_activation(LayerNorm(Dense(x)))))
+        diff = pos_branch - neg_branch
+        output = Dense(Dropout(LayerNorm(diff)))
 
     This approach can be particularly effective for:
     - Capturing subtle differences in feature importance
-    - Implementing a form of attention mechanism through the gating
+    - Implementing attention-like gating mechanisms
     - Improving gradient flow during backpropagation
     - Enhancing feature discrimination capabilities
 
-    The layer applies layer normalization in several steps to stabilize training:
-    1. After each branch's initial dense layer (before activation)
-    2. To the differential representation before the final projection
-
     Args:
-        hidden_dim: int, dimension of the hidden layer
-        output_dim: int, dimension of the output
-        branch_activation: Union[str, Callable], activation function used in the branches (default: "gelu")
-        gate_activation: Union[str, Callable], activation function to use in the gate (default: "sigmoid")
-        dropout_rate: float, dropout rate (default: 0.0)
-        kernel_initializer: Union[str, Initializer], initializer for kernel weights (default: 'glorot_uniform')
-        kernel_regularizer: Optional[Union[str, Regularizer]], regularizer for kernel weights
-                           (default: SoftOrthonormalConstraintRegularizer)
-        bias_initializer: Union[str, Initializer], initializer for bias (default: 'zeros')
-        use_bias: bool, whether to use bias (default: True)
-        name: Optional[str], name for the layer (default: None)
-        **kwargs: Additional keyword arguments for the base Layer class
+        hidden_dim: Integer, dimension of the hidden layer in each branch. Must be positive
+            and divisible by 2 for proper gating projection.
+        output_dim: Integer, dimension of the output. Must be positive.
+        branch_activation: String or callable, activation function used in the branches.
+            Accepts standard activation names ('gelu', 'relu', 'swish') or callables.
+            Defaults to 'gelu'.
+        gate_activation: String or callable, activation function used in the gate projections.
+            Typically 'sigmoid' for proper gating behavior. Defaults to 'sigmoid'.
+        dropout_rate: Float, dropout rate applied to the differential features.
+            Must be between 0.0 and 1.0. Defaults to 0.0.
+        use_bias: Boolean, whether to use bias terms in dense layers. Defaults to True.
+        kernel_initializer: String or Initializer, initializer for kernel weights.
+            Defaults to 'glorot_uniform'.
+        bias_initializer: String or Initializer, initializer for bias weights.
+            Defaults to 'zeros'.
+        kernel_regularizer: Optional Regularizer, regularizer for kernel weights.
+            If None, uses SoftOrthonormalConstraintRegularizer for better training stability.
+        bias_regularizer: Optional Regularizer, regularizer for bias weights.
+            Defaults to None.
+        **kwargs: Additional keyword arguments for the Layer base class.
+
+    Input shape:
+        Tensor with shape: `(batch_size, ..., input_dim)`
+        Where input_dim is the last dimension of the input tensor.
+
+    Output shape:
+        Tensor with shape: `(batch_size, ..., output_dim)`
+        Same as input shape except the last dimension is replaced by output_dim.
+
+    Attributes:
+        positive_dense: Dense layer for positive branch initial projection.
+        layer_norm_pos: LayerNormalization for positive branch.
+        positive_proj: Dense layer for positive branch gating.
+        negative_dense: Dense layer for negative branch initial projection.
+        layer_norm_neg: LayerNormalization for negative branch.
+        negative_proj: Dense layer for negative branch gating.
+        layer_norm_diff: LayerNormalization for differential features.
+        dropout: Dropout layer for regularization.
+        output_proj: Final dense projection to output dimension.
+
+    Example:
+        ```python
+        # Basic usage
+        layer = DifferentialFFN(hidden_dim=128, output_dim=64)
+
+        # Advanced configuration
+        layer = DifferentialFFN(
+            hidden_dim=256,
+            output_dim=128,
+            branch_activation='swish',
+            dropout_rate=0.1,
+            kernel_regularizer=keras.regularizers.L2(1e-4)
+        )
+
+        # In a model
+        inputs = keras.Input(shape=(512,))
+        x = DifferentialFFN(hidden_dim=256, output_dim=128)(inputs)
+        outputs = keras.layers.Dense(10, activation='softmax')(x)
+        model = keras.Model(inputs, outputs)
+        ```
+
+    Raises:
+        ValueError: If hidden_dim is not positive or not divisible by 2.
+        ValueError: If output_dim is not positive.
+        ValueError: If dropout_rate is not between 0.0 and 1.0.
+
+    Note:
+        The hidden_dim should be divisible by 2 as each branch projects to hidden_dim // 2
+        before the differential computation. This ensures balanced pathway processing.
+
+    References:
+        - Inspired by biological excitatory/inhibitory neural processing
+        - Related to differential attention mechanisms in modern transformers
     """
 
     def __init__(
-            self,
-            hidden_dim: int,
-            output_dim: int,
-            branch_activation: Union[str, Callable] = "gelu",
-            gate_activation: Union[str, Callable] = "sigmoid",
-            dropout_rate: float = 0.0,
-            kernel_initializer: Union[str, Initializer] = 'glorot_uniform',
-            kernel_regularizer: Optional[Union[str, Regularizer]] = None,
-            bias_initializer: Union[str, Initializer] = 'zeros',
-            use_bias: bool = True,
-            name: Optional[str] = None,
-            **kwargs
-    ):
-        super().__init__(name=name, **kwargs)
+        self,
+        hidden_dim: int,
+        output_dim: int,
+        branch_activation: Union[str, Callable] = "gelu",
+        gate_activation: Union[str, Callable] = "sigmoid",
+        dropout_rate: float = 0.0,
+        use_bias: bool = True,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+        bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+
+        # Validate inputs
+        if hidden_dim <= 0:
+            raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
+        if hidden_dim % 2 != 0:
+            raise ValueError(f"hidden_dim must be divisible by 2, got {hidden_dim}")
+        if output_dim <= 0:
+            raise ValueError(f"output_dim must be positive, got {output_dim}")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(f"dropout_rate must be between 0.0 and 1.0, got {dropout_rate}")
+
+        # Store configuration
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.branch_activation = keras.activations.get(branch_activation)
         self.gate_activation = keras.activations.get(gate_activation)
         self.dropout_rate = dropout_rate
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer) or SoftOrthonormalConstraintRegularizer()
-        self.bias_initializer = keras.initializers.get(bias_initializer)
         self.use_bias = use_bias
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
 
-        # These will be created in build()
-        self.positive_dense = None
-        self.layer_norm_pos = None
-        self.positive_proj = None
+        # Handle regularizer - use default if None provided
+        if kernel_regularizer is None:
+            self.kernel_regularizer = SoftOrthonormalConstraintRegularizer()
+        else:
+            self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        self.negative_dense = None
-        self.layer_norm_neg = None
-        self.negative_proj = None
+        # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
 
-        self.layer_norm_diff = None
-        self.output_proj = None
-        self.dropout = None
-
-        # Store build shape for serialization
-        self._build_input_shape = None
-
-    def build(self, input_shape: Tuple) -> None:
-        """Create the layer's weights and sublayers based on input shape.
-
-        This method instantiates all the sublayers with the appropriate configurations
-        when the shape of the input is known.
-
-        Args:
-            input_shape: Shape tuple (tuple of integers) or list of shape tuples,
-                indicating the input shape of the layer.
-        """
-        # Store input shape for serialization
-        self._build_input_shape = input_shape
-
-        # Create sublayers
-        # Positive path: Dense -> Normalization -> Activation -> Projection
+        # Positive branch: Dense -> LayerNorm -> Activation -> Dense(gate)
         self.positive_dense = keras.layers.Dense(
-            self.hidden_dim,
-            activation=None,  # No activation here, will be applied after normalization
+            units=self.hidden_dim,
+            activation=None,  # Applied after normalization
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
             bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="positive_dense"
         )
 
@@ -166,23 +219,25 @@ class DifferentialFFN(keras.layers.Layer):
         )
 
         self.positive_proj = keras.layers.Dense(
-            self.hidden_dim // 2,
+            units=self.hidden_dim // 2,
             activation=self.gate_activation,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
             bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="positive_proj"
         )
 
-        # Negative path: Dense -> Normalization -> Activation -> Projection
+        # Negative branch: Dense -> LayerNorm -> Activation -> Dense(gate)
         self.negative_dense = keras.layers.Dense(
-            self.hidden_dim,
-            activation=None,  # No activation here, will be applied after normalization
+            units=self.hidden_dim,
+            activation=None,  # Applied after normalization
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
             bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="negative_dense"
         )
 
@@ -193,106 +248,151 @@ class DifferentialFFN(keras.layers.Layer):
         )
 
         self.negative_proj = keras.layers.Dense(
-            self.hidden_dim // 2,
+            units=self.hidden_dim // 2,
             activation=self.gate_activation,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
             bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="negative_proj"
         )
 
-        # Final normalization and projection
+        # Differential processing layers
         self.layer_norm_diff = keras.layers.LayerNormalization(
-            center=False,
+            center=False,  # No centering for differential features
             scale=True,
             name="layer_norm_diff"
         )
 
+        self.dropout = keras.layers.Dropout(
+            rate=self.dropout_rate,
+            name="dropout"
+        )
+
         self.output_proj = keras.layers.Dense(
-            self.output_dim,
+            units=self.output_dim,
             activation=None,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
             bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="output_proj"
         )
 
-        self.dropout = keras.layers.Dropout(self.dropout_rate)
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build the layer and all its sub-layers.
 
+        CRITICAL: Explicitly build each sub-layer for robust serialization.
+        This follows Pattern 2: Composite Layer from the modern Keras 3 guide.
+        """
+        # Build sub-layers in computational order to ensure proper weight creation
+
+        # Positive branch layers
+        self.positive_dense.build(input_shape)
+
+        # Compute intermediate shape after positive_dense
+        dense_output_shape = self.positive_dense.compute_output_shape(input_shape)
+
+        self.layer_norm_pos.build(dense_output_shape)
+
+        # After normalization and activation, shape is preserved
+        self.positive_proj.build(dense_output_shape)
+
+        # Negative branch layers (same shapes as positive)
+        self.negative_dense.build(input_shape)
+        self.layer_norm_neg.build(dense_output_shape)
+        self.negative_proj.build(dense_output_shape)
+
+        # Differential processing layers
+        # After projection, shape is (batch, ..., hidden_dim // 2)
+        proj_output_shape = self.positive_proj.compute_output_shape(dense_output_shape)
+
+        self.layer_norm_diff.build(proj_output_shape)
+        self.dropout.build(proj_output_shape)
+        self.output_proj.build(proj_output_shape)
+
+        # Always call parent build at the end
         super().build(input_shape)
 
-    def call(self, inputs:keras.KerasTensor, training: bool = None) -> keras.KerasTensor:
-        """Forward pass through the Differential FFN layer.
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Forward pass through the Differential FFN layer.
 
         The computation follows these steps:
         1. Process inputs through separate positive and negative branches:
-           - Dense projection
+           - Dense projection to hidden_dim
            - Layer normalization
-           - Activation
-           - Projection with gate activation
+           - Branch activation
+           - Dense projection to hidden_dim // 2 with gate activation
         2. Compute the difference (positive - negative)
         3. Normalize the differential representation
         4. Apply dropout for regularization
         5. Project to output dimension
 
         Args:
-            inputs: Input tensor
+            inputs: Input tensor with shape (..., input_dim).
             training: Boolean indicating whether the layer should behave in
-                training mode or inference mode (affects dropout behavior)
+                training mode (applies dropout) or inference mode. If None,
+                uses the learning phase.
 
         Returns:
-            Output tensor with shape [..., output_dim]
+            Output tensor with shape (..., output_dim).
         """
-        # Positive branch: Dense -> Normalization -> Activation -> Projection
-        positive_dense = self.positive_dense(inputs, training=training)
-        positive_norm = self.layer_norm_pos(positive_dense, training=training)
-        positive_act = self.branch_activation(positive_norm)
-        positive_gate = self.positive_proj(positive_act, training=training)
+        # Positive branch: Dense -> LayerNorm -> Activation -> Gate
+        pos_hidden = self.positive_dense(inputs, training=training)
+        pos_normed = self.layer_norm_pos(pos_hidden, training=training)
+        pos_activated = self.branch_activation(pos_normed)
+        pos_gated = self.positive_proj(pos_activated, training=training)
 
-        # Negative branch: Dense -> Normalization -> Activation -> Projection
-        negative_dense = self.negative_dense(inputs, training=training)
-        negative_norm = self.layer_norm_neg(negative_dense, training=training)
-        negative_act = self.branch_activation(negative_norm)
-        negative_gate = self.negative_proj(negative_act, training=training)
+        # Negative branch: Dense -> LayerNorm -> Activation -> Gate
+        neg_hidden = self.negative_dense(inputs, training=training)
+        neg_normed = self.layer_norm_neg(neg_hidden, training=training)
+        neg_activated = self.branch_activation(neg_normed)
+        neg_gated = self.negative_proj(neg_activated, training=training)
 
-        # Differential and attenuation
-        diff = positive_gate - negative_gate
-        diff = self.layer_norm_diff(diff, training=training)
+        # Compute differential representation
+        differential = pos_gated - neg_gated
 
-        # Apply dropout to the normalized differential features
-        diff = self.dropout(diff, training=training)
+        # Normalize differential features
+        diff_normed = self.layer_norm_diff(differential, training=training)
 
-        # Project to output dimension
-        output = self.output_proj(diff, training=training)
+        # Apply regularization
+        diff_dropped = self.dropout(diff_normed, training=training)
+
+        # Final projection to output dimension
+        output = self.output_proj(diff_dropped, training=training)
 
         return output
 
-    def compute_output_shape(self, input_shape: Tuple) -> Tuple:
-        """Compute the output shape of the layer.
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape of the layer.
 
         Args:
-            input_shape: Shape of the input tensor
+            input_shape: Shape tuple of the input tensor.
 
         Returns:
-            Output shape tuple, which is the input shape with the last dimension
-            replaced by output_dim
+            Output shape tuple. Same as input shape except the last dimension
+            is replaced by output_dim.
         """
-        # Convert to list for consistent manipulation
-        input_shape_list = list(input_shape)
-
-        # Set the last dimension to output_dim
-        output_shape = input_shape_list[:-1] + [self.output_dim]
-
-        # Return as tuple for consistency
+        output_shape = list(input_shape)
+        output_shape[-1] = self.output_dim
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization.
+        """
+        Get layer configuration for serialization.
 
         Returns:
-            Dictionary containing all parameters needed to instantiate this layer
+            Dictionary containing all parameters needed to reconstruct this layer.
+            Includes all __init__ parameters with proper serialization of complex objects.
         """
         config = super().get_config()
         config.update({
@@ -301,30 +401,10 @@ class DifferentialFFN(keras.layers.Layer):
             'branch_activation': keras.activations.serialize(self.branch_activation),
             'gate_activation': keras.activations.serialize(self.gate_activation),
             'dropout_rate': self.dropout_rate,
-            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
-            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
-            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
             'use_bias': self.use_bias,
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get configuration needed to build the layer from a config.
-
-        This method is needed for proper model saving and loading.
-
-        Returns:
-            Dictionary containing the build configuration
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
