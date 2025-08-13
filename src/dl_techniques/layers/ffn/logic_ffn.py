@@ -44,7 +44,6 @@ The `LogicFFN` layer operates through a sequence of carefully designed steps:
 
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
-import numpy as np
 
 # ---------------------------------------------------------------------
 # local imports
