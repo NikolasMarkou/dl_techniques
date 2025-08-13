@@ -1,5 +1,5 @@
 import keras
-from typing import Optional, Dict, Any, Tuple, Union, Literal
+from typing import Optional, Dict, Any, Tuple, List
 
 # ---------------------------------------------------------------------
 # local imports
@@ -9,122 +9,64 @@ from ..utils.logger import logger
 from .bert import BertEmbeddings, BertConfig
 from ..layers.transformer import TransformerLayer
 
-# ---------------------------------------------------------------------
-# Type definitions for enhanced type safety
-# ---------------------------------------------------------------------
-
-NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'dynamic_tanh']
-NormalizationPosition = Literal['post', 'pre']
-AttentionType = Literal['multi_head_attention', 'window_attention', 'group_query_attention', 'differential_attention']
-FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'residual', 'swin_mlp']
-
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class TextDecoder(keras.layers.Layer):
     """
-    Text decoder using BERT-style embeddings with causal attention for text generation.
+    Text decoder using BERT-style embeddings with causal attention for generation.
 
-    This layer implements a transformer-based text decoder that combines BERT-style
-    embeddings with configurable transformer blocks for autoregressive text generation.
-    The decoder supports various attention mechanisms, normalization techniques, and
-    feed-forward network architectures.
+    This layer implements a transformer-based text decoder that uses BERT's
+    embedding approach (word + position + token type embeddings) but with
+    causal attention for autoregressive text generation. It's designed for
+    vision-language models that need to generate text conditioned on visual input.
 
-    Key features:
-    - BERT-style token, position, and type embeddings
-    - Configurable transformer layers with multiple attention types
-    - Support for different normalization strategies (pre/post-norm)
-    - Flexible feed-forward network architectures
-    - Proper causal masking for autoregressive generation
-    - Modern Keras 3 serialization support
+    The decoder consists of:
+    - BERT-style embeddings (word, position, token type)
+    - Stack of causal transformer decoder layers
+    - Layer normalization and dropout for regularization
 
     Args:
-        vocab_size: Integer, size of the vocabulary. Must be positive. Defaults to 32000.
-        hidden_dim: Integer, dimensionality of the model hidden states. Must be positive
-            and divisible by num_heads. Defaults to 768.
-        num_layers: Integer, number of transformer decoder layers. Must be positive.
-            Defaults to 12.
-        num_heads: Integer, number of attention heads in each layer. Must be positive
-            and divide hidden_dim evenly. Defaults to 12.
-        mlp_dim: Integer, dimensionality of the feed-forward network. Must be positive.
-            Defaults to 3072.
-        max_position_embeddings: Integer, maximum sequence length for position embeddings.
-            Must be positive. Defaults to 512.
-        type_vocab_size: Integer, vocabulary size for token type embeddings. Must be positive.
-            Defaults to 2.
-        dropout: Float, dropout rate applied throughout the model. Must be between 0 and 1.
-            Defaults to 0.1.
-        activation: String, activation function for feed-forward networks. Can be any
-            valid Keras activation name. Defaults to 'gelu'.
-        normalization_type: NormalizationType, type of normalization to use.
-            Options: 'layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'dynamic_tanh'.
-            Defaults to 'layer_norm'.
-        normalization_position: NormalizationPosition, position of normalization layers.
-            Options: 'post' (original Transformer), 'pre' (often more stable).
-            Defaults to 'post'.
-        attention_type: AttentionType, type of attention mechanism.
-            Options: 'multi_head_attention', 'window_attention', 'group_query_attention',
-            'differential_attention'. Defaults to 'multi_head_attention'.
-        ffn_type: FFNType, type of feed-forward network.
-            Options: 'mlp', 'swiglu', 'differential', 'glu', 'residual', 'swin_mlp'.
-            Defaults to 'mlp'.
-        use_bias: Boolean, whether to use bias terms in linear layers. Defaults to True.
-        kernel_initializer: String or initializer, initializer for kernel weights.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: String or initializer, initializer for bias weights.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        initializer_range: Float, standard deviation for truncated normal initialization
-            of transformer weights. Must be positive. Defaults to 0.02.
-        layer_norm_eps: Float, epsilon value for layer normalization. Must be positive.
-            Defaults to 1e-12.
+        vocab_size: Size of the vocabulary for text embeddings.
+        hidden_dim: Hidden dimension of the transformer layers.
+        num_layers: Number of transformer decoder layers.
+        num_heads: Number of attention heads in each transformer layer.
+        mlp_dim: Dimension of the feed-forward network.
+        max_position_embeddings: Maximum sequence length for positional embeddings.
+        type_vocab_size: Size of the token type vocabulary.
+        dropout: Dropout rate applied throughout the model.
+        activation: Activation function for transformer layers.
+        normalization_type: Type of normalization layer to use.
+        normalization_position: Position of normalization ('pre' or 'post').
+        attention_type: Type of attention mechanism.
+        ffn_type: Type of feed-forward network architecture.
+        use_bias: Whether to use bias in linear layers.
+        kernel_initializer: Initializer for kernel weights.
+        bias_initializer: Initializer for bias vectors.
+        kernel_regularizer: Regularizer for kernel weights.
+        bias_regularizer: Regularizer for bias vectors.
+        initializer_range: Standard deviation for weight initialization.
+        layer_norm_eps: Epsilon value for normalization layers.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
-        2D tensor with shape: `(batch_size, sequence_length)`
-        Input should contain integer token IDs.
+        2D tensor of shape (batch_size, sequence_length) containing token IDs
 
     Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, hidden_dim)`
+        3D tensor of shape (batch_size, sequence_length, hidden_dim)
 
     Example:
-        ```python
-        # Basic usage
-        decoder = TextDecoder(
-            vocab_size=50000,
-            hidden_dim=768,
-            num_layers=12
-        )
-
-        # Advanced configuration with custom attention and normalization
-        decoder = TextDecoder(
-            vocab_size=50000,
-            hidden_dim=768,
-            num_layers=12,
-            num_heads=12,
-            attention_type='differential_attention',
-            normalization_type='rms_norm',
-            normalization_position='pre',
-            ffn_type='swiglu',
-            dropout=0.1
-        )
-
-        # In a model
-        inputs = keras.Input(shape=(512,), dtype='int32')
-        hidden_states = decoder(inputs)
-        logits = keras.layers.Dense(vocab_size)(hidden_states)
-        model = keras.Model(inputs, logits)
-        ```
-
-    Raises:
-        ValueError: If any parameter is invalid or incompatible.
-
-    Note:
-        This implementation follows the modern Keras 3 pattern where all sub-layers
-        are created in __init__ and Keras handles building automatically. This ensures
-        proper serialization and eliminates common build errors.
+        >>> decoder = TextDecoder(
+        ...     vocab_size=32000,
+        ...     hidden_dim=768,
+        ...     num_layers=12,
+        ...     num_heads=12,
+        ...     mlp_dim=3072
+        ... )
+        >>>
+        >>> text_tokens = keras.ops.random.uniform((2, 50), 0, 32000, dtype='int32')
+        >>> features = decoder(text_tokens)  # Shape: (2, 50, 768)
     """
 
     def __init__(
@@ -138,36 +80,22 @@ class TextDecoder(keras.layers.Layer):
             type_vocab_size: int = 2,
             dropout: float = 0.1,
             activation: str = 'gelu',
-            normalization_type: NormalizationType = 'layer_norm',
-            normalization_position: NormalizationPosition = 'post',
-            attention_type: AttentionType = 'multi_head_attention',
-            ffn_type: FFNType = 'mlp',
+            normalization_type: str = 'layer_norm',
+            normalization_position: str = 'post',
+            attention_type: str = 'multi_head_attention',
+            ffn_type: str = 'mlp',
             use_bias: bool = True,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+            kernel_initializer: str = 'glorot_uniform',
+            bias_initializer: str = 'zeros',
+            kernel_regularizer: Optional[str] = None,
+            bias_regularizer: Optional[str] = None,
             initializer_range: float = 0.02,
             layer_norm_eps: float = 1e-12,
-            **kwargs: Any
+            **kwargs
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate configuration before storing
-        self._validate_config_params(
-            vocab_size=vocab_size,
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            num_heads=num_heads,
-            mlp_dim=mlp_dim,
-            max_position_embeddings=max_position_embeddings,
-            type_vocab_size=type_vocab_size,
-            dropout=dropout,
-            initializer_range=initializer_range,
-            layer_norm_eps=layer_norm_eps
-        )
-
-        # Store ALL configuration parameters as instance attributes
+        # Store configuration
         self.vocab_size = vocab_size
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
@@ -182,164 +110,107 @@ class TextDecoder(keras.layers.Layer):
         self.attention_type = attention_type
         self.ffn_type = ffn_type
         self.use_bias = use_bias
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.bias_initializer = keras.initializers.get(bias_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+        self.kernel_initializer = kernel_initializer
+        self.bias_initializer = bias_initializer
+        self.kernel_regularizer = kernel_regularizer
+        self.bias_regularizer = bias_regularizer
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
 
-        # CREATE all sub-layers in __init__ following modern Keras 3 pattern
-        try:
-            # Create BERT configuration for embeddings
-            bert_config = BertConfig(
-                vocab_size=self.vocab_size,
+        # Validate configuration
+        self._validate_config()
+
+        # FIX: Instantiate sublayers in __init__ for proper serialization
+        bert_config = BertConfig(
+            vocab_size=self.vocab_size,
+            hidden_size=self.hidden_dim,
+            num_heads=self.num_heads,
+            max_position_embeddings=self.max_position_embeddings,
+            type_vocab_size=self.type_vocab_size,
+            hidden_dropout_prob=self.dropout,
+            initializer_range=self.initializer_range,
+            layer_norm_eps=self.layer_norm_eps,
+            normalization_type=self.normalization_type
+        )
+        self.embeddings = BertEmbeddings(
+            config=bert_config,
+            name='embeddings'
+        )
+
+        self.decoder_layers = [
+            TransformerLayer(
                 hidden_size=self.hidden_dim,
                 num_heads=self.num_heads,
-                max_position_embeddings=self.max_position_embeddings,
-                type_vocab_size=self.type_vocab_size,
-                hidden_dropout_prob=self.dropout,
-                initializer_range=self.initializer_range,
-                layer_norm_eps=self.layer_norm_eps,
-                normalization_type=self.normalization_type
-            )
+                intermediate_size=self.mlp_dim,
+                normalization_type=self.normalization_type,
+                normalization_position=self.normalization_position,
+                attention_type=self.attention_type,
+                ffn_type=self.ffn_type,
+                dropout_rate=self.dropout,
+                attention_dropout_rate=self.dropout,
+                activation=self.activation,
+                use_bias=self.use_bias,
+                kernel_initializer=keras.initializers.TruncatedNormal(
+                    stddev=self.initializer_range
+                ),
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=keras.regularizers.get(self.kernel_regularizer),
+                bias_regularizer=keras.regularizers.get(self.bias_regularizer),
+                name=f'decoder_layer_{i}'
+            ) for i in range(self.num_layers)
+        ]
 
-            # Create embeddings layer
-            self.embeddings = BertEmbeddings(
-                config=bert_config,
-                name='embeddings'
-            )
+        self.final_norm = keras.layers.LayerNormalization(
+            epsilon=self.layer_norm_eps,
+            name='final_norm'
+        )
 
-            # Create transformer decoder layers
-            self.decoder_layers = []
-            for i in range(self.num_layers):
-                decoder_layer = TransformerLayer(
-                    hidden_size=self.hidden_dim,
-                    num_heads=self.num_heads,
-                    intermediate_size=self.mlp_dim,
-                    normalization_type=self.normalization_type,
-                    normalization_position=self.normalization_position,
-                    attention_type=self.attention_type,
-                    ffn_type=self.ffn_type,
-                    dropout_rate=self.dropout,
-                    attention_dropout_rate=self.dropout,
-                    activation=self.activation,
-                    use_bias=self.use_bias,
-                    kernel_initializer=keras.initializers.TruncatedNormal(
-                        stddev=self.initializer_range
-                    ),
-                    bias_initializer=self.bias_initializer,
-                    kernel_regularizer=self.kernel_regularizer,
-                    bias_regularizer=self.bias_regularizer,
-                    name=f'decoder_layer_{i}'
-                )
-                self.decoder_layers.append(decoder_layer)
+        # Store build input shape for serialization
+        self._build_input_shape = None
 
-            # Create final normalization layer
-            self.final_norm = keras.layers.LayerNormalization(
-                epsilon=self.layer_norm_eps,
-                name='final_norm'
-            )
+        logger.info(f"Created TextDecoder with {num_layers} layers, "
+                    f"hidden_dim={hidden_dim}, vocab_size={vocab_size}")
 
-            logger.info(
-                f"Created TextDecoder with {self.num_layers} layers, "
-                f"hidden_dim={self.hidden_dim}, vocab_size={self.vocab_size}, "
-                f"attention_type={self.attention_type}, ffn_type={self.ffn_type}"
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to create TextDecoder sub-layers: {e}")
+    def _validate_config(self) -> None:
+        """Validate configuration parameters."""
+        if self.hidden_dim <= 0:
+            raise ValueError(f"hidden_dim must be positive, got {self.hidden_dim}")
+        if self.num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {self.num_heads}")
+        if self.hidden_dim % self.num_heads != 0:
             raise ValueError(
-                f"Failed to create TextDecoder. This might be due to missing "
-                f"dependencies or incompatible configurations. Original error: {e}"
+                f"hidden_dim ({self.hidden_dim}) must be divisible by "
+                f"num_heads ({self.num_heads})"
             )
-
-    def _validate_config_params(
-            self,
-            vocab_size: int,
-            hidden_dim: int,
-            num_layers: int,
-            num_heads: int,
-            mlp_dim: int,
-            max_position_embeddings: int,
-            type_vocab_size: int,
-            dropout: float,
-            initializer_range: float,
-            layer_norm_eps: float
-    ) -> None:
-        """
-        Validate configuration parameters.
-
-        Args:
-            vocab_size: Vocabulary size to validate
-            hidden_dim: Hidden dimension to validate
-            num_layers: Number of layers to validate
-            num_heads: Number of attention heads to validate
-            mlp_dim: MLP dimension to validate
-            max_position_embeddings: Maximum position embeddings to validate
-            type_vocab_size: Type vocabulary size to validate
-            dropout: Dropout rate to validate
-            initializer_range: Initializer range to validate
-            layer_norm_eps: Layer norm epsilon to validate
-
-        Raises:
-            ValueError: If any parameter is invalid or incompatible
-        """
-        if vocab_size <= 0:
-            raise ValueError(f"vocab_size must be positive, got {vocab_size}")
-
-        if hidden_dim <= 0:
-            raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
-
-        if num_layers <= 0:
-            raise ValueError(f"num_layers must be positive, got {num_layers}")
-
-        if num_heads <= 0:
-            raise ValueError(f"num_heads must be positive, got {num_heads}")
-
-        if hidden_dim % num_heads != 0:
-            raise ValueError(
-                f"hidden_dim ({hidden_dim}) must be divisible by "
-                f"num_heads ({num_heads})"
-            )
-
-        if mlp_dim <= 0:
-            raise ValueError(f"mlp_dim must be positive, got {mlp_dim}")
-
-        if max_position_embeddings <= 0:
-            raise ValueError(f"max_position_embeddings must be positive, got {max_position_embeddings}")
-
-        if type_vocab_size <= 0:
-            raise ValueError(f"type_vocab_size must be positive, got {type_vocab_size}")
-
-        if not (0.0 <= dropout <= 1.0):
-            raise ValueError(f"dropout must be between 0 and 1, got {dropout}")
-
-        if initializer_range <= 0:
-            raise ValueError(f"initializer_range must be positive, got {initializer_range}")
-
-        if layer_norm_eps <= 0:
-            raise ValueError(f"layer_norm_eps must be positive, got {layer_norm_eps}")
+        if not (0.0 <= self.dropout <= 1.0):
+            raise ValueError(f"dropout must be between 0 and 1, got {self.dropout}")
+        if self.vocab_size <= 0:
+            raise ValueError(f"vocab_size must be positive, got {self.vocab_size}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the text decoder layer.
+        Build the text decoder by creating embeddings and transformer layers.
 
         Args:
-            input_shape: Shape tuple of the input tensor, including batch dimension.
-                Expected to be (batch_size, sequence_length).
+            input_shape: Shape tuple of input token IDs (batch_size, seq_length)
 
         Raises:
-            ValueError: If input shape is invalid or incompatible.
+            ValueError: If input shape is invalid
         """
+        if self.built:
+            return
+
+        self._build_input_shape = input_shape
+
         if len(input_shape) != 2:
             raise ValueError(
-                f"Expected 2D input shape (batch_size, sequence_length), "
-                f"got {len(input_shape)}D: {input_shape}"
+                f"Expected 2D input shape (batch_size, seq_length), "
+                f"got {input_shape}"
             )
 
-        # Let Keras know the build is complete
+        logger.info(f"Building TextDecoder with input_shape: {input_shape}")
         super().build(input_shape)
+        logger.info("TextDecoder built successfully")
 
     def call(
             self,
@@ -353,24 +224,15 @@ class TextDecoder(keras.layers.Layer):
         Forward pass through the text decoder.
 
         Args:
-            inputs: Input tensor containing token IDs with shape (batch_size, seq_length).
-            token_type_ids: Optional tensor for token type IDs with shape (batch_size, seq_length).
-                Used to distinguish different segments in the input. If None, all tokens
-                are treated as type 0.
-            position_ids: Optional tensor for position IDs with shape (batch_size, seq_length).
-                If None, positions are automatically generated as [0, 1, 2, ..., seq_length-1].
-            attention_mask: Optional attention mask tensor. Can be:
-                - 2D tensor of shape (batch_size, seq_length) for padding mask
-                - 3D tensor of shape (batch_size, seq_length, seq_length) for attention mask
-                - 4D tensor of shape (batch_size, num_heads, seq_length, seq_length)
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
+            inputs: Input token IDs of shape [batch_size, seq_length]
+            token_type_ids: Token type IDs for segment embeddings (optional)
+            position_ids: Position IDs for custom positional encoding (optional)
+            attention_mask: Attention mask to avoid attention on padding tokens (optional)
+            training: Whether in training mode
 
         Returns:
-            Output tensor with shape (batch_size, seq_length, hidden_dim) containing
-            contextualized hidden states for each input token.
+            Hidden states of shape [batch_size, seq_length, hidden_dim]
         """
-        # Process embeddings
         embeddings = self.embeddings(
             input_ids=inputs,
             token_type_ids=token_type_ids,
@@ -378,45 +240,36 @@ class TextDecoder(keras.layers.Layer):
             training=training
         )
 
-        # Pass through transformer decoder layers
         hidden_states = embeddings
-        for i, decoder_layer in enumerate(self.decoder_layers):
+        for decoder_layer in self.decoder_layers:
             hidden_states = decoder_layer(
-                inputs=hidden_states,
+                hidden_states,
                 attention_mask=attention_mask,
-                layer_idx=i,  # Useful for differential attention
                 training=training
             )
 
-        # Apply final normalization
         hidden_states = self.final_norm(hidden_states, training=training)
 
         return hidden_states
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """
-        Compute the output shape of the layer.
+        Compute output shape given input shape.
 
         Args:
-            input_shape: Shape tuple of the input tensor (batch_size, seq_length).
+            input_shape: Input shape tuple
 
         Returns:
-            Output shape tuple (batch_size, seq_length, hidden_dim).
+            Output shape tuple [batch_size, seq_length, hidden_dim]
         """
-        # Convert to list for manipulation, then back to tuple
-        output_shape = list(input_shape)
-        output_shape.append(self.hidden_dim)
-        return tuple(output_shape)
+        return (*input_shape, self.hidden_dim)
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Return the layer's configuration for serialization.
-
-        This method must return ALL arguments needed to recreate the layer
-        via __init__. Use keras serializers for complex objects.
+        Get layer configuration for serialization.
 
         Returns:
-            Dictionary containing the layer configuration.
+            Dictionary containing layer configuration
         """
         config = super().get_config()
         config.update({
@@ -434,45 +287,63 @@ class TextDecoder(keras.layers.Layer):
             'attention_type': self.attention_type,
             'ffn_type': self.ffn_type,
             'use_bias': self.use_bias,
-            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
-            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
+            'kernel_initializer': self.kernel_initializer,
+            'bias_initializer': self.bias_initializer,
+            'kernel_regularizer': self.kernel_regularizer,
+            'bias_regularizer': self.bias_regularizer,
             'initializer_range': self.initializer_range,
             'layer_norm_eps': self.layer_norm_eps,
         })
         return config
+
+    def get_build_config(self) -> Dict[str, Any]:
+        """
+        Get build configuration for serialization.
+
+        Returns:
+            Dictionary containing build configuration
+        """
+        return {
+            'input_shape': self._build_input_shape,
+        }
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """
+        Build layer from configuration.
+
+        Args:
+            config: Build configuration dictionary
+        """
+        if config.get('input_shape') is not None:
+            self.build(config['input_shape'])
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> 'TextDecoder':
+        """
+        Create layer from configuration.
+
+        Args:
+            config: Layer configuration dictionary
+
+        Returns:
+            TextDecoder instance
+        """
+        return cls(**config)
 
 
 # ---------------------------------------------------------------------
 # Factory Functions
 # ---------------------------------------------------------------------
 
-def create_text_decoder_base(**kwargs: Any) -> TextDecoder:
+def create_text_decoder_base(**kwargs) -> TextDecoder:
     """
     Create base text decoder configuration.
 
-    This function creates a TextDecoder with balanced performance and efficiency,
-    suitable for most text generation tasks.
-
     Args:
-        **kwargs: Additional arguments to override base configuration.
-            Any parameter accepted by TextDecoder.__init__ can be overridden.
+        **kwargs: Additional arguments to override base configuration
 
     Returns:
-        TextDecoder instance with base configuration.
-
-    Example:
-        ```python
-        # Default base configuration
-        decoder = create_text_decoder_base()
-
-        # Override specific parameters
-        decoder = create_text_decoder_base(
-            vocab_size=50000,
-            attention_type='differential_attention'
-        )
-        ```
+        TextDecoder with base configuration
     """
     config = {
         'vocab_size': 32000,
@@ -488,28 +359,15 @@ def create_text_decoder_base(**kwargs: Any) -> TextDecoder:
     return TextDecoder(**config)
 
 
-def create_text_decoder_small(**kwargs: Any) -> TextDecoder:
+def create_text_decoder_small(**kwargs) -> TextDecoder:
     """
     Create small text decoder configuration.
 
-    This function creates a smaller, faster TextDecoder suitable for
-    resource-constrained environments or when training speed is critical.
-
     Args:
-        **kwargs: Additional arguments to override small configuration.
-            Any parameter accepted by TextDecoder.__init__ can be overridden.
+        **kwargs: Additional arguments to override small configuration
 
     Returns:
-        TextDecoder instance with small configuration.
-
-    Example:
-        ```python
-        # Default small configuration
-        decoder = create_text_decoder_small()
-
-        # Override with even smaller vocabulary
-        decoder = create_text_decoder_small(vocab_size=16000)
-        ```
+        TextDecoder with small configuration
     """
     config = {
         'vocab_size': 32000,
@@ -525,31 +383,15 @@ def create_text_decoder_small(**kwargs: Any) -> TextDecoder:
     return TextDecoder(**config)
 
 
-def create_text_decoder_large(**kwargs: Any) -> TextDecoder:
+def create_text_decoder_large(**kwargs) -> TextDecoder:
     """
     Create large text decoder configuration.
 
-    This function creates a larger, more powerful TextDecoder suitable for
-    high-quality text generation where computational resources are available.
-
     Args:
-        **kwargs: Additional arguments to override large configuration.
-            Any parameter accepted by TextDecoder.__init__ can be overridden.
+        **kwargs: Additional arguments to override large configuration
 
     Returns:
-        TextDecoder instance with large configuration.
-
-    Example:
-        ```python
-        # Default large configuration
-        decoder = create_text_decoder_large()
-
-        # Override with custom normalization
-        decoder = create_text_decoder_large(
-            normalization_type='rms_norm',
-            normalization_position='pre'
-        )
-        ```
+        TextDecoder with large configuration
     """
     config = {
         'vocab_size': 32000,
