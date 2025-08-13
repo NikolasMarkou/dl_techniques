@@ -1,10 +1,3 @@
-"""
-Comprehensive Test Suite for RBF Layer
-
-This test suite follows Modern Keras 3 testing best practices with emphasis on
-serialization testing and production readiness validation.
-"""
-
 import pytest
 import tempfile
 import os

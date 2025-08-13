@@ -1,88 +1,5 @@
-"""
-SwiGLU Feed-Forward Network Implementation
-
-This module implements the SwiGLU (Swish Gated Linear Unit) activation function within
-a feed-forward network architecture. SwiGLU has been shown to outperform other gating
-mechanisms like GeGLU and standard ReLU-based FFNs in large language models, providing
-better training stability and model performance.
-
-Mathematical Formulation:
-    SwiGLU combines the Swish activation function with a gating mechanism:
-
-    SwiGLU(x, W, V, b, c) = Swish(xW + b) ⊗ (xV + c)
-
-    Where:
-    - Swish(x) = x * sigmoid(x) = x * σ(x)
-    - ⊗ denotes element-wise multiplication
-    - W and V are learned weight matrices
-    - b and c are bias terms (typically omitted)
-
-    In this implementation:
-    - gate = Swish(x * W_gate)
-    - up = x * W_up  
-    - hidden = gate ⊗ up
-    - output = hidden * W_down
-
-Architecture Details:
-    1. Input projection to hidden dimension (typically 2/3 * expansion_factor * d_model)
-    2. Two parallel projections: gate_proj (with Swish) and up_proj (linear)
-    3. Element-wise multiplication of activated gate and up projections
-    4. Down projection back to model dimension
-    5. Optional dropout for regularization
-
-Key Benefits:
-    - Better gradient flow compared to standard ReLU-based FFNs
-    - Gating mechanism allows selective information flow
-    - Empirically superior performance in large language models
-    - Maintains computational efficiency while improving representational capacity
-
-Hardware Optimization:
-    - Hidden dimension is rounded to multiples for efficient matrix operations
-    - Follows the 2/3 rule from PaLM paper for optimal parameter allocation
-    - Uses bias=False by default to reduce memory and computation
-
-References:
-    - Shazeer, N. (2020). "GLU Variants Improve Transformer."
-      https://arxiv.org/abs/2002.05202
-
-    - Chowdhery, A., et al. (2022). "PaLM: Scaling Language Modeling with Pathways."
-      https://arxiv.org/abs/2204.02311 (Uses SwiGLU in practice)
-
-    - Touvron, H., et al. (2023). "LLaMA: Open and Efficient Foundation Language Models."
-      https://arxiv.org/abs/2302.13971 (SwiGLU in LLaMA architecture)
-
-Usage Examples:
-    Basic usage:
-    >>> ffn = SwiGLUFFN(
-    ...     d_model=512,
-    ...     ffn_expansion_factor=4,
-    ...     ffn_multiple_of=256
-    ... )
-    >>> output = ffn(inputs)
-
-    In a transformer block:
-    >>> def transformer_block(x):
-    ...     # Self-attention
-    ...     attn_out = MultiHeadAttention(...)(x)
-    ...     x = LayerNorm()(x + attn_out)
-    ...     
-    ...     # SwiGLU FFN
-    ...     ffn_out = SwiGLUFFN(...)(x)
-    ...     return LayerNorm()(x + ffn_out)
-
-    With custom parameters:
-    >>> ffn = SwiGLUFFN(
-    ...     d_model=768,
-    ...     ffn_expansion_factor=8,  # Larger expansion
-    ...     ffn_multiple_of=128,     # Hardware-friendly multiple
-    ...     dropout_rate=0.1,        # Regularization
-    ...     use_bias=False           # Memory efficiency
-    ... )
-"""
-
 import keras
-from keras import ops
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, Tuple, Union
 
 # ---------------------------------------------------------------------
 # local imports
@@ -99,21 +16,46 @@ class SwiGLUFFN(keras.layers.Layer):
     SwiGLU Feed-Forward Network with gating mechanism.
 
     This layer implements the SwiGLU activation function within a feed-forward
-    network, combining Swish activation with a gating mechanism for improved
+    network, combining SiLU (Swish) activation with a gating mechanism for improved
     performance in transformer architectures.
 
+    SwiGLU has been shown to outperform other gating mechanisms like GeGLU and
+    standard ReLU-based FFNs in large language models, providing better training
+    stability and model performance.
+
+    The layer applies the following transformation:
+        1. Projects input to hidden dimension using two parallel Dense layers
+        2. Applies SiLU activation to gate projection
+        3. Element-wise multiplication of activated gate and up projection
+        4. Projects back to model dimension
+        5. Optional dropout for regularization
+
+    Mathematical formulation:
+        gate = SiLU(input @ W_gate + b_gate)
+        up = input @ W_up + b_up
+        hidden = gate ⊗ up
+        output = hidden @ W_down + b_down
+
+    Where ⊗ denotes element-wise multiplication.
+
     Args:
-        d_model: int
-            Model dimension (input/output feature size).
-        ffn_expansion_factor: int, default=4
-            Factor by which to expand the hidden dimension relative to d_model.
-        ffn_multiple_of: int, default=256
-            Round hidden dimension to this multiple for hardware efficiency.
-        dropout_rate: float, default=0.0
-            Dropout probability applied to the output.
-        use_bias: bool, default=False
-            Whether to use bias in linear projections.
-        **kwargs: Additional keyword arguments for the Layer parent class.
+        d_model: Integer, model dimension (input/output feature size).
+            Must be positive.
+        ffn_expansion_factor: Integer, factor by which to expand the hidden
+            dimension relative to d_model. Must be positive. Defaults to 4.
+        ffn_multiple_of: Integer, round hidden dimension to this multiple
+            for hardware efficiency. Must be positive. Defaults to 256.
+        dropout_rate: Float, dropout probability applied to the output.
+            Must be between 0.0 and 1.0. Defaults to 0.0.
+        use_bias: Boolean, whether to use bias in linear projections.
+            Defaults to False for memory efficiency.
+        kernel_initializer: String or Initializer, initializer for kernel weights.
+            Defaults to 'glorot_uniform'.
+        bias_initializer: String or Initializer, initializer for bias weights.
+            Defaults to 'zeros'.
+        kernel_regularizer: Optional regularizer for kernel weights.
+        bias_regularizer: Optional regularizer for bias weights.
+        **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
         N-D tensor with shape: (..., d_model)
@@ -121,9 +63,50 @@ class SwiGLUFFN(keras.layers.Layer):
     Output shape:
         N-D tensor with shape: (..., d_model)
 
+    Attributes:
+        gate_proj: Dense layer for gate projection with SiLU activation.
+        up_proj: Dense layer for up projection (linear).
+        down_proj: Dense layer for down projection back to d_model.
+        dropout: Dropout layer for regularization.
+        hidden_dim: Computed hidden dimension after applying expansion and rounding.
+
+    Example:
+        ```python
+        # Basic usage
+        ffn = SwiGLUFFN(d_model=512)
+
+        # Custom configuration
+        ffn = SwiGLUFFN(
+            d_model=768,
+            ffn_expansion_factor=8,  # Larger expansion
+            ffn_multiple_of=128,     # Hardware-friendly multiple
+            dropout_rate=0.1,        # Regularization
+            use_bias=False           # Memory efficiency
+        )
+
+        # In a transformer block
+        inputs = keras.Input(shape=(seq_len, d_model))
+        x = MultiHeadAttention(...)(inputs)
+        x = keras.layers.LayerNormalization()(inputs + x)
+        ffn_out = SwiGLUFFN(d_model=d_model)(x)
+        outputs = keras.layers.LayerNormalization()(x + ffn_out)
+        model = keras.Model(inputs, outputs)
+        ```
+
+    References:
+        - Shazeer, N. (2020). "GLU Variants Improve Transformer."
+        - Chowdhery, A., et al. (2022). "PaLM: Scaling Language Modeling with Pathways."
+        - Touvron, H., et al. (2023). "LLaMA: Open and Efficient Foundation Language Models."
+
     Raises:
         ValueError: If d_model, ffn_expansion_factor, or ffn_multiple_of are not positive,
-                   or if dropout_prob is not in [0, 1].
+                   or if dropout_rate is not in [0, 1].
+
+    Note:
+        This implementation follows the modern Keras 3 pattern where all sub-layers
+        are created in __init__ and Keras handles building automatically. The hidden
+        dimension calculation follows the 2/3 rule from the PaLM paper for optimal
+        parameter allocation.
     """
 
     def __init__(
@@ -133,6 +116,10 @@ class SwiGLUFFN(keras.layers.Layer):
             ffn_multiple_of: int = 256,
             dropout_rate: float = 0.0,
             use_bias: bool = False,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -140,41 +127,102 @@ class SwiGLUFFN(keras.layers.Layer):
         # Validate inputs
         self._validate_inputs(d_model, ffn_expansion_factor, ffn_multiple_of, dropout_rate)
 
+        # Store configuration
         self.d_model = d_model
         self.ffn_expansion_factor = ffn_expansion_factor
         self.ffn_multiple_of = ffn_multiple_of
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Calculate hidden dimension with proper rounding (2/3 rule from PaLM)
         self.hidden_dim = self._calculate_hidden_dim()
 
-        # Will be initialized in build()
-        self.gate_proj = None
-        self.up_proj = None
-        self.down_proj = None
-        self.dropout = None
-        self._build_input_shape = None
+        # CREATE all sub-layers in __init__ (modern Keras 3 pattern)
+        try:
+            # Three projections for SwiGLU
+            # Gate projection: will apply SiLU activation in call()
+            self.gate_proj = keras.layers.Dense(
+                self.hidden_dim,
+                use_bias=self.use_bias,
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                bias_regularizer=self.bias_regularizer,
+                name='gate_proj'
+            )
+
+            # Up projection: linear transformation
+            self.up_proj = keras.layers.Dense(
+                self.hidden_dim,
+                use_bias=self.use_bias,
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                bias_regularizer=self.bias_regularizer,
+                name='up_proj'
+            )
+
+            # Down projection: back to model dimension
+            self.down_proj = keras.layers.Dense(
+                self.d_model,
+                use_bias=self.use_bias,
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                bias_regularizer=self.bias_regularizer,
+                name='down_proj'
+            )
+
+            # Dropout layer
+            if self.dropout_rate > 0.0:
+                self.dropout = keras.layers.Dropout(
+                    self.dropout_rate,
+                    name='dropout'
+                )
+            else:
+                self.dropout = None
+
+        except Exception as e:
+            logger.error(f"Failed to create SwiGLUFFN sub-layers: {e}")
+            raise ValueError(
+                f"Failed to create SwiGLUFFN sub-layers. This might be due to "
+                f"incompatible parameters or missing dependencies. Original error: {e}"
+            )
 
         logger.info(f"SwiGLUFFN initialized: d_model={d_model}, "
-                    f"hidden_dim={self.hidden_dim}, expansion_factor={ffn_expansion_factor}")
+                   f"hidden_dim={self.hidden_dim}, expansion_factor={ffn_expansion_factor}")
 
     def _validate_inputs(
             self,
             d_model: int,
             ffn_expansion_factor: int,
             ffn_multiple_of: int,
-            dropout_prob: float
+            dropout_rate: float
     ) -> None:
-        """Validate initialization parameters."""
+        """
+        Validate initialization parameters.
+
+        Args:
+            d_model: Model dimension to validate.
+            ffn_expansion_factor: Expansion factor to validate.
+            ffn_multiple_of: Multiple constraint to validate.
+            dropout_rate: Dropout rate to validate.
+
+        Raises:
+            ValueError: If any parameter is invalid.
+        """
         if d_model <= 0:
             raise ValueError(f"d_model must be positive, got {d_model}")
         if ffn_expansion_factor <= 0:
             raise ValueError(f"ffn_expansion_factor must be positive, got {ffn_expansion_factor}")
         if ffn_multiple_of <= 0:
             raise ValueError(f"ffn_multiple_of must be positive, got {ffn_multiple_of}")
-        if not 0.0 <= dropout_prob <= 1.0:
-            raise ValueError(f"dropout_prob must be in [0, 1], got {dropout_prob}")
+        if not 0.0 <= dropout_rate <= 1.0:
+            raise ValueError(f"dropout_rate must be in [0, 1], got {dropout_rate}")
 
     def _calculate_hidden_dim(self) -> int:
         """
@@ -185,7 +233,7 @@ class SwiGLUFFN(keras.layers.Layer):
         2. Round up to the nearest multiple of ffn_multiple_of
 
         Returns:
-            Calculated hidden dimension.
+            Calculated hidden dimension as integer.
         """
         # Apply 2/3 rule for optimal parameter allocation
         hidden_dim = int(self.d_model * self.ffn_expansion_factor * 2 / 3)
@@ -197,38 +245,16 @@ class SwiGLUFFN(keras.layers.Layer):
 
         return hidden_dim
 
-    def build(self, input_shape) -> None:
-        """Build the layer weights and sublayers."""
-        self._build_input_shape = input_shape
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build the layer and all its sub-layers.
 
-        # Three projections for SwiGLU
-        # Gate projection: applies Swish activation
-        self.gate_proj = keras.layers.Dense(
-            self.hidden_dim,
-            use_bias=self.use_bias,
-            name='gate_proj'
-        )
+        For robust serialization, explicitly build sub-layers in computational order.
 
-        # Up projection: linear transformation
-        self.up_proj = keras.layers.Dense(
-            self.hidden_dim,
-            use_bias=self.use_bias,
-            name='up_proj'
-        )
-
-        # Down projection: back to model dimension
-        self.down_proj = keras.layers.Dense(
-            self.d_model,
-            use_bias=self.use_bias,
-            name='down_proj'
-        )
-
-        # Dropout layer
-        self.dropout = keras.layers.Dropout(
-            self.dropout_rate
-        )
-
-        # Build sublayers
+        Args:
+            input_shape: Shape of the input tensor.
+        """
+        # Build sub-layers in computational order
         self.gate_proj.build(input_shape)
         self.up_proj.build(input_shape)
 
@@ -237,6 +263,11 @@ class SwiGLUFFN(keras.layers.Layer):
         down_input_shape[-1] = self.hidden_dim
         self.down_proj.build(tuple(down_input_shape))
 
+        # Build dropout if present
+        if self.dropout is not None:
+            self.dropout.build(tuple(down_input_shape))
+
+        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -247,22 +278,29 @@ class SwiGLUFFN(keras.layers.Layer):
         """
         Apply SwiGLU feed-forward transformation.
 
+        Performs the following computation:
+        1. Parallel projections to hidden dimension (gate and up)
+        2. Apply SiLU activation to gate projection
+        3. Element-wise multiplication of activated gate and up projection
+        4. Project back to model dimension
+        5. Apply dropout if configured
+
         Args:
-            inputs: Input tensor of shape (..., d_model)
-            training: Whether in training mode
+            inputs: Input tensor of shape (..., d_model).
+            training: Boolean indicating training mode for dropout.
 
         Returns:
-            Output tensor of shape (..., d_model)
+            Output tensor of shape (..., d_model).
         """
-        # SwiGLU formula: Swish(xW₁) ⊗ xW₂
+        # SwiGLU formula: SiLU(xW₁ + b₁) ⊗ (xW₂ + b₂)
         # where ⊗ denotes element-wise multiplication
 
         # Parallel projections to hidden dimension
         gate = self.gate_proj(inputs)  # (..., hidden_dim)
-        up = self.up_proj(inputs)  # (..., hidden_dim)
+        up = self.up_proj(inputs)      # (..., hidden_dim)
 
         # Apply SiLU (Swish) activation to gate: x * sigmoid(x)
-        gate_activated = ops.silu(gate)
+        gate_activated = keras.ops.silu(gate)
 
         # Element-wise multiplication (gating mechanism)
         hidden = gate_activated * up
@@ -271,45 +309,61 @@ class SwiGLUFFN(keras.layers.Layer):
         output = self.down_proj(hidden)
 
         # Apply dropout if specified
-        if self.dropout_rate > 0.0:
+        if self.dropout is not None:
             output = self.dropout(output, training=training)
 
         return output
 
-    def compute_output_shape(self, input_shape) -> tuple:
-        """Compute output shape (same as input shape)."""
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute output shape (same as input shape for FFN).
+
+        Args:
+            input_shape: Shape of the input tensor.
+
+        Returns:
+            Output shape tuple, same as input shape.
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
+        """
+        Get layer configuration for serialization.
+
+        Returns:
+            Dictionary containing all configuration parameters needed
+            to recreate the layer.
+        """
         config = super().get_config()
         config.update({
             "d_model": self.d_model,
             "ffn_expansion_factor": self.ffn_expansion_factor,
             "ffn_multiple_of": self.ffn_multiple_of,
-            "dropout_prob": self.dropout_rate,
+            "dropout_rate": self.dropout_rate,
             "use_bias": self.use_bias,
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration for serialization."""
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build layer from configuration."""
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
     @property
     def num_parameters(self) -> int:
-        """Get the total number of parameters in the layer."""
+        """
+        Get the total number of parameters in the layer.
+
+        Returns:
+            Total number of trainable and non-trainable parameters.
+            Returns 0 if layer is not built.
+        """
         if not self.built:
             return 0
 
         total_params = 0
         for weight in self.weights:
-            total_params += weight.shape.num_elements()
-        return total_params
+            # Use ops.size for Keras backend compatibility
+            total_params += keras.ops.size(weight)
+        return int(total_params)
 
 # ---------------------------------------------------------------------

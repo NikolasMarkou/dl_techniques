@@ -1,12 +1,3 @@
-"""
-Comprehensive test suite for modern SwinMLP layer implementation.
-
-This test suite follows modern Keras 3 testing patterns and validates the
-SwinMLP layer's functionality, serialization, and integration capabilities.
-
-Place this file in: tests/test_layers/test_swin_mlp.py
-"""
-
 import pytest
 import numpy as np
 import keras
