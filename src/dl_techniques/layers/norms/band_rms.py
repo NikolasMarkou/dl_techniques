@@ -44,13 +44,15 @@ References:
 
 import keras
 from keras import ops
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Union, Tuple
 
-# ---------------------------------------------------------------------
+from dl_techniques.utils.logger import logger
+
 
 @keras.saving.register_keras_serializable()
 class BandRMS(keras.layers.Layer):
-    """Root Mean Square Normalization layer with bounded RMS constraints.
+    """
+    Root Mean Square Normalization layer with bounded RMS constraints.
 
     This layer implements root mean square normalization that guarantees the output
     RMS value will be between [1-α, 1], where α is the max_band_width parameter.
@@ -65,136 +67,166 @@ class BandRMS(keras.layers.Layer):
     allowing features to exist within a bounded range while maintaining dimension-
     independent behavior across different layer widths.
 
+    Mathematical formulation:
+        First step: x_norm = x / sqrt(mean(x²) + ε)
+        Second step: output = x_norm * scale, where scale ∈ [1-α, 1]
+
+    Where the scale is learned via: scale = (1-α) + α * sigmoid(5 * band_param)
+
     Args:
-        max_band_width: Maximum allowed deviation from unit normalization (0 < α < 1).
-            Controls the thickness of the spherical shell.
-        axis: int or tuple of ints, default=-1
-            Axis or axes along which to compute RMS statistics. The default (-1)
-            computes RMS over the last dimension.
-        epsilon: Small constant added to denominator for numerical stability.
-        band_initializer: str or initializer, default="zeros"
-            Initializer for the single band parameter.
-        band_regularizer: Regularizer for the band parameter. Default is L2(1e-5).
-        **kwargs: Additional layer arguments.
+        max_band_width: Float between 0 and 1, maximum allowed deviation from unit
+            normalization. Controls the thickness of the spherical shell. Higher values
+            allow more flexibility but may reduce normalization stability. Defaults to 0.1.
+        axis: Integer or tuple of integers, axis or axes along which to compute RMS
+            statistics. The default (-1) computes RMS over the last dimension. For
+            convolutional layers, you might want axis=(1, 2) for spatial dimensions.
+            Defaults to -1.
+        epsilon: Float, small constant added to denominator for numerical stability.
+            Should be positive and small. Defaults to 1e-7.
+        band_initializer: String or keras.initializers.Initializer instance,
+            initializer for the single band parameter. The parameter starts at the
+            initializer value and is mapped through sigmoid to the band range.
+            Defaults to "zeros" (which maps to the middle of the band).
+        band_regularizer: Optional keras.regularizers.Regularizer instance for the
+            band parameter. Helps prevent the parameter from becoming too extreme.
+            Defaults to L2(1e-5) for stability.
+        **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
-        Arbitrary. Use the keyword argument `input_shape`
-        (tuple of integers, does not include the samples axis)
-        when using this layer as the first layer in a model.
+        Arbitrary N-D tensor. The normalization is applied along the specified axis/axes.
+        Common shapes:
+        - 2D: (batch_size, features) for dense layers
+        - 3D: (batch_size, sequence_length, features) for transformers
+        - 4D: (batch_size, height, width, channels) for CNNs
 
     Output shape:
         Same shape as input.
 
+    Attributes:
+        band_param: Trainable scalar parameter that controls the scaling factor.
+            Mapped to [1-max_band_width, 1] range via sigmoid activation.
+
     Example:
-    ```python
-    # Apply BandRMS normalization to the output of a dense layer
-    x = keras.layers.Dense(64)(inputs)
-    x = BandRMS(max_band_width=0.2)(x)
+        ```python
+        # Basic usage with dense layer
+        inputs = keras.Input(shape=(784,))
+        x = keras.layers.Dense(64)(inputs)
+        x = BandRMS(max_band_width=0.2)(x)
+        outputs = keras.layers.Dense(10)(x)
+        model = keras.Model(inputs, outputs)
 
-    # Apply to a specific axis in a CNN
-    conv = keras.layers.Conv2D(32, 3)(inputs)
-    norm = BandRMS(axis=3, max_band_width=0.1)(conv)
+        # Usage in transformer with sequence dimension
+        inputs = keras.Input(shape=(128, 512))  # (seq_len, embed_dim)
+        x = BandRMS(axis=-1, max_band_width=0.1)(inputs)  # Normalize over embed_dim
 
-    # With custom regularization
-    norm_layer = BandRMS(
-        max_band_width=0.3,
-        band_regularizer=keras.regularizers.L2(1e-4)
-    )
-    ```
+        # Usage in CNN with spatial normalization
+        inputs = keras.Input(shape=(224, 224, 3))
+        x = keras.layers.Conv2D(32, 3)(inputs)
+        x = BandRMS(axis=(1, 2), max_band_width=0.15)(x)  # Normalize over spatial dims
+
+        # Custom configuration
+        norm_layer = BandRMS(
+            max_band_width=0.3,
+            epsilon=1e-6,
+            band_initializer='random_normal',
+            band_regularizer=keras.regularizers.L2(1e-4)
+        )
+        ```
+
+    References:
+        - Root Mean Square Layer Normalization (Zhang & Sennrich, 2019)
+          https://arxiv.org/abs/1910.07467
+
+    Raises:
+        ValueError: If max_band_width is not between 0 and 1.
+        ValueError: If epsilon is not positive.
+
+    Note:
+        This implementation follows the modern Keras 3 pattern where weights
+        are created in build() and all sub-layers are created in __init__.
+        The layer is designed to work efficiently with mixed precision training
+        by casting to float32 for computations and back to the original dtype.
     """
 
     def __init__(
-            self,
-            max_band_width: float = 0.1,
-            axis: Union[int, tuple] = -1,
-            epsilon: float = 1e-7,
-            band_initializer: Union[str, keras.initializers.Initializer] = "zeros",
-            band_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            **kwargs: Any
-    ):
-        """Initialize the BandRMS layer.
-
-        Args:
-            max_band_width: Maximum allowed deviation from unit normalization (0 < α < 1).
-                Controls the thickness of the spherical shell.
-            axis: int or tuple of ints, default=-1
-                Axis or axes along which to compute RMS statistics.
-            epsilon: Small constant added to denominator for numerical stability.
-            band_initializer: Initializer for the single band parameter.
-            band_regularizer: Regularizer for the band parameter. Default is L2(1e-5).
-            **kwargs: Additional layer arguments.
-
-        Raises:
-            ValueError: If max_band_width is not between 0 and 1 or if epsilon is not positive.
-        """
+        self,
+        max_band_width: float = 0.1,
+        axis: Union[int, Tuple[int, ...]] = -1,
+        epsilon: float = 1e-7,
+        band_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+        band_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
 
         # Validate inputs
-        self._validate_inputs(max_band_width, epsilon)
+        if not (0.0 < max_band_width < 1.0):
+            raise ValueError(
+                f"max_band_width must be between 0 and 1, got {max_band_width}"
+            )
+        if epsilon <= 0.0:
+            raise ValueError(f"epsilon must be positive, got {epsilon}")
 
-        # Store configuration
+        # Store ALL configuration arguments as instance attributes
         self.max_band_width = max_band_width
         self.axis = axis
         self.epsilon = epsilon
         self.band_initializer = keras.initializers.get(band_initializer)
 
-        # Default regularizer if none provided
-        self.band_regularizer = band_regularizer or keras.regularizers.L2(1e-5)
+        # Set default regularizer if none provided
+        if band_regularizer is None:
+            band_regularizer = keras.regularizers.L2(1e-5)
+        self.band_regularizer = keras.regularizers.get(band_regularizer)
 
-        # Will be set in build()
+        # Initialize weight attribute to None - will be created in build()
         self.band_param = None
-        self._build_input_shape = None
 
-    def _validate_inputs(self, max_band_width: float, epsilon: float) -> None:
-        """Validate initialization parameters.
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Create the layer's trainable weights.
+
+        This method is called automatically by Keras when the layer is first used.
+        It creates the single trainable band parameter using add_weight().
 
         Args:
-            max_band_width: Maximum allowed deviation from unit norm.
-            epsilon: Small constant for numerical stability.
+            input_shape: Shape tuple of the input tensor, including batch dimension.
 
         Raises:
-            ValueError: If parameters are invalid.
+            ValueError: If input_shape is invalid.
         """
-        if not 0 < max_band_width < 1:
-            raise ValueError(
-                f"max_band_width must be between 0 and 1, got {max_band_width}"
-            )
-        if epsilon <= 0:
-            raise ValueError(f"epsilon must be positive, got {epsilon}")
+        if len(input_shape) < 1:
+            raise ValueError(f"Expected at least 1D input, got {len(input_shape)}D: {input_shape}")
 
-    def build(self, input_shape):
-        """Create the layer's trainable weights.
-
-        Args:
-            input_shape: Shape of input tensor.
-        """
-        self._build_input_shape = input_shape
-
-        # Create a single scalar band parameter
+        # CREATE the layer's single trainable weight using add_weight()
         self.band_param = self.add_weight(
             name="band_param",
-            shape=(),  # Scalar shape
+            shape=(),  # Scalar parameter
             initializer=self.band_initializer,
+            regularizer=self.band_regularizer,
             trainable=True,
-            regularizer=self.band_regularizer
         )
 
+        # Let Keras know the build is complete
         super().build(input_shape)
 
     def call(
-            self,
-            inputs: keras.KerasTensor,
-            training: Optional[bool] = None
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply constrained RMS normalization.
+        """
+        Apply constrained RMS normalization.
 
         Args:
-            inputs: Input tensor.
-            training: Boolean indicating whether in training mode.
+            inputs: Input tensor of arbitrary shape.
+            training: Boolean indicating whether the layer should behave in
+                training mode or inference mode. Used for numerical stability
+                in mixed precision training.
 
         Returns:
             Normalized tensor with RMS value in [1-max_band_width, 1] and
-            L2 norm approximately in [(1-max_band_width)×sqrt(D), sqrt(D)].
+            L2 norm approximately in [(1-max_band_width)×sqrt(D), sqrt(D)],
+            where D is the dimension size along the normalized axes.
         """
         # Cast to float32 for numerical stability in mixed precision training
         inputs_fp32 = ops.cast(inputs, "float32")
@@ -209,7 +241,8 @@ class BandRMS(keras.layers.Layer):
             keepdims=True
         )
 
-        # clamp it for stability, protection for division by zero and sqrt(negative)
+        # Compute RMS with numerical stability
+        # Clamp to epsilon to protect against division by zero and sqrt(negative)
         rms = ops.maximum(
             ops.sqrt(mean_square + self.epsilon),
             self.epsilon
@@ -220,35 +253,40 @@ class BandRMS(keras.layers.Layer):
         normalized = inputs_fp32 / rms
 
         # Step 2: Apply learnable scaling within [1-α, 1] band
-        # Use sigmoid to map the band_param to [0, 1]
-        # with 5x multiplier, sigmoid(-5) ~ 0, sigmoid(+5) ~ 1
+        # Use sigmoid to map the band_param to [0, 1] with good gradient properties
+        # The 5x multiplier ensures sigmoid(-5) ≈ 0 and sigmoid(+5) ≈ 1
         band_activation = ops.sigmoid(5.0 * self.band_param)
 
-        # Scale the activation to be within [1-max_band_width, 1]
-        # When band_activation = 0: scale = 1 - max_band_width
-        # When band_activation = 1: scale = 1
+        # Map activation to the target band [1-max_band_width, 1]
+        # When band_activation = 0: scale = 1 - max_band_width (minimum)
+        # When band_activation = 1: scale = 1 (maximum)
         scale = (1.0 - self.max_band_width) + (self.max_band_width * band_activation)
 
         # Apply scaling to the normalized tensor
-        # The single scalar scale is automatically broadcast to all elements
+        # The scalar scale is automatically broadcast to all tensor elements
         output = normalized * scale
 
-        # Cast back to original dtype
+        # Cast back to original dtype to maintain precision compatibility
         return ops.cast(output, inputs.dtype)
 
-    def compute_output_shape(self, input_shape) -> tuple:
-        """Compute the shape of output tensor.
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape of the layer.
 
         Args:
-            input_shape: Shape of input tensor.
+            input_shape: Shape tuple of the input tensor.
 
         Returns:
-            Shape of output tensor (same as input).
+            Output shape tuple. Same as input shape for normalization layers.
         """
-        return input_shape
+        return tuple(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return layer configuration for serialization.
+        """
+        Return the layer's configuration for serialization.
+
+        This method must return ALL arguments needed to recreate the layer
+        via __init__. Uses keras serializers for complex objects.
 
         Returns:
             Dictionary containing the layer configuration.
@@ -263,13 +301,6 @@ class BandRMS(keras.layers.Layer):
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration for serialization."""
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build layer from configuration."""
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
-# ---------------------------------------------------------------------
+    # Note: get_build_config() and build_from_config() methods are REMOVED
+    # as they are deprecated in modern Keras 3. Keras handles the build
+    # lifecycle automatically when following the modern pattern.
