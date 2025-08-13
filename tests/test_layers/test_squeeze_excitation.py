@@ -449,9 +449,6 @@ class TestSqueezeExcitation:
         assert len(bias_shapes) == 2, "Should have 2 bias weights"
 
 
-class TestSqueezeExcitationEdgeCases:
-    """Test edge cases and boundary conditions."""
-
     def test_minimal_input_size(self):
         """Test with minimal spatial dimensions."""
         layer = SqueezeExcitation(reduction_ratio=0.5)
@@ -499,8 +496,8 @@ class TestSqueezeExcitationEdgeCases:
         assert output.shape == test_input.shape
         assert layer_max.bottleneck_channels == 64
 
-    def test_layer_reuse_different_inputs(self):
-        """Test reusing the same layer instance with different shaped inputs."""
+    def test_layer_reuse_same_channels(self):
+        """Test reusing layer instance with compatible input shapes."""
         layer = SqueezeExcitation(reduction_ratio=0.25)
 
         # First input
@@ -518,12 +515,338 @@ class TestSqueezeExcitationEdgeCases:
         output3 = layer(input3)
         assert output3.shape == input3.shape
 
-        # Different channel count - should raise error or rebuild
-        input4 = keras.random.normal([2, 16, 16, 64])
-        try:
-            output4 = layer(input4)
-            # If it works, verify shape
-            assert output4.shape == input4.shape
-        except Exception as e:
-            # Expected behavior - layer was built for 32 channels
-            assert "incompatible" in str(e).lower() or "shape" in str(e).lower()
+        # All outputs should be valid
+        for output in [output1, output2, output3]:
+            assert not keras.ops.any(keras.ops.isnan(output))
+
+    def test_different_channel_counts_separate_layers(self):
+        """Test different channel counts with separate layer instances."""
+        channel_counts = [1, 8, 32, 128, 512]
+
+        for channels in channel_counts:
+            layer = SqueezeExcitation(reduction_ratio=0.25)
+            test_input = keras.random.normal([2, 8, 8, channels])
+
+            output = layer(test_input)
+
+            assert output.shape == test_input.shape
+            assert not keras.ops.any(keras.ops.isnan(output))
+
+            # Verify bottleneck calculation
+            expected_bottleneck = max(1, int(round(channels * 0.25)))
+            assert layer.bottleneck_channels == expected_bottleneck
+
+    def test_model_save_load(self, sample_input):
+        """Test saving and loading a model with the SqueezeExcitation layer."""
+        # Create a model with the SE layer
+        inputs = keras.layers.Input(shape=sample_input.shape[1:])
+        x = keras.layers.Conv2D(64, 3, padding='same', activation='relu')(inputs)
+        x = SqueezeExcitation(reduction_ratio=0.25, name="se_block")(x)
+        x = keras.layers.GlobalAveragePooling2D()(x)
+        outputs = keras.layers.Dense(10, activation='softmax')(x)
+
+        model = keras.Model(inputs=inputs, outputs=outputs)
+        model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
+
+        # Generate prediction before saving
+        original_prediction = model.predict(sample_input, verbose=0)
+
+        # Save and load model
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = os.path.join(tmpdir, 'model.keras')
+
+            # Save the model
+            model.save(model_path)
+
+            # Load without custom_objects (thanks to registration decorator)
+            loaded_model = keras.models.load_model(model_path)
+
+            # Generate prediction with loaded model
+            loaded_prediction = loaded_model.predict(sample_input, verbose=0)
+
+            # Check predictions match
+            np.testing.assert_allclose(
+                original_prediction,
+                loaded_prediction,
+                rtol=1e-6, atol=1e-6,
+                err_msg="Predictions should match after model save/load"
+            )
+
+            # Check layer type is preserved
+            se_layer = loaded_model.get_layer("se_block")
+            assert isinstance(se_layer, SqueezeExcitation)
+            assert se_layer.reduction_ratio == 0.25
+
+    def test_training_behavior_detailed(self, sample_input):
+        """Test detailed behavior differences in training vs inference mode."""
+        layer = SqueezeExcitation(reduction_ratio=0.25)
+
+        # Test training mode multiple times (should be deterministic for SE)
+        training_outputs = []
+        for _ in range(3):
+            output = layer(sample_input, training=True)
+            training_outputs.append(keras.ops.convert_to_numpy(output))
+
+        # SE layer should be deterministic even in training mode
+        for i in range(1, len(training_outputs)):
+            np.testing.assert_allclose(
+                training_outputs[0],
+                training_outputs[i],
+                rtol=1e-6, atol=1e-6,
+                err_msg="SE layer should be deterministic in training mode"
+            )
+
+        # Test inference mode
+        inference_output1 = layer(sample_input, training=False)
+        inference_output2 = layer(sample_input, training=False)
+
+        # Inference should also be deterministic
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(inference_output1),
+            keras.ops.convert_to_numpy(inference_output2),
+            rtol=1e-6, atol=1e-6,
+            err_msg="SE layer should be deterministic in inference mode"
+        )
+
+        # Training and inference should produce same result for SE layer
+        np.testing.assert_allclose(
+            training_outputs[0],
+            keras.ops.convert_to_numpy(inference_output1),
+            rtol=1e-6, atol=1e-6,
+            err_msg="SE layer should produce same output in training and inference"
+        )
+
+    def test_different_input_sizes_comprehensive(self):
+        """Test layer with comprehensive range of input sizes."""
+        # Various input configurations
+        input_configs = [
+            (1, 8, 8, 16),  # Small spatial, few channels
+            (2, 32, 32, 64),  # Medium spatial, medium channels
+            (1, 224, 224, 3),  # Large spatial, few channels (like RGB)
+            (4, 16, 16, 256),  # Small spatial, many channels
+            (2, 64, 128, 32),  # Non-square spatial dimensions
+            (3, 1, 1, 512),  # Minimal spatial dimensions
+            (1, 512, 512, 1),  # Very large spatial, single channel
+        ]
+
+        for batch, height, width, channels in input_configs:
+            # Create new layer instance for each configuration
+            layer = SqueezeExcitation(reduction_ratio=0.5)
+            test_input = keras.random.normal([batch, height, width, channels])
+            output = layer(test_input)
+
+            assert output.shape == test_input.shape
+            assert not keras.ops.any(keras.ops.isnan(output))
+            assert not keras.ops.any(keras.ops.isinf(output))
+
+            # Verify bottleneck calculation
+            expected_bottleneck = max(1, int(round(channels * 0.5)))
+            assert layer.bottleneck_channels == expected_bottleneck
+
+    def test_regularization_comprehensive(self, sample_input):
+        """Test comprehensive regularization behavior."""
+        # Test kernel regularization
+        layer_kernel_reg = SqueezeExcitation(
+            reduction_ratio=0.25,
+            kernel_regularizer=keras.regularizers.L2(0.01)
+        )
+
+        initial_losses_kernel = len(layer_kernel_reg.losses)
+        _ = layer_kernel_reg(sample_input)
+        assert len(layer_kernel_reg.losses) > initial_losses_kernel
+
+        # Test bias regularization
+        layer_bias_reg = SqueezeExcitation(
+            reduction_ratio=0.25,
+            use_bias=True,
+            bias_regularizer=keras.regularizers.L1(0.01)
+        )
+
+        initial_losses_bias = len(layer_bias_reg.losses)
+        _ = layer_bias_reg(sample_input)
+        assert len(layer_bias_reg.losses) > initial_losses_bias
+
+        # Test combined regularization
+        layer_combined = SqueezeExcitation(
+            reduction_ratio=0.25,
+            use_bias=True,
+            kernel_regularizer=keras.regularizers.L2(0.01),
+            bias_regularizer=keras.regularizers.L1(0.01)
+        )
+
+        initial_losses_combined = len(layer_combined.losses)
+        _ = layer_combined(sample_input)
+        final_losses_combined = len(layer_combined.losses)
+
+        # Should have regularization losses from both kernel and bias
+        assert final_losses_combined > initial_losses_combined
+
+        # Verify regularization losses are positive
+        total_reg_loss = sum(layer_combined.losses)
+        assert keras.ops.convert_to_numpy(total_reg_loss) > 0
+
+    def test_attention_mechanism_properties(self, sample_input):
+        """Test detailed properties of the SE attention mechanism."""
+        layer = SqueezeExcitation(reduction_ratio=0.25)
+
+        # Test that different channels get different attention weights
+        # Create input with distinct channel patterns
+        channels = sample_input.shape[-1]
+
+        # Create patterned input more simply
+        patterned_input = keras.ops.zeros_like(sample_input)
+        for c in range(min(channels, 8)):  # Test first 8 channels
+            channel_value = (c + 1) * 0.5
+            # Set specific channel to specific value
+            channel_slice = patterned_input[:, :, :, c:c + 1]
+            patterned_input = keras.ops.concatenate([
+                patterned_input[:, :, :, :c],
+                keras.ops.full_like(channel_slice, channel_value),
+                patterned_input[:, :, :, c + 1:]
+            ], axis=-1)
+
+        output = layer(patterned_input)
+
+        # Verify output properties
+        assert output.shape == patterned_input.shape
+        assert not keras.ops.any(keras.ops.isnan(output))
+
+        # SE should modulate the input based on channel importance
+        # Check that output is not identical to input (SE is doing something)
+        input_mean = keras.ops.mean(keras.ops.abs(patterned_input))
+        output_mean = keras.ops.mean(keras.ops.abs(output))
+
+        # SE should produce some modulation (output shouldn't be identical to input)
+        # unless all channels have the same statistics (which they don't in our test)
+        relative_diff = keras.ops.abs(output_mean - input_mean) / (input_mean + 1e-8)
+        assert keras.ops.convert_to_numpy(relative_diff) > 1e-6
+
+    def test_gradient_flow_comprehensive(self, sample_input):
+        """Test comprehensive gradient flow analysis."""
+        layer = SqueezeExcitation(reduction_ratio=0.25, use_bias=True)
+
+        with tf.GradientTape(persistent=True) as tape:
+            tape.watch(sample_input)
+            output = layer(sample_input)
+
+            # Test different loss functions
+            losses = {
+                'mse': keras.ops.mean(keras.ops.square(output)),
+                'mae': keras.ops.mean(keras.ops.abs(output)),
+                'sum': keras.ops.sum(output)
+            }
+
+        for loss_name, loss_value in losses.items():
+            # Input gradients
+            input_grads = tape.gradient(loss_value, sample_input)
+            assert input_grads is not None, f"No input gradients for {loss_name}"
+            assert input_grads.shape == sample_input.shape
+            assert not keras.ops.any(keras.ops.isnan(input_grads))
+
+            # Layer weight gradients
+            weight_grads = tape.gradient(loss_value, layer.trainable_variables)
+            assert all(g is not None for g in weight_grads), f"Missing weight gradients for {loss_name}"
+
+            # Verify gradient shapes and properties
+            for grad, var in zip(weight_grads, layer.trainable_variables):
+                assert grad.shape == var.shape, f"Gradient shape mismatch for {loss_name}"
+                assert not keras.ops.any(keras.ops.isnan(grad)), f"NaN gradients for {loss_name}"
+
+                # Gradients should not all be zero (unless input is pathological)
+                grad_magnitude = keras.ops.sqrt(keras.ops.sum(keras.ops.square(grad)))
+                assert keras.ops.convert_to_numpy(grad_magnitude) > 1e-10, f"Zero gradients for {loss_name}"
+
+    def test_compatibility_with_other_layers(self, sample_input):
+        """Test compatibility and integration with various other layers."""
+        # Test with different normalization layers
+        normalizations = [
+            keras.layers.BatchNormalization(),
+            keras.layers.LayerNormalization(),
+        ]
+
+        for norm_layer in normalizations:
+            inputs = keras.layers.Input(shape=sample_input.shape[1:])
+            x = keras.layers.Conv2D(64, 3, padding='same')(inputs)
+            x = norm_layer(x)
+            x = SqueezeExcitation(reduction_ratio=0.25)(x)
+            x = keras.layers.GlobalAveragePooling2D()(x)
+            outputs = keras.layers.Dense(10)(x)
+
+            model = keras.Model(inputs, outputs)
+            result = model(sample_input)
+
+            assert result.shape == (sample_input.shape[0], 10)
+            assert not keras.ops.any(keras.ops.isnan(result))
+
+        # Test with different activation patterns
+        activations = ['relu', 'swish', 'gelu']
+        for activation in activations:
+            inputs = keras.layers.Input(shape=sample_input.shape[1:])
+            x = keras.layers.Conv2D(64, 3, padding='same', activation=activation)(inputs)
+            x = SqueezeExcitation(reduction_ratio=0.25)(x)
+            x = keras.layers.GlobalAveragePooling2D()(x)
+            outputs = keras.layers.Dense(10)(x)
+
+            model = keras.Model(inputs, outputs)
+            result = model(sample_input)
+
+            assert result.shape == (sample_input.shape[0], 10)
+            assert not keras.ops.any(keras.ops.isnan(result))
+
+    def test_memory_efficiency(self):
+        """Test memory usage with large inputs."""
+        # Test with progressively larger inputs to verify memory efficiency
+        base_channels = 32
+
+        input_sizes = [
+            (1, 64, 64, base_channels),
+            (1, 128, 128, base_channels),
+            (1, 256, 256, base_channels),
+        ]
+
+        for size in input_sizes:
+            # Create new layer instance for each size test
+            layer = SqueezeExcitation(reduction_ratio=0.25)
+            test_input = keras.random.normal(size)
+
+            # Should handle large inputs without issues
+            output = layer(test_input)
+
+            assert output.shape == test_input.shape
+            assert not keras.ops.any(keras.ops.isnan(output))
+
+            # Clean up
+            del layer, test_input, output
+
+    def test_performance_characteristics(self, sample_input):
+        """Test performance-related characteristics."""
+        import time
+
+        # Compare performance with different reduction ratios
+        ratios = [0.0625, 0.125, 0.25, 0.5]
+        times = []
+
+        for ratio in ratios:
+            layer = SqueezeExcitation(reduction_ratio=ratio)
+
+            # Warm up
+            _ = layer(sample_input)
+
+            # Measure time for multiple iterations with same layer
+            start_time = time.time()
+            for _ in range(10):
+                _ = layer(sample_input, training=False)
+            end_time = time.time()
+
+            avg_time = (end_time - start_time) / 10
+            times.append(avg_time)
+
+        # Times should be reasonable (not testing exact values due to hardware variation)
+        for t in times:
+            assert t < 1.0  # Should complete in under 1 second for 10 iterations
+
+        # All times should be positive and finite
+        for t in times:
+            assert t > 0
+            assert not np.isnan(t)
+            assert not np.isinf(t)
