@@ -41,10 +41,11 @@ from typing import Optional, Union, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.activations.relu_k import ReLUK
-from dl_techniques.layers.activations.basis_function import BasisFunction
+from ..activations.relu_k import ReLUK
+from ..activations.basis_function import BasisFunction
 
 # ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class PowerMLPLayer(keras.layers.Layer):
@@ -70,19 +71,20 @@ class PowerMLPLayer(keras.layers.Layer):
     more effectively than traditional MLPs.
 
     Args:
-        units: Integer, number of output units/neurons in the layer.
+        units: Integer, number of output units/neurons in the layer. Must be positive.
         k: Integer, power exponent for the ReLU-k activation function.
             Must be positive. Higher values create more aggressive non-linearities.
+            Defaults to 3.
         kernel_initializer: Initializer for the kernel weights in both branches.
-            Can be string name or Initializer instance.
+            Can be string name or Initializer instance. Defaults to 'he_normal'.
         bias_initializer: Initializer for the bias vector in the main branch.
-            Can be string name or Initializer instance.
+            Can be string name or Initializer instance. Defaults to 'zeros'.
         kernel_regularizer: Optional regularizer function applied to kernel weights
-            in both branches.
+            in both branches. Defaults to None.
         bias_regularizer: Optional regularizer function applied to bias vector
-            in the main branch.
+            in the main branch. Defaults to None.
         use_bias: Boolean, whether to use bias in the main branch dense layer.
-            The basis branch never uses bias by design.
+            The basis branch never uses bias by design. Defaults to True.
         **kwargs: Additional keyword arguments passed to the Layer parent class,
             such as `name`, `dtype`, `trainable`, etc.
 
@@ -96,30 +98,35 @@ class PowerMLPLayer(keras.layers.Layer):
         the output would have shape `(batch_size, units)`.
 
     Example:
-        >>>
-        >>> # Create a PowerMLP layer
-        >>> power_mlp = PowerMLPLayer(units=64, k=3)
-        >>>
-        >>> # Use in a model
-        >>> model = keras.Sequential([
-        ...     keras.layers.Input(shape=(784,)),
-        ...     PowerMLPLayer(units=128, k=2),
-        ...     keras.layers.Dropout(0.2),
-        ...     PowerMLPLayer(units=64, k=3),
-        ...     keras.layers.Dense(10, activation='softmax')
-        ... ])
-        >>>
-        >>> # Or in functional API
-        >>> inputs = keras.Input(shape=(784,))
-        >>> x = PowerMLPLayer(units=128, k=2)(inputs)
-        >>> x = keras.layers.LayerNormalization()(x)
-        >>> outputs = PowerMLPLayer(units=10, k=1)(x)
-        >>> model = keras.Model(inputs, outputs)
+        ```python
+        # Create a PowerMLP layer
+        power_mlp = PowerMLPLayer(units=64, k=3)
+
+        # Use in a model
+        model = keras.Sequential([
+            keras.layers.Input(shape=(784,)),
+            PowerMLPLayer(units=128, k=2),
+            keras.layers.Dropout(0.2),
+            PowerMLPLayer(units=64, k=3),
+            keras.layers.Dense(10, activation='softmax')
+        ])
+
+        # Or in functional API
+        inputs = keras.Input(shape=(784,))
+        x = PowerMLPLayer(units=128, k=2)(inputs)
+        x = keras.layers.LayerNormalization()(x)
+        outputs = PowerMLPLayer(units=10, k=1)(x)
+        model = keras.Model(inputs, outputs)
+        ```
 
     References:
         - PowerMLP architectures for enhanced function approximation
         - Combines benefits of ReLU-k and basis function activations
         - Designed for improved gradient flow and expressiveness
+
+    Raises:
+        ValueError: If units or k are not positive integers.
+        TypeError: If k is not an integer.
 
     Note:
         - The main branch uses bias while the basis branch does not
@@ -142,8 +149,8 @@ class PowerMLPLayer(keras.layers.Layer):
         """Initialize the PowerMLP layer.
 
         Args:
-            units: Number of output units.
-            k: Power for ReLU-k activation.
+            units: Number of output units. Must be positive.
+            k: Power for ReLU-k activation. Must be positive integer.
             kernel_initializer: Initializer for kernel weights.
             bias_initializer: Initializer for bias vector.
             kernel_regularizer: Regularizer for kernel weights.
@@ -177,30 +184,8 @@ class PowerMLPLayer(keras.layers.Layer):
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.use_bias = use_bias
 
-        # Sublayers - will be initialized in build()
-        self.main_dense = None
-        self.relu_k = None
-        self.basis_function = None
-        self.basis_dense = None
-        self._build_input_shape = None
-
-        logger.info(f"Initialized PowerMLP layer with {units} units, k={k}")
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer weights and initialize sublayers.
-
-        This method creates and configures the four main components:
-        1. Main branch dense layer
-        2. ReLU-k activation layer
-        3. Basis function activation layer
-        4. Basis branch dense layer
-
-        Args:
-            input_shape: Shape tuple of the input tensor, including the batch
-                dimension as None or an integer.
-        """
-        # Store input shape for serialization
-        self._build_input_shape = input_shape
+        # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
+        # These are unbuilt until build() is called
 
         # Main branch dense layer (with bias)
         self.main_dense = keras.layers.Dense(
@@ -228,12 +213,30 @@ class PowerMLPLayer(keras.layers.Layer):
             name="basis_dense"
         )
 
-        # Build all sublayers with the appropriate shapes
-        self.main_dense.build(input_shape)
-        self.relu_k.build((input_shape[0], self.units))  # After main_dense
-        self.basis_function.build(input_shape)
-        self.basis_dense.build(input_shape)  # After basis_function
+        logger.info(f"Initialized PowerMLP layer with {units} units, k={k}")
 
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the layer weights and initialize sublayers.
+
+        This method explicitly builds all sub-layers to ensure robust serialization.
+        This is the modern Keras 3 pattern for composite layers.
+
+        Args:
+            input_shape: Shape tuple of the input tensor, including the batch
+                dimension as None or an integer.
+        """
+        # Build sub-layers in computational order for robust serialization
+        self.main_dense.build(input_shape)
+
+        # Compute intermediate shapes for proper building
+        main_dense_output_shape = self.main_dense.compute_output_shape(input_shape)
+        self.relu_k.build(main_dense_output_shape)
+
+        self.basis_function.build(input_shape)
+        # basis_function output shape is the same as input shape
+        self.basis_dense.build(input_shape)
+
+        # Always call parent build at the end
         super().build(input_shape)
 
         logger.debug(f"Built PowerMLP layer with input shape: {input_shape}")
@@ -266,7 +269,7 @@ class PowerMLPLayer(keras.layers.Layer):
         basis_branch = self.basis_function(inputs, training=training)
         basis_branch = self.basis_dense(basis_branch, training=training)
 
-        # Combine branches via addition
+        # Combine branches via element-wise addition
         output = main_branch + basis_branch
 
         return output
@@ -310,30 +313,6 @@ class PowerMLPLayer(keras.layers.Layer):
             "use_bias": self.use_bias,
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the build configuration for serialization.
-
-        Returns:
-            Dictionary containing the build configuration, specifically
-            the input shape used during the build process.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a build configuration.
-
-        This method is used during model loading to properly rebuild
-        the layer's internal state and sublayers.
-
-        Args:
-            config: Dictionary containing the build configuration,
-                as returned by get_build_config().
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
     def __repr__(self) -> str:
         """Return string representation of the layer.
