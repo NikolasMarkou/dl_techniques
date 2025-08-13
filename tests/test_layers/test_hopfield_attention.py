@@ -176,7 +176,6 @@ class TestHopfieldAttentionBuild:
         input_shape = (None, 32, 512)
 
         layer.build(input_shape)
-        assert layer._build_input_shape == input_shape
 
 
 class TestHopfieldAttentionForwardPass:
@@ -400,7 +399,6 @@ class TestHopfieldAttentionSerialization:
 
         # Check that new layer is built
         assert new_layer.built
-        assert new_layer._build_input_shape == input_shape
 
     def test_full_serialization_cycle(self):
         """Test complete save/load cycle."""

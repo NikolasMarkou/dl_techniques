@@ -95,53 +95,88 @@ class HopfieldAttention(keras.layers.Layer):
     the accompanying documentation file.
 
     Args:
-        num_heads: Number of attention heads.
-        key_dim: Size of each attention head for key and query.
-        value_dim: Size of each attention head for value. If None, defaults to key_dim.
-        dropout_rate: Dropout probability for attention weights.
-        use_bias: Whether to use bias in the attention projections.
-        kernel_initializer: Initializer for the projection matrices.
-        bias_initializer: Initializer for the bias vectors.
-        kernel_regularizer: Regularizer function for the projection matrices.
-        bias_regularizer: Regularizer function for the bias vectors.
-        activity_regularizer: Regularizer function for the output.
-        normalize_patterns: Whether to apply layer normalization to patterns.
-        update_steps_max: Maximum number of association update steps (0 means no limit).
-        update_steps_eps: Minimum difference threshold between update steps.
-        **kwargs: Additional keyword arguments for the Layer parent class.
+        num_heads: Integer, number of attention heads. Must be positive.
+        key_dim: Integer, size of each attention head for key and query. Must be positive.
+        value_dim: Optional integer, size of each attention head for value.
+            If None, defaults to key_dim.
+        dropout_rate: Float, dropout probability for attention weights.
+            Must be between 0.0 and 1.0. Defaults to 0.0.
+        use_bias: Boolean, whether to use bias in the attention projections.
+            Defaults to True.
+        kernel_initializer: String or initializer instance for projection matrices.
+            Defaults to 'glorot_uniform'.
+        bias_initializer: String or initializer instance for bias vectors.
+            Defaults to 'zeros'.
+        kernel_regularizer: Optional regularizer for projection matrices.
+        bias_regularizer: Optional regularizer for bias vectors.
+        activity_regularizer: Optional regularizer for layer output.
+        normalize_patterns: Boolean, whether to apply layer normalization to patterns.
+            Defaults to True.
+        update_steps_max: Integer, maximum number of association update steps.
+            0 means single-step (standard attention). Must be non-negative.
+            Defaults to 0.
+        update_steps_eps: Float, minimum difference threshold between update steps
+            for convergence detection. Must be positive. Defaults to 1e-4.
+        **kwargs: Additional keyword arguments for the Layer base class.
 
-    Call arguments:
-        inputs: Query tensor of shape `(batch_size, seq_len_q, dim)` or list of tensors
-               [query, key, value].
-        mask: Optional mask of shape `(batch_size, seq_len_q, seq_len_k)`.
-        return_attention_scores: If True, returns attention scores with output.
-        training: Boolean indicating whether the layer should behave in training mode.
+    Input shape:
+        - Single tensor: (batch_size, seq_len, input_dim) for self-attention
+        - List of tensors: [query, key, value] where each has shape
+          (batch_size, seq_len, input_dim)
 
-    Returns:
-        output: Hopfield-processed tensor of shape `(batch_size, seq_len_q, dim)`.
-        attention_scores: Optional attention weight tensor if return_attention_scores=True.
+    Output shape:
+        Tensor with shape (batch_size, seq_len_query, input_dim).
+
+    Attributes:
+        query_dense: Dense layer for query projection.
+        key_dense: Dense layer for key projection.
+        value_dense: Dense layer for value projection.
+        output_dense: Dense layer for final output projection.
+        dropout_layer: Dropout layer for attention weights (if dropout_rate > 0).
+        layernorm: LayerNormalization for pattern normalization (if normalize_patterns=True).
+
+    Example:
+        ```python
+        # Self-attention with iterative updates (Hopfield dynamics)
+        layer = HopfieldAttention(
+            num_heads=8,
+            key_dim=64,
+            update_steps_max=3,
+            normalize_patterns=True
+        )
+        inputs = keras.Input(shape=(128, 512))
+        outputs = layer(inputs)
+
+        # Cross-attention (standard attention behavior)
+        layer = HopfieldAttention(
+            num_heads=8,
+            key_dim=64,
+            update_steps_max=0  # Single step
+        )
+        query = keras.Input(shape=(32, 512))
+        key_value = keras.Input(shape=(64, 512))
+        outputs = layer([query, key_value, key_value])
+
+        # With custom regularization
+        layer = HopfieldAttention(
+            num_heads=12,
+            key_dim=64,
+            dropout_rate=0.1,
+            kernel_regularizer=keras.regularizers.L2(1e-4),
+            update_steps_max=5,
+            update_steps_eps=1e-5
+        )
+        ```
 
     Raises:
         ValueError: If num_heads <= 0 or key_dim <= 0.
-        ValueError: If dropout is not in [0, 1].
+        ValueError: If dropout_rate is not in [0, 1].
         ValueError: If update_steps_max < 0.
         ValueError: If update_steps_eps <= 0.
 
-    Example:
-        >>> # Self-attention case
-        >>> x = keras.random.normal((4, 32, 128))
-        >>> hopfield_layer = HopfieldAttention(num_heads=8, key_dim=64)
-        >>> output = hopfield_layer(x)
-        >>> print(output.shape)
-        (4, 32, 128)
-
-        >>> # Cross-attention case
-        >>> query = keras.random.normal((4, 32, 128))
-        >>> key = keras.random.normal((4, 64, 128))
-        >>> value = keras.random.normal((4, 64, 128))
-        >>> output = hopfield_layer([query, key, value])
-        >>> print(output.shape)
-        (4, 32, 128)
+    Note:
+        This implementation follows the modern Keras 3 pattern where all sub-layers
+        are created in __init__ and explicitly built in build() for robust serialization.
     """
 
     def __init__(
@@ -175,7 +210,7 @@ class HopfieldAttention(keras.layers.Layer):
         if update_steps_eps <= 0:
             raise ValueError(f"update_steps_eps must be positive, got {update_steps_eps}")
 
-        # Store configuration parameters
+        # Store ALL configuration parameters
         self.num_heads = num_heads
         self.key_dim = key_dim
         self.value_dim = value_dim if value_dim is not None else key_dim
@@ -190,47 +225,10 @@ class HopfieldAttention(keras.layers.Layer):
         self.update_steps_max = update_steps_max
         self.update_steps_eps = update_steps_eps
 
-        # Initialize sublayers to None - will be created in build()
-        self.query_dense = None
-        self.key_dense = None
-        self.value_dense = None
-        self.output_dense = None
-        self.dropout_layer = None
-        self.layernorm = None
+        # CREATE all sub-layers in __init__ (they are unbuilt at this point)
+        # Following Pattern 2: Composite Layer from the Modern Keras 3 guide
 
-        # Store build input shape for serialization
-        self._build_input_shape = None
-
-        logger.info(f"Initialized HopfieldAttention with {num_heads} heads, "
-                   f"key_dim={key_dim}, value_dim={self.value_dim}")
-
-    def build(self, input_shape: Union[Tuple, List]) -> None:
-        """
-        Build the layer by creating sublayers when first called.
-
-        Args:
-            input_shape: Shape of input tensor or list of shapes for [query, key, value].
-        """
-        # Store input shape for serialization
-        self._build_input_shape = input_shape
-
-        # Handle different input formats
-        if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0:
-            # Check if this is a list of shapes or a single shape
-            if isinstance(input_shape[0], (list, tuple)):
-                # This is a list of shapes [query_shape, key_shape, value_shape]
-                query_shape = input_shape[0]
-            else:
-                # This is a single shape tuple (None, 32, 512)
-                query_shape = input_shape
-        else:
-            # Single input shape provided
-            query_shape = input_shape
-
-        input_dim = query_shape[-1]
-        logger.debug(f"Building HopfieldAttention with input_dim={input_dim}")
-
-        # Create projection layers
+        # Projection layers - will be properly dimensioned in build()
         self.query_dense = keras.layers.Dense(
             self.num_heads * self.key_dim,
             use_bias=self.use_bias,
@@ -264,9 +262,10 @@ class HopfieldAttention(keras.layers.Layer):
             name="value_dense"
         )
 
-        # Output projection
+        # Output projection - input_dim will be determined in build()
+        # For now, we create it but it will be properly built later
         self.output_dense = keras.layers.Dense(
-            input_dim,
+            0,  # Will be set correctly in build()
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
@@ -276,35 +275,91 @@ class HopfieldAttention(keras.layers.Layer):
             name="output_dense"
         )
 
-        # Dropout layer
+        # Dropout layer (conditional creation)
         if self.dropout_rate > 0.0:
-            self.dropout_layer = keras.layers.Dropout(self.dropout_rate, name="attention_dropout")
+            self.dropout_layer = keras.layers.Dropout(
+                self.dropout_rate,
+                name="attention_dropout"
+            )
+        else:
+            self.dropout_layer = None
 
-        # Layer normalization
+        # Layer normalization (conditional creation)
         if self.normalize_patterns:
             self.layernorm = keras.layers.LayerNormalization(
                 epsilon=1e-5,
                 name="pattern_norm"
             )
+        else:
+            self.layernorm = None
 
-        # Build sublayers explicitly
+        logger.info(f"Initialized HopfieldAttention with {num_heads} heads, "
+                   f"key_dim={key_dim}, value_dim={self.value_dim}")
+
+    def build(self, input_shape: Union[Tuple, List]) -> None:
+        """
+        Build the layer and all its sub-layers.
+
+        CRITICAL: Explicitly build each sub-layer for robust serialization
+        following the Modern Keras 3 pattern.
+
+        Args:
+            input_shape: Shape of input tensor or list of shapes for [query, key, value].
+        """
+        # Handle different input formats to extract query shape
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0:
+            # Check if this is a list of shapes or a single shape
+            if isinstance(input_shape[0], (list, tuple)):
+                # This is a list of shapes [query_shape, key_shape, value_shape]
+                query_shape = input_shape[0]
+            else:
+                # This is a single shape tuple (None, 32, 512)
+                query_shape = input_shape
+        else:
+            # Single input shape provided
+            query_shape = input_shape
+
+        input_dim = query_shape[-1]
+        logger.debug(f"Building HopfieldAttention with input_dim={input_dim}")
+
+        # Update output_dense to have correct units
+        # We need to recreate it with the correct output dimension
+        self.output_dense = keras.layers.Dense(
+            input_dim,  # Output same dimension as input
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+            activity_regularizer=self.activity_regularizer,
+            name="output_dense"
+        )
+
+        # Build sub-layers explicitly in computational order
+        # This ensures all weight variables exist before weight restoration
+
+        # Build projection layers with input shape
         self.query_dense.build(query_shape)
-        self.key_dense.build(query_shape)
-        self.value_dense.build(query_shape)
+        self.key_dense.build(query_shape)  # Assuming key has same shape as query for self-attention
+        self.value_dense.build(query_shape)  # Assuming value has same shape as query for self-attention
 
-        # Calculate output shape for output_dense
+        # Calculate intermediate shape for output projection
         projected_shape = list(query_shape)
         projected_shape[-1] = self.num_heads * self.value_dim
         self.output_dense.build(tuple(projected_shape))
 
+        # Build conditional layers
         if self.dropout_layer is not None:
-            # Dropout doesn't need explicit build
+            # Dropout layer doesn't need explicit build as it doesn't have weights
             pass
 
         if self.layernorm is not None:
-            norm_shape = (None, None, self.num_heads, self.key_dim)
+            # Build layer norm with the shape it will receive
+            # LayerNorm will receive (batch, num_heads, seq_len, head_dim)
+            norm_shape = (None, None, None, self.key_dim)
             self.layernorm.build(norm_shape)
 
+        # Always call parent build at the end
         super().build(input_shape)
         logger.debug("HopfieldAttention build completed")
 
@@ -333,8 +388,7 @@ class HopfieldAttention(keras.layers.Layer):
         scale = ops.sqrt(ops.cast(self.key_dim, query.dtype))
         attention_scores = ops.matmul(query, ops.transpose(key, [0, 1, 3, 2])) / scale
 
-        # The 'mask' argument can be a tensor, None, or a list of masks propagated
-        # by Keras. We need to resolve this to a single tensor mask or None.
+        # Handle mask processing
         actual_mask = None
         if isinstance(mask, (list, tuple)):
             # If Keras passes a list, find the first non-None mask.
@@ -373,16 +427,19 @@ class HopfieldAttention(keras.layers.Layer):
         training: Optional[bool] = None
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
         """
-        Forward pass of the layer.
+        Forward pass of the Hopfield attention layer.
 
         Args:
-            inputs: A tensor or list of tensors [query, key, value].
-            mask: Optional attention mask.
-            return_attention_scores: Whether to return attention scores.
-            training: Whether in training mode.
+            inputs: Input tensor or list of tensors [query, key, value].
+                For self-attention, pass a single tensor.
+                For cross-attention, pass [query, key, value] or [query, key_value].
+            mask: Optional attention mask tensor.
+            return_attention_scores: Boolean, whether to return attention scores along with output.
+            training: Optional boolean indicating training mode.
 
         Returns:
-            Output tensor or tuple of (output tensor, attention scores).
+            If return_attention_scores=False: Output tensor of shape (batch_size, seq_len_query, input_dim).
+            If return_attention_scores=True: Tuple of (output tensor, attention_weights tensor).
         """
         # Handle input formats
         if isinstance(inputs, (list, tuple)):
@@ -394,6 +451,7 @@ class HopfieldAttention(keras.layers.Layer):
             else:
                 raise ValueError(f"Expected 2 or 3 inputs, got {len(inputs)}")
         else:
+            # Self-attention case
             query = key = value = inputs
 
         # Get shapes using Keras ops
@@ -401,7 +459,7 @@ class HopfieldAttention(keras.layers.Layer):
         query_len = ops.shape(query)[1]
         key_len = ops.shape(key)[1]
 
-        # Linear projections
+        # Linear projections using built sub-layers
         query_proj = self.query_dense(query)
         key_proj = self.key_dense(key)
         value_proj = self.value_dense(value)
@@ -487,7 +545,7 @@ class HopfieldAttention(keras.layers.Layer):
             input_shape: Shape of the input or list of input shapes.
 
         Returns:
-            Output shape tuple.
+            Output shape tuple. Same as query input shape for Hopfield attention.
         """
         # Handle different input formats
         if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0:
@@ -502,18 +560,18 @@ class HopfieldAttention(keras.layers.Layer):
             # Single input shape provided
             query_shape = input_shape
 
-        # Convert to list for manipulation
-        output_shape = list(query_shape)
-
         # Output has same shape as query input
-        return tuple(output_shape)
+        return tuple(query_shape)
 
     def get_config(self) -> Dict[str, Any]:
         """
         Return the configuration of the layer for serialization.
 
+        This method must include ALL parameters passed to __init__ for proper
+        serialization and deserialization.
+
         Returns:
-            Dictionary containing the layer configuration.
+            Dictionary containing all layer configuration parameters.
         """
         config = super().get_config()
         config.update({
@@ -532,26 +590,5 @@ class HopfieldAttention(keras.layers.Layer):
             "update_steps_eps": self.update_steps_eps,
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """
-        Get the build configuration for serialization.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """
-        Build the layer from a configuration dictionary.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------
