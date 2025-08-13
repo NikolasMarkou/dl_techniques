@@ -66,152 +66,120 @@ class GlobalResponseNormalization(keras.layers.Layer):
     4. Add the result to the input (residual connection)
 
     Args:
-        eps: Float, small constant for numerical stability. Must be positive.
-            Defaults to 1e-6.
-        gamma_initializer: Initializer for gamma (scale) weights. Can be string name
-            or keras.initializers.Initializer instance. Defaults to 'ones'.
-        beta_initializer: Initializer for beta (bias) weights. Can be string name
-            or keras.initializers.Initializer instance. Defaults to 'zeros'.
-        gamma_regularizer: Optional regularizer for gamma weights. Can be string name
-            or keras.regularizers.Regularizer instance. Defaults to None.
-        beta_regularizer: Optional regularizer for beta weights. Can be string name
-            or keras.regularizers.Regularizer instance. Defaults to None.
-        activity_regularizer: Optional regularizer for the layer output. Can be string
-            name or keras.regularizers.Regularizer instance. Defaults to None.
+        eps: Small constant for numerical stability. Must be positive.
+        gamma_initializer: Initializer for gamma (scale) weights.
+        beta_initializer: Initializer for beta (bias) weights.
+        gamma_regularizer: Regularizer for gamma weights.
+        beta_regularizer: Regularizer for beta weights.
+        activity_regularizer: Regularizer for the layer output.
         **kwargs: Additional keyword arguments for the Layer parent class.
 
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`.
-        The layer expects data in channels-last format.
+    Call arguments:
+        inputs: Input tensor of shape `(batch_size, height, width, channels)`.
+        training: Boolean indicating whether the layer should behave in training mode.
 
-    Output shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`.
-        Same shape as input.
-
-    Attributes:
-        gamma: Scale parameter weights of shape (1, 1, 1, channels).
-        beta: Bias parameter weights of shape (1, 1, 1, channels).
-
-    Example:
-        ```python
-        # Basic usage
-        layer = GlobalResponseNormalization()
-
-        # With custom parameters
-        layer = GlobalResponseNormalization(
-            eps=1e-8,
-            gamma_initializer='glorot_uniform',
-            gamma_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # In a model
-        inputs = keras.Input(shape=(224, 224, 3))
-        x = keras.layers.Conv2D(64, 3, activation='relu')(inputs)
-        x = GlobalResponseNormalization()(x)
-        outputs = keras.layers.Conv2D(10, 1)(x)
-        model = keras.Model(inputs, outputs)
-        ```
+    Returns:
+        output: Normalized tensor of the same shape as input with enhanced inter-channel
+               feature competition.
 
     Raises:
         ValueError: If eps <= 0.
-        ValueError: If input is not 4D during forward pass.
-        ValueError: If channel dimension is None during build.
+        ValueError: If input shape is not 4D.
+        ValueError: If channel dimension is not defined.
 
     References:
-        ConvNeXt V2: Co-designing and Scaling ConvNets with Masked Autoencoders
-        (https://arxiv.org/abs/2301.00808)
-
-    Note:
-        This implementation follows the modern Keras 3 pattern where weights
-        are created in build() and all configuration is stored in __init__.
-        This ensures proper serialization and avoids common build errors.
+        ConvNeXt V2 paper: https://arxiv.org/abs/2301.00808
     """
 
     def __init__(
-        self,
-        eps: float = 1e-6,
-        gamma_initializer: Union[str, keras.initializers.Initializer] = 'ones',
-        beta_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-        gamma_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-        beta_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-        activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-        **kwargs: Any
+            self,
+            eps: float = 1e-6,
+            gamma_initializer: Union[str, keras.initializers.Initializer] = 'ones',
+            beta_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+            gamma_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+            beta_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+            activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+            **kwargs: Any
     ) -> None:
-        super().__init__(activity_regularizer=activity_regularizer, **kwargs)
+        super().__init__(**kwargs)
 
-        # Validate eps parameter
+        # Validate parameters
         if eps <= 0:
             raise ValueError(f"eps must be positive, got {eps}")
 
-        # 1. Store ALL configuration arguments as instance attributes
+        # Store configuration parameters
         self.eps = eps
         self.gamma_initializer = keras.initializers.get(gamma_initializer)
         self.beta_initializer = keras.initializers.get(beta_initializer)
         self.gamma_regularizer = keras.regularizers.get(gamma_regularizer)
         self.beta_regularizer = keras.regularizers.get(beta_regularizer)
+        self.activity_regularizer = keras.regularizers.get(activity_regularizer)
 
-        # 2. No sub-layers to create for this layer
-
-        # 3. Initialize weight attributes to None - they'll be created in build()
+        # Initialize weight attributes to None - will be created in build()
         self.gamma = None
         self.beta = None
+
+        # Store build input shape for serialization
+        self._build_input_shape = None
+        self._channels = None
 
         logger.debug(f"Initialized GlobalResponseNormalization with eps={eps}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Create the layer's weights.
-
-        This method is called automatically by Keras when the layer is first used.
-        It creates the layer's gamma and beta weights using add_weight().
+        Build the layer by creating weights and setting up input specifications.
 
         Args:
-            input_shape: Shape tuple of the input tensor, including batch dimension.
-                Expected shape: (batch_size, height, width, channels).
+            input_shape: Tuple of integers defining the input shape.
 
         Raises:
-            ValueError: If input shape is not 4D.
-            ValueError: If channel dimension is not defined.
+            ValueError: If input shape is invalid.
         """
-        # Validate input shape
+        # Store input shape for serialization
+        self._build_input_shape = input_shape
+
+        # Input validation
         if len(input_shape) != 4:
-            raise ValueError(
-                f"GlobalResponseNormalization expects 4D input "
-                f"(batch_size, height, width, channels), got {len(input_shape)}D: {input_shape}"
-            )
+            raise ValueError(f"Input shape must be 4D (batch, height, width, channels), "
+                             f"got {len(input_shape)}D")
 
         # Get number of channels
         channels = input_shape[-1]
         if channels is None:
-            raise ValueError("The channel dimension (last dimension) must be defined")
+            raise ValueError("Channel dimension must be defined")
 
+        self._channels = channels
         logger.debug(f"Building GlobalResponseNormalization with {channels} channels")
 
-        # CREATE the layer's weights using add_weight()
+        # Create trainable parameters
         self.gamma = self.add_weight(
-            name='gamma',
+            name="gamma",
             shape=(1, 1, 1, channels),
             initializer=self.gamma_initializer,
             regularizer=self.gamma_regularizer,
-            trainable=True,
+            trainable=True
         )
 
         self.beta = self.add_weight(
-            name='beta',
+            name="beta",
             shape=(1, 1, 1, channels),
             initializer=self.beta_initializer,
             regularizer=self.beta_regularizer,
-            trainable=True,
+            trainable=True
         )
 
-        # Let Keras know the build is complete
+        # Set input spec for automatic shape validation
+        self.input_spec = keras.layers.InputSpec(
+            ndim=4, axes={-1: channels}
+        )
+
         super().build(input_shape)
         logger.debug("GlobalResponseNormalization build completed")
 
     def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
         Apply global response normalization to the input tensor.
@@ -227,29 +195,16 @@ class GlobalResponseNormalization(keras.layers.Layer):
 
         Args:
             inputs: Input tensor of shape (batch_size, height, width, channels).
-            training: Boolean indicating whether the layer should behave in training
-                mode or inference mode. Not used in this layer but included for
-                consistency with Keras API.
+            training: Whether in training mode (unused, included for API compatibility).
 
         Returns:
-            Normalized tensor of the same shape as input with enhanced inter-channel
-            feature competition.
-
-        Raises:
-            ValueError: If input tensor is not 4D.
+            Normalized tensor of the same shape as input.
         """
-        # Validate input shape at runtime
-        input_shape = ops.shape(inputs)
-        if len(input_shape) != 4:
-            raise ValueError(
-                f"GlobalResponseNormalization expects 4D input, got {len(input_shape)}D"
-            )
-
         # Get input shape for reshaping operations
-        batch_size = input_shape[0]
-        height = input_shape[1]
-        width = input_shape[2]
-        channels = input_shape[3]
+        batch_size = ops.shape(inputs)[0]
+        height = ops.shape(inputs)[1]
+        width = ops.shape(inputs)[2]
+        channels = ops.shape(inputs)[3]
 
         # Step 1: Reshape to (batch_size, pixels, channels) for efficient norm calculation
         # This flattens spatial dimensions while keeping channels separate
@@ -285,32 +240,48 @@ class GlobalResponseNormalization(keras.layers.Layer):
         Compute the output shape of the layer.
 
         Args:
-            input_shape: Shape tuple of the input.
+            input_shape: Shape of the input tensor.
 
         Returns:
-            Output shape tuple (same as input shape for GRN).
+            Output shape (same as input shape).
         """
-        return tuple(input_shape)
+        return input_shape
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Return the layer's configuration for serialization.
-
-        This method must return ALL arguments needed to recreate the layer
-        via __init__. Uses keras serializers for complex objects.
+        Return the configuration of the layer for serialization.
 
         Returns:
             Dictionary containing the layer configuration.
         """
         config = super().get_config()
         config.update({
-            'eps': self.eps,
-            'gamma_initializer': keras.initializers.serialize(self.gamma_initializer),
-            'beta_initializer': keras.initializers.serialize(self.beta_initializer),
-            'gamma_regularizer': keras.regularizers.serialize(self.gamma_regularizer),
-            'beta_regularizer': keras.regularizers.serialize(self.beta_regularizer),
+            "eps": float(self.eps),
+            "gamma_initializer": keras.initializers.serialize(self.gamma_initializer),
+            "beta_initializer": keras.initializers.serialize(self.beta_initializer),
+            "gamma_regularizer": keras.regularizers.serialize(self.gamma_regularizer),
+            "beta_regularizer": keras.regularizers.serialize(self.beta_regularizer),
+            "activity_regularizer": keras.regularizers.serialize(self.activity_regularizer),
         })
         return config
 
-    # Modern Keras 3: NO get_build_config or build_from_config needed.
-    # Keras handles the build lifecycle automatically.
+    def get_build_config(self) -> Dict[str, Any]:
+        """
+        Get the build configuration for serialization.
+
+        Returns:
+            Dictionary containing the build configuration.
+        """
+        return {
+            "input_shape": self._build_input_shape,
+        }
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """
+        Build the layer from a configuration dictionary.
+
+        Args:
+            config: Dictionary containing the build configuration.
+        """
+        if config.get("input_shape") is not None:
+            self.build(config["input_shape"])
