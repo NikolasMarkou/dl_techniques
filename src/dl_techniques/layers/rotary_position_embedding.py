@@ -62,7 +62,7 @@ q_rotated = rope(queries)  # Shape: (batch, heads, seq_len, head_dim)
 k_rotated = rope(keys)     # Shape: (batch, heads, seq_len, head_dim)
 
 # Compute attention with rotated Q and K
-attention_scores = tf.matmul(q_rotated, k_rotated, transpose_b=True)
+attention_scores = keras.ops.matmul(q_rotated, k_rotated, transpose_b=True)
 ```
 
 References:
@@ -82,24 +82,17 @@ References:
    "Extending Context Window of Large Language Models via Positional Interpolation"
    arXiv:2306.15595
    https://arxiv.org/abs/2306.15595
-
 """
 
 import keras
-from typing import Optional, Any, Tuple
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from ..utils.logger import logger
-
-# ---------------------------------------------------------------------
+from typing import Optional, Any, Tuple, Dict
+from dl_techniques.utils.logger import logger
 
 
 @keras.saving.register_keras_serializable()
 class RotaryPositionEmbedding(keras.layers.Layer):
-    """Rotary Position Embedding layer for attention mechanisms.
+    """
+    Rotary Position Embedding layer for attention mechanisms.
 
     Rotary Position Embedding (RoPE) integrates positional information by rotating
     query and key vectors in attention mechanisms. This allows the model to naturally
@@ -109,13 +102,13 @@ class RotaryPositionEmbedding(keras.layers.Layer):
     typically 25-50%, while leaving the remaining dimensions unchanged for stability.
 
     Args:
-        head_dim: Integer, the dimensionality of each attention head.
+        head_dim: Integer, the dimensionality of each attention head. Must be positive.
         max_seq_len: Integer, maximum sequence length for which to precompute
-            rotary embeddings.
+            rotary embeddings. Must be positive.
         rope_theta: Float, base frequency for rotary embedding computation.
-            Default is 10000.0, following the original RoPE paper.
+            Default is 10000.0, following the original RoPE paper. Must be positive.
         rope_percentage: Float between 0.0 and 1.0, fraction of head dimensions
-            to apply RoPE to. Default is 0.5 (50% of dimensions).
+            to apply RoPE to. Default is 0.5 (50% of dimensions). Must be in (0, 1].
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
@@ -125,16 +118,39 @@ class RotaryPositionEmbedding(keras.layers.Layer):
         4D tensor with shape: `(batch_size, num_heads, seq_len, head_dim)`
         Same as input shape.
 
+    Raises:
+        ValueError: If any parameter is invalid or incompatible.
+
     Example:
-        >>> rope = RotaryPositionEmbedding(head_dim=64, max_seq_len=512)
-        >>> x = tf.random.normal([2, 8, 128, 64])  # (batch, heads, seq, dim)
-        >>> output = rope(x)
-        >>> print(output.shape)
-        (2, 8, 128, 64)
+        ```python
+        # Basic usage
+        rope = RotaryPositionEmbedding(head_dim=64, max_seq_len=512)
+        x = keras.ops.random.normal([2, 8, 128, 64])  # (batch, heads, seq, dim)
+        output = rope(x)
+        print(output.shape)  # (2, 8, 128, 64)
+
+        # With custom parameters
+        rope = RotaryPositionEmbedding(
+            head_dim=128,
+            max_seq_len=2048,
+            rope_theta=50000.0,
+            rope_percentage=0.25  # Apply to only 25% of dimensions
+        )
+
+        # In a transformer model
+        inputs = keras.Input(shape=(None, 512, 64))  # (batch, heads, seq, head_dim)
+        rope_layer = RotaryPositionEmbedding(head_dim=64, max_seq_len=2048)
+        rotated = rope_layer(inputs)
+        ```
 
     References:
         RoFormer: Enhanced Transformer with Rotary Position Embedding
         https://arxiv.org/abs/2104.09864
+
+    Note:
+        This implementation follows the modern Keras 3 pattern where weights
+        are created in build() and configuration is stored in __init__.
+        This ensures proper serialization and avoids common build errors.
     """
 
     def __init__(
@@ -143,53 +159,53 @@ class RotaryPositionEmbedding(keras.layers.Layer):
         max_seq_len: int,
         rope_theta: float = 10000.0,
         rope_percentage: float = 0.5,
-        name: Optional[str] = None,
         **kwargs: Any
     ) -> None:
-        super().__init__(name=name, **kwargs)
+        super().__init__(**kwargs)
 
         # Validate inputs
         if head_dim <= 0:
             raise ValueError(f"head_dim must be positive, got {head_dim}")
         if max_seq_len <= 0:
             raise ValueError(f"max_seq_len must be positive, got {max_seq_len}")
-        if rope_theta <= 0:
+        if rope_theta <= 0.0:
             raise ValueError(f"rope_theta must be positive, got {rope_theta}")
         if not 0.0 < rope_percentage <= 1.0:
             raise ValueError(f"rope_percentage must be in (0, 1], got {rope_percentage}")
         if head_dim % 2 != 0:
             logger.warning(f"head_dim ({head_dim}) is odd, RoPE works best with even dimensions")
 
-        # Store configuration
+        # Store ALL configuration arguments as instance attributes
         self.head_dim = head_dim
         self.max_seq_len = max_seq_len
         self.rope_theta = rope_theta
         self.rope_percentage = rope_percentage
 
-        # Calculate RoPE dimensions
+        # Calculate derived parameters
         self.rope_dim = int(head_dim * rope_percentage)
         # Ensure rope_dim is even for proper complex number treatment
         if self.rope_dim % 2 != 0:
             self.rope_dim -= 1
             logger.info(f"Adjusted rope_dim to {self.rope_dim} to ensure even dimension")
 
-        # Initialize weights to None - will be created in build()
+        # Initialize weight attributes to None - they'll be created in build()
         self.cos_cached = None
         self.sin_cached = None
 
-        # Store build shape for serialization
-        self._build_input_shape = None
-
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer weights based on input shape.
+        """
+        Create the layer's weights.
+
+        This method is called automatically by Keras when the layer is first used.
+        It creates the layer's cached cos/sin tables using add_weight().
 
         Args:
-            input_shape: Shape tuple indicating the input shape of the layer.
+            input_shape: Shape tuple of the input tensor, including batch dimension.
                 Expected: (batch_size, num_heads, seq_len, head_dim)
-        """
-        # Store input shape for serialization
-        self._build_input_shape = input_shape
 
+        Raises:
+            ValueError: If input_shape is invalid or incompatible.
+        """
         # Validate input shape
         if len(input_shape) != 4:
             raise ValueError(
@@ -198,15 +214,16 @@ class RotaryPositionEmbedding(keras.layers.Layer):
             )
 
         input_head_dim = input_shape[-1]
-        if input_head_dim != self.head_dim:
+        if input_head_dim is not None and input_head_dim != self.head_dim:
             raise ValueError(
                 f"Input head_dim ({input_head_dim}) doesn't match "
                 f"layer head_dim ({self.head_dim})"
             )
 
-        # Build RoPE cache
+        # CREATE the layer's own weights using add_weight()
         self._build_rope_cache()
 
+        # Let Keras know the build is complete
         super().build(input_shape)
 
     def _build_rope_cache(self) -> None:
@@ -216,6 +233,21 @@ class RotaryPositionEmbedding(keras.layers.Layer):
 
         if freq_dim == 0:
             logger.warning("rope_dim is too small, no rotary embedding will be applied")
+            # Create dummy weights to avoid serialization issues
+            self.cos_cached = self.add_weight(
+                name='cos_cached',
+                shape=(self.max_seq_len, 1),
+                initializer='zeros',
+                trainable=False,
+                dtype='float32'
+            )
+            self.sin_cached = self.add_weight(
+                name='sin_cached',
+                shape=(self.max_seq_len, 1),
+                initializer='zeros',
+                trainable=False,
+                dtype='float32'
+            )
             return
 
         # Create frequency tensor: 1 / (theta ^ (2i / rope_dim)) for i in [0, freq_dim)
@@ -258,19 +290,23 @@ class RotaryPositionEmbedding(keras.layers.Layer):
 
     def call(
         self,
-        inputs: Any,
-        training: Optional[bool] = None,
-        **kwargs: Any
-    ) -> Any:
-        """Apply rotary position embedding to input tensor.
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Apply rotary position embedding to input tensor.
 
         Args:
             inputs: Input tensor with shape (batch_size, num_heads, seq_len, head_dim)
             training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
+                training mode or inference mode. Not used in this layer but
+                included for consistency.
 
         Returns:
             Output tensor with same shape as input, with RoPE applied.
+
+        Raises:
+            ValueError: If sequence length exceeds max_seq_len.
         """
         # Get sequence length from input
         seq_len = keras.ops.shape(inputs)[2]
@@ -280,16 +316,18 @@ class RotaryPositionEmbedding(keras.layers.Layer):
             return inputs
 
         # Ensure sequence length doesn't exceed our cached values
-        if seq_len > self.max_seq_len:
+        max_seq_len_tensor = keras.ops.convert_to_tensor(self.max_seq_len, dtype='int32')
+        if keras.ops.any(seq_len > max_seq_len_tensor):
             raise ValueError(
-                f"Input sequence length ({seq_len}) exceeds max_seq_len ({self.max_seq_len}). "
+                f"Input sequence length exceeds max_seq_len ({self.max_seq_len}). "
                 f"Please increase max_seq_len or truncate the input."
             )
 
         return self._apply_rope(inputs, seq_len)
 
-    def _apply_rope(self, x: Any, seq_len: int) -> Any:
-        """Apply rotary position embedding to input tensor.
+    def _apply_rope(self, x: keras.KerasTensor, seq_len: keras.KerasTensor) -> keras.KerasTensor:
+        """
+        Apply rotary position embedding to input tensor.
 
         Args:
             x: Input tensor with shape (batch_size, num_heads, seq_len, head_dim)
@@ -310,6 +348,10 @@ class RotaryPositionEmbedding(keras.layers.Layer):
         # From: (batch, heads, seq_len, rope_dim)
         # To: (batch, heads, seq_len, rope_dim // 2, 2)
         rope_pairs = self.rope_dim // 2
+
+        if rope_pairs == 0:
+            # If no pairs to process, return original input
+            return x
 
         # Get the dynamic shape and construct new shape
         input_shape = keras.ops.shape(x_rope)
@@ -348,19 +390,24 @@ class RotaryPositionEmbedding(keras.layers.Layer):
             return x_rope_rotated
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
+        """
+        Compute the output shape of the layer.
 
         Args:
-            input_shape: Shape of the input tensor.
+            input_shape: Shape tuple of the input tensor.
 
         Returns:
             Output shape tuple (same as input shape).
         """
         # RoPE doesn't change the shape, just applies rotational transformations
-        return input_shape
+        return tuple(input_shape)
 
-    def get_config(self) -> dict[str, Any]:
-        """Return the layer configuration for serialization.
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Return the layer configuration for serialization.
+
+        This method must return ALL arguments needed to recreate the layer
+        via __init__.
 
         Returns:
             Dictionary containing the layer configuration.
@@ -374,23 +421,5 @@ class RotaryPositionEmbedding(keras.layers.Layer):
         })
         return config
 
-    def get_build_config(self) -> dict[str, Any]:
-        """Get the build configuration for proper serialization.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {
-            'input_shape': self._build_input_shape,
-        }
-
-    def build_from_config(self, config: dict[str, Any]) -> None:
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get('input_shape') is not None:
-            self.build(config['input_shape'])
-
-# ---------------------------------------------------------------------
+    # Note: No get_build_config or build_from_config needed.
+    # Keras handles the build lifecycle automatically in modern Keras 3.
