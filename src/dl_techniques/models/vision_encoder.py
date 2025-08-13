@@ -24,39 +24,94 @@ class VisionEncoder(keras.layers.Layer):
     to provide spatial visual features that can be aligned with text tokens
     in vision-language models.
 
+    Key features:
+    - Patch-level feature extraction for spatial understanding
+    - CLS token access for global image representation
+    - Spatial feature extraction for dense prediction tasks
+    - Configurable architecture parameters
+
+    Mathematical formulation:
+        features = ViTSigLIP(images)
+        patch_features = features[:, 1:, :]  # Exclude CLS token
+
+    Where patch_features contain spatial information for cross-modal alignment.
+
     Args:
-        img_size: Input image size. Defaults to 224.
-        patch_size: Size of image patches. Defaults to 16.
-        embed_dim: Embedding dimension. Defaults to 768.
-        depth: Number of transformer blocks. Defaults to 12.
-        num_heads: Number of attention heads. Defaults to 12.
-        mlp_ratio: MLP expansion ratio. Defaults to 4.0.
-        dropout: Dropout rate. Defaults to 0.0.
-        activation: Activation function. Defaults to 'gelu'.
-        use_bias: Whether to use bias in linear layers. Defaults to True.
-        kernel_initializer: Initializer for convolution kernels.
-        bias_initializer: Initializer for bias vectors.
-        kernel_regularizer: Regularizer for convolution kernels.
-        bias_regularizer: Regularizer for bias vectors.
+        img_size: Integer, input image size. Must be positive and divisible by patch_size.
+            Defaults to 224.
+        patch_size: Integer, size of image patches. Must be positive and divide img_size.
+            Defaults to 16.
+        embed_dim: Integer, embedding dimension. Must be positive. Defaults to 768.
+        depth: Integer, number of transformer blocks. Must be positive. Defaults to 12.
+        num_heads: Integer, number of attention heads. Must be positive and divide embed_dim.
+            Defaults to 12.
+        mlp_ratio: Float, MLP expansion ratio. Must be positive. Defaults to 4.0.
+        dropout: Float, dropout rate between 0 and 1. Defaults to 0.0.
+        activation: String, activation function name. Accepts standard Keras activations
+            like 'gelu', 'relu', 'swish'. Defaults to 'gelu'.
+        use_bias: Boolean, whether to use bias in linear layers. Defaults to True.
+        kernel_initializer: String or Initializer, initializer for convolution kernels.
+            Defaults to 'glorot_uniform'.
+        bias_initializer: String or Initializer, initializer for bias vectors.
+            Defaults to 'zeros'.
+        kernel_regularizer: Optional Regularizer, regularizer for convolution kernels.
+            Defaults to None.
+        bias_regularizer: Optional Regularizer, regularizer for bias vectors.
+            Defaults to None.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
-        4D tensor of shape (batch_size, height, width, channels)
+        4D tensor with shape: `(batch_size, height, width, channels)`
+        - height and width should equal img_size
+        - channels is typically 3 for RGB images
 
     Output shape:
-        3D tensor of shape (batch_size, num_patches, embed_dim)
+        3D tensor with shape: `(batch_size, num_patches, embed_dim)`
         where num_patches = (img_size // patch_size) ** 2
 
+    Attributes:
+        vision_transformer: ViTSigLIP model for feature extraction.
+        num_patches: Number of image patches computed from img_size and patch_size.
+
     Example:
-        >>> encoder = VisionEncoder(
-        ...     img_size=224,
-        ...     patch_size=16,
-        ...     embed_dim=768,
-        ...     depth=12
-        ... )
-        >>>
-        >>> images = keras.ops.random.normal((2, 224, 224, 3))
-        >>> features = encoder(images)  # Shape: (2, 196, 768)
+        ```python
+        # Basic usage
+        encoder = VisionEncoder(img_size=224, embed_dim=768)
+
+        # Small configuration
+        encoder = VisionEncoder(
+            img_size=224,
+            patch_size=16,
+            embed_dim=384,
+            depth=6,
+            num_heads=6
+        )
+
+        # With regularization
+        encoder = VisionEncoder(
+            img_size=224,
+            embed_dim=768,
+            kernel_regularizer=keras.regularizers.L2(1e-4),
+            dropout=0.1
+        )
+
+        # In a vision-language model
+        images = keras.Input(shape=(224, 224, 3))
+        patch_features = encoder(images)  # Shape: (batch, 196, 768)
+
+        # Access CLS token for classification
+        cls_features = encoder.get_cls_token(images)  # Shape: (batch, 768)
+        ```
+
+    Note:
+        The layer excludes the CLS token from the default output to provide
+        spatial patch-level features suitable for cross-modal alignment.
+        Use get_cls_token() or get_spatial_features() for alternative outputs.
+
+    Raises:
+        ValueError: If img_size is not positive or not divisible by patch_size.
+        ValueError: If embed_dim is not positive or not divisible by num_heads.
+        ValueError: If any dimension parameter is not positive.
     """
 
     def __init__(
@@ -72,13 +127,37 @@ class VisionEncoder(keras.layers.Layer):
             use_bias: bool = True,
             kernel_initializer: str = 'glorot_uniform',
             bias_initializer: str = 'zeros',
-            kernel_regularizer: Optional[str] = None,
-            bias_regularizer: Optional[str] = None,
-            **kwargs
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
-        # Store configuration
+        # Validate inputs
+        if img_size <= 0:
+            raise ValueError(f"img_size must be positive, got {img_size}")
+        if patch_size <= 0:
+            raise ValueError(f"patch_size must be positive, got {patch_size}")
+        if img_size % patch_size != 0:
+            raise ValueError(
+                f"img_size ({img_size}) must be divisible by patch_size ({patch_size})"
+            )
+        if embed_dim <= 0:
+            raise ValueError(f"embed_dim must be positive, got {embed_dim}")
+        if depth <= 0:
+            raise ValueError(f"depth must be positive, got {depth}")
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
+        if embed_dim % num_heads != 0:
+            raise ValueError(
+                f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})"
+            )
+        if mlp_ratio <= 0.0:
+            raise ValueError(f"mlp_ratio must be positive, got {mlp_ratio}")
+        if not (0.0 <= dropout <= 1.0):
+            raise ValueError(f"dropout must be between 0 and 1, got {dropout}")
+
+        # Store ALL configuration parameters
         self.img_size = img_size
         self.patch_size = patch_size
         self.embed_dim = embed_dim
@@ -88,15 +167,15 @@ class VisionEncoder(keras.layers.Layer):
         self.dropout = dropout
         self.activation = activation
         self.use_bias = use_bias
-        self.kernel_initializer = kernel_initializer
-        self.bias_initializer = bias_initializer
-        self.kernel_regularizer = kernel_regularizer
-        self.bias_regularizer = bias_regularizer
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Computed properties
         self.num_patches = (img_size // patch_size) ** 2
 
-        # FIX: Instantiate vision transformer in __init__ for correct serialization
+        # CREATE sub-layer in __init__ (following modern Keras 3 pattern)
         self.vision_transformer = ViTSigLIP(
             img_size=self.img_size,
             patch_size=self.patch_size,
@@ -114,27 +193,22 @@ class VisionEncoder(keras.layers.Layer):
             name='vit_siglip'
         )
 
-        # Store build input shape for serialization
-        self._build_input_shape = None
-
         logger.info(f"Created VisionEncoder with {self.num_patches} patches, "
                     f"embed_dim={embed_dim}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the vision encoder by creating the ViTSigLIP model.
+        Build the vision encoder and its sub-layers.
+
+        This method validates input shape and explicitly builds the sub-layer
+        for robust serialization following modern Keras 3 patterns.
 
         Args:
             input_shape: Shape tuple of input images (batch, height, width, channels)
 
         Raises:
-            ValueError: If input shape is invalid
+            ValueError: If input shape is invalid or incompatible with configuration.
         """
-        if self.built:
-            return
-
-        self._build_input_shape = input_shape
-
         # Validate input shape
         if len(input_shape) != 4:
             raise ValueError(
@@ -142,16 +216,22 @@ class VisionEncoder(keras.layers.Layer):
                 f"got {input_shape}"
             )
 
-        if input_shape[1] != self.img_size or input_shape[2] != self.img_size:
-            logger.warning(
-                f"Input image size {input_shape[1:3]} does not match "
-                f"configured img_size ({self.img_size}). This is allowed but may lead to "
-                f"unexpected behavior if positional embeddings are not interpolated."
-            )
+        height, width = input_shape[1], input_shape[2]
+        if height is not None and width is not None:
+            if height != self.img_size or width != self.img_size:
+                logger.warning(
+                    f"Input image size ({height}, {width}) does not match "
+                    f"configured img_size ({self.img_size}). This may lead to "
+                    f"unexpected behavior if positional embeddings are not interpolated."
+                )
+
+        # Explicitly build sub-layer for robust serialization
+        # This ensures weight variables exist before loading saved weights
+        self.vision_transformer.build(input_shape)
 
         logger.info(f"Building VisionEncoder with input_shape: {input_shape}")
 
-        # Let Keras handle building the sub-layer
+        # Always call parent build at the end
         super().build(input_shape)
         logger.info("VisionEncoder built successfully")
 
@@ -163,18 +243,24 @@ class VisionEncoder(keras.layers.Layer):
         """
         Forward pass through the vision encoder.
 
+        Processes input images through the ViT and extracts patch-level features
+        by excluding the CLS token, providing spatial features suitable for
+        cross-modal alignment.
+
         Args:
-            inputs: Input images of shape [batch_size, height, width, channels]
-            training: Whether in training mode
+            inputs: Input images tensor of shape [batch_size, height, width, channels]
+            training: Optional boolean indicating training mode. If None, uses
+                the default behavior of the sub-layers.
 
         Returns:
-            Patch features of shape [batch_size, num_patches, embed_dim]
-            Excludes the CLS token to provide spatial patch-level features
+            Patch features tensor of shape [batch_size, num_patches, embed_dim]
+            Contains spatial patch-level features excluding the CLS token.
         """
         # Get full ViT features (includes CLS token + patch tokens)
         vit_features = self.vision_transformer(inputs, training=training)
 
         # Extract patch tokens (exclude CLS token at position 0)
+        # This provides spatial features for cross-modal alignment
         patch_features = self.vision_transformer.get_patch_tokens(vit_features)
 
         return patch_features
@@ -185,14 +271,18 @@ class VisionEncoder(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Extract CLS token for classification tasks.
+        Extract CLS token for global image classification tasks.
+
+        The CLS token provides a global representation of the entire image,
+        suitable for image classification or global image understanding tasks.
 
         Args:
-            inputs: Input images of shape [batch_size, height, width, channels]
-            training: Whether in training mode
+            inputs: Input images tensor of shape [batch_size, height, width, channels]
+            training: Optional boolean indicating training mode.
 
         Returns:
-            CLS token features of shape [batch_size, embed_dim]
+            CLS token features tensor of shape [batch_size, embed_dim]
+            Contains global image representation.
         """
         vit_features = self.vision_transformer(inputs, training=training)
         return self.vision_transformer.get_cls_token(vit_features)
@@ -203,14 +293,18 @@ class VisionEncoder(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Get spatial features for dense prediction tasks.
+        Get spatial features reshaped for dense prediction tasks.
+
+        Reshapes patch features into spatial dimensions suitable for tasks
+        like segmentation, object detection, or other dense prediction tasks.
 
         Args:
-            inputs: Input images of shape [batch_size, height, width, channels]
-            training: Whether in training mode
+            inputs: Input images tensor of shape [batch_size, height, width, channels]
+            training: Optional boolean indicating training mode.
 
         Returns:
-            Spatial features of shape [batch_size, patch_height, patch_width, embed_dim]
+            Spatial features tensor of shape [batch_size, patch_height, patch_width, embed_dim]
+            where patch_height = patch_width = img_size // patch_size
         """
         vit_features = self.vision_transformer(inputs, training=training)
         return self.vision_transformer.get_spatial_features(vit_features)
@@ -220,10 +314,10 @@ class VisionEncoder(keras.layers.Layer):
         Compute output shape given input shape.
 
         Args:
-            input_shape: Input shape tuple
+            input_shape: Input shape tuple (batch_size, height, width, channels)
 
         Returns:
-            Output shape tuple [batch_size, num_patches, embed_dim]
+            Output shape tuple (batch_size, num_patches, embed_dim)
         """
         batch_size = input_shape[0]
         return (batch_size, self.num_patches, self.embed_dim)
@@ -232,8 +326,10 @@ class VisionEncoder(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
+        Returns ALL parameters passed to __init__ for complete reconstruction.
+
         Returns:
-            Dictionary containing layer configuration
+            Dictionary containing all layer configuration parameters.
         """
         config = super().get_config()
         config.update({
@@ -246,61 +342,36 @@ class VisionEncoder(keras.layers.Layer):
             'dropout': self.dropout,
             'activation': self.activation,
             'use_bias': self.use_bias,
-            'kernel_initializer': self.kernel_initializer,
-            'bias_initializer': self.bias_initializer,
-            'kernel_regularizer': self.kernel_regularizer,
-            'bias_regularizer': self.bias_regularizer,
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """
-        Get build configuration for serialization.
-
-        Returns:
-            Dictionary containing build configuration
-        """
-        return {
-            'input_shape': self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """
-        Build layer from configuration.
-
-        Args:
-            config: Build configuration dictionary
-        """
-        if config.get('input_shape') is not None:
-            self.build(config['input_shape'])
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> 'VisionEncoder':
-        """
-        Create layer from configuration.
-
-        Args:
-            config: Layer configuration dictionary
-
-        Returns:
-            VisionEncoder instance
-        """
-        return cls(**config)
 
 
 # ---------------------------------------------------------------------
 # Factory Functions
 # ---------------------------------------------------------------------
 
-def create_vision_encoder_base(**kwargs) -> VisionEncoder:
+def create_vision_encoder_base(**kwargs: Any) -> VisionEncoder:
     """
     Create base vision encoder configuration.
+
+    Provides a standard base configuration suitable for most vision-language
+    applications with good balance of performance and computational efficiency.
 
     Args:
         **kwargs: Additional arguments to override base configuration
 
     Returns:
-        VisionEncoder with base configuration
+        VisionEncoder instance with base configuration
+
+    Example:
+        ```python
+        encoder = create_vision_encoder_base()
+        encoder = create_vision_encoder_base(dropout=0.1)  # With custom dropout
+        ```
     """
     config = {
         'img_size': 224,
@@ -317,15 +388,24 @@ def create_vision_encoder_base(**kwargs) -> VisionEncoder:
     return VisionEncoder(**config)
 
 
-def create_vision_encoder_small(**kwargs) -> VisionEncoder:
+def create_vision_encoder_small(**kwargs: Any) -> VisionEncoder:
     """
     Create small vision encoder configuration.
+
+    Provides a smaller, more efficient configuration suitable for resource-
+    constrained environments or when faster inference is required.
 
     Args:
         **kwargs: Additional arguments to override small configuration
 
     Returns:
-        VisionEncoder with small configuration
+        VisionEncoder instance with small configuration
+
+    Example:
+        ```python
+        encoder = create_vision_encoder_small()
+        encoder = create_vision_encoder_small(img_size=196)  # Custom image size
+        ```
     """
     config = {
         'img_size': 224,
@@ -342,15 +422,24 @@ def create_vision_encoder_small(**kwargs) -> VisionEncoder:
     return VisionEncoder(**config)
 
 
-def create_vision_encoder_large(**kwargs) -> VisionEncoder:
+def create_vision_encoder_large(**kwargs: Any) -> VisionEncoder:
     """
     Create large vision encoder configuration.
+
+    Provides a larger, more powerful configuration suitable for high-accuracy
+    applications where computational resources are available.
 
     Args:
         **kwargs: Additional arguments to override large configuration
 
     Returns:
-        VisionEncoder with large configuration
+        VisionEncoder instance with large configuration
+
+    Example:
+        ```python
+        encoder = create_vision_encoder_large()
+        encoder = create_vision_encoder_large(depth=36)  # Even deeper model
+        ```
     """
     config = {
         'img_size': 224,

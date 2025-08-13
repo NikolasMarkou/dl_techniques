@@ -93,17 +93,30 @@ class NanoVLM(keras.Model):
         self.dropout_rate = dropout_rate
 
         # Validate configurations
-        # FIX 1: Pass the instance's config copies to be validated and potentially modified.
         self._validate_configs(self.vision_config, self.language_config, self.projection_config)
 
-        # Store build input shape for serialization
-        self._build_input_shape = None
+        # CREATE all sub-layers in __init__ (Modern Keras 3 pattern)
+        logger.info("Creating NanoVLM components...")
 
-        # Initialize component placeholders (will be created in build())
-        self.vision_encoder = None
-        self.modality_projection = None
-        self.text_decoder = None
-        self.output_projection = None
+        # Create vision encoder
+        self.vision_encoder = VisionEncoder(**self.vision_config, name='vision_encoder')
+
+        # Create modality projection
+        self.modality_projection = ModalityProjection(**self.projection_config, name='modality_projection')
+
+        # Create text decoder with consistent vocab_size
+        text_decoder_config = self.language_config.copy()
+        text_decoder_config['vocab_size'] = self.vocab_size
+        self.text_decoder = TextDecoder(**text_decoder_config, name='text_decoder')
+
+        # Create output projection
+        self.output_projection = keras.layers.Dense(
+            self.vocab_size,
+            use_bias=False,
+            kernel_initializer='glorot_uniform',
+            name='output_projection'
+        )
+        logger.info("NanoVLM components created successfully.")
 
     def _validate_configs(
             self,
@@ -162,43 +175,6 @@ class NanoVLM(keras.Model):
             )
             language_config['vocab_size'] = self.vocab_size
 
-    def build(self, input_shape: Optional[Tuple] = None) -> None:
-        """
-        Build all model components.
-
-        Args:
-            input_shape: Input shape tuple (optional, not used for this model)
-        """
-        if self.built:
-            return
-
-        # Store for serialization
-        self._build_input_shape = input_shape
-
-        logger.info("Building NanoVLM components...")
-
-        # Build vision encoder
-        self.vision_encoder = VisionEncoder(**self.vision_config, name='vision_encoder')
-
-        # Build modality projection
-        self.modality_projection = ModalityProjection(**self.projection_config, name='modality_projection')
-
-        # Build text decoder with consistent vocab_size
-        text_decoder_config = self.language_config.copy()
-        text_decoder_config['vocab_size'] = self.vocab_size
-        self.text_decoder = TextDecoder(**text_decoder_config, name='text_decoder')
-
-        # Build output projection
-        self.output_projection = keras.layers.Dense(
-            self.vocab_size,
-            use_bias=False,
-            kernel_initializer='glorot_uniform',
-            name='output_projection'
-        )
-
-        super().build(input_shape)
-        logger.info("NanoVLM components built successfully")
-
     def call(
             self,
             inputs: Union[Dict[str, keras.KerasTensor], Tuple[keras.KerasTensor, keras.KerasTensor]],
@@ -223,9 +199,6 @@ class NanoVLM(keras.Model):
         Raises:
             ValueError: If inputs format is invalid or shapes are incompatible.
         """
-        if not self.built:
-            self.build()
-
         # Parse inputs
         if isinstance(inputs, dict):
             if 'images' not in inputs or 'text_tokens' not in inputs:
@@ -249,7 +222,7 @@ class NanoVLM(keras.Model):
         # Process images through vision encoder
         vision_features = self.vision_encoder(images, training=training)
 
-        # FIX 2: WORKAROUND for component mismatch. The ViTSigLIP-based vision encoder
+        # WORKAROUND for component mismatch. The ViTSigLIP-based vision encoder
         # returns only patch features (e.g., 196), but the ModalityProjection appears
         # to expect an additional [CLS] token (total 197) to correctly identify the
         # spatial tokens. We add a dummy token to satisfy this shape requirement.
@@ -311,9 +284,6 @@ class NanoVLM(keras.Model):
             This method assumes batch size of 1 for simplicity. For batch generation,
             use the call method directly with appropriate masking.
         """
-        if not self.built:
-            self.build()
-
         # Process image once (cached for generation loop)
         vision_features = self.vision_encoder(image, training=False)
         cls_token_shape = (
@@ -387,7 +357,7 @@ class NanoVLM(keras.Model):
 
             # Sample from top-k distribution
             probs = ops.softmax(top_k_logits)
-            # FIX 3: Use keras.random.categorical instead of ops.random.categorical
+            # Use keras.random.categorical for backend-agnostic sampling
             sampled_index = keras.random.categorical(
                 ops.expand_dims(probs, 0),
                 num_samples=1
@@ -422,7 +392,7 @@ class NanoVLM(keras.Model):
         if batch_size is None or text_seq_len is None:
             return (batch_size, None, self.vocab_size)
 
-        # FIX: Correctly calculate vision sequence length after projection
+        # Correctly calculate vision sequence length after projection
         vision_patches = (self.vision_config['img_size'] // self.vision_config['patch_size']) ** 2
         scale_factor = self.projection_config.get('scale_factor', 1)
         shuffled_vision_patches = vision_patches // (scale_factor ** 2)
@@ -449,29 +419,6 @@ class NanoVLM(keras.Model):
             "dropout_rate": self.dropout_rate,
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """
-        Get build configuration for serialization.
-
-        Returns:
-            Dictionary containing build-time configuration.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """
-        Build model from saved configuration.
-
-        Args:
-            config: Build configuration dictionary from get_build_config()
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-        else:
-            self.build()
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'NanoVLM':
