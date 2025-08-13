@@ -47,68 +47,108 @@ Architecture:
 """
 
 import keras
-from typing import Optional, Union, Literal, Any
+from typing import Optional, Union, Literal, Any, Tuple, Callable
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from ..conv2d_builder import activation_wrapper
-
-# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class GatedMLP(keras.layers.Layer):
-    """A Gated MLP layer implementation using 1x1 convolutions.
+    """
+    A Gated MLP layer implementation using 1x1 convolutions.
 
     This layer implements a gated MLP architecture where the input is processed through
     three separate 1x1 convolution paths: gate, up, and down projections. The gating
     mechanism allows the network to selectively focus on relevant features.
 
+    The architecture follows the pattern from "Pay Attention to MLPs" where:
+    1. Input is processed through parallel gate and up convolutions
+    2. Both branches apply activation functions
+    3. Element-wise multiplication combines the branches
+    4. A down convolution processes the combined features
+    5. Final activation produces the output
+
     Args:
-        filters: Number of filters for the output convolution.
-        use_bias: Whether to use bias in the convolution layers.
-        kernel_initializer: Initializer for the kernel weights matrices.
-        bias_initializer: Initializer for the bias vectors.
-        kernel_regularizer: Regularizer function applied to kernel weights.
-        bias_regularizer: Regularizer function applied to bias vectors.
-        attention_activation: Activation function for the gate and up projections.
-        output_activation: Activation function for the output.
-        data_format: String, either "channels_last" or "channels_first".
+        filters: Integer, number of filters for the output convolution. Must be positive.
+        use_bias: Boolean, whether to use bias in the convolution layers. Defaults to True.
+        kernel_initializer: String or Initializer, initializer for the kernel weights matrices.
+            Defaults to 'glorot_uniform'.
+        bias_initializer: String or Initializer, initializer for the bias vectors.
+            Defaults to 'zeros'.
+        kernel_regularizer: Optional regularizer for the kernel weights.
+        bias_regularizer: Optional regularizer for the bias vectors.
+        attention_activation: String or callable, activation function for the gate and up projections.
+            Can be 'relu', 'gelu', 'swish', 'linear', or any valid Keras activation.
+            Defaults to 'relu'.
+        output_activation: String or callable, activation function for the output.
+            Can be 'relu', 'gelu', 'swish', 'linear', or any valid Keras activation.
+            Defaults to 'linear'.
+        data_format: String, either 'channels_last' or 'channels_first'.
+            Defaults to None (uses keras.backend.image_data_format()).
         **kwargs: Additional arguments passed to the parent Layer class.
 
     Input shape:
         4D tensor with shape:
-        - If data_format="channels_last": (batch_size, height, width, channels)
-        - If data_format="channels_first": (batch_size, channels, height, width)
+        - If data_format='channels_last': (batch_size, height, width, channels)
+        - If data_format='channels_first': (batch_size, channels, height, width)
 
     Output shape:
         4D tensor with shape:
-        - Same as input shape but with 'filters' output channels
+        - If data_format='channels_last': (batch_size, height, width, filters)
+        - If data_format='channels_first': (batch_size, filters, height, width)
+
+    Raises:
+        ValueError: If filters is not positive or data_format is invalid.
 
     Example:
-        >>> x = np.random.rand(4, 32, 32, 64)  # Input feature map
-        >>> gmlp = GatedMLP(filters=128, attention_activation="gelu")
-        >>> y = gmlp(x)
-        >>> print(y.shape)
-        (4, 32, 32, 128)
+        ```python
+        # Basic usage
+        x = np.random.rand(4, 32, 32, 64)  # Input feature map
+        gmlp = GatedMLP(filters=128, attention_activation='gelu')
+        y = gmlp(x)
+        print(y.shape)  # (4, 32, 32, 128)
+
+        # Advanced usage with regularization
+        gmlp = GatedMLP(
+            filters=256,
+            attention_activation='gelu',
+            output_activation='swish',
+            kernel_regularizer=keras.regularizers.L2(1e-4),
+            use_bias=False
+        )
+
+        # In a model
+        inputs = keras.Input(shape=(224, 224, 3))
+        x = keras.layers.Conv2D(64, 3, activation='relu')(inputs)
+        x = GatedMLP(128, attention_activation='gelu')(x)
+        outputs = keras.layers.GlobalAveragePooling2D()(x)
+        model = keras.Model(inputs, outputs)
+        ```
+
+    Note:
+        This implementation follows the modern Keras 3 pattern where all sub-layers
+        are created in __init__ and Keras handles the building automatically. This
+        ensures proper serialization and eliminates common build errors.
     """
 
     def __init__(
-            self,
-            filters: int,
-            use_bias: bool = True,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
-            bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
-            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            attention_activation: Literal["relu", "gelu", "swish", "linear"] = "relu",
-            output_activation: Literal["relu", "gelu", "swish", "linear"] = "linear",
-            data_format: Optional[str] = None,
-            **kwargs: Any
+        self,
+        filters: int,
+        use_bias: bool = True,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+        bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        attention_activation: Union[str, Callable] = 'relu',
+        output_activation: Union[str, Callable] = 'linear',
+        data_format: Optional[str] = None,
+        **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
+        # Validate inputs
+        if filters <= 0:
+            raise ValueError(f"filters must be positive, got {filters}")
+
+        # Store configuration - ALL parameters needed for reconstruction
         self.filters = filters
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -119,32 +159,24 @@ class GatedMLP(keras.layers.Layer):
         self.output_activation = output_activation
         self.data_format = data_format or keras.backend.image_data_format()
 
-        if self.data_format not in {"channels_first", "channels_last"}:
-            raise ValueError(f"data_format must be 'channels_first' or 'channels_last', got {data_format}")
+        # Validate data format
+        if self.data_format not in {'channels_first', 'channels_last'}:
+            raise ValueError(
+                f"data_format must be 'channels_first' or 'channels_last', "
+                f"got {self.data_format}"
+            )
 
-        # These will be initialized in build()
-        self.conv_gate = None
-        self.conv_up = None
-        self.conv_down = None
+        # Get activation functions
+        self.attention_activation_fn = keras.activations.get(attention_activation)
+        self.output_activation_fn = keras.activations.get(output_activation)
 
-        # Store the build shape for serialization
-        self._build_input_shape = None
-
-    def build(self, input_shape):
-        """Build the GatedMLP layer.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
-        """
-        # Store input shape for serialization
-        self._build_input_shape = input_shape
-
-        # Create the convolution layers
+        # CREATE all sub-layers in __init__ - this is the key change!
+        # Gate convolution path
         self.conv_gate = keras.layers.Conv2D(
             filters=self.filters,
             kernel_size=(1, 1),
             strides=(1, 1),
-            padding="same",
+            padding='same',
             data_format=self.data_format,
             activation=None,
             use_bias=self.use_bias,
@@ -152,14 +184,15 @@ class GatedMLP(keras.layers.Layer):
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
+            name='gate_conv'
         )
-        self.conv_gate.build(input_shape)
 
+        # Up convolution path
         self.conv_up = keras.layers.Conv2D(
             filters=self.filters,
             kernel_size=(1, 1),
             strides=(1, 1),
-            padding="same",
+            padding='same',
             data_format=self.data_format,
             activation=None,
             use_bias=self.use_bias,
@@ -167,21 +200,15 @@ class GatedMLP(keras.layers.Layer):
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
+            name='up_conv'
         )
-        self.conv_up.build(input_shape)
 
-        # Calculate the shape for the intermediate tensor after gate and up paths
-        input_shape_list = list(input_shape)
-        if self.data_format == "channels_last":
-            intermediate_shape = tuple(input_shape_list[:-1] + [self.filters])
-        else:  # channels_first
-            intermediate_shape = tuple([input_shape_list[0], self.filters] + input_shape_list[2:])
-
+        # Down convolution path
         self.conv_down = keras.layers.Conv2D(
             filters=self.filters,
             kernel_size=(1, 1),
             strides=(1, 1),
-            padding="same",
+            padding='same',
             data_format=self.data_format,
             activation=None,
             use_bias=self.use_bias,
@@ -189,99 +216,89 @@ class GatedMLP(keras.layers.Layer):
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
+            name='down_conv'
         )
-        self.conv_down.build(intermediate_shape)
 
-        # Set up activation functions directly instead of using external function
-        self.attention_activation_fn = activation_wrapper(self.attention_activation)
-        self.output_activation_fn = activation_wrapper(self.output_activation)
-
-        super().build(input_shape)
-
-    def call(self, inputs, training=None):
-        """Forward pass for the GatedMLP layer.
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Forward pass for the GatedMLP layer.
 
         Args:
-            inputs: Input tensor.
+            inputs: Input tensor with shape (batch_size, height, width, channels)
+                for channels_last format or (batch_size, channels, height, width)
+                for channels_first format.
             training: Boolean indicating whether the layer should behave in
                 training mode or inference mode.
 
         Returns:
-            The output tensor after applying the Gated MLP operations.
+            Output tensor after applying the Gated MLP operations.
         """
-        # Gate branch
+        # Gate branch: input -> conv -> activation
         x_gate = self.conv_gate(inputs, training=training)
         x_gate = self.attention_activation_fn(x_gate)
 
-        # Up branch
+        # Up branch: input -> conv -> activation
         x_up = self.conv_up(inputs, training=training)
         x_up = self.attention_activation_fn(x_up)
 
-        # Combine gate and up paths with element-wise multiplication
-        x_combined = x_gate * x_up
+        # Combine gate and up paths with element-wise multiplication (gating)
+        x_combined = keras.ops.multiply(x_gate, x_up)
 
-        # Down path
+        # Down path: combined -> conv -> activation
         x_gated_mlp = self.conv_down(x_combined, training=training)
-
-        # Apply output activation
         output = self.output_activation_fn(x_gated_mlp)
 
         return output
 
-    def compute_output_shape(self, input_shape):
-        """Compute the output shape of the layer.
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape of the layer.
 
         Args:
-            input_shape: Shape of the input.
+            input_shape: Shape tuple of the input tensor.
 
         Returns:
-            Output shape.
+            Output shape tuple.
         """
-        # Convert input_shape to a list if it's a tuple or TensorShape
+        # Convert to list for manipulation
         input_shape_list = list(input_shape)
 
-        if self.data_format == "channels_last":
-            return tuple(input_shape_list[:-1] + [self.filters])
+        if self.data_format == 'channels_last':
+            # (..., height, width, channels) -> (..., height, width, filters)
+            input_shape_list[-1] = self.filters
         else:  # channels_first
-            return tuple([input_shape_list[0], self.filters] + input_shape_list[2:])
+            # (..., channels, height, width) -> (..., filters, height, width)
+            input_shape_list[-3] = self.filters
 
-    def get_config(self):
-        """Return the configuration of the layer for serialization.
+        return tuple(input_shape_list)
+
+    def get_config(self) -> dict[str, Any]:
+        """
+        Return the configuration of the layer for serialization.
+
+        This method must return ALL arguments needed to recreate the layer
+        via __init__.
 
         Returns:
-            Dictionary containing the configuration of the layer.
+            Dictionary containing the layer configuration.
         """
         config = super().get_config()
         config.update({
-            "filters": self.filters,
-            "use_bias": self.use_bias,
-            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
-            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
-            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
-            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
-            "attention_activation": self.attention_activation,
-            "output_activation": self.output_activation,
-            "data_format": self.data_format,
+            'filters': self.filters,
+            'use_bias': self.use_bias,
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
+            'attention_activation': keras.activations.serialize(self.attention_activation_fn),
+            'output_activation': keras.activations.serialize(self.output_activation_fn),
+            'data_format': self.data_format,
         })
         return config
 
-    def get_build_config(self):
-        """Get the config needed to build the layer from a config.
-
-        This method is needed for proper model saving and loading.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config):
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
+    # Note: NO get_build_config() or build_from_config() methods needed!
+    # Keras handles the build lifecycle automatically with the modern pattern.

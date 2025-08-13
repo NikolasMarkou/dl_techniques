@@ -122,9 +122,9 @@ class TransformerLayer(keras.layers.Layer):
     - Enhanced parameter control through argument dictionaries
 
     Args:
-        hidden_size: Integer, hidden size of the layer.
-        num_heads: Integer, number of attention heads.
-        intermediate_size: Integer, size of the intermediate (feed-forward) layer.
+        hidden_size: Integer, hidden size of the layer. Must be positive and divisible by num_heads.
+        num_heads: Integer, number of attention heads. Must be positive.
+        intermediate_size: Integer, size of the intermediate (feed-forward) layer. Must be positive.
         attention_type: AttentionType, type of attention mechanism to use.
             Available options:
             - 'multi_head_attention': Standard multi-head self-attention (default)
@@ -154,12 +154,12 @@ class TransformerLayer(keras.layers.Layer):
             - 'swin_mlp': Swin Transformer MLP variant
         ffn_args: Optional dictionary of custom arguments for FFN layer.
             These will override default parameters for the specific FFN type.
-        dropout_rate: Float, dropout rate. Defaults to 0.1.
-        attention_dropout_rate: Float, attention-specific dropout rate. Defaults to 0.1.
+        dropout_rate: Float, dropout rate. Must be between 0 and 1. Defaults to 0.1.
+        attention_dropout_rate: Float, attention-specific dropout rate. Must be between 0 and 1. Defaults to 0.1.
         use_stochastic_depth: Boolean, whether to use stochastic depth regularization.
             Defaults to False.
         stochastic_depth_rate: Float, drop path rate for stochastic depth.
-            Only used when use_stochastic_depth=True. Defaults to 0.1.
+            Only used when use_stochastic_depth=True. Must be between 0 and 1. Defaults to 0.1.
         activation: String or callable, activation function for feed-forward network.
             Defaults to 'gelu'.
         use_bias: Boolean, whether to use bias in linear layers. Defaults to True.
@@ -169,13 +169,13 @@ class TransformerLayer(keras.layers.Layer):
             Defaults to 'zeros'.
         kernel_regularizer: Optional regularizer for kernel weights.
         bias_regularizer: Optional regularizer for bias weights.
-        ffn_expansion_factor: Integer, expansion factor for SwiGLU FFN. Defaults to 4.
-        ffn_multiple_of: Integer, multiple constraint for SwiGLU FFN. Defaults to 256.
-        window_size: Integer, window size for window attention. Defaults to 8.
+        ffn_expansion_factor: Integer, expansion factor for SwiGLU FFN. Must be positive. Defaults to 4.
+        ffn_multiple_of: Integer, multiple constraint for SwiGLU FFN. Must be positive. Defaults to 256.
+        window_size: Integer, window size for window attention. Must be positive. Defaults to 8.
         n_kv_head: Integer, number of key-value heads for grouped query attention.
-            Defaults to None (uses num_heads).
+            If None, uses num_heads. Defaults to None.
         lambda_init: Float, initial lambda value for differential attention.
-            Only used when attention_type='differential_attention'. Defaults to 0.8.
+            Only used when attention_type='differential_attention'. Must be between 0 and 1. Defaults to 0.8.
         attention_norm_alpha: Float, initial alpha value for DynamicTanh in attention normalization.
             Only used when normalization_type='dynamic_tanh'. Defaults to 0.7.
         ffn_norm_alpha: Float, initial alpha value for DynamicTanh in FFN normalization.
@@ -187,6 +187,9 @@ class TransformerLayer(keras.layers.Layer):
 
     Output shape:
         3D tensor with shape: `(batch_size, sequence_length, hidden_size)`
+
+    Raises:
+        ValueError: If any parameter is invalid or incompatible.
 
     Example:
         ```python
@@ -255,6 +258,11 @@ class TransformerLayer(keras.layers.Layer):
             stochastic_depth_rate=0.1
         )
         ```
+
+    Note:
+        This implementation follows the modern Keras 3 pattern where all sub-layers
+        are created in __init__ and Keras handles the building automatically. This
+        ensures proper serialization and eliminates common build errors.
     """
 
     def __init__(
@@ -327,6 +335,15 @@ class TransformerLayer(keras.layers.Layer):
         if window_size <= 0:
             raise ValueError(f"window_size must be positive, got {window_size}")
 
+        if ffn_expansion_factor <= 0:
+            raise ValueError(f"ffn_expansion_factor must be positive, got {ffn_expansion_factor}")
+
+        if ffn_multiple_of <= 0:
+            raise ValueError(f"ffn_multiple_of must be positive, got {ffn_multiple_of}")
+
+        if not (0.0 <= lambda_init <= 1.0):
+            raise ValueError(f"lambda_init must be between 0 and 1, got {lambda_init}")
+
         # Store configuration parameters
         self.hidden_size = hidden_size
         self.num_heads = num_heads
@@ -355,18 +372,42 @@ class TransformerLayer(keras.layers.Layer):
         self.attention_norm_alpha = attention_norm_alpha
         self.ffn_norm_alpha = ffn_norm_alpha
 
-        # Initialize layers to None - will be created in build()
-        self.attention = None
-        self.attention_norm = None
-        self.ffn_layer = None
-        self.output_norm = None
-        self.dropout = None
-        self.attention_dropout = None
-        self.attention_stochastic_depth = None
-        self.ffn_stochastic_depth = None
+        # CREATE all sub-layers in __init__ following modern Keras 3 pattern
+        try:
+            # Create attention layer
+            self.attention = self._create_attention_layer('attention')
 
-        # Store build input shape for serialization
-        self._build_input_shape = None
+            # Create normalization layers
+            self.attention_norm = self._create_normalization_layer('attention_norm', 'attention')
+            self.output_norm = self._create_normalization_layer('output_norm', 'ffn')
+
+            # Create FFN layer
+            self.ffn_layer = self._create_ffn_layer('ffn')
+
+            # Create dropout layers
+            self.dropout = keras.layers.Dropout(self.dropout_rate, name='dropout')
+            self.attention_dropout = keras.layers.Dropout(
+                self.attention_dropout_rate,
+                name='attention_dropout'
+            )
+
+            # Create stochastic depth layers if enabled
+            if self.use_stochastic_depth:
+                self.attention_stochastic_depth = StochasticDepth(
+                    drop_path_rate=self.stochastic_depth_rate,
+                    name='attention_stochastic_depth'
+                )
+                self.ffn_stochastic_depth = StochasticDepth(
+                    drop_path_rate=self.stochastic_depth_rate,
+                    name='ffn_stochastic_depth'
+                )
+            else:
+                self.attention_stochastic_depth = None
+                self.ffn_stochastic_depth = None
+
+        except Exception as e:
+            logger.error(f"Failed to create TransformerLayer sub-layers: {e}")
+            raise ValueError(f"Failed to create TransformerLayer. This might be due to missing dependencies or incompatible configurations. Original error: {e}")
 
     def _create_normalization_layer(self, name: str, layer_type: str = 'attention') -> keras.layers.Layer:
         """Create a normalization layer based on the specified type.
@@ -378,6 +419,9 @@ class TransformerLayer(keras.layers.Layer):
 
         Returns:
             A normalization layer instance.
+
+        Raises:
+            ValueError: If unknown normalization type is specified.
         """
         if self.normalization_type == 'layer_norm':
             return keras.layers.LayerNormalization(
@@ -416,6 +460,9 @@ class TransformerLayer(keras.layers.Layer):
 
         Returns:
             Dictionary of default parameters for the specific attention type.
+
+        Raises:
+            ValueError: If unknown attention type is specified.
         """
         if attention_type == 'multi_head_attention':
             # Standard Keras MultiHeadAttention parameters
@@ -493,6 +540,9 @@ class TransformerLayer(keras.layers.Layer):
 
         Returns:
             An attention layer instance.
+
+        Raises:
+            ValueError: If layer creation fails or unknown attention type is specified.
         """
         # Get parameters for this attention type (defaults + custom args)
         params = self._get_attention_params(self.attention_type, name)
@@ -532,6 +582,9 @@ class TransformerLayer(keras.layers.Layer):
 
         Returns:
             Dictionary of default parameters for the specific FFN type.
+
+        Raises:
+            ValueError: If unknown FFN type is specified.
         """
         if ffn_type == 'mlp':
             # MLPBlock parameters
@@ -633,6 +686,9 @@ class TransformerLayer(keras.layers.Layer):
 
         Returns:
             An FFN layer instance.
+
+        Raises:
+            ValueError: If layer creation fails or unknown FFN type is specified.
         """
         # Get parameters for this FFN type (defaults + custom args)
         params = self._get_ffn_params(self.ffn_type, name)
@@ -667,94 +723,28 @@ class TransformerLayer(keras.layers.Layer):
                 f"Original error: {e}"
             )
 
-    def build(self, input_shape: Tuple[int, ...]) -> None:
-        """Build the transformer layer components.
-
-        Args:
-            input_shape: Shape of the input tensor.
-        """
-        self._build_input_shape = input_shape
-
-        # Validate input shape
-        if len(input_shape) != 3:
-            raise ValueError(f"Expected 3D input shape, got {len(input_shape)}D: {input_shape}")
-
-        if input_shape[-1] != self.hidden_size:
-            raise ValueError(
-                f"Input feature dimension ({input_shape[-1]}) must match hidden_size ({self.hidden_size})"
-            )
-
-        # Configurable attention layer
-        self.attention = self._create_attention_layer('attention')
-
-        # Attention layer normalization
-        self.attention_norm = self._create_normalization_layer('attention_norm', 'attention')
-
-        # Feed-forward network (configurable)
-        self.ffn_layer = self._create_ffn_layer('ffn')
-
-        # Output layer normalization
-        self.output_norm = self._create_normalization_layer('output_norm', 'ffn')
-
-        # Dropout layers
-        self.dropout = keras.layers.Dropout(self.dropout_rate, name='dropout')
-        self.attention_dropout = keras.layers.Dropout(
-            self.attention_dropout_rate,
-            name='attention_dropout'
-        )
-
-        # Stochastic depth layers (if enabled)
-        if self.use_stochastic_depth:
-            self.attention_stochastic_depth = StochasticDepth(
-                drop_path_rate=self.stochastic_depth_rate,
-                name='attention_stochastic_depth'
-            )
-            self.ffn_stochastic_depth = StochasticDepth(
-                drop_path_rate=self.stochastic_depth_rate,
-                name='ffn_stochastic_depth'
-            )
-
-        # Build sublayers
-        # For different attention types, we need to handle the build call appropriately
-        if self.attention_type == 'multi_head_attention':
-            self.attention.build(query_shape=input_shape, value_shape=input_shape)
-        else:
-            # For custom attention layers, just pass the input shape
-            self.attention.build(input_shape)
-
-        self.attention_norm.build(input_shape)
-        self.ffn_layer.build(input_shape)
-        self.output_norm.build(input_shape)
-
-        # Build stochastic depth layers if enabled
-        if self.use_stochastic_depth:
-            self.attention_stochastic_depth.build(input_shape)
-            self.ffn_stochastic_depth.build(input_shape)
-
-        super().build(input_shape)
-
     def call(
             self,
-            inputs: Any,
-            attention_mask: Optional[Any] = None,
+            inputs: keras.KerasTensor,
+            attention_mask: Optional[keras.KerasTensor] = None,
             layer_idx: int = 0,
             training: Optional[bool] = None
-    ) -> Any:
+    ) -> keras.KerasTensor:
         """
         Forward pass of the transformer layer.
 
         Args:
-            inputs: Input tensor of shape [batch_size, seq_length, hidden_size]
+            inputs: Input tensor of shape [batch_size, seq_length, hidden_size].
             attention_mask: Optional attention mask tensor. Can be:
                 - 2D tensor of shape (batch_size, seq_length) for padding mask
                 - 3D tensor of shape (batch_size, seq_length, seq_length) for attention mask
                 - 4D tensor of shape (batch_size, num_heads, seq_length, seq_length) for full mask
             layer_idx: Layer index for differential attention (used to compute lambda parameter).
-                Only relevant when attention_type='differential_attention'.
-            training: Boolean indicating training mode
+                Only relevant when attention_type='differential_attention'. Defaults to 0.
+            training: Boolean indicating training mode.
 
         Returns:
-            Output tensor of shape [batch_size, seq_length, hidden_size]
+            Output tensor of shape [batch_size, seq_length, hidden_size].
         """
         # Handle attention mask processing
         processed_mask = None
@@ -799,7 +789,7 @@ class TransformerLayer(keras.layers.Layer):
             attention_output = self.attention_dropout(attention_output, training=training)
 
             # Apply stochastic depth if enabled
-            if self.use_stochastic_depth:
+            if self.use_stochastic_depth and self.attention_stochastic_depth is not None:
                 attention_output = self.attention_stochastic_depth(attention_output, training=training)
 
             attention_output = self.attention_norm(attention_output + inputs, training=training)
@@ -808,7 +798,7 @@ class TransformerLayer(keras.layers.Layer):
             ffn_output = self.ffn_layer(attention_output, training=training)
 
             # Apply stochastic depth if enabled
-            if self.use_stochastic_depth:
+            if self.use_stochastic_depth and self.ffn_stochastic_depth is not None:
                 ffn_output = self.ffn_stochastic_depth(ffn_output, training=training)
 
             layer_output = self.output_norm(ffn_output + attention_output, training=training)
@@ -843,7 +833,7 @@ class TransformerLayer(keras.layers.Layer):
             attention_output = self.attention_dropout(attention_output, training=training)
 
             # Apply stochastic depth if enabled
-            if self.use_stochastic_depth:
+            if self.use_stochastic_depth and self.attention_stochastic_depth is not None:
                 attention_output = self.attention_stochastic_depth(attention_output, training=training)
 
             attention_output = attention_output + inputs  # Add residual
@@ -853,27 +843,24 @@ class TransformerLayer(keras.layers.Layer):
             ffn_output = self.ffn_layer(normalized_attention, training=training)
 
             # Apply stochastic depth if enabled
-            if self.use_stochastic_depth:
+            if self.use_stochastic_depth and self.ffn_stochastic_depth is not None:
                 ffn_output = self.ffn_stochastic_depth(ffn_output, training=training)
 
             layer_output = ffn_output + attention_output  # Add residual
 
         return layer_output
 
-    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
         Args:
             input_shape: Shape of the input tensor.
 
         Returns:
-            Output shape tuple.
+            Output shape tuple. Same as input shape for transformer layers.
         """
-        # Convert to list for consistent manipulation
-        input_shape_list = list(input_shape)
-
         # Output shape is the same as input shape for transformer layers
-        return tuple(input_shape_list)
+        return tuple(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
@@ -911,24 +898,5 @@ class TransformerLayer(keras.layers.Layer):
             'ffn_norm_alpha': self.ffn_norm_alpha,
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration for serialization.
-
-        Returns:
-            Dictionary containing build configuration.
-        """
-        return {
-            'input_shape': self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from configuration.
-
-        Args:
-            config: Dictionary containing build configuration.
-        """
-        if config.get('input_shape') is not None:
-            self.build(config['input_shape'])
 
 # ---------------------------------------------------------------------

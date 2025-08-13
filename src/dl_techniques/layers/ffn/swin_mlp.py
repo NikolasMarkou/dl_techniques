@@ -69,31 +69,94 @@ non-linear transformations with regularization.
 """
 
 import keras
-from typing import Tuple, Optional, Dict, Any, Union
+from typing import Tuple, Optional, Dict, Any, Union, Callable
 
 # ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
 class SwinMLP(keras.layers.Layer):
-    """MLP module for Swin Transformer with configurable activation and regularization.
+    """
+    MLP module for Swin Transformer with configurable activation and regularization.
 
     This layer implements a two-layer MLP with configurable hidden dimension,
     activation function, dropout, and regularization. It's designed to be used
     within Swin Transformer blocks but can be used as a general-purpose MLP.
 
+    The layer follows the expansion-contraction pattern typical in transformer
+    architectures:
+    1. Dense layer projecting to hidden_dim
+    2. Non-linear activation (default GELU)
+    3. Optional dropout for regularization
+    4. Dense layer projecting to output dimension
+    5. Optional final dropout
+
     Args:
-        hidden_dim: Dimension of the hidden layer.
-        use_bias: Whether to use bias or not
-        out_dim: Dimension of the output layer. If None, uses input dimension.
-        activation: Activation function name or callable. Defaults to "gelu".
-        dropout_rate: Dropout rate. Defaults to 0.0.
-        kernel_initializer: Initializer for the kernel weights. Defaults to "glorot_uniform".
-        bias_initializer: Initializer for the bias vector. Defaults to "zeros".
-        kernel_regularizer: Optional regularizer for the kernel weights.
-        bias_regularizer: Optional regularizer for the bias vector.
-        activity_regularizer: Optional regularizer function for the output.
+        hidden_dim: Integer, dimension of the hidden layer. Must be positive.
+            This is typically larger than the input dimension (e.g., 4x expansion).
+        use_bias: Boolean, whether to use bias in dense layers. Defaults to True.
+        out_dim: Optional integer, dimension of the output layer. If None, uses
+            input dimension (auto-detected during first call). Must be positive if specified.
+        activation: Union[str, callable], activation function name or callable.
+            Can be string name ('gelu', 'relu') or callable. Defaults to 'gelu'.
+        dropout_rate: Float, dropout rate for regularization. Must be between 0 and 1.
+            Applied after both the activation and final projection. Defaults to 0.0.
+        kernel_initializer: Union[str, keras.initializers.Initializer], initializer for
+            kernel weights. Defaults to 'glorot_uniform'.
+        bias_initializer: Union[str, keras.initializers.Initializer], initializer for
+            bias weights. Defaults to 'zeros'.
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]], regularizer
+            for kernel weights.
+        bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]], regularizer
+            for bias weights.
+        activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]], regularizer
+            for layer activations.
         **kwargs: Additional keyword arguments for Layer base class.
+
+    Input shape:
+        N-D tensor with shape: `(batch_size, ..., input_dim)`.
+        Most common case is 3D input: `(batch_size, sequence_length, input_dim)`.
+
+    Output shape:
+        N-D tensor with shape: `(batch_size, ..., out_dim)`.
+        If out_dim is None, output shape is: `(batch_size, ..., input_dim)`.
+
+    Raises:
+        ValueError: If hidden_dim is not positive.
+        ValueError: If out_dim is specified and not positive.
+        ValueError: If dropout_rate is not between 0 and 1.
+
+    Example:
+        ```python
+        # Basic usage for Swin Transformer (4x expansion)
+        layer = SwinMLP(hidden_dim=3072)  # For 768-dim input
+
+        # With custom output dimension and dropout
+        layer = SwinMLP(
+            hidden_dim=2048,
+            out_dim=512,
+            dropout_rate=0.1,
+            activation='swish'
+        )
+
+        # With regularization
+        layer = SwinMLP(
+            hidden_dim=1024,
+            dropout_rate=0.15,
+            kernel_regularizer=keras.regularizers.L2(1e-4),
+            activity_regularizer=keras.regularizers.L1(1e-5)
+        )
+
+        # In a model
+        inputs = keras.Input(shape=(196, 768))  # Vision Transformer patch tokens
+        x = SwinMLP(hidden_dim=3072, dropout_rate=0.1)(inputs)
+        model = keras.Model(inputs, x)
+        ```
+
+    Note:
+        This implementation follows the modern Keras 3 pattern where all sub-layers
+        are created in __init__ and Keras handles the building automatically. This
+        ensures proper serialization and avoids common build errors.
     """
 
     def __init__(
@@ -101,7 +164,7 @@ class SwinMLP(keras.layers.Layer):
             hidden_dim: int,
             use_bias: bool = True,
             out_dim: Optional[int] = None,
-            activation: Union[str, callable] = "gelu",
+            activation: Union[str, Callable] = "gelu",
             dropout_rate: float = 0.0,
             kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
             bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
@@ -112,17 +175,19 @@ class SwinMLP(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate parameters
+        # Validate inputs
         if hidden_dim <= 0:
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
-        if not 0.0 <= dropout_rate <= 1.0:
-            raise ValueError(f"drop rate must be between 0.0 and 1.0, got {dropout_rate}")
+        if out_dim is not None and out_dim <= 0:
+            raise ValueError(f"out_dim must be positive when specified, got {out_dim}")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(f"dropout_rate must be between 0.0 and 1.0, got {dropout_rate}")
 
-        # Store configuration parameters
+        # Store ALL configuration parameters as instance attributes
         self.hidden_dim = hidden_dim
         self.use_bias = use_bias
         self.out_dim = out_dim
-        self.activation = activation
+        self.activation_fn = keras.activations.get(activation)
         self.dropout_rate = dropout_rate
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
@@ -130,30 +195,11 @@ class SwinMLP(keras.layers.Layer):
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.activity_regularizer = keras.regularizers.get(activity_regularizer)
 
-        # Initialize layers to None - will be created in build()
-        self.fc1 = None
-        self.act = None
-        self.drop1 = None
-        self.fc2 = None
-        self.drop2 = None
+        # Store original activation for serialization
+        self.activation = activation
 
-        # Store build input shape for serialization
-        self._build_input_shape = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer's weights and sublayers.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
-        """
-        # Store input shape for serialization
-        self._build_input_shape = input_shape
-
-        # Determine output dimension
-        input_dim = input_shape[-1]
-        out_dim = self.out_dim or input_dim
-
-        # Create first dense layer
+        # CREATE all sub-layers in __init__ (MODERN PATTERN)
+        # First dense layer (expansion)
         self.fc1 = keras.layers.Dense(
             self.hidden_dim,
             use_bias=self.use_bias,
@@ -165,88 +211,93 @@ class SwinMLP(keras.layers.Layer):
             name="fc1"
         )
 
-        # Create activation layer
-        self.act = keras.layers.Activation(self.activation, name="act")
+        # Dropout layers (created even if rate is 0 for consistency)
+        self.drop1 = keras.layers.Dropout(self.dropout_rate, name="drop1")
+        self.drop2 = keras.layers.Dropout(self.dropout_rate, name="drop2")
 
-        # Create dropout layers if needed
-        if self.dropout_rate > 0.0:
-            self.drop1 = keras.layers.Dropout(self.dropout_rate, name="drop1")
-            self.drop2 = keras.layers.Dropout(self.dropout_rate, name="drop2")
+        # Second dense layer will be created when we know the output dimension
+        # We defer this to the first call since out_dim might be None
+        self.fc2 = None
+        self._output_dim = None
 
-        # Create second dense layer
-        self.fc2 = keras.layers.Dense(
-            out_dim,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            activity_regularizer=self.activity_regularizer,
-            name="fc2"
-        )
+    def _create_second_layer(self, input_dim: int) -> None:
+        """Create the second dense layer when output dimension is known."""
+        if self.fc2 is None:
+            # Determine actual output dimension
+            self._output_dim = self.out_dim if self.out_dim is not None else input_dim
 
-        # Build sublayers
-        self.fc1.build(input_shape)
-
-        # Compute intermediate shape for fc2
-        intermediate_shape = list(input_shape)
-        intermediate_shape[-1] = self.hidden_dim
-        self.fc2.build(tuple(intermediate_shape))
-
-        super().build(input_shape)
+            # Create second dense layer (contraction)
+            self.fc2 = keras.layers.Dense(
+                self._output_dim,
+                use_bias=self.use_bias,
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                bias_regularizer=self.bias_regularizer,
+                activity_regularizer=self.activity_regularizer,
+                name="fc2"
+            )
 
     def call(self, x: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        """Forward pass of the SwinMLP layer.
+        """
+        Forward pass of the SwinMLP layer.
 
         Args:
             x: Input tensor of shape (..., input_dim).
             training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
+                training mode or inference mode. Affects dropout behavior.
 
         Returns:
             Output tensor of shape (..., out_dim) after MLP transformation.
         """
-        # First dense layer
-        x = self.fc1(x)
+        # Create second layer if not yet created
+        if self.fc2 is None:
+            input_dim = x.shape[-1]
+            self._create_second_layer(input_dim)
+
+        # First dense layer (expansion)
+        x = self.fc1(x, training=training)
 
         # Activation
-        x = self.act(x)
+        x = self.activation_fn(x)
 
-        # First dropout
-        if self.drop1 is not None:
-            x = self.drop1(x, training=training)
+        # First dropout (after activation)
+        x = self.drop1(x, training=training)
 
-        # Second dense layer
-        x = self.fc2(x)
+        # Second dense layer (contraction)
+        x = self.fc2(x, training=training)
 
-        # Second dropout
-        if self.drop2 is not None:
-            x = self.drop2(x, training=training)
+        # Second dropout (final regularization)
+        x = self.drop2(x, training=training)
 
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
+        """
+        Compute the output shape of the layer.
 
         Args:
-            input_shape: Shape of the input.
+            input_shape: Shape tuple of the input.
 
         Returns:
             Output shape tuple.
         """
         # Convert to list for manipulation
-        input_shape_list = list(input_shape)
+        output_shape = list(input_shape)
 
         # Set output dimension
         if self.out_dim is not None:
-            input_shape_list[-1] = self.out_dim
+            output_shape[-1] = self.out_dim
         # If out_dim is None, output shape is same as input shape
 
-        # Return as tuple
-        return tuple(input_shape_list)
+        return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """Returns the layer configuration for serialization.
+        """
+        Get layer configuration for serialization.
+
+        This method returns ALL arguments needed to recreate the layer
+        via __init__. Uses keras serializers for complex objects.
 
         Returns:
             Dictionary containing the layer configuration.
@@ -254,10 +305,10 @@ class SwinMLP(keras.layers.Layer):
         config = super().get_config()
         config.update({
             "hidden_dim": self.hidden_dim,
-            "out_dim": self.out_dim,
-            "activation": self.activation,
-            "dropout_rate": self.dropout_rate,
             "use_bias": self.use_bias,
+            "out_dim": self.out_dim,
+            "activation": self.activation,  # Store original activation for serialization
+            "dropout_rate": self.dropout_rate,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
@@ -266,21 +317,8 @@ class SwinMLP(keras.layers.Layer):
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the config needed to build the layer from a config.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
+    # NOTE: get_build_config() and build_from_config() are REMOVED
+    # These are deprecated methods that cause serialization issues in Keras 3
+    # The modern pattern handles building automatically
 
 # ---------------------------------------------------------------------

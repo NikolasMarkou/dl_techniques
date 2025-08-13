@@ -67,178 +67,318 @@ ReLU and GELU activations in Transformer FFNs across multiple language understan
    - Average SuperGLUE benchmark: SwiGLU achieved 74.56 vs. ReLU's 72.76
    - SQuAD v1.1 F1: ReGLU achieved 91.18 vs. ReLU's 90.87
 
-Implementation Details:
----------------------
-This implementation provides two variants of GLU FFN:
-1. Dense-based implementation (GLUFFN): Uses standard Dense layers for projections
-2. Conv2D-based implementation (Conv2DGLUFFN): Uses 1x1 convolutions for projections
-
-Both implementations follow the architecture described in the paper:
-- Input is projected twice to create gate and value paths
-- The gate projection is passed through a customizable activation function
-- Gate and value are multiplied element-wise
-- The result is projected to the output dimension
-
-The implementation supports all activation variants mentioned in the paper and allows
-for customizable kernel initializers and regularizers. The activation function is passed
-as an initialization parameter, making it easy to create any GLU variant.
-
-Improvements Over Standard FFN:
------------------------------
-1. Performance Improvements:
-   - Consistent improvement in perplexity and downstream task performance
-   - Better convergence properties during training
-
-2. Architectural Advantages:
-   - Introduces multiplicative gating that helps control information flow
-   - Allows different parts of the network to specialize (gate vs. value paths)
-   - Provides a more expressive intermediate representation
-
-3. Flexibility:
-   - The gating mechanism allows the network to selectively emphasize or suppress
-     different parts of the representation
-   - Different activation functions can be chosen based on the specific task
-
-4. Parameter Efficiency:
-   - The paper shows that GLU variants perform better even when normalized for
-     parameter count and computation cost
-
-The paper attributes the success of these architectures to "divine benevolence" rather
-than providing a theoretical explanation, suggesting that the empirical results are
-the primary justification for their use.
-
 References:
 ----------
 Shazeer, N. (2020). GLU Variants Improve Transformer. arXiv preprint.
 """
 
 import keras
-import tensorflow as tf
-from keras.api.regularizers import Regularizer
-from keras.api.initializers import Initializer
-from typing import Callable, Optional, Union
+from typing import Optional, Union, Tuple, Any, Callable
+from keras import ops, layers, initializers, regularizers, activations
 
 
-# ---------------------------------------------------------------------
-
-
-@keras.utils.register_keras_serializable()
+@keras.saving.register_keras_serializable()
 class GLUFFN(keras.layers.Layer):
     """
     Gated Linear Unit Feed Forward Network as described in "GLU Variants Improve Transformer" (Shazeer, 2020).
 
-    This implementation uses Dense layers and supports various GLU variants through different activation functions.
+    This layer implements the GLU mechanism where the input is projected to two parallel paths:
+    a gate path and a value path. The gate path is passed through an activation function,
+    and then element-wise multiplied with the value path before final projection to output.
+
+    The GLU mechanism provides better control over information flow compared to standard
+    feed-forward networks and has been shown to improve performance in Transformer models.
+
+    Mathematical formulation:
+        gate = activation(input @ W_gate + b_gate)
+        value = input @ W_value + b_value
+        hidden = gate ⊙ value  # Element-wise multiplication
+        output = hidden @ W_out + b_out
+
+    Where ⊙ denotes element-wise multiplication.
 
     Args:
-        hidden_dim: int, dimension of the hidden layer
-        output_dim: int, dimension of the output
-        activation: Callable, activation function to use in the gate (default: sigmoid)
-        dropout_rate: float, dropout rate (default: 0.0)
-        kernel_initializer: Union[str, Initializer], initializer for kernel weights (default: 'glorot_uniform')
-        kernel_regularizer: Optional[Regularizer], regularizer for kernel weights (default: None)
-        bias_initializer: Union[str, Initializer], initializer for bias (default: 'zeros')
-        use_bias: bool, whether to use bias (default: True)
-        name: Optional[str], name for the layer (default: None)
+        hidden_dim: Integer, dimension of the hidden layer (intermediate dimension).
+            Must be positive. This determines the size of both gate and value projections.
+        output_dim: Integer, dimension of the output layer. Must be positive.
+            This is the final output dimension after the second linear projection.
+        activation: Callable or string, activation function to apply to the gate projection.
+            Common choices:
+            - keras.ops.sigmoid: Original GLU variant
+            - keras.ops.relu: ReGLU variant
+            - keras.ops.gelu: GEGLU variant
+            - keras.ops.silu: SwiGLU variant
+            Defaults to keras.ops.sigmoid.
+        dropout_rate: Float, dropout rate applied to the hidden representation.
+            Must be between 0.0 and 1.0. Defaults to 0.0 (no dropout).
+        use_bias: Boolean, whether to use bias terms in linear projections.
+            Defaults to True.
+        kernel_initializer: String or keras.initializers.Initializer, initializer for
+            the kernel weights of all linear projections. Defaults to 'glorot_uniform'.
+        bias_initializer: String or keras.initializers.Initializer, initializer for
+            the bias weights of all linear projections. Defaults to 'zeros'.
+        kernel_regularizer: Optional keras.regularizers.Regularizer, regularizer applied
+            to all kernel weights. Defaults to None.
+        bias_regularizer: Optional keras.regularizers.Regularizer, regularizer applied
+            to all bias weights. Defaults to None.
+        **kwargs: Additional keyword arguments for the Layer base class.
+
+    Input shape:
+        N-D tensor with shape: `(..., input_dim)`.
+        Most common case is 3D input: `(batch_size, sequence_length, input_dim)`.
+
+    Output shape:
+        N-D tensor with shape: `(..., output_dim)`.
+        For 3D input: `(batch_size, sequence_length, output_dim)`.
+
+    Example:
+        ```python
+        # Basic GLU (with sigmoid activation)
+        layer = GLUFFN(hidden_dim=2048, output_dim=768)
+
+        # GEGLU variant (with GELU activation)
+        layer = GLUFFN(
+            hidden_dim=2048,
+            output_dim=768,
+            activation=keras.ops.gelu,
+            dropout_rate=0.1
+        )
+
+        # SwiGLU variant (with Swish/SiLU activation)
+        layer = GLUFFN(
+            hidden_dim=2048,
+            output_dim=768,
+            activation=keras.ops.silu,
+            kernel_regularizer=keras.regularizers.L2(1e-4)
+        )
+
+        # ReGLU variant (with ReLU activation)
+        layer = GLUFFN(
+            hidden_dim=2048,
+            output_dim=768,
+            activation=keras.ops.relu,
+            use_bias=False
+        )
+
+        # In a Transformer model
+        inputs = keras.Input(shape=(128, 768))
+        x = GLUFFN(hidden_dim=3072, output_dim=768, activation=keras.ops.gelu)(inputs)
+        model = keras.Model(inputs, x)
+        ```
+
+    Note:
+        This implementation follows the modern Keras 3 pattern where sub-layers
+        are created in __init__ and Keras handles building automatically. This
+        ensures proper serialization and eliminates common build errors.
+
+        The different activation functions create different GLU variants:
+        - sigmoid: Original GLU
+        - relu: ReGLU (often performs well)
+        - gelu: GEGLU (excellent for language tasks)
+        - silu/swish: SwiGLU (state-of-the-art performance)
+
+    References:
+        Shazeer, N. (2020). GLU Variants Improve Transformer. arXiv preprint arXiv:2002.05202.
     """
 
     def __init__(
-            self,
-            hidden_dim: int,
-            output_dim: int,
-            activation: Callable = keras.ops.sigmoid,
-            dropout_rate: float = 0.0,
-            kernel_initializer: Union[str, Initializer] = 'glorot_uniform',
-            kernel_regularizer: Optional[Regularizer] = None,
-            bias_initializer: Union[str, Initializer] = 'zeros',
-            use_bias: bool = True,
-            name: Optional[str] = None,
-            **kwargs
-    ):
-        """Initialize the GLU FFN layer."""
-        super(GLUFFN, self).__init__(name=name, **kwargs)
+        self,
+        hidden_dim: int,
+        output_dim: int,
+        activation: Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = keras.ops.sigmoid,
+        dropout_rate: float = 0.0,
+        use_bias: bool = True,
+        kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
+        bias_initializer: Union[str, initializers.Initializer] = 'zeros',
+        kernel_regularizer: Optional[regularizers.Regularizer] = None,
+        bias_regularizer: Optional[regularizers.Regularizer] = None,
+        **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+
+        # Validate inputs
+        if hidden_dim <= 0:
+            raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
+        if output_dim <= 0:
+            raise ValueError(f"output_dim must be positive, got {output_dim}")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
+
+        # Store ALL configuration arguments as instance attributes
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
-        self.activation = activation
+        self.activation = activations.get(activation)  # Convert string to callable if needed
         self.dropout_rate = dropout_rate
-        self.kernel_initializer = kernel_initializer
-        self.kernel_regularizer = kernel_regularizer
-        self.bias_initializer = bias_initializer
         self.use_bias = use_bias
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.bias_initializer = initializers.get(bias_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.bias_regularizer = regularizers.get(bias_regularizer)
 
-        # Define the layers
-        self.gate_proj = keras.layers.Dense(
-            hidden_dim,
-            activation=None,
+        # CREATE all sub-layers in __init__ following modern Keras 3 pattern
+        self.gate_proj = layers.Dense(
+            units=hidden_dim,
+            activation=None,  # We apply activation manually in call()
             use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            bias_initializer=bias_initializer,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="gate_proj"
         )
 
-        self.value_proj = keras.layers.Dense(
-            hidden_dim,
+        self.value_proj = layers.Dense(
+            units=hidden_dim,
             activation=None,
             use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            bias_initializer=bias_initializer,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="value_proj"
         )
 
-        self.output_proj = keras.layers.Dense(
-            output_dim,
+        self.output_proj = layers.Dense(
+            units=output_dim,
             activation=None,
             use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            bias_initializer=bias_initializer,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="output_proj"
         )
 
-        self.dropout = keras.layers.Dropout(dropout_rate)
+        # Create dropout layer if needed
+        if dropout_rate > 0.0:
+            self.dropout = layers.Dropout(rate=dropout_rate, name="dropout")
+        else:
+            self.dropout = None
 
-    def call(self, inputs: tf.Tensor, training: bool = False) -> tf.Tensor:
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """
-        Forward pass for the GLU FFN.
+        Forward pass of the GLU FFN.
 
         Args:
-            inputs: tf.Tensor, input tensor
-            training: bool, whether in training mode
+            inputs: Input tensor with shape (..., input_dim).
+            training: Boolean indicating whether the layer should behave in
+                training mode or inference mode.
 
         Returns:
-            tf.Tensor: Output tensor
+            Output tensor with shape (..., output_dim).
         """
-        # Project inputs for gate and value
-        gate = self.gate_proj(inputs)
-        value = self.value_proj(inputs)
+        # Project inputs to gate and value paths
+        gate = self.gate_proj(inputs, training=training)
+        value = self.value_proj(inputs, training=training)
 
-        # Apply activation to gate
-        gate = self.activation(gate)
+        # Apply activation to gate (this creates the GLU mechanism)
+        if self.activation is not None:
+            gate = self.activation(gate)
 
-        # Element-wise multiplication of gate and value
-        hidden = gate * value
+        # Element-wise multiplication of gate and value (core GLU operation)
+        hidden = ops.multiply(gate, value)
 
-        # Apply dropout (if any)
-        if self.dropout_rate > 0:
+        # Apply dropout if configured
+        if self.dropout is not None:
             hidden = self.dropout(hidden, training=training)
 
         # Project to output dimension
-        output = self.output_proj(hidden)
+        output = self.output_proj(hidden, training=training)
 
         return output
 
-    def get_config(self) -> dict:
-        """Get layer configuration."""
-        config = super(GLUFFN, self).get_config()
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape of the layer.
+
+        Args:
+            input_shape: Shape tuple of the input.
+
+        Returns:
+            Output shape tuple. Same as input shape except last dimension
+            becomes output_dim.
+        """
+        # Convert to list for manipulation, then back to tuple
+        output_shape = list(input_shape)
+        output_shape[-1] = self.output_dim
+        return tuple(output_shape)
+
+    def get_config(self) -> dict[str, Any]:
+        """
+        Return the layer's configuration for serialization.
+
+        This method must return ALL arguments needed to recreate the layer
+        via __init__.
+
+        Returns:
+            Dictionary containing the layer configuration.
+        """
+        config = super().get_config()
         config.update({
             'hidden_dim': self.hidden_dim,
             'output_dim': self.output_dim,
-            'activation': self.activation,
+            'activation': activations.serialize(self.activation),
             'dropout_rate': self.dropout_rate,
-            'kernel_initializer': self.kernel_initializer,
-            'kernel_regularizer': self.kernel_regularizer,
-            'bias_initializer': self.bias_initializer,
             'use_bias': self.use_bias,
+            'kernel_initializer': initializers.serialize(self.kernel_initializer),
+            'bias_initializer': initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+
+def create_glu_variants() -> dict[str, GLUFFN]:
+    """
+    Create common GLU variants as described in the paper.
+
+    Returns:
+        Dictionary mapping variant names to configured GLUFFN instances.
+
+    Example:
+        ```python
+        variants = create_glu_variants()
+
+        # Use GEGLU for language modeling
+        geglu_layer = variants['geglu']
+
+        # Use SwiGLU for best performance
+        swiglu_layer = variants['swiglu']
+        ```
+    """
+    return {
+        'glu': GLUFFN(
+            hidden_dim=2048,
+            output_dim=768,
+            activation=keras.ops.sigmoid,
+            dropout_rate=0.1
+        ),
+        'bilinear': GLUFFN(
+            hidden_dim=2048,
+            output_dim=768,
+            activation=None,  # Linear (no activation)
+            dropout_rate=0.1
+        ),
+        'reglu': GLUFFN(
+            hidden_dim=2048,
+            output_dim=768,
+            activation=keras.ops.relu,
+            dropout_rate=0.1
+        ),
+        'geglu': GLUFFN(
+            hidden_dim=2048,
+            output_dim=768,
+            activation=keras.ops.gelu,
+            dropout_rate=0.1
+        ),
+        'swiglu': GLUFFN(
+            hidden_dim=2048,
+            output_dim=768,
+            activation=keras.ops.silu,  # Swish/SiLU activation
+            dropout_rate=0.1
+        ),
+    }

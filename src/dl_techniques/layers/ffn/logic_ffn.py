@@ -44,7 +44,7 @@ The `LogicFFN` layer operates through a sequence of carefully designed steps:
 
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
-from keras import layers, ops, initializers, regularizers
+from keras import ops, initializers, regularizers
 
 # ---------------------------------------------------------------------
 # local imports
@@ -55,7 +55,7 @@ from dl_techniques.utils.logger import logger
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class LogicFFN(layers.Layer):
+class LogicFFN(keras.layers.Layer):
     """
     Logic-based Feed-Forward Network using learnable soft logic operations.
 
@@ -72,9 +72,9 @@ class LogicFFN(layers.Layer):
     5. Combining results and projecting back to output dimension
 
     Args:
-        output_dim: Integer, the final output dimension of the layer.
+        output_dim: Integer, the final output dimension of the layer. Must be positive.
         logic_dim: Integer, the intermediate dimension for logic operations.
-            Controls the complexity of logical reasoning.
+            Controls the complexity of logical reasoning. Must be positive.
         use_bias: Boolean, whether to use bias terms in dense layers.
             Defaults to True.
         kernel_initializer: String or initializer instance for kernel weights.
@@ -84,7 +84,7 @@ class LogicFFN(layers.Layer):
         kernel_regularizer: Optional regularizer for kernel weights.
         bias_regularizer: Optional regularizer for bias weights.
         temperature: Float, temperature parameter for softmax gating.
-            Higher values make gating more uniform. Defaults to 1.0.
+            Higher values make gating more uniform, must be positive. Defaults to 1.0.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
@@ -103,7 +103,7 @@ class LogicFFN(layers.Layer):
             output_dim=768,
             logic_dim=256,
             use_bias=False,
-            kernel_regularizer='l2',
+            kernel_regularizer=keras.regularizers.L2(1e-4),
             temperature=1.5
         )
 
@@ -117,6 +117,10 @@ class LogicFFN(layers.Layer):
         This layer is particularly effective for tasks requiring explicit
         logical reasoning over input features. The logic_dim parameter
         controls the complexity of logical operations that can be learned.
+
+        This implementation follows the modern Keras 3 pattern where sub-layers
+        are created in __init__ and Keras handles the build lifecycle automatically.
+        This ensures proper serialization and avoids common build errors.
     """
 
     def __init__(
@@ -141,7 +145,7 @@ class LogicFFN(layers.Layer):
         if temperature <= 0:
             raise ValueError(f"temperature must be positive, got {temperature}")
 
-        # Store configuration
+        # Store ALL configuration parameters as instance attributes
         self.output_dim = output_dim
         self.logic_dim = logic_dim
         self.use_bias = use_bias
@@ -154,44 +158,14 @@ class LogicFFN(layers.Layer):
         # Number of logic operations: AND, OR, XOR
         self.num_logic_ops = 3
 
-        # Initialize sublayers to None - will be created in build()
-        self.logic_projection = None
-        self.gate_projection = None
-        self.output_projection = None
-
-        # Store build input shape for serialization
-        self._build_input_shape = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the logic FFN sublayers.
-
-        Args:
-            input_shape: Shape tuple of input tensor.
-        """
-        if self.built:
-            return
-
-        # Store for serialization
-        self._build_input_shape = input_shape
-
-        # Validate input shape
-        if len(input_shape) < 2:
-            raise ValueError(
-                f"Input must be at least 2D, got {len(input_shape)}D: {input_shape}"
-            )
-
-        input_dim = input_shape[-1]
-        if input_dim is None:
-            raise ValueError("Input feature dimension must be specified")
-
+        # CREATE all sub-layers here in __init__ (MODERN KERAS 3 PATTERN)
         logger.info(
-            f"Building LogicFFN: input_dim={input_dim}, "
-            f"logic_dim={self.logic_dim}, output_dim={self.output_dim}"
+            f"Creating LogicFFN sublayers: logic_dim={self.logic_dim}, "
+            f"output_dim={self.output_dim}, num_ops={self.num_logic_ops}"
         )
 
-        # Create projection layers
-        self.logic_projection = layers.Dense(
+        # Logic projection layer: projects input to logic space with two operands
+        self.logic_projection = keras.layers.Dense(
             units=self.logic_dim * 2,  # Two operands for logic operations
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
@@ -201,7 +175,8 @@ class LogicFFN(layers.Layer):
             name='logic_projection'
         )
 
-        self.gate_projection = layers.Dense(
+        # Gate projection layer: learns weights for logic operations
+        self.gate_projection = keras.layers.Dense(
             units=self.num_logic_ops,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
@@ -211,7 +186,8 @@ class LogicFFN(layers.Layer):
             name='gate_projection'
         )
 
-        self.output_projection = layers.Dense(
+        # Output projection layer: projects back to desired output dimension
+        self.output_projection = keras.layers.Dense(
             units=self.output_dim,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
@@ -221,14 +197,8 @@ class LogicFFN(layers.Layer):
             name='output_projection'
         )
 
-        # Build sublayers
-        self.logic_projection.build(input_shape)
-        self.gate_projection.build(input_shape)
-        # FIX: Ensure shape is a tuple for concatenation, making it robust
-        # for deserialization where input_shape can be a list.
-        self.output_projection.build(tuple(input_shape[:-1]) + (self.logic_dim,))
-
-        super().build(input_shape)
+        # No custom weights to create, so no build() method is needed
+        # Keras will automatically handle building of sub-layers
 
     def call(
             self,
@@ -296,17 +266,17 @@ class LogicFFN(layers.Layer):
         Returns:
             Output shape tuple.
         """
-        # Convert to list for manipulation
-        input_shape_list = list(input_shape)
-
-        # Replace last dimension with output_dim
-        output_shape_list = input_shape_list[:-1] + [self.output_dim]
-
-        return tuple(output_shape_list)
+        # Convert to list for manipulation, then back to tuple
+        output_shape = list(input_shape)
+        output_shape[-1] = self.output_dim
+        return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
         """
         Get layer configuration for serialization.
+
+        This method must return ALL arguments needed to recreate the layer
+        via __init__. Uses keras serializers for complex objects.
 
         Returns:
             Dictionary containing layer configuration.
@@ -324,25 +294,8 @@ class LogicFFN(layers.Layer):
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """
-        Get build configuration for serialization.
-
-        Returns:
-            Dictionary containing build configuration.
-        """
-        return {
-            'input_shape': self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """
-        Build layer from configuration.
-
-        Args:
-            config: Dictionary containing build configuration.
-        """
-        if config.get('input_shape') is not None:
-            self.build(config['input_shape'])
+    # DELETED: get_build_config() and build_from_config() methods
+    # These are deprecated in Keras 3 and cause serialization issues
+    # Keras handles the build lifecycle automatically with the modern pattern
 
 # ---------------------------------------------------------------------

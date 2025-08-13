@@ -160,6 +160,8 @@ for vision transformer token processing:
 - The operation is fully differentiable and suitable for end-to-end training
 """
 
+# ---------------------------------------------------------------------
+
 import keras
 from keras import ops
 from typing import Optional, Tuple, Any
@@ -168,34 +170,6 @@ from typing import Optional, Tuple, Any
 
 @keras.saving.register_keras_serializable()
 class PixelShuffle(keras.layers.Layer):
-    """Pixel shuffle operation for reducing spatial tokens in vision transformers.
-
-    Implements pixel shuffle to reduce the number of visual tokens by rearranging
-    spatial information into channel dimensions, enabling more efficient processing
-    in vision-language models. This operation is particularly useful for reducing
-    computational complexity while preserving spatial information.
-
-    The layer assumes input tokens are arranged as [CLS_token, spatial_tokens] where
-    spatial tokens represent a square spatial grid.
-
-    Args:
-        scale_factor: Factor by which to reduce spatial dimensions. Must be a positive
-            integer that evenly divides the spatial dimensions. Default: 2.
-        validate_spatial_dims: Whether to validate that spatial dimensions are
-            perfect squares and divisible by scale_factor. Default: True.
-        **kwargs: Additional keyword arguments for the Layer base class.
-
-    Example:
-        >>> # Input: [batch, 197, 768] (196 spatial tokens + 1 CLS token, 14x14 spatial)
-        >>> pixel_shuffle = PixelShuffle(scale_factor=2)
-        >>> # Output: [batch, 50, 3072] (49 spatial tokens + 1 CLS token, 7x7 spatial)
-
-    Raises:
-        ValueError: If scale_factor is not a positive integer.
-        ValueError: If spatial dimensions are not compatible with scale_factor
-            when validate_spatial_dims is True.
-    """
-
     def __init__(
             self,
             scale_factor: int = 2,
@@ -203,173 +177,63 @@ class PixelShuffle(keras.layers.Layer):
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
-
         if not isinstance(scale_factor, int) or scale_factor <= 0:
-            raise ValueError(
-                f"scale_factor must be a positive integer, got {scale_factor}"
-            )
-
+            raise ValueError(f"scale_factor must be a positive integer, got {scale_factor}")
         self.scale_factor = scale_factor
         self.validate_spatial_dims = validate_spatial_dims
-        self._build_input_shape = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Raises:
-            ValueError: If input shape is invalid or incompatible with scale_factor.
-        """
-        self._build_input_shape = input_shape
-
-        # Validate input shape
         if len(input_shape) != 3:
-            raise ValueError(
-                f"Expected 3D input (batch, seq_len, channels), got shape {input_shape}"
-            )
-
-        # Validate spatial dimensions if enabled and known
+            raise ValueError(f"Expected 3D input (batch, seq_len, channels), got shape {input_shape}")
         if self.validate_spatial_dims and input_shape[1] is not None:
             seq_len = input_shape[1]
-            spatial_len = seq_len - 1  # Subtract CLS token
-
+            spatial_len = seq_len - 1
             if spatial_len <= 0:
-                raise ValueError(
-                    f"Sequence length must be > 1 (need at least CLS + 1 spatial token), "
-                    f"got {seq_len}"
-                )
-
-            # Check if spatial_len is a perfect square
+                raise ValueError(f"Sequence length must be > 1, got {seq_len}")
             h_float = spatial_len ** 0.5
             h = int(h_float)
             if h * h != spatial_len:
-                raise ValueError(
-                    f"Spatial tokens ({spatial_len}) must form a perfect square, "
-                    f"got {spatial_len} tokens"
-                )
-
-            # Check if spatial dimensions are divisible by scale_factor
+                raise ValueError(f"Spatial tokens ({spatial_len}) must form a perfect square.")
             if h % self.scale_factor != 0:
-                raise ValueError(
-                    f"Spatial dimension ({h}) must be divisible by scale_factor "
-                    f"({self.scale_factor})"
-                )
-
+                raise ValueError(f"Spatial dimension ({h}) must be divisible by scale_factor ({self.scale_factor})")
         super().build(input_shape)
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """Apply pixel shuffle operation.
-
-        Args:
-            inputs: Input tensor of shape [batch, num_tokens, channels] where
-                num_tokens = 1 + H*W (CLS token + spatial tokens).
-
-        Returns:
-            Shuffled tensor with reduced spatial tokens of shape
-            [batch, 1 + (H//scale_factor)*(W//scale_factor), channels*scale_factor^2].
-
-        Raises:
-            ValueError: If runtime spatial dimensions are incompatible.
-        """
         if self.scale_factor == 1:
             return inputs
-
-        # Get dynamic shapes
         input_shape = ops.shape(inputs)
-        batch_size = input_shape[0]
-        seq_len = input_shape[1]
-        channels = inputs.shape[-1]  # Known at build time
-
-        # Separate CLS token and spatial tokens
-        cls_token = inputs[:, 0:1, :]  # [batch, 1, channels]
-        spatial_tokens = inputs[:, 1:, :]  # [batch, H*W, channels]
-
-        # Calculate spatial dimensions (assuming square)
+        batch_size, seq_len, channels = input_shape[0], input_shape[1], inputs.shape[-1]
+        cls_token, spatial_tokens = inputs[:, 0:1, :], inputs[:, 1:, :]
         spatial_len = seq_len - 1
-        h_float = ops.sqrt(ops.cast(spatial_len, "float32"))
-        h = ops.cast(h_float, "int32")
-        w = h  # Assume square spatial arrangement
-
-        # Reshape spatial tokens to 2D spatial format
+        h = ops.cast(ops.sqrt(ops.cast(spatial_len, "float32")), "int32")
+        w = h
         spatial_tokens = ops.reshape(spatial_tokens, [batch_size, h, w, channels])
-
-        # Apply pixel shuffle (space-to-depth operation)
-        new_h = h // self.scale_factor
-        new_w = w // self.scale_factor
+        new_h, new_w = h // self.scale_factor, w // self.scale_factor
         new_c = channels * (self.scale_factor ** 2)
-
-        # Rearrange pixels: group scale_factor x scale_factor blocks into channels
-        # [B, H, W, C] -> [B, H//s, s, W//s, s, C] -> [B, H//s, W//s, s, s, C] -> [B, H//s, W//s, s*s*C]
-        shuffled = ops.reshape(spatial_tokens, [
-            batch_size, new_h, self.scale_factor, new_w, self.scale_factor, channels
-        ])
+        shuffled = ops.reshape(spatial_tokens, [batch_size, new_h, self.scale_factor, new_w, self.scale_factor, channels])
         shuffled = ops.transpose(shuffled, [0, 1, 3, 2, 4, 5])
         shuffled = ops.reshape(shuffled, [batch_size, new_h * new_w, new_c])
-
-        # Pad CLS token to match the new channel dimension
         padding_amount = new_c - channels
         paddings = [[0, 0], [0, 0], [0, padding_amount]]
         cls_token_expanded = ops.pad(cls_token, paddings)
-
-        # Concatenate CLS token back
         return ops.concatenate([cls_token_expanded, shuffled], axis=1)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
-
-        Args:
-            input_shape: Shape of the input tensor.
-
-        Returns:
-            Output shape tuple.
-        """
-        input_shape_list = list(input_shape)
-        batch_size, seq_len, channels = input_shape_list
-
+        batch_size, seq_len, channels = input_shape
         if seq_len is None:
             new_seq_len = None
         else:
-            spatial_len = seq_len - 1
-            new_spatial_len = spatial_len // (self.scale_factor ** 2)
-            new_seq_len = new_spatial_len + 1
-
+            new_seq_len = ((seq_len - 1) // (self.scale_factor ** 2)) + 1
         if channels is None:
             new_channels = None
         else:
             new_channels = channels * (self.scale_factor ** 2)
-
-        return tuple([batch_size, new_seq_len, new_channels])
+        return batch_size, new_seq_len, new_channels
 
     def get_config(self) -> dict:
-        """Get layer configuration for serialization.
-
-        Returns:
-            Dictionary containing the layer configuration.
-        """
         config = super().get_config()
         config.update({
             "scale_factor": self.scale_factor,
             "validate_spatial_dims": self.validate_spatial_dims,
         })
         return config
-
-    def get_build_config(self) -> dict:
-        """Get build configuration for serialization.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: dict) -> None:
-        """Build layer from configuration.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
-# ---------------------------------------------------------------------
