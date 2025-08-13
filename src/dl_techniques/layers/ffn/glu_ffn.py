@@ -18,7 +18,6 @@ Shazeer, N. (2020). GLU Variants Improve Transformer. arXiv preprint.
 """
 
 import keras
-import tensorflow as tf
 from keras import layers, initializers, regularizers, activations
 from typing import Callable, Optional, Union, Any, Dict
 
@@ -102,7 +101,7 @@ class GLUFFN(keras.layers.Layer):
 
         self.dropout = layers.Dropout(dropout_rate)
 
-    def call(self, inputs: tf.Tensor, training: Optional[bool] = None) -> tf.Tensor:
+    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """Forward pass for the GLU FFN."""
         gate = self.gate_proj(inputs)
         value = self.value_proj(inputs)
