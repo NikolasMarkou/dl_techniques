@@ -2,7 +2,8 @@
 Comprehensive test suite for GroupedQueryAttention layer.
 
 Tests cover initialization, build process, forward pass, serialization,
-integration, and edge cases following dl-techniques testing standards.
+integration, and edge cases following dl-techniques testing standards
+and modern Keras 3 patterns.
 """
 
 import pytest
@@ -10,7 +11,8 @@ import numpy as np
 import keras
 import tempfile
 import os
-from typing import Tuple, Optional
+import tensorflow as tf
+from typing import Tuple, Optional, List
 
 # Import the layer to test
 from dl_techniques.layers.attention.group_query_attention import GroupedQueryAttention
@@ -54,11 +56,23 @@ class TestGroupedQueryAttention:
         assert layer.max_seq_len == 128
         assert layer.dropout_rate == 0.0
         assert layer.rope_percentage == 1.0
+        assert layer.rope_theta == 10000.0
         assert layer.use_bias is False
 
         # Check derived parameters
         assert layer.head_dim == 64  # 512 // 8
         assert layer.n_group == 4    # 8 // 2
+
+        # Check sub-layers exist (created in __init__)
+        assert layer.w_q is not None
+        assert layer.w_k is not None
+        assert layer.w_v is not None
+        assert layer.w_o is not None
+        assert layer.dropout is not None
+        assert layer.rope is not None
+
+        # But layer should not be built yet
+        assert not layer.built
 
     def test_initialization_custom_parameters(self):
         """Test initialization with custom parameters."""
@@ -69,7 +83,10 @@ class TestGroupedQueryAttention:
             max_seq_len=256,
             dropout_rate=0.1,
             rope_percentage=0.5,
-            use_bias=True
+            rope_theta=50000.0,
+            use_bias=True,
+            kernel_initializer='he_normal',
+            bias_initializer='ones'
         )
 
         assert layer.d_model == 768
@@ -78,9 +95,14 @@ class TestGroupedQueryAttention:
         assert layer.max_seq_len == 256
         assert layer.dropout_rate == 0.1
         assert layer.rope_percentage == 0.5
+        assert layer.rope_theta == 50000.0
         assert layer.use_bias is True
         assert layer.head_dim == 64  # 768 // 12
         assert layer.n_group == 3    # 12 // 4
+
+        # Check initializers are set correctly
+        assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
+        assert isinstance(layer.bias_initializer, keras.initializers.Ones)
 
     def test_invalid_parameters(self):
         """Test that invalid parameters raise appropriate errors."""
@@ -88,7 +110,7 @@ class TestGroupedQueryAttention:
         with pytest.raises(ValueError, match="d_model.*must be divisible by n_head"):
             GroupedQueryAttention(d_model=513, n_head=8, n_kv_head=2, max_seq_len=128)
 
-        # n_head not divisible by n_kv_head (use valid d_model/n_head combination)
+        # n_head not divisible by n_kv_head
         with pytest.raises(ValueError, match="n_head.*must be divisible by n_kv_head"):
             GroupedQueryAttention(d_model=504, n_head=7, n_kv_head=2, max_seq_len=128)
 
@@ -96,8 +118,26 @@ class TestGroupedQueryAttention:
         with pytest.raises(ValueError, match="d_model must be positive"):
             GroupedQueryAttention(d_model=-512, n_head=8, n_kv_head=2, max_seq_len=128)
 
+        # Negative n_head
+        with pytest.raises(ValueError, match="n_head must be positive"):
+            GroupedQueryAttention(d_model=512, n_head=0, n_kv_head=2, max_seq_len=128)
+
+        # Negative n_kv_head
+        with pytest.raises(ValueError, match="n_kv_head must be positive"):
+            GroupedQueryAttention(d_model=512, n_head=8, n_kv_head=0, max_seq_len=128)
+
+        # Negative max_seq_len
+        with pytest.raises(ValueError, match="max_seq_len must be positive"):
+            GroupedQueryAttention(d_model=512, n_head=8, n_kv_head=2, max_seq_len=-1)
+
+        # Negative rope_theta
+        with pytest.raises(ValueError, match="rope_theta must be positive"):
+            GroupedQueryAttention(
+                d_model=512, n_head=8, n_kv_head=2, max_seq_len=128, rope_theta=-1.0
+            )
+
         # Invalid dropout rate
-        with pytest.raises(ValueError, match="attention_dropout must be in"):
+        with pytest.raises(ValueError, match="dropout_rate must be in"):
             GroupedQueryAttention(
                 d_model=512, n_head=8, n_kv_head=2, max_seq_len=128, dropout_rate=1.5
             )
@@ -108,10 +148,10 @@ class TestGroupedQueryAttention:
                 d_model=512, n_head=8, n_kv_head=2, max_seq_len=128, rope_percentage=2.0
             )
 
-        # Invalid rope_percentage (zero or negative)
+        # Negative rope_percentage
         with pytest.raises(ValueError, match="rope_percentage must be in"):
             GroupedQueryAttention(
-                d_model=512, n_head=8, n_kv_head=2, max_seq_len=128, rope_percentage=0.0
+                d_model=512, n_head=8, n_kv_head=2, max_seq_len=128, rope_percentage=-0.1
             )
 
     # =========================================================================
@@ -120,25 +160,20 @@ class TestGroupedQueryAttention:
 
     def test_build_process(self, basic_layer, input_tensor):
         """Test that the layer builds properly."""
-        # Before building, sublayers should be None
-        assert basic_layer.w_q is None
-        assert basic_layer.w_k is None
-        assert basic_layer.w_v is None
-        assert basic_layer.w_o is None
-        assert basic_layer.dropout is None
-        assert basic_layer.rope is None
-
-        # Trigger build by calling the layer
-        output = basic_layer(input_tensor)
-
-        # After building, sublayers should exist
-        assert basic_layer.built is True
+        # Sub-layers should exist but layer should not be built
         assert basic_layer.w_q is not None
         assert basic_layer.w_k is not None
         assert basic_layer.w_v is not None
         assert basic_layer.w_o is not None
         assert basic_layer.dropout is not None
         assert basic_layer.rope is not None
+        assert not basic_layer.built
+
+        # Trigger build by calling the layer
+        output = basic_layer(input_tensor)
+
+        # After building, layer should be built
+        assert basic_layer.built is True
 
         # Check sublayer types
         assert isinstance(basic_layer.w_q, keras.layers.Dense)
@@ -183,6 +218,36 @@ class TestGroupedQueryAttention:
         assert layer_with_bias.w_v.use_bias is True
         assert layer_with_bias.w_o.use_bias is True
 
+    def test_regularizers_and_initializers(self):
+        """Test that regularizers and initializers are properly configured."""
+        kernel_reg = keras.regularizers.L2(1e-4)
+        bias_reg = keras.regularizers.L1(1e-5)
+
+        layer = GroupedQueryAttention(
+            d_model=256,
+            n_head=4,
+            n_kv_head=2,
+            max_seq_len=64,
+            kernel_initializer='he_normal',
+            bias_initializer='zeros',
+            kernel_regularizer=kernel_reg,
+            bias_regularizer=bias_reg,
+            use_bias=True
+        )
+
+        inputs = keras.random.normal([2, 16, 256])
+        layer(inputs)
+
+        # Check initializers
+        assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
+        assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
+
+        # Check regularizers are applied to sub-layers
+        assert layer.w_q.kernel_regularizer is not None
+        assert layer.w_k.kernel_regularizer is not None
+        assert layer.w_v.kernel_regularizer is not None
+        assert layer.w_o.kernel_regularizer is not None
+
     # =========================================================================
     # Forward Pass Tests
     # =========================================================================
@@ -195,8 +260,9 @@ class TestGroupedQueryAttention:
         assert output.shape == input_tensor.shape
 
         # Check output contains no NaN or Inf values
-        assert not np.any(np.isnan(output.numpy()))
-        assert not np.any(np.isinf(output.numpy()))
+        output_np = keras.ops.convert_to_numpy(output)
+        assert not np.any(np.isnan(output_np))
+        assert not np.any(np.isinf(output_np))
 
     def test_forward_pass_different_shapes(self, basic_layer):
         """Test forward pass with different input shapes."""
@@ -241,7 +307,7 @@ class TestGroupedQueryAttention:
         mask = np.tril(np.ones((seq_len, seq_len)))
         mask = np.expand_dims(mask, 0)  # Add batch dimension
         mask = np.repeat(mask, batch_size, axis=0)
-        mask = keras.ops.convert_to_tensor(mask, dtype=bool)
+        mask = keras.ops.convert_to_tensor(mask, dtype=keras.backend.floatx())
 
         # Test with mask
         output_masked = basic_layer(inputs, mask=mask)
@@ -249,7 +315,9 @@ class TestGroupedQueryAttention:
 
         assert output_masked.shape == output_unmasked.shape
         # Outputs should be different when mask is applied
-        assert not np.allclose(output_masked.numpy(), output_unmasked.numpy(), rtol=1e-3)
+        mask_np = keras.ops.convert_to_numpy(output_masked)
+        unmask_np = keras.ops.convert_to_numpy(output_unmasked)
+        assert not np.allclose(mask_np, unmask_np, rtol=1e-3)
 
     def test_return_attention_weights(self, basic_layer, input_tensor):
         """Test returning attention weights."""
@@ -267,9 +335,10 @@ class TestGroupedQueryAttention:
         assert attention_weights.shape == expected_attn_shape
 
         # Check attention weights are valid probabilities
-        assert np.all(attention_weights.numpy() >= 0)
+        attn_np = keras.ops.convert_to_numpy(attention_weights)
+        assert np.all(attn_np >= 0)
         # Check attention weights sum to 1 along last dimension
-        attn_sums = np.sum(attention_weights.numpy(), axis=-1)
+        attn_sums = np.sum(attn_np, axis=-1)
         assert np.allclose(attn_sums, 1.0, rtol=1e-5)
 
     # =========================================================================
@@ -359,7 +428,7 @@ class TestGroupedQueryAttention:
             assert layer.n_group == n_head // n_kv_head
 
     # =========================================================================
-    # Serialization Tests
+    # Serialization Tests (Modern Keras 3 Pattern)
     # =========================================================================
 
     def test_get_config(self, basic_layer):
@@ -368,7 +437,8 @@ class TestGroupedQueryAttention:
 
         expected_keys = {
             'd_model', 'n_head', 'n_kv_head', 'max_seq_len',
-            'dropout_rate', 'rope_percentage', 'use_bias'
+            'dropout_rate', 'rope_percentage', 'rope_theta', 'use_bias',
+            'kernel_initializer', 'bias_initializer', 'kernel_regularizer', 'bias_regularizer'
         }
 
         # Check all expected keys are present
@@ -381,49 +451,78 @@ class TestGroupedQueryAttention:
         assert config['max_seq_len'] == 128
         assert config['dropout_rate'] == 0.0
         assert config['rope_percentage'] == 1.0
+        assert config['rope_theta'] == 10000.0
         assert config['use_bias'] is False
 
-    def test_serialization_roundtrip(self, basic_layer, input_tensor):
-        """Test complete serialization and deserialization."""
-        # Build the layer
-        original_output = basic_layer(input_tensor)
-
-        # Get configurations
-        config = basic_layer.get_config()
-        build_config = basic_layer.get_build_config()
-
-        # Create new layer from config
-        recreated_layer = GroupedQueryAttention.from_config(config)
-        recreated_layer.build_from_config(build_config)
-
-        # Check configuration matches
-        assert recreated_layer.d_model == basic_layer.d_model
-        assert recreated_layer.n_head == basic_layer.n_head
-        assert recreated_layer.n_kv_head == basic_layer.n_kv_head
-        assert recreated_layer.max_seq_len == basic_layer.max_seq_len
-
-        # Check that both layers have the same structure
-        recreated_output = recreated_layer(input_tensor)
-        assert recreated_output.shape == original_output.shape
-
-    def test_build_config_methods(self, basic_layer, input_tensor):
-        """Test build configuration methods."""
-        # Before building
-        build_config = basic_layer.get_build_config()
-        assert build_config['input_shape'] is None
-
-        # After building
-        basic_layer(input_tensor)
-        build_config = basic_layer.get_build_config()
-        assert build_config['input_shape'] is not None
-        assert build_config['input_shape'] == input_tensor.shape
-
-        # Test build_from_config
-        new_layer = GroupedQueryAttention(
-            d_model=512, n_head=8, n_kv_head=2, max_seq_len=128
+    def test_serialization_cycle(self, input_tensor):
+        """Test complete serialization cycle using modern Keras 3 pattern."""
+        # Create original layer
+        original_layer = GroupedQueryAttention(
+            d_model=512,
+            n_head=8,
+            n_kv_head=2,
+            max_seq_len=128,
+            dropout_rate=0.1,
+            use_bias=True,
+            name='test_gqa'
         )
-        new_layer.build_from_config(build_config)
-        assert new_layer.built is True
+
+        # Build the layer
+        original_output = original_layer(input_tensor)
+
+        # Create model for serialization testing
+        inputs = keras.Input(shape=input_tensor.shape[1:])
+        outputs = GroupedQueryAttention(
+            d_model=512,
+            n_head=8,
+            n_kv_head=2,
+            max_seq_len=128,
+            dropout_rate=0.1,
+            use_bias=True,
+            name='gqa_layer'
+        )(inputs)
+        model = keras.Model(inputs, outputs)
+
+        # Get prediction from original model
+        original_prediction = model(input_tensor)
+
+        # Save and load model
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'test_model.keras')
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+            loaded_prediction = loaded_model(input_tensor)
+
+            # Verify identical predictions
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
+                rtol=1e-6, atol=1e-6,
+                err_msg="Predictions differ after serialization"
+            )
+
+    def test_config_completeness(self):
+        """Test that get_config contains all __init__ parameters."""
+        layer_config = {
+            'd_model': 256,
+            'n_head': 4,
+            'n_kv_head': 2,
+            'max_seq_len': 64,
+            'dropout_rate': 0.1,
+            'rope_percentage': 0.8,
+            'rope_theta': 50000.0,
+            'use_bias': True
+        }
+
+        layer = GroupedQueryAttention(**layer_config)
+        config = layer.get_config()
+
+        # Check all config parameters are present
+        for key in layer_config:
+            assert key in config, f"Missing {key} in get_config()"
+            if key not in ['kernel_initializer', 'bias_initializer']:  # Skip serialized objects
+                assert config[key] == layer_config[key], f"Mismatch for {key}"
 
     # =========================================================================
     # Model Integration Tests
@@ -470,16 +569,17 @@ class TestGroupedQueryAttention:
             model_path = os.path.join(tmpdirname, "model.keras")
             model.save(model_path)
 
-            loaded_model = keras.models.load_model(
-                model_path,
-                custom_objects={"GroupedQueryAttention": GroupedQueryAttention}
-            )
+            loaded_model = keras.models.load_model(model_path)
 
             # Test prediction with loaded model
             loaded_prediction = loaded_model(input_tensor)
 
             # Predictions should match
-            assert np.allclose(original_prediction.numpy(), loaded_prediction.numpy(), rtol=1e-5)
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
+                rtol=1e-5, atol=1e-5
+            )
 
             # Check layer type is preserved
             gqa_layer = loaded_model.get_layer('gqa')
@@ -510,16 +610,14 @@ class TestGroupedQueryAttention:
             output = layer(test_input)
 
             # Check for NaN/Inf values
-            assert not np.any(np.isnan(output.numpy())), "NaN values detected"
-            assert not np.any(np.isinf(output.numpy())), "Inf values detected"
+            output_np = keras.ops.convert_to_numpy(output)
+            assert not np.any(np.isnan(output_np)), "NaN values detected"
+            assert not np.any(np.isinf(output_np)), "Inf values detected"
 
     def test_gradient_flow(self, basic_layer, input_tensor):
         """Test gradient flow through the layer."""
-        # Import tensorflow for gradient tape
-        import tensorflow as tf
-
         with tf.GradientTape() as tape:
-            inputs = tf.Variable(input_tensor)
+            inputs = tf.Variable(keras.ops.convert_to_numpy(input_tensor))
             tape.watch(inputs)
             outputs = basic_layer(inputs)
             loss = tf.reduce_mean(tf.square(outputs))
@@ -532,8 +630,9 @@ class TestGroupedQueryAttention:
 
         # Check gradients have reasonable values
         for grad in grads:
-            assert not np.any(np.isnan(grad.numpy()))
-            assert not np.any(np.isinf(grad.numpy()))
+            grad_np = keras.ops.convert_to_numpy(grad)
+            assert not np.any(np.isnan(grad_np))
+            assert not np.any(np.isinf(grad_np))
 
     def test_variable_sequence_lengths(self):
         """Test handling of different sequence lengths."""
@@ -562,7 +661,8 @@ class TestGroupedQueryAttention:
             output = layer(inputs)
 
             assert output.shape == (2, 16, 256)
-            assert not np.any(np.isnan(output.numpy()))
+            output_np = keras.ops.convert_to_numpy(output)
+            assert not np.any(np.isnan(output_np))
 
     # =========================================================================
     # Performance and Memory Tests
@@ -608,12 +708,12 @@ class TestGroupedQueryAttention:
 
     def test_output_determinism(self):
         """Test that layer behavior is consistent and deterministic."""
-        # Create layer with attention_dropout=0 to ensure deterministic behavior
+        # Create layer with dropout_rate=0 to ensure deterministic behavior
         layer = GroupedQueryAttention(
             d_model=256, n_head=4, n_kv_head=2, max_seq_len=64, dropout_rate=0.0
         )
 
-        # Use completely fixed inputs
+        # Use fixed inputs
         inputs = keras.ops.ones([2, 16, 256])
 
         # Multiple calls with same input should give same output (no randomness)
@@ -621,14 +721,23 @@ class TestGroupedQueryAttention:
         output2 = layer(inputs, training=False)
 
         # Should be exactly the same (deterministic computation)
-        assert np.allclose(output1.numpy(), output2.numpy(), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(output1),
+            keras.ops.convert_to_numpy(output2),
+            rtol=1e-6, atol=1e-6,
+            err_msg="Outputs should be deterministic"
+        )
 
         # Test that layer produces different outputs for different inputs
         inputs_different = keras.ops.ones([2, 16, 256]) * 0.5
         output_different = layer(inputs_different, training=False)
 
         # Different inputs should produce different outputs
-        assert not np.allclose(output1.numpy(), output_different.numpy(), rtol=1e-3)
+        assert not np.allclose(
+            keras.ops.convert_to_numpy(output1),
+            keras.ops.convert_to_numpy(output_different),
+            rtol=1e-3
+        )
 
 
 # Additional utility functions for testing
@@ -637,10 +746,10 @@ def create_causal_mask(seq_len: int, batch_size: int = 1) -> keras.KerasTensor:
     mask = np.tril(np.ones((seq_len, seq_len)))
     mask = np.expand_dims(mask, 0)
     mask = np.repeat(mask, batch_size, axis=0)
-    return keras.ops.convert_to_tensor(mask, dtype=bool)
+    return keras.ops.convert_to_tensor(mask, dtype=keras.backend.floatx())
 
 
-def create_padding_mask(lengths: list, max_len: int) -> keras.KerasTensor:
+def create_padding_mask(lengths: List[int], max_len: int) -> keras.KerasTensor:
     """Create a padding mask for variable length sequences."""
     batch_size = len(lengths)
     mask = np.zeros((batch_size, max_len, max_len))
@@ -648,42 +757,7 @@ def create_padding_mask(lengths: list, max_len: int) -> keras.KerasTensor:
     for i, length in enumerate(lengths):
         mask[i, :length, :length] = 1
 
-    return keras.ops.convert_to_tensor(mask, dtype=bool)
-
-
-# Performance benchmarking function (optional)
-def benchmark_gqa_vs_mha():
-    """Benchmark GQA against full MHA (not part of test suite)."""
-    import time
-
-    d_model, seq_len, batch_size = 512, 128, 8
-    inputs = keras.random.normal([batch_size, seq_len, d_model])
-
-    # Full MHA
-    mha = GroupedQueryAttention(d_model=d_model, n_head=8, n_kv_head=8, max_seq_len=seq_len)
-
-    # GQA
-    gqa = GroupedQueryAttention(d_model=d_model, n_head=8, n_kv_head=2, max_seq_len=seq_len)
-
-    # Warmup
-    mha(inputs)
-    gqa(inputs)
-
-    # Benchmark MHA
-    start_time = time.time()
-    for _ in range(100):
-        mha(inputs)
-    mha_time = time.time() - start_time
-
-    # Benchmark GQA
-    start_time = time.time()
-    for _ in range(100):
-        gqa(inputs)
-    gqa_time = time.time() - start_time
-
-    print(f"MHA time: {mha_time:.4f}s")
-    print(f"GQA time: {gqa_time:.4f}s")
-    print(f"GQA speedup: {mha_time / gqa_time:.2f}x")
+    return keras.ops.convert_to_tensor(mask, dtype=keras.backend.floatx())
 
 
 if __name__ == "__main__":
