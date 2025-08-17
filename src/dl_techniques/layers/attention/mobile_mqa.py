@@ -58,177 +58,258 @@ import keras
 from keras import ops
 from typing import Tuple, Optional, Any, Dict, Union
 
-# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class MobileMQA(keras.layers.Layer):
-    """Mobile Multi-Query Attention (MQA) block.
+    """
+    Mobile Multi-Query Attention (MQA) block.
 
     This block implements an efficient attention mechanism optimized for mobile accelerators.
     It uses shared keys and values across heads to reduce memory bandwidth requirements.
 
+    The layer operates on 4D feature maps and applies multi-query attention where all heads
+    share the same key and value projections, significantly reducing memory requirements
+    compared to standard multi-head attention.
+
     Args:
-        dim: Dimension of the input and output tensors
-        num_heads: Number of attention heads
-        use_downsampling: Whether to use spatial downsampling for keys and values
-        kernel_initializer: Initializer for the convolution kernels
-        kernel_regularizer: Regularizer for the convolution kernels
+        dim: Integer, dimension of the input and output tensors. Must be positive and
+            divisible by num_heads.
+        num_heads: Integer, number of attention heads. Must be positive. Defaults to 8.
+        use_downsampling: Boolean, whether to use spatial downsampling for keys and values
+            to further reduce computational cost. Defaults to False.
+        kernel_initializer: String or initializer, initializer for the convolution kernels.
+            Defaults to 'he_normal'.
+        kernel_regularizer: Optional regularizer for the convolution kernels.
+            Defaults to None.
+        **kwargs: Additional keyword arguments for the Layer base class.
+
+    Input shape:
+        4D tensor with shape: `(batch_size, height, width, channels)`
+        where channels must equal dim.
+
+    Output shape:
+        4D tensor with shape: `(batch_size, height, width, dim)`
+
+    Attributes:
+        q_proj: Dense layer for query projection.
+        kv_proj: Dense layer for shared key-value projection.
+        o_proj: Dense layer for output projection.
+        downsample: Optional DepthwiseConv2D layer for spatial downsampling.
+        lambda_param: Learnable parameter weight.
+
+    Example:
+        ```python
+        # Basic usage
+        layer = MobileMQA(dim=256, num_heads=8)
+
+        # With downsampling for efficiency
+        layer = MobileMQA(
+            dim=512,
+            num_heads=16,
+            use_downsampling=True,
+            kernel_regularizer=keras.regularizers.L2(1e-4)
+        )
+
+        # In a model
+        inputs = keras.Input(shape=(32, 32, 256))
+        outputs = MobileMQA(dim=256, num_heads=8)(inputs)
+        model = keras.Model(inputs, outputs)
+        ```
+
+    Raises:
+        ValueError: If dim is not positive or not divisible by num_heads.
+        ValueError: If num_heads is not positive.
+
+    Note:
+        This implementation is optimized for computer vision tasks and operates on
+        4D feature maps. The spatial dimensions are flattened for attention computation
+        and then reshaped back to the original format.
     """
 
     def __init__(
-            self,
-            dim: int,
-            num_heads: int = 8,
-            use_downsampling: bool = False,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
-            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            **kwargs: Any
-    ):
+        self,
+        dim: int,
+        num_heads: int = 8,
+        use_downsampling: bool = False,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
+
+        # Validate inputs
+        if dim <= 0:
+            raise ValueError(f"dim must be positive, got {dim}")
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
+        if dim % num_heads != 0:
+            raise ValueError(
+                f"dim ({dim}) must be divisible by num_heads ({num_heads})"
+            )
+
+        # Store ALL configuration parameters
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.use_downsampling = use_downsampling
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
 
-        # Initialize layer attributes to None - will be built in build()
-        self.q_proj = None
-        self.kv_proj = None
-        self.o_proj = None
-        self.downsample = None
-        self.lambda_param = None
-        self._build_input_shape = None
+        # CREATE all sub-layers in __init__ (they are unbuilt)
+        dense_config = {"kernel_initializer": self.kernel_initializer}
 
-    def build(self, input_shape: Tuple[int, ...]) -> None:
-        """Build the layer weights and sublayers.
+        # Only add regularizer if it's not None
+        if self.kernel_regularizer is not None:
+            dense_config["kernel_regularizer"] = self.kernel_regularizer
 
-        Args:
-            input_shape: Shape of the input tensor
-        """
-        # Store for serialization
-        self._build_input_shape = input_shape
-
-        # Layer configurations
-        dense_config = {
-            "kernel_initializer": self.kernel_initializer,
-            "kernel_regularizer": self.kernel_regularizer
-        }
-
-        self.q_proj = keras.layers.Dense(self.dim, **dense_config)
-        self.kv_proj = keras.layers.Dense(2 * self.dim, **dense_config)
-        self.o_proj = keras.layers.Dense(self.dim, **dense_config)
+        self.q_proj = keras.layers.Dense(self.dim, name="q_proj", **dense_config)
+        self.kv_proj = keras.layers.Dense(
+            2 * self.head_dim, name="kv_proj", **dense_config
+        )
+        self.o_proj = keras.layers.Dense(self.dim, name="o_proj", **dense_config)
 
         if self.use_downsampling:
-            self.downsample = keras.layers.DepthwiseConv2D(
-                3,
-                strides=2,
-                padding='same',
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer
-            )
+            # Configure downsample layer arguments
+            downsample_args = {
+                "kernel_size": 3,
+                "strides": 2,
+                "padding": "same",
+                "depthwise_initializer": self.kernel_initializer,
+                "name": "downsample",
+            }
 
+            # Only add regularizer if it's not None
+            if self.kernel_regularizer is not None:
+                downsample_args["depthwise_regularizer"] = self.kernel_regularizer
+
+            self.downsample = keras.layers.DepthwiseConv2D(**downsample_args)
+        else:
+            self.downsample = None
+
+        # Layer's own weights will be created in build()
+        self.lambda_param = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build the layer's own weights and explicitly build sub-layers.
+
+        Args:
+            input_shape: Shape of the input tensor.
+        """
+        # Create layer's own weights using add_weight()
         self.lambda_param = self.add_weight(
-            "lambda",
-            shape=(),
-            initializer="ones",
-            trainable=True
+            name="lambda", shape=(), initializer="ones", trainable=True
         )
 
-        # Build sublayers explicitly
+        # Build sub-layers explicitly for robust serialization
         self.q_proj.build(input_shape)
         self.kv_proj.build(input_shape)
         self.o_proj.build(input_shape)
 
-        if self.use_downsampling:
-            self.downsample.build(input_shape)
+        if self.downsample is not None:
+            # FIX: Handle both list and tuple for input_shape during serialization.
+            kv_shape = list(input_shape)
+            kv_shape[-1] = 2 * self.head_dim
+            self.downsample.build(tuple(kv_shape))
 
+        # Always call parent build at the end
         super().build(input_shape)
 
-    def call(self, x: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        """Forward pass of the MobileMQA block.
+    def call(
+        self, x: keras.KerasTensor, training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Forward pass of the MobileMQA block.
 
         Args:
-            x: Input tensor
-            training: Whether in training mode
+            x: Input tensor of shape (batch_size, height, width, channels).
+            training: Boolean indicating training mode.
 
         Returns:
-            Output tensor
+            Output tensor of shape (batch_size, height, width, dim).
         """
         batch_size = ops.shape(x)[0]
         height = ops.shape(x)[1]
         width = ops.shape(x)[2]
 
-        q = self.q_proj(x)
-        kv = self.kv_proj(x)
+        # Project to queries and key-values
+        q = self.q_proj(x, training=training)
+        kv = self.kv_proj(x, training=training)
 
-        if self.use_downsampling:
-            kv = self.downsample(kv)
+        # Apply optional downsampling to key-values
+        if self.downsample is not None:
+            kv = self.downsample(kv, training=training)
             kv_height, kv_width = height // 2, width // 2
         else:
             kv_height, kv_width = height, width
 
-        # Split kv into k and v - using slice operation since tf.split isn't in keras.ops
-        k = kv[..., :self.dim]
-        v = kv[..., self.dim:]
+        # Split kv into k and v using head_dim
+        k = kv[..., : self.head_dim]
+        v = kv[..., self.head_dim :]
 
+        # Reshape for attention computation
+        # q: (batch_size, num_heads, height * width, head_dim)
         q = ops.reshape(q, (batch_size, height * width, self.num_heads, self.head_dim))
-        k = ops.reshape(k, (batch_size, kv_height * kv_width, 1, self.head_dim))
-        v = ops.reshape(v, (batch_size, kv_height * kv_width, 1, self.head_dim))
+        q = ops.transpose(q, (0, 2, 1, 3))
 
-        attn = ops.matmul(q, k, transpose_b=True) * self.scale
+        # k, v: (batch_size, 1, kv_height * kv_width, head_dim) - shared across heads
+        k = ops.reshape(k, (batch_size, kv_height * kv_width, self.head_dim))
+        v = ops.reshape(v, (batch_size, kv_height * kv_width, self.head_dim))
+        k = ops.expand_dims(k, axis=1)
+        v = ops.expand_dims(v, axis=1)
+
+        # Compute scaled dot-product attention
+        k_transposed = ops.transpose(k, axes=(0, 1, 3, 2))
+        attn = ops.matmul(q, k_transposed) * self.scale
         attn = ops.nn.softmax(attn, axis=-1)
 
+        # Apply attention to values
         out = ops.matmul(attn, v)
+
+        # Reshape back to spatial format
+        out = ops.transpose(out, (0, 2, 1, 3))
         out = ops.reshape(out, (batch_size, height, width, self.dim))
 
-        return self.o_proj(out)
+        # Final output projection
+        attention_output = self.o_proj(out, training=training)
 
-    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
-        """Compute the output shape of the layer.
+        # FIX: Add a scaled residual connection to use lambda_param and ensure gradients.
+        return x + self.lambda_param * attention_output
+
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape of the layer.
 
         Args:
-            input_shape: Shape of the input
+            input_shape: Shape of the input tensor.
 
         Returns:
-            Output shape
+            Output shape tuple. Same as input shape for MobileMQA.
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Returns the layer configuration for serialization.
+        """
+        Return layer configuration for serialization.
 
         Returns:
-            Dictionary containing the layer configuration
+            Dictionary containing ALL __init__ parameters for reconstruction.
         """
         config = super().get_config()
-        config.update({
-            "dim": self.dim,
-            "num_heads": self.num_heads,
-            "use_downsampling": self.use_downsampling,
-            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
-        })
+        config.update(
+            {
+                "dim": self.dim,
+                "num_heads": self.num_heads,
+                "use_downsampling": self.use_downsampling,
+                "kernel_initializer": keras.initializers.serialize(
+                    self.kernel_initializer
+                ),
+                "kernel_regularizer": keras.regularizers.serialize(
+                    self.kernel_regularizer
+                ),
+            }
+        )
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the config needed to build the layer from a config.
-
-        Returns:
-            Dictionary containing the build configuration
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
-# ---------------------------------------------------------------------

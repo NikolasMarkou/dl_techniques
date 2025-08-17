@@ -30,25 +30,6 @@ Key Concepts:
    - Reduction in activation outliers, enabling better quantization
    - Mitigation of hallucination in generation tasks
    - Superior performance with fewer parameters
-
-Usage Example:
--------------
-```python
-# Create differential attention layer
-diff_attention = DifferentialMultiHeadAttention(
-    dim=512,
-    num_heads=8,
-    head_dim=64,
-    dropout=0.1,
-    attention_dropout=0.1,
-    lambda_init=0.8
-)
-
-# Use in transformer block with layer index for optimal lambda computation
-x_norm = keras.layers.LayerNormalization()(inputs)
-attn_output = diff_attention(x_norm, layer_idx=2, training=training)
-x = inputs + attn_output  # Residual connection
-```
 """
 
 import keras
