@@ -2,9 +2,12 @@
 Squeeze-and-Excitation Layer
 ===========================
 
-Implementation of the Squeeze-and-Excitation (SE) block as described in:
+Modern Keras 3 implementation of the Squeeze-and-Excitation (SE) block as described in:
 "Squeeze-and-Excitation Networks" (Hu et al., 2019)
 https://arxiv.org/abs/1709.01507
+
+This implementation follows modern Keras 3 patterns while acknowledging that SE blocks
+fundamentally require input channel information to create properly sized sub-layers.
 
 Architecture:
 ------------
@@ -20,28 +23,17 @@ The SE block consists of:
 The computation flow is:
 input -> global_pool -> conv_reduce -> activation -> conv_restore -> sigmoid -> scale -> output
 
-Usage Example:
-------------
-```python
-# Default configuration with ReLU activation
-se_block = SqueezeExcitation(
-    reduction_ratio=0.25,
-    kernel_initializer='he_normal',
-    kernel_regularizer=keras.regularizers.L2(l2=0.01)
-)
-
-# Custom activation
-se_block = SqueezeExcitation(
-    reduction_ratio=0.25,
-    activation='swish',
-    kernel_regularizer=keras.regularizers.L2(l2=0.01)
-)
-```
+Design Note:
+-----------
+This layer creates sub-layers in build() because the SE mechanism fundamentally
+requires knowledge of input channels to determine bottleneck dimensions. This is
+a necessary exception to the general Keras 3 pattern, handled with extra care
+for serialization robustness.
 """
 
 import keras
-from keras import layers, activations, ops, initializers, regularizers
 from typing import Dict, Optional, Tuple, Union, Callable, Any
+from keras import layers, activations, ops, initializers, regularizers
 
 # ---------------------------------------------------------------------
 # local imports
@@ -113,10 +105,12 @@ class SqueezeExcitation(layers.Layer):
         conv_reduce: Conv2D layer for channel dimensionality reduction.
         conv_restore: Conv2D layer for channel dimensionality restoration.
         reduction_activation: Activation function applied after reduction.
+        input_channels: Number of input channels (set during build).
+        bottleneck_channels: Number of bottleneck channels (set during build).
 
     Example:
         ```python
-        # Basic usage
+        # Basic usage - channels inferred from input
         inputs = keras.Input(shape=(32, 32, 64))
         se_layer = SqueezeExcitation(reduction_ratio=0.25)
         outputs = se_layer(inputs)
@@ -130,9 +124,11 @@ class SqueezeExcitation(layers.Layer):
             kernel_regularizer=keras.regularizers.L2(1e-4)
         )
 
-        # In a model
+        # In a ResNet-style model
         inputs = keras.Input(shape=(224, 224, 3))
-        x = keras.layers.Conv2D(64, 3, activation='relu')(inputs)
+        x = keras.layers.Conv2D(64, 7, strides=2, activation='relu')(inputs)
+        x = SqueezeExcitation(reduction_ratio=0.25)(x)
+        x = keras.layers.Conv2D(128, 3, activation='relu')(x)
         x = SqueezeExcitation(reduction_ratio=0.25)(x)
         outputs = keras.layers.GlobalAveragePooling2D()(x)
         model = keras.Model(inputs, outputs)
@@ -143,11 +139,12 @@ class SqueezeExcitation(layers.Layer):
         - https://arxiv.org/abs/1709.01507
 
     Raises:
-        ValueError: If reduction_ratio is not in the range (0, 1].
+        ValueError: If reduction_ratio is not in (0, 1] or input shape is invalid.
 
     Note:
-        The layer requires input shape information to determine bottleneck
-        dimensions, so sub-layers are created during the build phase.
+        This layer creates sub-layers in build() rather than __init__() because
+        the SE mechanism requires knowledge of input channels. Extra care is taken
+        to ensure robust serialization by explicitly building all sub-layers.
         The original paper recommends reduction_ratio=0.25 for most cases.
     """
 
@@ -182,9 +179,11 @@ class SqueezeExcitation(layers.Layer):
         # Get activation function
         self.reduction_activation = activations.get(activation)
 
-        # Sub-layers (created in build due to shape dependency)
+        # Shape-dependent attributes (set during build)
         self.input_channels: Optional[int] = None
         self.bottleneck_channels: Optional[int] = None
+
+        # Sub-layers (created during build due to shape dependency)
         self.global_pool: Optional[layers.GlobalAveragePooling2D] = None
         self.conv_reduce: Optional[layers.Conv2D] = None
         self.conv_restore: Optional[layers.Conv2D] = None
@@ -194,14 +193,16 @@ class SqueezeExcitation(layers.Layer):
         Build the layer and create all sub-layers.
 
         This method creates sub-layers based on input shape since the SE block
-        needs to know the number of input channels to create the bottleneck.
+        fundamentally needs to know the number of input channels. Extra care
+        is taken to ensure robust serialization by explicitly building all
+        sub-layers.
 
         Args:
             input_shape: Shape of the input tensor.
                 Expected format: (batch_size, height, width, channels)
 
         Raises:
-            ValueError: If input_shape doesn't have channel dimension.
+            ValueError: If input_shape is invalid or channels are undefined.
         """
         if len(input_shape) != 4:
             raise ValueError(
@@ -223,7 +224,7 @@ class SqueezeExcitation(layers.Layer):
             f"bottleneck_channels={self.bottleneck_channels}"
         )
 
-        # CREATE all sub-layers
+        # CREATE all sub-layers (necessary exception to general Keras 3 pattern)
         self.global_pool = layers.GlobalAveragePooling2D(
             keepdims=True,
             name='global_pool'
@@ -251,9 +252,9 @@ class SqueezeExcitation(layers.Layer):
             name='conv_restore'
         )
 
-        # BUILD sub-layers explicitly for robust serialization
-        # Compute intermediate shapes for building
-        pooled_shape = (input_shape[0], 1, 1, input_shape[-1])
+        # BUILD all sub-layers explicitly for robust serialization
+        # This is CRITICAL for proper weight loading after model deserialization
+        pooled_shape = (input_shape[0], 1, 1, self.input_channels)
 
         self.global_pool.build(input_shape)
         self.conv_reduce.build(pooled_shape)
@@ -261,7 +262,7 @@ class SqueezeExcitation(layers.Layer):
         reduced_shape = (pooled_shape[0], 1, 1, self.bottleneck_channels)
         self.conv_restore.build(reduced_shape)
 
-        # Call parent build
+        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -275,11 +276,24 @@ class SqueezeExcitation(layers.Layer):
         Args:
             inputs: Input tensor with shape (batch_size, height, width, channels).
             training: Boolean indicating whether the layer should behave in
-                training mode (applying dropout) or inference mode.
+                training mode or inference mode. Passed to sub-layers that
+                support training behavior.
 
         Returns:
             Output tensor after applying SE operations with same shape as input.
+
+        Raises:
+            RuntimeError: If layer hasn't been built (sub-layers are None).
         """
+        # Ensure layer is built
+        if (self.global_pool is None or
+            self.conv_reduce is None or
+            self.conv_restore is None):
+            raise RuntimeError(
+                "Layer must be built before calling. "
+                "This usually happens automatically on first call."
+            )
+
         # Squeeze: Global average pooling to capture channel statistics
         squeezed = self.global_pool(inputs)
 
@@ -310,6 +324,10 @@ class SqueezeExcitation(layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """
         Return layer configuration for serialization.
+
+        This method returns all parameters needed to reconstruct the layer.
+        Note that shape-dependent attributes (input_channels, bottleneck_channels)
+        are not included as they are derived during build().
 
         Returns:
             Dictionary containing all configuration parameters needed to

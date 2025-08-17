@@ -99,11 +99,12 @@ Implementation Notes:
 
 import keras
 from keras import ops
-from typing import Optional, Union, Tuple, List, Any
+from typing import Optional, Union, Tuple, List, Any, Dict
 
-from dl_techniques.layers.squeeze_excitation import SqueezeExcitation
+from .squeeze_excitation import SqueezeExcitation
 
 
+@keras.saving.register_keras_serializable()
 class MLFCLayer(keras.layers.Layer):
     """
     Multi Level Feature Compilation (MLFC) Layer.
@@ -120,11 +121,18 @@ class MLFCLayer(keras.layers.Layer):
 
     Args:
         channels_list: List of channel counts for each of the 4 levels [c1, c2, c3, c4].
-        num_iterations: Number of compilation iterations to apply.
-        kernel_initializer: Initializer for convolution kernels.
-        bias_initializer: Initializer for bias vectors.
-        kernel_regularizer: Regularizer for convolution kernels.
-        bias_regularizer: Regularizer for bias vectors.
+            Must contain exactly 4 positive integers.
+        num_iterations: Integer, number of compilation iterations to apply. Must be positive.
+            More iterations strengthen feature mixing but increase computation.
+            Defaults to 1.
+        kernel_initializer: String or Initializer instance for convolution kernels.
+            Defaults to 'glorot_uniform'.
+        bias_initializer: String or Initializer instance for bias vectors.
+            Defaults to 'zeros'.
+        kernel_regularizer: Optional Regularizer instance for convolution kernels.
+            Defaults to None.
+        bias_regularizer: Optional Regularizer instance for bias vectors.
+            Defaults to None.
         **kwargs: Additional arguments for the Layer base class.
 
     Input shape:
@@ -137,6 +145,12 @@ class MLFCLayer(keras.layers.Layer):
     Output shape:
         List of 4 tensors with same shapes as input but enriched features.
 
+    Raises:
+        ValueError: If channels_list doesn't have exactly 4 elements.
+        ValueError: If any channel count is not positive.
+        ValueError: If num_iterations is not positive.
+        ValueError: If inputs don't contain exactly 4 tensors.
+
     Example:
         ```python
         # For standard U-Net with base filters=32
@@ -148,7 +162,8 @@ class MLFCLayer(keras.layers.Layer):
         # Multiple iterations for stronger feature mixing
         mlfc = MLFCLayer(
             channels_list=[32, 64, 128, 256],
-            num_iterations=3
+            num_iterations=3,
+            kernel_regularizer=keras.regularizers.L2(1e-4)
         )
 
         # Usage in model
@@ -160,23 +175,34 @@ class MLFCLayer(keras.layers.Layer):
         This layer expects exactly 4 input feature maps from different
         encoder levels with 2x downsampling between adjacent levels.
         The spatial dimensions are handled automatically through resizing.
+
+        Following modern Keras 3 patterns, all sub-layers are created in __init__()
+        and built appropriately for robust serialization.
     """
 
     def __init__(
-            self,
-            channels_list: List[int],
-            num_iterations: int = 1,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            **kwargs: Any
+        self,
+        channels_list: List[int],
+        num_iterations: int = 1,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+        bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
+        # Validate inputs
         if len(channels_list) != 4:
             raise ValueError(f"channels_list must have exactly 4 elements, got {len(channels_list)}")
 
+        if any(c <= 0 for c in channels_list):
+            raise ValueError(f"All channel counts must be positive, got {channels_list}")
+
+        if num_iterations <= 0:
+            raise ValueError(f"num_iterations must be positive, got {num_iterations}")
+
+        # Store ALL configuration parameters
         self.channels_list = channels_list
         self.num_iterations = num_iterations
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -184,45 +210,19 @@ class MLFCLayer(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # Validate parameters
-        if any(c <= 0 for c in channels_list):
-            raise ValueError(f"All channel counts must be positive, got {channels_list}")
-        if num_iterations <= 0:
-            raise ValueError(f"num_iterations must be positive, got {num_iterations}")
-
         self.total_channels = sum(channels_list)
 
-        # Will be initialized in build()
-        self.compilation_convs = []  # [num_iterations][4 levels]
-        self.merge_convs = []  # [num_iterations][4 levels]
-        self.batch_norms = []  # [num_iterations][4 levels]
-        self.merge_batch_norms = []  # [num_iterations][4 levels]
-        self.squeeze_excitations = []  # [4 levels]
-        self.activation = None
+        # CREATE all sub-layers in __init__ following modern Keras 3 pattern
+        # These layers are created but not built yet
 
-        self._build_input_shape = None
+        # Use flat lists for sub-layers for robust serialization
+        self.compilation_convs: List[keras.layers.Layer] = []
+        self.merge_convs: List[keras.layers.Layer] = []
+        self.batch_norms: List[keras.layers.Layer] = []
+        self.merge_batch_norms: List[keras.layers.Layer] = []
 
-    def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
-        """Build the compilation layers."""
-        if not isinstance(input_shape, list) or len(input_shape) != 4:
-            raise ValueError(
-                f"input_shape must be a list of 4 shapes, got {type(input_shape)} with length {len(input_shape) if isinstance(input_shape, list) else 'N/A'}")
-
-        self._build_input_shape = input_shape
-
-        # Initialize layer lists
-        self.compilation_convs = []
-        self.merge_convs = []
-        self.batch_norms = []
-        self.merge_batch_norms = []
-
-        # Create layers for each iteration
+        # Create layers for each iteration and level
         for iter_idx in range(self.num_iterations):
-            iter_comp_convs = []
-            iter_merge_convs = []
-            iter_bns = []
-            iter_merge_bns = []
-
             for level_idx in range(4):
                 channels = self.channels_list[level_idx]
 
@@ -236,13 +236,13 @@ class MLFCLayer(keras.layers.Layer):
                     kernel_regularizer=self.kernel_regularizer,
                     name=f'comp_conv_iter{iter_idx}_level{level_idx}'
                 )
-                iter_comp_convs.append(comp_conv)
+                self.compilation_convs.append(comp_conv)
 
-                # Compilation batch norm
+                # Compilation batch normalization
                 comp_bn = keras.layers.BatchNormalization(
                     name=f'comp_bn_iter{iter_idx}_level{level_idx}'
                 )
-                iter_bns.append(comp_bn)
+                self.batch_norms.append(comp_bn)
 
                 # Merge convolution (2*channels -> channels)
                 merge_conv = keras.layers.Conv2D(
@@ -254,21 +254,16 @@ class MLFCLayer(keras.layers.Layer):
                     kernel_regularizer=self.kernel_regularizer,
                     name=f'merge_conv_iter{iter_idx}_level{level_idx}'
                 )
-                iter_merge_convs.append(merge_conv)
+                self.merge_convs.append(merge_conv)
 
-                # Merge batch norm
+                # Merge batch normalization
                 merge_bn = keras.layers.BatchNormalization(
                     name=f'merge_bn_iter{iter_idx}_level{level_idx}'
                 )
-                iter_merge_bns.append(merge_bn)
-
-            self.compilation_convs.append(iter_comp_convs)
-            self.merge_convs.append(iter_merge_convs)
-            self.batch_norms.append(iter_bns)
-            self.merge_batch_norms.append(iter_merge_bns)
+                self.merge_batch_norms.append(merge_bn)
 
         # Squeeze-excitation for each level (applied once at the end)
-        self.squeeze_excitations = []
+        self.squeeze_excitations: List[keras.layers.Layer] = []
         for level_idx in range(4):
             se = SqueezeExcitation(
                 reduction_ratio=0.25,
@@ -278,17 +273,87 @@ class MLFCLayer(keras.layers.Layer):
             )
             self.squeeze_excitations.append(se)
 
-        # Activation
+        # Activation layer
         self.activation = keras.layers.LeakyReLU(negative_slope=0.01, name='activation')
 
+    def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
+        """
+        Build the layer and all its sub-layers.
+
+        Following modern Keras 3 pattern, this method builds the sub-layers
+        for robust serialization. All sub-layers were already created in __init__.
+
+        Args:
+            input_shape: List of 4 input shapes for the 4 encoder levels.
+
+        Raises:
+            ValueError: If input_shape is not a list of 4 shapes.
+        """
+        if not isinstance(input_shape, list) or len(input_shape) != 4:
+            raise ValueError(
+                f"input_shape must be a list of 4 shapes, got {type(input_shape)} "
+                f"with length {len(input_shape) if isinstance(input_shape, list) else 'N/A'}"
+            )
+
+        # Build all sub-layers explicitly for robust serialization
+        # This ensures all weight variables exist before weight restoration during loading
+
+        # Build compilation and merge layers
+        for iter_idx in range(self.num_iterations):
+            for level_idx in range(4):
+                idx = iter_idx * 4 + level_idx
+
+                # Build compilation conv with concatenated input shape
+                concat_shape = list(input_shape[level_idx])
+                concat_shape[-1] = self.total_channels  # All channels concatenated
+                self.compilation_convs[idx].build(tuple(concat_shape))
+
+                # Build compilation batch norm
+                comp_output_shape = list(concat_shape)
+                comp_output_shape[-1] = self.channels_list[level_idx]
+                self.batch_norms[idx].build(tuple(comp_output_shape))
+
+                # Build merge conv with 2x channels input
+                merge_input_shape = list(input_shape[level_idx])
+                merge_input_shape[-1] = 2 * self.channels_list[level_idx]
+                self.merge_convs[idx].build(tuple(merge_input_shape))
+
+                # Build merge batch norm
+                merge_output_shape = list(input_shape[level_idx])
+                merge_output_shape[-1] = self.channels_list[level_idx]
+                self.merge_batch_norms[idx].build(tuple(merge_output_shape))
+
+        # Build squeeze-excitation layers
+        for level_idx in range(4):
+            self.squeeze_excitations[level_idx].build(input_shape[level_idx])
+
+        # Build activation layer (LeakyReLU doesn't need explicit building but good practice)
+        self.activation.build(input_shape[0])  # Any shape works for activation
+
+        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
-            self,
-            inputs: List[keras.KerasTensor],
-            training: Optional[bool] = None
+        self,
+        inputs: List[keras.KerasTensor],
+        training: Optional[bool] = None
     ) -> List[keras.KerasTensor]:
-        """Forward pass computation."""
+        """
+        Forward pass computation.
+
+        Performs multi-level feature compilation through iterative cross-level fusion,
+        adaptive resizing, and residual enhancement.
+
+        Args:
+            inputs: List of 4 input tensors from different encoder levels.
+            training: Boolean indicating training mode for batch normalization and dropout.
+
+        Returns:
+            List of 4 output tensors with same shapes as input but enriched features.
+
+        Raises:
+            ValueError: If inputs doesn't contain exactly 4 tensors.
+        """
         if len(inputs) != 4:
             raise ValueError(f"Expected 4 input tensors, got {len(inputs)}")
 
@@ -302,64 +367,41 @@ class MLFCLayer(keras.layers.Layer):
 
             # Process each level
             for level_idx in range(4):
+                idx = iter_idx * 4 + level_idx
                 target_shape = ops.shape(current_features[level_idx])
-                batch_size = target_shape[0]
                 target_height = target_shape[1]
                 target_width = target_shape[2]
 
-                # Resize all features to current level's spatial dimensions
+                # Resize all features to current level's spatial dimensions using ops
                 resized_features = []
                 for feat_idx, feat in enumerate(current_features):
                     if feat_idx == level_idx:
                         # Same level, no resizing needed
                         resized_features.append(feat)
                     else:
-                        # Need to resize to target dimensions
-                        feat_height = ops.shape(feat)[1]
-                        feat_width = ops.shape(feat)[2]
-
-                        if feat_height > target_height:
-                            # Downsample using average pooling
-                            scale_h = feat_height // target_height
-                            scale_w = feat_width // target_width
-                            feat_resized = keras.layers.AveragePooling2D(
-                                pool_size=(scale_h, scale_w),
-                                strides=(scale_h, scale_w),
-                                padding='same'
-                            )(feat)
-                        else:
-                            # Upsample using bilinear interpolation
-                            scale_h = target_height // feat_height
-                            scale_w = target_width // feat_width
-                            feat_resized = keras.layers.UpSampling2D(
-                                size=(scale_h, scale_w),
-                                interpolation='bilinear'
-                            )(feat)
-
-                        # Ensure exact dimensions match
-                        feat_resized = keras.layers.Resizing(
-                            height=target_height,
-                            width=target_width,
+                        # Use keras.ops for resizing to ensure proper serialization
+                        feat_resized = keras.ops.image.resize(
+                            feat,
+                            size=(target_height, target_width),
                             interpolation='bilinear'
-                        )(feat_resized)
-
+                        )
                         resized_features.append(feat_resized)
 
-                # Concatenate all resized features
-                concatenated = keras.layers.Concatenate(axis=-1)(resized_features)
+                # Concatenate all resized features using ops
+                concatenated = ops.concatenate(resized_features, axis=-1)
 
                 # Apply compilation convolution
-                compiled_feat = self.compilation_convs[iter_idx][level_idx](concatenated)
-                compiled_feat = self.batch_norms[iter_idx][level_idx](compiled_feat, training=training)
+                compiled_feat = self.compilation_convs[idx](concatenated)
+                compiled_feat = self.batch_norms[idx](compiled_feat, training=training)
                 compiled_feat = self.activation(compiled_feat)
 
                 # Merge with original features using residual connection
                 original_feat = current_features[level_idx]
-                merged_input = keras.layers.Concatenate(axis=-1)([compiled_feat, original_feat])
+                merged_input = ops.concatenate([compiled_feat, original_feat], axis=-1)
 
                 # Apply merge convolution with residual
-                merged_feat = self.merge_convs[iter_idx][level_idx](merged_input)
-                merged_feat = self.merge_batch_norms[iter_idx][level_idx](merged_feat, training=training)
+                merged_feat = self.merge_convs[idx](merged_input)
+                merged_feat = self.merge_batch_norms[idx](merged_feat, training=training)
                 merged_feat = merged_feat + original_feat  # Residual connection
                 merged_feat = self.activation(merged_feat)
 
@@ -376,12 +418,32 @@ class MLFCLayer(keras.layers.Layer):
 
         return final_features
 
-    def compute_output_shape(self, input_shape: List[Tuple[Optional[int], ...]]) -> List[Tuple[Optional[int], ...]]:
-        """Compute output shapes."""
+    def compute_output_shape(
+        self,
+        input_shape: List[Tuple[Optional[int], ...]]
+    ) -> List[Tuple[Optional[int], ...]]:
+        """
+        Compute output shapes.
+
+        Args:
+            input_shape: List of input shapes for the 4 encoder levels.
+
+        Returns:
+            List of output shapes, identical to input shapes since only
+            channel-wise operations are performed.
+        """
         return input_shape  # Shapes remain unchanged
 
-    def get_config(self) -> dict:
-        """Get layer configuration."""
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Get layer configuration for serialization.
+
+        Following modern Keras 3 pattern, this includes ALL parameters
+        passed to __init__() to ensure complete reconstruction.
+
+        Returns:
+            Dictionary containing the complete layer configuration.
+        """
         config = super().get_config()
         config.update({
             'channels_list': self.channels_list,
@@ -392,14 +454,3 @@ class MLFCLayer(keras.layers.Layer):
             'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-    def get_build_config(self) -> dict:
-        """Get build configuration."""
-        return {
-            'input_shape': self._build_input_shape,
-        }
-
-    def build_from_config(self, config: dict) -> None:
-        """Build from configuration."""
-        if config.get('input_shape') is not None:
-            self.build(config['input_shape'])
