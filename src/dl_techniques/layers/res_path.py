@@ -14,8 +14,13 @@ serializable composite layers.
 import keras
 from typing import Optional, Union, Tuple, Any, List
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .squeeze_excitation import SqueezeExcitation
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class ResPath(keras.layers.Layer):
@@ -177,3 +182,5 @@ class ResPath(keras.layers.Layer):
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------
