@@ -36,75 +36,11 @@ Performance Characteristics:
     - Supports both binary and multi-class segmentation tasks
     - Handles variable input sizes (dynamic shape support)
 
-Usage Examples:
-    ```python
-    import keras
-    from dl_techniques.models.acc_unet import AccUNet, create_acc_unet_binary
-
-    # Binary medical image segmentation (grayscale input)
-    model = create_acc_unet_binary(
-        input_channels=1,
-        input_shape=(224, 224)
-    )
-    model.compile(
-        optimizer='adam',
-        loss='binary_crossentropy',
-        metrics=['accuracy']
-    )
-
-    # Multi-class segmentation with custom configuration
-    from dl_techniques.models.acc_unet import create_acc_unet_multiclass
-
-    model = create_acc_unet_multiclass(
-        input_channels=3,           # RGB images
-        num_classes=5,              # 5 semantic classes
-        input_shape=(256, 256),
-        base_filters=64,            # Wider network
-        mlfc_iterations=4           # More feature compilation
-    )
-
-    # Dynamic input size for flexible deployment
-    from dl_techniques.models.acc_unet import create_acc_unet
-
-    model = create_acc_unet(
-        input_channels=3,
-        num_classes=1,
-        input_shape=None,           # Accepts any input size
-        kernel_regularizer=keras.regularizers.L2(1e-4)
-    )
-
-    # Custom model instance
-    model = AccUNet(
-        input_channels=1,
-        num_classes=1,
-        base_filters=32,
-        mlfc_iterations=3
-    )
-
-    # Model can handle different input sizes at inference
-    output_224 = model(tf.random.normal((1, 224, 224, 1)))  # (1, 224, 224, 1)
-    output_512 = model(tf.random.normal((1, 512, 512, 1)))  # (1, 512, 512, 1)
-    ```
-
-Integration with dl-techniques:
-    - Seamlessly integrates with existing dl-techniques components
-    - Reuses SqueezeExcitation layers from dl_techniques.layers
-    - Follows dl-techniques documentation and coding standards
-    - Supports model serialization and deserialization
-    - Compatible with all dl-techniques training utilities and loss functions
-
 Model Components:
     - **HANCBlock**: Core building block with hierarchical context aggregation
     - **ResPath**: Enhanced skip connection processing with residual blocks
     - **MLFCLayer**: Multi-level feature compilation for cross-scale fusion
     - **AccUNet**: Complete model implementation with factory functions
-
-Training Recommendations:
-    - Use mixed precision training for faster convergence
-    - Apply data augmentation (rotation, flipping, elastic deformation)
-    - Consider gradient accumulation for large input sizes
-    - Use cosine annealing or warmup learning rate schedules
-    - Monitor both dice coefficient and cross-entropy loss
 
 References:
     Ibtehaz, N., & Kihara, D. (2023). ACC-UNet: A Completely Convolutional UNet
@@ -116,7 +52,7 @@ References:
 """
 
 import keras
-from typing import Optional, Union, Tuple, Any
+from typing import Optional, Union, Tuple, Any, List, Dict
 
 # ---------------------------------------------------------------------
 # local imports
@@ -128,6 +64,7 @@ from ..layers.hanc_block import HANCBlock
 
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class AccUNet(keras.Model):
     """
     ACC-UNet: A Completely Convolutional UNet model for the 2020s.
@@ -143,16 +80,22 @@ class AccUNet(keras.Model):
     through convolutional operations.
 
     Args:
-        input_channels: Number of input channels (e.g., 3 for RGB, 1 for grayscale).
-        num_classes: Number of output classes for segmentation.
-        base_filters: Base number of filters (default: 32). The model uses
+        input_channels: Integer, number of input channels (e.g., 3 for RGB, 1 for grayscale).
+            Must be positive.
+        num_classes: Integer, number of output classes for segmentation. Must be positive.
+        base_filters: Integer, base number of filters. The model uses
             [base_filters, base_filters*2, base_filters*4, base_filters*8, base_filters*16]
-            for the 5 encoder levels.
-        mlfc_iterations: Number of MLFC iterations for feature compilation (default: 3).
-        kernel_initializer: Initializer for convolution kernels.
-        bias_initializer: Initializer for bias vectors.
-        kernel_regularizer: Regularizer for convolution kernels.
-        bias_regularizer: Regularizer for bias vectors.
+            for the 5 encoder levels. Must be positive. Defaults to 32.
+        mlfc_iterations: Integer, number of MLFC iterations for feature compilation.
+            Must be positive. Defaults to 3.
+        kernel_initializer: String or Initializer instance for convolution kernels.
+            Defaults to 'glorot_uniform'.
+        bias_initializer: String or Initializer instance for bias vectors.
+            Defaults to 'zeros'.
+        kernel_regularizer: Optional Regularizer instance for convolution kernels.
+            Defaults to None.
+        bias_regularizer: Optional Regularizer instance for bias vectors.
+            Defaults to None.
         **kwargs: Additional arguments for the Model base class.
 
     Input shape:
@@ -162,6 +105,16 @@ class AccUNet(keras.Model):
         4D tensor with shape (batch_size, height, width, num_classes) for
         multi-class segmentation, or (batch_size, height, width, 1) for
         binary segmentation.
+
+    Attributes:
+        encoder_blocks: List of lists containing HANC blocks for each encoder level.
+        pooling_layers: List of max pooling layers for encoder downsampling.
+        decoder_upsamples: List of transposed convolution layers for decoder upsampling.
+        decoder_blocks: List of lists containing HANC blocks for each decoder level.
+        res_paths: List of ResPath layers for enhanced skip connection processing.
+        mlfc_layers: List of MLFC layers for multi-level feature compilation.
+        output_conv: Final convolution layer for class prediction.
+        output_activation: Final activation layer (sigmoid or softmax).
 
     Example:
         ```python
@@ -176,7 +129,8 @@ class AccUNet(keras.Model):
             input_channels=3,
             num_classes=2,
             base_filters=64,
-            mlfc_iterations=4
+            mlfc_iterations=4,
+            kernel_regularizer=keras.regularizers.L2(1e-4)
         )
 
         # Compile and use
@@ -187,34 +141,34 @@ class AccUNet(keras.Model):
         )
         ```
 
+    Raises:
+        ValueError: If input_channels is not positive.
+        ValueError: If num_classes is not positive.
+        ValueError: If base_filters is not positive.
+        ValueError: If mlfc_iterations is not positive.
+
     Note:
         The model automatically determines the final activation (sigmoid for
         num_classes=1, softmax for num_classes>1). For training, use logits
         by setting the appropriate loss function.
+
+        Following modern Keras 3 patterns, all sub-layers are created in __init__
+        without helper methods, ensuring proper serialization and build handling.
     """
 
     def __init__(
-            self,
-            input_channels: int,
-            num_classes: int,
-            base_filters: int = 32,
-            mlfc_iterations: int = 3,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            **kwargs: Any
+        self,
+        input_channels: int,
+        num_classes: int,
+        base_filters: int = 32,
+        mlfc_iterations: int = 3,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+        bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
-
-        self.input_channels = input_channels
-        self.num_classes = num_classes
-        self.base_filters = base_filters
-        self.mlfc_iterations = mlfc_iterations
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.bias_initializer = keras.initializers.get(bias_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Validate parameters
         if input_channels <= 0:
@@ -226,52 +180,41 @@ class AccUNet(keras.Model):
         if mlfc_iterations <= 0:
             raise ValueError(f"mlfc_iterations must be positive, got {mlfc_iterations}")
 
+        # Store ALL configuration parameters for serialization
+        self.input_channels = input_channels
+        self.num_classes = num_classes
+        self.base_filters = base_filters
+        self.mlfc_iterations = mlfc_iterations
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+
         # Calculate filter sizes for each level
         self.filter_sizes = [
-            base_filters,  # Level 1: 32
-            base_filters * 2,  # Level 2: 64
-            base_filters * 4,  # Level 3: 128
-            base_filters * 8,  # Level 4: 256
-            base_filters * 16  # Level 5 (bottleneck): 512
+            base_filters,        # Level 0: 32
+            base_filters * 2,    # Level 1: 64
+            base_filters * 4,    # Level 2: 128
+            base_filters * 8,    # Level 3: 256
+            base_filters * 16    # Level 4 (bottleneck): 512
         ]
 
-        # Build the network components
-        self._build_encoder()
-        self._build_decoder()
-        self._build_skip_connections()
-        self._build_output_layer()
+        # CREATE all sub-layers in __init__ following Modern Keras 3 pattern
+        # No helper methods - all layers created here directly
 
-    def _build_encoder(self) -> None:
-        """Build encoder blocks."""
-        # Encoder blocks - each level has 2 HANC blocks
-        self.encoder_blocks = []
-        self.pooling_layers = []
+        # === ENCODER BLOCKS ===
+        self.encoder_blocks: List[List[HANCBlock]] = []
 
-        for level in range(5):  # 5 levels total
-            level_blocks = []
-
+        for level in range(5):  # 5 encoder levels
             if level == 0:
                 # First level: input_channels -> base_filters
-                block1 = HANCBlock(
-                    filters=self.filter_sizes[0],
-                    k=3, inv_factor=3,
-                    kernel_initializer=self.kernel_initializer,
-                    kernel_regularizer=self.kernel_regularizer,
-                    name=f'encoder_l{level}_block1'
-                )
-                block2 = HANCBlock(
-                    filters=self.filter_sizes[0],
-                    k=3, inv_factor=3,
-                    kernel_initializer=self.kernel_initializer,
-                    kernel_regularizer=self.kernel_regularizer,
-                    name=f'encoder_l{level}_block2'
-                )
-                level_blocks = [block1, block2]
+                input_ch = input_channels
+                output_ch = self.filter_sizes[0]
+                k = 3
             else:
                 # Other levels: prev_filters -> curr_filters
-                prev_filters = self.filter_sizes[level - 1]
-                curr_filters = self.filter_sizes[level]
-
+                input_ch = self.filter_sizes[level - 1]
+                output_ch = self.filter_sizes[level]
                 # Determine k based on level (as per paper)
                 if level <= 2:
                     k = 3
@@ -280,41 +223,46 @@ class AccUNet(keras.Model):
                 else:  # level 4 (bottleneck)
                     k = 1
 
-                block1 = HANCBlock(
-                    filters=curr_filters,
-                    k=k, inv_factor=3,
-                    kernel_initializer=self.kernel_initializer,
-                    kernel_regularizer=self.kernel_regularizer,
-                    name=f'encoder_l{level}_block1'
-                )
-                block2 = HANCBlock(
-                    filters=curr_filters,
-                    k=k, inv_factor=3,
-                    kernel_initializer=self.kernel_initializer,
-                    kernel_regularizer=self.kernel_regularizer,
-                    name=f'encoder_l{level}_block2'
-                )
-                level_blocks = [block1, block2]
+            # Create 2 HANC blocks per level
+            block1 = HANCBlock(
+                filters=output_ch,
+                input_channels=input_ch,  # FIX: First block always takes input_ch for the level
+                k=k,
+                inv_factor=3,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name=f'encoder_l{level}_block1'
+            )
 
-            self.encoder_blocks.append(level_blocks)
+            block2 = HANCBlock(
+                filters=output_ch,
+                input_channels=output_ch,  # Second block always has same in/out
+                k=k,
+                inv_factor=3,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name=f'encoder_l{level}_block2'
+            )
 
-            # Pooling layers (not needed for last level)
-            if level < 4:
-                pool = keras.layers.MaxPooling2D(
-                    pool_size=2,
-                    strides=2,
-                    name=f'pool_{level}'
-                )
-                self.pooling_layers.append(pool)
+            self.encoder_blocks.append([block1, block2])
 
-    def _build_decoder(self) -> None:
-        """Build decoder blocks."""
-        self.decoder_upsamples = []
-        self.decoder_blocks = []
+        # === POOLING LAYERS ===
+        self.pooling_layers: List[keras.layers.Layer] = []
+        for level in range(4):  # Only 4 pooling layers (not needed for bottleneck)
+            pool = keras.layers.MaxPooling2D(
+                pool_size=2,
+                strides=2,
+                name=f'pool_{level}'
+            )
+            self.pooling_layers.append(pool)
+
+        # === DECODER BLOCKS ===
+        self.decoder_upsamples: List[keras.layers.Layer] = []
+        self.decoder_blocks: List[List[HANCBlock]] = []
 
         for level in range(4):  # 4 decoder levels
             # Upsample layer
-            curr_filters = self.filter_sizes[4 - level]  # 512, 256, 128, 64
+            # curr_filters = self.filter_sizes[4 - level]  # 512, 256, 128, 64
             next_filters = self.filter_sizes[3 - level]  # 256, 128, 64, 32
 
             upsample = keras.layers.Conv2DTranspose(
@@ -337,20 +285,25 @@ class AccUNet(keras.Model):
                 inv_factor = 3
             else:  # level 3
                 k = 3
-                inv_factor = 34  # Special case as per paper
+                inv_factor = 4  # Special case as per paper
 
             # Decoder blocks (2 per level)
-            # Input channels: next_filters (from upsample) + next_filters (from skip) = 2*next_filters
+            # Input: next_filters (from upsample) + next_filters (from skip) = 2*next_filters
             block1 = HANCBlock(
                 filters=next_filters,
-                k=k, inv_factor=inv_factor,
+                input_channels=2 * next_filters,  # Concatenated channels
+                k=k,
+                inv_factor=inv_factor,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name=f'decoder_l{level}_block1'
             )
+
             block2 = HANCBlock(
                 filters=next_filters,
-                k=k, inv_factor=inv_factor,
+                input_channels=next_filters,  # Output of block1
+                k=k,
+                inv_factor=inv_factor,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name=f'decoder_l{level}_block2'
@@ -358,10 +311,9 @@ class AccUNet(keras.Model):
 
             self.decoder_blocks.append([block1, block2])
 
-    def _build_skip_connections(self) -> None:
-        """Build skip connection processing."""
+        # === SKIP CONNECTION PROCESSING ===
         # ResPath layers for each encoder level (except bottleneck)
-        self.res_paths = []
+        self.res_paths: List[ResPath] = []
         res_path_blocks = [4, 3, 2, 1]  # Number of blocks for each level
 
         for level in range(4):
@@ -375,7 +327,7 @@ class AccUNet(keras.Model):
             self.res_paths.append(res_path)
 
         # MLFC layers for multi-level feature compilation
-        self.mlfc_layers = []
+        self.mlfc_layers: List[MLFCLayer] = []
         channels_list = self.filter_sizes[:4]  # First 4 levels only
 
         for i in range(self.mlfc_iterations):
@@ -388,40 +340,48 @@ class AccUNet(keras.Model):
             )
             self.mlfc_layers.append(mlfc)
 
-    def _build_output_layer(self) -> None:
-        """Build output layer."""
-        # Output convolution
+        # === OUTPUT LAYER ===
+        # Output convolution and activation
+        self.output_conv = keras.layers.Conv2D(
+            filters=self.num_classes,
+            kernel_size=1,
+            padding='same',
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            name='output_conv'
+        )
+
         if self.num_classes == 1:
             # Binary segmentation
-            self.output_conv = keras.layers.Conv2D(
-                filters=1,
-                kernel_size=1,
-                padding='same',
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                name='output_conv'
-            )
-            self.output_activation = keras.layers.Sigmoid(name='output_activation')
+            self.output_activation = keras.layers.Activation("sigmoid", name='output_activation')
         else:
             # Multi-class segmentation
-            self.output_conv = keras.layers.Conv2D(
-                filters=self.num_classes,
-                kernel_size=1,
-                padding='same',
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                name='output_conv'
-            )
             self.output_activation = keras.layers.Softmax(name='output_activation')
 
+        # === CONCATENATION LAYERS ===
+        # Create concatenation layers for decoder skip connections
+        self.concat_layers: List[keras.layers.Layer] = []
+        for level in range(4):
+            concat = keras.layers.Concatenate(axis=-1, name=f'concat_{level}')
+            self.concat_layers.append(concat)
+
     def call(
-            self,
-            inputs: keras.KerasTensor,
-            training: Optional[bool] = None
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass computation."""
-        # Encoder forward pass
-        encoder_features = []
+        """
+        Forward pass computation.
+
+        Args:
+            inputs: Input tensor of shape (batch_size, height, width, input_channels).
+            training: Boolean indicating training mode.
+
+        Returns:
+            Output tensor of shape (batch_size, height, width, num_classes).
+        """
+        # === ENCODER FORWARD PASS ===
+        encoder_features: List[keras.KerasTensor] = []
         x = inputs
 
         for level in range(5):
@@ -437,9 +397,9 @@ class AccUNet(keras.Model):
                 # Bottleneck features (level 4)
                 bottleneck_features = x
 
-        # Process skip connection features
+        # === SKIP CONNECTION PROCESSING ===
         # Apply ResPath to encoder features
-        processed_features = []
+        processed_features: List[keras.KerasTensor] = []
         for level, features in enumerate(encoder_features):
             processed = self.res_paths[level](features, training=training)
             processed_features.append(processed)
@@ -448,7 +408,7 @@ class AccUNet(keras.Model):
         for mlfc_layer in self.mlfc_layers:
             processed_features = mlfc_layer(processed_features, training=training)
 
-        # Decoder forward pass
+        # === DECODER FORWARD PASS ===
         x = bottleneck_features
 
         for level in range(4):
@@ -457,20 +417,25 @@ class AccUNet(keras.Model):
 
             # Concatenate with processed skip connection features
             skip_features = processed_features[3 - level]  # Reverse order
-            x = keras.layers.Concatenate(axis=-1)([x, skip_features])
+            x = self.concat_layers[level]([x, skip_features])
 
             # Apply decoder blocks
             for block in self.decoder_blocks[level]:
                 x = block(x, training=training)
 
-        # Output layer
+        # === OUTPUT LAYER ===
         x = self.output_conv(x)
         x = self.output_activation(x)
 
         return x
 
-    def get_config(self) -> dict:
-        """Get model configuration."""
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Get model configuration for serialization.
+
+        Returns:
+            Dictionary containing all model configuration parameters.
+        """
         config = super().get_config()
         config.update({
             'input_channels': self.input_channels,
@@ -485,30 +450,32 @@ class AccUNet(keras.Model):
         return config
 
     @classmethod
-    def from_config(cls, config: dict) -> 'AccUNet':
+    def from_config(cls, config: Dict[str, Any]) -> 'AccUNet':
         """Create model from configuration."""
         return cls(**config)
 
 # ---------------------------------------------------------------------
+# Factory Functions
+# ---------------------------------------------------------------------
 
 def create_acc_unet(
-        input_channels: int,
-        num_classes: int,
-        base_filters: int = 32,
-        mlfc_iterations: int = 3,
-        input_shape: Optional[Tuple[int, int]] = None,
-        **kwargs: Any
+    input_channels: int,
+    num_classes: int,
+    base_filters: int = 32,
+    mlfc_iterations: int = 3,
+    input_shape: Optional[Tuple[int, int]] = None,
+    **kwargs: Any
 ) -> keras.Model:
     """
     Create ACC-UNet model with functional API.
 
     Args:
-        input_channels: Number of input channels.
-        num_classes: Number of output classes.
-        base_filters: Base number of filters.
-        mlfc_iterations: Number of MLFC iterations.
-        input_shape: Input spatial dimensions (height, width). If None,
-            uses dynamic shape.
+        input_channels: Integer, number of input channels.
+        num_classes: Integer, number of output classes.
+        base_filters: Integer, base number of filters. Defaults to 32.
+        mlfc_iterations: Integer, number of MLFC iterations. Defaults to 3.
+        input_shape: Optional tuple, input spatial dimensions (height, width).
+            If None, uses dynamic shape.
         **kwargs: Additional arguments for AccUNet.
 
     Returns:
@@ -553,63 +520,105 @@ def create_acc_unet(
 
     return model
 
-# ---------------------------------------------------------------------
 
 def create_acc_unet_binary(
-        input_channels: int = 3,
-        input_shape: Tuple[int, int] = (256, 256),
-        base_filters: int = 32,
-        **kwargs: Any
+    input_channels: int,
+    input_shape: Optional[Tuple[int, int]] = None,
+    base_filters: int = 32,
+    mlfc_iterations: int = 3,
+    **kwargs: Any
 ) -> keras.Model:
     """
-    Create ACC-UNet for binary segmentation.
+    Create ACC-UNet model for binary segmentation.
 
     Args:
-        input_channels: Number of input channels (default: 3 for RGB).
-        input_shape: Input spatial dimensions (default: (256, 256)).
-        base_filters: Base number of filters (default: 32).
-        **kwargs: Additional arguments for create_acc_unet.
+        input_channels: Integer, number of input channels.
+        input_shape: Optional tuple, input spatial dimensions (height, width).
+            If None, uses dynamic shape.
+        base_filters: Integer, base number of filters. Defaults to 32.
+        mlfc_iterations: Integer, number of MLFC iterations. Defaults to 3.
+        **kwargs: Additional arguments for AccUNet.
 
     Returns:
-        Keras Model for binary segmentation.
+        Keras Model instance configured for binary segmentation with sigmoid activation.
+
+    Example:
+        ```python
+        # Grayscale medical image segmentation
+        model = create_acc_unet_binary(
+            input_channels=1,
+            input_shape=(512, 512),
+            base_filters=32
+        )
+
+        model.compile(
+            optimizer='adam',
+            loss='binary_crossentropy',
+            metrics=['binary_accuracy', 'dice_coefficient']
+        )
+        ```
     """
     return create_acc_unet(
         input_channels=input_channels,
-        num_classes=1,
+        num_classes=1,  # Binary segmentation
         base_filters=base_filters,
+        mlfc_iterations=mlfc_iterations,
         input_shape=input_shape,
         **kwargs
     )
 
-# ---------------------------------------------------------------------
 
 def create_acc_unet_multiclass(
-        input_channels: int,
-        num_classes: int,
-        input_shape: Tuple[int, int] = (256, 256),
-        base_filters: int = 32,
-        **kwargs: Any
+    input_channels: int,
+    num_classes: int,
+    input_shape: Optional[Tuple[int, int]] = None,
+    base_filters: int = 32,
+    mlfc_iterations: int = 3,
+    **kwargs: Any
 ) -> keras.Model:
     """
-    Create ACC-UNet for multi-class segmentation.
+    Create ACC-UNet model for multi-class segmentation.
 
     Args:
-        input_channels: Number of input channels.
-        num_classes: Number of output classes (> 1).
-        input_shape: Input spatial dimensions (default: (256, 256)).
-        base_filters: Base number of filters (default: 32).
-        **kwargs: Additional arguments for create_acc_unet.
+        input_channels: Integer, number of input channels.
+        num_classes: Integer, number of output classes (must be > 1).
+        input_shape: Optional tuple, input spatial dimensions (height, width).
+            If None, uses dynamic shape.
+        base_filters: Integer, base number of filters. Defaults to 32.
+        mlfc_iterations: Integer, number of MLFC iterations. Defaults to 3.
+        **kwargs: Additional arguments for AccUNet.
 
     Returns:
-        Keras Model for multi-class segmentation.
+        Keras Model instance configured for multi-class segmentation with softmax activation.
+
+    Raises:
+        ValueError: If num_classes is not greater than 1.
+
+    Example:
+        ```python
+        # RGB image with 5 semantic classes
+        model = create_acc_unet_multiclass(
+            input_channels=3,
+            num_classes=5,
+            input_shape=(256, 256),
+            base_filters=64
+        )
+
+        model.compile(
+            optimizer='adamw',
+            loss='sparse_categorical_crossentropy',
+            metrics=['sparse_categorical_accuracy', 'mean_iou']
+        )
+        ```
     """
     if num_classes <= 1:
-        raise ValueError(f"For multi-class segmentation, num_classes must be > 1, got {num_classes}")
+        raise ValueError(f"num_classes must be > 1 for multi-class segmentation, got {num_classes}")
 
     return create_acc_unet(
         input_channels=input_channels,
         num_classes=num_classes,
         base_filters=base_filters,
+        mlfc_iterations=mlfc_iterations,
         input_shape=input_shape,
         **kwargs
     )

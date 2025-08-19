@@ -69,40 +69,24 @@ Performance Characteristics:
     - **Training Stability**: Residual connections ensure stable gradient flow
     - **Inference Speed**: Parallelizable operations with minimal sequential dependencies
 
-Use Cases:
-    - **Medical Image Segmentation**: Excellent for multi-scale pathology detection
-    - **Remote Sensing**: Effective for objects at different scales in satellite imagery
-    - **Industrial Inspection**: Handles both fine defects and large structural patterns
-    - **Biological Imaging**: Processes cellular details alongside tissue-level structures
-
-Integration with ACC-UNet:
-    MLFC layers are strategically placed in the skip connection pathway:
-    - Applied after ResPath processing of encoder features
-    - Typically 3 MLFC layers in series for optimal feature compilation
-    - Feeds enriched features to decoder levels for improved reconstruction
-    - Works synergistically with HANC blocks for comprehensive context modeling
-
 Comparison to Alternatives:
     - **vs. Standard Skip Connections**: Provides cross-level information vs. single-level
     - **vs. Feature Pyramid Networks**: More sophisticated fusion vs. simple concatenation
     - **vs. Attention Mechanisms**: Computationally efficient vs. quadratic complexity
     - **vs. Transformer Approaches**: Convolutional efficiency vs. global modeling
-
-Implementation Notes:
-    - Automatically handles different input spatial dimensions through intelligent resizing
-    - Uses bilinear interpolation for smooth upsampling transitions
-    - Employs average pooling for information-preserving downsampling
-    - Applies batch normalization for training stability
-    - Includes squeeze-excitation for adaptive channel importance weighting
-    - Supports gradient checkpointing for memory-efficient training
 """
 
 import keras
 from keras import ops
 from typing import Optional, Union, Tuple, List, Any, Dict
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .squeeze_excitation import SqueezeExcitation
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class MLFCLayer(keras.layers.Layer):

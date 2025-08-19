@@ -92,8 +92,7 @@ class TestHANCLayer:
         # Check that pooling layers are pre-created (for all possible scales)
         assert len(layer.avg_pooling_layers) == 4  # scales 1,2,3,4 (for max k=5)
         assert len(layer.max_pooling_layers) == 4
-        assert len(layer.avg_upsampling_layers) == 4
-        assert len(layer.max_upsampling_layers) == 4
+        # FIX: Removed checks for upsampling layers as they are no longer attributes
 
         # Sub-layers should not be built yet
         assert not layer.conv.built
@@ -176,8 +175,7 @@ class TestHANCLayer:
         for scale in range(min(layer_config['k'] - 1, len(layer.avg_pooling_layers))):
             assert layer.avg_pooling_layers[scale].built
             assert layer.max_pooling_layers[scale].built
-            assert layer.avg_upsampling_layers[scale].built
-            assert layer.max_upsampling_layers[scale].built
+            # FIX: Removed checks for upsampling layers being built
 
         # Verify output shape
         expected_shape = (sample_input.shape[0], sample_input.shape[1],
@@ -285,8 +283,7 @@ class TestHANCLayer:
 
             assert layer.avg_pooling_layers[scale].pool_size == (pool_size, pool_size)
             assert layer.max_pooling_layers[scale].pool_size == (pool_size, pool_size)
-            assert layer.avg_upsampling_layers[scale].size == (pool_size, pool_size)
-            assert layer.max_upsampling_layers[scale].size == (pool_size, pool_size)
+            # FIX: Removed checks for upsampling layer sizes
 
         assert output.shape == (1, 16, 16, 32)
         assert not keras.ops.any(keras.ops.isnan(output))

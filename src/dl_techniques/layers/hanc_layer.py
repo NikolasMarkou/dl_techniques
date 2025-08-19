@@ -234,8 +234,6 @@ class HANCLayer(keras.layers.Layer):
         activation: LeakyReLU activation function.
         avg_pooling_layers: List of average pooling layers for each scale.
         max_pooling_layers: List of max pooling layers for each scale.
-        avg_upsampling_layers: List of upsampling layers for average pooling.
-        max_upsampling_layers: List of upsampling layers for max pooling.
         concatenate: Concatenation layer for combining multi-scale features.
 
     Example:
@@ -269,7 +267,7 @@ class HANCLayer(keras.layers.Layer):
         context modeling with reasonable computational overhead.
 
         The layer automatically handles spatial dimension alignment through
-        nearest neighbor upsampling and robust cropping/padding mechanisms.
+        `keras.ops.image.resize`, making it robust to dynamic input shapes.
     """
 
     def __init__(
@@ -320,47 +318,33 @@ class HANCLayer(keras.layers.Layer):
         # Concatenation layer
         self.concatenate = keras.layers.Concatenate(axis=-1, name='hanc_concat')
 
-        # Pre-create pooling and upsampling layers for all possible scales (1 to k-1)
-        # These will be used conditionally based on k value
+        # Pre-create pooling layers for all possible scales (1 to k-1)
         max_k = 5  # Maximum supported k value
         self.avg_pooling_layers: List[keras.layers.Layer] = []
         self.max_pooling_layers: List[keras.layers.Layer] = []
-        self.avg_upsampling_layers: List[keras.layers.Layer] = []
-        self.max_upsampling_layers: List[keras.layers.Layer] = []
 
         for scale in range(1, max_k):  # scales 1, 2, 3, 4 (for k up to 5)
             pool_size = 2 ** scale  # 2, 4, 8, 16
 
-            # Average pooling and upsampling
+            # Average pooling
             avg_pool = keras.layers.AveragePooling2D(
                 pool_size=pool_size,
                 strides=pool_size,
                 padding='same',
                 name=f'hanc_avg_pool_{scale}'
             )
-            avg_upsample = keras.layers.UpSampling2D(
-                size=pool_size,
-                interpolation='nearest',
-                name=f'hanc_avg_upsample_{scale}'
-            )
 
-            # Max pooling and upsampling
+            # Max pooling
             max_pool = keras.layers.MaxPooling2D(
                 pool_size=pool_size,
                 strides=pool_size,
                 padding='same',
                 name=f'hanc_max_pool_{scale}'
             )
-            max_upsample = keras.layers.UpSampling2D(
-                size=pool_size,
-                interpolation='nearest',
-                name=f'hanc_max_upsample_{scale}'
-            )
 
             self.avg_pooling_layers.append(avg_pool)
-            self.avg_upsampling_layers.append(avg_upsample)
             self.max_pooling_layers.append(max_pool)
-            self.max_upsampling_layers.append(max_upsample)
+
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
@@ -377,7 +361,7 @@ class HANCLayer(keras.layers.Layer):
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D: {input_shape}")
 
-        if input_shape[-1] != self.in_channels:
+        if input_shape[-1] is not None and input_shape[-1] != self.in_channels:
             raise ValueError(
                 f"Input channels mismatch: expected {self.in_channels}, "
                 f"got {input_shape[-1]}"
@@ -394,14 +378,8 @@ class HANCLayer(keras.layers.Layer):
 
         # Build pooling and upsampling layers that will be used (based on k)
         for scale in range(min(self.k - 1, len(self.avg_pooling_layers))):
-            # Build pooling layers
             self.avg_pooling_layers[scale].build(input_shape)
             self.max_pooling_layers[scale].build(input_shape)
-
-            # Compute pooled shape for upsampling
-            pooled_shape = self.avg_pooling_layers[scale].compute_output_shape(input_shape)
-            self.avg_upsampling_layers[scale].build(pooled_shape)
-            self.max_upsampling_layers[scale].build(pooled_shape)
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -436,22 +414,28 @@ class HANCLayer(keras.layers.Layer):
             # No hierarchical pooling, just use original features
             concatenated = inputs
         else:
+            # Get target shape for resizing, compatible with graph mode
+            target_shape = ops.shape(inputs)
+            target_height, target_width = target_shape[1], target_shape[2]
+
             # Stage 2 & 3: Add average and max pooled features at different scales
             for scale in range(self.k - 1):  # scales 0 to k-2, representing 2^1 to 2^(k-1)
                 # Average pooling path
                 avg_pooled = self.avg_pooling_layers[scale](inputs)
-                avg_upsampled = self.avg_upsampling_layers[scale](avg_pooled)
-
-                # Ensure correct spatial dimensions by cropping if needed
-                avg_upsampled = self._resize_to_match(avg_upsampled, inputs)
+                avg_upsampled = ops.image.resize(
+                    avg_pooled,
+                    size=(target_height, target_width),
+                    interpolation='nearest'
+                )
                 features_list.append(avg_upsampled)
 
                 # Max pooling path
                 max_pooled = self.max_pooling_layers[scale](inputs)
-                max_upsampled = self.max_upsampling_layers[scale](max_pooled)
-
-                # Ensure correct spatial dimensions by cropping if needed
-                max_upsampled = self._resize_to_match(max_upsampled, inputs)
+                max_upsampled = ops.image.resize(
+                    max_pooled,
+                    size=(target_height, target_width),
+                    interpolation='nearest'
+                )
                 features_list.append(max_upsampled)
 
             # Stage 4: Hierarchical concatenation along channel dimension
@@ -465,35 +449,6 @@ class HANCLayer(keras.layers.Layer):
         x = self.activation(x)
 
         return x
-
-    def _resize_to_match(self, tensor: keras.KerasTensor, target: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Resize tensor to match target spatial dimensions through cropping.
-
-        This method handles the rare case where upsampling doesn't produce
-        exact spatial dimensions due to edge effects with certain input sizes.
-
-        Args:
-            tensor: Tensor to resize.
-            target: Target tensor with desired spatial dimensions.
-
-        Returns:
-            Resized tensor with spatial dimensions matching target.
-        """
-        target_height = ops.shape(target)[1]
-        target_width = ops.shape(target)[2]
-        tensor_height = ops.shape(tensor)[1]
-        tensor_width = ops.shape(tensor)[2]
-
-        # If dimensions don't match, crop (should rarely be needed with proper upsampling)
-        if tensor_height != target_height or tensor_width != target_width:
-            # Crop to target dimensions if tensor is larger
-            if tensor_height > target_height:
-                tensor = tensor[:, :target_height, :, :]
-            if tensor_width > target_width:
-                tensor = tensor[:, :, :target_width, :]
-
-        return tensor
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """
