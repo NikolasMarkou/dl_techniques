@@ -225,12 +225,17 @@ class TestBertEmbeddingsComponent:
         assert embeddings.config.max_position_embeddings == 128
         assert embeddings.config.type_vocab_size == 2
 
-        # Components should be None before building
-        assert embeddings.word_embeddings is None
-        assert embeddings.position_embeddings is None
-        assert embeddings.token_type_embeddings is None
-        assert embeddings.layer_norm is None
-        assert embeddings.dropout is None
+        # Components should be created in __init__ (modern Keras 3 pattern)
+        assert embeddings.word_embeddings is not None
+        assert embeddings.position_embeddings is not None
+        assert embeddings.token_type_embeddings is not None
+        assert embeddings.layer_norm is not None
+        assert embeddings.dropout is not None
+
+        # Check that they are unbuilt initially
+        assert not embeddings.built
+        assert not embeddings.word_embeddings.built
+        assert not embeddings.position_embeddings.built
 
     def test_bert_embeddings_build(self, basic_config):
         """Test BertEmbeddings build process."""
@@ -240,12 +245,11 @@ class TestBertEmbeddingsComponent:
         embeddings.build(input_shape)
 
         assert embeddings.built is True
-        assert embeddings._build_input_shape == input_shape
-        assert embeddings.word_embeddings is not None
-        assert embeddings.position_embeddings is not None
-        assert embeddings.token_type_embeddings is not None
-        assert embeddings.layer_norm is not None
-        assert embeddings.dropout is not None
+        assert embeddings.word_embeddings.built
+        assert embeddings.position_embeddings.built
+        assert embeddings.token_type_embeddings.built
+        assert embeddings.layer_norm.built
+        assert embeddings.dropout.built
 
         # Check embedding dimensions
         assert embeddings.word_embeddings.input_dim == basic_config.vocab_size
@@ -429,10 +433,15 @@ class TestBERTModelInitialization:
         assert model.add_pooling_layer is True
         assert model.built is False
 
-        # Components should be None before building
-        assert model.embeddings is None
-        assert len(model.encoder_layers) == 0
-        assert model.pooler is None
+        # Components should be created in __init__ (modern Keras 3 pattern)
+        assert model.embeddings is not None
+        assert len(model.encoder_layers) == 6
+        assert model.pooler is not None
+
+        # But should not be built yet
+        assert not model.embeddings.built
+        for layer in model.encoder_layers:
+            assert not layer.built
 
     def test_initialization_without_pooling(self):
         """Test BERT model initialization without pooling layer."""
@@ -440,6 +449,7 @@ class TestBERTModelInitialization:
         model = Bert(config, add_pooling_layer=False)
 
         assert model.add_pooling_layer is False
+        assert model.pooler is None
 
     def test_initialization_with_custom_config(self):
         """Test BERT model initialization with custom configuration."""
@@ -481,71 +491,64 @@ class TestBERTModelBuilding:
             max_position_embeddings=128
         )
 
-    def test_build_with_tuple_input_shape(self, basic_config):
-        """Test building BERT model with tuple input shape."""
+    def test_build_basic_functionality(self, basic_config):
+        """Test basic building functionality."""
         model = Bert(basic_config)
         input_shape = (None, 64)
 
-        model.build(input_shape)
+        # Test forward pass (builds automatically)
+        batch_size = 2
+        seq_length = 32
+        input_ids = ops.cast(
+            keras.random.uniform(
+                (batch_size, seq_length),
+                minval=1,
+                maxval=basic_config.vocab_size
+            ),
+            dtype='int32'
+        )
+
+        outputs = model(input_ids, training=False)
 
         assert model.built is True
-        assert model._build_input_shape == input_shape
-        assert model.embeddings is not None
+        assert model.embeddings.built
         assert len(model.encoder_layers) == basic_config.num_layers
-        assert model.pooler is not None
 
         # Check that transformer layers are built
         for layer in model.encoder_layers:
             assert layer.built is True
 
-    def test_build_with_dict_input_shape(self, basic_config):
-        """Test building BERT model with dictionary input shape."""
-        model = Bert(basic_config)
-        input_shape = {
-            'input_ids': (None, 64),
-            'attention_mask': (None, 64),
-            'token_type_ids': (None, 64)
-        }
-
-        model.build(input_shape)
-
-        assert model.built is True
-        assert model._build_input_shape == input_shape
-        assert model.embeddings is not None
-        assert len(model.encoder_layers) == basic_config.num_layers
-
-    def test_build_prevents_double_building(self, basic_config):
-        """Test that building twice handles correctly."""
-        model = Bert(basic_config)
-        input_shape = (None, 32)
-
-        # Build first time
-        model.build(input_shape)
-        assert model.built is True
-
-        # Store reference to check components are preserved
-        embeddings_first = model.embeddings
-        encoder_layers_first = model.encoder_layers
-
-        # Building again should not cause errors and should preserve state
-        model.build(input_shape)
-
-        # Model should still be built and components preserved
-        assert model.built is True
-        assert model.embeddings is embeddings_first
+        # Check outputs
+        assert isinstance(outputs, tuple)
+        sequence_output, pooled_output = outputs
+        assert sequence_output.shape == (batch_size, seq_length, basic_config.hidden_size)
+        assert pooled_output.shape == (batch_size, basic_config.hidden_size)
 
     def test_build_without_pooling_layer(self, basic_config):
         """Test building BERT model without pooling layer."""
         model = Bert(basic_config, add_pooling_layer=False)
-        model.build((None, 32))
+
+        input_ids = ops.cast(
+            keras.random.uniform((2, 32), minval=1, maxval=basic_config.vocab_size),
+            dtype='int32'
+        )
+
+        output = model(input_ids, training=False)
 
         assert model.built is True
         assert model.pooler is None
+        assert output.shape == (2, 32, basic_config.hidden_size)
 
     def test_transformer_layers_configuration(self, basic_config):
         """Test that TransformerLayers are configured correctly."""
         model = Bert(basic_config)
-        model.build((None, 32))
+
+        # Trigger building by calling the model
+        input_ids = ops.cast(
+            keras.random.uniform((1, 16), minval=1, maxval=basic_config.vocab_size),
+            dtype='int32'
+        )
+        _ = model(input_ids, training=False)
 
         # Check transformer layer configuration
         for i, layer in enumerate(model.encoder_layers):
@@ -572,7 +575,14 @@ class TestBERTModelForwardPass:
             max_position_embeddings=128
         )
         model = Bert(config)
-        model.build((None, 64))
+
+        # Build by calling with sample input
+        sample_input = ops.cast(
+            keras.random.uniform((1, 16), minval=1, maxval=config.vocab_size),
+            dtype='int32'
+        )
+        _ = model(sample_input, training=False)
+
         return model
 
     def test_forward_pass_input_ids_only(self, built_model):
@@ -661,7 +671,6 @@ class TestBERTModelForwardPass:
             num_heads=8  # 256/8=32, valid
         )
         model = Bert(config, add_pooling_layer=False)
-        model.build((None, 32))
 
         batch_size = 2
         seq_length = 16
@@ -808,22 +817,6 @@ class TestBERTModelSerialization:
         assert reconstructed_model.config.num_heads == original_config.num_heads
         assert reconstructed_model.add_pooling_layer == original_model.add_pooling_layer
 
-    def test_build_config_serialization(self):
-        """Test build configuration serialization."""
-        config = BertConfig(hidden_size=256, num_heads=8)  # 256/8=32, valid
-        model = Bert(config)
-
-        input_shape = (None, 64)
-        model.build(input_shape)
-
-        build_config = model.get_build_config()
-        assert build_config['input_shape'] == input_shape
-
-        # Test build from config
-        new_model = Bert(config)
-        new_model.build_from_config(build_config)
-        assert new_model.built is True
-
     def test_embeddings_serialization(self):
         """Test BertEmbeddings serialization."""
         config = BertConfig(vocab_size=1000, hidden_size=256, num_heads=8)  # 256/8=32, valid
@@ -838,7 +831,7 @@ class TestBERTModelSerialization:
 
     def test_model_save_load(self):
         """Test saving and loading complete model."""
-        # Create and build model
+        # Create and use model (this builds it)
         config = BertConfig(
             vocab_size=1000,
             hidden_size=256,
@@ -847,10 +840,8 @@ class TestBERTModelSerialization:
             intermediate_size=512
         )
         model = Bert(config)
-        # Build with specific input shape to avoid None dimension issues
-        model.build((2, 32))  # Use fixed batch size for building
 
-        # Test forward pass before saving
+        # Test forward pass (builds automatically)
         batch_size = 2
         seq_length = 16
         input_ids = ops.cast(
@@ -869,14 +860,7 @@ class TestBERTModelSerialization:
             model_path = os.path.join(tmpdir, 'test_bert.keras')
             model.save(model_path)
 
-            loaded_model = keras.models.load_model(
-                model_path,
-                custom_objects={
-                    'BERT': Bert,
-                    'BertEmbeddings': BertEmbeddings,
-                    'BertConfig': BertConfig
-                }
-            )
+            loaded_model = keras.models.load_model(model_path)
 
             # Test that loaded model produces same output
             loaded_outputs = loaded_model(input_ids, training=False)
@@ -889,18 +873,20 @@ class TestBERTModelSerialization:
                 # Outputs should be very close
                 for orig, loaded in zip(original_outputs, loaded_outputs):
                     np.testing.assert_allclose(
-                        orig.numpy(),
-                        loaded.numpy(),
+                        keras.ops.convert_to_numpy(orig),
+                        keras.ops.convert_to_numpy(loaded),
                         rtol=1e-5,
-                        atol=1e-6
+                        atol=1e-6,
+                        err_msg="Outputs should match after serialization"
                     )
             else:
                 # Single tensor output
                 np.testing.assert_allclose(
-                    original_outputs.numpy(),
-                    loaded_outputs.numpy(),
+                    keras.ops.convert_to_numpy(original_outputs),
+                    keras.ops.convert_to_numpy(loaded_outputs),
                     rtol=1e-5,
-                    atol=1e-6
+                    atol=1e-6,
+                    err_msg="Outputs should match after serialization"
                 )
 
 
@@ -916,7 +902,6 @@ class TestBERTEdgeCases:
             num_heads=8  # 128/8=16, valid
         )
         model = Bert(config)
-        model.build((None, 1))
 
         input_ids = ops.cast([[42]], dtype='int32')
         outputs = model(input_ids, training=False)
@@ -937,8 +922,6 @@ class TestBERTEdgeCases:
         model = Bert(config)
 
         seq_length = 64
-        model.build((None, seq_length))
-
         input_ids = ops.cast(
             keras.random.uniform(
                 (2, seq_length),
@@ -956,7 +939,6 @@ class TestBERTEdgeCases:
         """Test BERT with batch size of 1."""
         config = BertConfig(vocab_size=1000, hidden_size=128, num_layers=2, num_heads=8)
         model = Bert(config)
-        model.build((None, 32))
 
         input_ids = ops.cast(
             keras.random.uniform((1, 32), minval=1, maxval=1000),
@@ -972,7 +954,6 @@ class TestBERTEdgeCases:
         """Test BERT with different batch sizes."""
         config = BertConfig(vocab_size=1000, hidden_size=128, num_layers=2, num_heads=8)
         model = Bert(config)
-        model.build((None, 24))
 
         batch_sizes = [1, 3, 8, 16]
 
@@ -996,7 +977,6 @@ class TestBERTEdgeCases:
         """Test BERT with heavy padding (lots of zeros)."""
         config = BertConfig(vocab_size=1000, hidden_size=128, num_layers=2, num_heads=8)
         model = Bert(config)
-        model.build((None, 32))
 
         batch_size = 3
         seq_length = 32
@@ -1029,7 +1009,6 @@ class TestBERTEdgeCases:
         """Test BERT with all padding tokens."""
         config = BertConfig(vocab_size=1000, hidden_size=128, num_layers=2, num_heads=8)
         model = Bert(config)
-        model.build((None, 16))
 
         # All padding tokens (0)
         input_ids = ops.zeros((2, 16), dtype='int32')
@@ -1049,7 +1028,6 @@ class TestBERTEdgeCases:
         """Test BERT with mixed token type IDs."""
         config = BertConfig(vocab_size=1000, hidden_size=128, num_layers=2, num_heads=8, type_vocab_size=3)
         model = Bert(config)
-        model.build((None, 24))
 
         batch_size = 2
         seq_length = 24
@@ -1335,10 +1313,6 @@ class TestBERTIntegration:
 
         # Create BERT model
         bert_model = Bert(config, add_pooling_layer=False)
-        bert_model.build((None, 24))
-
-        # Use the model's own embeddings layer for the manual check
-        embeddings = bert_model.embeddings
 
         batch_size = 2
         seq_length = 24
@@ -1356,7 +1330,7 @@ class TestBERTIntegration:
         bert_output = bert_model(input_ids, training=False)
 
         # Manual processing through components
-        embeddings_output = embeddings(input_ids, training=False)
+        embeddings_output = bert_model.embeddings(input_ids, training=False)
 
         # Process through transformer layers manually
         hidden_states = embeddings_output
@@ -1384,7 +1358,6 @@ class TestBERTIntegration:
             )
 
             model = Bert(config, add_pooling_layer=False)
-            model.build((None, 16))
 
             input_ids = ops.cast(
                 keras.random.uniform(
@@ -1418,7 +1391,6 @@ class TestBERTIntegration:
         )
 
         model = Bert(config)
-        model.build((None, 16))
 
         input_ids = ops.cast(
             keras.random.uniform(
@@ -1462,16 +1434,11 @@ class TestBERTIntegration:
         )
         attention_mask = ops.ones((batch_size, seq_length), dtype='int32')
 
-        # FIX: Use non-constant token_type_ids. Using all zeros causes the
-        # token_type_embedding to be a constant vector added to all positions.
-        # This constant is then cancelled out by the mean-subtraction in the
-        # subsequent LayerNormalization layer, resulting in a zero gradient for
-        # the token_type_embeddings weight.
+        # Use non-constant token_type_ids to ensure gradient flow
         token_type_ids = ops.concatenate([
             ops.zeros((batch_size, seq_length // 2), dtype="int32"),
             ops.ones((batch_size, seq_length - seq_length // 2), dtype="int32"),
         ], axis=1)
-
 
         with tf.GradientTape() as tape:
             logits = model([input_ids, attention_mask, token_type_ids], training=True)
@@ -1485,7 +1452,7 @@ class TestBERTIntegration:
 
         # Check that we have gradients for most weights
         non_none_grads = [g for g in gradients if g is not None]
-        # Relax the requirement - at least half of the weights should have gradients
+        # At least half of the weights should have gradients
         assert len(non_none_grads) > len(model.trainable_weights) * 0.5
 
         # Check that gradients have reasonable magnitudes
@@ -1505,7 +1472,6 @@ class TestBERTIntegration:
         )
 
         model = Bert(config, add_pooling_layer=True)
-        model.build((None, 20))
 
         batch_size = 3
         seq_length = 20
@@ -1558,7 +1524,6 @@ class TestBERTAdvancedFeatures:
         config.vocab_size = 1000
 
         model = Bert(config)
-        model.build((None, 32))
 
         # Test forward pass
         batch_size = 2
@@ -1592,7 +1557,6 @@ class TestBERTAdvancedFeatures:
             )
 
             model = Bert(config, add_pooling_layer=False)
-            model.build((None, 16))
 
             input_ids = ops.cast(
                 keras.random.uniform((2, 16), minval=1, maxval=1000),
@@ -1614,7 +1578,6 @@ class TestBERTAdvancedFeatures:
         )
 
         model = Bert(config)
-        model.build((None, 24))
 
         input_ids = ops.cast(
             keras.random.uniform((2, 24), minval=1, maxval=1000),

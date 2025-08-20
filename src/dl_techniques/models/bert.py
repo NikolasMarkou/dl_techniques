@@ -160,15 +160,42 @@ class BertEmbeddings(keras.layers.Layer):
         config.validate()
         self.config = config
 
-        # Initialize all sublayers to None - will be created in build()
-        self.word_embeddings = None
-        self.position_embeddings = None
-        self.token_type_embeddings = None
-        self.layer_norm = None
-        self.dropout = None
+        # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
+        self.word_embeddings = keras.layers.Embedding(
+            input_dim=config.vocab_size,
+            output_dim=config.hidden_size,
+            embeddings_initializer=keras.initializers.TruncatedNormal(
+                stddev=config.initializer_range
+            ),
+            mask_zero=True,
+            name="word_embeddings"
+        )
 
-        # Store build input shape for serialization
-        self._build_input_shape = None
+        self.position_embeddings = keras.layers.Embedding(
+            input_dim=config.max_position_embeddings,
+            output_dim=config.hidden_size,
+            embeddings_initializer=keras.initializers.TruncatedNormal(
+                stddev=config.initializer_range
+            ),
+            name="position_embeddings"
+        )
+
+        self.token_type_embeddings = keras.layers.Embedding(
+            input_dim=config.type_vocab_size,
+            output_dim=config.hidden_size,
+            embeddings_initializer=keras.initializers.TruncatedNormal(
+                stddev=config.initializer_range
+            ),
+            name="token_type_embeddings"
+        )
+
+        # Create normalization layer based on config
+        self.layer_norm = self._create_normalization_layer("layer_norm")
+
+        self.dropout = keras.layers.Dropout(
+            rate=config.hidden_dropout_prob,
+            name="dropout"
+        )
 
         logger.info(f"Created BertEmbeddings with hidden_size={config.hidden_size}, "
                     f"vocab_size={config.vocab_size}")
@@ -214,11 +241,10 @@ class BertEmbeddings(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the embeddings layer by creating all sublayers.
+        Build the embeddings layer by explicitly building all sub-layers.
 
-        This method creates the word, position, and token type embedding layers,
-        along with normalization and dropout layers. All sublayers are properly
-        initialized according to the configuration.
+        This follows the modern Keras 3 pattern where the parent layer
+        explicitly builds all child layers for robust serialization.
 
         Args:
             input_shape: Shape tuple for input_ids (batch_size, seq_length).
@@ -229,8 +255,6 @@ class BertEmbeddings(keras.layers.Layer):
         if self.built:
             return
 
-        self._build_input_shape = input_shape
-
         # Validate input shape
         if len(input_shape) != 2:
             raise ValueError(f"Expected 2D input shape (batch_size, seq_length), "
@@ -238,45 +262,7 @@ class BertEmbeddings(keras.layers.Layer):
 
         logger.info(f"Building BertEmbeddings with input_shape: {input_shape}")
 
-        # Create word embeddings
-        self.word_embeddings = keras.layers.Embedding(
-            input_dim=self.config.vocab_size,
-            output_dim=self.config.hidden_size,
-            embeddings_initializer=keras.initializers.TruncatedNormal(
-                stddev=self.config.initializer_range
-            ),
-            mask_zero=True,
-            name="word_embeddings"
-        )
-
-        # Create position embeddings
-        self.position_embeddings = keras.layers.Embedding(
-            input_dim=self.config.max_position_embeddings,
-            output_dim=self.config.hidden_size,
-            embeddings_initializer=keras.initializers.TruncatedNormal(
-                stddev=self.config.initializer_range
-            ),
-            name="position_embeddings"
-        )
-
-        # Create token type embeddings
-        self.token_type_embeddings = keras.layers.Embedding(
-            input_dim=self.config.type_vocab_size,
-            output_dim=self.config.hidden_size,
-            embeddings_initializer=keras.initializers.TruncatedNormal(
-                stddev=self.config.initializer_range
-            ),
-            name="token_type_embeddings"
-        )
-
-        # Create normalization and dropout layers
-        self.layer_norm = self._create_normalization_layer("layer_norm")
-        self.dropout = keras.layers.Dropout(
-            rate=self.config.hidden_dropout_prob,
-            name="dropout"
-        )
-
-        # Build all sublayers with appropriate shapes
+        # CRITICAL: Explicitly build all sub-layers for robust serialization
         self.word_embeddings.build(input_shape)
         self.position_embeddings.build(input_shape)
         self.token_type_embeddings.build(input_shape)
@@ -351,17 +337,6 @@ class BertEmbeddings(keras.layers.Layer):
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration for serialization."""
-        return {
-            'input_shape': self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build layer from configuration."""
-        if config.get('input_shape') is not None:
-            self.build(config['input_shape'])
-
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'BertEmbeddings':
         """Create layer from configuration."""
@@ -403,14 +378,10 @@ class Bert(keras.Model):
     Example:
         ```python
         config = BertConfig(num_layers=12, hidden_size=768)
-        model = BERT(config, add_pooling_layer=True)
-
-        # Build the model
-        input_shape = (None, 512)  # batch_size, seq_length
-        model.build(input_shape)
+        model = Bert(config, add_pooling_layer=True)
 
         # Use the model
-        input_ids = keras.ops.random.uniform((2, 512), 0, 30522, dtype='int32')
+        input_ids = keras.random.uniform((2, 512), 0, 30522, dtype='int32')
         outputs = model(input_ids)
         ```
     """
@@ -428,109 +399,51 @@ class Bert(keras.Model):
         self.config = config
         self.add_pooling_layer = add_pooling_layer
 
-        # Initialize all sublayers to None - will be created in build()
-        self.embeddings = None
-        self.encoder_layers: List[TransformerLayer] = []
-        self.pooler = None
-
-        # Store build input shape for serialization
-        self._build_input_shape = None
-
-        logger.info(f"Created BERT model with {config.num_layers} layers, "
-                    f"hidden_size={config.hidden_size}, pooling={add_pooling_layer}")
-
-    def build(self, input_shape: Union[Tuple[Optional[int], ...], Dict[str, Tuple[Optional[int], ...]]]) -> None:
-        """
-        Build the BERT model by creating and building all sublayers.
-
-        This method follows the "Parent Controls the Build" pattern by explicitly
-        building all child layers in the correct order with proper input shapes.
-
-        Args:
-            input_shape: Shape of input tensor(s). Can be a single shape tuple
-                for input_ids or a dictionary mapping input names to shapes.
-
-        Raises:
-            ValueError: If input_shape format is invalid.
-        """
-        if self.built:
-            return
-
-        self._build_input_shape = input_shape
-
-        # Handle different input shape formats
-        if isinstance(input_shape, dict):
-            # Multiple inputs case
-            input_ids_shape = input_shape.get('input_ids', input_shape.get('inputs'))
-            if input_ids_shape is None:
-                raise ValueError("input_shape dict must contain 'input_ids' or 'inputs' key")
-        else:
-            # Single input case
-            input_ids_shape = input_shape
-
-        if len(input_ids_shape) != 2:
-            raise ValueError(f"Expected 2D input shape (batch_size, seq_length), "
-                             f"got {len(input_ids_shape)}D: {input_ids_shape}")
-
-        logger.info(f"Building BERT with input_ids_shape: {input_ids_shape}")
-
-        # Create and build embeddings layer
+        # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
         self.embeddings = BertEmbeddings(
-            config=self.config,
+            config=config,
             name="embeddings"
         )
-        # CRITICAL: Build embeddings first
-        self.embeddings.build(input_ids_shape)
 
         # Create transformer encoder layers
-        self.encoder_layers = []
-        embeddings_output_shape = (*input_ids_shape, self.config.hidden_size)
-
-        for i in range(self.config.num_layers):
+        self.encoder_layers: List[TransformerLayer] = []
+        for i in range(config.num_layers):
             transformer_layer = TransformerLayer(
-                hidden_size=self.config.hidden_size,
-                num_heads=self.config.num_heads,
-                intermediate_size=self.config.intermediate_size,
-                normalization_type=self.config.normalization_type,
-                normalization_position=self.config.normalization_position,
-                attention_type=self.config.attention_type,
-                ffn_type=self.config.ffn_type,
-                dropout_rate=self.config.hidden_dropout_prob,
-                attention_dropout_rate=self.config.attention_probs_dropout_prob,
-                use_stochastic_depth=self.config.use_stochastic_depth,
-                stochastic_depth_rate=self.config.stochastic_depth_rate,
-                activation=self.config.hidden_act,
+                hidden_size=config.hidden_size,
+                num_heads=config.num_heads,
+                intermediate_size=config.intermediate_size,
+                normalization_type=config.normalization_type,
+                normalization_position=config.normalization_position,
+                attention_type=config.attention_type,
+                ffn_type=config.ffn_type,
+                dropout_rate=config.hidden_dropout_prob,
+                attention_dropout_rate=config.attention_probs_dropout_prob,
+                use_stochastic_depth=config.use_stochastic_depth,
+                stochastic_depth_rate=config.stochastic_depth_rate,
+                activation=config.hidden_act,
                 use_bias=True,
                 kernel_initializer=keras.initializers.TruncatedNormal(
-                    stddev=self.config.initializer_range
+                    stddev=config.initializer_range
                 ),
                 bias_initializer="zeros",
                 name=f"encoder_layer_{i}"
             )
-
-            # CRITICAL: Build each transformer layer with correct input shape
-            transformer_layer.build(embeddings_output_shape)
             self.encoder_layers.append(transformer_layer)
 
-            logger.info(f"Built transformer layer {i + 1}/{self.config.num_layers}")
-
         # Create pooler if needed
-        if self.add_pooling_layer:
+        self.pooler = None
+        if add_pooling_layer:
             self.pooler = keras.layers.Dense(
-                units=self.config.hidden_size,
+                units=config.hidden_size,
                 activation="tanh",
                 kernel_initializer=keras.initializers.TruncatedNormal(
-                    stddev=self.config.initializer_range
+                    stddev=config.initializer_range
                 ),
                 name="pooler"
             )
-            # Build pooler with shape for first token
-            pooler_input_shape = (None, self.config.hidden_size)
-            self.pooler.build(pooler_input_shape)
 
-        # Build parent model
-        super().build(input_shape)
-        logger.info("BERT model built successfully")
+        logger.info(f"Created BERT model with {config.num_layers} layers, "
+                    f"hidden_size={config.hidden_size}, pooling={add_pooling_layer}")
 
     def call(
             self,
@@ -581,6 +494,7 @@ class Bert(keras.Model):
             hidden_states = encoder_layer(
                 hidden_states,
                 attention_mask=attention_mask,
+                layer_idx=i,  # For differential attention
                 training=training
             )
 
@@ -615,17 +529,6 @@ class Bert(keras.Model):
             'add_pooling_layer': self.add_pooling_layer,
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration for serialization."""
-        return {
-            'input_shape': self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build model from configuration."""
-        if config.get('input_shape') is not None:
-            self.build(config['input_shape'])
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'Bert':
