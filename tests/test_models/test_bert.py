@@ -1,9 +1,9 @@
 """
-Comprehensive pytest test suite for BERT (Bidirectional Encoder Representations from Transformers) model.
+Comprehensive pytest test suite for refactored BERT (Bidirectional Encoder Representations from Transformers) model.
 
 This module provides extensive testing for the BERT implementation including:
 - Configuration validation and serialization
-- Embeddings layer functionality
+- Embeddings layer functionality with individual parameters
 - Model initialization and parameter validation
 - Architecture building and shape consistency
 - Forward pass functionality with different input formats
@@ -14,12 +14,10 @@ This module provides extensive testing for the BERT implementation including:
 - Factory function testing for classification and sequence output models
 - Integration testing
 
-Key BERT-specific testing areas:
-- Token, position, and type embeddings combination
-- Attention mask handling
-- Different sequence lengths and padding
-- Pooled output for classification tasks
-- Multiple input format support (dict vs individual tensors)
+Key changes from original:
+- BertEmbeddings tests use individual parameters instead of config object
+- All functionality preserved with improved modularity
+- Enhanced parameter validation testing
 """
 
 import pytest
@@ -200,30 +198,34 @@ class TestBertConfig:
 
 
 class TestBertEmbeddingsComponent:
-    """Test BertEmbeddings component individually."""
+    """Test BertEmbeddings component individually with individual parameters."""
 
     @pytest.fixture
-    def basic_config(self) -> BertConfig:
-        """Create a basic BERT config for testing."""
-        return BertConfig(
-            vocab_size=1000,
-            hidden_size=256,
-            num_layers=4,
-            num_heads=8,  # 256 is divisible by 8
-            intermediate_size=1024,
-            max_position_embeddings=128,
-            type_vocab_size=2
-        )
+    def basic_params(self) -> Dict[str, Any]:
+        """Create basic parameters for BertEmbeddings testing."""
+        return {
+            'vocab_size': 1000,
+            'hidden_size': 256,
+            'max_position_embeddings': 128,
+            'type_vocab_size': 2,
+            'initializer_range': 0.02,
+            'layer_norm_eps': 1e-12,
+            'hidden_dropout_prob': 0.1,
+            'normalization_type': 'layer_norm'
+        }
 
-    def test_bert_embeddings_initialization(self, basic_config):
-        """Test BertEmbeddings initialization."""
-        embeddings = BertEmbeddings(basic_config)
+    def test_bert_embeddings_initialization(self, basic_params):
+        """Test BertEmbeddings initialization with individual parameters."""
+        embeddings = BertEmbeddings(**basic_params)
 
-        assert embeddings.config == basic_config
-        assert embeddings.config.vocab_size == 1000
-        assert embeddings.config.hidden_size == 256
-        assert embeddings.config.max_position_embeddings == 128
-        assert embeddings.config.type_vocab_size == 2
+        assert embeddings.vocab_size == 1000
+        assert embeddings.hidden_size == 256
+        assert embeddings.max_position_embeddings == 128
+        assert embeddings.type_vocab_size == 2
+        assert embeddings.initializer_range == 0.02
+        assert embeddings.layer_norm_eps == 1e-12
+        assert embeddings.hidden_dropout_prob == 0.1
+        assert embeddings.normalization_type == 'layer_norm'
 
         # Components should be created in __init__ (modern Keras 3 pattern)
         assert embeddings.word_embeddings is not None
@@ -237,9 +239,70 @@ class TestBertEmbeddingsComponent:
         assert not embeddings.word_embeddings.built
         assert not embeddings.position_embeddings.built
 
-    def test_bert_embeddings_build(self, basic_config):
+    def test_bert_embeddings_parameter_validation(self):
+        """Test BertEmbeddings parameter validation."""
+        base_params = {
+            'vocab_size': 1000,
+            'hidden_size': 256,
+            'max_position_embeddings': 128,
+            'type_vocab_size': 2,
+            'initializer_range': 0.02,
+            'layer_norm_eps': 1e-12,
+            'hidden_dropout_prob': 0.1,
+            'normalization_type': 'layer_norm'
+        }
+
+        # Test invalid vocab_size
+        with pytest.raises(ValueError, match="vocab_size must be positive"):
+            params = base_params.copy()
+            params['vocab_size'] = -1
+            BertEmbeddings(**params)
+
+        # Test invalid hidden_size
+        with pytest.raises(ValueError, match="hidden_size must be positive"):
+            params = base_params.copy()
+            params['hidden_size'] = 0
+            BertEmbeddings(**params)
+
+        # Test invalid max_position_embeddings
+        with pytest.raises(ValueError, match="max_position_embeddings must be positive"):
+            params = base_params.copy()
+            params['max_position_embeddings'] = -10
+            BertEmbeddings(**params)
+
+        # Test invalid type_vocab_size
+        with pytest.raises(ValueError, match="type_vocab_size must be positive"):
+            params = base_params.copy()
+            params['type_vocab_size'] = 0
+            BertEmbeddings(**params)
+
+        # Test invalid initializer_range
+        with pytest.raises(ValueError, match="initializer_range must be positive"):
+            params = base_params.copy()
+            params['initializer_range'] = -0.1
+            BertEmbeddings(**params)
+
+        # Test invalid layer_norm_eps
+        with pytest.raises(ValueError, match="layer_norm_eps must be positive"):
+            params = base_params.copy()
+            params['layer_norm_eps'] = 0
+            BertEmbeddings(**params)
+
+        # Test invalid hidden_dropout_prob
+        with pytest.raises(ValueError, match="hidden_dropout_prob must be between 0 and 1"):
+            params = base_params.copy()
+            params['hidden_dropout_prob'] = 1.5
+            BertEmbeddings(**params)
+
+        # Test invalid normalization_type
+        with pytest.raises(ValueError, match="normalization_type must be one of"):
+            params = base_params.copy()
+            params['normalization_type'] = 'invalid_norm'
+            BertEmbeddings(**params)
+
+    def test_bert_embeddings_build(self, basic_params):
         """Test BertEmbeddings build process."""
-        embeddings = BertEmbeddings(basic_config)
+        embeddings = BertEmbeddings(**basic_params)
         input_shape = (None, 64)  # (batch_size, sequence_length)
 
         embeddings.build(input_shape)
@@ -252,14 +315,26 @@ class TestBertEmbeddingsComponent:
         assert embeddings.dropout.built
 
         # Check embedding dimensions
-        assert embeddings.word_embeddings.input_dim == basic_config.vocab_size
-        assert embeddings.word_embeddings.output_dim == basic_config.hidden_size
-        assert embeddings.position_embeddings.input_dim == basic_config.max_position_embeddings
-        assert embeddings.token_type_embeddings.input_dim == basic_config.type_vocab_size
+        assert embeddings.word_embeddings.input_dim == basic_params['vocab_size']
+        assert embeddings.word_embeddings.output_dim == basic_params['hidden_size']
+        assert embeddings.position_embeddings.input_dim == basic_params['max_position_embeddings']
+        assert embeddings.token_type_embeddings.input_dim == basic_params['type_vocab_size']
 
-    def test_bert_embeddings_forward_pass(self, basic_config):
+    def test_bert_embeddings_build_invalid_shape(self, basic_params):
+        """Test BertEmbeddings build with invalid input shape."""
+        embeddings = BertEmbeddings(**basic_params)
+
+        # Test 3D input (should be 2D)
+        with pytest.raises(ValueError, match="Expected 2D input shape"):
+            embeddings.build((None, 32, 128))
+
+        # Test 1D input (should be 2D)
+        with pytest.raises(ValueError, match="Expected 2D input shape"):
+            embeddings.build((None,))
+
+    def test_bert_embeddings_forward_pass(self, basic_params):
         """Test BertEmbeddings forward pass."""
-        embeddings = BertEmbeddings(basic_config)
+        embeddings = BertEmbeddings(**basic_params)
 
         batch_size = 4
         seq_length = 32
@@ -269,18 +344,18 @@ class TestBertEmbeddingsComponent:
             keras.random.uniform(
                 (batch_size, seq_length),
                 minval=1,
-                maxval=basic_config.vocab_size
+                maxval=basic_params['vocab_size']
             ),
             dtype='int32'
         )
 
         output = embeddings(input_ids, training=False)
 
-        assert output.shape == (batch_size, seq_length, basic_config.hidden_size)
+        assert output.shape == (batch_size, seq_length, basic_params['hidden_size'])
 
-    def test_bert_embeddings_with_token_type_ids(self, basic_config):
+    def test_bert_embeddings_with_token_type_ids(self, basic_params):
         """Test BertEmbeddings with token type IDs."""
-        embeddings = BertEmbeddings(basic_config)
+        embeddings = BertEmbeddings(**basic_params)
 
         batch_size = 3
         seq_length = 16
@@ -289,7 +364,7 @@ class TestBertEmbeddingsComponent:
             keras.random.uniform(
                 (batch_size, seq_length),
                 minval=1,
-                maxval=basic_config.vocab_size
+                maxval=basic_params['vocab_size']
             ),
             dtype='int32'
         )
@@ -302,11 +377,11 @@ class TestBertEmbeddingsComponent:
 
         output = embeddings(input_ids, token_type_ids=token_type_ids, training=False)
 
-        assert output.shape == (batch_size, seq_length, basic_config.hidden_size)
+        assert output.shape == (batch_size, seq_length, basic_params['hidden_size'])
 
-    def test_bert_embeddings_with_position_ids(self, basic_config):
+    def test_bert_embeddings_with_position_ids(self, basic_params):
         """Test BertEmbeddings with custom position IDs."""
-        embeddings = BertEmbeddings(basic_config)
+        embeddings = BertEmbeddings(**basic_params)
 
         batch_size = 2
         seq_length = 20
@@ -315,7 +390,7 @@ class TestBertEmbeddingsComponent:
             keras.random.uniform(
                 (batch_size, seq_length),
                 minval=1,
-                maxval=basic_config.vocab_size
+                maxval=basic_params['vocab_size']
             ),
             dtype='int32'
         )
@@ -332,11 +407,11 @@ class TestBertEmbeddingsComponent:
             training=False
         )
 
-        assert output.shape == (batch_size, seq_length, basic_config.hidden_size)
+        assert output.shape == (batch_size, seq_length, basic_params['hidden_size'])
 
-    def test_bert_embeddings_all_inputs(self, basic_config):
+    def test_bert_embeddings_all_inputs(self, basic_params):
         """Test BertEmbeddings with all input types."""
-        embeddings = BertEmbeddings(basic_config)
+        embeddings = BertEmbeddings(**basic_params)
 
         batch_size = 2
         seq_length = 24
@@ -345,7 +420,7 @@ class TestBertEmbeddingsComponent:
             keras.random.uniform(
                 (batch_size, seq_length),
                 minval=1,
-                maxval=basic_config.vocab_size
+                maxval=basic_params['vocab_size']
             ),
             dtype='int32'
         )
@@ -354,7 +429,7 @@ class TestBertEmbeddingsComponent:
             keras.random.uniform(
                 (batch_size, seq_length),
                 minval=0,
-                maxval=basic_config.type_vocab_size
+                maxval=basic_params['type_vocab_size']
             ),
             dtype='int32'
         )
@@ -371,11 +446,11 @@ class TestBertEmbeddingsComponent:
             training=False
         )
 
-        assert output.shape == (batch_size, seq_length, basic_config.hidden_size)
+        assert output.shape == (batch_size, seq_length, basic_params['hidden_size'])
 
-    def test_bert_embeddings_training_mode(self, basic_config):
+    def test_bert_embeddings_training_mode(self, basic_params):
         """Test BertEmbeddings in training vs evaluation mode."""
-        embeddings = BertEmbeddings(basic_config)
+        embeddings = BertEmbeddings(**basic_params)
 
         batch_size = 2
         seq_length = 16
@@ -384,7 +459,7 @@ class TestBertEmbeddingsComponent:
             keras.random.uniform(
                 (batch_size, seq_length),
                 minval=1,
-                maxval=basic_config.vocab_size
+                maxval=basic_params['vocab_size']
             ),
             dtype='int32'
         )
@@ -394,21 +469,25 @@ class TestBertEmbeddingsComponent:
         output_eval = embeddings(input_ids, training=False)
 
         assert output_train.shape == output_eval.shape
-        assert output_train.shape == (batch_size, seq_length, basic_config.hidden_size)
+        assert output_train.shape == (batch_size, seq_length, basic_params['hidden_size'])
 
     def test_bert_embeddings_normalization_types(self):
         """Test BertEmbeddings with different normalization types."""
         normalization_types = ["layer_norm", "rms_norm", "batch_norm"]
 
         for norm_type in normalization_types:
-            config = BertConfig(
-                vocab_size=500,
-                hidden_size=128,
-                num_heads=8,  # 128 is divisible by 8
-                normalization_type=norm_type
-            )
+            params = {
+                'vocab_size': 500,
+                'hidden_size': 128,
+                'max_position_embeddings': 64,
+                'type_vocab_size': 2,
+                'initializer_range': 0.02,
+                'layer_norm_eps': 1e-12,
+                'hidden_dropout_prob': 0.1,
+                'normalization_type': norm_type
+            }
 
-            embeddings = BertEmbeddings(config)
+            embeddings = BertEmbeddings(**params)
 
             input_ids = ops.cast(
                 keras.random.uniform((2, 16), minval=1, maxval=500),
@@ -417,6 +496,40 @@ class TestBertEmbeddingsComponent:
 
             output = embeddings(input_ids, training=False)
             assert output.shape == (2, 16, 128)
+
+    def test_bert_embeddings_serialization(self, basic_params):
+        """Test BertEmbeddings serialization and deserialization."""
+        embeddings = BertEmbeddings(**basic_params)
+
+        # Test get_config
+        config = embeddings.get_config()
+        assert isinstance(config, dict)
+        assert config['vocab_size'] == basic_params['vocab_size']
+        assert config['hidden_size'] == basic_params['hidden_size']
+        assert config['max_position_embeddings'] == basic_params['max_position_embeddings']
+        assert config['type_vocab_size'] == basic_params['type_vocab_size']
+        assert config['initializer_range'] == basic_params['initializer_range']
+        assert config['layer_norm_eps'] == basic_params['layer_norm_eps']
+        assert config['hidden_dropout_prob'] == basic_params['hidden_dropout_prob']
+        assert config['normalization_type'] == basic_params['normalization_type']
+
+        # Test from_config
+        reconstructed = BertEmbeddings.from_config(config)
+        assert reconstructed.vocab_size == embeddings.vocab_size
+        assert reconstructed.hidden_size == embeddings.hidden_size
+        assert reconstructed.max_position_embeddings == embeddings.max_position_embeddings
+        assert reconstructed.type_vocab_size == embeddings.type_vocab_size
+        assert reconstructed.normalization_type == embeddings.normalization_type
+
+    def test_bert_embeddings_compute_output_shape(self, basic_params):
+        """Test BertEmbeddings compute_output_shape method."""
+        embeddings = BertEmbeddings(**basic_params)
+
+        input_shape = (4, 32)  # (batch_size, seq_length)
+        output_shape = embeddings.compute_output_shape(input_shape)
+
+        expected_shape = (4, 32, basic_params['hidden_size'])
+        assert output_shape == expected_shape
 
 
 class TestBERTModelInitialization:
@@ -442,6 +555,13 @@ class TestBERTModelInitialization:
         assert not model.embeddings.built
         for layer in model.encoder_layers:
             assert not layer.built
+
+        # Check that embeddings has correct parameters (passed individually)
+        assert model.embeddings.vocab_size == config.vocab_size
+        assert model.embeddings.hidden_size == config.hidden_size
+        assert model.embeddings.max_position_embeddings == config.max_position_embeddings
+        assert model.embeddings.type_vocab_size == config.type_vocab_size
+        assert model.embeddings.normalization_type == config.normalization_type
 
     def test_initialization_without_pooling(self):
         """Test BERT model initialization without pooling layer."""
@@ -474,6 +594,12 @@ class TestBERTModelInitialization:
         assert model.config.hidden_dropout_prob == 0.2
         assert model.config.normalization_type == "rms_norm"
         assert model.config.normalization_position == "pre"
+
+        # Check that embeddings received correct individual parameters
+        assert model.embeddings.vocab_size == 25000
+        assert model.embeddings.hidden_size == 512
+        assert model.embeddings.hidden_dropout_prob == 0.2
+        assert model.embeddings.normalization_type == "rms_norm"
 
 
 class TestBERTModelBuilding:
@@ -817,17 +943,32 @@ class TestBERTModelSerialization:
         assert reconstructed_model.config.num_heads == original_config.num_heads
         assert reconstructed_model.add_pooling_layer == original_model.add_pooling_layer
 
+        # Check that embeddings parameters match
+        assert reconstructed_model.embeddings.vocab_size == original_model.embeddings.vocab_size
+        assert reconstructed_model.embeddings.hidden_size == original_model.embeddings.hidden_size
+
     def test_embeddings_serialization(self):
         """Test BertEmbeddings serialization."""
-        config = BertConfig(vocab_size=1000, hidden_size=256, num_heads=8)  # 256/8=32, valid
+        params = {
+            'vocab_size': 1000,
+            'hidden_size': 256,
+            'max_position_embeddings': 128,
+            'type_vocab_size': 2,
+            'initializer_range': 0.02,
+            'layer_norm_eps': 1e-12,
+            'hidden_dropout_prob': 0.1,
+            'normalization_type': 'layer_norm'
+        }
 
         # Test BertEmbeddings serialization
-        embeddings = BertEmbeddings(config)
+        embeddings = BertEmbeddings(**params)
         embeddings_config = embeddings.get_config()
         reconstructed_embeddings = BertEmbeddings.from_config(embeddings_config)
 
-        assert reconstructed_embeddings.config.vocab_size == config.vocab_size
-        assert reconstructed_embeddings.config.hidden_size == config.hidden_size
+        assert reconstructed_embeddings.vocab_size == params['vocab_size']
+        assert reconstructed_embeddings.hidden_size == params['hidden_size']
+        assert reconstructed_embeddings.max_position_embeddings == params['max_position_embeddings']
+        assert reconstructed_embeddings.normalization_type == params['normalization_type']
 
     def test_model_save_load(self):
         """Test saving and loading complete model."""
@@ -1591,6 +1732,97 @@ class TestBERTAdvancedFeatures:
         # Both should have correct shapes
         assert output_train[0].shape == (2, 24, 128)
         assert output_eval[0].shape == (2, 24, 128)
+
+    def test_embeddings_parameter_propagation(self):
+        """Test that config parameters are correctly propagated to embeddings."""
+        config = BertConfig(
+            vocab_size=25000,
+            hidden_size=512,
+            max_position_embeddings=1024,
+            type_vocab_size=4,
+            initializer_range=0.01,
+            layer_norm_eps=1e-6,
+            hidden_dropout_prob=0.15,
+            normalization_type="rms_norm"
+        )
+
+        model = Bert(config)
+
+        # Check that embeddings received correct individual parameters
+        assert model.embeddings.vocab_size == config.vocab_size
+        assert model.embeddings.hidden_size == config.hidden_size
+        assert model.embeddings.max_position_embeddings == config.max_position_embeddings
+        assert model.embeddings.type_vocab_size == config.type_vocab_size
+        assert model.embeddings.initializer_range == config.initializer_range
+        assert model.embeddings.layer_norm_eps == config.layer_norm_eps
+        assert model.embeddings.hidden_dropout_prob == config.hidden_dropout_prob
+        assert model.embeddings.normalization_type == config.normalization_type
+
+
+class TestBERTModularity:
+    """Test the improved modularity of the refactored BERT implementation."""
+
+    def test_embeddings_independent_of_config(self):
+        """Test that BertEmbeddings can be used independently without BertConfig."""
+        # Create embeddings with custom parameters
+        embeddings = BertEmbeddings(
+            vocab_size=5000,
+            hidden_size=384,
+            max_position_embeddings=256,
+            type_vocab_size=3,
+            initializer_range=0.01,
+            layer_norm_eps=1e-8,
+            hidden_dropout_prob=0.05,
+            normalization_type='rms_norm'
+        )
+
+        # Test that it works independently
+        input_ids = ops.cast(
+            keras.random.uniform((2, 32), minval=1, maxval=5000),
+            dtype='int32'
+        )
+
+        output = embeddings(input_ids)
+        assert output.shape == (2, 32, 384)
+
+        # Verify parameters are stored correctly
+        assert embeddings.vocab_size == 5000
+        assert embeddings.hidden_size == 384
+        assert embeddings.normalization_type == 'rms_norm'
+
+    def test_embeddings_different_configs_same_model(self):
+        """Test using different embedding configs in the same model."""
+        # This demonstrates the modularity - we could theoretically create
+        # a model with different embedding parameters than the main config
+        # (though in practice this would be unusual)
+
+        config = BertConfig(
+            vocab_size=1000,
+            hidden_size=256,
+            num_layers=2,
+            num_heads=8
+        )
+
+        # Create embeddings with different parameters than config
+        custom_embeddings = BertEmbeddings(
+            vocab_size=2000,  # Different from config
+            hidden_size=256,  # Same as config (must match for compatibility)
+            max_position_embeddings=128,
+            type_vocab_size=4,  # Different from config
+            initializer_range=0.01,
+            layer_norm_eps=1e-10,
+            hidden_dropout_prob=0.05,
+            normalization_type='layer_norm'
+        )
+
+        # The custom embeddings should work independently
+        input_ids = ops.cast(
+            keras.random.uniform((2, 16), minval=1, maxval=2000),
+            dtype='int32'
+        )
+
+        output = custom_embeddings(input_ids)
+        assert output.shape == (2, 16, 256)
 
 
 if __name__ == "__main__":

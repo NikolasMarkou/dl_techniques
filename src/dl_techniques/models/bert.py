@@ -4,18 +4,9 @@ BERT (Bidirectional Encoder Representations from Transformers) Implementation
 This module provides a comprehensive BERT implementation using the dl-techniques framework,
 featuring configurable architectures, proper serialization, and integration with the
 existing TransformerLayer component.
-
-Key features:
-- Full compatibility with Keras 3.x model lifecycle
-- Configurable normalization types (LayerNorm, RMSNorm, BandRMS)
-- Configurable attention mechanisms and FFN architectures
-- Proper serialization and deserialization support
-- Integration with dl-techniques TransformerLayer
-- Support for both classification and sequence output tasks
 """
 
 import keras
-from keras import ops
 from dataclasses import dataclass
 from typing import Optional, Union, Any, Dict, Tuple, List
 
@@ -24,8 +15,7 @@ from typing import Optional, Union, Any, Dict, Tuple, List
 # ---------------------------------------------------------------------
 
 from ..utils.logger import logger
-from ..layers.norms.rms_norm import RMSNorm
-from ..layers.norms.band_rms import BandRMS
+from ..layers.bert_blocks import BertEmbeddings
 from ..layers.transformer import TransformerLayer
 
 
@@ -114,239 +104,6 @@ class BertConfig:
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class BertEmbeddings(keras.layers.Layer):
-    """
-    BERT embeddings layer combining word, position, and token type embeddings.
-
-    This layer implements the embedding component of BERT, which combines:
-    - Word embeddings: Map token IDs to dense vector representations
-    - Position embeddings: Add positional information to sequence tokens
-    - Token type embeddings: Distinguish between different sentence segments
-
-    The embeddings are summed together, normalized, and passed through dropout
-    for regularization. Supports configurable normalization types from the
-    dl-techniques framework.
-
-    Args:
-        config: BERT configuration object containing all hyperparameters.
-        **kwargs: Additional keyword arguments for the Layer base class.
-
-    Input shape:
-        - input_ids: (batch_size, sequence_length)
-        - token_type_ids: (batch_size, sequence_length) - optional
-        - position_ids: (batch_size, sequence_length) - optional
-
-    Output shape:
-        (batch_size, sequence_length, hidden_size)
-
-    Example:
-        ```python
-        config = BertConfig(hidden_size=768, vocab_size=30522)
-        embeddings = BertEmbeddings(config)
-
-        input_ids = keras.ops.array([[101, 2023, 2003, 102]])  # [CLS] this is [SEP]
-        embedded = embeddings(input_ids)
-        ```
-    """
-
-    def __init__(
-            self,
-            config: BertConfig,
-            **kwargs: Any
-    ) -> None:
-        super().__init__(**kwargs)
-
-        # Validate configuration
-        config.validate()
-        self.config = config
-
-        # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
-        self.word_embeddings = keras.layers.Embedding(
-            input_dim=config.vocab_size,
-            output_dim=config.hidden_size,
-            embeddings_initializer=keras.initializers.TruncatedNormal(
-                stddev=config.initializer_range
-            ),
-            mask_zero=True,
-            name="word_embeddings"
-        )
-
-        self.position_embeddings = keras.layers.Embedding(
-            input_dim=config.max_position_embeddings,
-            output_dim=config.hidden_size,
-            embeddings_initializer=keras.initializers.TruncatedNormal(
-                stddev=config.initializer_range
-            ),
-            name="position_embeddings"
-        )
-
-        self.token_type_embeddings = keras.layers.Embedding(
-            input_dim=config.type_vocab_size,
-            output_dim=config.hidden_size,
-            embeddings_initializer=keras.initializers.TruncatedNormal(
-                stddev=config.initializer_range
-            ),
-            name="token_type_embeddings"
-        )
-
-        # Create normalization layer based on config
-        self.layer_norm = self._create_normalization_layer("layer_norm")
-
-        self.dropout = keras.layers.Dropout(
-            rate=config.hidden_dropout_prob,
-            name="dropout"
-        )
-
-        logger.info(f"Created BertEmbeddings with hidden_size={config.hidden_size}, "
-                    f"vocab_size={config.vocab_size}")
-
-    def _create_normalization_layer(self, name: str) -> keras.layers.Layer:
-        """
-        Create a normalization layer based on the configuration type.
-
-        Args:
-            name: Name for the normalization layer.
-
-        Returns:
-            Configured normalization layer instance.
-
-        Raises:
-            ValueError: If normalization_type is not supported.
-        """
-        if self.config.normalization_type == 'layer_norm':
-            return keras.layers.LayerNormalization(
-                epsilon=self.config.layer_norm_eps,
-                name=name
-            )
-        elif self.config.normalization_type == 'rms_norm':
-            return RMSNorm(
-                epsilon=self.config.layer_norm_eps,
-                name=name
-            )
-        elif self.config.normalization_type == 'band_rms':
-            return BandRMS(
-                epsilon=self.config.layer_norm_eps,
-                name=name
-            )
-        elif self.config.normalization_type == 'batch_norm':
-            return keras.layers.BatchNormalization(
-                epsilon=self.config.layer_norm_eps,
-                name=name
-            )
-        else:
-            raise ValueError(
-                f"Unknown normalization type: {self.config.normalization_type}. "
-                f"Supported types: layer_norm, rms_norm, band_rms, batch_norm"
-            )
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the embeddings layer by explicitly building all sub-layers.
-
-        This follows the modern Keras 3 pattern where the parent layer
-        explicitly builds all child layers for robust serialization.
-
-        Args:
-            input_shape: Shape tuple for input_ids (batch_size, seq_length).
-
-        Raises:
-            ValueError: If input_shape is invalid.
-        """
-        if self.built:
-            return
-
-        # Validate input shape
-        if len(input_shape) != 2:
-            raise ValueError(f"Expected 2D input shape (batch_size, seq_length), "
-                             f"got {len(input_shape)}D: {input_shape}")
-
-        logger.info(f"Building BertEmbeddings with input_shape: {input_shape}")
-
-        # CRITICAL: Explicitly build all sub-layers for robust serialization
-        self.word_embeddings.build(input_shape)
-        self.position_embeddings.build(input_shape)
-        self.token_type_embeddings.build(input_shape)
-
-        # Build normalization and dropout with embeddings output shape
-        embeddings_output_shape = (*input_shape, self.config.hidden_size)
-        self.layer_norm.build(embeddings_output_shape)
-        self.dropout.build(embeddings_output_shape)
-
-        super().build(input_shape)
-        logger.info("BertEmbeddings built successfully")
-
-    def call(
-            self,
-            input_ids: keras.KerasTensor,
-            token_type_ids: Optional[keras.KerasTensor] = None,
-            position_ids: Optional[keras.KerasTensor] = None,
-            training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """
-        Apply embeddings to input tokens.
-
-        Args:
-            input_ids: Token IDs of shape (batch_size, seq_length).
-            token_type_ids: Token type IDs of shape (batch_size, seq_length).
-                If None, defaults to all zeros.
-            position_ids: Position IDs of shape (batch_size, seq_length).
-                If None, defaults to sequential positions.
-            training: Whether the layer is in training mode.
-
-        Returns:
-            Embedded and normalized tokens of shape
-            (batch_size, seq_length, hidden_size).
-        """
-        input_shape = ops.shape(input_ids)
-        batch_size = input_shape[0]
-        seq_length = input_shape[1]
-
-        # Create position IDs if not provided
-        if position_ids is None:
-            position_ids = ops.arange(seq_length, dtype="int32")
-            position_ids = ops.expand_dims(position_ids, axis=0)
-            position_ids = ops.broadcast_to(position_ids, (batch_size, seq_length))
-
-        # Create token type IDs if not provided
-        if token_type_ids is None:
-            token_type_ids = ops.zeros_like(input_ids, dtype="int32")
-
-        # Apply all embeddings
-        word_embeds = self.word_embeddings(input_ids)
-        position_embeds = self.position_embeddings(position_ids)
-        token_type_embeds = self.token_type_embeddings(token_type_ids)
-
-        # Sum all embeddings
-        embeddings = word_embeds + position_embeds + token_type_embeds
-
-        # Apply normalization and dropout
-        embeddings = self.layer_norm(embeddings, training=training)
-        embeddings = self.dropout(embeddings, training=training)
-
-        return embeddings
-
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute output shape given input shape."""
-        return (*input_shape, self.config.hidden_size)
-
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            'config': self.config.to_dict(),
-        })
-        return config
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> 'BertEmbeddings':
-        """Create layer from configuration."""
-        bert_config = BertConfig.from_dict(config['config'])
-        return cls(config=bert_config)
-
-
-# ---------------------------------------------------------------------
-
-@keras.saving.register_keras_serializable()
 class Bert(keras.Model):
     """
     BERT (Bidirectional Encoder Representations from Transformers) model.
@@ -400,8 +157,16 @@ class Bert(keras.Model):
         self.add_pooling_layer = add_pooling_layer
 
         # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
+        # Pass individual parameters to BertEmbeddings instead of config object
         self.embeddings = BertEmbeddings(
-            config=config,
+            vocab_size=config.vocab_size,
+            hidden_size=config.hidden_size,
+            max_position_embeddings=config.max_position_embeddings,
+            type_vocab_size=config.type_vocab_size,
+            initializer_range=config.initializer_range,
+            layer_norm_eps=config.layer_norm_eps,
+            hidden_dropout_prob=config.hidden_dropout_prob,
+            normalization_type=config.normalization_type,
             name="embeddings"
         )
 
