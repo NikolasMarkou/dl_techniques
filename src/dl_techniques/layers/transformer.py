@@ -480,13 +480,26 @@ class TransformerLayer(keras.layers.Layer):
         """Forward pass of the transformer layer."""
         residual = inputs
 
+        mha_attention_mask = attention_mask
+        if self.attention_type == 'multi_head_attention' and mha_attention_mask is not None:
+            mask_shape = ops.shape(mha_attention_mask)
+            # This logic specifically targets 2D padding masks (batch_size, seq_len)
+            # and expands them to a broadcastable 4D shape. Other mask formats
+            # (e.g., (seq_len, seq_len) for causal) are passed through as-is,
+            # as Keras's MHA layer can handle them correctly.
+            if len(mask_shape) == 2:
+                input_shape = ops.shape(inputs)
+                # Check if it's a (batch_size, seq_len) padding mask.
+                if mask_shape[0] == input_shape[0] and mask_shape[1] == input_shape[1]:
+                    mha_attention_mask = mha_attention_mask[:, None, None, :]
+
         if self.normalization_position == 'pre':
             # --- Pre-Normalization: Normalize -> SubLayer -> StochasticDepth -> Add ---
             # 1. Attention block
             x = self.attention_norm(inputs, training=training)
 
             if self.attention_type == 'multi_head_attention':
-                x = self.attention(query=x, value=x, key=x, attention_mask=attention_mask, training=training)
+                x = self.attention(query=x, value=x, key=x, attention_mask=mha_attention_mask, training=training)
             elif self.attention_type == 'differential_attention':
                 x = self.attention(x, mask=attention_mask, layer_idx=layer_idx, training=training)
             else:
@@ -510,7 +523,7 @@ class TransformerLayer(keras.layers.Layer):
             # --- Post-Normalization: SubLayer -> StochasticDepth -> Add -> Normalize ---
             # 1. Attention block
             if self.attention_type == 'multi_head_attention':
-                x = self.attention(query=inputs, value=inputs, key=inputs, attention_mask=attention_mask, training=training)
+                x = self.attention(query=inputs, value=inputs, key=inputs, attention_mask=mha_attention_mask, training=training)
             elif self.attention_type == 'differential_attention':
                 x = self.attention(inputs, mask=attention_mask, layer_idx=layer_idx, training=training)
             else:
