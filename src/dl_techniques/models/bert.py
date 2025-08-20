@@ -308,7 +308,7 @@ class BertEmbeddings(keras.layers.Layer):
             training: Whether the layer is in training mode.
 
         Returns:
-            Embedded and normalized tokens of shape 
+            Embedded and normalized tokens of shape
             (batch_size, seq_length, hidden_size).
         """
         input_shape = ops.shape(input_ids)
@@ -372,7 +372,7 @@ class BertEmbeddings(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class BERT(keras.Model):
+class Bert(keras.Model):
     """
     BERT (Bidirectional Encoder Representations from Transformers) model.
 
@@ -628,7 +628,7 @@ class BERT(keras.Model):
             self.build(config['input_shape'])
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> 'BERT':
+    def from_config(cls, config: Dict[str, Any]) -> 'Bert':
         """Create model from configuration."""
         bert_config = BertConfig.from_dict(config['config'])
         return cls(
@@ -677,7 +677,7 @@ def create_bert_for_classification(
     logger.info(f"Creating BERT classification model with {num_labels} labels")
 
     # Create base BERT model with pooling
-    bert = BERT(config=config, add_pooling_layer=True, name="bert")
+    bert = Bert(config=config, add_pooling_layer=True, name="bert")
 
     # Define inputs
     input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
@@ -757,7 +757,7 @@ def create_bert_for_sequence_output(
     logger.info("Creating BERT model for sequence output tasks")
 
     # Create base BERT model without pooling
-    bert = BERT(config=config, add_pooling_layer=False, name="bert")
+    bert = Bert(config=config, add_pooling_layer=False, name="bert")
 
     # Define inputs
     input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")

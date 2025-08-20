@@ -482,15 +482,13 @@ class TransformerLayer(keras.layers.Layer):
 
         mha_attention_mask = attention_mask
         if self.attention_type == 'multi_head_attention' and mha_attention_mask is not None:
-            mask_shape = ops.shape(mha_attention_mask)
-            # This logic specifically targets 2D padding masks (batch_size, seq_len)
-            # and expands them to a broadcastable 4D shape. Other mask formats
-            # (e.g., (seq_len, seq_len) for causal) are passed through as-is,
-            # as Keras's MHA layer can handle them correctly.
+            mask_shape = mha_attention_mask.shape
             if len(mask_shape) == 2:
-                input_shape = ops.shape(inputs)
-                # Check if it's a (batch_size, seq_len) padding mask.
-                if mask_shape[0] == input_shape[0] and mask_shape[1] == input_shape[1]:
+                # This heuristic differentiates between a (batch_size, seq_len) padding mask
+                # and a (seq_len, seq_len) causal mask. It's robust because even if
+                # batch_size == seq_len, a square mask is almost always a causal mask,
+                # which Keras's MHA handles correctly without expansion.
+                if mask_shape[0] != mask_shape[1]:
                     mha_attention_mask = mha_attention_mask[:, None, None, :]
 
         if self.normalization_position == 'pre':

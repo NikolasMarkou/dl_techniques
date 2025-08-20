@@ -34,7 +34,7 @@ from typing import Dict, Any
 from dl_techniques.models.bert import (
     BertConfig,
     BertEmbeddings,
-    BERT,
+    Bert,
     create_bert_for_classification,
     create_bert_for_sequence_output,
     create_bert_base_uncased,
@@ -421,7 +421,7 @@ class TestBERTModelInitialization:
     def test_basic_initialization(self):
         """Test basic BERT model initialization."""
         config = BertConfig(hidden_size=256, num_layers=6, num_heads=8)  # 256/8=32, valid
-        model = BERT(config)
+        model = Bert(config)
 
         assert model.config == config
         assert model.config.hidden_size == 256
@@ -437,7 +437,7 @@ class TestBERTModelInitialization:
     def test_initialization_without_pooling(self):
         """Test BERT model initialization without pooling layer."""
         config = BertConfig(hidden_size=256, num_heads=8)  # 256/8=32, valid
-        model = BERT(config, add_pooling_layer=False)
+        model = Bert(config, add_pooling_layer=False)
 
         assert model.add_pooling_layer is False
 
@@ -454,7 +454,7 @@ class TestBERTModelInitialization:
             normalization_type="rms_norm",
             normalization_position="pre"
         )
-        model = BERT(config)
+        model = Bert(config)
 
         assert model.config.vocab_size == 25000
         assert model.config.hidden_size == 512
@@ -483,7 +483,7 @@ class TestBERTModelBuilding:
 
     def test_build_with_tuple_input_shape(self, basic_config):
         """Test building BERT model with tuple input shape."""
-        model = BERT(basic_config)
+        model = Bert(basic_config)
         input_shape = (None, 64)
 
         model.build(input_shape)
@@ -500,7 +500,7 @@ class TestBERTModelBuilding:
 
     def test_build_with_dict_input_shape(self, basic_config):
         """Test building BERT model with dictionary input shape."""
-        model = BERT(basic_config)
+        model = Bert(basic_config)
         input_shape = {
             'input_ids': (None, 64),
             'attention_mask': (None, 64),
@@ -516,7 +516,7 @@ class TestBERTModelBuilding:
 
     def test_build_prevents_double_building(self, basic_config):
         """Test that building twice handles correctly."""
-        model = BERT(basic_config)
+        model = Bert(basic_config)
         input_shape = (None, 32)
 
         # Build first time
@@ -536,7 +536,7 @@ class TestBERTModelBuilding:
 
     def test_build_without_pooling_layer(self, basic_config):
         """Test building BERT model without pooling layer."""
-        model = BERT(basic_config, add_pooling_layer=False)
+        model = Bert(basic_config, add_pooling_layer=False)
         model.build((None, 32))
 
         assert model.built is True
@@ -544,7 +544,7 @@ class TestBERTModelBuilding:
 
     def test_transformer_layers_configuration(self, basic_config):
         """Test that TransformerLayers are configured correctly."""
-        model = BERT(basic_config)
+        model = Bert(basic_config)
         model.build((None, 32))
 
         # Check transformer layer configuration
@@ -561,7 +561,7 @@ class TestBERTModelForwardPass:
     """Test BERT model forward pass functionality."""
 
     @pytest.fixture
-    def built_model(self) -> BERT:
+    def built_model(self) -> Bert:
         """Create a built BERT model for testing."""
         config = BertConfig(
             vocab_size=1000,
@@ -571,7 +571,7 @@ class TestBERTModelForwardPass:
             intermediate_size=1024,
             max_position_embeddings=128
         )
-        model = BERT(config)
+        model = Bert(config)
         model.build((None, 64))
         return model
 
@@ -660,7 +660,7 @@ class TestBERTModelForwardPass:
             num_layers=2,
             num_heads=8  # 256/8=32, valid
         )
-        model = BERT(config, add_pooling_layer=False)
+        model = Bert(config, add_pooling_layer=False)
         model.build((None, 32))
 
         batch_size = 2
@@ -772,7 +772,7 @@ class TestBERTModelSerialization:
             hidden_dropout_prob=0.15,
             normalization_type="rms_norm"
         )
-        model = BERT(config)
+        model = Bert(config)
 
         model_config = model.get_config()
 
@@ -795,11 +795,11 @@ class TestBERTModelSerialization:
             num_layers=6,
             num_heads=12  # 384/12=32, valid
         )
-        original_model = BERT(original_config, add_pooling_layer=False)
+        original_model = Bert(original_config, add_pooling_layer=False)
 
         # Get config and reconstruct
         model_config = original_model.get_config()
-        reconstructed_model = BERT.from_config(model_config)
+        reconstructed_model = Bert.from_config(model_config)
 
         # Check that configs match
         assert reconstructed_model.config.vocab_size == original_config.vocab_size
@@ -811,7 +811,7 @@ class TestBERTModelSerialization:
     def test_build_config_serialization(self):
         """Test build configuration serialization."""
         config = BertConfig(hidden_size=256, num_heads=8)  # 256/8=32, valid
-        model = BERT(config)
+        model = Bert(config)
 
         input_shape = (None, 64)
         model.build(input_shape)
@@ -820,7 +820,7 @@ class TestBERTModelSerialization:
         assert build_config['input_shape'] == input_shape
 
         # Test build from config
-        new_model = BERT(config)
+        new_model = Bert(config)
         new_model.build_from_config(build_config)
         assert new_model.built is True
 
@@ -846,7 +846,7 @@ class TestBERTModelSerialization:
             num_heads=8,   # 256/8=32, valid
             intermediate_size=512
         )
-        model = BERT(config)
+        model = Bert(config)
         # Build with specific input shape to avoid None dimension issues
         model.build((2, 32))  # Use fixed batch size for building
 
@@ -872,7 +872,7 @@ class TestBERTModelSerialization:
             loaded_model = keras.models.load_model(
                 model_path,
                 custom_objects={
-                    'BERT': BERT,
+                    'BERT': Bert,
                     'BertEmbeddings': BertEmbeddings,
                     'BertConfig': BertConfig
                 }
@@ -915,7 +915,7 @@ class TestBERTEdgeCases:
             num_layers=2,
             num_heads=8  # 128/8=16, valid
         )
-        model = BERT(config)
+        model = Bert(config)
         model.build((None, 1))
 
         input_ids = ops.cast([[42]], dtype='int32')
@@ -934,7 +934,7 @@ class TestBERTEdgeCases:
             num_heads=8,  # 128/8=16, valid
             max_position_embeddings=64
         )
-        model = BERT(config)
+        model = Bert(config)
 
         seq_length = 64
         model.build((None, seq_length))
@@ -955,7 +955,7 @@ class TestBERTEdgeCases:
     def test_single_sample_batch(self):
         """Test BERT with batch size of 1."""
         config = BertConfig(vocab_size=1000, hidden_size=128, num_layers=2, num_heads=8)
-        model = BERT(config)
+        model = Bert(config)
         model.build((None, 32))
 
         input_ids = ops.cast(
@@ -971,7 +971,7 @@ class TestBERTEdgeCases:
     def test_different_batch_sizes(self):
         """Test BERT with different batch sizes."""
         config = BertConfig(vocab_size=1000, hidden_size=128, num_layers=2, num_heads=8)
-        model = BERT(config)
+        model = Bert(config)
         model.build((None, 24))
 
         batch_sizes = [1, 3, 8, 16]
@@ -995,7 +995,7 @@ class TestBERTEdgeCases:
     def test_input_with_heavy_padding(self):
         """Test BERT with heavy padding (lots of zeros)."""
         config = BertConfig(vocab_size=1000, hidden_size=128, num_layers=2, num_heads=8)
-        model = BERT(config)
+        model = Bert(config)
         model.build((None, 32))
 
         batch_size = 3
@@ -1028,7 +1028,7 @@ class TestBERTEdgeCases:
     def test_all_padding_input(self):
         """Test BERT with all padding tokens."""
         config = BertConfig(vocab_size=1000, hidden_size=128, num_layers=2, num_heads=8)
-        model = BERT(config)
+        model = Bert(config)
         model.build((None, 16))
 
         # All padding tokens (0)
@@ -1048,7 +1048,7 @@ class TestBERTEdgeCases:
     def test_mixed_token_types(self):
         """Test BERT with mixed token type IDs."""
         config = BertConfig(vocab_size=1000, hidden_size=128, num_layers=2, num_heads=8, type_vocab_size=3)
-        model = BERT(config)
+        model = Bert(config)
         model.build((None, 24))
 
         batch_size = 2
@@ -1334,7 +1334,7 @@ class TestBERTIntegration:
         )
 
         # Create BERT model
-        bert_model = BERT(config, add_pooling_layer=False)
+        bert_model = Bert(config, add_pooling_layer=False)
         bert_model.build((None, 24))
 
         # Use the model's own embeddings layer for the manual check
@@ -1383,7 +1383,7 @@ class TestBERTIntegration:
                 initializer_range=0.01
             )
 
-            model = BERT(config, add_pooling_layer=False)
+            model = Bert(config, add_pooling_layer=False)
             model.build((None, 16))
 
             input_ids = ops.cast(
@@ -1417,7 +1417,7 @@ class TestBERTIntegration:
             attention_probs_dropout_prob=0.0
         )
 
-        model = BERT(config)
+        model = Bert(config)
         model.build((None, 16))
 
         input_ids = ops.cast(
@@ -1504,7 +1504,7 @@ class TestBERTIntegration:
             num_heads=8  # 128/8=16, valid
         )
 
-        model = BERT(config, add_pooling_layer=True)
+        model = Bert(config, add_pooling_layer=True)
         model.build((None, 20))
 
         batch_size = 3
@@ -1557,7 +1557,7 @@ class TestBERTAdvancedFeatures:
         config.num_heads = 8
         config.vocab_size = 1000
 
-        model = BERT(config)
+        model = Bert(config)
         model.build((None, 32))
 
         # Test forward pass
@@ -1591,7 +1591,7 @@ class TestBERTAdvancedFeatures:
                 ffn_type=ffn_type
             )
 
-            model = BERT(config, add_pooling_layer=False)
+            model = Bert(config, add_pooling_layer=False)
             model.build((None, 16))
 
             input_ids = ops.cast(
@@ -1613,7 +1613,7 @@ class TestBERTAdvancedFeatures:
             stochastic_depth_rate=0.2
         )
 
-        model = BERT(config)
+        model = Bert(config)
         model.build((None, 24))
 
         input_ids = ops.cast(
