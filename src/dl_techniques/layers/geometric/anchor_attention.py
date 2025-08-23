@@ -1,15 +1,13 @@
-"""Anchor-based hierarchical attention mechanism."""
-
 import keras
 from keras import ops
-from typing import Optional, Any, Dict, Tuple
+from typing import Optional, Any, Dict, Tuple, Union
 
-from dl_techniques.utils.logger import logger
-
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class AnchorAttention(keras.layers.Layer):
-    """Hierarchical attention where anchor tokens have full self-attention.
+    """
+    Hierarchical attention where anchor tokens have full self-attention.
 
     This layer implements a memory-efficient attention mechanism where:
     - Anchor tokens have full self-attention among themselves
@@ -19,13 +17,24 @@ class AnchorAttention(keras.layers.Layer):
     computational complexity for large sequences while maintaining representational
     power through the anchor tokens.
 
+    Mathematical formulation:
+        For standard mode: Attention(Q, K, V) = softmax(QK^T / √d_k)V
+        For hierarchical mode: Query tokens only attend to anchor K, V
+
     Args:
-        dim: Integer, input/output dimension of the attention layer.
-        num_heads: Integer, number of attention heads. Defaults to 8.
-        dropout: Float, dropout rate for attention weights. Defaults to 0.0.
+        dim: Integer, input/output dimension of the attention layer. Must be positive
+            and divisible by num_heads.
+        num_heads: Integer, number of attention heads. Must be positive and divide dim.
+            Defaults to 8.
+        dropout: Float, dropout rate for attention weights. Must be between 0 and 1.
+            Defaults to 0.0.
         use_bias: Boolean, whether to use bias in linear projections. Defaults to True.
-        kernel_initializer: Initializer for the kernel weights.
-        bias_initializer: Initializer for the bias vector.
+        kernel_initializer: String or Initializer instance for kernel weights.
+            Defaults to 'glorot_uniform'.
+        bias_initializer: String or Initializer instance for bias vector.
+            Defaults to 'zeros'.
+        kernel_regularizer: Optional regularizer for kernel weights. Defaults to None.
+        bias_regularizer: Optional regularizer for bias weights. Defaults to None.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
@@ -47,17 +56,32 @@ class AnchorAttention(keras.layers.Layer):
     Returns:
         Output tensor with same shape as input.
 
-    Example:
-        >>> # Standard self-attention (all tokens are anchors)
-        >>> x = keras.random.normal((2, 100, 256))
-        >>> attn = AnchorAttention(dim=256, num_heads=8)
-        >>> output = attn(x)
-        >>> print(output.shape)  # (2, 100, 256)
+    Raises:
+        ValueError: If dim is not divisible by num_heads.
+        ValueError: If dim or num_heads is not positive.
+        ValueError: If dropout is not between 0 and 1.
 
-        >>> # Hierarchical attention (first 20 tokens are anchors)
-        >>> output = attn(x, num_anchor_tokens=20)
-        >>> print(output.shape)  # (2, 100, 256)
-        >>> # First 20 tokens attend to each other, last 80 only attend to first 20
+    Example:
+        ```python
+        # Standard self-attention (all tokens are anchors)
+        x = keras.random.normal((2, 100, 256))
+        attn = AnchorAttention(dim=256, num_heads=8)
+        output = attn(x)
+        print(output.shape)  # (2, 100, 256)
+
+        # Hierarchical attention (first 20 tokens are anchors)
+        output = attn(x, num_anchor_tokens=20)
+        print(output.shape)  # (2, 100, 256)
+        # First 20 tokens attend to each other, last 80 only attend to first 20
+
+        # With regularization
+        attn = AnchorAttention(
+            dim=512,
+            num_heads=16,
+            dropout=0.1,
+            kernel_regularizer=keras.regularizers.L2(1e-4)
+        )
+        ```
     """
 
     def __init__(
@@ -66,15 +90,25 @@ class AnchorAttention(keras.layers.Layer):
             num_heads: int = 8,
             dropout: float = 0.0,
             use_bias: bool = True,
-            kernel_initializer: str = "glorot_uniform",
-            bias_initializer: str = "zeros",
+            kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+            bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
+        # Validate inputs
+        if dim <= 0:
+            raise ValueError(f"dim must be positive, got {dim}")
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
         if dim % num_heads != 0:
             raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
+        if not (0.0 <= dropout <= 1.0):
+            raise ValueError(f"dropout must be between 0 and 1, got {dropout}")
 
+        # Store ALL configuration parameters
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -82,36 +116,20 @@ class AnchorAttention(keras.layers.Layer):
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Scale factor for attention scores
         self.scale = 1.0 / ops.sqrt(float(self.head_dim))
 
-        # Store build information
-        self._build_input_shape = None
-
-        # Will be created in build()
-        self.qkv_dense = None
-        self.q_dense = None  # For query tokens when using anchors
-        self.proj_dense = None
-        self.dropout_layer = None
-
-    def build(self, input_shape):
-        """Build the layer weights."""
-        self._build_input_shape = input_shape
-
-        if len(input_shape) != 3:
-            raise ValueError(f"Input must be 3D, got shape {input_shape}")
-
-        if input_shape[-1] != self.dim:
-            raise ValueError(f"Last dimension of input ({input_shape[-1]}) "
-                             f"must match dim ({self.dim})")
-
-        # QKV projection for anchor tokens (or all tokens in standard mode)
+        # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
         self.qkv_dense = keras.layers.Dense(
             self.dim * 3,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="qkv"
         )
 
@@ -121,6 +139,8 @@ class AnchorAttention(keras.layers.Layer):
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="q_query"
         )
 
@@ -130,17 +150,57 @@ class AnchorAttention(keras.layers.Layer):
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="proj"
         )
 
         # Dropout layer
         if self.dropout_rate > 0.0:
-            self.dropout_layer = keras.layers.Dropout(self.dropout_rate)
+            self.dropout_layer = keras.layers.Dropout(self.dropout_rate, name="dropout")
+        else:
+            self.dropout_layer = None
 
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build the layer and all its sub-layers.
+
+        CRITICAL: Explicitly build each sub-layer for robust serialization.
+
+        Args:
+            input_shape: Shape of the input tensor.
+        """
+        if len(input_shape) != 3:
+            raise ValueError(f"Input must be 3D, got shape {input_shape}")
+
+        if input_shape[-1] is None:
+            raise ValueError("Last dimension of input must be defined")
+
+        if input_shape[-1] != self.dim:
+            raise ValueError(f"Last dimension of input ({input_shape[-1]}) "
+                             f"must match dim ({self.dim})")
+
+        # Build sub-layers explicitly for robust serialization
+        self.qkv_dense.build(input_shape)
+        self.q_dense.build(input_shape)
+        self.proj_dense.build(input_shape)
+
+        if self.dropout_layer is not None:
+            # Dropout doesn't change shape, but we still build it
+            attention_shape = input_shape[:-1] + (self.num_heads, input_shape[-1], input_shape[-1])
+            self.dropout_layer.build(attention_shape)
+
+        # Always call parent build at the end
         super().build(input_shape)
 
-    def call(self, x, num_anchor_tokens=None, training=None):
-        """Apply anchor-based attention.
+    def call(
+            self,
+            x: keras.KerasTensor,
+            num_anchor_tokens: Optional[int] = None,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Apply anchor-based attention.
 
         Args:
             x: Input tensor of shape (batch_size, seq_len, dim).
@@ -151,8 +211,6 @@ class AnchorAttention(keras.layers.Layer):
         Returns:
             Output tensor with same shape as input.
         """
-        batch_size, seq_len, _ = x.shape
-
         if num_anchor_tokens is None:
             # Standard self-attention mode
             return self._standard_attention(x, training)
@@ -160,9 +218,13 @@ class AnchorAttention(keras.layers.Layer):
             # Hierarchical anchor-query attention mode
             return self._hierarchical_attention(x, num_anchor_tokens, training)
 
-    def _standard_attention(self, x, training):
+    def _standard_attention(
+            self,
+            x: keras.KerasTensor,
+            training: Optional[bool]
+    ) -> keras.KerasTensor:
         """Standard multi-head self-attention."""
-        batch_size, seq_len, _ = x.shape
+        batch_size, seq_len, _ = ops.shape(x)
 
         # Compute Q, K, V
         qkv = self.qkv_dense(x)  # (batch_size, seq_len, dim * 3)
@@ -188,9 +250,14 @@ class AnchorAttention(keras.layers.Layer):
 
         return out
 
-    def _hierarchical_attention(self, x, num_anchor_tokens, training):
+    def _hierarchical_attention(
+            self,
+            x: keras.KerasTensor,
+            num_anchor_tokens: int,
+            training: Optional[bool]
+    ) -> keras.KerasTensor:
         """Hierarchical anchor-query attention."""
-        batch_size, seq_len, _ = x.shape
+        batch_size, seq_len, _ = ops.shape(x)
 
         if num_anchor_tokens >= seq_len:
             # All tokens are anchors, fallback to standard attention
@@ -236,12 +303,17 @@ class AnchorAttention(keras.layers.Layer):
 
         return out
 
-    def compute_output_shape(self, input_shape):
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer."""
         return input_shape
 
-    def get_config(self):
-        """Returns the layer configuration."""
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Return configuration for serialization.
+
+        Returns:
+            Dictionary containing ALL __init__ parameters for complete serialization.
+        """
         config = super().get_config()
         config.update({
             "dim": self.dim,
@@ -250,14 +322,9 @@ class AnchorAttention(keras.layers.Layer):
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
 
-    def get_build_config(self):
-        """Get build configuration."""
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config):
-        """Build from configuration."""
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
+# ---------------------------------------------------------------------

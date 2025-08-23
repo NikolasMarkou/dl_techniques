@@ -6,7 +6,7 @@ from keras import ops
 # ---------------------------------------------------------------------
 
 from ..layers.geometric import (
-    ContinuousSincosEmbed,
+    ContinuousSinCosEmbed,
     ContinuousRoPE,
     PerceiverBlock,
     SupernodePooling,
@@ -99,7 +99,7 @@ class AnchoredBranchedUPT(keras.Model):
         ]
 
         # Position embedding layers
-        self.pos_embed = ContinuousSincosEmbed(dim=self.dim, ndim=self.ndim, name="pos_embed")
+        self.pos_embed = ContinuousSinCosEmbed(dim=self.dim, ndim=self.ndim, name="pos_embed")
 
         # Surface and volume bias networks
         self.surface_bias = keras.Sequential([

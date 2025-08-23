@@ -1,3 +1,12 @@
+"""Squash activation layer for Capsule Networks.
+
+This layer applies the squashing non-linearity commonly used in Capsule Networks
+to ensure that vector outputs have meaningful magnitudes while preserving their
+directional information. The squashing function ensures that short vectors get
+shrunk to almost zero length and long vectors get shrunk to a length slightly
+below 1, while maintaining vector orientation.
+"""
+
 import keras
 from keras import ops, backend
 from typing import Optional, Tuple, Dict, Any
@@ -8,106 +17,149 @@ from typing import Optional, Tuple, Dict, Any
 
 from dl_techniques.utils.logger import logger
 
+
 # ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class SquashLayer(keras.layers.Layer):
     """Applies squashing non-linearity to vectors (capsules).
 
-    The squashing function ensures that:
+    The squashing function is a key component in Capsule Networks that ensures
+    capsule outputs have meaningful magnitudes while preserving their directional
+    information. This function provides the following properties:
+
     1. Short vectors get shrunk to almost zero length
-    2. Long vectors get shrunk to a length slightly below 1
-    3. Vector orientation is preserved
+    2. Long vectors get shrunk to a length slightly below 1  
+    3. Vector orientation is preserved throughout the transformation
 
-    This is commonly used in Capsule Networks to ensure capsule outputs
-    have meaningful magnitudes while preserving their directional information.
-    The squashing function is defined as:
+    Mathematical formulation:
+        squash(v) = (||v||² / (1 + ||v||²)) * (v / ||v||)
 
-    .. math::
-        \\text{squash}(\\mathbf{v}) = \\frac{||\\mathbf{v}||^2}{1 + ||\\mathbf{v}||^2} \\cdot \\frac{\\mathbf{v}}{||\\mathbf{v}||}
+    Where ||v|| represents the L2 norm of vector v, and the operation is applied
+    along the specified axis. The resulting vectors have norms in the range [0, 1).
 
     Args:
-        axis: Integer, axis along which to compute the norm. Defaults to -1.
-        epsilon: Float, small constant for numerical stability. If None, uses keras.backend.epsilon().
-        **kwargs: Additional keyword arguments to pass to the Layer base class.
+        axis: Integer, axis along which to compute the vector norm for squashing.
+            Defaults to -1 (last axis). This determines which dimension represents
+            the vector components to be squashed.
+        epsilon: Float, small constant for numerical stability to prevent division
+            by zero. If None, uses keras.backend.epsilon() which is typically 1e-7.
+            Defaults to None.
+        **kwargs: Additional keyword arguments passed to the Layer base class,
+            such as `name`, `dtype`, `trainable`, etc.
 
     Input shape:
-        Arbitrary tensor of rank >= 1.
+        Arbitrary tensor of rank >= 1. The squashing operation is applied along
+        the specified axis, treating slices along that axis as vectors.
 
     Output shape:
-        Same as input shape.
+        Same as input shape. No dimensional transformation occurs.
+
+    Attributes:
+        axis: The axis along which vector norms are computed.
+        epsilon: The small constant used for numerical stability.
 
     Example:
-        >>> layer = SquashLayer()
-        >>> x = keras.random.normal((32, 10, 16))
-        >>> y = layer(x)
-        >>> print(y.shape)
-        (32, 10, 16)
+        ```python
+        # Basic usage for capsule vectors
+        layer = SquashLayer()
+        inputs = keras.Input(shape=(10, 16))  # 10 capsules, each 16-dimensional
+        outputs = layer(inputs)  # Same shape, but vectors are squashed
 
-        >>> # Custom axis for squashing
-        >>> layer = SquashLayer(axis=1)
-        >>> x = keras.random.normal((32, 10, 16))
-        >>> y = layer(x)
-        >>> print(y.shape)
-        (32, 10, 16)
+        # Custom axis for different tensor layouts
+        layer = SquashLayer(axis=1)
+        inputs = keras.Input(shape=(32, 10, 16))  # Batch of capsule matrices
+        outputs = layer(inputs)  # Squashing applied along axis 1
+
+        # In a Capsule Network
+        inputs = keras.Input(shape=(1152, 8))  # Primary capsules
+        x = keras.layers.Dense(160)(inputs)  # Transform to digit capsules
+        x = keras.layers.Reshape((10, 16))(x)  # 10 digit capsules, 16D each
+        outputs = SquashLayer()(x)  # Apply squashing to capsule vectors
+
+        # Custom epsilon for numerical stability
+        layer = SquashLayer(epsilon=1e-8)
+        ```
+
+    References:
+        - Sabour, S., Frosst, N., & Hinton, G. E. (2017). Dynamic routing between
+          capsules. In Advances in neural information processing systems.
+        - Hinton, G. E., Krizhevsky, A., & Wang, S. D. (2011). Transforming
+          auto-encoders. In International conference on artificial neural networks.
+
+    Note:
+        - The squashing function is non-linear and differentiable
+        - Output vector norms are bounded in the range [0, 1)
+        - This layer has no trainable parameters
+        - Commonly used as the final activation in capsule layers
+        - The epsilon parameter is crucial for numerical stability when vectors
+          have very small norms
     """
 
     def __init__(
-        self,
-        axis: int = -1,
-        epsilon: Optional[float] = None,
-        **kwargs: Any
+            self,
+            axis: int = -1,
+            epsilon: Optional[float] = None,
+            **kwargs: Any
     ) -> None:
+        """Initialize the Squash layer.
+
+        Args:
+            axis: Axis along which to compute vector norms for squashing.
+            epsilon: Small constant for numerical stability. If None, uses
+                keras.backend.epsilon().
+            **kwargs: Additional keyword arguments for the Layer base class.
+        """
         super().__init__(**kwargs)
+
+        # Store configuration
         self.axis = axis
         self.epsilon = epsilon if epsilon is not None else backend.epsilon()
 
-        # Store build input shape for serialization
-        self._build_input_shape = None
-
         logger.debug(f"Initialized SquashLayer with axis={axis}, epsilon={self.epsilon}")
 
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer.
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """Apply squashing non-linearity to input vectors.
+
+        Applies the squashing function: squash(v) = (||v||² / (1 + ||v||²)) * (v / ||v||)
 
         Args:
-            input_shape: Shape tuple of the input tensor.
-        """
-        # Store for serialization
-        self._build_input_shape = input_shape
-
-        logger.debug(f"Building SquashLayer with input_shape={input_shape}")
-
-        super().build(input_shape)
-
-    def call(self, inputs, training: Optional[bool] = None) -> Any:
-        """Apply squashing non-linearity.
-
-        Args:
-            inputs: Input tensor to be squashed.
+            inputs: Input tensor to be squashed. Vectors are identified along
+                the specified axis.
             training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
+                training mode or inference mode. Not used in this layer but
+                kept for API consistency.
 
         Returns:
-            Squashed vectors with norm between 0 and 1.
+            Tensor with same shape as inputs, containing squashed vectors with
+            norms bounded in [0, 1).
         """
-        # Compute squared norm along specified axis
+        # Compute squared L2 norm along specified axis
+        # Shape: input_shape with axis dimension reduced to 1
         squared_norm = ops.sum(
             ops.square(inputs),
             axis=self.axis,
             keepdims=True
         )
 
-        # Safe norm computation to avoid division by zero
+        # Compute safe norm to avoid division by zero
+        # Add epsilon for numerical stability
         safe_norm = ops.sqrt(squared_norm + self.epsilon)
 
-        # Compute scale factor: ||v||^2 / (1 + ||v||^2)
+        # Compute scale factor: ||v||² / (1 + ||v||²)
+        # This ensures output norm is in [0, 1)
         scale = squared_norm / (1.0 + squared_norm)
 
-        # Compute unit vector
+        # Compute unit vector: v / ||v||
         unit_vector = inputs / safe_norm
 
         # Apply squashing: scale * unit_vector
+        # Final result: (||v||² / (1 + ||v||²)) * (v / ||v||)
         return scale * unit_vector
 
     def compute_output_shape(
@@ -116,19 +168,26 @@ class SquashLayer(keras.layers.Layer):
     ) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
+        For the squash layer, output shape is identical to input shape since
+        no dimensional transformation occurs - only the vector magnitudes change.
+
         Args:
-            input_shape: Shape of the input tensor.
+            input_shape: Shape tuple of the input tensor.
 
         Returns:
-            Output shape (same as input shape).
+            Output shape tuple, identical to input_shape.
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Returns the layer configuration for serialization.
+        """Get the layer configuration for serialization.
+
+        Returns all parameters passed to __init__ so the layer can be
+        properly reconstructed during model loading.
 
         Returns:
-            Dictionary containing the layer configuration.
+            Dictionary containing the layer configuration, including
+            axis and epsilon parameters along with parent class configuration.
         """
         config = super().get_config()
         config.update({
@@ -137,23 +196,12 @@ class SquashLayer(keras.layers.Layer):
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the config needed to build the layer from a config.
+    def __repr__(self) -> str:
+        """Return string representation of the layer.
 
         Returns:
-            Dictionary containing the build configuration.
+            String representation including the layer name and key parameters.
         """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
+        return f"SquashLayer(axis={self.axis}, epsilon={self.epsilon}, name='{self.name}')"
 
 # ---------------------------------------------------------------------

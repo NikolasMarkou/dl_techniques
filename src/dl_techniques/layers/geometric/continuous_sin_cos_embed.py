@@ -1,54 +1,87 @@
-"""Continuous sine-cosine positional embedding layer for spatial coordinates."""
-
 import keras
-from keras import ops
-from typing import Optional, Any, Dict
 import numpy as np
+from keras import ops
+from typing import Optional, Any, Dict, Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class ContinuousSincosEmbed(keras.layers.Layer):
-    """Continuous coordinate embedding using sine and cosine functions.
+class ContinuousSinCosEmbed(keras.layers.Layer):
+    """
+    Continuous coordinate embedding using sine and cosine functions.
 
     This layer embeds continuous coordinates (like 3D positions) using sinusoidal
     functions similar to transformer positional encodings but extended to handle
-    arbitrary coordinate dimensions and continuous values.
+    arbitrary coordinate dimensions and continuous values. The embedding uses
+    alternating sine and cosine functions at different frequencies to create
+    rich positional representations.
+
+    The layer generates embeddings by:
+    1. Computing frequency-scaled coordinate values
+    2. Applying sine and cosine functions to create periodic features
+    3. Concatenating the results to form the final embedding
 
     Args:
         dim: Integer, dimensionality of the embedded output coordinates.
+            Must be positive and should be at least 2*ndim for optimal performance.
         ndim: Integer, number of dimensions of the input coordinate space
             (e.g., 2 for 2D coordinates, 3 for 3D coordinates).
+            Must be positive and typically 2 or 3.
         max_wavelength: Float, maximum wavelength for the sinusoidal embedding.
-            Controls the frequency range of the embedding. Defaults to 10000.0.
+            Controls the frequency range of the embedding. Higher values create
+            more gradual spatial variations. Defaults to 10000.0.
         assert_positive: Boolean, whether to assert that all input coordinates
-            are positive. Useful for normalized coordinate systems. Defaults to True.
+            are positive. Useful for normalized coordinate systems where coordinates
+            should be non-negative. Defaults to True.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
-        - 2D tensor with shape: `(num_points, ndim)`
-        - 3D tensor with shape: `(batch_size, num_points, ndim)`
+        2D tensor with shape: `(num_points, ndim)` or
+        3D tensor with shape: `(batch_size, num_points, ndim)`
 
     Output shape:
-        - 2D tensor with shape: `(num_points, dim)`
-        - 3D tensor with shape: `(batch_size, num_points, dim)`
+        2D tensor with shape: `(num_points, dim)` or
+        3D tensor with shape: `(batch_size, num_points, dim)`
 
     Returns:
-        Tensor with embedded coordinates using sinusoidal functions.
+        Tensor with embedded coordinates using sinusoidal functions. The output
+        contains alternating sine and cosine features at different frequencies.
+
+    Raises:
+        ValueError: If dim is too small for the given ndim.
+        ValueError: If input parameters are invalid.
+        ValueError: If input shape is invalid.
 
     Example:
-        >>> # 3D coordinates for point cloud
-        >>> coords = keras.random.uniform((100, 3)) * 1000  # 100 points in 3D
-        >>> embed_layer = ContinuousSincosEmbed(dim=256, ndim=3)
-        >>> embedded = embed_layer(coords)
-        >>> print(embedded.shape)  # (100, 256)
+        ```python
+        # 3D coordinates for point cloud
+        coords = keras.random.uniform((100, 3)) * 1000  # 100 points in 3D
+        embed_layer = ContinuousSincosEmbed(dim=256, ndim=3)
+        embedded = embed_layer(coords)
+        print(embedded.shape)  # (100, 256)
 
-        >>> # Batch of 2D coordinates
-        >>> coords_batch = keras.random.uniform((4, 50, 2)) * 100
-        >>> embed_layer_2d = ContinuousSincosEmbed(dim=128, ndim=2)
-        >>> embedded_batch = embed_layer_2d(coords_batch)
-        >>> print(embedded_batch.shape)  # (4, 50, 128)
+        # Batch of 2D coordinates with custom wavelength
+        coords_batch = keras.random.uniform((4, 50, 2)) * 100
+        embed_layer_2d = ContinuousSincosEmbed(
+            dim=128,
+            ndim=2,
+            max_wavelength=5000.0,
+            assert_positive=False  # Allow negative coordinates
+        )
+        embedded_batch = embed_layer_2d(coords_batch)
+        print(embedded_batch.shape)  # (4, 50, 128)
+        ```
+
+    Notes:
+        The layer automatically handles padding when dim is not cleanly divisible
+        by ndim. The sinusoidal embedding creates smooth, continuous representations
+        that preserve spatial relationships in the coordinate space.
     """
 
     def __init__(
@@ -61,6 +94,15 @@ class ContinuousSincosEmbed(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
+        # Validate inputs
+        if dim <= 0:
+            raise ValueError(f"dim must be positive, got {dim}")
+        if ndim <= 0:
+            raise ValueError(f"ndim must be positive, got {ndim}")
+        if max_wavelength <= 0:
+            raise ValueError(f"max_wavelength must be positive, got {max_wavelength}")
+
+        # Store ALL configuration parameters
         self.dim = dim
         self.ndim = ndim
         self.max_wavelength = max_wavelength
@@ -78,16 +120,24 @@ class ContinuousSincosEmbed(keras.layers.Layer):
             raise ValueError(f"dim ({dim}) too small for ndim ({ndim}). "
                              f"Need at least {ndim * 2} dimensions.")
 
-        # Store build information
-        self._build_input_shape = None
+        # Store effective dimension for weight creation
+        self.effective_dim_per_wave = effective_dim_per_wave
 
-        # Will be created in build()
+        # Initialize weight attributes - created in build()
         self.omega = None
 
-    def build(self, input_shape):
-        """Build the layer weights."""
-        self._build_input_shape = input_shape
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Create the layer's frequency weights.
 
+        This is called automatically when the layer first processes input.
+
+        Args:
+            input_shape: Shape tuple of the input tensor.
+
+        Raises:
+            ValueError: If input shape is invalid.
+        """
         # Validate input shape
         if len(input_shape) < 2:
             raise ValueError(f"Input must be at least 2D, got shape {input_shape}")
@@ -97,10 +147,10 @@ class ContinuousSincosEmbed(keras.layers.Layer):
                              f"must match ndim ({self.ndim})")
 
         # Create frequency weights
-        effective_dim_per_wave = (self.dim - self.padding) // self.ndim
-        arange_vals = np.arange(0, effective_dim_per_wave, 2, dtype=np.float32)
-        omega_vals = 1.0 / (self.max_wavelength ** (arange_vals / effective_dim_per_wave))
+        arange_vals = np.arange(0, self.effective_dim_per_wave, 2, dtype=np.float32)
+        omega_vals = 1.0 / (self.max_wavelength ** (arange_vals / self.effective_dim_per_wave))
 
+        # Create layer's own weights
         self.omega = self.add_weight(
             name="omega",
             shape=omega_vals.shape,
@@ -111,22 +161,29 @@ class ContinuousSincosEmbed(keras.layers.Layer):
         # Set the omega values
         self.omega.assign(omega_vals)
 
+        # Always call parent build at the end
         super().build(input_shape)
 
-    def call(self, coords, training=None):
-        """Forward computation with sinusoidal embedding.
+    def call(
+            self,
+            coords: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Forward computation with sinusoidal embedding.
 
         Args:
             coords: Input tensor of coordinates with shape (..., ndim).
             training: Boolean indicating training mode (unused).
 
         Returns:
-            Embedded coordinates with shape (..., dim).
+            Embedded coordinates with shape (..., dim) using alternating
+            sine and cosine functions at different frequencies.
         """
         if self.assert_positive:
             # Check if coordinates are positive
             min_coords = ops.min(coords)
-            if min_coords < 0:
+            if ops.convert_to_numpy(min_coords) < 0:
                 logger.warning(f"Negative coordinates detected: min={min_coords}")
 
         # Ensure float32 precision for numerical stability
@@ -171,13 +228,26 @@ class ContinuousSincosEmbed(keras.layers.Layer):
 
         return emb
 
-    def compute_output_shape(self, input_shape):
-        """Compute the output shape of the layer."""
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape of the layer.
+
+        Args:
+            input_shape: Shape tuple of the input tensor.
+
+        Returns:
+            Output shape tuple with last dimension changed to self.dim.
+        """
         input_shape_list = list(input_shape)
         return tuple(input_shape_list[:-1] + [self.dim])
 
-    def get_config(self):
-        """Returns the layer configuration."""
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Return configuration for serialization.
+
+        Returns:
+            Dictionary containing all layer configuration parameters.
+        """
         config = super().get_config()
         config.update({
             "dim": self.dim,
@@ -186,12 +256,3 @@ class ContinuousSincosEmbed(keras.layers.Layer):
             "assert_positive": self.assert_positive,
         })
         return config
-
-    def get_build_config(self):
-        """Get build configuration."""
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config):
-        """Build from configuration."""
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])

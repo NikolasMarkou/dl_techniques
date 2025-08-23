@@ -33,7 +33,6 @@ class TestReLUK:
 
         # Check default values
         assert layer.k == 3
-        assert layer._build_input_shape is None
         assert layer.built is False
 
     def test_initialization_custom(self):
@@ -50,7 +49,6 @@ class TestReLUK:
         assert layer.name == "custom_reluk"
         assert layer.dtype == "float32"
         assert layer.trainable is True
-        assert layer._build_input_shape is None
 
     def test_invalid_parameters(self):
         """Test that invalid parameters raise appropriate errors."""
@@ -79,7 +77,6 @@ class TestReLUK:
 
         # Check that layer was built
         assert layer_instance.built is True
-        assert layer_instance._build_input_shape == input_tensor.shape
 
         # For activation layers, there are typically no trainable weights
         assert len(layer_instance.trainable_weights) == 0
@@ -258,7 +255,6 @@ class TestReLUK:
         # Check configuration matches
         assert recreated_layer.k == original_layer.k
         assert recreated_layer.name == original_layer.name
-        assert recreated_layer._build_input_shape == original_layer._build_input_shape
 
         # Test that both layers produce same output
         test_input = keras.random.normal([2, 32, 64])

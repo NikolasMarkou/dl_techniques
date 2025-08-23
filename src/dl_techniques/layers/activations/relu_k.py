@@ -1,4 +1,4 @@
-"""ReLU-k activation layer
+"""ReLU-k activation layer implementing f(x) = max(0, x)^k.
 
 This layer applies a powered ReLU activation function, providing more
 expressiveness than standard ReLU while maintaining computational
@@ -11,41 +11,6 @@ Where `k` is a positive integer power parameter. When `k=1`, this layer is
 equivalent to the standard `keras.layers.ReLU`. Higher values of `k` create
 more aggressive non-linearities that can help with gradient flow in
 certain network architectures.
-
-Args:
-    k (int): Power exponent for the ReLU function. Must be a positive
-        integer. Defaults to `3`.
-    **kwargs: Additional keyword arguments passed to the `Layer` parent
-        class, such as `name`, `dtype`, `trainable`, etc.
-
-Input shape:
-    Arbitrary. Use the keyword argument `input_shape` (tuple of integers,
-    does not include the batch axis) when using this layer as the first
-    layer in a model.
-
-Output shape:
-    Same shape as the input.
-
-Example:
-```python
-import keras
-import numpy as np
-
-# Create a ReLU-k layer with k=2
-layer = ReLUK(k=2)
-input_data = np.array([-2.0, -1.0, 0.0, 1.0, 2.0, 3.0])
-
-# Apply the layer
-output = layer(input_data)
-# output will be [0., 0., 0., 1., 4., 9.]
-```
-
-Note:
-    - For `k=1`, this layer is equivalent to `keras.layers.ReLU`.
-    - Higher `k` values may cause vanishing gradients for small positive
-      inputs (x < 1) or exploding gradients for large positive inputs (x > 1).
-    - Consider the range of your input values and network stability when
-      choosing `k`.
 """
 
 import keras
@@ -59,6 +24,7 @@ from typing import Optional, Any, Dict, Tuple
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class ReLUK(keras.layers.Layer):
@@ -76,28 +42,63 @@ class ReLUK(keras.layers.Layer):
     aggressive activations that can help with gradient flow in certain
     architectures.
 
+    Mathematical formulation:
+        output = max(0, input)^k
+
+    Where k is the power parameter and the max operation ensures non-negativity
+    before applying the power transformation.
+
     Args:
-        k: Power exponent for the ReLU function. Must be a positive integer.
+        k: Integer, power exponent for the ReLU function. Must be a positive integer.
             Default is 3. Higher values create more aggressive non-linearities.
-        **kwargs: Additional keyword arguments passed to the Layer parent class,
+            When k=1, equivalent to standard ReLU.
+        **kwargs: Additional keyword arguments passed to the Layer base class,
             such as `name`, `dtype`, `trainable`, etc.
 
     Input shape:
-        Arbitrary. Use the keyword argument `input_shape` (tuple of integers,
-        does not include the batch axis) when using this layer as the first
-        layer in a model.
+        Arbitrary tensor with any shape. Use the keyword argument `input_shape`
+        (tuple of integers, does not include the batch axis) when using this
+        layer as the first layer in a model.
 
     Output shape:
-        Same shape as the input.
+        Same shape as the input tensor.
+
+    Attributes:
+        k: The power exponent parameter used in the activation function.
+
+    Example:
+        ```python
+        # Basic usage
+        layer = ReLUK(k=2)
+        inputs = keras.Input(shape=(10,))
+        outputs = layer(inputs)
+
+        # In a model
+        model = keras.Sequential([
+            keras.layers.Dense(64, input_shape=(784,)),
+            ReLUK(k=3),  # Apply ReLU^3 activation
+            keras.layers.Dense(10)
+        ])
+
+        # Custom power
+        custom_layer = ReLUK(k=5, name='relu_k_5')
+        ```
 
     References:
         The ReLU-k activation is inspired by various works on alternative
-        activation functions that provide more flexibility than standard ReLU.
+        activation functions that provide more flexibility than standard ReLU
+        while maintaining computational efficiency.
+
+    Raises:
+        ValueError: If k is not a positive integer.
+        TypeError: If k is not an integer.
 
     Note:
-        - For k=1, this is equivalent to standard ReLU
-        - Higher k values may cause vanishing gradients for small positive inputs
-        - Consider the range of your input values when choosing k
+        - For k=1, this is equivalent to standard ReLU activation
+        - Higher k values may cause vanishing gradients for small positive inputs (x < 1)
+        - Higher k values may cause exploding gradients for large positive inputs (x > 1)
+        - Consider the range of your input values and network stability when choosing k
+        - This layer has no trainable parameters and adds minimal computational overhead
     """
 
     def __init__(
@@ -109,6 +110,7 @@ class ReLUK(keras.layers.Layer):
 
         Args:
             k: Power exponent for the ReLU function. Must be a positive integer.
+                Default is 3.
             **kwargs: Additional keyword arguments for the Layer parent class.
 
         Raises:
@@ -123,27 +125,10 @@ class ReLUK(keras.layers.Layer):
         if k <= 0:
             raise ValueError(f"k must be a positive integer, got {k}")
 
+        # Store configuration
         self.k = k
-        self._build_input_shape = None
 
         logger.info(f"Initialized ReLUK layer with k={k}")
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer weights and initialize internal state.
-
-        This method is called automatically when the layer is first used.
-        For activation layers, this typically just stores the input shape
-        for serialization purposes.
-
-        Args:
-            input_shape: Shape tuple of the input tensor, including the batch
-                dimension as None or an integer.
-        """
-        # Store input shape for serialization
-        self._build_input_shape = input_shape
-
-        logger.debug(f"Built ReLUK layer with input shape: {input_shape}")
-        super().build(input_shape)
 
     def call(
             self,
@@ -157,14 +142,14 @@ class ReLUK(keras.layers.Layer):
         Args:
             inputs: Input tensor of any shape.
             training: Boolean indicating whether the layer should behave in
-                training mode or inference mode. Not used in this layer but
-                kept for API consistency.
+                training mode or inference mode. Not used in this activation
+                layer but kept for API consistency.
 
         Returns:
             Output tensor with the same shape as inputs, after applying
             the ReLU-k activation function.
         """
-        # Apply ReLU to get non-negative values
+        # Apply ReLU to get non-negative values: max(0, x)
         relu_output = ops.maximum(0.0, inputs)
 
         # Apply power transformation
@@ -172,6 +157,7 @@ class ReLUK(keras.layers.Layer):
             # Optimization: avoid unnecessary power operation for standard ReLU
             return relu_output
         else:
+            # Apply power: max(0, x)^k
             return ops.power(relu_output, float(self.k))
 
     def compute_output_shape(
@@ -180,7 +166,8 @@ class ReLUK(keras.layers.Layer):
     ) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
-        For activation layers, the output shape is identical to the input shape.
+        For activation layers, the output shape is identical to the input shape
+        since no dimensional transformation occurs.
 
         Args:
             input_shape: Shape tuple of the input tensor.
@@ -193,6 +180,9 @@ class ReLUK(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Get the layer configuration for serialization.
 
+        Returns all parameters passed to __init__ so the layer can be
+        properly reconstructed during model loading.
+
         Returns:
             Dictionary containing the layer configuration, including
             the power parameter k and parent class configuration.
@@ -203,33 +193,6 @@ class ReLUK(keras.layers.Layer):
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the build configuration for serialization.
-
-        This method returns the configuration needed to properly rebuild
-        the layer after deserialization.
-
-        Returns:
-            Dictionary containing the build configuration, specifically
-            the input shape used during the build process.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a build configuration.
-
-        This method is used during model loading to properly rebuild
-        the layer's internal state.
-
-        Args:
-            config: Dictionary containing the build configuration,
-                as returned by get_build_config().
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
     def __repr__(self) -> str:
         """Return string representation of the layer.
 
@@ -237,5 +200,6 @@ class ReLUK(keras.layers.Layer):
             String representation including the layer name and key parameters.
         """
         return f"ReLUK(k={self.k}, name='{self.name}')"
+
 
 # ---------------------------------------------------------------------

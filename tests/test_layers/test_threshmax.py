@@ -16,7 +16,7 @@ import numpy as np
 import keras
 from typing import Dict, Any, Tuple
 
-from dl_techniques.layers.activations.thresh_max import ThreshMax, thresh_max, create_thresh_max
+from dl_techniques.layers.activations.thresh_max import ThreshMax, thresh_max
 
 
 # Test fixtures
@@ -236,16 +236,6 @@ def test_functional_vs_layer_consistency(sample_logits: tf.Tensor, default_param
 
     # Should be identical
     assert np.allclose(layer_output.numpy(), func_output.numpy(), rtol=1e-10, atol=1e-10)
-
-
-# Factory function tests
-def test_factory_function() -> None:
-    """Test the create_thresh_max factory function."""
-    layer = create_thresh_max(axis=1, epsilon=1e-10, name="test_thresh_max")
-
-    assert layer.axis == 1
-    assert layer.epsilon == 1e-10
-    assert layer.name == "test_thresh_max"
 
 
 # Serialization tests

@@ -13,8 +13,8 @@ from .continuous_rope import ContinuousRoPE
 from .anchor_attention import AnchorAttention
 from .supernode_pooling import SupernodePooling
 from .perceiver_attention import PerceiverAttention
-from .continuous_sin_cos_embed import ContinuousSincosEmbed
-from .shared_weights_cross_attention import SharedWeightsCrossAttention
+from .continuous_sin_cos_embed import ContinuousSinCosEmbed
+from ..attention.shared_weights_cross_attention import SharedWeightsCrossAttention
 
 # ============================================================================
 # 1. COMPUTER VISION & 3D PROCESSING
@@ -28,7 +28,7 @@ def build_point_cloud_classifier(num_points: int = 2048, num_classes: int = 40):
     inputs = keras.Input(shape=(num_points, 3), name="point_coordinates")
 
     # Continuous position embedding
-    embedded = ContinuousSincosEmbed(dim=256, ndim=3, name="position_embed")(inputs)
+    embedded = ContinuousSinCosEmbed(dim=256, ndim=3, name="position_embed")(inputs)
 
     # Hierarchical attention with supernodes
     attention1 = AnchorAttention(dim=256, num_heads=8, name="attention1")(
@@ -60,8 +60,8 @@ def build_point_cloud_segmentation(num_points: int = 2048, num_classes: int = 13
     inputs = keras.Input(shape=(num_points, 3), name="point_coordinates")
 
     # Multi-scale position encoding
-    pos_embed_fine = ContinuousSincosEmbed(dim=128, ndim=3, max_wavelength=1000)(inputs)
-    pos_embed_coarse = ContinuousSincosEmbed(dim=128, ndim=3, max_wavelength=10000)(inputs)
+    pos_embed_fine = ContinuousSinCosEmbed(dim=128, ndim=3, max_wavelength=1000)(inputs)
+    pos_embed_coarse = ContinuousSinCosEmbed(dim=128, ndim=3, max_wavelength=10000)(inputs)
     embedded = keras.layers.Concatenate()([pos_embed_fine, pos_embed_coarse])  # 256-dim
 
     # Hierarchical processing
@@ -146,7 +146,7 @@ def build_vision_language_model(max_text_len: int = 77, image_patches: int = 196
     text_tokens = keras.Input(shape=(max_text_len, 512), name="text_tokens")
 
     # Vision processing with spatial awareness
-    visual_pos_embed = ContinuousSincosEmbed(dim=768, ndim=2)(patch_positions)
+    visual_pos_embed = ContinuousSinCosEmbed(dim=768, ndim=2)(patch_positions)
     visual_features = patch_features + visual_pos_embed
 
     # Cross-modal attention
@@ -194,19 +194,19 @@ def build_multi_sensor_fusion():
 
     # Process each modality
     # 1. LIDAR processing
-    lidar_embed = ContinuousSincosEmbed(dim=512, ndim=3)(lidar_points)
+    lidar_embed = ContinuousSinCosEmbed(dim=512, ndim=3)(lidar_points)
     lidar_features = AnchorAttention(dim=512, num_heads=8)(lidar_embed, num_anchor_tokens=256)
     lidar_global = keras.layers.GlobalMaxPooling1D()(lidar_features)
 
     # 2. Camera processing with spatial awareness
     camera_flat = keras.layers.Reshape((64 * 64, 256))(camera_features)
     camera_pos_flat = keras.layers.Reshape((64 * 64, 2))(camera_positions)
-    camera_pos_embed = ContinuousSincosEmbed(dim=256, ndim=2)(camera_pos_flat)
+    camera_pos_embed = ContinuousSinCosEmbed(dim=256, ndim=2)(camera_pos_flat)
     camera_enhanced = camera_flat + camera_pos_embed
     camera_global = keras.layers.GlobalAveragePooling1D()(camera_enhanced)
 
     # 3. Radar processing
-    radar_embed = ContinuousSincosEmbed(dim=256, ndim=4)(radar_points)
+    radar_embed = ContinuousSinCosEmbed(dim=256, ndim=4)(radar_points)
     radar_global = keras.layers.GlobalMaxPooling1D()(radar_embed)
 
     # Cross-modal fusion using Perceiver
@@ -254,7 +254,7 @@ def build_physics_simulator(grid_size: int = 64):
     boundary_mask = keras.Input(shape=(grid_size ** 3, 1), name="boundary_mask")
 
     # Spatial embedding
-    pos_embed = ContinuousSincosEmbed(dim=256, ndim=3)(coordinates)
+    pos_embed = ContinuousSinCosEmbed(dim=256, ndim=3)(coordinates)
 
     # Combine state and position
     state_features = keras.layers.Dense(256)(initial_state)
@@ -305,7 +305,7 @@ def build_molecular_property_predictor():
     bond_features = keras.Input(shape=(None, 16), name="bond_features")
 
     # Spatial molecular embedding
-    spatial_embed = ContinuousSincosEmbed(dim=256, ndim=3)(atom_positions)
+    spatial_embed = ContinuousSinCosEmbed(dim=256, ndim=3)(atom_positions)
     atom_embed = keras.layers.Dense(256)(atom_features)
 
     # Combine spatial and chemical features
@@ -363,7 +363,7 @@ def build_manipulation_planner():
     goal_orientation = keras.Input(shape=(4,), name="goal_quaternion")
 
     # Scene understanding
-    scene_embed = ContinuousSincosEmbed(dim=512, ndim=3)(scene_points)
+    scene_embed = ContinuousSinCosEmbed(dim=512, ndim=3)(scene_points)
     scene_features = scene_embed * object_mask  # Focus on objects
 
     # Spatial reasoning for manipulation
@@ -420,11 +420,11 @@ def build_slam_system():
     odometry = keras.Input(shape=(6,), name="odometry")  # x,y,z,roll,pitch,yaw
 
     # Process current scan
-    scan_embed = ContinuousSincosEmbed(dim=256, ndim=3)(lidar_scan)
+    scan_embed = ContinuousSinCosEmbed(dim=256, ndim=3)(lidar_scan)
     scan_features = AnchorAttention(dim=256, num_heads=8)(scan_embed, num_anchor_tokens=128)
 
     # Process existing map
-    map_embed = ContinuousSincosEmbed(dim=256, ndim=3)(map_points)
+    map_embed = ContinuousSinCosEmbed(dim=256, ndim=3)(map_points)
     enhanced_map = map_embed + keras.layers.Dense(256)(map_features)
 
     # Cross-attention between scan and map for localization
@@ -485,7 +485,7 @@ def build_climate_model():
     atmospheric_state = ops.concatenate([temperature, pressure, humidity, wind_velocity], axis=-1)
 
     # Spatial embedding for geographic coordinates
-    geo_embed = ContinuousSincosEmbed(dim=512, ndim=3, max_wavelength=1000000)(coordinates)  # Large scale
+    geo_embed = ContinuousSinCosEmbed(dim=512, ndim=3, max_wavelength=1000000)(coordinates)  # Large scale
     state_embed = keras.layers.Dense(512)(atmospheric_state)
 
     # Combine geographic and atmospheric information
@@ -544,7 +544,7 @@ def build_procedural_world_generator():
     constraints = keras.Input(shape=(None, 4), name="constraints")  # boundaries, water, etc.
 
     # Spatial embedding for world coordinates
-    spatial_embed = ContinuousSincosEmbed(dim=512, ndim=3, max_wavelength=10000)(seed_points)
+    spatial_embed = ContinuousSinCosEmbed(dim=512, ndim=3, max_wavelength=10000)(seed_points)
     control_embed = keras.layers.Dense(512)(control_params)
     constraint_embed = keras.layers.Dense(512)(constraints)
 

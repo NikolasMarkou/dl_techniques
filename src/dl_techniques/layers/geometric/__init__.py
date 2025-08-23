@@ -59,7 +59,7 @@ Applications and Use Cases:
     Computer Vision & 3D Processing:
         >>> # Point cloud classification
         >>> points = keras.random.uniform((1000, 3)) * 10  # 1000 3D points
-        >>> embed = ContinuousSincosEmbed(dim=256, ndim=3)
+        >>> embed = ContinuousSinCosEmbed(dim=256, ndim=3)
         >>> features = embed(points)
         >>> attn = AnchorAttention(dim=256, num_heads=8)
         >>> output = attn(features, num_anchor_tokens=100)
@@ -76,7 +76,7 @@ Applications and Use Cases:
         >>> # Physics simulation with spatial coordinates
         >>> coords = keras.random.uniform((1000, 3)) * 100  # Simulation grid
         >>> initial_state = keras.random.normal((1000, 7))  # Physical quantities
-        >>> pos_embed = ContinuousSincosEmbed(dim=512, ndim=3)
+        >>> pos_embed = ContinuousSinCosEmbed(dim=512, ndim=3)
         >>> spatial_features = pos_embed(coords)
         >>> physics_attn = AnchorAttention(dim=512, num_heads=16)
         >>> evolved_state = physics_attn(spatial_features, num_anchor_tokens=200)
@@ -161,7 +161,7 @@ Related Work and References:
     • "Geometric Deep Learning: Grids, Groups, Graphs, Geodesics, and Gauges"
 """
 
-from .continuous_sin_cos_embed import ContinuousSincosEmbed
+from .continuous_sin_cos_embed import ContinuousSinCosEmbed
 from .continuous_rope import ContinuousRoPE, apply_rope
 from .anchor_attention import AnchorAttention
 from .perceiver_attention import PerceiverAttention
@@ -178,7 +178,7 @@ from .transformer_block import TransformerBlock
 
 __all__ = [
     # Core spatial embedding layers
-    "ContinuousSincosEmbed",
+    "ContinuousSinCosEmbed",
     "ContinuousRoPE",
 
     # Attention mechanisms
@@ -196,7 +196,5 @@ __all__ = [
     "create_rope_frequencies",
     "scaled_dot_product_attention_with_rope",
     "rope_attention_block",
-
-    "TransformerBlock"
 ]
 

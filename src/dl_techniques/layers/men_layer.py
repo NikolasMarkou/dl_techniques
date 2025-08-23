@@ -42,7 +42,7 @@ from typing import Dict, Optional, Tuple, Union, Any
 # ---------------------------------------------------------------------
 
 from ..utils.logger import logger
-from .activations.explanded_activations import elu_plus_one_plus_epsilon
+from .activations.expanded_activations import elu_plus_one_plus_epsilon
 
 # ---------------------------------------------------------------------
 

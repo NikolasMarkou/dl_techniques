@@ -1,10 +1,3 @@
-"""
-Basis function activation layer
-
-This module implements the basis function activation used in PowerMLP,
-which applies a smooth, differentiable transformation to enhance network expressiveness.
-"""
-
 import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple

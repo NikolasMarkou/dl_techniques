@@ -123,7 +123,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="DLTechniques")
+@keras.saving.register_keras_serializable()
 class BaseActivation(keras.layers.Layer):
     """
     Base class for all custom activation functions.
@@ -183,7 +183,7 @@ class BaseActivation(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="DLTechniques")
+@keras.saving.register_keras_serializable()
 class GELU(BaseActivation):
     """
     Gaussian Error Linear Unit (GELU) activation function.
@@ -226,7 +226,7 @@ class GELU(BaseActivation):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="DLTechniques")
+@keras.saving.register_keras_serializable()
 class SiLU(BaseActivation):
     """
     Sigmoid Linear Unit (SiLU) activation function.
@@ -264,7 +264,7 @@ class SiLU(BaseActivation):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="DLTechniques")
+@keras.saving.register_keras_serializable()
 class ExpandedActivation(BaseActivation):
     """
     Base class for expanded gating range activation functions.
@@ -357,7 +357,7 @@ class ExpandedActivation(BaseActivation):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="DLTechniques")
+@keras.saving.register_keras_serializable()
 class xATLU(ExpandedActivation):
     """
     Expanded ArcTan Linear Unit activation function.
@@ -411,7 +411,7 @@ class xATLU(ExpandedActivation):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="DLTechniques")
+@keras.saving.register_keras_serializable()
 class xGELU(ExpandedActivation):
     """
     Expanded Gaussian Error Linear Unit (xGELU) activation function.
@@ -465,7 +465,7 @@ class xGELU(ExpandedActivation):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="DLTechniques")
+@keras.saving.register_keras_serializable()
 class xSiLU(ExpandedActivation):
     """
     Expanded Sigmoid Linear Unit (xSiLU) activation function.
@@ -547,7 +547,7 @@ def elu_plus_one_plus_epsilon(x: keras.KerasTensor) -> keras.KerasTensor:
     return keras.activations.elu(x) + 1.0 + keras.backend.epsilon()
 
 
-@keras.saving.register_keras_serializable(package="DLTechniques")
+@keras.saving.register_keras_serializable()
 class EluPlusOne(BaseActivation):
     """
     Enhanced ELU activation layer to ensure positive values.
