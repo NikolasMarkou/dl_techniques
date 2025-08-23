@@ -70,18 +70,18 @@ class RMSNorm(keras.layers.Layer):
     Where scale is a learnable parameter when ``use_scale=True``.
 
     Args:
-        axis (int or tuple of ints, optional): Axis or axes along which to compute RMS statistics.
+        axis: Axis or axes along which to compute RMS statistics.
             The default (-1) computes RMS over the last dimension. For multi-axis normalization,
             pass a tuple (e.g., (-2, -1) for normalizing over last two dimensions).
             Defaults to -1.
-        epsilon (float, optional): Small constant added to denominator for numerical stability.
+        epsilon: Small constant added to denominator for numerical stability.
             Should be positive and typically in range [1e-8, 1e-5]. Defaults to 1e-6.
-        use_scale (bool, optional): Whether to use a learnable scaling parameter after
+        use_scale: Whether to use a learnable scaling parameter after
             normalization. When True, adds a trainable parameter that can help the model
             learn appropriate scaling. Defaults to True.
-        scale_initializer (str or keras.initializers.Initializer, optional): Initializer
-            for the scale parameter when ``use_scale=True``. Common choices include
-            "ones" (default), "zeros", or custom initializers. Defaults to "ones".
+        scale_initializer: Initializer for the scale parameter when ``use_scale=True``.
+            Common choices include "ones" (default), "zeros", or custom initializers.
+            Defaults to "ones".
         **kwargs: Additional keyword arguments passed to the parent Layer class.
 
     Input shape:
@@ -199,6 +199,7 @@ class RMSNorm(keras.layers.Layer):
         - Particularly effective in transformer architectures and large language models
         - The implementation automatically handles mixed precision training with appropriate casting
         - Scale parameter shape is automatically inferred from normalization axes
+        - This implementation follows modern Keras 3 patterns for robust serialization
     """
 
     def __init__(
@@ -214,14 +215,14 @@ class RMSNorm(keras.layers.Layer):
         # Validate inputs early
         self._validate_inputs(axis, epsilon)
 
+        # Store ALL configuration parameters - required for get_config()
         self.axis = axis
         self.epsilon = epsilon
         self.use_scale = use_scale
         self.scale_initializer = keras.initializers.get(scale_initializer)
 
-        # Will be set in build()
+        # Initialize weight attributes - created in build()
         self.scale = None
-        self._build_input_shape = None
 
         logger.debug(f"Initialized RMSNorm with axis={axis}, epsilon={epsilon}, use_scale={use_scale}")
 
@@ -249,7 +250,10 @@ class RMSNorm(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the layer weights based on input shape.
+        Create the layer's own weights.
+
+        This is called automatically when the layer first processes input.
+        Following modern Keras 3 Pattern 1: Simple Layer (No Sub-layers).
 
         Args:
             input_shape: Shape tuple indicating input tensor shape.
@@ -259,8 +263,6 @@ class RMSNorm(keras.layers.Layer):
             ValueError: If attempting to create scale parameter with dynamic shape
                 along normalization axes.
         """
-        self._build_input_shape = input_shape
-
         if self.use_scale:
             # Determine the shape for the scale parameter
             # Scale parameter shape matches the input shape along normalization axes
@@ -283,6 +285,7 @@ class RMSNorm(keras.layers.Layer):
                     f"Scale parameter shape would be {param_shape}."
                 )
 
+            # Create layer's own weights using add_weight()
             self.scale = self.add_weight(
                 name="scale",
                 shape=param_shape,
@@ -292,6 +295,7 @@ class RMSNorm(keras.layers.Layer):
 
             logger.debug(f"Created scale parameter with shape {param_shape}")
 
+        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -355,11 +359,13 @@ class RMSNorm(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Get layer configuration for serialization.
+        Return configuration for serialization.
+
+        Following modern Keras 3 patterns, this method returns ALL constructor
+        arguments needed to recreate this layer instance.
 
         Returns:
-            Dictionary containing all constructor arguments needed to recreate
-            this layer instance.
+            Dictionary containing all constructor arguments.
         """
         config = super().get_config()
         config.update({
@@ -369,25 +375,5 @@ class RMSNorm(keras.layers.Layer):
             "scale_initializer": keras.initializers.serialize(self.scale_initializer),
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """
-        Get build configuration for serialization.
-
-        Returns:
-            Dictionary containing build-specific configuration needed to rebuild
-            the layer after loading.
-        """
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """
-        Build the layer from configuration.
-
-        Args:
-            config: Dictionary containing build configuration from get_build_config().
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------

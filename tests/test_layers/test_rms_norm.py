@@ -297,21 +297,6 @@ def test_norm_build_configuration(default_norm_params: Dict[str, Any], sample_in
 
     # Check that new norm is built
     assert new_norm.built
-    assert new_norm._build_input_shape == sample_inputs_3d.shape
-
-
-def test_norm_build_configuration_none_input_shape(default_norm_params: Dict[str, Any]) -> None:
-    """Test build configuration methods handle None input_shape."""
-    norm = RMSNorm(**default_norm_params)
-
-    # Before building
-    build_config = norm.get_build_config()
-    assert build_config["input_shape"] is None
-
-    # build_from_config with None should not crash
-    new_norm = RMSNorm(**default_norm_params)
-    new_norm.build_from_config({"input_shape": None})
-    assert not new_norm.built  # Should not be built if input_shape is None
 
 
 # Parametrized tests
