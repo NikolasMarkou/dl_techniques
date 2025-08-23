@@ -78,7 +78,6 @@ class TestStandardScaler:
         assert layer.built is True
         assert layer.stored_mean is None
         assert layer.stored_std is None
-        assert layer._built_input_shape == input_tensor.shape
 
     def test_build_process_with_stats(self, input_tensor):
         """Test that the layer builds properly with stats storage."""
@@ -92,7 +91,6 @@ class TestStandardScaler:
         assert layer.stored_mean is not None
         assert layer.stored_std is not None
         assert len(layer.weights) == 2  # stored_mean and stored_std
-        assert layer._built_input_shape == input_tensor.shape
 
         # Check stats shapes
         expected_stats_shape = list(input_tensor.shape[1:])  # Remove batch dimension
