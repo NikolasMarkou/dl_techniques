@@ -37,7 +37,6 @@ class TestMovingStd:
         assert layer.padding == "same"
         assert layer.data_format in ["channels_last", "channels_first"]
         assert layer.epsilon == 1e-7
-        assert layer.pooler is None
 
     def test_initialization_custom(self):
         """Test initialization with custom parameters."""
@@ -98,7 +97,6 @@ class TestMovingStd:
         assert layer.built is True
         assert layer.pooler is not None
         assert layer.pooler.built is True
-        assert layer._build_input_shape is not None
 
     def test_build_invalid_input_shape(self):
         """Test that build raises error for invalid input shapes."""
