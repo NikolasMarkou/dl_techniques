@@ -25,85 +25,11 @@ Input --> Conv Layers --> Primary Capsule --> CapsuleBlock
 ### 1. Primary Capsule Layer
 Transforms traditional CNN features into capsule vectors.
 
-```
-        [Input: Feature Maps]
-               ↓
-        ┌─────────────────┐
-        │   Conv2D Layer  │  ← Kernel size, strides, padding
-        └─────────────────┘
-               ↓
-        ┌─────────────────┐
-        │     Reshape     │  ← To [batch, num_capsules*h*w, dim_capsules]
-        └─────────────────┘
-               ↓
-        ┌─────────────────┐
-        │  Squash Function│  ← Non-linearity for capsules
-        └─────────────────┘
-               ↓
-[Output: Primary Capsules Vectors]
-```
-
 ### 2. Routing Capsule Layer
 Implements dynamic routing mechanism between capsule layers.
 
-```
-    [Input: Lower-level Capsules]
-               ↓
-┌─────────────────────────────────┐
-│      Transformation Matrix      │ ← W_ij transforms u_i to û_j|i
-└─────────────────────────────────┘
-               ↓
-┌─────────────────────────────────┐
-│      Initialize Routing         │ ← b_ij = 0
-│         Coefficients            │
-└─────────────────────────────────┘
-               ↓
-┌─────────────────────────────────┐
-│      Routing Iterations         │
-│                                 │
-│    ┌───────────────────────┐    │
-│    │ Softmax to get c_ij   │    │ ← c_ij = softmax(b_ij)
-│    └───────────────────────┘    │
-│               ↓                 │
-│    ┌───────────────────────┐    │
-│    │ Weighted sum to get   │    │ ← s_j = Σ c_ij * û_j|i
-│    │ capsule input s_j     │    │
-│    └───────────────────────┘    │
-│               ↓                 │
-│    ┌───────────────────────┐    │
-│    │ Squash to get capsule │    │ ← v_j = squash(s_j)
-│    │ output v_j            │    │
-│    └───────────────────────┘    │
-│               ↓                 │
-│    ┌───────────────────────┐    │
-│    │ Update routing logits │    │ ← b_ij += v_j • û_j|i
-│    └───────────────────────┘    │
-│                                 │
-└─────────────────────────────────┘
-               ↓
-   [Output: Higher-level Capsules]
-```
-
 ### 3. Capsule Block
 A complete block combining routing capsules with regularization.
-
-```
-    [Input: Lower-level Capsules]
-               ↓
-    ┌─────────────────────────┐
-    │     Routing Capsule     │
-    └─────────────────────────┘
-               ↓
-    ┌─────────────────────────┐
-    │     Dropout (Opt.)      │
-    └─────────────────────────┘
-               ↓
-    ┌─────────────────────────┐
-    │   Layer Norm (Opt.)     │
-    └─────────────────────────┘
-               ↓
-   [Output: Higher-level Capsules]
-```
 
 ## Squash Function
 
@@ -115,24 +41,10 @@ squash(s) = --------- * (s / ||s||)
             1 + ||s||²
 ```
 
-Where:
-- s is the input vector
-- ||s|| is the Euclidean norm of s
-- The output vector has the same orientation as the input but with length compressed to [0,1]
+## Dynamic Routing Algorithm
 
-## Margin Loss
-
-For class k:
-
-```
-L_k = T_k * max(0, m⁺ - ||v_k||)² + λ(1-T_k) * max(0, ||v_k|| - m⁻)²
-```
-
-Where:
-- T_k = 1 if class k is present
-- m⁺ = 0.9 (margin for correct class)
-- m⁻ = 0.1 (margin for incorrect classes)
-- λ = 0.5 (down-weighting factor for absent classes)
+The routing process iteratively refines the connection strengths between input
+and output capsules through an agreement mechanism.
 
 ## References
 
@@ -141,7 +53,7 @@ In Advances in Neural Information Processing Systems (pp. 3856-3866).
 """
 
 import keras
-from keras import ops, backend
+from keras import ops
 from typing import Optional, Tuple, Union, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -153,6 +65,7 @@ from .activations.squash import SquashLayer
 
 # ---------------------------------------------------------------------
 
+
 @keras.saving.register_keras_serializable()
 class PrimaryCapsule(keras.layers.Layer):
     """Primary Capsule Layer implementation.
@@ -162,18 +75,44 @@ class PrimaryCapsule(keras.layers.Layer):
     and squashing operations.
 
     Args:
-        num_capsules: Number of primary capsules to create
-        dim_capsules: Dimension of each capsule's output vector
-        kernel_size: Size of the convolutional kernel
-        strides: Stride length for convolution
-        padding: Type of padding for convolution ('valid' or 'same')
-        kernel_initializer: Initializer for the conv kernel
-        kernel_regularizer: Regularizer function for the conv kernel
-        use_bias: Whether to include bias terms
-        squash_axis: Axis along which to apply squashing operation
-        squash_epsilon: Epsilon for numerical stability in squashing
-        name: Optional name for the layer
-        **kwargs: Additional keyword arguments for the base class
+        num_capsules: Integer, number of primary capsules to create. Must be positive.
+        dim_capsules: Integer, dimension of each capsule's output vector. Must be positive.
+        kernel_size: Integer or tuple of integers, size of the convolutional kernel.
+        strides: Integer or tuple of integers, stride length for convolution. Defaults to 1.
+        padding: String, type of padding for convolution ('valid' or 'same'). Defaults to 'valid'.
+        kernel_initializer: String or Initializer, initializer for the conv kernel. Defaults to 'he_normal'.
+        kernel_regularizer: Optional regularizer function for the conv kernel.
+        use_bias: Boolean, whether to include bias terms. Defaults to True.
+        squash_axis: Integer, axis along which to apply squashing operation. Defaults to -1.
+        squash_epsilon: Float, epsilon for numerical stability in squashing. Optional.
+        **kwargs: Additional keyword arguments for the Layer base class.
+
+    Input shape:
+        4D tensor with shape: ``(batch_size, height, width, channels)``
+
+    Output shape:
+        3D tensor with shape: ``(batch_size, num_spatial_capsules * num_capsules, dim_capsules)``
+        where ``num_spatial_capsules`` depends on the input size and convolution parameters.
+
+    Example:
+        ```python
+        # Create primary capsules from feature maps
+        primary_caps = PrimaryCapsule(
+            num_capsules=32,
+            dim_capsules=8,
+            kernel_size=9,
+            strides=2
+        )
+
+        # Process feature maps to capsules
+        feature_maps = keras.random.normal((32, 20, 20, 256))
+        capsules = primary_caps(feature_maps)
+        print(capsules.shape)  # (32, 1152, 8) - 6*6*32 = 1152 capsules
+        ```
+
+    Raises:
+        ValueError: If num_capsules or dim_capsules is not positive.
+        ValueError: If padding is not 'valid' or 'same'.
     """
 
     def __init__(
@@ -188,10 +127,9 @@ class PrimaryCapsule(keras.layers.Layer):
         use_bias: bool = True,
         squash_axis: int = -1,
         squash_epsilon: Optional[float] = None,
-        name: Optional[str] = None,
-        **kwargs
-    ):
-        super().__init__(name=name, **kwargs)
+        **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
 
         # Validate inputs
         if num_capsules <= 0:
@@ -213,27 +151,7 @@ class PrimaryCapsule(keras.layers.Layer):
         self.squash_axis = squash_axis
         self.squash_epsilon = squash_epsilon
 
-        # Store build input shape for serialization
-        self._build_input_shape = None
-
-        # Layers to be initialized in build()
-        self.conv = None
-        self.squash_layer = None
-
-    def build(self, input_shape) -> None:
-        """Build the layer based on input shape.
-
-        Args:
-            input_shape: Shape of input tensor
-        """
-        # Store for serialization
-        self._build_input_shape = input_shape
-
-        # Validate input shape
-        if len(input_shape) != 4:  # [batch_size, height, width, channels]
-            raise ValueError(f"Expected 4D input shape [batch, height, width, channels], got {input_shape}")
-
-        # Create the convolutional layer
+        # CREATE sub-layers in __init__ (modern Keras 3 pattern)
         self.conv = keras.layers.Conv2D(
             filters=self.num_capsules * self.dim_capsules,
             kernel_size=self.kernel_size,
@@ -242,33 +160,59 @@ class PrimaryCapsule(keras.layers.Layer):
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             use_bias=self.use_bias,
-            name=f"{self.name}_conv" if self.name else "conv"
+            name="primary_conv"
         )
 
-        # Build the convolutional layer
-        self.conv.build(input_shape)
-
-        # Create squashing layer
         self.squash_layer = SquashLayer(
             axis=self.squash_axis,
             epsilon=self.squash_epsilon,
-            name=f"{self.name}_squash" if self.name else "squash"
+            name="primary_squash"
         )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the layer based on input shape.
+
+        Args:
+            input_shape: Shape of input tensor as tuple.
+        """
+        # Validate input shape
+        if len(input_shape) != 4:  # [batch_size, height, width, channels]
+            raise ValueError(f"Expected 4D input shape [batch, height, width, channels], got {input_shape}")
+
+        # BUILD sub-layers explicitly (critical for serialization)
+        self.conv.build(input_shape)
+
+        # Compute conv output shape to build squash layer
+        conv_output_shape = self.conv.compute_output_shape(input_shape)
+        h, w = conv_output_shape[1], conv_output_shape[2]
+        num_spatial_capsules = h * w
+
+        # Build squash layer with reshaped dimensions
+        squash_input_shape = (
+            input_shape[0],
+            num_spatial_capsules * self.num_capsules,
+            self.dim_capsules
+        )
+        self.squash_layer.build(squash_input_shape)
 
         super().build(input_shape)
 
         logger.info(f"Built PrimaryCapsule layer: {self.num_capsules} capsules, "
                    f"{self.dim_capsules} dimensions each")
 
-    def call(self, inputs, training: Optional[bool] = None) -> Any:
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """Forward pass for primary capsule layer.
 
         Args:
-            inputs: Input tensor of shape [batch_size, height, width, channels]
-            training: Whether in training mode
+            inputs: Input tensor of shape [batch_size, height, width, channels].
+            training: Boolean, whether in training mode.
 
         Returns:
-            Output tensor of shape [batch_size, num_capsules, dim_capsules]
+            Output tensor of shape [batch_size, num_capsules_total, dim_capsules].
         """
         batch_size = ops.shape(inputs)[0]
 
@@ -280,7 +224,7 @@ class PrimaryCapsule(keras.layers.Layer):
         h, w = ops.shape(conv_output)[1], ops.shape(conv_output)[2]
         num_spatial_capsules = h * w
 
-        # Reshape to [batch_size, h*w * num_capsules, dim_capsules]
+        # Reshape to [batch_size, num_spatial_capsules * num_capsules, dim_capsules]
         capsules = ops.reshape(
             conv_output,
             [batch_size, num_spatial_capsules * self.num_capsules, self.dim_capsules]
@@ -289,14 +233,14 @@ class PrimaryCapsule(keras.layers.Layer):
         # Apply squashing
         return self.squash_layer(capsules, training=training)
 
-    def compute_output_shape(self, input_shape) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape based on input shape.
 
         Args:
-            input_shape: Shape of input tensor
+            input_shape: Shape of input tensor.
 
         Returns:
-            Shape of output tensor
+            Shape of output tensor as tuple.
         """
         # Compute the shape after convolution
         conv_output_shape = self.conv.compute_output_shape(input_shape)
@@ -304,17 +248,17 @@ class PrimaryCapsule(keras.layers.Layer):
         num_spatial_capsules = h * w
 
         # Shape after reshaping and squashing
-        return tuple([
+        return (
             input_shape[0],  # batch size
             num_spatial_capsules * self.num_capsules,
             self.dim_capsules
-        ])
+        )
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
         Returns:
-            Dictionary containing layer configuration
+            Dictionary containing layer configuration.
         """
         config = super().get_config()
         config.update({
@@ -330,27 +274,6 @@ class PrimaryCapsule(keras.layers.Layer):
             "squash_epsilon": self.squash_epsilon,
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the config needed to build the layer from a config.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
-# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -392,49 +315,19 @@ class RoutingCapsule(keras.layers.Layer):
     .. math::
         b_{ij} \\leftarrow b_{ij} + \\hat{u}_{j|i} \\cdot v_j \\quad \\text{(update logits)}
 
-    Where:
-    - :math:`c_{ij}`: routing coefficient from input capsule i to output capsule j
-    - :math:`b_{ij}`: routing logit (accumulated agreement)
-    - :math:`\\hat{u}_{j|i}`: prediction from input capsule i for output capsule j
-    - :math:`v_j`: final output of capsule j
-    - :math:`s_j`: weighted input to capsule j
-
-    ## Intuitive Understanding
-
-    Consider face recognition:
-    - **Lower capsules**: Detect eyes, nose, mouth features
-    - **Higher capsules**: Detect complete faces
-    - **Without routing**: All features contribute equally to face detection
-    - **With routing**:
-        - Iteration 1: Eyes strongly predict "face present", mouth prediction is weaker
-        - Iteration 2: Eye→face connections strengthened, mouth→face connections weakened
-        - Iteration 3: Stable routing where relevant features dominate face detection
-
-    ## Why Multiple Iterations?
-
-    - **Iteration 1**: Uniform routing, initial outputs computed
-    - **Iteration 2**: Routing refined based on agreement, better connections strengthened
-    - **Iteration 3**: Further refinement, typically reaches stable routing pattern
-    - **3+ iterations**: Diminishing returns, computational cost increases linearly
-
-    The iterative process creates a competitive mechanism where input capsules compete
-    to contribute to output capsules based on prediction quality, leading to more
-    interpretable and hierarchical representations.
-
     Args:
-        num_capsules: Number of output capsules to produce.
-        dim_capsules: Dimension of each output capsule's vector.
-        routing_iterations: Number of dynamic routing iterations. The paper recommends 3
+        num_capsules: Integer, number of output capsules to produce. Must be positive.
+        dim_capsules: Integer, dimension of each output capsule's vector. Must be positive.
+        routing_iterations: Integer, number of dynamic routing iterations. The paper recommends 3
             iterations as a good balance between performance and computational cost.
-            More iterations provide diminishing returns.
-        kernel_initializer: Initializer for the transformation matrices W that transform
-            input capsule predictions to output capsule space.
-        kernel_regularizer: Regularizer function applied to the transformation matrices.
-        use_bias: Whether to include bias terms in the routing computation.
-        squash_axis: Axis along which to apply the squashing non-linearity. Default is -2
+            Must be positive. Defaults to 3.
+        kernel_initializer: String or Initializer, initializer for the transformation matrices W that transform
+            input capsule predictions to output capsule space. Defaults to 'glorot_uniform'.
+        kernel_regularizer: Optional regularizer function applied to the transformation matrices.
+        use_bias: Boolean, whether to include bias terms in the routing computation. Defaults to True.
+        squash_axis: Integer, axis along which to apply the squashing non-linearity. Default is -2
             to squash along the capsule dimension.
-        squash_epsilon: Small constant for numerical stability in the squashing function.
-        name: Optional name for the layer.
+        squash_epsilon: Optional float, small constant for numerical stability in the squashing function.
         **kwargs: Additional keyword arguments passed to the Layer base class.
 
     Input shape:
@@ -444,16 +337,20 @@ class RoutingCapsule(keras.layers.Layer):
         3D tensor with shape: ``(batch_size, num_capsules, dim_capsules)``
 
     Example:
-        >>> # Route from 1152 primary capsules (8D) to 10 digit capsules (16D)
-        >>> routing_layer = RoutingCapsule(
-        ...     num_capsules=10,
-        ...     dim_capsules=16,
-        ...     routing_iterations=3
-        ... )
-        >>> primary_caps = keras.random.normal((32, 1152, 8))
-        >>> digit_caps = routing_layer(primary_caps)
-        >>> print(digit_caps.shape)
-        (32, 10, 16)
+        ```python
+        # Route from 1152 primary capsules (8D) to 10 digit capsules (16D)
+        routing_layer = RoutingCapsule(
+            num_capsules=10,
+            dim_capsules=16,
+            routing_iterations=3
+        )
+        primary_caps = keras.random.normal((32, 1152, 8))
+        digit_caps = routing_layer(primary_caps)
+        print(digit_caps.shape)  # (32, 10, 16)
+        ```
+
+    Raises:
+        ValueError: If num_capsules, dim_capsules, or routing_iterations is not positive.
 
     References:
         Sabour, S., Frosst, N., & Hinton, G. E. (2017). Dynamic routing between capsules.
@@ -468,12 +365,11 @@ class RoutingCapsule(keras.layers.Layer):
         kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         use_bias: bool = True,
-        squash_axis: int = -2,  # Different default for routing capsules
+        squash_axis: int = -2,
         squash_epsilon: Optional[float] = None,
-        name: Optional[str] = None,
-        **kwargs
-    ):
-        super().__init__(name=name, **kwargs)
+        **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
 
         # Validate inputs
         if num_capsules <= 0:
@@ -493,25 +389,27 @@ class RoutingCapsule(keras.layers.Layer):
         self.squash_axis = squash_axis
         self.squash_epsilon = squash_epsilon
 
-        # Store build input shape for serialization
-        self._build_input_shape = None
+        # CREATE squashing layer in __init__ (modern Keras 3 pattern)
+        self.squash_layer = SquashLayer(
+            axis=self.squash_axis,
+            epsilon=self.squash_epsilon,
+            name="routing_squash"
+        )
 
-        # These will be set in build()
+        # Weight variables - created in build()
         self.W = None
         self.bias = None
+
+        # Shape attributes - set in build()
         self.num_input_capsules = None
         self.input_dim_capsules = None
-        self.squash_layer = None
 
-    def build(self, input_shape) -> None:
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build layer weights based on input shape.
 
         Args:
-            input_shape: Shape of input tensor [batch_size, num_input_capsules, input_dim_capsules]
+            input_shape: Shape of input tensor [batch_size, num_input_capsules, input_dim_capsules].
         """
-        # Store for serialization
-        self._build_input_shape = input_shape
-
         # Validate input shape
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D input shape [batch, num_capsules, dim_capsules], got {input_shape}")
@@ -540,27 +438,28 @@ class RoutingCapsule(keras.layers.Layer):
                 name="capsule_bias"
             )
 
-        # Create squashing layer
-        self.squash_layer = SquashLayer(
-            axis=self.squash_axis,
-            epsilon=self.squash_epsilon,
-            name=f"{self.name}_squash" if self.name else "squash"
-        )
+        # BUILD squashing layer - it needs output shape
+        squash_input_shape = (input_shape[0], 1, self.num_capsules, self.dim_capsules, 1)
+        self.squash_layer.build(squash_input_shape)
 
         super().build(input_shape)
 
         logger.info(f"Built RoutingCapsule layer: {self.num_input_capsules} -> {self.num_capsules} capsules, "
                    f"{self.routing_iterations} routing iterations")
 
-    def call(self, inputs, training: Optional[bool] = None) -> Any:
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """Forward pass implementing dynamic routing between capsules.
 
         Args:
-            inputs: Input tensor of shape [batch_size, num_input_capsules, input_dim_capsules]
-            training: Whether in training mode
+            inputs: Input tensor of shape [batch_size, num_input_capsules, input_dim_capsules].
+            training: Boolean, whether in training mode.
 
         Returns:
-            Output tensor of shape [batch_size, num_capsules, dim_capsules]
+            Output tensor of shape [batch_size, num_capsules, dim_capsules].
         """
         batch_size = ops.shape(inputs)[0]
 
@@ -628,22 +527,22 @@ class RoutingCapsule(keras.layers.Layer):
         # Final output: shape [batch_size, num_capsules, dim_capsules]
         return ops.reshape(v, (batch_size, self.num_capsules, self.dim_capsules))
 
-    def compute_output_shape(self, input_shape) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape based on input shape.
 
         Args:
-            input_shape: Shape of input tensor
+            input_shape: Shape of input tensor.
 
         Returns:
-            Shape of output tensor
+            Shape of output tensor as tuple.
         """
-        return tuple([input_shape[0], self.num_capsules, self.dim_capsules])
+        return (input_shape[0], self.num_capsules, self.dim_capsules)
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
         Returns:
-            Dictionary containing layer configuration
+            Dictionary containing layer configuration.
         """
         config = super().get_config()
         config.update({
@@ -658,49 +557,55 @@ class RoutingCapsule(keras.layers.Layer):
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the config needed to build the layer from a config.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
-# ---------------------------------------------------------------------
-
 
 @keras.saving.register_keras_serializable()
 class CapsuleBlock(keras.layers.Layer):
-    """
-    A complete capsule block with optional dropout and normalization.
+    """A complete capsule block with optional dropout and normalization.
 
     This block combines a RoutingCapsule layer with optional regularization
-    techniques like dropout and layer normalization.
+    techniques like dropout and layer normalization to create a robust
+    capsule processing unit.
 
     Args:
-        num_capsules: Number of output capsules
-        dim_capsules: Dimension of each output capsule's vector
-        routing_iterations: Number of routing iterations
-        dropout_rate: Dropout rate (0.0 means no dropout)
-        use_layer_norm: Whether to use layer normalization
-        kernel_initializer: Initializer for the transformation matrices
-        kernel_regularizer: Regularizer function for the transformation matrices
-        use_bias: Whether to use biases in routing
-        squash_axis: Axis along which to apply squashing operation
-        squash_epsilon: Epsilon for numerical stability in squashing
-        name: Optional name for the layer
-        **kwargs: Additional keyword arguments for the base class
+        num_capsules: Integer, number of output capsules. Must be positive.
+        dim_capsules: Integer, dimension of each output capsule's vector. Must be positive.
+        routing_iterations: Integer, number of routing iterations. Must be positive. Defaults to 3.
+        dropout_rate: Float, dropout rate. Must be in [0.0, 1.0). 0.0 means no dropout. Defaults to 0.0.
+        use_layer_norm: Boolean, whether to use layer normalization. Defaults to False.
+        kernel_initializer: String or Initializer, initializer for the transformation matrices.
+            Defaults to 'glorot_uniform'.
+        kernel_regularizer: Optional regularizer function for the transformation matrices.
+        use_bias: Boolean, whether to use biases in routing. Defaults to True.
+        squash_axis: Integer, axis along which to apply squashing operation. Defaults to -2.
+        squash_epsilon: Optional float, epsilon for numerical stability in squashing.
+        **kwargs: Additional keyword arguments for the Layer base class.
+
+    Input shape:
+        3D tensor with shape: ``(batch_size, num_input_capsules, input_dim_capsules)``
+
+    Output shape:
+        3D tensor with shape: ``(batch_size, num_capsules, dim_capsules)``
+
+    Example:
+        ```python
+        # Create a capsule block with regularization
+        capsule_block = CapsuleBlock(
+            num_capsules=10,
+            dim_capsules=16,
+            routing_iterations=3,
+            dropout_rate=0.2,
+            use_layer_norm=True
+        )
+
+        # Process capsules
+        primary_caps = keras.random.normal((32, 1152, 8))
+        digit_caps = capsule_block(primary_caps, training=True)
+        print(digit_caps.shape)  # (32, 10, 16)
+        ```
+
+    Raises:
+        ValueError: If dropout_rate is not in [0.0, 1.0).
+        TypeError: If use_layer_norm is not boolean.
     """
 
     def __init__(
@@ -715,10 +620,9 @@ class CapsuleBlock(keras.layers.Layer):
         use_bias: bool = True,
         squash_axis: int = -2,
         squash_epsilon: Optional[float] = None,
-        name: Optional[str] = None,
-        **kwargs
-    ):
-        super().__init__(name=name, **kwargs)
+        **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
 
         # Validate inputs
         if dropout_rate < 0.0 or dropout_rate >= 1.0:
@@ -738,24 +642,7 @@ class CapsuleBlock(keras.layers.Layer):
         self.squash_axis = squash_axis
         self.squash_epsilon = squash_epsilon
 
-        # Store build input shape for serialization
-        self._build_input_shape = None
-
-        # Create layers (will be initialized in build)
-        self.capsule_layer = None
-        self.dropout = None
-        self.layer_norm = None
-
-    def build(self, input_shape) -> None:
-        """Build the layer based on input shape.
-
-        Args:
-            input_shape: Shape of input tensor
-        """
-        # Store for serialization
-        self._build_input_shape = input_shape
-
-        # Create the routing capsule layer
+        # CREATE all sub-layers in __init__ (modern Keras 3 pattern)
         self.capsule_layer = RoutingCapsule(
             num_capsules=self.num_capsules,
             dim_capsules=self.dim_capsules,
@@ -765,23 +652,39 @@ class CapsuleBlock(keras.layers.Layer):
             use_bias=self.use_bias,
             squash_axis=self.squash_axis,
             squash_epsilon=self.squash_epsilon,
-            name=f"{self.name}_capsules" if self.name else None
+            name="block_capsules"
         )
-
-        # Build the capsule layer
-        self.capsule_layer.build(input_shape)
 
         # Optional regularization layers
         if self.dropout_rate > 0.0:
-            self.dropout = keras.layers.Dropout(self.dropout_rate)
+            self.dropout = keras.layers.Dropout(self.dropout_rate, name="block_dropout")
+        else:
+            self.dropout = None
 
         if self.use_layer_norm:
             self.layer_norm = keras.layers.LayerNormalization(
                 axis=-1,
-                name=f"{self.name}_norm" if self.name else None
+                name="block_norm"
             )
-            # Build layer normalization if used
-            output_shape = self.capsule_layer.compute_output_shape(input_shape)
+        else:
+            self.layer_norm = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the layer based on input shape.
+
+        Args:
+            input_shape: Shape of input tensor.
+        """
+        # BUILD all sub-layers explicitly (critical for serialization)
+        self.capsule_layer.build(input_shape)
+
+        # Compute output shape for building optional layers
+        output_shape = self.capsule_layer.compute_output_shape(input_shape)
+
+        if self.dropout is not None:
+            self.dropout.build(output_shape)
+
+        if self.layer_norm is not None:
             self.layer_norm.build(output_shape)
 
         super().build(input_shape)
@@ -789,15 +692,19 @@ class CapsuleBlock(keras.layers.Layer):
         logger.info(f"Built CapsuleBlock: {self.num_capsules} capsules, "
                    f"dropout={self.dropout_rate}, layer_norm={self.use_layer_norm}")
 
-    def call(self, inputs, training: Optional[bool] = None) -> Any:
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """Forward pass through the capsule block.
 
         Args:
-            inputs: Input tensor
-            training: Whether in training mode
+            inputs: Input tensor of shape [batch_size, num_input_capsules, input_dim_capsules].
+            training: Boolean, whether in training mode.
 
         Returns:
-            Processed output tensor
+            Processed output tensor of shape [batch_size, num_capsules, dim_capsules].
         """
         # Process through capsule layer
         x = self.capsule_layer(inputs, training=training)
@@ -807,18 +714,18 @@ class CapsuleBlock(keras.layers.Layer):
             x = self.dropout(x, training=training)
 
         if self.layer_norm is not None:
-            x = self.layer_norm(x)
+            x = self.layer_norm(x, training=training)
 
         return x
 
-    def compute_output_shape(self, input_shape) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape based on input shape.
 
         Args:
-            input_shape: Shape of input tensor
+            input_shape: Shape of input tensor.
 
         Returns:
-            Shape of output tensor
+            Shape of output tensor as tuple.
         """
         return self.capsule_layer.compute_output_shape(input_shape)
 
@@ -826,7 +733,7 @@ class CapsuleBlock(keras.layers.Layer):
         """Get layer configuration for serialization.
 
         Returns:
-            Dictionary containing layer configuration
+            Dictionary containing layer configuration.
         """
         config = super().get_config()
         config.update({
@@ -842,24 +749,3 @@ class CapsuleBlock(keras.layers.Layer):
             "squash_epsilon": self.squash_epsilon,
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the config needed to build the layer from a config.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
-# ---------------------------------------------------------------------
