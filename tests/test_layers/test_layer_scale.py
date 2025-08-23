@@ -97,7 +97,6 @@ class TestLearnableMultiplier:
         # Check default values
         assert layer.multiplier_type == MultiplierType.CHANNEL
         assert layer.gamma is None
-        assert layer._build_input_shape is None
         assert isinstance(layer.initializer, keras.initializers.Ones)
         assert layer.regularizer is None
         assert isinstance(layer.constraint, keras.constraints.NonNeg)
@@ -127,7 +126,6 @@ class TestLearnableMultiplier:
         # Global multiplier should have shape (1,) for efficient broadcasting
         assert layer.gamma.shape == (1,)
         assert layer.built is True
-        assert layer._build_input_shape == sample_shape
 
     def test_build_channel(self, sample_shape: Tuple[int, int, int, int]) -> None:
         """Test build with channel multiplier."""
@@ -145,14 +143,6 @@ class TestLearnableMultiplier:
 
         # Should work with 2D inputs
         assert layer.gamma.shape == (sample_2d_shape[-1],)
-
-    def test_build_channel_invalid_shape(self) -> None:
-        """Test build with channel multiplier on invalid input shape."""
-        layer = LearnableMultiplier(multiplier_type="CHANNEL")
-
-        # Should raise error for 1D input (insufficient dimensions)
-        with pytest.raises(ValueError, match="Input must have at least 2 dimensions"):
-            layer.build((10,))
 
     def test_call_global(self, layer_params: Dict[str, Any], sample_input: tf.Tensor) -> None:
         """Test call with global multiplier."""

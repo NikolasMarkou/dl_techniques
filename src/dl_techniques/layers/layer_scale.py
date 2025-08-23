@@ -48,7 +48,7 @@ Common Use Cases:
 import keras
 from keras import ops
 from enum import Enum
-from typing import Dict, Any, Optional, Union, Tuple
+from typing import Dict, Any, Optional, Union, Tuple, Literal
 
 # ---------------------------------------------------------------------
 
@@ -106,45 +106,94 @@ class MultiplierType(Enum):
 @keras.saving.register_keras_serializable()
 class LearnableMultiplier(keras.layers.Layer):
     """
-    Layer implementing learnable multipliers.
+    Layer implementing learnable element-wise multipliers for adaptive feature scaling.
 
-    The multipliers can be either global (single value) or per-channel.
-    This layer multiplies the input tensor with learnable parameters that
-    can be constrained and regularized.
+    This layer introduces trainable scaling parameters that can be applied either
+    globally across the entire input tensor or per-channel. It provides a simple
+    but effective mechanism for learning feature importance and can act as a
+    differentiable gating mechanism.
+
+    The layer implements two operational modes:
+    - **Global**: Single scalar multiplier applied uniformly across all features
+    - **Channel**: Individual multipliers for each channel, enabling channel-wise
+      feature re-weighting
+
+    Key architectural benefits:
+    - **Identity initialization**: Starts as identity transform for stable training
+    - **Non-negative constraint**: Optional constraint to ensure positive scaling
+    - **Minimal overhead**: Lightweight operation with negligible computational cost
+    - **Flexible integration**: Can be inserted anywhere in the network architecture
+
+    Mathematical formulation:
+        - Global mode: ``output = gamma * input`` where gamma is scalar
+        - Channel mode: ``output = gamma ⊙ input`` where ⊙ is element-wise product
+          and gamma has shape ``(channels,)``
 
     Args:
-        multiplier_type: Type of multiplier ('GLOBAL' or 'CHANNEL').
-            - GLOBAL: Single multiplier applied to entire tensor
-            - CHANNEL: Separate multiplier for each channel
-        initializer: Weight initializer for the multiplier parameters.
-            Defaults to constant 1.0.
-        regularizer: Optional regularizer for the multiplier weights.
-        constraint: Optional constraint for the multiplier weights.
-            Defaults to NonNeg constraint (values >= 0).
+        multiplier_type: Union[MultiplierType, str], type of multiplier operation.
+            Either 'GLOBAL' for uniform scaling or 'CHANNEL' for per-channel scaling.
+            Accepts MultiplierType enum or string. Defaults to 'CHANNEL'.
+        initializer: Union[str, keras.initializers.Initializer], initializer for
+            the multiplier weights. Should typically be 'ones' to start as identity.
+            Defaults to 'ones'.
+        regularizer: Optional[Union[str, keras.regularizers.Regularizer]], optional
+            regularizer applied to the multiplier weights. Use for preventing
+            overfitting or enforcing sparsity. Defaults to None.
+        constraint: Optional[Union[str, keras.constraints.Constraint]], optional
+            constraint applied to the multiplier weights. Common choices include
+            'non_neg' to ensure positive values or 'unit_norm' for normalization.
+            Defaults to 'non_neg'.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
-        Arbitrary. Use the keyword argument `input_shape` (tuple of integers,
-        does not include the batch axis) when using this layer as the first
-        layer in a model.
+        Arbitrary tensor shape. For CHANNEL mode, input must have at least 2 dimensions
+        with the last dimension representing channels.
 
     Output shape:
-        Same shape as input.
+        Same shape as input tensor.
+
+    Attributes:
+        gamma: The trainable multiplier weights. Shape depends on multiplier_type:
+            - Global: shape ``(1,)``
+            - Channel: shape ``(input_channels,)``
+        multiplier_type: The type of multiplier operation being performed.
 
     Example:
-        >>> # Global multiplier
-        >>> layer = LearnableMultiplier(multiplier_type='GLOBAL')
-        >>> x = keras.random.normal((2, 10, 10, 3))
-        >>> y = layer(x)
-        >>> print(y.shape)
-        (2, 10, 10, 3)
+        ```python
+        # Global multiplier for residual gating
+        inputs = keras.Input(shape=(32, 32, 64))
+        residual = keras.layers.Conv2D(64, 3, padding='same')(inputs)
+        gated_residual = LearnableMultiplier(
+            multiplier_type='GLOBAL',
+            initializer='zeros'  # Start with no residual
+        )(residual)
+        outputs = keras.layers.Add()([inputs, gated_residual])
 
-        >>> # Per-channel multiplier
-        >>> layer = LearnableMultiplier(multiplier_type='CHANNEL')
-        >>> x = keras.random.normal((2, 10, 10, 3))
-        >>> y = layer(x)
-        >>> print(y.shape)
-        (2, 10, 10, 3)
+        # Per-channel feature re-weighting
+        inputs = keras.Input(shape=(224, 224, 3))
+        features = keras.layers.Conv2D(256, 3)(inputs)
+        reweighted = LearnableMultiplier(
+            multiplier_type='CHANNEL',
+            regularizer=keras.regularizers.L1(1e-4)
+        )(features)
+
+        # Custom constraint for bounded scaling
+        bounded_multiplier = LearnableMultiplier(
+            multiplier_type='CHANNEL',
+            constraint=keras.constraints.clip(0.1, 2.0)
+        )
+        ```
+
+    Raises:
+        ValueError: If multiplier_type is invalid or input dimensions are
+            incompatible with CHANNEL mode.
+        TypeError: If initializer, regularizer, or constraint types are invalid.
+
+    Note:
+        This layer is particularly useful in attention mechanisms, gating networks,
+        and architectural search where adaptive feature scaling is beneficial.
+        The non-negative constraint is recommended for interpretability but can
+        be removed if negative scaling is desired.
     """
 
     def __init__(
@@ -158,42 +207,42 @@ class LearnableMultiplier(keras.layers.Layer):
         """Initialize the LearnableMultiplier layer."""
         super().__init__(**kwargs)
 
-        # Store configuration parameters
+        # Validate and store configuration parameters
         self.multiplier_type = MultiplierType.from_string(multiplier_type)
         self.initializer = keras.initializers.get(initializer)
         self.regularizer = keras.regularizers.get(regularizer)
         self.constraint = keras.constraints.get(constraint)
 
-        # Will be initialized in build()
+        # Initialize weight attribute - created in build()
         self.gamma = None
-        self._build_input_shape = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the layer by creating the multiplier weights.
+        Create the layer's trainable multiplier weights.
 
         Args:
             input_shape: Shape tuple of the input tensor.
-        """
-        # Store input shape for serialization
-        self._build_input_shape = input_shape
 
+        Raises:
+            ValueError: If input shape is incompatible with multiplier type.
+        """
         # Determine weight shape based on multiplier type
         if self.multiplier_type == MultiplierType.GLOBAL:
-            # Global multiplier: single scalar value broadcasted
+            # Global multiplier: single scalar value broadcasted across entire tensor
             weight_shape = (1,)
         elif self.multiplier_type == MultiplierType.CHANNEL:
-            # Per-channel multiplier: shape matches last dimension (channels)
+            # Per-channel multiplier: one weight per channel (last dimension)
             if len(input_shape) < 2:
                 raise ValueError(
-                    f"Input must have at least 2 dimensions for CHANNEL multiplier, "
+                    f"CHANNEL multiplier requires input with at least 2 dimensions, "
                     f"got shape: {input_shape}"
                 )
             weight_shape = (input_shape[-1],)
         else:
+            # This should never happen due to enum validation, but defensive programming
             raise ValueError(f"Invalid multiplier_type: {self.multiplier_type}")
 
-        # Create the multiplier weight
+        # Create the trainable multiplier weight
         self.gamma = self.add_weight(
             name="gamma",
             shape=weight_shape,
@@ -204,6 +253,7 @@ class LearnableMultiplier(keras.layers.Layer):
             dtype=self.dtype
         )
 
+        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -216,26 +266,27 @@ class LearnableMultiplier(keras.layers.Layer):
         Apply the learnable multipliers to inputs.
 
         Args:
-            inputs: Input tensor.
+            inputs: Input tensor to be scaled.
             training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
+                training mode or inference mode. Not used in this layer but
+                included for API consistency.
             **kwargs: Additional call arguments.
 
         Returns:
-            Output tensor with multipliers applied element-wise.
+            Output tensor with multipliers applied element-wise. Same shape as input.
         """
-        # Use keras.ops for backend compatibility
+        # Element-wise multiplication using Keras ops for backend compatibility
         return ops.multiply(inputs, self.gamma)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """
-        Compute output shape (same as input shape).
+        Compute the output shape of the layer.
 
         Args:
-            input_shape: Shape tuple of the input.
+            input_shape: Shape tuple of the input tensor.
 
         Returns:
-            Output shape tuple (same as input).
+            Output shape tuple (identical to input shape).
         """
         return input_shape
 
@@ -244,7 +295,8 @@ class LearnableMultiplier(keras.layers.Layer):
         Get layer configuration for serialization.
 
         Returns:
-            Dictionary containing the layer configuration.
+            Dictionary containing all layer configuration parameters needed
+            for reconstruction during model loading.
         """
         config = super().get_config()
         config.update({
@@ -255,25 +307,5 @@ class LearnableMultiplier(keras.layers.Layer):
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """
-        Get build configuration for proper serialization.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """
-        Build the layer from a build configuration.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------
