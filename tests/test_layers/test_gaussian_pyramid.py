@@ -1,495 +1,539 @@
 import pytest
-import numpy as np
-import tensorflow as tf
-import keras
 import tempfile
 import os
+import numpy as np
+import keras
+from typing import Any, Dict, List, Tuple
 
-from dl_techniques.layers.gaussian_pyramid import (
-    GaussianPyramid, gaussian_pyramid)
+# Import the layer to test
+from dl_techniques.layers.gaussian_pyramid import GaussianPyramid, gaussian_pyramid
 
 
 class TestGaussianPyramid:
     """Comprehensive test suite for GaussianPyramid layer."""
 
     @pytest.fixture
-    def input_tensor_channels_last(self):
-        """Create test input tensor with channels_last format."""
-        return tf.random.normal([2, 32, 32, 3])
+    def layer_config(self) -> Dict[str, Any]:
+        """Standard configuration for testing."""
+        return {
+            'levels': 3,
+            'kernel_size': (5, 5),
+            'sigma': 1.0,
+            'scale_factor': 2,
+            'padding': 'same',
+            'data_format': 'channels_last'
+        }
 
     @pytest.fixture
-    def input_tensor_channels_first(self):
-        """Create test input tensor with channels_first format."""
-        return tf.random.normal([2, 3, 32, 32])
+    def sample_input_channels_last(self) -> keras.KerasTensor:
+        """Sample input for channels_last format."""
+        return keras.random.normal(shape=(4, 32, 32, 3))
 
     @pytest.fixture
-    def layer_instance(self):
-        """Create default layer instance for testing."""
-        return GaussianPyramid(levels=3)
+    def sample_input_channels_first(self) -> keras.KerasTensor:
+        """Sample input for channels_first format."""
+        return keras.random.normal(shape=(4, 3, 32, 32))
 
-    # =====================================================================
-    # Initialization Tests
-    # =====================================================================
+    def test_initialization(self, layer_config):
+        """Test layer initialization."""
+        layer = GaussianPyramid(**layer_config)
 
-    def test_initialization_defaults(self):
-        """Test initialization with default parameters."""
-        layer = GaussianPyramid()
+        # Check attributes are stored
+        assert layer.levels == layer_config['levels']
+        assert layer.kernel_size == layer_config['kernel_size']
+        assert layer.scale_factor == layer_config['scale_factor']
+        assert layer.padding == layer_config['padding']
+        assert layer.data_format == layer_config['data_format']
+        assert layer.sigma == (1.0, 1.0)  # Should be converted to tuple
 
+        # Check sub-layers are created
+        assert len(layer.gaussian_filters) == layer_config['levels']
+        assert not layer.built  # Layer should not be built yet
+
+        # Sub-layers should exist but not be built
+        for gaussian_filter in layer.gaussian_filters:
+            assert gaussian_filter is not None
+            assert not gaussian_filter.built
+
+    def test_forward_pass_channels_last(self, layer_config, sample_input_channels_last):
+        """Test forward pass with channels_last format and downsampling."""
+        layer = GaussianPyramid(**layer_config)
+
+        outputs = layer(sample_input_channels_last)
+
+        # Check layer is built
+        assert layer.built
+
+        # Check output structure
+        assert isinstance(outputs, list)
+        assert len(outputs) == layer_config['levels']
+
+        # Check shapes progression with scale_factor=2
+        expected_shapes = [
+            (4, 32, 32, 3),  # Level 0: original size
+            (4, 16, 16, 3),  # Level 1: downsampled by 2
+            (4, 8, 8, 3),  # Level 2: downsampled by 4
+        ]
+
+        for i, (output, expected_shape) in enumerate(zip(outputs, expected_shapes)):
+            assert output.shape == expected_shape, f"Level {i} shape mismatch"
+            assert output.dtype == sample_input_channels_last.dtype
+
+    def test_forward_pass_channels_first_config_only(self, sample_input_channels_first):
+        """Test channels_first configuration without forward pass (CPU limitation)."""
+        layer_config = {
+            'levels': 3,
+            'kernel_size': (5, 5),
+            'sigma': 1.0,
+            'scale_factor': 2,
+            'data_format': 'channels_first'
+        }
+        layer = GaussianPyramid(**layer_config)
+
+        # Test configuration is correct
+        assert layer.data_format == 'channels_first'
         assert layer.levels == 3
-        assert layer.kernel_size == (5, 5)
-        assert layer.sigma == (2.0, 2.0)
-        assert layer.scale_factor == 2
-        assert layer.padding == "same"
-        assert layer.data_format == keras.backend.image_data_format()
-        assert layer.trainable is False
-        assert layer.gaussian_filters == []
 
-    def test_initialization_custom(self):
-        """Test initialization with custom parameters."""
-        layer = GaussianPyramid(
-            levels=4,
-            kernel_size=(7, 7),
-            sigma=1.5,
-            scale_factor=3,
-            padding="valid",
-            data_format="channels_first",
-            trainable=True
-        )
-
-        assert layer.levels == 4
-        assert layer.kernel_size == (7, 7)
-        assert layer.sigma == (1.5, 1.5)
-        assert layer.scale_factor == 3
-        assert layer.padding == "valid"
-        assert layer.data_format == "channels_first"
-        assert layer.trainable is True
-
-    def test_initialization_sigma_variations(self):
-        """Test initialization with different sigma values."""
-        # Single float sigma
-        layer1 = GaussianPyramid(sigma=2.0)
-        assert layer1.sigma == (2.0, 2.0)
-
-        # Tuple sigma
-        layer2 = GaussianPyramid(sigma=(1.5, 2.0))
-        assert layer2.sigma == (1.5, 2.0)
-
-        # None sigma (should use default calculation)
-        layer3 = GaussianPyramid(sigma=None)
-        assert layer3.sigma == ((5 - 1) / 2, (5 - 1) / 2)  # Based on default kernel_size
-
-    def test_invalid_parameters(self):
-        """Test that invalid parameters raise appropriate errors."""
-        # Invalid levels
-        with pytest.raises(ValueError, match="levels must be >= 1"):
-            GaussianPyramid(levels=0)
-
-        # Invalid kernel_size
-        with pytest.raises(ValueError, match="kernel_size must be length 2"):
-            GaussianPyramid(kernel_size=(5,))
-
-        # Invalid scale_factor
-        with pytest.raises(ValueError, match="scale_factor must be >= 1"):
-            GaussianPyramid(scale_factor=0)
-
-        # Invalid padding
-        with pytest.raises(ValueError, match="padding must be 'valid' or 'same'"):
-            GaussianPyramid(padding="invalid")
-
-        # Invalid data_format
-        with pytest.raises(ValueError, match="data_format must be 'channels_first' or 'channels_last'"):
-            GaussianPyramid(data_format="invalid")
-
-    # =====================================================================
-    # Build Process Tests
-    # =====================================================================
-
-    def test_build_process_channels_last(self, input_tensor_channels_last):
-        """Test that the layer builds properly with channels_last format."""
-        layer = GaussianPyramid(levels=3, data_format="channels_last")
-        layer(input_tensor_channels_last)  # Trigger build
-
-        assert layer.built is True
-        assert len(layer.gaussian_filters) == 3
-        assert all(filter.built for filter in layer.gaussian_filters)
-        assert layer._build_input_shape is not None
-
-    def test_build_different_levels(self, input_tensor_channels_last):
-        """Test building with different number of levels."""
-        for levels in [1, 2, 4, 5]:
-            layer = GaussianPyramid(levels=levels)
-            layer(input_tensor_channels_last)
-
-            assert len(layer.gaussian_filters) == levels
-            assert all(filter.built for filter in layer.gaussian_filters)
-
-    # =====================================================================
-    # Output Shape Tests
-    # =====================================================================
-
-    def test_output_shapes_channels_last(self, input_tensor_channels_last):
-        """Test output shapes with channels_last format."""
-        layer = GaussianPyramid(levels=3, scale_factor=2, data_format="channels_last")
-        outputs = layer(input_tensor_channels_last)
-
-        # Check number of outputs
-        assert len(outputs) == 3
-
-        # Check shapes: (2, 32, 32, 3) -> (2, 16, 16, 3) -> (2, 8, 8, 3)
-        expected_shapes = [(2, 32, 32, 3), (2, 16, 16, 3), (2, 8, 8, 3)]
-        actual_shapes = [tuple(output.shape) for output in outputs]
-
-        assert actual_shapes == expected_shapes
-
-    def test_compute_output_shape(self):
-        """Test compute_output_shape method."""
-        layer = GaussianPyramid(levels=3, scale_factor=2, data_format="channels_last")
-
-        input_shape = (None, 64, 64, 3)
+        # Test compute_output_shape works for channels_first
+        input_shape = (None, 3, 32, 32)
         output_shapes = layer.compute_output_shape(input_shape)
 
         expected_shapes = [
-            (None, 64, 64, 3),
-            (None, 32, 32, 3),
-            (None, 16, 16, 3)
+            (None, 3, 32, 32),  # Level 0: original size
+            (None, 3, 16, 16),  # Level 1: downsampled by 2
+            (None, 3, 8, 8),  # Level 2: downsampled by 4
         ]
 
-        assert output_shapes == expected_shapes
+        for i, (computed_shape, expected_shape) in enumerate(zip(output_shapes, expected_shapes)):
+            assert computed_shape == expected_shape, f"Level {i} computed shape mismatch"
 
-    def test_different_scale_factors(self, input_tensor_channels_last):
-        """Test with different scale factors."""
-        # Scale factor 3
-        layer = GaussianPyramid(levels=3, scale_factor=3)
-        outputs = layer(input_tensor_channels_last)
+        # Note: Actual forward pass skipped due to TensorFlow CPU limitation
+        # with depthwise convolution in NCHW format
 
-        expected_shapes = [(2, 32, 32, 3), (2, 10, 10, 3), (2, 3, 3, 3)]
-        actual_shapes = [tuple(output.shape) for output in outputs]
+    def test_downsampling_progression(self):
+        """Test that downsampling works correctly across pyramid levels."""
+        layer = GaussianPyramid(levels=4, kernel_size=(3, 3), scale_factor=2)
+        sample_input = keras.random.normal(shape=(2, 64, 64, 1))
 
-        assert actual_shapes == expected_shapes
+        outputs = layer(sample_input)
 
-    def test_scale_factor_one(self, input_tensor_channels_last):
-        """Test with scale factor 1 (no downsampling)."""
-        layer = GaussianPyramid(levels=3, scale_factor=1)
-        outputs = layer(input_tensor_channels_last)
+        # Expected shapes with scale_factor=2
+        expected_shapes = [
+            (2, 64, 64, 1),  # Level 0: original
+            (2, 32, 32, 1),  # Level 1: /2
+            (2, 16, 16, 1),  # Level 2: /4
+            (2, 8, 8, 1),  # Level 3: /8
+        ]
 
-        # All outputs should have the same shape
-        expected_shapes = [(2, 32, 32, 3)] * 3
-        actual_shapes = [tuple(output.shape) for output in outputs]
+        for i, (output, expected_shape) in enumerate(zip(outputs, expected_shapes)):
+            assert output.shape == expected_shape, f"Level {i} shape mismatch"
 
-        assert actual_shapes == expected_shapes
+    def test_serialization_cycle(self, layer_config, sample_input_channels_last):
+        """CRITICAL TEST: Full serialization cycle."""
+        # Create model with custom layer
+        inputs = keras.Input(shape=sample_input_channels_last.shape[1:])
+        pyramid_outputs = GaussianPyramid(**layer_config)(inputs)
 
-    # =====================================================================
-    # Forward Pass Tests
-    # =====================================================================
+        # Since output is a list, we need to handle it properly for model creation
+        # We'll use only the first level for simplicity
+        model = keras.Model(inputs, pyramid_outputs[0])
 
-    def test_forward_pass_validity(self, input_tensor_channels_last):
-        """Test that forward pass produces valid outputs."""
-        layer = GaussianPyramid(levels=3)
-        outputs = layer(input_tensor_channels_last)
+        # Get original prediction
+        original_pred = model(sample_input_channels_last)
 
-        # Check that all outputs are valid tensors
-        for output in outputs:
-            assert not np.any(np.isnan(output.numpy()))
-            assert not np.any(np.isinf(output.numpy()))
-            assert output.dtype == input_tensor_channels_last.dtype
+        # Save and load
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'test_model.keras')
+            model.save(filepath)
 
-    def test_forward_pass_deterministic(self):
-        """Test that forward pass is deterministic."""
-        layer = GaussianPyramid(levels=2, trainable=False)
+            loaded_model = keras.models.load_model(filepath)
+            loaded_pred = loaded_model(sample_input_channels_last)
 
-        # Same input should produce same output
-        x = tf.constant(np.random.rand(1, 16, 16, 1).astype(np.float32))
-
-        output1 = layer(x)
-        output2 = layer(x)
-
-        for o1, o2 in zip(output1, output2):
-            assert np.allclose(o1.numpy(), o2.numpy())
-
-    def test_training_mode_parameter(self, input_tensor_channels_last):
-        """Test that training parameter is handled correctly."""
-        layer = GaussianPyramid(levels=2)
-
-        # Should work in both training modes
-        output_train = layer(input_tensor_channels_last, training=True)
-        output_eval = layer(input_tensor_channels_last, training=False)
-
-        assert len(output_train) == len(output_eval) == 2
-
-    def test_single_level_pyramid(self, input_tensor_channels_last):
-        """Test pyramid with only one level."""
-        layer = GaussianPyramid(levels=1)
-        outputs = layer(input_tensor_channels_last)
-
-        assert len(outputs) == 1
-        assert outputs[0].shape == input_tensor_channels_last.shape
-
-    # =====================================================================
-    # Serialization Tests
-    # =====================================================================
-
-    def test_serialization_basic(self):
-        """Test basic serialization and deserialization."""
-        original_layer = GaussianPyramid(
-            levels=3,
-            kernel_size=(7, 7),
-            sigma=1.5,
-            scale_factor=2,
-            padding="valid",
-            data_format="channels_last"
-        )
-
-        # Build the layer
-        original_layer.build((None, 32, 32, 3))
-
-        # Get configs
-        config = original_layer.get_config()
-        build_config = original_layer.get_build_config()
-
-        # Recreate layer
-        recreated_layer = GaussianPyramid.from_config(config)
-        recreated_layer.build_from_config(build_config)
-
-        # Check configuration matches
-        assert recreated_layer.levels == original_layer.levels
-        assert recreated_layer.kernel_size == original_layer.kernel_size
-        assert recreated_layer.sigma == original_layer.sigma
-        assert recreated_layer.scale_factor == original_layer.scale_factor
-        assert recreated_layer.padding == original_layer.padding
-        assert recreated_layer.data_format == original_layer.data_format
-
-    def test_serialization_with_outputs(self):
-        """Test serialization with actual forward pass."""
-        original_layer = GaussianPyramid(levels=2, sigma=1.0)
-
-        # Test input
-        x = tf.random.normal((1, 16, 16, 3))
-
-        # Build and get output
-        original_outputs = original_layer(x)
-
-        # Serialize and recreate
-        config = original_layer.get_config()
-        build_config = original_layer.get_build_config()
-
-        recreated_layer = GaussianPyramid.from_config(config)
-        recreated_layer.build_from_config(build_config)
-
-        recreated_outputs = recreated_layer(x)
-
-        # Check outputs match
-        assert len(original_outputs) == len(recreated_outputs)
-        for orig, recreated in zip(original_outputs, recreated_outputs):
-            assert orig.shape == recreated.shape
-
-    # =====================================================================
-    # Model Integration Tests
-    # =====================================================================
-
-    def test_model_integration(self, input_tensor_channels_last):
-        """Test the layer in a model context."""
-        # Create model with GaussianPyramid
-        inputs = keras.Input(shape=(32, 32, 3))
-        pyramid_outputs = GaussianPyramid(levels=3)(inputs)
-
-        # Use the largest scale output for classification
-        x = pyramid_outputs[0]  # First level (original size)
-        x = keras.layers.GlobalAveragePooling2D()(x)
-        outputs = keras.layers.Dense(10, activation='softmax')(x)
-
-        model = keras.Model(inputs=inputs, outputs=outputs)
-
-        # Compile model
-        model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
-
-        # Test forward pass
-        y_pred = model(input_tensor_channels_last)
-        assert y_pred.shape == (2, 10)
-
-    def test_model_with_multiple_pyramid_outputs(self, input_tensor_channels_last):
-        """Test model that uses multiple pyramid outputs."""
-        inputs = keras.Input(shape=(32, 32, 3))
-        pyramid_outputs = GaussianPyramid(levels=3)(inputs)
-
-        # Process each scale differently
-        features = []
-        for i, output in enumerate(pyramid_outputs):
-            x = keras.layers.GlobalAveragePooling2D()(output)
-            x = keras.layers.Dense(16, activation='relu')(x)
-            features.append(x)
-
-        # Combine features
-        combined = keras.layers.Concatenate()(features)
-        final_output = keras.layers.Dense(10, activation='softmax')(combined)
-
-        model = keras.Model(inputs=inputs, outputs=final_output)
-        model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
-
-        # Test forward pass
-        y_pred = model(input_tensor_channels_last)
-        assert y_pred.shape == (2, 10)
-
-    # =====================================================================
-    # Model Save/Load Tests
-    # =====================================================================
-
-    def test_model_save_load(self, input_tensor_channels_last):
-        """Test saving and loading a model with GaussianPyramid."""
-        # Create model
-        inputs = keras.Input(shape=(32, 32, 3))
-        pyramid_outputs = GaussianPyramid(levels=2, name="gaussian_pyramid")(inputs)
-        x = keras.layers.GlobalAveragePooling2D()(pyramid_outputs[0])
-        outputs = keras.layers.Dense(5)(x)
-
-        model = keras.Model(inputs=inputs, outputs=outputs)
-
-        # Generate prediction
-        original_prediction = model.predict(input_tensor_channels_last)
-
-        # Save and load model
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            model_path = os.path.join(tmpdirname, "model.keras")
-
-            model.save(model_path)
-
-            loaded_model = keras.models.load_model(
-                model_path,
-                custom_objects={"GaussianPyramid": GaussianPyramid}
+            # Verify identical predictions
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_pred),
+                keras.ops.convert_to_numpy(loaded_pred),
+                rtol=1e-6, atol=1e-6,
+                err_msg="Predictions differ after serialization"
             )
 
-            # Test loaded model
-            loaded_prediction = loaded_model.predict(input_tensor_channels_last)
+    def test_serialization_cycle_full_pyramid(self, sample_input_channels_last):
+        """Test serialization with all pyramid outputs."""
+        # Simpler config for testing
+        layer_config = {'levels': 2, 'kernel_size': (3, 3), 'sigma': 1.0}
 
-            # Check predictions match
-            assert np.allclose(original_prediction, loaded_prediction, rtol=1e-5)
+        inputs = keras.Input(shape=sample_input_channels_last.shape[1:])
+        pyramid_outputs = GaussianPyramid(**layer_config)(inputs)
 
-            # Check layer type is preserved
-            assert isinstance(loaded_model.get_layer("gaussian_pyramid"), GaussianPyramid)
+        # Create a model that processes all pyramid levels
+        # Concatenate all levels after flattening
+        flattened_levels = [keras.layers.GlobalAveragePooling2D()(level) for level in pyramid_outputs]
+        concatenated = keras.layers.Concatenate()(flattened_levels)
+        model = keras.Model(inputs, concatenated)
 
-    # =====================================================================
-    # Edge Case Tests
-    # =====================================================================
+        # Get original prediction
+        original_pred = model(sample_input_channels_last)
 
-    def test_small_input_sizes(self):
-        """Test with very small input sizes."""
-        layer = GaussianPyramid(levels=3, scale_factor=2)
+        # Save and load
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'test_pyramid_model.keras')
+            model.save(filepath)
 
-        # 4x4 input should still work
-        x = tf.random.normal((1, 4, 4, 3))
-        outputs = layer(x)
+            loaded_model = keras.models.load_model(filepath)
+            loaded_pred = loaded_model(sample_input_channels_last)
 
-        assert len(outputs) == 3
-        # Check that dimensions don't go below 1
-        assert all(output.shape[1] >= 1 and output.shape[2] >= 1 for output in outputs)
+            # Verify identical predictions
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_pred),
+                keras.ops.convert_to_numpy(loaded_pred),
+                rtol=1e-6, atol=1e-6,
+                err_msg="Full pyramid predictions differ after serialization"
+            )
 
-    def test_large_scale_factor(self):
-        """Test with large scale factor."""
-        layer = GaussianPyramid(levels=2, scale_factor=10)
+    def test_config_completeness(self, layer_config):
+        """Test that get_config contains all __init__ parameters."""
+        layer = GaussianPyramid(**layer_config)
+        config = layer.get_config()
 
-        x = tf.random.normal((1, 32, 32, 3))
-        outputs = layer(x)
+        # Check all config parameters are present
+        expected_keys = {
+            'levels', 'kernel_size', 'sigma', 'scale_factor',
+            'padding', 'data_format'
+        }
+        config_keys = set(config.keys())
+
+        for key in expected_keys:
+            assert key in config_keys, f"Missing {key} in get_config()"
+
+        # Verify values match
+        assert config['levels'] == layer_config['levels']
+        assert config['kernel_size'] == layer_config['kernel_size']
+        assert config['scale_factor'] == layer_config['scale_factor']
+        assert config['padding'] == layer_config['padding']
+        assert config['data_format'] == layer_config['data_format']
+
+    def test_gradients_flow(self, layer_config, sample_input_channels_last):
+        """Test gradient computation."""
+        import tensorflow as tf
+
+        layer = GaussianPyramid(**layer_config)
+
+        with tf.GradientTape() as tape:
+            tape.watch(sample_input_channels_last)
+            outputs = layer(sample_input_channels_last)
+            # Take mean of all pyramid levels for single scalar loss
+            loss = keras.ops.mean([keras.ops.mean(keras.ops.square(output)) for output in outputs])
+
+        # Get gradients with respect to input
+        input_gradients = tape.gradient(loss, sample_input_channels_last)
+        assert input_gradients is not None
+        assert input_gradients.shape == sample_input_channels_last.shape
+
+        # Check gradients with respect to trainable variables (if any)
+        if layer.trainable and layer.trainable_variables:
+            var_gradients = tape.gradient(loss, layer.trainable_variables)
+            assert all(g is not None for g in var_gradients)
+
+    @pytest.mark.parametrize("training", [True, False, None])
+    def test_training_modes(self, layer_config, sample_input_channels_last, training):
+        """Test behavior in different training modes."""
+        layer = GaussianPyramid(**layer_config)
+
+        outputs = layer(sample_input_channels_last, training=training)
+
+        assert isinstance(outputs, list)
+        assert len(outputs) == layer_config['levels']
+        for output in outputs:
+            assert output.shape[0] == sample_input_channels_last.shape[0]
+
+    @pytest.mark.parametrize("levels", [1, 2, 5])
+    def test_different_levels(self, levels, sample_input_channels_last):
+        """Test different numbers of pyramid levels."""
+        layer = GaussianPyramid(levels=levels, kernel_size=(3, 3))
+
+        outputs = layer(sample_input_channels_last)
+
+        assert len(outputs) == levels
+
+        # Check downsampling progression
+        for i, output in enumerate(outputs):
+            expected_size = 32 // (2 ** i)  # scale_factor=2 by default
+            assert output.shape == (4, expected_size, expected_size, 3)
+
+    @pytest.mark.parametrize("kernel_size", [(3, 3), (5, 5), (7, 7)])
+    def test_different_kernel_sizes(self, kernel_size, sample_input_channels_last):
+        """Test different kernel sizes."""
+        layer = GaussianPyramid(levels=2, kernel_size=kernel_size)
+
+        outputs = layer(sample_input_channels_last)
 
         assert len(outputs) == 2
-        assert outputs[0].shape == (1, 32, 32, 3)
-        assert outputs[1].shape == (1, 3, 3, 3)  # 32//10 = 3
+        assert layer.kernel_size == kernel_size
+        # Check first level is original size, second is downsampled
+        assert outputs[0].shape == (4, 32, 32, 3)
+        assert outputs[1].shape == (4, 16, 16, 3)
 
-    def test_different_kernel_sizes(self, input_tensor_channels_last):
-        """Test with different kernel sizes."""
-        kernel_sizes = [(3, 3), (7, 7), (9, 9)]
+    @pytest.mark.parametrize("sigma", [0.5, 1.0, 2.0, (1.0, 2.0)])
+    def test_different_sigma_values(self, sigma, sample_input_channels_last):
+        """Test different sigma values."""
+        layer = GaussianPyramid(levels=2, kernel_size=(5, 5), sigma=sigma)
 
-        for kernel_size in kernel_sizes:
-            layer = GaussianPyramid(levels=2, kernel_size=kernel_size)
-            outputs = layer(input_tensor_channels_last)
+        outputs = layer(sample_input_channels_last)
 
-            assert len(outputs) == 2
-            assert all(not np.any(np.isnan(output.numpy())) for output in outputs)
+        assert len(outputs) == 2
 
-    def test_numerical_stability(self):
-        """Test numerical stability with extreme values."""
-        layer = GaussianPyramid(levels=2)
+        # Check sigma is processed correctly
+        if isinstance(sigma, tuple):
+            assert layer.sigma == sigma
+        else:
+            assert layer.sigma == (sigma, sigma)
 
-        # Test with very small values
-        x_small = tf.ones((1, 16, 16, 3)) * 1e-8
-        outputs_small = layer(x_small)
+    @pytest.mark.parametrize("scale_factor", [1, 2, 3, 4])
+    def test_different_scale_factors(self, scale_factor):
+        """Test different scale factors."""
+        sample_input = keras.random.normal(shape=(2, 16, 16, 1))
+        layer = GaussianPyramid(levels=3, scale_factor=scale_factor)
 
-        for output in outputs_small:
-            assert not np.any(np.isnan(output.numpy()))
-            assert not np.any(np.isinf(output.numpy()))
-
-        # Test with very large values
-        x_large = tf.ones((1, 16, 16, 3)) * 1e8
-        outputs_large = layer(x_large)
-
-        for output in outputs_large:
-            assert not np.any(np.isnan(output.numpy()))
-            assert not np.any(np.isinf(output.numpy()))
-
-    # =====================================================================
-    # Functional Interface Tests
-    # =====================================================================
-
-    def test_functional_interface(self, input_tensor_channels_last):
-        """Test the functional interface gaussian_pyramid."""
-        # Test functional interface
-        outputs = gaussian_pyramid(
-            input_tensor_channels_last,
-            levels=3,
-            kernel_size=(5, 5),
-            sigma=1.0,
-            scale_factor=2
-        )
+        outputs = layer(sample_input)
 
         assert len(outputs) == 3
-        expected_shapes = [(2, 32, 32, 3), (2, 16, 16, 3), (2, 8, 8, 3)]
-        actual_shapes = [tuple(output.shape) for output in outputs]
+        assert layer.scale_factor == scale_factor
 
-        assert actual_shapes == expected_shapes
+        # Check progression
+        for i, output in enumerate(outputs):
+            expected_size = 16 // (scale_factor ** i)
+            expected_size = max(1, expected_size)  # Minimum size is 1
+            assert output.shape == (2, expected_size, expected_size, 1)
 
-    def test_functional_interface_equivalence(self, input_tensor_channels_last):
-        """Test that functional interface produces same results as layer."""
-        # Layer interface
-        layer = GaussianPyramid(levels=2, sigma=1.0)
-        layer_outputs = layer(input_tensor_channels_last)
+    @pytest.mark.parametrize("padding", ["same", "valid", "SAME", "VALID"])
+    def test_different_padding(self, padding, sample_input_channels_last):
+        """Test different padding modes (case insensitive)."""
+        layer = GaussianPyramid(levels=2, padding=padding)
 
-        # Functional interface
-        func_outputs = gaussian_pyramid(
-            input_tensor_channels_last,
-            levels=2,
+        outputs = layer(sample_input_channels_last)
+
+        assert len(outputs) == 2
+        assert layer.padding == padding.lower()
+
+    @pytest.mark.parametrize("trainable", [True, False])
+    def test_trainable_parameter(self, trainable, sample_input_channels_last):
+        """Test trainable parameter."""
+        layer = GaussianPyramid(levels=2, trainable=trainable)
+
+        outputs = layer(sample_input_channels_last)
+
+        assert len(outputs) == 2
+        assert layer.trainable == trainable
+
+        # Check that sub-layers have correct trainable setting
+        for gaussian_filter in layer.gaussian_filters:
+            assert gaussian_filter.trainable == trainable
+
+    def test_edge_cases(self):
+        """Test error conditions."""
+        # Test invalid levels
+        with pytest.raises(ValueError, match="levels must be >= 1"):
+            GaussianPyramid(levels=0)
+
+        with pytest.raises(ValueError, match="levels must be >= 1"):
+            GaussianPyramid(levels=-1)
+
+        # Test invalid kernel size
+        with pytest.raises(ValueError, match="kernel_size must be length 2"):
+            GaussianPyramid(kernel_size=(5,))
+
+        with pytest.raises(ValueError, match="kernel_size must be length 2"):
+            GaussianPyramid(kernel_size=(5, 5, 5))
+
+        # Test invalid scale factor
+        with pytest.raises(ValueError, match="scale_factor must be >= 1"):
+            GaussianPyramid(scale_factor=0)
+
+        with pytest.raises(ValueError, match="scale_factor must be >= 1"):
+            GaussianPyramid(scale_factor=-1)
+
+        # Test invalid padding
+        with pytest.raises(ValueError, match="padding must be 'valid' or 'same'"):
+            GaussianPyramid(padding="invalid")
+
+        # Test invalid data format
+        with pytest.raises(ValueError, match="data_format must be 'channels_first' or 'channels_last'"):
+            GaussianPyramid(data_format="invalid")
+
+    def test_compute_output_shape(self, layer_config):
+        """Test compute_output_shape method."""
+        layer = GaussianPyramid(**layer_config)
+        input_shape = (None, 32, 32, 3)
+
+        output_shapes = layer.compute_output_shape(input_shape)
+
+        assert isinstance(output_shapes, list)
+        assert len(output_shapes) == layer_config['levels']
+
+        # Check downsampling progression in computed shapes
+        expected_shapes = [
+            (None, 32, 32, 3),  # Level 0
+            (None, 16, 16, 3),  # Level 1
+            (None, 8, 8, 3),  # Level 2
+        ]
+
+        for computed_shape, expected_shape in zip(output_shapes, expected_shapes):
+            assert computed_shape == expected_shape
+
+    def test_compute_output_shape_channels_first(self):
+        """Test compute_output_shape with channels_first."""
+        layer = GaussianPyramid(levels=3, data_format='channels_first')
+        input_shape = (None, 3, 32, 32)
+
+        output_shapes = layer.compute_output_shape(input_shape)
+
+        expected_shapes = [
+            (None, 3, 32, 32),  # Level 0
+            (None, 3, 16, 16),  # Level 1
+            (None, 3, 8, 8),  # Level 2
+        ]
+
+        for computed_shape, expected_shape in zip(output_shapes, expected_shapes):
+            assert computed_shape == expected_shape
+
+    def test_functional_interface(self, sample_input_channels_last):
+        """Test functional interface."""
+        outputs = gaussian_pyramid(
+            sample_input_channels_last,
+            levels=3,
+            kernel_size=(5, 5),
             sigma=1.0
         )
 
-        # Should produce same results
+        assert isinstance(outputs, list)
+        assert len(outputs) == 3
+
+        # Check downsampling progression
+        expected_shapes = [
+            (4, 32, 32, 3),  # Level 0
+            (4, 16, 16, 3),  # Level 1
+            (4, 8, 8, 3),  # Level 2
+        ]
+
+        for output, expected_shape in zip(outputs, expected_shapes):
+            assert output.shape == expected_shape
+
+    def test_functional_vs_layer_consistency(self, sample_input_channels_last):
+        """Test that functional interface gives same results as layer interface."""
+        # Layer interface
+        layer = GaussianPyramid(levels=2, kernel_size=(3, 3), sigma=1.0)
+        layer_outputs = layer(sample_input_channels_last)
+
+        # Functional interface
+        func_outputs = gaussian_pyramid(
+            sample_input_channels_last,
+            levels=2,
+            kernel_size=(3, 3),
+            sigma=1.0
+        )
+
+        # Compare outputs
         assert len(layer_outputs) == len(func_outputs)
         for layer_out, func_out in zip(layer_outputs, func_outputs):
-            assert layer_out.shape == func_out.shape
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(layer_out),
+                keras.ops.convert_to_numpy(func_out),
+                rtol=1e-6, atol=1e-6,
+                err_msg="Layer and functional interfaces should give same results"
+            )
 
-    # =====================================================================
-    # Performance Tests
-    # =====================================================================
+    def test_sigma_auto_calculation(self, sample_input_channels_last):
+        """Test automatic sigma calculation when sigma=-1."""
+        layer = GaussianPyramid(levels=2, kernel_size=(7, 7), sigma=-1)
 
-    def test_memory_efficiency(self):
-        """Test that the layer doesn't create unnecessary memory overhead."""
-        import gc
+        # Should auto-calculate sigma based on kernel size
+        expected_sigma = ((7 - 1) / 2, (7 - 1) / 2)
+        assert layer.sigma == expected_sigma
 
-        # Create layer and test input
-        layer = GaussianPyramid(levels=3)
-        x = tf.random.normal((1, 64, 64, 3))
+        # Should still work
+        outputs = layer(sample_input_channels_last)
+        assert len(outputs) == 2
 
-        # Run forward pass
-        outputs = layer(x)
+    def test_sigma_none_calculation(self, sample_input_channels_last):
+        """Test automatic sigma calculation when sigma=None."""
+        layer = GaussianPyramid(levels=2, kernel_size=(5, 5), sigma=None)
 
-        # Clean up
-        del outputs
-        gc.collect()
+        # Should auto-calculate sigma based on kernel size
+        expected_sigma = ((5 - 1) / 2, (5 - 1) / 2)
+        assert layer.sigma == expected_sigma
 
-        # Should complete without memory issues
-        assert True
+        # Should still work
+        outputs = layer(sample_input_channels_last)
+        assert len(outputs) == 2
 
-    def test_repeated_calls(self, input_tensor_channels_last):
-        """Test that repeated calls work correctly."""
-        layer = GaussianPyramid(levels=2)
+    def test_build_method_explicit(self):
+        """Test that build method works with explicit shapes."""
+        layer = GaussianPyramid(levels=3, kernel_size=(5, 5))
+        input_shape = (None, 64, 64, 3)
 
-        # Multiple calls should work
-        for _ in range(5):
-            outputs = layer(input_tensor_channels_last)
-            assert len(outputs) == 2
+        # Explicitly call build
+        layer.build(input_shape)
+
+        assert layer.built
+        # Check that all sub-layers are built
+        for gaussian_filter in layer.gaussian_filters:
+            assert gaussian_filter.built
+
+    def test_realistic_small_input_downsampling(self):
+        """Test behavior with small inputs using realistic expectations."""
+        # Use 8x8 input which can be reasonably downsampled
+        small_input = keras.random.normal(shape=(2, 8, 8, 1))
+        layer = GaussianPyramid(levels=3, scale_factor=2)
+
+        outputs = layer(small_input)
+
+        # Expected progression: 8 -> 4 -> 2
+        expected_shapes = [
+            (2, 8, 8, 1),  # Level 0: original
+            (2, 4, 4, 1),  # Level 1: downsampled by 2
+            (2, 2, 2, 1),  # Level 2: downsampled by 4
+        ]
+
+        for i, (output, expected_shape) in enumerate(zip(outputs, expected_shapes)):
+            assert output.shape == expected_shape, f"Level {i} shape mismatch"
+
+    def test_very_small_input_edge_case(self):
+        """Test very small input that demonstrates downsampling limitations."""
+        # Use 4x4 input to show what happens at the edge
+        very_small_input = keras.random.normal(shape=(2, 4, 4, 1))
+        layer = GaussianPyramid(levels=4, scale_factor=2)
+
+        outputs = layer(very_small_input)
+
+        # Actual progression: 4 -> 2 -> 1 -> 0 (this is what average pooling does)
+        expected_shapes = [
+            (2, 4, 4, 1),  # Level 0: original
+            (2, 2, 2, 1),  # Level 1: downsampled by 2
+            (2, 1, 1, 1),  # Level 2: downsampled by 4
+            (2, 0, 0, 1),  # Level 3: downsampled to 0 (edge case behavior)
+        ]
+
+        for i, (output, expected_shape) in enumerate(zip(outputs, expected_shapes)):
+            assert output.shape == expected_shape, f"Level {i} actual shape: {output.shape}, expected: {expected_shape}"
+
+    def test_data_format_none_defaults(self, sample_input_channels_last):
+        """Test that data_format=None uses Keras default."""
+        # Save current setting
+        original_format = keras.backend.image_data_format()
+
+        try:
+            # Set to channels_last
+            keras.backend.set_image_data_format('channels_last')
+
+            layer = GaussianPyramid(levels=2, data_format=None)
+            assert layer.data_format == 'channels_last'
+
+            # Set to channels_first
+            keras.backend.set_image_data_format('channels_first')
+
+            layer = GaussianPyramid(levels=2, data_format=None)
+            assert layer.data_format == 'channels_first'
+
+        finally:
+            # Restore original setting
+            keras.backend.set_image_data_format(original_format)

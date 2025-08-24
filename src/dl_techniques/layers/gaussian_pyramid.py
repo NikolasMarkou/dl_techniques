@@ -1,6 +1,6 @@
 import keras
 from keras import ops
-from typing import Tuple, Union, Optional, Sequence
+from typing import Tuple, Union, Optional, Sequence, List, Dict, Any
 
 # ---------------------------------------------------------------------
 # local imports
@@ -8,6 +8,7 @@ from typing import Tuple, Union, Optional, Sequence
 
 from ..utils.logger import logger
 from .gaussian_filter import GaussianFilter
+
 
 # ---------------------------------------------------------------------
 
@@ -60,13 +61,30 @@ class GaussianPyramid(keras.layers.Layer):
             or invalid padding/data_format values.
 
     Example:
-        >>> x = np.random.rand(4, 32, 32, 3)  # Input images
-        >>> layer = GaussianPyramid(levels=3, kernel_size=(5, 5), sigma=1.0)
-        >>> pyramid = layer(x)
-        >>> print(len(pyramid))  # Number of levels
-        3
-        >>> print([p.shape for p in pyramid])
-        [(4, 32, 32, 3), (4, 16, 16, 3), (4, 8, 8, 3)]
+        ```python
+        # Basic usage
+        layer = GaussianPyramid(levels=3, kernel_size=(5, 5), sigma=1.0)
+
+        # Advanced configuration
+        layer = GaussianPyramid(
+            levels=4,
+            kernel_size=(7, 7),
+            sigma=(1.5, 1.5),
+            scale_factor=2,
+            padding="same"
+        )
+
+        # In a model
+        inputs = keras.Input(shape=(64, 64, 3))
+        pyramid = GaussianPyramid(levels=3)(inputs)
+        # pyramid is a list of 3 tensors with shapes:
+        # [(None, 64, 64, 3), (None, 32, 32, 3), (None, 16, 16, 3)]
+        ```
+
+    Note:
+        This implementation follows modern Keras 3 patterns where all sub-layers
+        are created in __init__ and explicitly built in build() for robust
+        serialization support.
     """
 
     def __init__(
@@ -78,25 +96,27 @@ class GaussianPyramid(keras.layers.Layer):
             padding: str = "same",
             data_format: Optional[str] = None,
             trainable: bool = False,
-            **kwargs):
+            **kwargs: Any
+    ) -> None:
         super().__init__(trainable=trainable, **kwargs)
 
         # Validate levels
         if levels < 1:
             raise ValueError(f"levels must be >= 1, got {levels}")
-        self.levels = levels
 
         # Validate kernel size
         if len(kernel_size) != 2:
             raise ValueError("kernel_size must be length 2")
-        self.kernel_size = kernel_size
 
         # Validate scale factor
         if scale_factor < 1:
             raise ValueError(f"scale_factor must be >= 1, got {scale_factor}")
+
+        # Store ALL configuration parameters
+        self.levels = levels
+        self.kernel_size = kernel_size
         self.scale_factor = scale_factor
 
-        # Store other parameters
         # Process sigma
         if (sigma is None or
                 (isinstance(sigma, (float, int)) and sigma <= 0)):
@@ -118,30 +138,8 @@ class GaussianPyramid(keras.layers.Layer):
         if self.data_format not in {"channels_first", "channels_last"}:
             raise ValueError(f"data_format must be 'channels_first' or 'channels_last', got {data_format}")
 
-        # Will be initialized in build()
-        self.gaussian_filters = []
-        self._build_input_shape = None
-
-        logger.info(
-            f"GaussianPyramid: levels={self.levels}, "
-            f"kernel_size={self.kernel_size}, "
-            f"scale_factor={self.scale_factor}, "
-            f"sigma={self.sigma}, "
-            f"data_format={self.data_format}"
-        )
-
-    def build(self, input_shape):
-        """Build the Gaussian filters for each pyramid level.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
-        """
-        self._build_input_shape = input_shape
-
-        # Create Gaussian filters for each level
-        self.gaussian_filters = []
-        current_shape = input_shape
-
+        # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
+        self.gaussian_filters: List[GaussianFilter] = []
         for i in range(self.levels):
             gaussian_filter = GaussianFilter(
                 kernel_size=self.kernel_size,
@@ -151,16 +149,40 @@ class GaussianPyramid(keras.layers.Layer):
                 trainable=self.trainable,
                 name=f"gaussian_filter_{i}"
             )
-            gaussian_filter.build(current_shape)
             self.gaussian_filters.append(gaussian_filter)
+
+        logger.info(
+            f"GaussianPyramid: levels={self.levels}, "
+            f"kernel_size={self.kernel_size}, "
+            f"scale_factor={self.scale_factor}, "
+            f"sigma={self.sigma}, "
+            f"data_format={self.data_format}"
+        )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build all Gaussian filters with appropriate input shapes.
+
+        This method explicitly builds each sub-layer with the correct input shape
+        for robust serialization support.
+
+        Args:
+            input_shape: Shape tuple of the input tensor.
+        """
+        # Build sub-layers in computational order with correct shapes
+        current_shape = input_shape
+
+        for i, gaussian_filter in enumerate(self.gaussian_filters):
+            # Build the gaussian filter with current shape
+            gaussian_filter.build(current_shape)
 
             # Update shape for next level (downsampled)
             if i < self.levels - 1:  # Don't update for the last level
                 current_shape = self._compute_downsampled_shape(current_shape)
 
+        # Always call parent build at the end
         super().build(input_shape)
 
-    def _compute_downsampled_shape(self, input_shape):
+    def _compute_downsampled_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the shape after downsampling.
 
         Args:
@@ -186,7 +208,7 @@ class GaussianPyramid(keras.layers.Layer):
 
         return tuple(input_shape_list)
 
-    def _downsample(self, inputs):
+    def _downsample(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Downsample the input tensor by the scale factor.
 
         Args:
@@ -207,7 +229,11 @@ class GaussianPyramid(keras.layers.Layer):
             data_format=self.data_format
         )
 
-    def call(self, inputs, training=None):
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> List[keras.KerasTensor]:
         """Apply Gaussian pyramid decomposition.
 
         Args:
@@ -233,7 +259,7 @@ class GaussianPyramid(keras.layers.Layer):
 
         return results
 
-    def compute_output_shape(self, input_shape):
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> List[Tuple[Optional[int], ...]]:
         """Compute the output shapes for all pyramid levels.
 
         Args:
@@ -252,8 +278,10 @@ class GaussianPyramid(keras.layers.Layer):
 
         return output_shapes
 
-    def get_config(self):
+    def get_config(self) -> Dict[str, Any]:
         """Return the configuration for serialization.
+
+        Returns ALL __init__ parameters for complete serialization support.
 
         Returns:
             Dictionary containing the layer configuration.
@@ -269,29 +297,12 @@ class GaussianPyramid(keras.layers.Layer):
         })
         return config
 
-    def get_build_config(self):
-        """Get build configuration.
-
-        Returns:
-            Dictionary containing build configuration.
-        """
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config):
-        """Build from configuration.
-
-        Args:
-            config: Dictionary containing build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
 
 # ---------------------------------------------------------------------
 
 
 def gaussian_pyramid(
-        inputs,
+        inputs: keras.KerasTensor,
         levels: int = 3,
         kernel_size: Tuple[int, int] = (5, 5),
         sigma: Union[float, Tuple[float, float]] = -1,
@@ -299,7 +310,7 @@ def gaussian_pyramid(
         padding: str = "same",
         data_format: Optional[str] = None,
         name: Optional[str] = None
-):
+) -> List[keras.KerasTensor]:
     """Functional interface for Gaussian pyramid decomposition.
 
     This is a convenience function that creates a Gaussian pyramid of the input.
@@ -324,12 +335,20 @@ def gaussian_pyramid(
         List of tensors representing the Gaussian pyramid levels.
 
     Example:
-        >>> x = np.random.rand(4, 32, 32, 3)  # Input images
-        >>> pyramid = gaussian_pyramid(x, levels=3, kernel_size=(5, 5), sigma=1.0)
-        >>> print(len(pyramid))  # Number of levels
-        3
-        >>> print([p.shape for p in pyramid])
-        [(4, 32, 32, 3), (4, 16, 16, 3), (4, 8, 8, 3)]
+        ```python
+        import numpy as np
+
+        # Create sample input
+        x = keras.random.normal(shape=(4, 32, 32, 3))
+
+        # Generate 3-level pyramid
+        pyramid = gaussian_pyramid(x, levels=3, kernel_size=(5, 5), sigma=1.0)
+
+        print(f"Number of levels: {len(pyramid)}")
+        print(f"Shapes: {[p.shape for p in pyramid]}")
+        # Output: Number of levels: 3
+        # Output: Shapes: [(4, 32, 32, 3), (4, 16, 16, 3), (4, 8, 8, 3)]
+        ```
     """
     layer = GaussianPyramid(
         levels=levels,
