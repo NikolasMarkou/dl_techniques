@@ -105,7 +105,6 @@ Use Cases:
 """
 
 import keras
-import numpy as np
 from keras import ops
 from typing import Tuple, Union, List, Optional, Sequence
 
@@ -287,56 +286,5 @@ class GaussianFilter(keras.layers.Layer):
             "data_format": self.data_format
         })
         return config
-
-# ---------------------------------------------------------------------
-
-
-def gaussian_filter(
-        inputs,
-        kernel_size: Tuple[int, int] = (5, 5),
-        sigma: Union[float, Tuple[float, float]] = 1.0,
-        strides: Tuple[int, int] = (1, 1),
-        padding: str = "same",
-        data_format: Optional[str] = None,
-        name: Optional[str] = None
-):
-    """Functional interface for Gaussian filtering.
-
-    This is a convenience function that applies a Gaussian filter to the input.
-
-    Args:
-        inputs: Input tensor of shape:
-            - If data_format="channels_last": (batch_size, height, width, channels)
-            - If data_format="channels_first": (batch_size, channels, height, width)
-        kernel_size: Tuple of two integers specifying the height and width of the
-            2D Gaussian kernel. Defaults to (5, 5).
-        sigma: Standard deviation of the Gaussian distribution. If a single value,
-            the same sigma is used for both dimensions. If a tuple, (sigma_height,
-            sigma_width) are used. Defaults to 1.0.
-        strides: Tuple of 2 integers specifying the strides of the convolution
-            along height and width. Defaults to (1, 1).
-        padding: String, either "valid" or "same" (case-insensitive). Defaults to "same".
-        data_format: String, either "channels_last" or "channels_first". If None,
-            uses the default format from Keras configuration.
-        name: Optional name for the operation.
-
-    Returns:
-        Filtered tensor with the same structure as the input tensor.
-
-    Example:
-        >>> x = np.random.rand(4, 32, 32, 3)  # Input images
-        >>> y = gaussian_filter(x, kernel_size=(5, 5), sigma=1.5)
-        >>> print(y.shape)
-        (4, 32, 32, 3)
-    """
-    layer = GaussianFilter(
-        kernel_size=kernel_size,
-        strides=strides,
-        sigma=sigma,
-        padding=padding,
-        data_format=data_format,
-        name=name
-    )
-    return layer(inputs)
 
 # ---------------------------------------------------------------------
