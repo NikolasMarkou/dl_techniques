@@ -21,18 +21,16 @@ Key features and behavior of this `StochasticDepth` implementation:
     - If the path is not dropped, the input tensor is scaled by `1 / (1 - drop_path_rate)`.
       This scaling is crucial for maintaining the expected magnitude of activations
       across dropped paths, ensuring that the expected output during training matches
-      the output during inference. (Note: Keras's `Dropout` layer handles this scaling
-      automatically).
+      the output during inference.
 
 3.  **During Inference (`training=False`):**
     - The layer acts as an identity function; the input tensor is passed through
       unchanged. No paths are dropped, and no scaling is applied, as the scaling factor
       from training ensures the expected output magnitude is preserved.
 
-4.  **Noise Shape for Broadcasting:**
-    The internal Keras `Dropout` layer is configured with a `noise_shape` of
-    `(batch_size, 1, 1, ..., 1)`. This ensures that the dropout mask (which decides
-    whether to drop a path) is consistent across all spatial or feature dimensions
+4.  **Dynamic Noise Shape:**
+    The noise shape is calculated dynamically based on input dimensions to ensure
+    that the dropout mask is consistent across all spatial or feature dimensions
     of the input for a given sample, making the "drop" an all-or-nothing decision for
     the entire path.
 
@@ -45,7 +43,7 @@ Reference:
 """
 
 import keras
-from typing import Optional, Dict, Any, Union, Tuple
+from typing import Optional, Dict, Any, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -55,41 +53,63 @@ from ..utils.logger import logger
 
 # ---------------------------------------------------------------------
 
+
 @keras.saving.register_keras_serializable()
 class StochasticDepth(keras.layers.Layer):
-    """Implements Stochastic Depth for deep networks.
+    """
+    Implements Stochastic Depth for deep networks.
 
     This layer implements batch-wise dropping of residual paths as described in the
     Stochastic Depth paper. Unlike sample-wise dropping methods (like DropPath in timm),
     this implementation drops the same paths for all samples in a batch.
 
+    The layer acts as an identity function during inference and randomly drops entire
+    paths during training with the specified probability.
+
     Args:
         drop_path_rate: Float between 0 and 1, probability of dropping the residual path.
-            Default is 0.5.
+            Must be in the range [0, 1). Defaults to 0.5.
         **kwargs: Additional keyword arguments passed to the parent Layer class.
 
+    Input shape:
+        Arbitrary tensor with at least 2 dimensions (batch_size, ...).
+
+    Output shape:
+        Same shape as input.
+
     Raises:
-        ValueError: If drop_path_rate is not in the interval [0, 1).
+        TypeError: If drop_path_rate is not a number.
+        ValueError: If drop_path_rate is not in the range [0, 1).
 
     References:
         - Deep Networks with Stochastic Depth (https://arxiv.org/abs/1603.09382)
         - timm library implementation (https://github.com/rwightman/pytorch-image-models)
 
     Example:
-        >>> import keras
-        >>> import numpy as np
-        >>> layer = StochasticDepth(drop_path_rate=0.2)
-        >>> x = np.random.rand(4, 32, 32, 64)
-        >>> output = layer(x, training=True)
-        >>> print(output.shape)  # (4, 32, 32, 64)
+        ```python
+        # Basic usage in a residual block
+        inputs = keras.Input(shape=(32, 32, 64))
+        x = keras.layers.Conv2D(64, 3, padding='same')(inputs)
+        x = StochasticDepth(drop_path_rate=0.2)(x)
+        x = keras.layers.Add()([inputs, x])  # Residual connection
+
+        # Higher drop rates for deeper layers
+        stoch_depth = StochasticDepth(drop_path_rate=0.3)
+        x = stoch_depth(x, training=True)  # Explicit training mode
+        ```
+
+    Note:
+        This implementation uses dynamic noise shape calculation to handle inputs
+        of varying dimensions without requiring build-time shape information.
     """
 
     def __init__(
-            self,
-            drop_path_rate: float = 0.5,
-            **kwargs: Any
+        self,
+        drop_path_rate: float = 0.5,
+        **kwargs: Any
     ) -> None:
-        """Initialize the StochasticDepth layer.
+        """
+        Initialize the StochasticDepth layer.
 
         Args:
             drop_path_rate: Probability of dropping the residual path.
@@ -112,146 +132,99 @@ class StochasticDepth(keras.layers.Layer):
 
         self.drop_path_rate = float(drop_path_rate)
 
-        # Initialize sublayer placeholder - will be created in build()
-        self.dropout: Optional[keras.layers.Dropout] = None
-
-        # Store build input shape for serialization
-        self._build_input_shape: Optional[Tuple[Optional[int], ...]] = None
-
-    def build(self, input_shape: Union[Tuple[Optional[int], ...], keras.KerasTensor]) -> None:
-        """Build the layer's internal state.
-
-        Creates a Dropout layer with appropriate noise shape based on input dimensions.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Raises:
-            TypeError: If input_shape is not a valid shape.
-            ValueError: If input has insufficient dimensions.
-        """
-        # Store input shape for serialization
-        if hasattr(input_shape, 'shape'):
-            # Handle KerasTensor
-            self._build_input_shape = tuple(input_shape.shape)
-        else:
-            # Handle tuple/list
-            self._build_input_shape = tuple(input_shape)
-
-        # Validate input shape
-        if not isinstance(input_shape, (tuple, list)) and not hasattr(input_shape, 'shape'):
-            raise TypeError(f"Expected tuple, list, or KerasTensor, got {type(input_shape)}")
-
-        shape_to_use = self._build_input_shape
-        dims = len(shape_to_use)
-
-        if dims < 2:
-            raise ValueError(
-                f"Input must have at least 2 dimensions, got {dims}"
-            )
-
-        # Create noise shape: (batch_size, 1, 1, ..., 1)
-        # This ensures the same dropout mask is applied to all spatial locations
-        # but can differ across batch samples
-        noise_shape = (shape_to_use[0],) + (1,) * (dims - 1)
-
-        # Initialize dropout layer in build() as per best practices
+        # CREATE sub-layer in __init__ following modern Keras 3 pattern
+        # We don't specify noise_shape here as it will be calculated dynamically
         self.dropout = keras.layers.Dropout(
             rate=self.drop_path_rate,
-            noise_shape=noise_shape,
             name=f"{self.name}_dropout"
         )
 
-        # Build the dropout layer
-        self.dropout.build(input_shape)
-
         logger.info(
-            f"Built StochasticDepth layer '{self.name}' with "
-            f"drop_path_rate={self.drop_path_rate}, "
-            f"input_shape={shape_to_use}, "
-            f"noise_shape={noise_shape}"
+            f"Created StochasticDepth layer '{self.name}' with "
+            f"drop_path_rate={self.drop_path_rate}"
         )
 
-        super().build(input_shape)
-
     def call(
-            self,
-            inputs: keras.KerasTensor,
-            training: Optional[bool] = None
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass of the layer.
+        """
+        Forward pass of the layer.
+
+        During training, randomly drops the entire path with probability drop_path_rate.
+        During inference, acts as identity function.
 
         Args:
-            inputs: Input tensor.
+            inputs: Input tensor with shape (batch_size, ...).
             training: Boolean indicating whether in training mode. If None,
-                the layer's default behavior is used.
+                uses the current training phase from the backend.
 
         Returns:
             Output tensor with same shape as input. During training, the tensor
             may be zeroed out with probability drop_path_rate. During inference,
             the tensor is returned unchanged.
-
-        Raises:
-            RuntimeError: If the layer has not been built.
         """
-        if self.dropout is None:
-            raise RuntimeError(
-                f"Layer '{self.name}' has not been built. "
-                "Call build() or pass data through the layer first."
-            )
-
-        # Apply stochastic depth only during training
+        # During inference, act as identity
         if training is False:
             return inputs
 
-        return self.dropout(inputs, training=training)
+        # During training, apply stochastic depth
+        if self.drop_path_rate == 0.0:
+            return inputs
+
+        # Calculate noise shape dynamically: (batch_size, 1, 1, ..., 1)
+        # This ensures the same dropout decision for all spatial/feature dimensions
+        input_shape = keras.ops.shape(inputs)
+        batch_size = input_shape[0]
+        remaining_dims = len(input_shape) - 1
+
+        # Create noise shape for broadcasting
+        noise_shape = [batch_size] + [1] * remaining_dims
+
+        # Apply dropout with dynamic noise shape
+        # We create a random mask and apply it manually for better control
+        if training is not False:  # training=True or training=None
+            # Generate random tensor with the noise shape
+            random_tensor = keras.random.uniform(noise_shape)
+            keep_prob = 1.0 - self.drop_path_rate
+
+            # Create binary mask
+            binary_mask = keras.ops.cast(random_tensor < keep_prob, inputs.dtype)
+
+            # Scale and apply mask
+            output = inputs * binary_mask / keep_prob
+
+            return output
+        else:
+            return inputs
 
     def compute_output_shape(
-            self,
-            input_shape: Union[Tuple[Optional[int], ...], keras.KerasTensor]
+        self,
+        input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
+        """
+        Compute the output shape of the layer.
 
         Args:
-            input_shape: Shape of input tensor.
+            input_shape: Shape tuple of the input tensor.
 
         Returns:
             Tuple representing output shape (same as input shape).
         """
-        if hasattr(input_shape, 'shape'):
-            return tuple(input_shape.shape)
         return tuple(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the config dictionary for layer serialization.
+        """
+        Return the config dictionary for layer serialization.
 
         Returns:
             Dictionary containing the layer configuration.
         """
-        base_config = super().get_config()
-        config = {
+        config = super().get_config()
+        config.update({
             "drop_path_rate": self.drop_path_rate,
-        }
-        return {**base_config, **config}
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the build configuration for proper serialization.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
+        })
+        return config
 
 # ---------------------------------------------------------------------
-
