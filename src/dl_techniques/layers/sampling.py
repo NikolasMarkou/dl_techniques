@@ -18,29 +18,11 @@ distribution), according to the formula:
 By reformulating the sampling process this way, the gradients can flow
 backwards from the decoder's loss, through the sample `z`, and to the
 encoder's parameters (`mu` and `log_var`), allowing for end-to-end training.
-
-Typical Usage:
-  >>> # Define the latent dimension
-  >>> latent_dim = 2
-  >>>
-  >>> # Assume `encoder_output` is the output of the main encoder network
-  >>> # e.g., encoder_output = keras.layers.Dense(16, activation="relu")(input_tensor)
-  >>>
-  >>> # Project the encoder output into mean and log variance vectors
-  >>> z_mean = keras.layers.Dense(latent_dim, name="z_mean")(encoder_output)
-  >>> z_log_var = keras.layers.Dense(latent_dim, name="z_log_var")(encoder_output)
-  >>>
-  >>> # Use the Sampling layer to get a sample from the latent space
-  >>> z = Sampling()([z_mean, z_log_var])
-  >>>
-  >>> # The sampled `z` tensor can then be passed to the decoder
-  >>> # e.g., decoded_output = decoder(z)
-  >>> # vae_model = keras.Model(inputs=input_tensor, outputs=decoded_output)
 """
 
 import keras
 from keras import ops
-from typing import Tuple, Any, Dict, Optional, Union
+from typing import Tuple, Any, Dict, Optional, Union, List
 
 # ---------------------------------------------------------------------
 # local imports
@@ -50,9 +32,11 @@ from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
+
 @keras.saving.register_keras_serializable()
 class Sampling(keras.layers.Layer):
-    """Uses reparameterization trick to sample from a Normal distribution.
+    """
+    Uses reparameterization trick to sample from a Normal distribution.
 
     This layer implements the reparameterization trick commonly used in Variational
     Autoencoders (VAEs). It takes as input the mean and log variance of a latent
@@ -62,16 +46,21 @@ class Sampling(keras.layers.Layer):
 
     The reparameterization trick allows gradients to flow through the sampling operation
     by expressing the random variable as a deterministic function of the parameters and
-    an auxiliary noise variable.
+    an auxiliary noise variable. This is essential for training VAEs end-to-end via
+    gradient descent.
+
+    Mathematical formulation:
+        z = μ + σ * ε
+        where σ = exp(0.5 * log_var) and ε ~ N(0, I)
 
     Args:
         seed: Optional integer seed for random number generation. If None, uses
-            random seed for each call. Defaults to None.
+            random seed for each call. Providing a seed ensures reproducible sampling.
+            Defaults to None.
         **kwargs: Additional keyword arguments to pass to the Layer base class.
 
     Input shape:
         A list/tuple of two tensors:
-
         - z_mean: Tensor of shape `(batch_size, latent_dim)` representing the mean
         - z_log_var: Tensor of shape `(batch_size, latent_dim)` representing the
           log variance
@@ -85,38 +74,65 @@ class Sampling(keras.layers.Layer):
         the input mean and log variance.
 
     Example:
-        >>> # In a VAE encoder
-        >>> encoded = encoder_layers(inputs)
-        >>> z_mean = keras.layers.Dense(latent_dim, name="z_mean")(encoded)
-        >>> z_log_var = keras.layers.Dense(latent_dim, name="z_log_var")(encoded)
-        >>> # Sample from the latent distribution
-        >>> z = Sampling()([z_mean, z_log_var])
-        >>>
-        >>> # With deterministic seed for reproducibility
-        >>> z = Sampling(seed=42)([z_mean, z_log_var])
+        ```python
+        # Basic usage in VAE encoder
+        encoded = encoder_layers(inputs)
+        z_mean = keras.layers.Dense(latent_dim, name="z_mean")(encoded)
+        z_log_var = keras.layers.Dense(latent_dim, name="z_log_var")(encoded)
+
+        # Sample from the latent distribution
+        z = Sampling()([z_mean, z_log_var])
+
+        # With deterministic seed for reproducibility
+        z_reproducible = Sampling(seed=42)([z_mean, z_log_var])
+
+        # In a complete VAE model
+        inputs = keras.Input(shape=(784,))
+        encoded = keras.layers.Dense(256, activation='relu')(inputs)
+        z_mean = keras.layers.Dense(2)(encoded)
+        z_log_var = keras.layers.Dense(2)(encoded)
+        z = Sampling()([z_mean, z_log_var])
+        decoded = keras.layers.Dense(784, activation='sigmoid')(z)
+        vae = keras.Model(inputs, decoded)
+        ```
+
+    Note:
+        This layer does not create any trainable parameters. It only performs
+        the sampling operation using the input mean and log variance tensors.
+        The layer is stateless except for the optional random seed.
+
+    Raises:
+        ValueError: If inputs don't contain exactly 2 tensors or if tensor
+            shapes are incompatible.
     """
 
     def __init__(
-            self,
-            seed: Optional[int] = None,
-            **kwargs: Any
+        self,
+        seed: Optional[int] = None,
+        **kwargs: Any
     ) -> None:
-        """Initialize the Sampling layer.
+        """
+        Initialize the Sampling layer.
 
         Args:
-            seed: Optional integer seed for random number generation.
+            seed: Optional integer seed for random number generation. If provided,
+                ensures reproducible sampling across calls.
             **kwargs: Additional keyword arguments for the Layer parent class.
         """
         super().__init__(**kwargs)
-        self.seed = seed
 
-        # Store build input shape for serialization
-        self._build_input_shape = None
+        # Validate seed parameter
+        if seed is not None and not isinstance(seed, int):
+            raise TypeError(f"seed must be an integer or None, got {type(seed)}")
+
+        # Store configuration
+        self.seed = seed
 
         logger.debug(f"Initialized Sampling layer with seed={seed}")
 
-    def build(self, input_shape: Union[Tuple[Tuple, Tuple], list]) -> None:
-        """Build the layer and validate input shapes.
+    def build(self, input_shape: Union[Tuple[Tuple, ...], List[Tuple]]) -> None:
+        """
+        Build the layer and validate input shapes.
 
         Args:
             input_shape: Tuple or list of two shape tuples for z_mean and z_log_var tensors.
@@ -125,45 +141,52 @@ class Sampling(keras.layers.Layer):
             ValueError: If input_shape doesn't contain exactly 2 tensors or if the
                 tensor shapes are incompatible.
         """
-        # Store input shape for serialization
-        self._build_input_shape = input_shape
-
-        # Validate input shapes
-        if len(input_shape) != 2:
+        # Validate input structure
+        if not isinstance(input_shape, (tuple, list)) or len(input_shape) != 2:
             raise ValueError(
                 f"Sampling layer expects exactly 2 inputs (z_mean, z_log_var), "
-                f"but received {len(input_shape)} inputs."
+                f"but received {len(input_shape) if isinstance(input_shape, (tuple, list)) else 'invalid'} inputs."
             )
 
         z_mean_shape, z_log_var_shape = input_shape
 
+        # Validate tensor dimensions
         if len(z_mean_shape) != len(z_log_var_shape):
             raise ValueError(
                 f"z_mean and z_log_var must have the same number of dimensions. "
                 f"Got z_mean: {len(z_mean_shape)}, z_log_var: {len(z_log_var_shape)}"
             )
 
+        # Validate shapes are compatible (excluding batch dimension)
         if z_mean_shape[1:] != z_log_var_shape[1:]:
             raise ValueError(
                 f"z_mean and z_log_var must have the same shape except for batch dimension. "
                 f"Got z_mean: {z_mean_shape}, z_log_var: {z_log_var_shape}"
             )
 
+        # Validate minimum dimensions
+        if len(z_mean_shape) < 2:
+            raise ValueError(
+                f"Input tensors must be at least 2D (batch_size, latent_dim), "
+                f"got shapes: z_mean={z_mean_shape}, z_log_var={z_log_var_shape}"
+            )
+
         logger.debug(f"Built Sampling layer with input shapes: {input_shape}")
         super().build(input_shape)
 
     def call(
-            self,
-            inputs: Union[Tuple[keras.KerasTensor, keras.KerasTensor], list],
-            training: Optional[bool] = None
+        self,
+        inputs: Union[Tuple[keras.KerasTensor, keras.KerasTensor], List[keras.KerasTensor]],
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply reparameterization trick to sample from Normal distribution.
+        """
+        Apply reparameterization trick to sample from Normal distribution.
 
         Args:
             inputs: Tuple or list containing (z_mean, z_log_var) tensors.
             training: Boolean indicating whether the layer should behave in
                 training mode or inference mode. Not used in this layer but
-                included for consistency.
+                included for consistency with Layer interface.
 
         Returns:
             Sampled tensor from the latent distribution using the reparameterization trick.
@@ -171,25 +194,33 @@ class Sampling(keras.layers.Layer):
         Raises:
             ValueError: If inputs doesn't contain exactly 2 tensors.
         """
-        if len(inputs) != 2:
+        if not isinstance(inputs, (tuple, list)) or len(inputs) != 2:
             raise ValueError(
-                f"Sampling layer call expects exactly 2 inputs, got {len(inputs)}"
+                f"Sampling layer call expects exactly 2 inputs, got {len(inputs) if isinstance(inputs, (tuple, list)) else 'invalid'}"
             )
 
         z_mean, z_log_var = inputs
 
+        # Get the shape of z_mean for sampling epsilon
+        mean_shape = ops.shape(z_mean)
+
         # Sample epsilon from standard normal distribution
+        # Use the same shape as z_mean
         epsilon = keras.random.normal(
-            shape=ops.shape(z_mean),
+            shape=mean_shape,
             seed=self.seed
         )
 
         # Apply reparameterization trick: z = mean + std * epsilon
-        # Note: std = exp(0.5 * log_var)
-        return z_mean + ops.exp(0.5 * z_log_var) * epsilon
+        # Note: std = exp(0.5 * log_var) = sqrt(var)
+        std = ops.exp(0.5 * z_log_var)
+        z_sample = z_mean + std * epsilon
 
-    def compute_output_shape(self, input_shape: Union[Tuple[Tuple, Tuple], list]) -> Tuple:
-        """Compute the output shape of the layer.
+        return z_sample
+
+    def compute_output_shape(self, input_shape: Union[Tuple[Tuple, ...], List[Tuple]]) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape of the layer.
 
         Args:
             input_shape: Tuple or list of two shape tuples for input tensors.
@@ -197,40 +228,24 @@ class Sampling(keras.layers.Layer):
         Returns:
             Output shape tuple (same as z_mean shape).
         """
+        if not isinstance(input_shape, (tuple, list)) or len(input_shape) != 2:
+            raise ValueError(f"Expected 2 input shapes, got {len(input_shape) if isinstance(input_shape, (tuple, list)) else 'invalid'}")
+
         z_mean_shape, _ = input_shape
         return tuple(z_mean_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """Returns the layer configuration for serialization.
+        """
+        Returns the layer configuration for serialization.
 
         Returns:
-            Dictionary containing the layer configuration.
+            Dictionary containing the layer configuration including all parameters
+            needed to reconstruct the layer.
         """
         config = super().get_config()
         config.update({
             "seed": self.seed,
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the config needed to build the layer from a config.
-
-        This method is needed for proper model saving and loading.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------

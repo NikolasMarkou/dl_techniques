@@ -54,7 +54,6 @@ class TestSampling:
         layer = Sampling()
 
         assert layer.seed is None
-        assert layer._build_input_shape is None
         assert layer.built is False
 
     def test_initialization_custom(self):
@@ -63,7 +62,6 @@ class TestSampling:
 
         assert layer.seed == 42
         assert layer.name == "test_sampling"
-        assert layer._build_input_shape is None
 
     def test_initialization_with_kwargs(self):
         """Test initialization with additional kwargs."""
@@ -85,7 +83,6 @@ class TestSampling:
         layer.build(input_shapes)
 
         assert layer.built is True
-        assert layer._build_input_shape == input_shapes
 
     def test_build_with_3d_tensors(self, input_shapes_3d):
         """Test build with 3D input tensors."""
@@ -93,7 +90,6 @@ class TestSampling:
         layer.build(input_shapes_3d)
 
         assert layer.built is True
-        assert layer._build_input_shape == input_shapes_3d
 
     def test_build_invalid_num_inputs(self):
         """Test build with wrong number of inputs."""
@@ -284,7 +280,6 @@ class TestSampling:
         # Check configuration matches
         assert recreated_layer.seed == original_layer.seed
         assert recreated_layer.name == original_layer.name
-        assert recreated_layer._build_input_shape == original_layer._build_input_shape
         assert recreated_layer.built == original_layer.built
 
     def test_serialization_no_seed(self, input_shapes):
