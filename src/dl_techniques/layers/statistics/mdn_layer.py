@@ -44,8 +44,8 @@ from typing import Dict, Optional, Tuple, Union, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
-from ..utils.tensors import gaussian_probability
+from dl_techniques.utils.logger import logger
+from dl_techniques.utils.tensors import gaussian_probability
 
 # ---------------------------------------------------------------------
 # Constants

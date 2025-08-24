@@ -12,9 +12,9 @@ import pytest
 import numpy as np
 import tensorflow as tf
 import tempfile
-from typing import Dict, Any, Tuple
+from typing import Dict, Any
 
-from dl_techniques.layers.mdn_layer import (
+from dl_techniques.layers.statistics.mdn_layer import (
     MDNLayer,
     get_point_estimate,
     get_uncertainty,
