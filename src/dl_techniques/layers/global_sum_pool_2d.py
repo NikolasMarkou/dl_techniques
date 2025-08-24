@@ -2,6 +2,7 @@ import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple
 
+
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -13,20 +14,23 @@ class GlobalSumPooling2D(keras.layers.Layer):
     shape `(batch_size, height, width, channels)` to `(batch_size, channels)`
     or `(batch_size, 1, 1, channels)` if `keepdims=True`.
 
+    Unlike average or max pooling, sum pooling preserves the total magnitude
+    of activations across spatial dimensions, making it useful for tasks where
+    the total activation strength is meaningful (e.g., object counting, density
+    estimation).
+
     Args:
         keepdims: Boolean, whether to keep the spatial dimensions as size 1.
-            If `True`, the output will have shape `(batch_size, 1, 1, channels)`.
-            If `False`, the output will have shape `(batch_size, channels)`.
-            Defaults to `False`.
+            If `True`, the output will have shape `(batch_size, 1, 1, channels)`
+            for channels_last format. If `False`, the output will have shape
+            `(batch_size, channels)`. Defaults to `False`.
         data_format: String, either `"channels_last"` or `"channels_first"`.
             The ordering of the dimensions in the inputs. `"channels_last"`
             corresponds to inputs with shape `(batch, height, width, channels)`
             while `"channels_first"` corresponds to inputs with shape
-            `(batch, channels, height, width)`. It defaults to the
-            `image_data_format` value found in your Keras config file at
-            `~/.keras/keras.json`. If you never set it, then it will be
-            `"channels_last"`.
-        **kwargs: Additional keyword arguments to pass to the Layer base class.
+            `(batch, channels, height, width)`. If `None`, uses the default
+            `image_data_format` from Keras config. Defaults to `None`.
+        **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
         - If `data_format="channels_last"`:
@@ -48,17 +52,29 @@ class GlobalSumPooling2D(keras.layers.Layer):
         A tensor with the spatial dimensions summed out.
 
     Example:
-        >>> import numpy as np
-        >>> x = np.random.rand(4, 32, 32, 64)
-        >>> layer = GlobalSumPooling2D()
-        >>> output = layer(x)
-        >>> print(output.shape)
-        (4, 64)
+        ```python
+        # Basic usage
+        inputs = keras.Input(shape=(32, 32, 64))
+        layer = GlobalSumPooling2D()
+        outputs = layer(inputs)
+        print(outputs.shape)  # (batch_size, 64)
 
-        >>> layer_keepdims = GlobalSumPooling2D(keepdims=True)
-        >>> output_keepdims = layer_keepdims(x)
-        >>> print(output_keepdims.shape)
-        (4, 1, 1, 64)
+        # Keep spatial dimensions
+        layer_keepdims = GlobalSumPooling2D(keepdims=True)
+        outputs_keepdims = layer_keepdims(inputs)
+        print(outputs_keepdims.shape)  # (batch_size, 1, 1, 64)
+
+        # Channels first format
+        inputs_cf = keras.Input(shape=(64, 32, 32))
+        layer_cf = GlobalSumPooling2D(data_format="channels_first")
+        outputs_cf = layer_cf(inputs_cf)
+        print(outputs_cf.shape)  # (batch_size, 64)
+        ```
+
+    Note:
+        This layer is particularly useful for tasks where the total activation
+        magnitude matters, such as object counting or when you want to preserve
+        the sum of feature responses across spatial locations.
     """
 
     def __init__(
@@ -68,20 +84,37 @@ class GlobalSumPooling2D(keras.layers.Layer):
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
+
+        # Store configuration parameters
         self.keepdims = keepdims
-        self.data_format = keras.backend.image_data_format()
 
-        # Will be set in build()
-        self._build_input_shape = None
+        # Set data format - use provided value or default from Keras config
+        if data_format is None:
+            data_format = keras.backend.image_data_format()
 
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer."""
-        # Store input shape for serialization
-        self._build_input_shape = input_shape
-        super().build(input_shape)
+        # Validate data format
+        if data_format not in ("channels_last", "channels_first"):
+            raise ValueError(
+                f"data_format must be 'channels_last' or 'channels_first', "
+                f"got {data_format}"
+            )
 
-    def call(self, inputs: Any, training: Optional[bool] = None) -> Any:
-        """Forward pass."""
+        self.data_format = data_format
+
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """Forward pass computation.
+
+        Args:
+            inputs: Input tensor of rank 4.
+            training: Boolean indicating training mode (unused for this layer).
+
+        Returns:
+            Tensor with spatial dimensions summed out.
+        """
         # Determine which axes to sum over based on data format
         if self.data_format == "channels_last":
             # For channels_last: (batch, height, width, channels)
@@ -94,8 +127,18 @@ class GlobalSumPooling2D(keras.layers.Layer):
 
         return ops.sum(inputs, axis=sum_axes, keepdims=self.keepdims)
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer."""
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Compute the output shape of the layer.
+
+        Args:
+            input_shape: Shape tuple of the input tensor.
+
+        Returns:
+            Output shape tuple.
+        """
         # Convert to list for manipulation
         input_shape_list = list(input_shape)
 
@@ -119,23 +162,16 @@ class GlobalSumPooling2D(keras.layers.Layer):
         return tuple(output_shape_list)
 
     def get_config(self) -> Dict[str, Any]:
-        """Get the layer configuration."""
+        """Get the layer configuration for serialization.
+
+        Returns:
+            Dictionary containing the layer configuration.
+        """
         config = super().get_config()
         config.update({
             "keepdims": self.keepdims,
             "data_format": self.data_format,
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the build configuration."""
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from configuration."""
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------
