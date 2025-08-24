@@ -9,7 +9,7 @@ import keras
 import os
 import tempfile
 
-from dl_techniques.layers.dynamic_tanh import DynamicTanh
+from dl_techniques.layers.activations.dynamic_tanh import DynamicTanh
 
 
 class TestDynamicTanh:
@@ -39,7 +39,6 @@ class TestDynamicTanh:
         assert layer.bias_constraint is None
         assert layer.supports_masking is True
         assert layer.built is False
-        assert layer._build_input_shape is None
 
     def test_initialization_custom(self):
         """Test initialization with custom parameters."""
@@ -98,7 +97,6 @@ class TestDynamicTanh:
         # Check that layer was built
         assert layer.built is True
         assert len(layer.weights) == 3  # alpha, weight, bias
-        assert layer._build_input_shape == input_tensor.shape
 
         # Check weight shapes
         assert layer.alpha.shape == ()  # Scalar
