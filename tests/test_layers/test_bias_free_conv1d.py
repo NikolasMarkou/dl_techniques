@@ -1,1130 +1,617 @@
 """
 Comprehensive test suite for BiasFreeConv1D and BiasFreeResidualBlock1D layers.
 
-Tests cover initialization, build process, forward pass, serialization,
-model integration, and edge cases following the dl-techniques testing guide.
+Following modern Keras 3 testing patterns with emphasis on serialization robustness
+and gradient flow validation.
 """
 
 import pytest
-import numpy as np
-import tensorflow as tf
-import keras
-import os
 import tempfile
+import os
+import numpy as np
+from typing import Any, Dict
 
-# Import the layers to test
+import keras
+import tensorflow as tf
+
 from dl_techniques.layers.bias_free_conv1d import BiasFreeConv1D, BiasFreeResidualBlock1D
 
 
 class TestBiasFreeConv1D:
-    """Test suite for BiasFreeConv1D layer implementation."""
+    """Comprehensive test suite for BiasFreeConv1D layer."""
 
     @pytest.fixture
-    def input_tensor(self) -> tf.Tensor:
-        """Create a test input tensor for time series."""
-        return tf.random.normal([4, 100, 3])  # [batch, time, features]
+    def basic_config(self) -> Dict[str, Any]:
+        """Basic configuration for testing."""
+        return {
+            'filters': 32,
+            'kernel_size': 3,
+            'activation': 'relu',
+            'use_batch_norm': True
+        }
 
     @pytest.fixture
-    def small_input_tensor(self) -> tf.Tensor:
-        """Create a smaller test input tensor for controlled tests."""
-        return tf.random.normal([2, 20, 1])  # [batch, time, features]
+    def advanced_config(self) -> Dict[str, Any]:
+        """Advanced configuration with regularization."""
+        return {
+            'filters': 64,
+            'kernel_size': 5,
+            'activation': 'gelu',
+            'kernel_initializer': 'he_normal',
+            'kernel_regularizer': keras.regularizers.L2(1e-4),
+            'use_batch_norm': True
+        }
 
     @pytest.fixture
-    def layer_instance(self) -> BiasFreeConv1D:
-        """Create a default layer instance for testing."""
-        return BiasFreeConv1D(filters=32)
+    def no_bn_config(self) -> Dict[str, Any]:
+        """Configuration without batch normalization."""
+        return {
+            'filters': 16,
+            'kernel_size': 7,
+            'activation': 'swish',
+            'use_batch_norm': False
+        }
 
-    # -------------------------------------------------------------------------
-    # 1. Initialization Tests
-    # -------------------------------------------------------------------------
+    @pytest.fixture
+    def sample_input_1d(self) -> keras.KerasTensor:
+        """Sample 1D input tensor for testing."""
+        return keras.random.normal(shape=(4, 100, 8))  # batch=4, time=100, features=8
 
-    def test_initialization_defaults(self):
-        """Test initialization with default parameters."""
-        layer = BiasFreeConv1D(filters=64)
+    @pytest.fixture
+    def large_input_1d(self) -> keras.KerasTensor:
+        """Larger 1D input tensor for gradient testing."""
+        return keras.random.normal(shape=(2, 500, 16))
 
-        # Check default values
-        assert layer.filters == 64
-        assert layer.kernel_size == 3
-        assert layer.activation == 'relu'
-        assert isinstance(layer.kernel_initializer, str)
-        assert layer.kernel_initializer == 'glorot_uniform'
-        assert layer.kernel_regularizer is None
-        assert layer.use_batch_norm is True
+    def test_initialization(self, basic_config: Dict[str, Any]) -> None:
+        """Test layer initialization and attribute setting."""
+        layer = BiasFreeConv1D(**basic_config)
 
-        # Check sublayers are initially None
-        assert layer.conv is None
-        assert layer.batch_norm is None
-        assert layer.activation_layer is None
+        # Check configuration attributes
+        assert layer.filters == basic_config['filters']
+        assert layer.kernel_size == basic_config['kernel_size']
+        assert layer.activation == basic_config['activation']
+        assert layer.use_batch_norm == basic_config['use_batch_norm']
 
-    def test_initialization_custom_parameters(self):
-        """Test initialization with custom parameters."""
-        custom_regularizer = keras.regularizers.L2(1e-4)
+        # Check layer is not built yet
+        assert not layer.built
 
-        layer = BiasFreeConv1D(
-            filters=128,
-            kernel_size=5,
-            activation='gelu',
-            kernel_initializer='he_normal',
-            kernel_regularizer=custom_regularizer,
-            use_batch_norm=False
-        )
-
-        # Check custom values
-        assert layer.filters == 128
-        assert layer.kernel_size == 5
-        assert layer.activation == 'gelu'
-        assert layer.kernel_initializer == 'he_normal'
-        assert layer.kernel_regularizer == custom_regularizer
-        assert layer.use_batch_norm is False
-
-    def test_initialization_invalid_parameters(self):
-        """Test that invalid parameters raise appropriate errors."""
-        # Keras validates parameters during build/call, not initialization
-        layer = BiasFreeConv1D(filters=-10)  # This won't raise error yet
-        test_input = tf.random.normal([1, 20, 3])
-
-        # Error should occur during layer call/build
-        with pytest.raises((ValueError, TypeError)):
-            layer(test_input)
-
-    def test_initialization_different_kernel_sizes(self):
-        """Test initialization with different kernel size formats."""
-        # Different integer kernel sizes
-        for kernel_size in [1, 3, 5, 7, 9]:
-            layer = BiasFreeConv1D(filters=32, kernel_size=kernel_size)
-            assert layer.kernel_size == kernel_size
-
-    # -------------------------------------------------------------------------
-    # 2. Build Process Tests
-    # -------------------------------------------------------------------------
-
-    def test_build_process(self, input_tensor):
-        """Test that the layer builds properly."""
-        layer = BiasFreeConv1D(filters=64)
-        layer(input_tensor)  # Forward pass triggers build
-
-        # Check that layer is built
-        assert layer.built is True
-        assert layer._build_input_shape is not None
-
-        # Check sublayers were created
-        assert layer.conv is not None
-        assert layer.batch_norm is not None  # default use_batch_norm=True
-        assert layer.activation_layer is not None  # default activation='relu'
-
-        # Check conv layer properties
-        assert layer.conv.filters == 64
-        assert layer.conv.use_bias is False  # Key requirement
-        assert layer.conv.padding == 'same'
-
-        # Check batch norm properties
-        assert layer.batch_norm.center is False  # Key requirement
-        assert layer.batch_norm.scale is True
-
-    def test_build_without_batch_norm(self, input_tensor):
-        """Test building with batch normalization disabled."""
-        layer = BiasFreeConv1D(filters=32, use_batch_norm=False)
-        layer(input_tensor)
-
-        assert layer.conv is not None
-        assert layer.batch_norm is None  # Should be None when disabled
-        assert layer.activation_layer is not None
-
-    def test_build_without_activation(self, input_tensor):
-        """Test building with activation disabled."""
-        layer = BiasFreeConv1D(filters=32, activation=None)
-        layer(input_tensor)
-
+        # Check sub-layers are created
         assert layer.conv is not None
         assert layer.batch_norm is not None
-        assert layer.activation_layer is None  # Should be None when disabled
+        assert layer.activation_layer is not None
 
-    def test_build_minimal_configuration(self, input_tensor):
-        """Test building with minimal configuration."""
-        layer = BiasFreeConv1D(
-            filters=16,
-            use_batch_norm=False,
-            activation=None
-        )
-        layer(input_tensor)
+        # Verify conv layer has no bias
+        assert not layer.conv.use_bias
 
-        # Only conv layer should be created
-        assert layer.conv is not None
+        # Verify batch norm has no center (no bias)
+        assert not layer.batch_norm.center
+        assert layer.batch_norm.scale  # Should still have scale
+
+    def test_initialization_no_batch_norm(self, no_bn_config: Dict[str, Any]) -> None:
+        """Test initialization without batch normalization."""
+        layer = BiasFreeConv1D(**no_bn_config)
+
+        assert layer.filters == no_bn_config['filters']
+        assert not layer.use_batch_norm
         assert layer.batch_norm is None
-        assert layer.activation_layer is None
+        assert layer.conv is not None
+        assert layer.activation_layer is not None
 
-    # -------------------------------------------------------------------------
-    # 3. Output Shape Tests
-    # -------------------------------------------------------------------------
+    def test_forward_pass(self, basic_config: Dict[str, Any], sample_input_1d: keras.KerasTensor) -> None:
+        """Test forward pass and automatic building."""
+        layer = BiasFreeConv1D(**basic_config)
 
-    def test_output_shapes(self, input_tensor):
-        """Test that output shapes are computed correctly."""
-        filters_to_test = [16, 32, 64, 128]
+        # Forward pass should trigger building
+        output = layer(sample_input_1d)
 
-        for filters in filters_to_test:
-            layer = BiasFreeConv1D(filters=filters)
-            output = layer(input_tensor)
+        # Check layer is now built
+        assert layer.built
 
-            # Check output shape (same padding preserves time dimension)
-            expected_shape = list(input_tensor.shape)
-            expected_shape[-1] = filters  # Only feature dim should change
-            expected_shape = tuple(expected_shape)
+        # Check output shape
+        expected_shape = (sample_input_1d.shape[0], sample_input_1d.shape[1], basic_config['filters'])
+        assert output.shape == expected_shape
 
-            assert output.shape == expected_shape
+        # Check output is not NaN or infinite
+        output_np = keras.ops.convert_to_numpy(output)
+        assert np.isfinite(output_np).all()
+        assert not np.isnan(output_np).any()
 
-            # Test compute_output_shape separately
-            computed_shape = layer.compute_output_shape(input_tensor.shape)
-            assert computed_shape == expected_shape
+    def test_forward_pass_no_batch_norm(self, no_bn_config: Dict[str, Any], sample_input_1d: keras.KerasTensor) -> None:
+        """Test forward pass without batch normalization."""
+        layer = BiasFreeConv1D(**no_bn_config)
 
-    def test_output_shapes_different_kernel_sizes(self, input_tensor):
-        """Test output shapes with different kernel sizes."""
-        kernel_sizes = [1, 3, 5, 7, 9]
+        output = layer(sample_input_1d)
 
-        for kernel_size in kernel_sizes:
-            layer = BiasFreeConv1D(filters=32, kernel_size=kernel_size)
-            output = layer(input_tensor)
+        expected_shape = (sample_input_1d.shape[0], sample_input_1d.shape[1], no_bn_config['filters'])
+        assert output.shape == expected_shape
 
-            # With 'same' padding, time dimension should be preserved
-            expected_shape = list(input_tensor.shape)
-            expected_shape[-1] = 32
-            assert output.shape == tuple(expected_shape)
+        # Output should still be valid
+        output_np = keras.ops.convert_to_numpy(output)
+        assert np.isfinite(output_np).all()
 
-    def test_compute_output_shape_before_build(self):
-        """Test compute_output_shape before layer is built."""
-        layer = BiasFreeConv1D(filters=64)
-        input_shape = (None, 100, 3)
-
-        output_shape = layer.compute_output_shape(input_shape)
-        expected_shape = (None, 100, 64)
-        assert output_shape == expected_shape
-
-    def test_output_shapes_different_sequence_lengths(self):
-        """Test output shapes with different sequence lengths."""
-        sequence_lengths = [10, 50, 100, 200, 500]
-
-        for seq_len in sequence_lengths:
-            layer = BiasFreeConv1D(filters=32)
-            test_input = tf.random.normal([2, seq_len, 3])
-            output = layer(test_input)
-
-            # Time dimension should be preserved with same padding
-            expected_shape = (2, seq_len, 32)
-            assert output.shape == expected_shape
-
-    # -------------------------------------------------------------------------
-    # 4. Forward Pass Tests
-    # -------------------------------------------------------------------------
-
-    def test_forward_pass_basic(self, input_tensor):
-        """Test that forward pass produces valid outputs."""
-        layer = BiasFreeConv1D(filters=32)
-        output = layer(input_tensor)
-
-        # Basic sanity checks
-        assert not np.any(np.isnan(output.numpy()))
-        assert not np.any(np.isinf(output.numpy()))
-        assert output.shape[0] == input_tensor.shape[0]  # Batch dim preserved
-        assert output.shape[1] == input_tensor.shape[1]  # Time dim preserved
-
-    def test_forward_pass_different_training_modes(self, input_tensor):
-        """Test forward pass in training and inference modes."""
-        layer = BiasFreeConv1D(filters=32)
-
-        # Training mode
-        output_train = layer(input_tensor, training=True)
-
-        # Inference mode
-        output_inference = layer(input_tensor, training=False)
-
-        # Outputs should be different due to batch norm behavior
-        # but both should be valid
-        assert not np.any(np.isnan(output_train.numpy()))
-        assert not np.any(np.isnan(output_inference.numpy()))
-        assert output_train.shape == output_inference.shape
-
-    def test_forward_pass_no_bias_property(self):
-        """Test that the layer maintains bias-free property."""
-        # Create controlled input
-        controlled_input = tf.ones([1, 10, 2])
-
-        # Layer with linear activation to test bias-free property
-        layer = BiasFreeConv1D(
-            filters=1,
-            kernel_size=1,
-            activation='linear',
-            kernel_initializer='ones',
-            use_batch_norm=False
-        )
-
-        output = layer(controlled_input)
-
-        # With ones initializer and no bias, output should be predictable
-        # Each output should be sum of input features (2 in this case)
-        expected_value = 2.0  # Sum of input features
-
-        # Check that output has expected pattern (approximately)
-        output_values = output.numpy().flatten()
-        assert np.allclose(output_values, expected_value, rtol=0.1)
-
-    def test_forward_pass_different_activations(self, small_input_tensor):
-        """Test forward pass with different activation functions."""
-        activations = ['relu', 'gelu', 'swish', 'linear', None]
-
-        for activation in activations:
-            layer = BiasFreeConv1D(filters=16, activation=activation)
-            output = layer(small_input_tensor)
-
-            # Check output is valid
-            assert not np.any(np.isnan(output.numpy()))
-            assert output.shape[-1] == 16
-
-    def test_forward_pass_temporal_consistency(self):
-        """Test that the convolution respects temporal structure."""
-        # Create input with known temporal pattern
-        seq_len = 50
-        test_input = tf.zeros([1, seq_len, 1])
-
-        # Set a single time step to 1.0
-        test_input = tf.tensor_scatter_nd_update(
-            test_input,
-            [[0, 25, 0]],
-            [1.0]
-        )
-
-        layer = BiasFreeConv1D(
-            filters=1,
-            kernel_size=3,
-            activation='linear',
-            kernel_initializer='ones',
-            use_batch_norm=False
-        )
-
-        output = layer(test_input)
-
-        # The peak in output should be around the same time step
-        peak_time = tf.argmax(output[0, :, 0]).numpy()
-        assert abs(peak_time - 25) <= 1  # Allow for small shifts due to convolution
-
-    # -------------------------------------------------------------------------
-    # 5. Serialization Tests
-    # -------------------------------------------------------------------------
-
-    def test_serialization_basic(self):
-        """Test basic serialization and deserialization."""
-        original_layer = BiasFreeConv1D(
-            filters=64,
-            kernel_size=3,
-            activation='relu',
-            kernel_initializer='he_normal',
-            use_batch_norm=True
-        )
-
-        # Build the layer
-        input_shape = (None, 100, 3)
-        original_layer.build(input_shape)
-
-        # Get configs
-        config = original_layer.get_config()
-        build_config = original_layer.get_build_config()
-
-        # Recreate the layer
-        recreated_layer = BiasFreeConv1D.from_config(config)
-        recreated_layer.build_from_config(build_config)
-
-        # Check configuration matches
-        assert recreated_layer.filters == original_layer.filters
-        assert recreated_layer.kernel_size == original_layer.kernel_size
-        assert recreated_layer.activation == original_layer.activation
-        assert recreated_layer.use_batch_norm == original_layer.use_batch_norm
-
-    def test_serialization_with_regularizers(self):
-        """Test serialization with various regularizers."""
-        original_layer = BiasFreeConv1D(
-            filters=32,
-            kernel_regularizer=keras.regularizers.L2(0.01),
-            kernel_initializer='glorot_normal'
-        )
-
-        # Build and serialize
-        original_layer.build((None, 50, 3))
-        config = original_layer.get_config()
-
-        # Recreate and check
-        recreated_layer = BiasFreeConv1D.from_config(config)
-        assert recreated_layer.filters == 32
-
-    def test_get_build_config(self):
-        """Test get_build_config returns correct information."""
-        layer = BiasFreeConv1D(filters=32)
-        input_shape = (None, 75, 3)
-        layer.build(input_shape)
-
-        build_config = layer.get_build_config()
-
-        assert 'input_shape' in build_config
-        assert build_config['input_shape'] == input_shape
-
-    # -------------------------------------------------------------------------
-    # 6. Model Integration Tests
-    # -------------------------------------------------------------------------
-
-    def test_model_integration_sequential(self, input_tensor):
-        """Test the layer in a Sequential model."""
-        model = keras.Sequential([
-            keras.layers.Input(shape=input_tensor.shape[1:]),
-            BiasFreeConv1D(filters=32, activation='relu'),
-            BiasFreeConv1D(filters=64, activation='relu'),
-            keras.layers.GlobalAveragePooling1D(),
-            keras.layers.Dense(10, activation='softmax')
-        ])
-
-        # Compile the model
-        model.compile(
-            optimizer='adam',
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
-        )
-
-        # Test forward pass
-        y_pred = model(input_tensor, training=False)
-        assert y_pred.shape == (input_tensor.shape[0], 10)
-
-    def test_model_integration_functional(self, input_tensor):
-        """Test the layer in a Functional API model."""
-        inputs = keras.Input(shape=input_tensor.shape[1:])
-        x = BiasFreeConv1D(filters=32, name='bf_conv1')(inputs)
-        x = BiasFreeConv1D(filters=64, name='bf_conv2')(x)
-        x = keras.layers.GlobalAveragePooling1D()(x)
-        outputs = keras.layers.Dense(5)(x)
-
-        model = keras.Model(inputs=inputs, outputs=outputs)
-
-        # Test forward pass
-        y_pred = model(input_tensor)
-        assert y_pred.shape == (input_tensor.shape[0], 5)
-
-    def test_model_integration_with_other_layers(self, input_tensor):
-        """Test integration with standard Keras layers."""
-        model = keras.Sequential([
-            keras.layers.Input(shape=input_tensor.shape[1:]),
-            keras.layers.Conv1D(16, 3, activation='relu'),
-            BiasFreeConv1D(filters=32, activation='relu'),
-            keras.layers.MaxPooling1D(2),
-            BiasFreeConv1D(filters=64, activation='relu'),
-            keras.layers.GlobalAveragePooling1D(),
-            keras.layers.Dense(10)
-        ])
-
-        output = model(input_tensor)
-        assert output.shape == (input_tensor.shape[0], 10)
-
-    def test_time_series_forecasting_architecture(self, input_tensor):
-        """Test in a time series forecasting architecture."""
-        # Encoder
-        inputs = keras.Input(shape=input_tensor.shape[1:])
-        x = BiasFreeConv1D(filters=32, activation='relu')(inputs)
-        x = BiasFreeConv1D(filters=64, activation='relu')(x)
-        x = BiasFreeConv1D(filters=32, activation='relu')(x)
-
-        # Output for forecasting
-        outputs = keras.layers.Conv1D(1, 1, activation='linear')(x)
-
+    def test_serialization_cycle(self, basic_config: Dict[str, Any], sample_input_1d: keras.KerasTensor) -> None:
+        """CRITICAL TEST: Full serialization cycle."""
+        # Create model with custom layer
+        inputs = keras.Input(shape=sample_input_1d.shape[1:])
+        outputs = BiasFreeConv1D(**basic_config)(inputs)
         model = keras.Model(inputs, outputs)
 
-        output = model(input_tensor)
-        # Output should have same time dimension, single feature
-        assert output.shape == (input_tensor.shape[0], input_tensor.shape[1], 1)
+        # Get original prediction
+        original_pred = model(sample_input_1d)
 
-    # -------------------------------------------------------------------------
-    # 7. Model Save/Load Tests
-    # -------------------------------------------------------------------------
+        # Save and load
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'test_model.keras')
+            model.save(filepath)
 
-    def test_model_save_load(self, input_tensor):
-        """Test saving and loading a model with BiasFreeConv1D layers."""
-        # Create model with custom layer
-        inputs = keras.Input(shape=input_tensor.shape[1:])
-        x = BiasFreeConv1D(filters=32, name='bf_conv1')(inputs)
-        x = BiasFreeConv1D(filters=64, name='bf_conv2')(x)
-        x = keras.layers.GlobalAveragePooling1D()(x)
-        outputs = keras.layers.Dense(5)(x)
+            # Load model
+            loaded_model = keras.models.load_model(filepath)
+            loaded_pred = loaded_model(sample_input_1d)
 
-        model = keras.Model(inputs=inputs, outputs=outputs)
-
-        # Generate prediction before saving
-        original_prediction = model.predict(input_tensor, verbose=0)
-
-        # Save and load model
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            model_path = os.path.join(tmpdirname, 'model.keras')
-
-            # Save the model
-            model.save(model_path)
-
-            # Load the model
-            loaded_model = keras.models.load_model(
-                model_path,
-                custom_objects={
-                    'BiasFreeConv1D': BiasFreeConv1D
-                }
+            # Verify identical predictions
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_pred),
+                keras.ops.convert_to_numpy(loaded_pred),
+                rtol=1e-6, atol=1e-6,
+                err_msg="Predictions differ after serialization"
             )
 
-            # Generate prediction with loaded model
-            loaded_prediction = loaded_model.predict(input_tensor, verbose=0)
+    def test_serialization_cycle_advanced_config(self, advanced_config: Dict[str, Any], sample_input_1d: keras.KerasTensor) -> None:
+        """Test serialization with advanced configuration."""
+        inputs = keras.Input(shape=sample_input_1d.shape[1:])
+        outputs = BiasFreeConv1D(**advanced_config)(inputs)
+        model = keras.Model(inputs, outputs)
 
-            # Check predictions match
-            assert np.allclose(original_prediction, loaded_prediction, rtol=1e-5)
+        original_pred = model(sample_input_1d)
 
-            # Check layer types are preserved
-            assert isinstance(loaded_model.get_layer('bf_conv1'), BiasFreeConv1D)
-            assert isinstance(loaded_model.get_layer('bf_conv2'), BiasFreeConv1D)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'test_advanced_model.keras')
+            model.save(filepath)
 
-    def test_model_save_load_with_training(self, input_tensor):
-        """Test save/load after some training."""
-        # Create simple model
-        model = keras.Sequential([
-            keras.layers.Input(shape=input_tensor.shape[1:]),
-            BiasFreeConv1D(filters=16, activation='relu'),
-            keras.layers.GlobalAveragePooling1D(),
-            keras.layers.Dense(2, activation='softmax')
-        ])
+            loaded_model = keras.models.load_model(filepath)
+            loaded_pred = loaded_model(sample_input_1d)
 
-        model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
-
-        # Create dummy training data
-        y_train = np.random.randint(0, 2, size=(input_tensor.shape[0],))
-
-        # Train for a few steps
-        model.fit(input_tensor, y_train, epochs=1, verbose=0)
-
-        # Save and reload
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            model_path = os.path.join(tmpdirname, 'trained_model.keras')
-            model.save(model_path)
-
-            loaded_model = keras.models.load_model(
-                model_path,
-                custom_objects={'BiasFreeConv1D': BiasFreeConv1D}
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_pred),
+                keras.ops.convert_to_numpy(loaded_pred),
+                rtol=1e-6, atol=1e-6,
+                err_msg="Advanced config predictions differ after serialization"
             )
 
-            # Compare predictions
-            original_pred = model.predict(input_tensor, verbose=0)
-            loaded_pred = loaded_model.predict(input_tensor, verbose=0)
+    def test_config_completeness(self, basic_config: Dict[str, Any]) -> None:
+        """Test that get_config contains all __init__ parameters."""
+        layer = BiasFreeConv1D(**basic_config)
+        config = layer.get_config()
 
-            assert np.allclose(original_pred, loaded_pred, rtol=1e-5)
+        # Check all basic config parameters are present
+        for key in basic_config:
+            assert key in config, f"Missing {key} in get_config()"
 
-    # -------------------------------------------------------------------------
-    # 8. Edge Cases and Robustness Tests
-    # -------------------------------------------------------------------------
+        # Check additional default parameters
+        assert 'kernel_initializer' in config
+        assert 'kernel_regularizer' in config
 
-    def test_different_input_shapes(self):
-        """Test layer with various input shapes."""
-        # Test different temporal and feature dimensions
+        # Verify serialized values are correct
+        assert config['filters'] == basic_config['filters']
+        assert config['kernel_size'] == basic_config['kernel_size']
+        assert config['use_batch_norm'] == basic_config['use_batch_norm']
+
+    def test_gradients_flow(self, basic_config: Dict[str, Any], large_input_1d: keras.KerasTensor) -> None:
+        """Test gradient computation and flow through the layer."""
+        layer = BiasFreeConv1D(**basic_config)
+
+        with tf.GradientTape() as tape:
+            tape.watch(large_input_1d)
+            output = layer(large_input_1d, training=True)
+            loss = keras.ops.mean(keras.ops.square(output))
+
+        # Compute gradients
+        gradients = tape.gradient(loss, layer.trainable_variables)
+
+        # Check gradients exist and are not None
+        assert gradients is not None
+        assert all(g is not None for g in gradients)
+        assert len(gradients) > 0
+
+        # Check gradients are not all zeros
+        for grad in gradients:
+            grad_np = keras.ops.convert_to_numpy(grad)
+            assert not np.allclose(grad_np, 0), "Gradient should not be all zeros"
+
+    @pytest.mark.parametrize("training", [True, False, None])
+    def test_training_modes(self, basic_config: Dict[str, Any], sample_input_1d: keras.KerasTensor, training: bool) -> None:
+        """Test behavior in different training modes."""
+        layer = BiasFreeConv1D(**basic_config)
+
+        # Forward pass in specified training mode
+        output = layer(sample_input_1d, training=training)
+
+        # Basic shape and validity checks
+        expected_shape = (sample_input_1d.shape[0], sample_input_1d.shape[1], basic_config['filters'])
+        assert output.shape == expected_shape
+
+        output_np = keras.ops.convert_to_numpy(output)
+        assert np.isfinite(output_np).all()
+
+    def test_different_input_shapes(self, basic_config: Dict[str, Any]) -> None:
+        """Test layer with different input shapes."""
+        # Test various input shapes
         test_shapes = [
-            (1, 10, 1),    # Short sequence, single feature
-            (4, 50, 3),    # Medium sequence, few features
-            (2, 200, 16),  # Long sequence, many features
-            (1, 1000, 1),  # Very long sequence
-            (8, 25, 128)   # Many features
+            (1, 50, 1),   # Single batch, 50 timesteps, 1 feature
+            (8, 200, 32), # Batch of 8, 200 timesteps, 32 features
+            (2, 10, 128)  # Small batch, short sequence, many features
         ]
 
         for shape in test_shapes:
-            # Create new layer instance for each shape
-            layer = BiasFreeConv1D(filters=32)
-            test_input = tf.random.normal(shape)
-            output = layer(test_input)
+            # Create a new layer instance for each shape since layers get locked to input shape after building
+            layer = BiasFreeConv1D(**basic_config)
+            inputs = keras.random.normal(shape=shape)
+            output = layer(inputs)
 
-            expected_shape = list(shape)
-            expected_shape[-1] = 32
-            assert output.shape == tuple(expected_shape)
+            expected_shape = (shape[0], shape[1], basic_config['filters'])
+            assert output.shape == expected_shape
 
-    def test_extreme_filter_numbers(self):
-        """Test with extreme numbers of filters."""
-        test_input = tf.random.normal([1, 20, 3])
+    def test_edge_cases_and_errors(self) -> None:
+        """Test error conditions and edge cases."""
+        # Test invalid filters
+        with pytest.raises(ValueError):
+            BiasFreeConv1D(filters=0)  # Zero filters
 
-        # Very few filters
-        layer_small = BiasFreeConv1D(filters=1)
-        output_small = layer_small(test_input)
-        assert output_small.shape[-1] == 1
+        with pytest.raises(ValueError):
+            BiasFreeConv1D(filters=-5)  # Negative filters
 
-        # Many filters
-        layer_large = BiasFreeConv1D(filters=512)
-        output_large = layer_large(test_input)
-        assert output_large.shape[-1] == 512
+        # Test invalid kernel_size
+        with pytest.raises(ValueError):
+            BiasFreeConv1D(filters=32, kernel_size=0)  # Zero kernel size
 
-    def test_extreme_kernel_sizes(self):
-        """Test with extreme kernel sizes."""
-        test_input = tf.random.normal([2, 50, 3])
+        with pytest.raises(ValueError):
+            BiasFreeConv1D(filters=32, kernel_size=-3)  # Negative kernel size
 
-        # Very small kernel
-        layer_small = BiasFreeConv1D(filters=16, kernel_size=1)
-        output_small = layer_small(test_input)
-        assert output_small.shape[1] == test_input.shape[1]
+        # Test invalid use_batch_norm type
+        with pytest.raises(TypeError):
+            BiasFreeConv1D(filters=32, use_batch_norm="invalid")  # String instead of bool
 
-        # Large kernel
-        layer_large = BiasFreeConv1D(filters=16, kernel_size=15)
-        output_large = layer_large(test_input)
-        assert output_large.shape[1] == test_input.shape[1]  # Same padding
+    def test_compute_output_shape(self, basic_config: Dict[str, Any]) -> None:
+        """Test output shape computation."""
+        layer = BiasFreeConv1D(**basic_config)
 
-    def test_numerical_stability(self):
-        """Test layer stability with extreme input values."""
-        layer = BiasFreeConv1D(filters=16)
+        input_shape = (None, 100, 16)  # Batch can be None
+        output_shape = layer.compute_output_shape(input_shape)
 
-        # Test different input magnitudes
-        test_cases = [
-            tf.zeros((2, 20, 3)),  # Zeros
-            tf.ones((2, 20, 3)) * 1e-10,  # Very small values
-            tf.ones((2, 20, 3)) * 1e10,  # Very large values
-            tf.random.normal((2, 20, 3)) * 1e5  # Large random values
-        ]
+        expected_shape = (None, 100, basic_config['filters'])
+        assert output_shape == expected_shape
 
-        for test_input in test_cases:
-            output = layer(test_input)
+    def test_no_activation(self) -> None:
+        """Test layer with no activation function."""
+        layer = BiasFreeConv1D(filters=16, activation=None)
 
-            # Check for NaN/Inf values
-            assert not np.any(np.isnan(output.numpy())), "NaN values detected in output"
-            assert not np.any(np.isinf(output.numpy())), "Inf values detected in output"
+        inputs = keras.random.normal(shape=(2, 50, 8))
+        output = layer(inputs)
 
-    def test_gradient_flow(self, input_tensor):
-        """Test gradient flow through the layer."""
-        layer = BiasFreeConv1D(filters=32)
-
-        # Watch the variables
-        with tf.GradientTape() as tape:
-            inputs = tf.Variable(input_tensor)
-            outputs = layer(inputs)
-            loss = tf.reduce_mean(tf.square(outputs))
-
-        # Get gradients
-        grads = tape.gradient(loss, layer.trainable_variables)
-
-        # Check gradients exist and are not None
-        assert all(g is not None for g in grads)
-
-        # Check gradients have values (not all zeros)
-        assert all(np.any(g.numpy() != 0) for g in grads)
+        # Should work without activation
+        assert output.shape == (2, 50, 16)
+        assert layer.activation_layer is None
 
 
 class TestBiasFreeResidualBlock1D:
-    """Test suite for BiasFreeResidualBlock1D layer implementation."""
+    """Comprehensive test suite for BiasFreeResidualBlock1D layer."""
 
     @pytest.fixture
-    def input_tensor(self) -> tf.Tensor:
-        """Create a test input tensor."""
-        return tf.random.normal([4, 100, 3])
+    def basic_config(self) -> Dict[str, Any]:
+        """Basic configuration for testing."""
+        return {
+            'filters': 32,
+            'kernel_size': 3,
+            'activation': 'relu'
+        }
 
     @pytest.fixture
-    def matching_channels_tensor(self) -> tf.Tensor:
-        """Create input tensor with matching channel count."""
-        return tf.random.normal([2, 50, 32])
+    def advanced_config(self) -> Dict[str, Any]:
+        """Advanced configuration with regularization."""
+        return {
+            'filters': 64,
+            'kernel_size': 5,
+            'activation': 'gelu',
+            'kernel_initializer': 'he_uniform',
+            'kernel_regularizer': keras.regularizers.L1L2(l1=1e-5, l2=1e-4)
+        }
 
-    # -------------------------------------------------------------------------
-    # 1. Initialization Tests
-    # -------------------------------------------------------------------------
+    @pytest.fixture
+    def sample_input_1d(self) -> keras.KerasTensor:
+        """Sample input tensor matching the output filters (no shortcut needed)."""
+        return keras.random.normal(shape=(4, 100, 32))  # features=32 to match basic_config filters
 
-    def test_initialization_defaults(self):
-        """Test initialization with default parameters."""
-        layer = BiasFreeResidualBlock1D(filters=64)
+    @pytest.fixture
+    def different_input_1d(self) -> keras.KerasTensor:
+        """Input tensor with different feature dimension (shortcut needed)."""
+        return keras.random.normal(shape=(4, 100, 16))  # features=16, different from output
 
-        assert layer.filters == 64
-        assert layer.kernel_size == 3
-        assert layer.activation == 'relu'
+    def test_initialization(self, basic_config: Dict[str, Any]) -> None:
+        """Test layer initialization and attribute setting."""
+        layer = BiasFreeResidualBlock1D(**basic_config)
 
-        # Check sublayers are initially None
-        assert layer.conv1 is None
-        assert layer.conv2 is None
-        assert layer.shortcut_conv is None
+        # Check configuration attributes
+        assert layer.filters == basic_config['filters']
+        assert layer.kernel_size == basic_config['kernel_size']
+        assert layer.activation == basic_config['activation']
 
-    def test_initialization_custom_parameters(self):
-        """Test initialization with custom parameters."""
-        layer = BiasFreeResidualBlock1D(
-            filters=128,
-            kernel_size=5,
-            activation='gelu',
-            kernel_initializer='he_normal'
-        )
+        # Check layer is not built yet
+        assert not layer.built
 
-        assert layer.filters == 128
-        assert layer.kernel_size == 5
-        assert layer.activation == 'gelu'
-        assert layer.kernel_initializer == 'he_normal'
-
-    # -------------------------------------------------------------------------
-    # 2. Build Process Tests
-    # -------------------------------------------------------------------------
-
-    def test_build_with_channel_mismatch(self, input_tensor):
-        """Test building when input and output channels differ."""
-        # Input has 3 features, output will have 64
-        layer = BiasFreeResidualBlock1D(filters=64)
-        layer(input_tensor)
-
-        # Should create shortcut convolution
+        # Check sub-layers are created
         assert layer.conv1 is not None
         assert layer.conv2 is not None
-        assert layer.shortcut_conv is not None  # Should be created
         assert layer.add_layer is not None
         assert layer.final_activation is not None
 
-    def test_build_with_matching_channels(self, matching_channels_tensor):
-        """Test building when input and output channels match."""
-        # Input has 32 features, output will have 32
-        layer = BiasFreeResidualBlock1D(filters=32)
-        layer(matching_channels_tensor)
+        # Shortcut should be None until build is called
+        assert layer.shortcut_conv is None
 
-        # Should not create shortcut convolution
-        assert layer.conv1 is not None
-        assert layer.conv2 is not None
-        assert layer.shortcut_conv is None  # Should not be created
-        assert layer.add_layer is not None
+    def test_forward_pass_no_shortcut(self, basic_config: Dict[str, Any], sample_input_1d: keras.KerasTensor) -> None:
+        """Test forward pass when input and output dimensions match (no shortcut conv needed)."""
+        layer = BiasFreeResidualBlock1D(**basic_config)
 
-    def test_sublayer_properties(self, input_tensor):
-        """Test that sublayers have correct properties."""
-        layer = BiasFreeResidualBlock1D(filters=64)
-        layer(input_tensor)
+        output = layer(sample_input_1d)
 
-        # Check conv1 has activation
-        assert layer.conv1.activation == 'relu'
+        # Check layer is built
+        assert layer.built
 
-        # Check conv2 has no activation (applied after addition)
-        assert layer.conv2.activation is None
-
-        # Check shortcut conv properties (if created)
-        if layer.shortcut_conv is not None:
-            assert layer.shortcut_conv.use_bias is False
-            assert layer.shortcut_conv.kernel_size == (1,)  # Conv1D returns tuple
-
-    # -------------------------------------------------------------------------
-    # 3. Forward Pass Tests
-    # -------------------------------------------------------------------------
-
-    def test_forward_pass_with_shortcut(self, input_tensor):
-        """Test forward pass when shortcut convolution is needed."""
-        layer = BiasFreeResidualBlock1D(filters=64)
-        output = layer(input_tensor)
+        # With matching dimensions, no shortcut conv should be created
+        assert layer.shortcut_conv is None
 
         # Check output shape
-        expected_shape = list(input_tensor.shape)
-        expected_shape[-1] = 64
-        assert output.shape == tuple(expected_shape)
+        expected_shape = sample_input_1d.shape
+        assert output.shape == expected_shape
 
-        # Basic sanity checks
-        assert not np.any(np.isnan(output.numpy()))
-        assert not np.any(np.isinf(output.numpy()))
+        # Verify output is valid
+        output_np = keras.ops.convert_to_numpy(output)
+        assert np.isfinite(output_np).all()
 
-    def test_forward_pass_without_shortcut(self, matching_channels_tensor):
-        """Test forward pass when shortcut convolution is not needed."""
-        layer = BiasFreeResidualBlock1D(filters=32)
-        output = layer(matching_channels_tensor)
+    def test_forward_pass_with_shortcut(self, basic_config: Dict[str, Any], different_input_1d: keras.KerasTensor) -> None:
+        """Test forward pass when input and output dimensions differ (shortcut conv needed)."""
+        layer = BiasFreeResidualBlock1D(**basic_config)
 
-        # Output shape should match input
-        assert output.shape == matching_channels_tensor.shape
+        output = layer(different_input_1d)
 
-        # Basic sanity checks
-        assert not np.any(np.isnan(output.numpy()))
-        assert not np.any(np.isinf(output.numpy()))
+        # Check layer is built
+        assert layer.built
 
-    def test_residual_connection_effect(self):
-        """Test that residual connection has the expected effect."""
-        # Create controlled input
-        controlled_input = tf.ones([1, 20, 32])
+        # With different dimensions, shortcut conv should be created
+        assert layer.shortcut_conv is not None
+        assert not layer.shortcut_conv.use_bias  # Should be bias-free
 
-        layer = BiasFreeResidualBlock1D(
-            filters=32,
-            activation='linear',  # Linear to see residual effect clearly
-            kernel_initializer='zeros'  # Zero weights make conv output = 0
-        )
+        # Check output shape matches the configured filters
+        expected_shape = (different_input_1d.shape[0], different_input_1d.shape[1], basic_config['filters'])
+        assert output.shape == expected_shape
 
-        output = layer(controlled_input)
+        # Verify output is valid
+        output_np = keras.ops.convert_to_numpy(output)
+        assert np.isfinite(output_np).all()
 
-        # With zero weights in conv layers, output should approximately equal input
-        # (residual connection preserves input)
-        input_mean = tf.reduce_mean(controlled_input).numpy()
-        output_mean = tf.reduce_mean(output).numpy()
-
-        # They should be similar (allowing for batch norm effects)
-        assert abs(output_mean - input_mean) < 2.0
-
-    def test_training_vs_inference_modes(self, input_tensor):
-        """Test different behavior in training vs inference."""
-        layer = BiasFreeResidualBlock1D(filters=64)
-
-        # Training mode
-        output_train = layer(input_tensor, training=True)
-
-        # Inference mode
-        output_inference = layer(input_tensor, training=False)
-
-        # Outputs should be different due to batch norm
-        assert output_train.shape == output_inference.shape
-        assert not np.allclose(output_train.numpy(), output_inference.numpy())
-
-    def test_temporal_structure_preservation(self):
-        """Test that residual block preserves temporal structure."""
-        # Create input with temporal pattern
-        seq_len = 100
-        test_input = tf.zeros([1, seq_len, 32])
-
-        # Add a pattern: peak at time step 50
-        test_input = tf.tensor_scatter_nd_update(
-            test_input,
-            [[0, 50]],
-            [tf.ones([32])]
-        )
-
-        layer = BiasFreeResidualBlock1D(filters=32)
-        output = layer(test_input)
-
-        # Check that the peak is preserved in the output
-        output_max_time = tf.argmax(tf.reduce_mean(output[0], axis=-1)).numpy()
-        assert abs(output_max_time - 50) <= 2  # Allow small shifts
-
-    # -------------------------------------------------------------------------
-    # 4. Output Shape Tests
-    # -------------------------------------------------------------------------
-
-    def test_output_shapes_various_filters(self, input_tensor):
-        """Test output shapes with various filter numbers."""
-        filter_counts = [16, 32, 64, 128, 256]
-
-        for filters in filter_counts:
-            layer = BiasFreeResidualBlock1D(filters=filters)
-            output = layer(input_tensor)
-
-            expected_shape = list(input_tensor.shape)
-            expected_shape[-1] = filters
-            assert output.shape == tuple(expected_shape)
-
-            # Test compute_output_shape
-            computed_shape = layer.compute_output_shape(input_tensor.shape)
-            assert computed_shape == tuple(expected_shape)
-
-    def test_output_shapes_different_kernel_sizes(self, input_tensor):
-        """Test output shapes with different kernel sizes."""
-        kernel_sizes = [1, 3, 5, 7, 9]
-
-        for kernel_size in kernel_sizes:
-            layer = BiasFreeResidualBlock1D(filters=32, kernel_size=kernel_size)
-            output = layer(input_tensor)
-
-            # Time dimension should be preserved
-            expected_shape = list(input_tensor.shape)
-            expected_shape[-1] = 32
-            assert output.shape == tuple(expected_shape)
-
-    # -------------------------------------------------------------------------
-    # 5. Serialization Tests
-    # -------------------------------------------------------------------------
-
-    def test_serialization(self):
-        """Test serialization and deserialization."""
-        original_layer = BiasFreeResidualBlock1D(
-            filters=64,
-            kernel_size=3,
-            activation='relu'
-        )
-
-        # Build the layer
-        input_shape = (None, 100, 16)
-        original_layer.build(input_shape)
-
-        # Get configs
-        config = original_layer.get_config()
-        build_config = original_layer.get_build_config()
-
-        # Recreate the layer
-        recreated_layer = BiasFreeResidualBlock1D.from_config(config)
-        recreated_layer.build_from_config(build_config)
-
-        # Check configuration matches
-        assert recreated_layer.filters == original_layer.filters
-        assert recreated_layer.kernel_size == original_layer.kernel_size
-        assert recreated_layer.activation == original_layer.activation
-
-    # -------------------------------------------------------------------------
-    # 6. Model Integration Tests
-    # -------------------------------------------------------------------------
-
-    def test_model_integration(self, input_tensor):
-        """Test the residual block in a model."""
-        model = keras.Sequential([
-            keras.layers.Input(shape=input_tensor.shape[1:]),
-            BiasFreeResidualBlock1D(filters=32),
-            BiasFreeResidualBlock1D(filters=64),
-            keras.layers.GlobalAveragePooling1D(),
-            keras.layers.Dense(10)
-        ])
-
-        output = model(input_tensor)
-        assert output.shape == (input_tensor.shape[0], 10)
-
-    def test_resnet_style_architecture(self, input_tensor):
-        """Test building a ResNet-style architecture for time series."""
-        inputs = keras.Input(shape=input_tensor.shape[1:])
-
-        # Initial conv
-        x = keras.layers.Conv1D(32, 7, padding='same', use_bias=False)(inputs)
-        x = keras.layers.BatchNormalization()(x)
-        x = keras.layers.Activation('relu')(x)
-
-        # Residual blocks
-        x = BiasFreeResidualBlock1D(filters=32)(x)
-        x = BiasFreeResidualBlock1D(filters=32)(x)
-        x = BiasFreeResidualBlock1D(filters=64)(x)  # Channel increase
-        x = BiasFreeResidualBlock1D(filters=64)(x)
-
-        # Output
-        x = keras.layers.GlobalAveragePooling1D()(x)
-        outputs = keras.layers.Dense(10)(x)
-
+    def test_serialization_cycle(self, basic_config: Dict[str, Any], sample_input_1d: keras.KerasTensor) -> None:
+        """CRITICAL TEST: Full serialization cycle."""
+        inputs = keras.Input(shape=sample_input_1d.shape[1:])
+        outputs = BiasFreeResidualBlock1D(**basic_config)(inputs)
         model = keras.Model(inputs, outputs)
 
-        prediction = model(input_tensor)
-        assert prediction.shape == (input_tensor.shape[0], 10)
+        original_pred = model(sample_input_1d)
 
-    def test_time_series_autoencoder_architecture(self, input_tensor):
-        """Test in a time series autoencoder architecture."""
-        # Encoder
-        inputs = keras.Input(shape=input_tensor.shape[1:])
-        x = BiasFreeResidualBlock1D(filters=64)(inputs)
-        x = keras.layers.MaxPooling1D(2)(x)
-        x = BiasFreeResidualBlock1D(filters=128)(x)
-        encoded = keras.layers.MaxPooling1D(2)(x)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'test_residual_model.keras')
+            model.save(filepath)
 
-        # Decoder
-        x = keras.layers.UpSampling1D(2)(encoded)
-        x = BiasFreeResidualBlock1D(filters=64)(x)
-        x = keras.layers.UpSampling1D(2)(x)
-        x = BiasFreeResidualBlock1D(filters=32)(x)
+            loaded_model = keras.models.load_model(filepath)
+            loaded_pred = loaded_model(sample_input_1d)
 
-        # Output layer to match input shape
-        outputs = keras.layers.Conv1D(
-            input_tensor.shape[-1],
-            1,
-            activation='linear'
-        )(x)
-
-        model = keras.Model(inputs, outputs)
-
-        output = model(input_tensor)
-        assert output.shape == input_tensor.shape
-
-    # -------------------------------------------------------------------------
-    # 7. Model Save/Load Tests
-    # -------------------------------------------------------------------------
-
-    def test_model_save_load_residual_block(self, input_tensor):
-        """Test saving and loading model with residual blocks."""
-        # Create model
-        model = keras.Sequential([
-            keras.layers.Input(shape=input_tensor.shape[1:]),
-            BiasFreeResidualBlock1D(filters=32, name='residual_1'),
-            BiasFreeResidualBlock1D(filters=64, name='residual_2'),
-            keras.layers.GlobalAveragePooling1D(),
-            keras.layers.Dense(5)
-        ])
-
-        # Get original prediction
-        original_pred = model.predict(input_tensor, verbose=0)
-
-        # Save and load
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            model_path = os.path.join(tmpdirname, 'residual_model.keras')
-            model.save(model_path)
-
-            loaded_model = keras.models.load_model(
-                model_path,
-                custom_objects={'BiasFreeResidualBlock1D': BiasFreeResidualBlock1D}
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_pred),
+                keras.ops.convert_to_numpy(loaded_pred),
+                rtol=1e-6, atol=1e-6,
+                err_msg="Residual block predictions differ after serialization"
             )
 
-            loaded_pred = loaded_model.predict(input_tensor, verbose=0)
+    def test_serialization_cycle_with_shortcut(self, basic_config: Dict[str, Any], different_input_1d: keras.KerasTensor) -> None:
+        """Test serialization when shortcut conv is needed."""
+        inputs = keras.Input(shape=different_input_1d.shape[1:])
+        outputs = BiasFreeResidualBlock1D(**basic_config)(inputs)
+        model = keras.Model(inputs, outputs)
 
-            # Check predictions match
-            assert np.allclose(original_pred, loaded_pred, rtol=1e-5)
+        original_pred = model(different_input_1d)
 
-            # Check layer types
-            assert isinstance(loaded_model.get_layer('residual_1'), BiasFreeResidualBlock1D)
-            assert isinstance(loaded_model.get_layer('residual_2'), BiasFreeResidualBlock1D)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'test_residual_shortcut_model.keras')
+            model.save(filepath)
 
+            loaded_model = keras.models.load_model(filepath)
+            loaded_pred = loaded_model(different_input_1d)
 
-class TestBiasFreeLayersIntegration1D:
-    """Integration tests for both BiasFree 1D layers working together."""
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_pred),
+                keras.ops.convert_to_numpy(loaded_pred),
+                rtol=1e-6, atol=1e-6,
+                err_msg="Residual block with shortcut predictions differ after serialization"
+            )
 
-    @pytest.fixture
-    def input_tensor(self) -> tf.Tensor:
-        """Create test input tensor."""
-        return tf.random.normal([2, 100, 3])
+    def test_config_completeness(self, basic_config: Dict[str, Any]) -> None:
+        """Test that get_config contains all __init__ parameters."""
+        layer = BiasFreeResidualBlock1D(**basic_config)
+        config = layer.get_config()
 
-    def test_mixed_architecture(self, input_tensor):
-        """Test using both layer types in the same model."""
-        inputs = keras.Input(shape=input_tensor.shape[1:])
+        # Check all config parameters are present
+        for key in basic_config:
+            assert key in config, f"Missing {key} in get_config()"
 
-        # Mix both layer types
-        x = BiasFreeConv1D(filters=32, activation='relu')(inputs)
-        x = BiasFreeConv1D(filters=32, activation='relu')(x)
-        x = BiasFreeResidualBlock1D(filters=64)(x)
-        x = BiasFreeConv1D(filters=64, activation='relu')(x)
-        x = BiasFreeResidualBlock1D(filters=128)(x)
+        # Check additional default parameters
+        assert 'kernel_initializer' in config
+        assert 'kernel_regularizer' in config
 
-        x = keras.layers.GlobalAveragePooling1D()(x)
-        outputs = keras.layers.Dense(10)(x)
+        # Verify values
+        assert config['filters'] == basic_config['filters']
+        assert config['kernel_size'] == basic_config['kernel_size']
+
+    def test_gradients_flow(self, basic_config: Dict[str, Any], sample_input_1d: keras.KerasTensor) -> None:
+        """Test gradient computation through the residual block."""
+        layer = BiasFreeResidualBlock1D(**basic_config)
+
+        with tf.GradientTape() as tape:
+            tape.watch(sample_input_1d)
+            output = layer(sample_input_1d, training=True)
+            loss = keras.ops.mean(keras.ops.square(output))
+
+        gradients = tape.gradient(loss, layer.trainable_variables)
+
+        assert gradients is not None
+        assert all(g is not None for g in gradients)
+        assert len(gradients) > 0
+
+        # Verify gradients are not all zeros
+        for grad in gradients:
+            grad_np = keras.ops.convert_to_numpy(grad)
+            assert not np.allclose(grad_np, 0), "Gradient should not be all zeros"
+
+    @pytest.mark.parametrize("training", [True, False, None])
+    def test_training_modes(self, basic_config: Dict[str, Any], sample_input_1d: keras.KerasTensor, training: bool) -> None:
+        """Test behavior in different training modes."""
+        layer = BiasFreeResidualBlock1D(**basic_config)
+
+        output = layer(sample_input_1d, training=training)
+
+        expected_shape = sample_input_1d.shape
+        assert output.shape == expected_shape
+
+        output_np = keras.ops.convert_to_numpy(output)
+        assert np.isfinite(output_np).all()
+
+    def test_residual_connection_effectiveness(self, basic_config: Dict[str, Any]) -> None:
+        """Test that residual connection actually works by comparing with and without."""
+        # Create input that exactly matches the filter dimension
+        inputs = keras.random.normal(shape=(2, 50, basic_config['filters']))
+
+        # Create layer and get output
+        layer = BiasFreeResidualBlock1D(**basic_config)
+        output = layer(inputs)
+
+        # The output should be different from input due to residual transformation
+        # but should maintain the same shape
+        assert output.shape == inputs.shape
+
+        # Verify the output is not identical to input (residual function adds something)
+        output_np = keras.ops.convert_to_numpy(output)
+        inputs_np = keras.ops.convert_to_numpy(inputs)
+
+        # Should not be identical due to the residual function F(x)
+        assert not np.allclose(output_np, inputs_np, rtol=1e-3)
+
+    def test_edge_cases_and_errors(self) -> None:
+        """Test error conditions."""
+        # Test invalid filters
+        with pytest.raises(ValueError):
+            BiasFreeResidualBlock1D(filters=0)
+
+        with pytest.raises(ValueError):
+            BiasFreeResidualBlock1D(filters=-10)
+
+        # Test invalid kernel_size
+        with pytest.raises(ValueError):
+            BiasFreeResidualBlock1D(filters=32, kernel_size=0)
+
+        with pytest.raises(ValueError):
+            BiasFreeResidualBlock1D(filters=32, kernel_size=-2)
+
+    def test_compute_output_shape(self, basic_config: Dict[str, Any]) -> None:
+        """Test output shape computation."""
+        layer = BiasFreeResidualBlock1D(**basic_config)
+
+        input_shape = (None, 100, 16)  # Different from output filters
+        output_shape = layer.compute_output_shape(input_shape)
+
+        expected_shape = (None, 100, basic_config['filters'])
+        assert output_shape == expected_shape
+
+    def test_deep_residual_stack(self, basic_config: Dict[str, Any]) -> None:
+        """Test stacking multiple residual blocks."""
+        inputs = keras.Input(shape=(100, 32))
+
+        # Stack multiple residual blocks
+        x = BiasFreeResidualBlock1D(32)(inputs)  # Same dimension
+        x = BiasFreeResidualBlock1D(32)(x)       # Same dimension
+        x = BiasFreeResidualBlock1D(64)(x)       # Different dimension (shortcut needed)
+        x = BiasFreeResidualBlock1D(64)(x)       # Same dimension
+        outputs = BiasFreeConv1D(1, activation='linear')(x)  # Final conv
 
         model = keras.Model(inputs, outputs)
 
         # Test forward pass
-        prediction = model(input_tensor)
-        assert prediction.shape == (input_tensor.shape[0], 10)
+        test_input = keras.random.normal(shape=(2, 100, 32))
+        output = model(test_input)
 
-        # Test training capability
-        model.compile(optimizer='adam', loss='mse')
-        dummy_targets = tf.random.normal([input_tensor.shape[0], 10])
+        assert output.shape == (2, 100, 1)
 
-        # Should be able to train without errors
-        history = model.fit(
-            input_tensor, dummy_targets,
-            epochs=1, verbose=0, validation_split=0.2
-        )
+        # Test gradient flow through deep stack
+        with tf.GradientTape() as tape:
+            tape.watch(test_input)
+            pred = model(test_input, training=True)
+            loss = keras.ops.mean(keras.ops.square(pred))
 
-        assert len(history.history['loss']) == 1
+        gradients = tape.gradient(loss, model.trainable_variables)
+        assert all(g is not None for g in gradients)
 
-    def test_bias_free_property_preservation(self, input_tensor):
-        """Test that bias-free property is maintained through the architecture."""
-        # Create model with both layer types
-        model = keras.Sequential([
-            keras.layers.Input(shape=input_tensor.shape[1:]),
-            BiasFreeConv1D(filters=16, use_batch_norm=False, activation='linear'),
-            BiasFreeResidualBlock1D(filters=16),
-            BiasFreeConv1D(filters=16, use_batch_norm=False, activation='linear')
-        ])
 
-        # Check that conv layers in the model don't have bias
-        conv_layers = []
-        for layer in model.layers:
-            if isinstance(layer, (BiasFreeConv1D, BiasFreeResidualBlock1D)):
-                # Build layer if not built
-                if not layer.built:
-                    layer.build(input_tensor.shape)
+class TestIntegrationAndCompatibility:
+    """Integration tests and compatibility checks."""
 
-                if hasattr(layer, 'conv') and layer.conv is not None:
-                    conv_layers.append(layer.conv)
+    def test_mixed_layer_compatibility(self) -> None:
+        """Test compatibility with standard Keras layers."""
+        inputs = keras.Input(shape=(200, 16))
 
-                if hasattr(layer, 'conv1') and layer.conv1 is not None:
-                    conv_layers.append(layer.conv1.conv)
-                    conv_layers.append(layer.conv2.conv)
-
-                if hasattr(layer, 'shortcut_conv') and layer.shortcut_conv is not None:
-                    conv_layers.append(layer.shortcut_conv)
-
-        # All conv layers should have use_bias=False
-        for conv_layer in conv_layers:
-            assert conv_layer.use_bias is False, f"Layer {conv_layer.name} has bias enabled"
-
-    def test_save_load_mixed_model(self, input_tensor):
-        """Test saving and loading model with both layer types."""
-        # Create mixed model
-        inputs = keras.Input(shape=input_tensor.shape[1:])
-        x = BiasFreeConv1D(filters=16, name='bf_conv')(inputs)
-        x = BiasFreeResidualBlock1D(filters=32, name='bf_residual')(x)
-        x = keras.layers.GlobalAveragePooling1D()(x)
-        outputs = keras.layers.Dense(5)(x)
-
-        model = keras.Model(inputs, outputs)
-        original_pred = model.predict(input_tensor, verbose=0)
-
-        # Save and load
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            model_path = os.path.join(tmpdirname, 'mixed_model.keras')
-            model.save(model_path)
-
-            loaded_model = keras.models.load_model(
-                model_path,
-                custom_objects={
-                    'BiasFreeConv1D': BiasFreeConv1D,
-                    'BiasFreeResidualBlock1D': BiasFreeResidualBlock1D
-                }
-            )
-
-            loaded_pred = loaded_model.predict(input_tensor, verbose=0)
-
-            # Predictions should match
-            assert np.allclose(original_pred, loaded_pred, rtol=1e-5)
-
-            # Check layer types preserved
-            assert isinstance(loaded_model.get_layer('bf_conv'), BiasFreeConv1D)
-            assert isinstance(loaded_model.get_layer('bf_residual'), BiasFreeResidualBlock1D)
-
-    def test_time_series_denoising_architecture(self, input_tensor):
-        """Test full time series denoising architecture."""
-        # Add noise to input for denoising test
-        noisy_input = input_tensor + tf.random.normal(input_tensor.shape) * 0.1
-
-        # Create denoising model
-        inputs = keras.Input(shape=input_tensor.shape[1:])
-
-        # Encoder
-        x = BiasFreeConv1D(filters=32, activation='relu')(inputs)
-        x = BiasFreeResidualBlock1D(filters=32)(x)
-        x = BiasFreeConv1D(filters=64, activation='relu')(x)
-        x = BiasFreeResidualBlock1D(filters=64)(x)
-
-        # Decoder
-        x = BiasFreeConv1D(filters=32, activation='relu')(x)
-        x = BiasFreeResidualBlock1D(filters=32)(x)
-        x = BiasFreeConv1D(filters=16, activation='relu')(x)
-
-        # Output layer (same shape as input)
-        outputs = keras.layers.Conv1D(
-            input_tensor.shape[-1],
-            1,
-            activation='linear',
-            use_bias=False  # Keep bias-free
-        )(x)
+        # Mix bias-free and standard layers
+        x = BiasFreeConv1D(32)(inputs)
+        x = keras.layers.Dropout(0.1)(x)
+        x = BiasFreeResidualBlock1D(32)(x)
+        x = keras.layers.GlobalMaxPooling1D()(x)
+        outputs = keras.layers.Dense(10, activation='softmax')(x)
 
         model = keras.Model(inputs, outputs)
 
-        # Test forward pass
-        denoised = model(noisy_input)
-        assert denoised.shape == input_tensor.shape
+        # Test compilation and forward pass
+        model.compile(optimizer='adam', loss='categorical_crossentropy')
 
-        # Test training
-        model.compile(optimizer='adam', loss='mse')
+        test_input = keras.random.normal(shape=(4, 200, 16))
+        output = model(test_input)
 
-        # Train model to denoise (using clean as target)
-        history = model.fit(
-            noisy_input, input_tensor,
-            epochs=1, verbose=0, batch_size=1
-        )
+        assert output.shape == (4, 10)
 
-        assert len(history.history['loss']) == 1
+    def test_different_data_types(self) -> None:
+        """Test layer with different input data types."""
+        layer = BiasFreeConv1D(filters=16, kernel_size=3)
 
+        # Test with float32 (standard)
+        inputs_f32 = keras.ops.cast(keras.random.normal(shape=(2, 50, 8)), 'float32')
+        output_f32 = layer(inputs_f32)
+        assert output_f32.dtype == 'float32'
 
-# -------------------------------------------------------------------------
-# Helper Functions for Testing
-# -------------------------------------------------------------------------
-
-def test_bias_free_conv1d_instantiation():
-    """Test that we can import and instantiate the layers."""
-    # This test ensures the imports work correctly
-    layer1 = BiasFreeConv1D(filters=32)
-    layer2 = BiasFreeResidualBlock1D(filters=64)
-
-    assert isinstance(layer1, keras.layers.Layer)
-    assert isinstance(layer2, keras.layers.Layer)
+        # Test output is valid
+        assert np.isfinite(keras.ops.convert_to_numpy(output_f32)).all()
 
 
-def test_compare_1d_vs_2d_bias_free_properties():
-    """Test that 1D and 2D versions have similar bias-free properties."""
-    # This conceptual test shows the similarity
-    conv1d = BiasFreeConv1D(filters=32, use_batch_norm=False, activation=None)
+# Additional utility functions for testing
+def create_test_model_with_bias_free_layers() -> keras.Model:
+    """Create a test model using both bias-free layer types."""
+    inputs = keras.Input(shape=(100, 1), name='input')
 
-    # Build and check properties
-    conv1d.build((None, 100, 3))
+    # Encoder path
+    x = BiasFreeConv1D(32, kernel_size=3, name='conv1')(inputs)
+    x = BiasFreeResidualBlock1D(32, kernel_size=3, name='res1')(x)
+    x = BiasFreeResidualBlock1D(64, kernel_size=3, name='res2')(x)  # Dimension change
 
-    # Should have no bias
-    assert conv1d.conv.use_bias is False
-    assert conv1d.batch_norm is None  # Disabled
-    assert conv1d.activation_layer is None  # Disabled
+    # Decoder path
+    x = BiasFreeConv1D(32, kernel_size=3, name='conv2')(x)
+    outputs = BiasFreeConv1D(1, kernel_size=1, activation='linear', name='output')(x)
+
+    return keras.Model(inputs, outputs, name='bias_free_test_model')
 
 
-if __name__ == '__main__':
-    # Run the tests
-    pytest.main([__file__])
+if __name__ == "__main__":
+    # Run tests with: pytest test_bias_free_conv1d.py -v
+    # Or run specific test class: pytest test_bias_free_conv1d.py::TestBiasFreeConv1D -v
+    pytest.main([__file__, "-v"])
