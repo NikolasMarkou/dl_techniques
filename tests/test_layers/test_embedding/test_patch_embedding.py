@@ -4,10 +4,8 @@ import tensorflow as tf
 import keras
 import tempfile
 import os
-from typing import Tuple, Union
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.patch_embedding import (
+from dl_techniques.layers.embedding.patch_embedding import (
     PatchEmbedding2D, PatchEmbedding1D)
 
 

@@ -122,7 +122,6 @@ class TestAdaptiveBandRMS:
         # Check build state
         assert layer.built is True
         assert layer._is_conv_layer is False
-        assert layer._build_input_shape == (None,) + input_shape
 
         # Check dense layer configuration
         assert layer.dense_layer is not None

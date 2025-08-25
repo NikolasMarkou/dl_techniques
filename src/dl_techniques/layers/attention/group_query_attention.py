@@ -55,7 +55,7 @@ from typing import Optional, Union, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from ..rotary_position_embedding import RotaryPositionEmbedding
+from ..embedding.rotary_position_embedding import RotaryPositionEmbedding
 
 # ---------------------------------------------------------------------
 

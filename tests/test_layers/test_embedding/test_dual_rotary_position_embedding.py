@@ -4,7 +4,7 @@ import keras
 import os
 import tempfile
 
-from dl_techniques.layers.dual_rotary_position_embedding import DualRotaryPositionEmbedding
+from dl_techniques.layers.embedding.dual_rotary_position_embedding import DualRotaryPositionEmbedding
 
 
 class TestDualRotaryPositionEmbedding:

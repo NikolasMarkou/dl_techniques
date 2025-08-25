@@ -164,7 +164,7 @@ class ConvNextV1Block(keras.layers.Layer):
             self,
             kernel_size: Union[int, Tuple[int, int]],
             filters: int,
-            activation: Union[str, keras.activations.Activation] = "gelu",
+            activation: Union[str, keras.layers.Activation] = "gelu",
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             use_bias: bool = True,
             dropout_rate: Optional[float] = 0.0,

@@ -4,7 +4,7 @@ import keras
 import os
 import tempfile
 
-from dl_techniques.layers.rotary_position_embedding import RotaryPositionEmbedding
+from dl_techniques.layers.embedding.rotary_position_embedding import RotaryPositionEmbedding
 
 
 class TestRotaryPositionEmbedding:

@@ -4,10 +4,9 @@ import tensorflow as tf
 import keras
 import tempfile
 import os
-from typing import Tuple
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.positional_embedding import PositionalEmbedding
+
+from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
 
 
 class TestPositionalEmbedding:
