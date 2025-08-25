@@ -2,34 +2,22 @@
 This module provides a specialized Transformer block, `HierarchicalReasoningBlock`,
 which serves as a core component for a Hierarchical Reasoning Model (HRM) architecture.
 
-The block inherits from a more generic `TransformerEncoderLayer` and customizes it
-to follow a specific architectural pattern characterized by post-normalization.
-This implementation makes two key modifications to the standard Transformer encoder design:
-1.  It enforces a "post-normalization" scheme where layer normalization is applied
-    *after* the residual connection. This is in contrast to the more common
-    "pre-normalization" scheme. The specific pattern is: `Norm(x + Sublayer(x))`.
-2.  It replaces the standard ReLU-based Feed-Forward Network (FFN) with a modern
-    SwiGLU (Swish-Gated Linear Unit) FFN, which often leads to improved model
-    performance through a gating mechanism.
-3.  It utilizes RMSNorm (Root Mean Square Normalization) as its normalization layer,
-    a computationally efficient alternative to standard LayerNorm.
+The block implements a post-normalization transformer architecture with SwiGLU activation
+and RMS normalization, specifically designed for hierarchical reasoning tasks. Unlike
+standard transformer blocks that use pre-normalization, this implementation applies
+normalization after the residual connections for improved training dynamics in the HRM context.
 
-The class is designed as a drop-in replacement or a specialized version of a
-transformer block, configured specifically for the HRM architecture's requirements.
-By inheriting from a base class, it reuses the core multi-head attention logic
-while overriding the normalization and feed-forward processing flow in its `call` method.
+The block consists of:
+1. Multi-head self-attention with post-normalization using RMSNorm
+2. SwiGLU Feed-Forward Network with post-normalization using RMSNorm
+3. Residual connections around both sub-components
 
-Architectural Flow:
-1.  Input is passed to a multi-head self-attention mechanism.
-2.  The output of the attention layer is added to the original input (residual connection).
-3.  The result is normalized using RMSNorm.
-4.  The normalized output is then passed to a SwiGLU Feed-Forward Network.
-5.  The output of the FFN is added to its input (a second residual connection).
-6.  The result is passed through a final RMSNorm layer to produce the block's final output.
+This implementation follows modern Keras 3 patterns for robust serialization and
+proper sub-layer management.
 """
 
 import keras
-from typing import Optional, Union
+from typing import Optional, Union, Dict, Any, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -37,99 +25,313 @@ from typing import Optional, Union
 
 from .norms.rms_norm import RMSNorm
 from .ffn.swiglu_ffn import SwiGLUFFN
-from .transformer import TransformerLayer
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class HierarchicalReasoningBlock(TransformerLayer):
+class HierarchicalReasoningBlock(keras.layers.Layer):
     """
-    Post-normalization transformer block for HRM.
+    Post-normalization transformer block for Hierarchical Reasoning Models.
 
-    Extends the existing TransformerEncoderLayer to use post-normalization
-    pattern and SwiGLU activation as required by HRM architecture.
+    This layer implements a transformer block specifically designed for hierarchical
+    reasoning tasks, featuring post-normalization architecture where RMS normalization
+    is applied after residual connections. The block uses SwiGLU activation for the
+    feed-forward network, providing enhanced gating capabilities compared to standard
+    ReLU-based FFNs.
+
+    **Intent**: Provide a transformer building block optimized for hierarchical reasoning
+    tasks, with architectural choices proven effective for complex reasoning scenarios.
+    The post-normalization pattern helps with gradient flow in deep reasoning networks.
+
+    **Architecture**:
+    ```
+    Input(shape=[batch_size, seq_length, hidden_size])
+           ↓
+    MultiHeadAttention(num_heads, key_dim=hidden_size//num_heads)
+           ↓
+    Add Residual: attention_output + input
+           ↓
+    RMSNorm(post-normalization)
+           ↓
+    SwiGLU FFN(intermediate_size)
+           ↓
+    Add Residual: ffn_output + normalized_attention
+           ↓
+    RMSNorm(post-normalization)
+           ↓
+    Output(shape=[batch_size, seq_length, hidden_size])
+    ```
+
+    **Post-Normalization Pattern**:
+    Unlike standard pre-normalization where norm is applied before the sub-layer,
+    this block uses post-normalization: `RMSNorm(x + SubLayer(x))`. This pattern
+    can provide better training stability for deep reasoning networks.
+
+    **Key Components**:
+    - **MultiHeadAttention**: Standard Keras multi-head self-attention
+    - **RMSNorm**: Root Mean Square normalization for efficiency
+    - **SwiGLU FFN**: Swish-Gated Linear Unit for enhanced expressiveness
+    - **Residual Connections**: Skip connections around both attention and FFN
 
     Args:
-        hidden_size: Hidden dimension size
-        num_heads: Number of attention heads
-        intermediate_size: FFN intermediate dimension
-        activation: Activation function (ignored, uses SwiGLU)
-        dropout_rate: Dropout rate
-        use_bias: Whether to use bias in linear layers
-        kernel_initializer: Initializer for kernel weights
-        kernel_regularizer: Regularizer for kernel weights
-        **kwargs: Additional layer arguments
+        hidden_size: Integer, hidden dimension size throughout the block.
+            Must be positive and divisible by num_heads. This dimension is preserved.
+        num_heads: Integer, number of attention heads for multi-head attention.
+            Must be positive and divide evenly into hidden_size.
+        intermediate_size: Integer, intermediate dimension for the FFN layer.
+            Typically 4x hidden_size for standard transformer scaling.
+        dropout_rate: Float between 0 and 1, dropout rate applied in attention and FFN.
+            Defaults to 0.0 (no dropout).
+        use_bias: Boolean, whether to use bias parameters in linear transformations.
+            Defaults to False following modern transformer practices.
+        kernel_initializer: String or Initializer, weight initialization strategy.
+            Defaults to 'he_normal' for improved gradient flow.
+        bias_initializer: String or Initializer, bias initialization strategy.
+            Only used if use_bias=True. Defaults to 'zeros'.
+        kernel_regularizer: Optional Regularizer for kernel weights.
+            Applied to attention and FFN weights. Defaults to None.
+        bias_regularizer: Optional Regularizer for bias weights.
+            Only used if use_bias=True. Defaults to None.
+        **kwargs: Additional arguments for Layer base class.
+
+    Input shape:
+        3D tensor with shape: `(batch_size, sequence_length, hidden_size)`.
+
+    Output shape:
+        3D tensor with shape: `(batch_size, sequence_length, hidden_size)`.
+        Same shape as input, preserving sequence structure.
+
+    Attributes:
+        attention: MultiHeadAttention layer for self-attention computation.
+        attention_norm: RMSNorm layer for post-attention normalization.
+        ffn: SwiGLU FFN layer for feed-forward processing.
+        output_norm: RMSNorm layer for final output normalization.
+        dropout: Dropout layer for regularization.
+
+    Example:
+        ```python
+        # Standard HRM block
+        block = HierarchicalReasoningBlock(
+            hidden_size=768,
+            num_heads=12,
+            intermediate_size=3072
+        )
+        inputs = keras.Input(shape=(128, 768))  # seq_len=128
+        outputs = block(inputs)
+
+        # With dropout and regularization
+        block = HierarchicalReasoningBlock(
+            hidden_size=512,
+            num_heads=8,
+            intermediate_size=2048,
+            dropout_rate=0.1,
+            kernel_regularizer=keras.regularizers.L2(1e-4)
+        )
+
+        # Custom initialization
+        block = HierarchicalReasoningBlock(
+            hidden_size=1024,
+            num_heads=16,
+            intermediate_size=4096,
+            use_bias=True,
+            kernel_initializer='glorot_uniform'
+        )
+        ```
+
+    Note:
+        This implementation follows the post-normalization pattern which can be
+        more challenging to train than pre-normalization but may provide better
+        performance for reasoning tasks when properly configured.
     """
 
     def __init__(
-            self,
-            hidden_size: int,
-            num_heads: int,
-            intermediate_size: int,
-            activation: str = "swiglu",  # Force SwiGLU
-            dropout_rate: float = 0.0,
-            use_bias: bool = False,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
-            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            **kwargs
-    ):
-        # Create RMSNorm factory for post-normalization
-        def rms_norm_factory():
-            return RMSNorm()
+        self,
+        hidden_size: int,
+        num_heads: int,
+        intermediate_size: int,
+        dropout_rate: float = 0.0,
+        use_bias: bool = False,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
+        bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
 
-        super().__init__(
-            hidden_size=hidden_size,
+        # Validate inputs
+        if hidden_size <= 0:
+            raise ValueError(f"hidden_size must be positive, got {hidden_size}")
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
+        if hidden_size % num_heads != 0:
+            raise ValueError(
+                f"hidden_size ({hidden_size}) must be divisible by num_heads ({num_heads})"
+            )
+        if intermediate_size <= 0:
+            raise ValueError(f"intermediate_size must be positive, got {intermediate_size}")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
+
+        # Store configuration parameters
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.intermediate_size = intermediate_size
+        self.dropout_rate = dropout_rate
+        self.use_bias = use_bias
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+
+        # Calculate key dimension for attention
+        self.key_dim = hidden_size // num_heads
+
+        # CREATE all sub-layers in __init__ (they are unbuilt)
+        self.attention = keras.layers.MultiHeadAttention(
             num_heads=num_heads,
-            intermediate_size=intermediate_size,
-            activation=activation,
-            dropout_rate=dropout_rate,
-            normalization_factory=rms_norm_factory,
+            key_dim=self.key_dim,
+            dropout=dropout_rate,
             use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            **kwargs
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            name='multi_head_attention'
         )
 
-        # Override FFN with SwiGLU
-        self._use_swiglu = True
-        self.ffn = None
-        self.norm1 = None
-        self.norm2 = None
-        self.feed_forward = None
+        self.attention_norm = RMSNorm(name='attention_rms_norm')
 
-    def build(self, input_shape):
-        """Build layer with SwiGLU FFN override."""
-        super().build(input_shape)
+        self.ffn = SwiGLUFFN(
+            d_model=hidden_size,
+            ffn_expansion_factor=intermediate_size // hidden_size,
+            dropout_rate=dropout_rate,
+            use_bias=use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+            name='swiglu_ffn'
+        )
 
-        # Replace the FFN with SwiGLU
-        if self._use_swiglu:
-            self.ffn = SwiGLUFFN(
-                d_model=self.hidden_size,
-                ffn_expansion_factor=self.intermediate_size // self.hidden_size,
-                dropout_rate=self.dropout_rate,
-                use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                name="swiglu_ffn"
+        self.output_norm = RMSNorm(name='output_rms_norm')
+
+        # Dropout for additional regularization if needed
+        if dropout_rate > 0.0:
+            self.dropout = keras.layers.Dropout(dropout_rate, name='dropout')
+        else:
+            self.dropout = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build the layer and all its sub-layers.
+
+        CRITICAL: Explicitly build each sub-layer for robust serialization.
+        """
+        if len(input_shape) != 3:
+            raise ValueError(f"Expected 3D input shape, got {len(input_shape)}D")
+
+        if input_shape[-1] != self.hidden_size:
+            raise ValueError(
+                f"Last dimension of input ({input_shape[-1]}) must match hidden_size ({self.hidden_size})"
             )
 
-    def call(self, inputs, training=None, mask=None):
+        # Build sub-layers in computational order
+        # MultiHeadAttention expects (batch_size, seq_length, hidden_size)
+        self.attention.build(input_shape)
+
+        # RMSNorm doesn't change shape
+        self.attention_norm.build(input_shape)
+
+        # SwiGLU FFN expects and returns same shape
+        self.ffn.build(input_shape)
+
+        # Final normalization
+        self.output_norm.build(input_shape)
+
+        # Dropout doesn't change shape
+        if self.dropout is not None:
+            self.dropout.build(input_shape)
+
+        # Always call parent build at the end
+        super().build(input_shape)
+
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        attention_mask: Optional[keras.KerasTensor] = None,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """
-        Post-normalization forward pass.
+        Post-normalization forward pass through the reasoning block.
 
-        Applies residual connections first, then normalization (post-norm pattern).
+        Args:
+            inputs: Input tensor of shape [batch_size, seq_length, hidden_size].
+            attention_mask: Optional attention mask for the self-attention computation.
+                Can be 2D (batch_size, seq_length) or 4D for full attention control.
+            training: Boolean indicating training mode for dropout behavior.
+
+        Returns:
+            Output tensor of shape [batch_size, seq_length, hidden_size].
         """
-        # Self-attention with residual connection and post-norm
-        attn_output = self.attention(inputs, training=training, mask=mask)
-        x = self.norm1(inputs + attn_output, training=training)
+        # Self-attention with residual connection and post-normalization
+        attention_output = self.attention(
+            query=inputs,
+            value=inputs,  # Self-attention: value = query
+            key=inputs,    # Self-attention: key = query
+            attention_mask=attention_mask,
+            training=training
+        )
 
-        # Feed-forward with residual connection and post-norm
-        if hasattr(self, 'ffn') and self._use_swiglu:
-            ffn_output = self.ffn(x, training=training)
-        else:
-            ffn_output = self.feed_forward(x, training=training)
-        x = self.norm2(x + ffn_output, training=training)
+        # Apply dropout if configured
+        if self.dropout is not None:
+            attention_output = self.dropout(attention_output, training=training)
 
-        return x
+        # Post-normalization: RMSNorm(inputs + attention_output)
+        attention_residual = self.attention_norm(inputs + attention_output, training=training)
+
+        # Feed-forward network with residual connection and post-normalization
+        ffn_output = self.ffn(attention_residual, training=training)
+
+        # Apply dropout if configured
+        if self.dropout is not None:
+            ffn_output = self.dropout(ffn_output, training=training)
+
+        # Post-normalization: RMSNorm(attention_residual + ffn_output)
+        final_output = self.output_norm(attention_residual + ffn_output, training=training)
+
+        return final_output
+
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute output shape.
+
+        Args:
+            input_shape: Shape of the input tensor.
+
+        Returns:
+            Output shape tuple. Same as input shape for transformer blocks.
+        """
+        # Output shape is identical to input shape for transformer blocks
+        return tuple(input_shape)
+
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Return configuration for serialization.
+
+        Returns:
+            Dictionary containing all constructor parameters for proper serialization.
+        """
+        config = super().get_config()
+        config.update({
+            'hidden_size': self.hidden_size,
+            'num_heads': self.num_heads,
+            'intermediate_size': self.intermediate_size,
+            'dropout_rate': self.dropout_rate,
+            'use_bias': self.use_bias,
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
+        })
+        return config
 
 # ---------------------------------------------------------------------

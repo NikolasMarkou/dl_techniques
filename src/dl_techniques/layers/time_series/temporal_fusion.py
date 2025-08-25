@@ -58,9 +58,33 @@ class TemporalFusionLayer(keras.layers.Layer):
     on two parallel forecasting pathways that are intelligently blended using a
     learned fusion gate.
 
+    **Architecture & Flow**:
+    ```
+    Inputs: [context_tensor, lag_tensor]
+             ↓
+    Context → Dense(attention_weights) → sigmoid
+             ↓
+    Context → Dense(fusion_gate) → sigmoid
+             ↓
+    Context → Dense(context_forecast)
+             ↓
+    Lags → [Optional: Dense(projection)] → Attention-weighted sum → Dense(lag_forecast)
+             ↓
+    Output = (1 - gate) * context_forecast + gate * lag_forecast
+    ```
+
+    **Mathematical Operations**:
+    1. **Attention**: α = sigmoid(Dense_att(context))
+    2. **Gate**: g = sigmoid(Dense_gate(context))
+    3. **Context Path**: fc = Dense_ctx(context)
+    4. **AR Path**: fl = Dense_lag(sum(α ⊙ lags))
+    5. **Fusion**: output = (1 - g) ⊙ fc + g ⊙ fl
+
     Args:
         output_dim: Integer, the dimensionality of the final output forecast.
+            Must be positive.
         num_lags: Integer, the number of past time series values (lags) to consider.
+            Must be positive.
         project_lags: Boolean, if True, an internal Dense layer will transform the
             raw lag values into a richer feature space before attention is applied.
             Defaults to False.
@@ -81,38 +105,53 @@ class TemporalFusionLayer(keras.layers.Layer):
     Output shape:
         A 2D tensor with shape `(batch_size, output_dim)`
 
+    Attributes:
+        attention_generator: Dense layer generating attention weights for lags.
+        gate_generator: Dense layer generating fusion gate values.
+        context_forecaster: Dense layer creating forecast from context.
+        lag_projector: Optional Dense layer for lag feature projection.
+        lag_forecaster: Dense layer creating forecast from weighted lags.
+
     Returns:
         A tensor representing the final fused forecast combining contextual and
         autoregressive pathways.
 
     Raises:
         ValueError: If output_dim or num_lags is not a positive integer.
-        ValueError: If input_shape is not a list of two tensors.
+        ValueError: If inputs is not a list of two tensors during call.
         ValueError: If lag tensor's last dimension doesn't match num_lags.
 
     Examples:
-        >>> # Basic usage with LSTM context
-        >>> context_dim = 128
-        >>> num_lags = 10
-        >>> output_dim = 1
-        >>>
-        >>> context_input = keras.Input(shape=(context_dim,), name="context_input")
-        >>> lag_input = keras.Input(shape=(num_lags,), name="lag_input")
-        >>>
-        >>> fusion_layer = TemporalFusionLayer(
-        ...     output_dim=output_dim,
-        ...     num_lags=num_lags,
-        ...     project_lags=True
-        ... )
-        >>> output = fusion_layer([context_input, lag_input])
-        >>> model = keras.Model(inputs=[context_input, lag_input], outputs=output)
-        >>>
-        >>> # Multi-dimensional forecasting
-        >>> multi_output = TemporalFusionLayer(
-        ...     output_dim=5,  # Forecast 5 variables
-        ...     num_lags=20,
-        ...     project_lags=False
-        ... )([context_input, keras.Input(shape=(20,))])
+        ```python
+        # Basic usage with LSTM context
+        context_dim = 128
+        num_lags = 10
+        output_dim = 1
+
+        context_input = keras.Input(shape=(context_dim,), name="context_input")
+        lag_input = keras.Input(shape=(num_lags,), name="lag_input")
+
+        fusion_layer = TemporalFusionLayer(
+            output_dim=output_dim,
+            num_lags=num_lags,
+            project_lags=True
+        )
+        output = fusion_layer([context_input, lag_input])
+        model = keras.Model(inputs=[context_input, lag_input], outputs=output)
+
+        # Multi-dimensional forecasting
+        multi_output = TemporalFusionLayer(
+            output_dim=5,  # Forecast 5 variables
+            num_lags=20,
+            project_lags=False
+        )([context_input, keras.Input(shape=(20,))])
+        ```
+
+    Note:
+        This implementation follows the modern Keras 3 pattern where all sub-layers
+        are created in __init__ and explicitly built in build() for proper serialization.
+        The fusion gate enables dynamic switching between context-driven and lag-driven
+        forecasting strategies.
     """
 
     def __init__(
@@ -146,48 +185,7 @@ class TemporalFusionLayer(keras.layers.Layer):
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.activity_regularizer = keras.regularizers.get(activity_regularizer)
 
-        # Will be initialized in build()
-        self.attention_generator = None
-        self.gate_generator = None
-        self.context_forecaster = None
-        self.lag_projector = None
-        self.lag_forecaster = None
-        self._build_input_shape = None
-
-        logger.debug(f"TemporalFusionLayer initialized with output_dim={output_dim}, num_lags={num_lags}")
-
-    def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
-        """Build the layer weights and sublayers based on input shape.
-
-        Args:
-            input_shape: A list of two tuples representing the shapes of
-                the context tensor and lag tensor inputs.
-
-        Raises:
-            ValueError: If input_shape is not a list of two tensors.
-            ValueError: If lag tensor's last dimension doesn't match num_lags.
-        """
-        if not isinstance(input_shape, list) or len(input_shape) != 2:
-            raise ValueError(
-                "TemporalFusionLayer expects a list of two inputs: "
-                "[context_tensor, lag_tensor]. "
-                f"Received input_shape: {input_shape}"
-            )
-
-        context_shape, lag_shape = input_shape
-        self._build_input_shape = input_shape
-
-        # Validate shapes
-        if len(context_shape) < 2:
-            raise ValueError(
-                f"Context tensor must be at least 2D, got shape: {context_shape}"
-            )
-        if len(lag_shape) < 2 or lag_shape[-1] != self.num_lags:
-            raise ValueError(
-                f"The last dimension of the lag_tensor input ({lag_shape[-1] if len(lag_shape) >= 2 else 'unknown'}) "
-                f"does not match `num_lags` ({self.num_lags})."
-            )
-
+        # CREATE all sub-layers in __init__ (modern pattern)
         # --- Control Pathway Sublayers (driven by context) ---
         self.attention_generator = keras.layers.Dense(
             units=self.num_lags,
@@ -231,6 +229,8 @@ class TemporalFusionLayer(keras.layers.Layer):
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer
             )
+        else:
+            self.lag_projector = None
 
         # This layer creates the final AR forecast from the weighted sum
         self.lag_forecaster = keras.layers.Dense(
@@ -242,23 +242,61 @@ class TemporalFusionLayer(keras.layers.Layer):
             bias_regularizer=self.bias_regularizer
         )
 
-        # Build sublayers with appropriate shapes
+        logger.debug(f"TemporalFusionLayer initialized with output_dim={output_dim}, num_lags={num_lags}")
+
+    def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
+        """Build the layer weights and sublayers based on input shape.
+
+        CRITICAL: Explicitly build each sub-layer for robust serialization.
+
+        Args:
+            input_shape: A list of two tuples representing the shapes of
+                the context tensor and lag tensor inputs.
+
+        Raises:
+            ValueError: If input_shape is not a list of two tensors.
+            ValueError: If lag tensor's last dimension doesn't match num_lags.
+        """
+        if not isinstance(input_shape, list) or len(input_shape) != 2:
+            raise ValueError(
+                "TemporalFusionLayer expects a list of two inputs: "
+                "[context_tensor, lag_tensor]. "
+                f"Received input_shape: {input_shape}"
+            )
+
+        context_shape, lag_shape = input_shape
+
+        # Validate shapes
+        if len(context_shape) < 2:
+            raise ValueError(
+                f"Context tensor must be at least 2D, got shape: {context_shape}"
+            )
+        if len(lag_shape) < 2 or lag_shape[-1] != self.num_lags:
+            raise ValueError(
+                f"The last dimension of the lag_tensor input ({lag_shape[-1] if len(lag_shape) >= 2 else 'unknown'}) "
+                f"does not match `num_lags` ({self.num_lags})."
+            )
+
+        # Build sub-layers in order they'll be used
+        # All context-driven layers use the same context shape
         self.attention_generator.build(context_shape)
         self.gate_generator.build(context_shape)
         self.context_forecaster.build(context_shape)
 
-        if self.project_lags and self.lag_projector:
+        # Lag processing layers
+        if self.lag_projector is not None:
             self.lag_projector.build(lag_shape)
 
-        # The lag_forecaster is built on a scalar input (the weighted sum)
+        # The lag_forecaster receives a weighted sum, which is (batch_size, 1)
         weighted_sum_shape = (context_shape[0], 1)
         self.lag_forecaster.build(weighted_sum_shape)
 
+        # Always call parent build at the end
         super().build(input_shape)
         logger.debug(f"TemporalFusionLayer built with context_shape={context_shape}, lag_shape={lag_shape}")
 
     def call(self, inputs: List[keras.KerasTensor], training: Optional[bool] = None) -> keras.KerasTensor:
-        """Forward pass of the layer.
+        """Forward pass through the temporal fusion mechanism.
 
         Args:
             inputs: A list containing two tensors:
@@ -286,7 +324,7 @@ class TemporalFusionLayer(keras.layers.Layer):
         fusion_gate = self.gate_generator(context_tensor, training=training)
 
         # Optionally project lags into a richer feature space
-        if self.project_lags and self.lag_projector:
+        if self.lag_projector is not None:
             processed_lags = self.lag_projector(lag_tensor, training=training)
         else:
             processed_lags = lag_tensor
@@ -326,10 +364,10 @@ class TemporalFusionLayer(keras.layers.Layer):
         context_shape, _ = input_shape
 
         # Convert to list for manipulation, then back to tuple
-        context_shape_list = list(context_shape)
-        output_shape_list = context_shape_list[:-1] + [self.output_dim]
+        output_shape = list(context_shape)
+        output_shape[-1] = self.output_dim
 
-        return tuple(output_shape_list)
+        return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
         """Returns the layer configuration for serialization.
@@ -349,36 +387,5 @@ class TemporalFusionLayer(keras.layers.Layer):
             "activity_regularizer": keras.regularizers.serialize(self.activity_regularizer),
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the build configuration for serialization.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a build configuration.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "TemporalFusionLayer":
-        """Creates a layer from its configuration.
-
-        Args:
-            config: Dictionary containing the layer configuration.
-
-        Returns:
-            A TemporalFusionLayer instance.
-        """
-        return cls(**config)
 
 # ---------------------------------------------------------------------

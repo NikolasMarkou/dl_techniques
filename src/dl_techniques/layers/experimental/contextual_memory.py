@@ -3,20 +3,28 @@ Contextual Memory Bank Implementation for Keras 3.x
 
 This module implements a sophisticated memory system that combines:
 - Key-Value memory store for long-term associations
-- Graph Neural Network for concept relationships
+- Complete configurable Graph Neural Network for concept relationships
 - Transformer encoder for temporal patterns
 - Feedback loops for dynamic memory updates
+
+Following modern Keras 3 best practices with proper sub-layer management.
 """
 
 import keras
-import numpy as np
 from keras import ops
-from typing import Optional, Dict, List, Tuple, Any
-
 from dataclasses import dataclass
+from typing import Optional, Dict, Tuple, Any, Union, Literal
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.ffn.mlp import MLPBlock
+from dl_techniques.layers.norms.rms_norm import RMSNorm
+from dl_techniques.layers.transformer import TransformerLayer
 
+# ---------------------------------------------------------------------
 
 def normalize_adjacency_matrix(adjacency: keras.KerasTensor,
                                normalization: str = 'symmetric') -> keras.KerasTensor:
@@ -69,6 +77,7 @@ def normalize_adjacency_matrix(adjacency: keras.KerasTensor,
     else:
         raise ValueError(f"Unknown normalization type: {normalization}")
 
+# ---------------------------------------------------------------------
 
 @dataclass
 class MemoryBankConfig:
@@ -86,7 +95,11 @@ class MemoryBankConfig:
         dropout_rate: Dropout rate for regularization
         use_layer_norm: Whether to use layer normalization
         memory_update_rate: Learning rate for memory updates
-        graph_aggregation: Type of graph aggregation ('mean', 'max', 'attention')
+        graph_aggregation: Type of graph aggregation ('mean', 'max', 'attention', 'sum')
+        graph_message_passing: Type of message passing ('gcn', 'graphsage', 'gat', 'gin')
+        graph_normalization: Graph normalization type ('none', 'batch', 'layer', 'rms')
+        graph_activation: Activation function for graph layers
+        temporal_normalization: Temporal normalization type ('layer', 'rms', 'batch')
     """
     memory_dim: int = 512
     concept_dim: int = 256
@@ -100,7 +113,12 @@ class MemoryBankConfig:
     use_layer_norm: bool = True
     memory_update_rate: float = 0.01
     graph_aggregation: str = 'attention'
+    graph_message_passing: str = 'gcn'
+    graph_normalization: str = 'layer'
+    graph_activation: str = 'relu'
+    temporal_normalization: str = 'layer'
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class KeyValueMemoryStore(keras.layers.Layer):
@@ -110,10 +128,31 @@ class KeyValueMemoryStore(keras.layers.Layer):
     that can store and retrieve associative memories.
 
     Args:
-        num_slots: Number of memory slots
-        memory_dim: Dimension of memory embeddings
-        key_dim: Dimension of keys
+        num_slots: Number of memory slots. Must be positive.
+        memory_dim: Dimension of memory embeddings. Must be positive.
+        key_dim: Dimension of keys. Must be positive.
+        temperature: Temperature for attention softmax. Defaults to 1.0.
+        use_bias: Whether to use bias in projections. Defaults to True.
+        kernel_initializer: Initializer for kernel weights.
+        bias_initializer: Initializer for bias weights.
         **kwargs: Additional keyword arguments for Layer base class
+
+    Input shape:
+        Query tensor of shape (batch_size, key_dim)
+
+    Output shape:
+        Retrieved memory tensor of shape (batch_size, memory_dim)
+
+    Example:
+        ```python
+        memory_store = KeyValueMemoryStore(
+            num_slots=1000,
+            memory_dim=512,
+            key_dim=256
+        )
+        query = keras.Input(shape=(256,))
+        retrieved = memory_store(query)
+        ```
     """
 
     def __init__(
@@ -121,34 +160,50 @@ class KeyValueMemoryStore(keras.layers.Layer):
             num_slots: int,
             memory_dim: int,
             key_dim: int,
+            temperature: float = 1.0,
+            use_bias: bool = True,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
+
+        # Validate inputs
+        if num_slots <= 0:
+            raise ValueError(f"num_slots must be positive, got {num_slots}")
+        if memory_dim <= 0:
+            raise ValueError(f"memory_dim must be positive, got {memory_dim}")
+        if key_dim <= 0:
+            raise ValueError(f"key_dim must be positive, got {key_dim}")
+        if temperature <= 0:
+            raise ValueError(f"temperature must be positive, got {temperature}")
+
         self.num_slots = num_slots
         self.memory_dim = memory_dim
         self.key_dim = key_dim
+        self.temperature = temperature
+        self.use_bias = use_bias
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
 
-        # Will be initialized in build()
+        # Initialize weight attributes - created in build()
         self.memory_keys = None
         self.memory_values = None
-        self._build_input_shape = None
 
-    def build(self, input_shape) -> None:
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the memory store weights."""
-        self._build_input_shape = input_shape
-
-        # Initialize memory keys and values
+        # Create memory keys and values
         self.memory_keys = self.add_weight(
             name="memory_keys",
             shape=(self.num_slots, self.key_dim),
-            initializer="glorot_uniform",
+            initializer=self.kernel_initializer,
             trainable=True,
         )
 
         self.memory_values = self.add_weight(
             name="memory_values",
             shape=(self.num_slots, self.memory_dim),
-            initializer="glorot_uniform",
+            initializer=self.kernel_initializer,
             trainable=True,
         )
 
@@ -168,6 +223,9 @@ class KeyValueMemoryStore(keras.layers.Layer):
         # Shape: (batch_size, 1, key_dim) @ (key_dim, num_slots) -> (batch_size, 1, num_slots)
         query_expanded = ops.expand_dims(query, axis=1)
         attention_logits = ops.matmul(query_expanded, ops.transpose(self.memory_keys))
+
+        # Apply temperature scaling
+        attention_logits = attention_logits / self.temperature
         attention_weights = ops.softmax(attention_logits, axis=-1)
 
         # Retrieve weighted memory values
@@ -177,36 +235,7 @@ class KeyValueMemoryStore(keras.layers.Layer):
         # Remove the singleton dimension: (batch_size, memory_dim)
         return ops.squeeze(retrieved_memory, axis=1)
 
-    def update_memory(self, key: keras.KerasTensor, value: keras.KerasTensor,
-                      update_rate: float = 0.01) -> None:
-        """Update memory with new key-value pairs.
-
-        WARNING: This is a non-operational placeholder method. In practice, memory updates
-        in neural networks occur through the standard training process via backpropagation.
-        The memory_keys and memory_values weights are updated automatically during training
-        when gradients flow through the memory retrieval operations.
-
-        To update memories in practice:
-        1. Include memory-relevant loss terms in your training objective
-        2. Ensure gradients flow through memory operations during backpropagation
-        3. Use standard optimizers (Adam, SGD, etc.) to update memory weights
-
-        This method exists for API completeness but does not perform actual updates.
-
-        Args:
-            key: New key tensor
-            value: New value tensor
-            update_rate: Rate of memory update (unused in this placeholder)
-        """
-        # Find the most similar memory slot
-        similarity = ops.matmul(ops.expand_dims(key, axis=0), ops.transpose(self.memory_keys))
-        best_slot = ops.argmax(similarity, axis=-1)
-
-        # This is just a placeholder - actual updates happen through training
-        logger.warning(f"update_memory called - this is a placeholder. Memory updates occur through training.")
-        logger.info(f"Would update memory slot {best_slot} with new association during training")
-
-    def compute_output_shape(self, input_shape) -> Tuple[int, ...]:
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape."""
         return tuple(list(input_shape)[:-1] + [self.memory_dim])
 
@@ -217,91 +246,193 @@ class KeyValueMemoryStore(keras.layers.Layer):
             "num_slots": self.num_slots,
             "memory_dim": self.memory_dim,
             "key_dim": self.key_dim,
+            "temperature": self.temperature,
+            "use_bias": self.use_bias,
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration."""
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build from configuration."""
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class GraphNeuralNetworkLayer(keras.layers.Layer):
-    """Graph Neural Network for concept relationship modeling.
+    """Complete configurable Graph Neural Network for concept relationship modeling.
 
-    Implements a simplified GNN that processes concept graphs to learn
-    relational embeddings between concepts.
+    Implements various GNN architectures including GCN, GraphSAGE, GAT, and GIN
+    with configurable message passing, aggregation, and normalization.
 
     Args:
-        concept_dim: Dimension of concept embeddings
-        num_layers: Number of GNN layers
-        aggregation: Type of aggregation ('mean', 'max', 'attention')
-        dropout_rate: Dropout rate
-        use_layer_norm: Whether to use layer normalization
+        concept_dim: Dimension of concept embeddings. Must be positive.
+        num_layers: Number of GNN layers. Must be positive. Defaults to 3.
+        message_passing: Type of message passing ('gcn', 'graphsage', 'gat', 'gin'). Defaults to 'gcn'.
+        aggregation: Type of aggregation ('mean', 'max', 'attention', 'sum'). Defaults to 'attention'.
+        normalization: Type of normalization ('none', 'batch', 'layer', 'rms'). Defaults to 'layer'.
+        activation: Activation function. Defaults to 'relu'.
+        dropout_rate: Dropout rate. Must be between 0 and 1. Defaults to 0.1.
+        use_residual: Whether to use residual connections. Defaults to True.
+        use_layer_norm: Whether to use layer normalization. Defaults to True.
+        num_attention_heads: Number of attention heads for GAT and attention aggregation. Defaults to 4.
         **kwargs: Additional keyword arguments for Layer base class
+
+    Input shape:
+        Tuple of (node_features, adjacency_matrix):
+        - node_features: Shape (batch_size, num_nodes, concept_dim)
+        - adjacency_matrix: Shape (batch_size, num_nodes, num_nodes)
+
+    Output shape:
+        Updated node embeddings of shape (batch_size, num_nodes, concept_dim)
+
+    Example:
+        ```python
+        gnn = GraphNeuralNetworkLayer(
+            concept_dim=256,
+            num_layers=3,
+            message_passing='gat',
+            aggregation='attention'
+        )
+
+        node_features = keras.Input(shape=(10, 256))
+        adjacency = keras.Input(shape=(10, 10))
+        output = gnn((node_features, adjacency))
+        ```
     """
 
     def __init__(
             self,
             concept_dim: int,
             num_layers: int = 3,
-            aggregation: str = 'attention',
+            message_passing: Literal['gcn', 'graphsage', 'gat', 'gin'] = 'gcn',
+            aggregation: Literal['mean', 'max', 'attention', 'sum'] = 'attention',
+            normalization: Literal['none', 'batch', 'layer', 'rms'] = 'layer',
+            activation: str = 'relu',
             dropout_rate: float = 0.1,
+            use_residual: bool = True,
             use_layer_norm: bool = True,
+            num_attention_heads: int = 4,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
+
+        # Validate inputs
+        if concept_dim <= 0:
+            raise ValueError(f"concept_dim must be positive, got {concept_dim}")
+        if num_layers <= 0:
+            raise ValueError(f"num_layers must be positive, got {num_layers}")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
+        if num_attention_heads <= 0:
+            raise ValueError(f"num_attention_heads must be positive, got {num_attention_heads}")
+
         self.concept_dim = concept_dim
         self.num_layers = num_layers
+        self.message_passing = message_passing
         self.aggregation = aggregation
+        self.normalization = normalization
+        self.activation = activation
         self.dropout_rate = dropout_rate
+        self.use_residual = use_residual
         self.use_layer_norm = use_layer_norm
+        self.num_attention_heads = num_attention_heads
 
-        # Will be initialized in build()
+        # Create sub-layers in __init__
         self.gnn_layers = []
         self.dropout_layers = []
-        self.layer_norms = []
-        self.attention_layer = None
-        self._build_input_shape = None
+        self.norm_layers = []
+        self.attention_layers = []
 
-    def build(self, input_shape) -> None:
-        """Build GNN layers."""
-        self._build_input_shape = input_shape
-
-        # Build GNN layers
         for i in range(self.num_layers):
-            # Message passing layer
-            self.gnn_layers.append(
-                keras.layers.Dense(
-                    self.concept_dim,
-                    activation='relu',
-                    name=f'gnn_layer_{i}'
+            # Message passing layers
+            if self.message_passing == 'gcn':
+                self.gnn_layers.append(
+                    keras.layers.Dense(
+                        self.concept_dim,
+                        activation=None,  # Apply activation separately
+                        name=f'gcn_layer_{i}'
+                    )
                 )
-            )
+            elif self.message_passing == 'graphsage':
+                # GraphSAGE uses separate transformations for self and neighbor
+                self.gnn_layers.append([
+                    keras.layers.Dense(self.concept_dim, activation=None, name=f'sage_self_{i}'),
+                    keras.layers.Dense(self.concept_dim, activation=None, name=f'sage_neighbor_{i}')
+                ])
+            elif self.message_passing == 'gat':
+                # Graph Attention Network
+                self.gnn_layers.append(
+                    keras.layers.MultiHeadAttention(
+                        num_heads=self.num_attention_heads,
+                        key_dim=self.concept_dim // self.num_attention_heads,
+                        dropout=self.dropout_rate,
+                        name=f'gat_layer_{i}'
+                    )
+                )
+            elif self.message_passing == 'gin':
+                # Graph Isomorphism Network
+                self.gnn_layers.append(
+                    MLPBlock(
+                        hidden_dim=self.concept_dim * 2,
+                        output_dim=self.concept_dim,
+                        activation=self.activation,
+                        dropout_rate=self.dropout_rate,
+                        name=f'gin_mlp_{i}'
+                    )
+                )
 
-            # Dropout layer
+            # Dropout layers
             self.dropout_layers.append(
                 keras.layers.Dropout(self.dropout_rate, name=f'gnn_dropout_{i}')
             )
 
-            # Layer normalization
-            if self.use_layer_norm:
-                self.layer_norms.append(
-                    keras.layers.LayerNormalization(name=f'gnn_norm_{i}')
+            # Normalization layers
+            if self.normalization == 'layer':
+                self.norm_layers.append(
+                    keras.layers.LayerNormalization(name=f'gnn_layer_norm_{i}')
                 )
+            elif self.normalization == 'rms':
+                self.norm_layers.append(
+                    RMSNorm(name=f'gnn_rms_norm_{i}')
+                )
+            elif self.normalization == 'batch':
+                self.norm_layers.append(
+                    keras.layers.BatchNormalization(name=f'gnn_batch_norm_{i}')
+                )
+            else:
+                self.norm_layers.append(None)
 
-        # Attention layer for aggregation
+        # Aggregation layer
         if self.aggregation == 'attention':
-            self.attention_layer = keras.layers.MultiHeadAttention(
+            self.aggregation_attention = keras.layers.MultiHeadAttention(
                 num_heads=4,
                 key_dim=self.concept_dim // 4,
-                name='graph_attention'
+                name='aggregation_attention'
             )
+        else:
+            self.aggregation_attention = None
+
+    def build(self, input_shape: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]) -> None:
+        """Build GNN layers."""
+        node_shape, adjacency_shape = input_shape
+
+        # Build all sub-layers
+        for i in range(self.num_layers):
+            if self.message_passing == 'gcn':
+                self.gnn_layers[i].build(node_shape)
+            elif self.message_passing == 'graphsage':
+                self.gnn_layers[i][0].build(node_shape)  # self transformation
+                self.gnn_layers[i][1].build(node_shape)  # neighbor transformation
+            elif self.message_passing == 'gat':
+                self.gnn_layers[i].build(node_shape, node_shape)
+            elif self.message_passing == 'gin':
+                self.gnn_layers[i].build(node_shape)
+
+            self.dropout_layers[i].build(node_shape)
+
+            if self.norm_layers[i] is not None:
+                self.norm_layers[i].build(node_shape)
+
+        if self.aggregation_attention is not None:
+            self.aggregation_attention.build(node_shape, node_shape)
 
         super().build(input_shape)
 
@@ -313,10 +444,6 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
             inputs: Tuple of (node_features, adjacency_matrix)
                 - node_features: Shape (batch_size, num_nodes, concept_dim)
                 - adjacency_matrix: Shape (batch_size, num_nodes, num_nodes)
-                  NOTE: adjacency_matrix should be normalized (e.g., using row normalization
-                  or symmetric normalization) for stable GNN training. Common normalizations:
-                  - Row normalization: A_norm = D^(-1) * A (where D is degree matrix)
-                  - Symmetric normalization: A_norm = D^(-1/2) * A * D^(-1/2)
             training: Whether in training mode
 
         Returns:
@@ -324,40 +451,69 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
         """
         node_features, adjacency_matrix = inputs
 
+        # Normalize adjacency matrix for stable training
+        normalized_adj = normalize_adjacency_matrix(adjacency_matrix, normalization='symmetric')
+
         # Process through GNN layers
         h = node_features
         for i in range(self.num_layers):
-            # Message passing: aggregate neighbor features
-            # Shape: (batch_size, num_nodes, num_nodes) @ (batch_size, num_nodes, concept_dim)
-            messages = ops.matmul(adjacency_matrix, h)
+            h_input = h
 
-            # Apply transformation
-            h_new = self.gnn_layers[i](messages)
+            if self.message_passing == 'gcn':
+                # GCN: H' = σ(A * H * W)
+                messages = ops.matmul(normalized_adj, h)
+                h_new = self.gnn_layers[i](messages)
+
+            elif self.message_passing == 'graphsage':
+                # GraphSAGE: H' = σ(W_self * H + W_neighbor * AGG(A * H))
+                self_transform = self.gnn_layers[i][0](h)
+                neighbor_messages = ops.matmul(normalized_adj, h)
+                neighbor_transform = self.gnn_layers[i][1](neighbor_messages)
+                h_new = self_transform + neighbor_transform
+
+            elif self.message_passing == 'gat':
+                # GAT: Use attention to weight neighbors
+                h_new = self.gnn_layers[i](h, h, training=training)
+
+            elif self.message_passing == 'gin':
+                # GIN: H' = MLP((1 + ε) * H + A * H)
+                neighbor_messages = ops.matmul(normalized_adj, h)
+                combined = h + neighbor_messages  # ε = 1 for simplicity
+                h_new = self.gnn_layers[i](combined, training=training)
+
+            # Apply activation
+            if self.message_passing != 'gin':  # GIN MLP already has activation
+                h_new = keras.activations.get(self.activation)(h_new)
 
             # Apply dropout
             h_new = self.dropout_layers[i](h_new, training=training)
 
             # Residual connection
-            h = h + h_new
+            if self.use_residual and h_input.shape[-1] == h_new.shape[-1]:
+                h = h_input + h_new
+            else:
+                h = h_new
 
-            # Layer normalization
-            if self.use_layer_norm:
-                h = self.layer_norms[i](h)
+            # Normalization
+            if self.norm_layers[i] is not None:
+                h = self.norm_layers[i](h, training=training)
 
         # Final aggregation
-        if self.aggregation == 'attention' and self.attention_layer is not None:
-            h = self.attention_layer(h, h, training=training)
+        if self.aggregation == 'attention' and self.aggregation_attention is not None:
+            h = self.aggregation_attention(h, h, training=training)
         elif self.aggregation == 'mean':
             h = ops.mean(h, axis=1, keepdims=True)
         elif self.aggregation == 'max':
             h = ops.max(h, axis=1, keepdims=True)
+        elif self.aggregation == 'sum':
+            h = ops.sum(h, axis=1, keepdims=True)
 
         return h
 
-    def compute_output_shape(self, input_shape) -> Tuple[int, ...]:
+    def compute_output_shape(self, input_shape: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]) -> Tuple[Optional[int], ...]:
         """Compute output shape."""
         node_shape, _ = input_shape
-        if self.aggregation in ['mean', 'max']:
+        if self.aggregation in ['mean', 'max', 'sum']:
             return tuple(list(node_shape)[:-2] + [1, self.concept_dim])
         return node_shape
 
@@ -367,36 +523,53 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
         config.update({
             "concept_dim": self.concept_dim,
             "num_layers": self.num_layers,
+            "message_passing": self.message_passing,
             "aggregation": self.aggregation,
+            "normalization": self.normalization,
+            "activation": self.activation,
             "dropout_rate": self.dropout_rate,
+            "use_residual": self.use_residual,
             "use_layer_norm": self.use_layer_norm,
+            "num_attention_heads": self.num_attention_heads,
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration."""
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build from configuration."""
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class TemporalContextEncoder(keras.layers.Layer):
-    """Temporal Context Encoder using Transformer architecture.
+    """Temporal Context Encoder using modern Transformer architecture.
 
-    Encodes temporal sequences of events using multi-head attention
+    Encodes temporal sequences using the framework's TransformerLayer
     to capture temporal dependencies and patterns.
 
     Args:
-        temporal_dim: Dimension of temporal embeddings
-        num_heads: Number of attention heads
-        num_layers: Number of transformer layers
-        max_sequence_length: Maximum sequence length
-        dropout_rate: Dropout rate
+        temporal_dim: Dimension of temporal embeddings. Must be positive.
+        num_heads: Number of attention heads. Must be positive. Defaults to 8.
+        num_layers: Number of transformer layers. Must be positive. Defaults to 6.
+        max_sequence_length: Maximum sequence length. Must be positive. Defaults to 128.
+        dropout_rate: Dropout rate. Must be between 0 and 1. Defaults to 0.1.
+        normalization_type: Type of normalization ('layer_norm', 'rms_norm'). Defaults to 'layer_norm'.
+        ffn_type: Type of FFN ('mlp', 'swiglu'). Defaults to 'mlp'.
         **kwargs: Additional keyword arguments for Layer base class
+
+    Input shape:
+        Temporal sequence tensor of shape (batch_size, seq_length, temporal_dim)
+
+    Output shape:
+        Encoded sequence tensor of shape (batch_size, seq_length, temporal_dim)
+
+    Example:
+        ```python
+        encoder = TemporalContextEncoder(
+            temporal_dim=512,
+            num_heads=8,
+            num_layers=6
+        )
+
+        sequence = keras.Input(shape=(128, 512))
+        encoded = encoder(sequence)
+        ```
     """
 
     def __init__(
@@ -406,64 +579,66 @@ class TemporalContextEncoder(keras.layers.Layer):
             num_layers: int = 6,
             max_sequence_length: int = 128,
             dropout_rate: float = 0.1,
+            normalization_type: str = 'layer_norm',
+            ffn_type: str = 'mlp',
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
+
+        # Validate inputs
+        if temporal_dim <= 0:
+            raise ValueError(f"temporal_dim must be positive, got {temporal_dim}")
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
+        if temporal_dim % num_heads != 0:
+            raise ValueError(f"temporal_dim ({temporal_dim}) must be divisible by num_heads ({num_heads})")
+        if num_layers <= 0:
+            raise ValueError(f"num_layers must be positive, got {num_layers}")
+        if max_sequence_length <= 0:
+            raise ValueError(f"max_sequence_length must be positive, got {max_sequence_length}")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
+
         self.temporal_dim = temporal_dim
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.max_sequence_length = max_sequence_length
         self.dropout_rate = dropout_rate
+        self.normalization_type = normalization_type
+        self.ffn_type = ffn_type
 
-        # Will be initialized in build()
-        self.positional_embedding = None
-        self.transformer_layers = []
-        self.layer_norms = []
-        self.ffn_layers = []
-        self._build_input_shape = None
-
-    def build(self, input_shape) -> None:
-        """Build temporal encoder layers."""
-        self._build_input_shape = input_shape
-
-        # Positional embedding
+        # Create sub-layers in __init__
         self.positional_embedding = keras.layers.Embedding(
             input_dim=self.max_sequence_length,
             output_dim=self.temporal_dim,
             name='positional_embedding'
         )
 
-        # Build transformer layers
+        # Use framework's TransformerLayer
+        self.transformer_layers = []
         for i in range(self.num_layers):
-            # Multi-head attention
             self.transformer_layers.append(
-                keras.layers.MultiHeadAttention(
+                TransformerLayer(
+                    hidden_size=self.temporal_dim,
                     num_heads=self.num_heads,
-                    key_dim=self.temporal_dim // self.num_heads,
-                    dropout=self.dropout_rate,
-                    name=f'temporal_attention_{i}'
+                    intermediate_size=self.temporal_dim * 4,
+                    attention_type='multi_head_attention',
+                    normalization_type=self.normalization_type,
+                    ffn_type=self.ffn_type,
+                    dropout_rate=self.dropout_rate,
+                    name=f'temporal_transformer_{i}'
                 )
             )
 
-            # Layer normalization
-            self.layer_norms.append([
-                keras.layers.LayerNormalization(name=f'temporal_norm1_{i}'),
-                keras.layers.LayerNormalization(name=f'temporal_norm2_{i}')
-            ])
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build temporal encoder layers."""
+        # Build positional embedding
+        pos_input_shape = (input_shape[0], input_shape[1])  # (batch_size, seq_length)
+        self.positional_embedding.build(pos_input_shape)
 
-            # Feed-forward network
-            self.ffn_layers.append([
-                keras.layers.Dense(
-                    self.temporal_dim * 4,
-                    activation='relu',
-                    name=f'temporal_ffn1_{i}'
-                ),
-                keras.layers.Dense(
-                    self.temporal_dim,
-                    name=f'temporal_ffn2_{i}'
-                ),
-                keras.layers.Dropout(self.dropout_rate, name=f'temporal_ffn_dropout_{i}')
-            ])
+        # Build transformer layers
+        for transformer in self.transformer_layers:
+            transformer.build(input_shape)
 
         super().build(input_shape)
 
@@ -485,24 +660,16 @@ class TemporalContextEncoder(keras.layers.Layer):
         positions = ops.expand_dims(positions, axis=0)
         positions = ops.repeat(positions, batch_size, axis=0)
 
-        pos_embeddings = self.positional_embedding(positions)
+        pos_embeddings = self.positional_embedding(positions, training=training)
         x = sequence + pos_embeddings
 
         # Process through transformer layers
-        for i in range(self.num_layers):
-            # Multi-head attention with residual connection
-            attention_output = self.transformer_layers[i](x, x, training=training)
-            x = self.layer_norms[i][0](x + attention_output)
-
-            # Feed-forward network with residual connection
-            ffn_output = self.ffn_layers[i][0](x)
-            ffn_output = self.ffn_layers[i][1](ffn_output)
-            ffn_output = self.ffn_layers[i][2](ffn_output, training=training)
-            x = self.layer_norms[i][1](x + ffn_output)
+        for transformer in self.transformer_layers:
+            x = transformer(x, training=training)
 
         return x
 
-    def compute_output_shape(self, input_shape) -> Tuple[int, ...]:
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape."""
         return input_shape
 
@@ -515,18 +682,12 @@ class TemporalContextEncoder(keras.layers.Layer):
             "num_layers": self.num_layers,
             "max_sequence_length": self.max_sequence_length,
             "dropout_rate": self.dropout_rate,
+            "normalization_type": self.normalization_type,
+            "ffn_type": self.ffn_type,
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration."""
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build from configuration."""
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class ContextualMemoryBank(keras.layers.Layer):
@@ -534,13 +695,44 @@ class ContextualMemoryBank(keras.layers.Layer):
 
     This layer implements a sophisticated memory system that combines:
     - Key-Value memory store for long-term associations
-    - Graph Neural Network for concept relationships
+    - Complete configurable Graph Neural Network for concept relationships
     - Transformer encoder for temporal patterns
-    - Feedback loops for dynamic memory updates
+    - Integration layer for combining all modalities
 
     Args:
-        config: MemoryBankConfig object with system parameters
+        config: MemoryBankConfig object with system parameters. If None, uses default config.
         **kwargs: Additional keyword arguments for Layer base class
+
+    Input shape:
+        Dictionary containing:
+        - 'query': Query tensor for memory retrieval (batch_size, concept_dim)
+        - 'concept_graph': Tuple of (node_features, adjacency_matrix)
+        - 'temporal_sequence': Temporal sequence (batch_size, seq_len, temporal_dim)
+
+    Output shape:
+        Dictionary containing:
+        - 'integrated_output': Final integrated contextual output (batch_size, memory_dim)
+        - 'memory_output': Retrieved memory (batch_size, memory_dim)
+        - 'graph_output': Graph neural network output (batch_size, num_nodes, concept_dim)
+        - 'temporal_output': Temporal encoder output (batch_size, seq_len, temporal_dim)
+
+    Example:
+        ```python
+        config = MemoryBankConfig(memory_dim=512, concept_dim=256)
+        memory_bank = ContextualMemoryBank(config=config)
+
+        # Define inputs
+        query = keras.Input(shape=(256,))
+        nodes = keras.Input(shape=(10, 256))
+        adjacency = keras.Input(shape=(10, 10))
+        temporal = keras.Input(shape=(128, 512))
+
+        outputs = memory_bank({
+            'query': query,
+            'concept_graph': (nodes, adjacency),
+            'temporal_sequence': temporal
+        })
+        ```
     """
 
     def __init__(
@@ -551,18 +743,7 @@ class ContextualMemoryBank(keras.layers.Layer):
         super().__init__(**kwargs)
         self.config = config or MemoryBankConfig()
 
-        # Will be initialized in build()
-        self.memory_store = None
-        self.graph_network = None
-        self.temporal_encoder = None
-        self.integration_layer = None
-        self.output_projection = None
-        self._build_input_shape = None
-
-    def build(self, input_shape) -> None:
-        """Build all components of the memory bank."""
-        self._build_input_shape = input_shape
-
+        # Create all sub-layers in __init__
         # Key-Value Memory Store
         self.memory_store = KeyValueMemoryStore(
             num_slots=self.config.num_memory_slots,
@@ -571,23 +752,27 @@ class ContextualMemoryBank(keras.layers.Layer):
             name='kv_memory_store'
         )
 
-        # Graph Neural Network for concept relationships
+        # Complete configurable Graph Neural Network
         self.graph_network = GraphNeuralNetworkLayer(
             concept_dim=self.config.concept_dim,
             num_layers=self.config.num_graph_layers,
+            message_passing=self.config.graph_message_passing,
             aggregation=self.config.graph_aggregation,
+            normalization=self.config.graph_normalization,
+            activation=self.config.graph_activation,
             dropout_rate=self.config.dropout_rate,
             use_layer_norm=self.config.use_layer_norm,
             name='concept_graph_network'
         )
 
-        # Temporal Context Encoder
+        # Temporal Context Encoder using framework's TransformerLayer
         self.temporal_encoder = TemporalContextEncoder(
             temporal_dim=self.config.temporal_dim,
             num_heads=self.config.num_temporal_heads,
             num_layers=self.config.num_temporal_layers,
             max_sequence_length=self.config.max_sequence_length,
             dropout_rate=self.config.dropout_rate,
+            normalization_type=self.config.temporal_normalization,
             name='temporal_context_encoder'
         )
 
@@ -604,6 +789,29 @@ class ContextualMemoryBank(keras.layers.Layer):
             self.config.memory_dim,
             name='output_projection'
         )
+
+    def build(self, input_shape: Dict[str, Any]) -> None:
+        """Build all components of the memory bank."""
+        # Extract shapes from input dictionary
+        query_shape = input_shape['query']
+        node_features_shape, adjacency_shape = input_shape['concept_graph']
+        temporal_shape = input_shape['temporal_sequence']
+
+        # Build memory store
+        self.memory_store.build(query_shape)
+
+        # Build graph network
+        self.graph_network.build((node_features_shape, adjacency_shape))
+
+        # Build temporal encoder
+        self.temporal_encoder.build(temporal_shape)
+
+        # Build integration layer
+        total_dim = self.config.memory_dim + self.config.concept_dim + self.config.temporal_dim
+        self.integration_layer.build((query_shape[0], total_dim))
+
+        # Build output projection
+        self.output_projection.build((query_shape[0], total_dim))
 
         super().build(input_shape)
 
@@ -632,20 +840,23 @@ class ContextualMemoryBank(keras.layers.Layer):
         # 1. Memory Access Interface - retrieve from KV store
         memory_output = self.memory_store(query, training=training)
 
-        # 2. Long-Term Association Module - process concept graph
+        # 2. Graph Neural Network - process concept relationships
         graph_output = self.graph_network(concept_graph, training=training)
 
         # 3. Temporal Context Encoder - encode temporal sequences
         temporal_output = self.temporal_encoder(temporal_sequence, training=training)
 
+        # Prepare features for integration
         # Average temporal output across sequence dimension for integration
         temporal_summary = ops.mean(temporal_output, axis=1)
 
-        # Squeeze graph output if it has singleton dimensions
-        if len(ops.shape(graph_output)) > 2:
+        # Process graph output - handle different aggregation types
+        if self.config.graph_aggregation in ['mean', 'max', 'sum']:
+            # Graph output is already aggregated to (batch_size, 1, concept_dim)
             graph_summary = ops.squeeze(graph_output, axis=1)
         else:
-            graph_summary = graph_output
+            # For attention aggregation, take mean across nodes
+            graph_summary = ops.mean(graph_output, axis=1)
 
         # 4. Integration - combine all outputs
         concatenated = ops.concatenate([
@@ -654,8 +865,8 @@ class ContextualMemoryBank(keras.layers.Layer):
             temporal_summary
         ], axis=-1)
 
-        integrated_features = self.integration_layer(concatenated)
-        integrated_output = self.output_projection(integrated_features)
+        integrated_features = self.integration_layer(concatenated, training=training)
+        integrated_output = self.output_projection(integrated_features, training=training)
 
         # Return comprehensive outputs for downstream use
         return {
@@ -664,29 +875,6 @@ class ContextualMemoryBank(keras.layers.Layer):
             'graph_output': graph_output,
             'temporal_output': temporal_output
         }
-
-    def update_memories(self, new_associations: List[Tuple[keras.KerasTensor, keras.KerasTensor]]) -> None:
-        """Update memory bank with new associations.
-
-        WARNING: This is a non-operational placeholder method. Memory updates in neural
-        networks occur through the standard training process via backpropagation, not
-        through explicit update calls.
-
-        To properly update memories:
-        1. Design your training data to include memory-relevant examples
-        2. Use appropriate loss functions that encourage correct memory associations
-        3. Train the entire model end-to-end using standard optimizers
-        4. The memory weights will be updated automatically through gradient descent
-
-        This method exists for API completeness but does not perform actual updates.
-
-        Args:
-            new_associations: List of (key, value) pairs to add to memory (unused in placeholder)
-        """
-        logger.warning(f"update_memories called - this is a placeholder. Memory updates occur through training.")
-        logger.info(f"Would process {len(new_associations)} new associations during training")
-        for key, value in new_associations:
-            self.memory_store.update_memory(key, value, self.config.memory_update_rate)
 
     def get_memory_state(self) -> Dict[str, keras.KerasTensor]:
         """Get current memory state for analysis or visualization.
@@ -699,14 +887,17 @@ class ContextualMemoryBank(keras.layers.Layer):
             'memory_values': self.memory_store.memory_values
         }
 
-    def compute_output_shape(self, input_shape) -> Dict[str, Tuple[int, ...]]:
+    def compute_output_shape(self, input_shape: Dict[str, Any]) -> Dict[str, Tuple[Optional[int], ...]]:
         """Compute output shapes."""
         batch_size = input_shape.get('query', [None])[0]
+        node_features_shape, _ = input_shape.get('concept_graph', ([None, None, None], [None, None, None]))
+        temporal_shape = input_shape.get('temporal_sequence', [None, None, None])
+
         return {
             'integrated_output': (batch_size, self.config.memory_dim),
             'memory_output': (batch_size, self.config.memory_dim),
-            'graph_output': (batch_size, 1, self.config.concept_dim),
-            'temporal_output': (batch_size, self.config.max_sequence_length, self.config.temporal_dim)
+            'graph_output': (node_features_shape[0], node_features_shape[1], self.config.concept_dim),
+            'temporal_output': (temporal_shape[0], temporal_shape[1], self.config.temporal_dim)
         }
 
     def get_config(self) -> Dict[str, Any]:
@@ -726,6 +917,10 @@ class ContextualMemoryBank(keras.layers.Layer):
                 "use_layer_norm": self.config.use_layer_norm,
                 "memory_update_rate": self.config.memory_update_rate,
                 "graph_aggregation": self.config.graph_aggregation,
+                "graph_message_passing": self.config.graph_message_passing,
+                "graph_normalization": self.config.graph_normalization,
+                "graph_activation": self.config.graph_activation,
+                "temporal_normalization": self.config.temporal_normalization,
             }
         })
         return config
@@ -736,15 +931,7 @@ class ContextualMemoryBank(keras.layers.Layer):
         memory_config = MemoryBankConfig(**config.pop("config", {}))
         return cls(config=memory_config, **config)
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration."""
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build from configuration."""
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
+# ---------------------------------------------------------------------
 
 def create_contextual_memory_model(
         config: Optional[MemoryBankConfig] = None,
@@ -753,16 +940,32 @@ def create_contextual_memory_model(
     """Create a complete model with Contextual Memory Bank.
 
     Args:
-        config: Memory bank configuration
+        config: Memory bank configuration. If None, uses default config.
         include_downstream_modules: Whether to include example downstream modules
 
     Returns:
         Keras model with contextual memory bank
+
+    Example:
+        ```python
+        # Create with default configuration
+        model = create_contextual_memory_model()
+
+        # Create with custom configuration
+        config = MemoryBankConfig(
+            memory_dim=512,
+            concept_dim=256,
+            temporal_dim=512,
+            num_graph_layers=4,
+            graph_message_passing='gat'
+        )
+        model = create_contextual_memory_model(config=config)
+        ```
     """
     if config is None:
         config = MemoryBankConfig()
 
-    # Define inputs
+    # Define inputs with proper shapes
     query_input = keras.Input(shape=(config.concept_dim,), name='query')
     node_features_input = keras.Input(shape=(None, config.concept_dim), name='node_features')
     adjacency_input = keras.Input(shape=(None, None), name='adjacency_matrix')
@@ -781,12 +984,17 @@ def create_contextual_memory_model(
     outputs = {'memory_bank_outputs': memory_outputs}
 
     if include_downstream_modules:
-        # Example downstream modules
+        # Example downstream modules using framework components
 
-        # Decision engine
-        decision_features = keras.layers.Dense(
-            256, activation='relu', name='decision_features'
+        # Decision engine with MLPBlock
+        decision_features = MLPBlock(
+            hidden_dim=256,
+            output_dim=128,
+            activation='relu',
+            dropout_rate=config.dropout_rate,
+            name='decision_mlp'
         )(memory_outputs['integrated_output'])
+
         decision_output = keras.layers.Dense(
             10, activation='softmax', name='decision_output'
         )(decision_features)
@@ -796,6 +1004,7 @@ def create_contextual_memory_model(
         prediction_features = keras.layers.Dense(
             128, activation='relu', name='prediction_features'
         )(memory_outputs['integrated_output'])
+
         prediction_output = keras.layers.Dense(
             1, name='prediction_output'
         )(prediction_features)
@@ -809,54 +1018,8 @@ def create_contextual_memory_model(
 
     logger.info("Created Contextual Memory Bank model with components:")
     logger.info(f"- Memory slots: {config.num_memory_slots}")
-    logger.info(f"- Graph layers: {config.num_graph_layers}")
+    logger.info(f"- Graph layers: {config.num_graph_layers} ({config.graph_message_passing})")
     logger.info(f"- Temporal layers: {config.num_temporal_layers}")
     logger.info(f"- Memory dimension: {config.memory_dim}")
 
     return model
-
-
-# Example usage and testing
-if __name__ == "__main__":
-    # Create configuration
-    config = MemoryBankConfig(
-        memory_dim=256,
-        concept_dim=128,
-        temporal_dim=256,
-        num_memory_slots=500,
-        num_graph_layers=2,
-        num_temporal_heads=4,
-        num_temporal_layers=3,
-        max_sequence_length=64
-    )
-
-    # Create model
-    model = create_contextual_memory_model(config, include_downstream_modules=True)
-
-    # Print model summary
-    print("Contextual Memory Bank Model:")
-    model.summary()
-
-    # Create sample data
-    batch_size = 2
-    num_nodes = 10
-    seq_length = 20
-
-    sample_query = np.random.randn(batch_size, config.concept_dim)
-    sample_nodes = np.random.randn(batch_size, num_nodes, config.concept_dim)
-    # Create adjacency matrix and normalize it for stable GNN training
-    sample_adjacency = np.random.rand(batch_size, num_nodes, num_nodes)
-    sample_adjacency = normalize_adjacency_matrix(sample_adjacency, normalization='symmetric')
-    sample_temporal = np.random.randn(batch_size, seq_length, config.temporal_dim)
-
-    # Test model
-    outputs = model([sample_query, sample_nodes, sample_adjacency, sample_temporal])
-
-    print("\nOutput shapes:")
-    for key, output in outputs.items():
-        if isinstance(output, dict):
-            print(f"{key}:")
-            for sub_key, sub_output in output.items():
-                print(f"  {sub_key}: {sub_output.shape}")
-        else:
-            print(f"{key}: {output.shape}")
