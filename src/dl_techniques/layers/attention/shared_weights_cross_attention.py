@@ -1,5 +1,3 @@
-"""Shared weights cross-attention for multi-modal processing."""
-
 import keras
 from keras import ops
 from typing import Any, List, Union, Tuple, Optional

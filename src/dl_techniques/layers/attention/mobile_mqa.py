@@ -58,6 +58,7 @@ import keras
 from keras import ops
 from typing import Tuple, Optional, Any, Dict, Union
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class MobileMQA(keras.layers.Layer):
@@ -313,3 +314,5 @@ class MobileMQA(keras.layers.Layer):
             }
         )
         return config
+
+# ---------------------------------------------------------------------
