@@ -44,9 +44,10 @@ from typing import Optional, Union, Tuple, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class PatchEmbedding2D(keras.layers.Layer):
@@ -56,10 +57,14 @@ class PatchEmbedding2D(keras.layers.Layer):
     This is commonly used as the first layer in Vision Transformers to convert
     images into sequences of patch embeddings.
 
+    This layer follows the modern Keras 3 pattern where sub-layers are created in
+    __init__() and explicitly built in build() for robust serialization.
+
     Args:
         patch_size: Size of patches to split the input image into. Can be an integer
             for square patches or a tuple (height, width) for rectangular patches.
-        embed_dim: Embedding dimension for each patch.
+            Must be positive.
+        embed_dim: Embedding dimension for each patch. Must be positive.
         kernel_initializer: Initializer for the projection matrix. Defaults to
             "glorot_normal".
         kernel_regularizer: Optional regularizer function for the projection matrix.
@@ -67,8 +72,7 @@ class PatchEmbedding2D(keras.layers.Layer):
         bias_regularizer: Optional regularizer function for the bias vector.
         activation: Activation function to apply after patch projection. Defaults
             to "linear" (no activation).
-        use_bias: Boolean, whether to use bias in the projection layer.
-        name: Optional name for the layer.
+        use_bias: Boolean, whether to use bias in the projection layer. Defaults to True.
         **kwargs: Additional layer arguments.
 
     Input shape:
@@ -79,21 +83,25 @@ class PatchEmbedding2D(keras.layers.Layer):
         3D tensor with shape: `(batch_size, num_patches, embed_dim)` where
         num_patches = (height // patch_height) * (width // patch_width).
 
-    Returns:
-        A tensor representing the patch embeddings.
-
     Raises:
-        ValueError: If input dimensions are not divisible by patch dimensions.
+        ValueError: If patch_size or embed_dim are not positive.
+        ValueError: If input dimensions are not divisible by patch dimensions during call.
 
     Example:
-        >>> # Create patch embedding layer
-        >>> patch_embed = PatchEmbedding2D(patch_size=16, embed_dim=768)
-        >>> # Input image
-        >>> x = tf.random.normal([4, 224, 224, 3])  # Standard ImageNet size
-        >>> # Convert to patches
-        >>> patches = patch_embed(x)
-        >>> print(patches.shape)
-        (4, 196, 768)  # 196 = 14*14 patches
+        ```python
+        # Create patch embedding layer
+        patch_embed = PatchEmbedding2D(patch_size=16, embed_dim=768)
+
+        # Input image
+        inputs = keras.Input(shape=(224, 224, 3))  # Standard ImageNet size
+
+        # Convert to patches
+        patches = patch_embed(inputs)
+        print(patches.shape)  # (None, 196, 768) - 196 = 14*14 patches
+
+        # In a model
+        model = keras.Model(inputs, patches)
+        ```
     """
 
     def __init__(
@@ -106,10 +114,9 @@ class PatchEmbedding2D(keras.layers.Layer):
         bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         activation: Optional[Union[str, callable]] = "linear",
         use_bias: bool = True,
-        name: Optional[str] = None,
         **kwargs: Any
     ) -> None:
-        super().__init__(name=name, **kwargs)
+        super().__init__(**kwargs)
 
         # Validate inputs
         if isinstance(patch_size, int):
@@ -124,7 +131,7 @@ class PatchEmbedding2D(keras.layers.Layer):
         if embed_dim <= 0:
             raise ValueError(f"embed_dim must be positive, got {embed_dim}")
 
-        # Store configuration parameters
+        # Store ALL configuration parameters
         self.embed_dim = embed_dim
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
@@ -133,37 +140,7 @@ class PatchEmbedding2D(keras.layers.Layer):
         self.activation = keras.activations.get(activation)
         self.use_bias = use_bias
 
-        # Will be initialized in build()
-        self.proj = None
-        self._build_input_shape = None
-
-        logger.info(f"Initialized PatchEmbedding2D with patch_size={self.patch_size}, "
-                    f"embed_dim={self.embed_dim}")
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer based on input shape.
-
-        Args:
-            input_shape: Shape of the input tensor (batch_size, height, width, channels).
-        """
-        # Store for serialization
-        self._build_input_shape = input_shape
-
-        # Validate input shape
-        if len(input_shape) != 4:
-            raise ValueError(f"Expected 4D input (batch_size, height, width, channels), "
-                             f"got {len(input_shape)}D input with shape {input_shape}")
-
-        # Validate that height and width are divisible by patch size
-        height, width = input_shape[1], input_shape[2]
-        if height is not None and height % self.patch_size[0] != 0:
-            raise ValueError(f"Input height ({height}) must be divisible by "
-                             f"patch height ({self.patch_size[0]})")
-        if width is not None and width % self.patch_size[1] != 0:
-            raise ValueError(f"Input width ({width}) must be divisible by "
-                             f"patch width ({self.patch_size[1]})")
-
-        # Create the projection layer
+        # CREATE sub-layer in __init__ (modern Keras 3 pattern)
         self.proj = keras.layers.Conv2D(
             filters=self.embed_dim,
             kernel_size=self.patch_size,
@@ -178,9 +155,33 @@ class PatchEmbedding2D(keras.layers.Layer):
             name="projection"
         )
 
-        # Build the projection layer
+        logger.info(f"Initialized PatchEmbedding2D with patch_size={self.patch_size}, "
+                    f"embed_dim={self.embed_dim}")
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the layer and its sub-layers.
+
+        Args:
+            input_shape: Shape of the input tensor (batch_size, height, width, channels).
+        """
+        # Validate input shape
+        if len(input_shape) != 4:
+            raise ValueError(f"Expected 4D input (batch_size, height, width, channels), "
+                             f"got {len(input_shape)}D input with shape {input_shape}")
+
+        # Validate that height and width are divisible by patch size (if known)
+        height, width = input_shape[1], input_shape[2]
+        if height is not None and height % self.patch_size[0] != 0:
+            raise ValueError(f"Input height ({height}) must be divisible by "
+                             f"patch height ({self.patch_size[0]})")
+        if width is not None and width % self.patch_size[1] != 0:
+            raise ValueError(f"Input width ({width}) must be divisible by "
+                             f"patch width ({self.patch_size[1]})")
+
+        # CRITICAL: Explicitly build sub-layers for robust serialization
         self.proj.build(input_shape)
 
+        # Always call parent build at the end
         super().build(input_shape)
 
         logger.info(f"Built PatchEmbedding2D with input_shape={input_shape}")
@@ -197,7 +198,7 @@ class PatchEmbedding2D(keras.layers.Layer):
             Embedded patches tensor of shape (batch_size, num_patches, embed_dim).
         """
         # Apply convolution to extract and embed patches
-        x = self.proj(inputs, training=training)  # (batch_size, h', w', embed_dim)
+        x = self.proj(inputs, training=training)  # (batch_size, h_patches, w_patches, embed_dim)
 
         # Get the spatial dimensions after convolution
         batch_size = ops.shape(x)[0]
@@ -241,7 +242,7 @@ class PatchEmbedding2D(keras.layers.Layer):
         """Return the configuration of the layer for serialization.
 
         Returns:
-            Dictionary containing the layer configuration.
+            Dictionary containing ALL __init__ parameters for proper serialization.
         """
         config = super().get_config()
         config.update({
@@ -256,61 +257,9 @@ class PatchEmbedding2D(keras.layers.Layer):
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the build configuration for proper serialization.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
-    @property
-    def num_patches(self) -> Optional[int]:
-        """Get the number of patches this layer will produce.
-
-        Returns:
-            Number of patches if input shape is known, None otherwise.
-        """
-        if self._build_input_shape is None:
-            return None
-
-        height, width = self._build_input_shape[1], self._build_input_shape[2]
-        if height is None or width is None:
-            return None
-
-        h_patches = height // self.patch_size[0]
-        w_patches = width // self.patch_size[1]
-        return h_patches * w_patches
-
-    def get_patch_grid_shape(self) -> Optional[Tuple[int, int]]:
-        """Get the grid shape of patches (height, width).
-
-        Returns:
-            Tuple of (h_patches, w_patches) if input shape is known, None otherwise.
-        """
-        if self._build_input_shape is None:
-            return None
-
-        height, width = self._build_input_shape[1], self._build_input_shape[2]
-        if height is None or width is None:
-            return None
-
-        h_patches = height // self.patch_size[0]
-        w_patches = width // self.patch_size[1]
-        return (h_patches, w_patches)
 
 # ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class PatchEmbedding1D(keras.layers.Layer):
@@ -319,14 +268,18 @@ class PatchEmbedding1D(keras.layers.Layer):
     Converts time series into patches and embeds them into a higher dimensional space.
     Supports overlapping patches through stride parameter.
 
+    This layer follows the modern Keras 3 pattern where sub-layers are created in
+    __init__() and explicitly built in build() for robust serialization.
+
     Args:
-        patch_size: Integer, size of each patch.
-        embed_dim: Integer, embedding dimension.
+        patch_size: Integer, size of each patch. Must be positive.
+        embed_dim: Integer, embedding dimension. Must be positive.
         stride: Integer, stride for patch extraction. If None, uses patch_size (non-overlapping).
+            Must be positive if provided.
         padding: String, padding mode ('same', 'valid', or 'causal'). Defaults to 'causal'.
-        use_bias: Boolean, whether to use bias in the embedding layer.
-        kernel_initializer: Initializer for the kernel weights.
-        bias_initializer: Initializer for the bias vector.
+        use_bias: Boolean, whether to use bias in the embedding layer. Defaults to True.
+        kernel_initializer: Initializer for the kernel weights. Defaults to "glorot_uniform".
+        bias_initializer: Initializer for the bias vector. Defaults to "zeros".
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
@@ -336,18 +289,27 @@ class PatchEmbedding1D(keras.layers.Layer):
         3D tensor with shape: `(batch_size, output_len, embed_dim)` where
         output_len depends on padding mode and stride.
 
-    Returns:
-        A tensor representing the patch embeddings.
+    Raises:
+        ValueError: If patch_size, embed_dim, or stride are not positive.
+        ValueError: If padding is not one of the allowed values.
 
     Example:
-        >>> # Create 1D patch embedding layer
-        >>> patch_embed = PatchEmbedding1d(patch_size=16, embed_dim=256)
-        >>> # Input time series
-        >>> x = tf.random.normal([4, 128, 64])  # batch_size=4, seq_len=128, features=64
-        >>> # Convert to patches
-        >>> patches = patch_embed(x)
-        >>> print(patches.shape)
-        (4, 8, 256)  # 8 patches from 128 timesteps
+        ```python
+        # Create 1D patch embedding layer
+        patch_embed = PatchEmbedding1D(patch_size=16, embed_dim=256)
+
+        # Input time series
+        inputs = keras.Input(shape=(128, 64))  # seq_len=128, features=64
+
+        # Convert to patches
+        patches = patch_embed(inputs)
+        print(patches.shape)  # (None, 8, 256) - 8 patches from 128 timesteps
+
+        # With overlapping patches
+        patch_embed_overlap = PatchEmbedding1D(patch_size=16, embed_dim=256, stride=8)
+        patches_overlap = patch_embed_overlap(inputs)
+        print(patches_overlap.shape)  # (None, 15, 256) - more patches due to overlap
+        ```
     """
 
     def __init__(
@@ -373,6 +335,7 @@ class PatchEmbedding1D(keras.layers.Layer):
         if padding not in ['same', 'valid', 'causal']:
             raise ValueError(f"padding must be one of ['same', 'valid', 'causal'], got {padding}")
 
+        # Store ALL configuration parameters
         self.patch_size = patch_size
         self.embed_dim = embed_dim
         self.stride = stride if stride is not None else patch_size
@@ -381,20 +344,7 @@ class PatchEmbedding1D(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
 
-        # Embedding layer will be initialized in build()
-        self.embedding = None
-        self._build_input_shape = None
-
-    def build(self, input_shape):
-        """Build the embedding layer."""
-        self._build_input_shape = input_shape
-
-        # Validate input shape
-        if len(input_shape) != 3:
-            raise ValueError(f"Expected 3D input (batch_size, seq_len, features), "
-                             f"got {len(input_shape)}D input with shape {input_shape}")
-
-        # Create 1D convolution layer for patch embedding
+        # CREATE sub-layer in __init__ (modern Keras 3 pattern)
         self.embedding = keras.layers.Conv1D(
             filters=self.embed_dim,
             kernel_size=self.patch_size,
@@ -406,11 +356,39 @@ class PatchEmbedding1D(keras.layers.Layer):
             name="patch_embedding"
         )
 
+        logger.info(f"Initialized PatchEmbedding1D with patch_size={self.patch_size}, "
+                    f"embed_dim={self.embed_dim}, stride={self.stride}")
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the layer and its sub-layers.
+
+        Args:
+            input_shape: Shape of the input tensor (batch_size, seq_len, features).
+        """
+        # Validate input shape
+        if len(input_shape) != 3:
+            raise ValueError(f"Expected 3D input (batch_size, seq_len, features), "
+                             f"got {len(input_shape)}D input with shape {input_shape}")
+
+        # CRITICAL: Explicitly build sub-layers for robust serialization
         self.embedding.build(input_shape)
+
+        # Always call parent build at the end
         super().build(input_shape)
 
-    def call(self, inputs, training=None):
-        """Convert inputs to patches and embed them."""
+        logger.info(f"Built PatchEmbedding1D with input_shape={input_shape}")
+
+    def call(self, inputs, training: Optional[bool] = None) -> keras.KerasTensor:
+        """Convert inputs to patches and embed them.
+
+        Args:
+            inputs: Input tensor of shape (batch_size, seq_len, features).
+            training: Boolean indicating whether the layer should behave in
+                training mode or inference mode.
+
+        Returns:
+            Embedded patches tensor of shape (batch_size, output_len, embed_dim).
+        """
         # Handle NaN values by replacing with zeros
         x = ops.where(ops.isnan(inputs), 0.0, inputs)
 
@@ -419,8 +397,15 @@ class PatchEmbedding1D(keras.layers.Layer):
 
         return embedded
 
-    def compute_output_shape(self, input_shape):
-        """Compute output shape after patch embedding."""
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Compute output shape after patch embedding.
+
+        Args:
+            input_shape: Shape of the input tensor.
+
+        Returns:
+            Output shape tuple (batch_size, output_len, embed_dim).
+        """
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D input shape, got {len(input_shape)}D")
 
@@ -439,8 +424,12 @@ class PatchEmbedding1D(keras.layers.Layer):
 
         return (batch_size, output_len, self.embed_dim)
 
-    def get_config(self):
-        """Get layer configuration."""
+    def get_config(self) -> Dict[str, Any]:
+        """Get layer configuration for serialization.
+
+        Returns:
+            Dictionary containing ALL __init__ parameters for proper serialization.
+        """
         config = super().get_config()
         config.update({
             "patch_size": self.patch_size,
@@ -453,13 +442,5 @@ class PatchEmbedding1D(keras.layers.Layer):
         })
         return config
 
-    def get_build_config(self):
-        """Get build configuration."""
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config):
-        """Build from configuration."""
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------

@@ -18,7 +18,7 @@ from typing import Optional, Tuple, Dict, Any, List
 # ---------------------------------------------------------------------
 
 from ..utils.logger import logger
-from ..layers.yolo12 import ConvBlock, A2C2fBlock, C3k2Block
+from ..layers.yolo12_blocks import ConvBlock, A2C2fBlock, C3k2Block
 
 # ---------------------------------------------------------------------
 

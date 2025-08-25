@@ -68,27 +68,75 @@ class KANLinear(keras.layers.Layer):
     functions through B-spline coefficients.
 
     Args:
-        in_features: Number of input features.
-        out_features: Number of output features.
-        grid_size: Size of the grid for B-splines. Default is 5.
-        spline_order: Order of B-splines. Default is 3.
-        activation: Activation function name to use. Default is 'swish'.
-        regularization_factor: L2 regularization factor. Default is 0.01.
-        grid_range: Range for the grid as (min, max). Default is (-1, 1).
-        epsilon: Small constant for numerical stability. Default is 1e-7.
-        clip_value: Maximum absolute value for gradients. Default is 1e3.
-        use_residual: Whether to use residual connections. Default is True.
-        kernel_initializer: Initializer for base weights. Default is 'orthogonal'.
-        spline_initializer: Initializer for spline weights. Default is 'glorot_uniform'.
-        kernel_regularizer: Regularizer for base weights.
-        spline_regularizer: Regularizer for spline weights.
+        in_features: Integer, number of input features. Must be positive.
+        out_features: Integer, number of output features. Must be positive.
+        grid_size: Integer, size of the grid for B-splines. Must be >= spline_order. Defaults to 5.
+        spline_order: Integer, order of B-splines. Must be positive. Defaults to 3.
+        activation: String or callable, activation function name to use. Defaults to 'swish'.
+        regularization_factor: Float, L2 regularization factor. Must be non-negative. Defaults to 0.01.
+        grid_range: Tuple of two floats, range for the grid as (min, max). Defaults to (-1, 1).
+        epsilon: Float, small constant for numerical stability. Must be positive. Defaults to 1e-7.
+        clip_value: Float, maximum absolute value for gradients. Must be positive. Defaults to 1e3.
+        use_residual: Boolean, whether to use residual connections. Only effective when
+            in_features == out_features. Defaults to True.
+        kernel_initializer: String or Initializer, initializer for base weights.
+            Defaults to 'orthogonal'.
+        spline_initializer: String or Initializer, initializer for spline weights.
+            Defaults to 'glorot_uniform'.
+        kernel_regularizer: Optional regularizer for base weights. If None, uses L2 with
+            regularization_factor.
+        spline_regularizer: Optional regularizer for spline weights. If None, uses L2 with
+            regularization_factor.
         **kwargs: Additional keyword arguments passed to the parent class.
 
+    Input shape:
+        Tensor with shape `(batch_size, ..., in_features)`.
+
+    Output shape:
+        Tensor with shape `(batch_size, ..., out_features)`.
+
+    Attributes:
+        base_weight: Weight matrix for linear transformation of shape (in_features, out_features).
+        spline_weight: Weight tensor for B-spline coefficients of shape
+            (in_features, out_features, grid_size + spline_order - 1).
+        spline_scaler: Scaling factors for spline outputs of shape (in_features, out_features).
+
     Example:
-        >>> layer = KANLinear(in_features=10, out_features=5, grid_size=8)
-        >>> x = keras.random.normal((32, 10))
-        >>> y = layer(x)
-        >>> print(y.shape)  # (32, 5)
+        ```python
+        # Basic usage
+        layer = KANLinear(in_features=10, out_features=5)
+        inputs = keras.Input(shape=(10,))
+        outputs = layer(inputs)
+
+        # Advanced configuration
+        layer = KANLinear(
+            in_features=64,
+            out_features=32,
+            grid_size=8,
+            spline_order=3,
+            activation='gelu',
+            regularization_factor=0.001,
+            grid_range=(-2, 2),
+            kernel_regularizer=keras.regularizers.L1L2(l1=1e-5, l2=1e-4)
+        )
+
+        # In a model
+        inputs = keras.Input(shape=(784,))
+        x = KANLinear(256, activation='swish')(inputs)
+        x = KANLinear(128, activation='gelu')(x)
+        outputs = KANLinear(10, activation='softmax')(x)
+        model = keras.Model(inputs, outputs)
+        ```
+
+    Raises:
+        ValueError: If in_features or out_features are not positive.
+        ValueError: If grid_size < spline_order.
+        ValueError: If grid_range[0] >= grid_range[1].
+
+    Note:
+        This implementation uses simplified B-spline basis functions based on Gaussian-like
+        functions for enhanced numerical stability. The residual connection is only applied
+        when input and output dimensions match.
     """
 
     def __init__(
@@ -131,6 +179,9 @@ class KANLinear(keras.layers.Layer):
         Raises:
             ValueError: If features are not positive, grid size < spline order, or invalid grid range.
         """
+        super().__init__(**kwargs)
+
+        # Validate inputs
         if in_features <= 0 or out_features <= 0:
             raise ValueError("Features must be positive integers")
         if grid_size < spline_order:
@@ -138,8 +189,7 @@ class KANLinear(keras.layers.Layer):
         if grid_range[0] >= grid_range[1]:
             raise ValueError("Invalid grid range")
 
-        super().__init__(**kwargs)
-
+        # Store ALL configuration parameters
         self.in_features = in_features
         self.out_features = out_features
         self.grid_size = grid_size
@@ -154,35 +204,40 @@ class KANLinear(keras.layers.Layer):
         # Store initializers and regularizers
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.spline_initializer = keras.initializers.get(spline_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer or keras.regularizers.L2(regularization_factor))
-        self.spline_regularizer = keras.regularizers.get(spline_regularizer or keras.regularizers.L2(regularization_factor))
+        self.kernel_regularizer = keras.regularizers.get(
+            kernel_regularizer or keras.regularizers.L2(regularization_factor)
+        )
+        self.spline_regularizer = keras.regularizers.get(
+            spline_regularizer or keras.regularizers.L2(regularization_factor)
+        )
 
         # Initialize activation function
         self.activation_fn = keras.activations.get(activation)
 
-        # Initialize weights to None - will be created in build()
+        # Initialize weight attributes - will be created in build()
         self.base_weight = None
         self.spline_weight = None
         self.spline_scaler = None
         self._cached_grid = None
-        self._build_input_shape = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer weights and setup internal state.
 
         Args:
             input_shape: Shape of the input tensor.
-        """
-        # Store for serialization
-        self._build_input_shape = input_shape
 
+        Raises:
+            ValueError: If input is not at least 2D or dimension mismatch.
+        """
         # Validate input shape
         if len(input_shape) < 2:
             raise ValueError(f"Input must be at least 2D, got shape {input_shape}")
 
         input_dim = input_shape[-1]
         if input_dim != self.in_features:
-            raise ValueError(f"Input dimension {input_dim} doesn't match in_features {self.in_features}")
+            raise ValueError(
+                f"Input dimension {input_dim} doesn't match in_features {self.in_features}"
+            )
 
         # Initialize base weights with orthogonal initialization for better gradient flow
         self.base_weight = self.add_weight(
@@ -228,8 +283,6 @@ class KANLinear(keras.layers.Layer):
             grid_points = ops.linspace(grid_min, grid_max, self.grid_size)
             self._cached_grid = ops.cast(grid_points, dtype="float32")
 
-
-
     def _normalize_inputs(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Normalize inputs to prevent numerical issues.
 
@@ -237,7 +290,7 @@ class KANLinear(keras.layers.Layer):
             x: Input tensor to normalize.
 
         Returns:
-            Normalized input tensor.
+            Normalized input tensor scaled to [0, 1] range.
         """
         # Clip extreme values
         x = ops.clip(x, self.grid_range[0], self.grid_range[1])
@@ -256,11 +309,12 @@ class KANLinear(keras.layers.Layer):
         """Compute B-spline basis functions with enhanced numerical stability.
 
         Args:
-            x: Input tensor.
+            x: Input tensor of shape (batch_size, in_features).
             safe_mode: Whether to use additional numerical safeguards.
 
         Returns:
-            Tensor of B-spline basis function values with shape [batch, in_features, num_basis_functions].
+            Tensor of B-spline basis function values with shape
+            (batch_size, in_features, num_basis_functions).
         """
         x_norm = self._normalize_inputs(x)
 
@@ -284,11 +338,13 @@ class KANLinear(keras.layers.Layer):
         basis_centers = ops.reshape(basis_centers, (1, 1, num_basis))
 
         # Expand dimensions for broadcasting
-        local_x_expanded = ops.expand_dims(local_x, axis=-1)  # [batch, in_features, 1]
+        local_x_expanded = ops.expand_dims(local_x, axis=-1)  # (batch, in_features, 1)
 
         # Compute Gaussian-like basis functions for stability
         sigma = 1.0 / num_basis
-        basis_values = ops.exp(-ops.square(local_x_expanded - basis_centers) / (2 * sigma * sigma))
+        basis_values = ops.exp(
+            -ops.square(local_x_expanded - basis_centers) / (2 * sigma * sigma)
+        )
 
         if safe_mode:
             basis_values = ops.clip(basis_values, self.epsilon, 1.0 - self.epsilon)
@@ -299,15 +355,19 @@ class KANLinear(keras.layers.Layer):
 
         return basis_values
 
-    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """Forward pass with enhanced stability and edge case handling.
 
         Args:
-            inputs: Input tensor.
-            training: Whether layer is in training mode.
+            inputs: Input tensor of shape (batch_size, ..., in_features).
+            training: Boolean indicating whether the layer is in training mode.
 
         Returns:
-            Output tensor after KAN transformation.
+            Output tensor of shape (batch_size, ..., out_features) after KAN transformation.
         """
         # Handle empty inputs using ops.cond for graph compatibility
         input_size = ops.size(inputs)
@@ -321,22 +381,24 @@ class KANLinear(keras.layers.Layer):
 
             # Compute spline transformation
             spline_basis = self._compute_spline_basis(inputs, safe_mode=training)
-            # spline_basis shape: [batch, in_features, num_basis_functions]
+            # spline_basis shape: (batch, in_features, num_basis_functions)
 
             # Compute spline output using tensor operations
-            # spline_weight shape: [in_features, out_features, num_basis_functions]
+            # spline_weight shape: (in_features, out_features, num_basis_functions)
 
-            # Expand spline_basis to [batch, in_features, 1, num_basis_functions]
+            # Expand spline_basis to (batch, in_features, 1, num_basis_functions)
             spline_basis_expanded = ops.expand_dims(spline_basis, axis=2)
 
-            # Expand spline_weight to [1, in_features, out_features, num_basis_functions]
+            # Expand spline_weight to (1, in_features, out_features, num_basis_functions)
             spline_weight_expanded = ops.expand_dims(self.spline_weight, axis=0)
 
             # Element-wise multiplication and sum over basis functions
-            # [batch, in_features, out_features, num_basis_functions] -> [batch, in_features, out_features]
-            spline_contributions = ops.sum(spline_basis_expanded * spline_weight_expanded, axis=-1)
+            # (batch, in_features, out_features, num_basis_functions) -> (batch, in_features, out_features)
+            spline_contributions = ops.sum(
+                spline_basis_expanded * spline_weight_expanded, axis=-1
+            )
 
-            # Sum over input features to get [batch, out_features]
+            # Sum over input features to get (batch, out_features)
             spline_output = ops.sum(spline_contributions, axis=1)
 
             # Scale spline output
@@ -372,19 +434,20 @@ class KANLinear(keras.layers.Layer):
         """Compute the output shape of the layer.
 
         Args:
-            input_shape: Shape of the input.
+            input_shape: Shape of the input tensor.
 
         Returns:
-            Output shape.
+            Output shape tuple with the last dimension changed to out_features.
         """
         input_shape_list = list(input_shape)
-        return tuple(input_shape_list[:-1] + [self.out_features])
+        input_shape_list[-1] = self.out_features
+        return tuple(input_shape_list)
 
     def get_config(self) -> Dict[str, Any]:
         """Return the config of the layer with all parameters.
 
         Returns:
-            Dictionary containing the layer configuration.
+            Dictionary containing the layer configuration for serialization.
         """
         config = super().get_config()
         config.update({
@@ -404,24 +467,5 @@ class KANLinear(keras.layers.Layer):
             "spline_regularizer": keras.regularizers.serialize(self.spline_regularizer),
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the config needed to build the layer from a config.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------

@@ -6,8 +6,7 @@ from typing import Optional, Any, Dict, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from .continuous_sin_cos_embed import ContinuousSinCosEmbed
+from ..embedding.continuous_sin_cos_embedding import ContinuousSinCosEmbed
 
 # ---------------------------------------------------------------------
 

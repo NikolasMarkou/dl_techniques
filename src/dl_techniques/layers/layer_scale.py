@@ -48,7 +48,7 @@ Common Use Cases:
 import keras
 from keras import ops
 from enum import Enum
-from typing import Dict, Any, Optional, Union, Tuple, Literal
+from typing import Dict, Any, Optional, Union, Tuple
 
 # ---------------------------------------------------------------------
 

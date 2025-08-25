@@ -71,18 +71,17 @@ and for building custom Transformer variants.
 """
 
 import keras
-from keras import layers, initializers, regularizers, activations, ops
+from keras import layers, initializers, regularizers
 from typing import Optional, Union, Any, Dict, Tuple, Literal, Callable
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
-
 from .norms.rms_norm import RMSNorm
 from .norms.band_rms import BandRMS
-from .dynamic_tanh import DynamicTanh
+from .stochastic_depth import StochasticDepth
+from .activations.dynamic_tanh import DynamicTanh
 
 from .ffn.mlp import MLPBlock
 from .ffn.glu_ffn import GLUFFN
@@ -94,8 +93,6 @@ from .ffn.residual_block import ResidualBlock
 from .attention.window_attention import WindowAttention
 from .attention.group_query_attention import GroupedQueryAttention
 from .attention.differential_attention import DifferentialMultiHeadAttention
-
-from .stochastic_depth import StochasticDepth
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety

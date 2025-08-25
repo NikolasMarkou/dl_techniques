@@ -18,42 +18,100 @@ from .attention.window_attention import WindowAttention
 
 @keras.saving.register_keras_serializable()
 class SwinTransformerBlock(keras.layers.Layer):
-    """Swin Transformer Block with windowed multi-head self-attention.
+    """
+    Swin Transformer Block with windowed multi-head self-attention.
 
     This layer implements a Swin Transformer block that performs windowed multi-head
     self-attention followed by an MLP. It supports shifted windows for cross-window
     connections and includes optional stochastic depth regularization.
 
+    The block follows the architecture from "Swin Transformer: Hierarchical Vision
+    Transformer using Shifted Windows" by Liu et al. (2021). It processes input
+    through the following sequence:
+    1. Layer normalization
+    2. Windowed multi-head self-attention (with optional shifting)
+    3. Stochastic depth + residual connection
+    4. Layer normalization
+    5. MLP (Swin MLP variant)
+    6. Stochastic depth + residual connection
+
+    Key Features:
+    - Window-based attention for computational efficiency
+    - Optional shifted windows for cross-window connections
+    - Stochastic depth regularization for deep networks
+    - Configurable MLP expansion ratio
+
     Args:
-        dim: Number of input channels.
-        num_heads: Number of attention heads.
-        window_size: Window size for attention. Must be positive. Defaults to 8.
-        shift_size: Shift size for shifted window attention. Must be non-negative
-            and less than window_size. Defaults to 0.
-        mlp_ratio: Ratio of mlp hidden dim to embedding dim. Must be positive.
+        dim: Integer, number of input channels. Must be positive.
+        num_heads: Integer, number of attention heads. Must be positive and
+            divide dim evenly.
+        window_size: Integer, window size for attention. Must be positive.
+            Defaults to 8.
+        shift_size: Integer, shift size for shifted window attention. Must be
+            non-negative and less than window_size. Defaults to 0.
+        mlp_ratio: Float, ratio of mlp hidden dim to embedding dim. Must be positive.
             Defaults to 4.0.
-        qkv_bias: If True, add a learnable bias to query, key, value. Defaults to True.
-        drop: Dropout rate. Must be in [0, 1). Defaults to 0.0.
-        attn_dropout_rate: Attention dropout rate. Must be in [0, 1). Defaults to 0.0.
-        drop_path: Stochastic depth rate. Must be in [0, 1). Defaults to 0.0.
-        activation: Activation layer. Defaults to "gelu".
-        use_bias: Use bias in layer normalization and projections. Defaults to True.
-        kernel_initializer: Initializer for the kernel weights. Defaults to "glorot_uniform".
-        bias_initializer: Initializer for the bias vector. Defaults to "zeros".
+        qkv_bias: Boolean, if True, add a learnable bias to query, key, value.
+            Defaults to True.
+        dropout_rate: Float, dropout rate for MLP and projection. Must be in [0, 1).
+            Defaults to 0.0.
+        attn_dropout_rate: Float, attention dropout rate. Must be in [0, 1).
+            Defaults to 0.0.
+        drop_path: Float, stochastic depth rate. Must be in [0, 1). Defaults to 0.0.
+        activation: String or callable, activation function for MLP. Defaults to "gelu".
+        use_bias: Boolean, whether to use bias in layer normalization and projections.
+            Defaults to True.
+        kernel_initializer: String or initializer, initializer for the kernel weights.
+            Defaults to "glorot_uniform".
+        bias_initializer: String or initializer, initializer for the bias vector.
+            Defaults to "zeros".
         kernel_regularizer: Optional regularizer for kernel weights.
         bias_regularizer: Optional regularizer for bias vector.
         activity_regularizer: Optional regularizer for layer output.
         **kwargs: Additional keyword arguments for Layer base class.
 
     Input shape:
-        4D tensor with shape (batch_size, height, width, channels).
+        4D tensor with shape `(batch_size, height, width, channels)`
 
     Output shape:
-        4D tensor with shape (batch_size, height, width, channels).
+        4D tensor with shape `(batch_size, height, width, channels)`
+
+    Example:
+        ```python
+        # Basic usage
+        block = SwinTransformerBlock(dim=96, num_heads=3, window_size=7)
+        inputs = keras.Input(shape=(224, 224, 96))
+        outputs = block(inputs)
+
+        # With shifted windows and stochastic depth
+        block = SwinTransformerBlock(
+            dim=192,
+            num_heads=6,
+            window_size=7,
+            shift_size=3,  # Half of window_size
+            drop_path=0.1
+        )
+
+        # Custom configuration
+        block = SwinTransformerBlock(
+            dim=384,
+            num_heads=12,
+            window_size=8,
+            mlp_ratio=6.0,
+            dropout_rate=0.1,
+            attn_dropout_rate=0.1,
+            activation='swish'
+        )
+        ```
 
     Raises:
         ValueError: If window_size <= 0, shift_size < 0, shift_size >= window_size,
-            mlp_ratio <= 0, or dropout rates are not in valid range.
+            mlp_ratio <= 0, dim <= 0, num_heads <= 0, or dropout rates are not
+            in valid range [0, 1).
+
+    References:
+        - Swin Transformer: Hierarchical Vision Transformer using Shifted Windows
+          (Liu et al., 2021): https://arxiv.org/abs/2103.14030
     """
 
     def __init__(
@@ -67,7 +125,7 @@ class SwinTransformerBlock(keras.layers.Layer):
             dropout_rate: float = 0.0,
             attn_dropout_rate: float = 0.0,
             drop_path: float = 0.0,
-            activation: str = "gelu",
+            activation: Union[str, callable] = "gelu",
             use_bias: bool = True,
             kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
             bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
@@ -82,6 +140,12 @@ class SwinTransformerBlock(keras.layers.Layer):
         )
 
         # Validate arguments
+        if dim <= 0:
+            raise ValueError(f"dim must be positive, got {dim}")
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
+        if dim % num_heads != 0:
+            raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
         if window_size <= 0:
             raise ValueError(f"window_size must be positive, got {window_size}")
         if shift_size < 0:
@@ -91,13 +155,13 @@ class SwinTransformerBlock(keras.layers.Layer):
         if mlp_ratio <= 0:
             raise ValueError(f"mlp_ratio must be positive, got {mlp_ratio}")
         if not (0 <= dropout_rate < 1):
-            raise ValueError(f"drop must be in [0, 1), got {dropout_rate}")
+            raise ValueError(f"dropout_rate must be in [0, 1), got {dropout_rate}")
         if not (0 <= attn_dropout_rate < 1):
-            raise ValueError(f"attn_drop must be in [0, 1), got {attn_dropout_rate}")
+            raise ValueError(f"attn_dropout_rate must be in [0, 1), got {attn_dropout_rate}")
         if not (0 <= drop_path < 1):
             raise ValueError(f"drop_path must be in [0, 1), got {drop_path}")
 
-        # Store configuration parameters
+        # Store ALL configuration parameters
         self.dim = dim
         self.num_heads = num_heads
         self.window_size = window_size
@@ -116,38 +180,10 @@ class SwinTransformerBlock(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # Initialize layers to None - will be created in build()
-        self.norm1 = None
-        self.attn = None
-        self.drop_path = None
-        self.norm2 = None
-        self.mlp = None
+        # CREATE all sub-layers in __init__ (they are unbuilt)
+        # Following Pattern 2: Composite Layer from the guide
 
-        # Store build input shape for serialization
-        self._build_input_shape = None
-
-        logger.debug(f"Initialized SwinTransformerBlock with dim={dim}, num_heads={num_heads}, "
-                     f"window_size={window_size}, shift_size={shift_size}")
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer's weights and sublayers.
-
-        Args:
-            input_shape: Shape tuple of the input tensor (B, H, W, C).
-
-        Raises:
-            ValueError: If input_shape is not 4D or channels dimension doesn't match dim.
-        """
-        if len(input_shape) != 4:
-            raise ValueError(f"Expected 4D input shape (B, H, W, C), got {input_shape}")
-
-        if input_shape[-1] is not None and input_shape[-1] != self.dim:
-            raise ValueError(f"Input channels ({input_shape[-1]}) must match dim ({self.dim})")
-
-        # Store input shape for serialization
-        self._build_input_shape = input_shape
-
-        # Create normalization layers
+        # Layer normalization layers
         self.norm1 = keras.layers.LayerNormalization(
             epsilon=1e-5,
             center=self.use_bias,
@@ -164,7 +200,7 @@ class SwinTransformerBlock(keras.layers.Layer):
             name="norm2"
         )
 
-        # Create attention layer
+        # Window attention layer
         self.attn = WindowAttention(
             dim=self.dim,
             window_size=self.window_size,
@@ -180,14 +216,16 @@ class SwinTransformerBlock(keras.layers.Layer):
             name="attn"
         )
 
-        # Create stochastic depth layer if needed
+        # Stochastic depth layer (optional)
         if self.drop_path_rate > 0.0:
-            self.drop_path = StochasticDepth(
+            self.drop_path_layer = StochasticDepth(
                 drop_path_rate=self.drop_path_rate,
                 name="drop_path"
             )
+        else:
+            self.drop_path_layer = None
 
-        # Create MLP layer
+        # MLP layer
         mlp_hidden_dim = int(self.dim * self.mlp_ratio)
         self.mlp = SwinMLP(
             hidden_dim=mlp_hidden_dim,
@@ -202,29 +240,54 @@ class SwinTransformerBlock(keras.layers.Layer):
             name="mlp"
         )
 
-        # ------------------- FIX STARTS HERE -------------------
-        # A parent layer's build() method MUST build all its children.
-        # This ensures they are ready to receive weights during model loading.
+        logger.debug(f"Initialized SwinTransformerBlock with dim={dim}, num_heads={num_heads}, "
+                     f"window_size={window_size}, shift_size={shift_size}")
 
-        # norm1, norm2, mlp, and drop_path all operate on the main input shape.
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build the layer and all its sub-layers.
+
+        CRITICAL: Explicitly build each sub-layer for robust serialization.
+        This ensures all weight variables exist before weight restoration.
+
+        Args:
+            input_shape: Shape tuple of the input tensor (B, H, W, C).
+
+        Raises:
+            ValueError: If input_shape is not 4D or channels dimension doesn't match dim.
+        """
+        if len(input_shape) != 4:
+            raise ValueError(f"Expected 4D input shape (B, H, W, C), got {input_shape}")
+
+        if input_shape[-1] is not None and input_shape[-1] != self.dim:
+            raise ValueError(f"Input channels ({input_shape[-1]}) must match dim ({self.dim})")
+
+        # Build sub-layers in computational order
+        # Normalization and MLP layers operate on the main input shape
         self.norm1.build(input_shape)
         self.norm2.build(input_shape)
         self.mlp.build(input_shape)
-        if self.drop_path is not None:
-            self.drop_path.build(input_shape)
 
-        # Explicitly build the attention sublayer to prevent "out of scope" errors
-        # during graph tracing. The attention layer expects an input of shape
-        # (batch, num_tokens, channels).
+        # Build stochastic depth layer if it exists
+        if self.drop_path_layer is not None:
+            self.drop_path_layer.build(input_shape)
+
+        # Attention layer expects windowed input shape
+        # After window partitioning: (batch * num_windows, window_size * window_size, channels)
         attn_input_shape = (None, self.window_size * self.window_size, self.dim)
         self.attn.build(attn_input_shape)
-        # -------------------- FIX ENDS HERE --------------------
 
+        # Always call parent build at the end
         super().build(input_shape)
         logger.debug(f"Built SwinTransformerBlock with input_shape={input_shape}")
 
-    def call(self, x: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        """Forward pass of the SwinTransformerBlock layer.
+    def call(
+            self,
+            x: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Forward pass of the SwinTransformerBlock layer.
 
         Args:
             x: Input tensor of shape (B, H, W, C).
@@ -243,67 +306,82 @@ class SwinTransformerBlock(keras.layers.Layer):
         B, H, W, C = ops.shape(x)[0], ops.shape(x)[1], ops.shape(x)[2], ops.shape(x)[3]
         shortcut = x
 
+        # =============================================
+        # Multi-head Self-Attention Block
+        # =============================================
+
         # Layer Norm 1
         x = self.norm1(x, training=training)
 
         # Window attention with optional cyclic shift
         if self.shift_size > 0:
-            # Cyclic shift
+            # Cyclic shift for shifted window attention
             shifted_x = ops.roll(x, shift=(-self.shift_size, -self.shift_size), axis=(1, 2))
         else:
             shifted_x = x
 
-        # Partition windows
-        x_windows = window_partition(shifted_x, self.window_size)  # (B*num_windows, window_size, window_size, C)
+        # Partition windows: (B, H, W, C) -> (B*num_windows, window_size, window_size, C)
+        x_windows = window_partition(shifted_x, self.window_size)
 
-        # Reshape for attention
-        x_windows = ops.reshape(x_windows, (-1, self.window_size * self.window_size, C))  # (B*num_windows, N, C)
+        # Reshape for attention: (B*num_windows, window_size*window_size, C)
+        x_windows = ops.reshape(x_windows, (-1, self.window_size * self.window_size, C))
 
-        # Window attention
-        attn_windows = self.attn(x_windows, training=training)  # (B*num_windows, N, C)
+        # Window-based multi-head self-attention
+        attn_windows = self.attn(x_windows, training=training)
 
-        # Reshape and reverse window partition
+        # Reshape back to windows: (B*num_windows, window_size, window_size, C)
         attn_windows = ops.reshape(attn_windows, (-1, self.window_size, self.window_size, C))
 
-        if self.shift_size > 0:
-            # Reverse cyclic shift
-            shifted_x = window_reverse(attn_windows, self.window_size, H, W)
-            x = ops.roll(shifted_x, shift=(self.shift_size, self.shift_size), axis=(1, 2))
-        else:
-            x = window_reverse(attn_windows, self.window_size, H, W)
+        # Reverse window partition: (B*num_windows, window_size, window_size, C) -> (B, H, W, C)
+        x = window_reverse(attn_windows, self.window_size, H, W)
 
-        # Apply drop path and residual connection
-        if self.drop_path is not None:
-            x = shortcut + self.drop_path(x, training=training)
+        # Reverse cyclic shift if it was applied
+        if self.shift_size > 0:
+            x = ops.roll(x, shift=(self.shift_size, self.shift_size), axis=(1, 2))
+
+        # Apply stochastic depth and residual connection
+        if self.drop_path_layer is not None:
+            x = shortcut + self.drop_path_layer(x, training=training)
         else:
             x = shortcut + x
 
-        # MLP block
+        # =============================================
+        # MLP Block
+        # =============================================
+
         shortcut = x
+
+        # Layer Norm 2
         x = self.norm2(x, training=training)
+
+        # MLP
         x = self.mlp(x, training=training)
 
-        if self.drop_path is not None:
-            x = shortcut + self.drop_path(x, training=training)
+        # Apply stochastic depth and residual connection
+        if self.drop_path_layer is not None:
+            x = shortcut + self.drop_path_layer(x, training=training)
         else:
             x = shortcut + x
 
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
+        """
+        Compute the output shape of the layer.
 
         Args:
             input_shape: Shape of the input (B, H, W, C).
 
         Returns:
-            Output shape tuple (B, H, W, C).
+            Output shape tuple (B, H, W, C). SwinTransformerBlock preserves input shape.
         """
-        # SwinTransformerBlock preserves input shape
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Returns the layer configuration for serialization.
+        """
+        Return configuration for serialization.
+
+        CRITICAL: Must include ALL __init__ parameters for proper serialization.
 
         Returns:
             Dictionary containing the layer configuration.
@@ -327,22 +405,5 @@ class SwinTransformerBlock(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the config needed to build the layer from a config.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------

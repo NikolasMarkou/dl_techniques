@@ -1,5 +1,4 @@
 import keras
-import numpy as np
 from keras import ops
 from typing import List, Optional, Union, Any, Dict, Tuple
 
@@ -12,6 +11,7 @@ from .logic_operators import LearnableLogicOperator
 from .arithmetic_operators import LearnableArithmeticOperator
 
 # ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class CircuitDepthLayer(keras.layers.Layer):
@@ -88,6 +88,7 @@ class CircuitDepthLayer(keras.layers.Layer):
         if num_arithmetic_ops <= 0:
             raise ValueError("num_arithmetic_ops must be positive.")
 
+        # Store ALL configuration parameters
         self.num_logic_ops = num_logic_ops
         self.num_arithmetic_ops = num_arithmetic_ops
         self.use_residual = use_residual
@@ -96,19 +97,18 @@ class CircuitDepthLayer(keras.layers.Layer):
         self.routing_initializer = keras.initializers.get(routing_initializer)
         self.combination_initializer = keras.initializers.get(combination_initializer)
 
-        # Operators will be initialized in build()
+        # Sub-layers and weights will be initialized in build()
         self.logic_operators = []
         self.arithmetic_operators = []
         self.routing_weights = None
         self.combination_weights = None
-        self._build_input_shape = None
 
         logger.info(
             f"CircuitDepthLayer initialized with {num_logic_ops} logic ops, "
             f"{num_arithmetic_ops} arithmetic ops, use_residual: {use_residual}"
         )
 
-    def build(self, input_shape: Tuple[int, ...]) -> None:
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer components.
 
         Args:
@@ -121,9 +121,7 @@ class CircuitDepthLayer(keras.layers.Layer):
                 f"got shape with {len(input_shape)} dimensions: {input_shape}"
             )
 
-        self._build_input_shape = input_shape
-
-        # Create logic operators
+        # Create logic operators and explicitly build them
         for i in range(self.num_logic_ops):
             logic_op = LearnableLogicOperator(
                 operation_types=self.logic_op_types,
@@ -132,7 +130,7 @@ class CircuitDepthLayer(keras.layers.Layer):
             logic_op.build(input_shape)
             self.logic_operators.append(logic_op)
 
-        # Create arithmetic operators
+        # Create arithmetic operators and explicitly build them
         for i in range(self.num_arithmetic_ops):
             arithmetic_op = LearnableArithmeticOperator(
                 operation_types=self.arithmetic_op_types,
@@ -143,7 +141,7 @@ class CircuitDepthLayer(keras.layers.Layer):
 
         total_operators = self.num_logic_ops + self.num_arithmetic_ops
 
-        # Routing weights for input distribution
+        # Create routing weights for input distribution
         self.routing_weights = self.add_weight(
             name="routing_weights",
             shape=(total_operators,),
@@ -151,7 +149,7 @@ class CircuitDepthLayer(keras.layers.Layer):
             trainable=True,
         )
 
-        # Combination weights for output fusion
+        # Create combination weights for output fusion
         self.combination_weights = self.add_weight(
             name="combination_weights",
             shape=(total_operators,),
@@ -222,7 +220,7 @@ class CircuitDepthLayer(keras.layers.Layer):
 
         return combined_output
 
-    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape.
 
         Args:
@@ -231,9 +229,7 @@ class CircuitDepthLayer(keras.layers.Layer):
         Returns:
             Output shape tuple (same as input shape).
         """
-        # Convert to list for manipulation, then back to tuple
-        shape_list = list(input_shape)
-        return tuple(shape_list)
+        return input_shape
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
@@ -253,22 +249,6 @@ class CircuitDepthLayer(keras.layers.Layer):
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration for serialization.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a configuration.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------
 
@@ -353,6 +333,7 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         if num_arithmetic_ops_per_depth <= 0:
             raise ValueError("num_arithmetic_ops_per_depth must be positive.")
 
+        # Store ALL configuration parameters
         self.circuit_depth = circuit_depth
         self.num_logic_ops_per_depth = num_logic_ops_per_depth
         self.num_arithmetic_ops_per_depth = num_arithmetic_ops_per_depth
@@ -366,7 +347,6 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         # Circuit layers will be initialized in build()
         self.circuit_layers = []
         self.layer_norms = []
-        self._build_input_shape = None
 
         logger.info(
             f"LearnableNeuralCircuit initialized with depth {circuit_depth}, "
@@ -375,7 +355,7 @@ class LearnableNeuralCircuit(keras.layers.Layer):
             f"use_residual: {use_residual}, use_layer_norm: {use_layer_norm}"
         )
 
-    def build(self, input_shape: Tuple[int, ...]) -> None:
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the neural circuit layers.
 
         Args:
@@ -388,11 +368,9 @@ class LearnableNeuralCircuit(keras.layers.Layer):
                 f"got shape with {len(input_shape)} dimensions: {input_shape}"
             )
 
-        self._build_input_shape = input_shape
-
         logger.info(f"Building LearnableNeuralCircuit with depth {self.circuit_depth}")
 
-        # Create circuit depth layers
+        # Create circuit depth layers and explicitly build them
         for depth in range(self.circuit_depth):
             circuit_layer = CircuitDepthLayer(
                 num_logic_ops=self.num_logic_ops_per_depth,
@@ -445,7 +423,7 @@ class LearnableNeuralCircuit(keras.layers.Layer):
 
         return x
 
-    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape.
 
         Args:
@@ -454,9 +432,7 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         Returns:
             Output shape tuple (same as input shape).
         """
-        # Convert to list for manipulation, then back to tuple
-        shape_list = list(input_shape)
-        return tuple(shape_list)
+        return input_shape
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
@@ -477,22 +453,5 @@ class LearnableNeuralCircuit(keras.layers.Layer):
             "combination_initializer": keras.initializers.serialize(self.combination_initializer),
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration for serialization.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a configuration.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------

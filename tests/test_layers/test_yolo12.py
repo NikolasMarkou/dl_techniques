@@ -7,7 +7,7 @@ from typing import Dict, Any, Tuple
 import tensorflow as tf
 
 # Import the YOLOv12 building blocks
-from dl_techniques.layers.yolo12 import (
+from dl_techniques.layers.yolo12_blocks import (
     ConvBlock,
     AreaAttention,
     AttentionBlock,

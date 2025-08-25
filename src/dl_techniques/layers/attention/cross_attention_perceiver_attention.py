@@ -1,14 +1,7 @@
-"""Perceiver-style cross-attention mechanism."""
-
 import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple, Union, List
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

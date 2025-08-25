@@ -79,6 +79,10 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         4D tensor with shape: `(batch_size, num_heads, seq_len, head_dim)`
         Same as input shape.
 
+    Raises:
+        ValueError: If head_dim is not positive or even, if max_seq_len is not positive,
+            if theta_base values are not positive, or if input shape is invalid.
+
     Example:
         ```python
         # Create dual RoPE layer
@@ -98,10 +102,6 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         q_local = dual_rope(queries, rope_type='local')
         k_local = dual_rope(keys, rope_type='local')
         ```
-
-    Note:
-        This implementation follows the modern Keras 3 pattern where weights
-        are created in build() and configuration is stored in __init__().
     """
 
     def __init__(
@@ -126,7 +126,7 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         if local_theta_base <= 0:
             raise ValueError(f"local_theta_base must be positive, got {local_theta_base}")
 
-        # Store configuration - NO weights created here
+        # Store ALL configuration - NO weights created here
         self.head_dim = head_dim
         self.max_seq_len = max_seq_len
         self.global_theta_base = global_theta_base
@@ -138,19 +138,16 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         self.cos_local_cached = None
         self.sin_local_cached = None
 
-        # Store build shape for serialization
-        self._build_input_shape = None
-
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer by creating cos/sin tables for both RoPE configurations.
 
         Args:
             input_shape: Shape tuple indicating the input shape of the layer.
                 Expected: (batch_size, num_heads, seq_len, head_dim)
-        """
-        # Store input shape for serialization
-        self._build_input_shape = input_shape
 
+        Raises:
+            ValueError: If input shape is invalid or incompatible with layer configuration.
+        """
         # Validate input shape
         if len(input_shape) != 4:
             raise ValueError(
@@ -244,11 +241,11 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
 
     def call(
             self,
-            inputs: Any,
+            inputs: keras.KerasTensor,
             rope_type: RopeType = 'global',
             training: Optional[bool] = None,
             **kwargs: Any
-    ) -> Any:
+    ) -> keras.KerasTensor:
         """Apply dual rotary position embedding to input tensor.
 
         Args:
@@ -257,6 +254,7 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
                 'local' for sliding attention. Defaults to 'global'.
             training: Boolean indicating whether the layer should behave in
                 training mode or inference mode.
+            **kwargs: Additional keyword arguments (unused).
 
         Returns:
             Output tensor with same shape as input, with appropriate RoPE applied.
@@ -281,7 +279,7 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
 
         return self._apply_rope(inputs, seq_len, rope_type)
 
-    def _apply_rope(self, x: Any, seq_len: int, rope_type: RopeType) -> Any:
+    def _apply_rope(self, x: keras.KerasTensor, seq_len: int, rope_type: RopeType) -> keras.KerasTensor:
         """Apply rotary position embedding using the specified RoPE type.
 
         Args:
@@ -349,24 +347,5 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
             'local_theta_base': self.local_theta_base,
         })
         return config
-
-    def get_build_config(self) -> dict[str, Any]:
-        """Get the build configuration for proper serialization.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {
-            'input_shape': self._build_input_shape,
-        }
-
-    def build_from_config(self, config: dict[str, Any]) -> None:
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get('input_shape') is not None:
-            self.build(config['input_shape'])
 
 # ---------------------------------------------------------------------

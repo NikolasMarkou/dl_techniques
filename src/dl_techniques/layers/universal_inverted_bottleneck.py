@@ -25,7 +25,7 @@ network designs:
         efficient `DepthwiseConv2D` layers. Depthwise convolutions process each
         channel independently, capturing spatial patterns without the high
         computational cost of standard convolutions.
-    -   The UIB can be configured to use zero, one (`use_dw2=True`), or two
+    -   The UIB can be configured to use zero, one (`use_dw1=True`), or two
         (`use_dw1=True` and `use_dw2=True`) of these depthwise layers. The first one
         can optionally perform spatial downsampling via its `stride`.
 
@@ -63,7 +63,7 @@ can mimic the following blocks:
 """
 
 import keras
-from keras import ops
+from keras import ops, layers, initializers, regularizers
 from typing import Tuple, Optional, Any, Dict, Union
 
 # ---------------------------------------------------------------------
@@ -76,15 +76,18 @@ class UIB(keras.layers.Layer):
     Inverted Bottleneck (IB), ConvNext, Feed-Forward Network (FFN), and Extra Depthwise (ExtraDW).
 
     Args:
-        filters: Number of output filters
-        expansion_factor: Expansion factor for the block
-        stride: Stride for the depthwise convolutions
-        kernel_size: Kernel size for depthwise convolutions
-        use_dw1: Whether to use the first depthwise convolution
-        use_dw2: Whether to use the second depthwise convolution
-        block_type: Type of the block ('IB', 'ConvNext', 'ExtraDW', or 'FFN')
-        kernel_initializer: Initializer for the convolution kernels
-        kernel_regularizer: Regularizer for the convolution kernels
+        filters: Number of output filters.
+        expansion_factor: Expansion factor for the hidden dimension of the block.
+        stride: Stride for the first depthwise convolution, used for downsampling.
+        kernel_size: Kernel size for all depthwise convolutions.
+        use_dw1: Whether to use the first depthwise convolution.
+        use_dw2: Whether to use the second depthwise convolution.
+        block_type: A string identifier for the block type ('IB', 'ConvNext',
+            'ExtraDW', or 'FFN'). This is for configuration tracking and does
+            not alter behavior, which is controlled by `use_dw1`/`use_dw2`.
+        kernel_initializer: Initializer for the convolution kernels.
+        kernel_regularizer: Regularizer for the convolution kernels.
+        **kwargs: Additional arguments for the `Layer` base class.
     """
 
     def __init__(
@@ -93,14 +96,16 @@ class UIB(keras.layers.Layer):
             expansion_factor: int = 4,
             stride: int = 1,
             kernel_size: int = 3,
-            use_dw1: bool = False,
-            use_dw2: bool = True,
+            use_dw1: bool = True,
+            use_dw2: bool = False,
             block_type: str = 'IB',
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
-            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, initializers.Initializer] = "he_normal",
+            kernel_regularizer: Optional[regularizers.Regularizer] = None,
             **kwargs: Any
     ):
         super().__init__(**kwargs)
+
+        # 1. Store all configuration parameters
         self.filters = filters
         self.expansion_factor = expansion_factor
         self.stride = stride
@@ -108,32 +113,10 @@ class UIB(keras.layers.Layer):
         self.use_dw1 = use_dw1
         self.use_dw2 = use_dw2
         self.block_type = block_type
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-        self.expanded_filters = filters * expansion_factor
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
-        # Initialize layer attributes to None - will be built in build()
-        self.expand_conv = None
-        self.bn1 = None
-        self.activation = None
-        self.dw1 = None
-        self.bn_dw1 = None
-        self.dw2 = None
-        self.bn_dw2 = None
-        self.project_conv = None
-        self.bn2 = None
-        self._build_input_shape = None
-
-    def build(self, input_shape: Tuple[int, ...]) -> None:
-        """Build the layer weights and sublayers.
-
-        Args:
-            input_shape: Shape of the input tensor
-        """
-        # Store for serialization
-        self._build_input_shape = input_shape
-
-        # Layer configurations
+        # Shared configuration for convolution layers
         conv_config = {
             "kernel_initializer": self.kernel_initializer,
             "kernel_regularizer": self.kernel_regularizer,
@@ -141,131 +124,128 @@ class UIB(keras.layers.Layer):
             "use_bias": False
         }
 
-        # Build sublayers following proper normalization order: Conv/Linear -> Norm -> Activation
-        self.expand_conv = keras.layers.Conv2D(self.expanded_filters, 1, **conv_config)
-        self.bn1 = keras.layers.BatchNormalization()
-        self.activation = keras.layers.ReLU()
+        # 2. CREATE all sub-layers in __init__ (they remain unbuilt)
+        # Expansion phase
+        # Note: The expanded filter count is determined from input_shape in build()
+        self.expand_conv = layers.Conv2D(
+            filters=1,  # Placeholder, will be set in build()
+            kernel_size=1,
+            **conv_config
+        )
+        self.bn1 = layers.BatchNormalization()
+        self.activation = layers.ReLU()
 
+        # Processing phase (depthwise convolutions)
         if self.use_dw1:
-            self.dw1 = keras.layers.DepthwiseConv2D(
-                self.kernel_size,
-                self.stride,
+            self.dw1 = layers.DepthwiseConv2D(
+                kernel_size=self.kernel_size,
+                strides=self.stride,
                 **conv_config
             )
-            self.bn_dw1 = keras.layers.BatchNormalization()
+            self.bn_dw1 = layers.BatchNormalization()
+        else:
+            self.dw1 = None
+            self.bn_dw1 = None
 
         if self.use_dw2:
-            self.dw2 = keras.layers.DepthwiseConv2D(
-                self.kernel_size,
-                1,
+            self.dw2 = layers.DepthwiseConv2D(
+                kernel_size=self.kernel_size,
+                strides=1,
                 **conv_config
             )
-            self.bn_dw2 = keras.layers.BatchNormalization()
+            self.bn_dw2 = layers.BatchNormalization()
+        else:
+            self.dw2 = None
+            self.bn_dw2 = None
 
-        self.project_conv = keras.layers.Conv2D(self.filters, 1, **conv_config)
-        self.bn2 = keras.layers.BatchNormalization()
+        # Projection phase
+        self.project_conv = layers.Conv2D(
+            filters=self.filters,
+            kernel_size=1,
+            **conv_config
+        )
+        self.bn2 = layers.BatchNormalization()
 
-        # Build sublayers explicitly
-        self.expand_conv.build(input_shape)
-        self.bn1.build(input_shape[:-1] + (self.expanded_filters,))
+    def build(self, input_shape: Tuple[int, ...]) -> None:
+        """Build the layer's weights and sub-layers."""
+        input_filters = input_shape[-1]
+        expanded_filters = input_filters * self.expansion_factor
+        self.expand_conv.filters = expanded_filters
 
-        if self.use_dw1:
-            dw1_input_shape = input_shape[:-1] + (self.expanded_filters,)
-            self.dw1.build(dw1_input_shape)
-            dw1_output_shape = self._compute_conv_output_shape(dw1_input_shape, self.stride)
-            self.bn_dw1.build(dw1_output_shape)
+        # Build sub-layers sequentially, propagating shape information.
+        # This ensures robust serialization and weight loading.
+        current_shape = input_shape
 
-        if self.use_dw2:
-            dw2_input_shape = input_shape[:-1] + (self.expanded_filters,)
-            if self.use_dw1:
-                dw2_input_shape = dw1_output_shape
-            self.dw2.build(dw2_input_shape)
-            self.bn_dw2.build(dw2_input_shape)
+        self.expand_conv.build(current_shape)
+        current_shape = self.expand_conv.compute_output_shape(current_shape)
 
-        project_input_shape = input_shape[:-1] + (self.expanded_filters,)
-        self.project_conv.build(project_input_shape)
-        self.bn2.build(input_shape[:-1] + (self.filters,))
+        self.bn1.build(current_shape)
 
+        if self.dw1 is not None:
+            self.dw1.build(current_shape)
+            current_shape = self.dw1.compute_output_shape(current_shape)
+            self.bn_dw1.build(current_shape)
+
+        if self.dw2 is not None:
+            self.dw2.build(current_shape)
+            current_shape = self.dw2.compute_output_shape(current_shape)
+            self.bn_dw2.build(current_shape)
+
+        self.project_conv.build(current_shape)
+        current_shape = self.project_conv.compute_output_shape(current_shape)
+
+        self.bn2.build(current_shape)
+
+        # Call the parent's build method at the end
         super().build(input_shape)
 
-    def _compute_conv_output_shape(self, input_shape: Tuple[int, ...], stride: int) -> Tuple[int, ...]:
-        """Compute output shape after convolution with given stride.
-
-        Args:
-            input_shape: Input shape
-            stride: Convolution stride
-
-        Returns:
-            Output shape
-        """
-        if input_shape[1] is None or input_shape[2] is None:
-            return input_shape
-
-        height = input_shape[1] // stride if input_shape[1] is not None else None
-        width = input_shape[2] // stride if input_shape[2] is not None else None
-        return input_shape[:1] + (height, width) + input_shape[3:]
-
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        """Forward pass of the UIB block.
+        """Forward pass of the UIB block."""
+        shortcut = inputs
 
-        Args:
-            inputs: Input tensor
-            training: Whether in training mode
-
-        Returns:
-            Output tensor
-        """
+        # Expansion phase
         x = self.expand_conv(inputs)
         x = self.bn1(x, training=training)
         x = self.activation(x)
 
-        if self.use_dw1:
+        # Processing phase
+        if self.dw1 is not None:
             x = self.dw1(x)
             x = self.bn_dw1(x, training=training)
             x = self.activation(x)
 
-        if self.use_dw2:
+        if self.dw2 is not None:
             x = self.dw2(x)
             x = self.bn_dw2(x, training=training)
             x = self.activation(x)
 
+        # Projection phase
         x = self.project_conv(x)
         x = self.bn2(x, training=training)
 
         # Residual connection
         if self.stride == 1 and ops.shape(inputs)[-1] == self.filters:
-            return inputs + x
+            return shortcut + x
         return x
 
     def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
-        """Compute the output shape of the layer.
-
-        Args:
-            input_shape: Shape of the input
-
-        Returns:
-            Output shape
-        """
-        input_shape_list = list(input_shape)
+        """Compute the output shape of the layer."""
+        output_shape = list(input_shape)
 
         # Apply stride to spatial dimensions
         if self.stride > 1:
-            if input_shape_list[1] is not None:
-                input_shape_list[1] = input_shape_list[1] // self.stride
-            if input_shape_list[2] is not None:
-                input_shape_list[2] = input_shape_list[2] // self.stride
+            if output_shape[1] is not None:
+                output_shape[1] //= self.stride
+            if output_shape[2] is not None:
+                output_shape[2] //= self.stride
 
         # Update channel dimension
-        input_shape_list[-1] = self.filters
+        output_shape[-1] = self.filters
 
-        return tuple(input_shape_list)
+        return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """Returns the layer configuration for serialization.
-
-        Returns:
-            Dictionary containing the layer configuration
-        """
+        """Return the layer's configuration for serialization."""
         config = super().get_config()
         config.update({
             "filters": self.filters,
@@ -275,28 +255,9 @@ class UIB(keras.layers.Layer):
             "use_dw1": self.use_dw1,
             "use_dw2": self.use_dw2,
             "block_type": self.block_type,
-            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "kernel_initializer": initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the config needed to build the layer from a config.
-
-        Returns:
-            Dictionary containing the build configuration
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------

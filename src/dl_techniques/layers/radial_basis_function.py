@@ -1,7 +1,3 @@
-"""
-Radial Basis Function Layer
-"""
-
 import keras
 from keras import ops
 from typing import Optional, Union, Tuple, Dict, Any
@@ -11,7 +7,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 @keras.saving.register_keras_serializable()
 class RBFLayer(keras.layers.Layer):
     """
-    Enhanced Radial Basis Function layer with stable center repulsion mechanism.
+    Radial Basis Function layer with stable center repulsion mechanism.
 
     This layer implements RBF units with an improved repulsive force mechanism
     between centers to ensure better coverage of the input space and prevent
@@ -395,3 +391,5 @@ class RBFLayer(keras.layers.Layer):
     def width_values(self) -> Optional[keras.KerasTensor]:
         """Get current effective width (gamma) values."""
         return self.gamma if self.built else None
+
+# ---------------------------------------------------------------------

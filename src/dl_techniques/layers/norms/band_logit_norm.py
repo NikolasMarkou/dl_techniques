@@ -13,10 +13,6 @@ Mathematical Operation:
 5. Apply scaling: output = x_norm * scale
 
 This ensures the output has L2 norm in the range [1-max_band_width, 1].
-
-Author: [Your Name]
-Date: [Date]
-Version: 1.0
 """
 
 import keras

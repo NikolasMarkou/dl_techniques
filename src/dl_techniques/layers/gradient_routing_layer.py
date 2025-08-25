@@ -8,7 +8,6 @@ during backpropagation. It includes type hints and comprehensive documentation.
 
 import keras
 import tensorflow as tf
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------

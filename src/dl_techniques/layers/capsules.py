@@ -31,16 +31,6 @@ Implements dynamic routing mechanism between capsule layers.
 ### 3. Capsule Block
 A complete block combining routing capsules with regularization.
 
-## Squash Function
-
-The squash function is a non-linearity that ensures the length of the output vector is between 0 and 1:
-
-```
-             ||s||²
-squash(s) = --------- * (s / ||s||)
-            1 + ||s||²
-```
-
 ## Dynamic Routing Algorithm
 
 The routing process iteratively refines the connection strengths between input
@@ -274,6 +264,8 @@ class PrimaryCapsule(keras.layers.Layer):
             "squash_epsilon": self.squash_epsilon,
         })
         return config
+
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -557,6 +549,8 @@ class RoutingCapsule(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class CapsuleBlock(keras.layers.Layer):
@@ -749,3 +743,5 @@ class CapsuleBlock(keras.layers.Layer):
             "squash_epsilon": self.squash_epsilon,
         })
         return config
+
+# ---------------------------------------------------------------------

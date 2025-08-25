@@ -46,7 +46,7 @@ The key components include:
 
 import keras
 from keras import ops
-from typing import Optional, Tuple, Union, Dict, Any, List
+from typing import Optional, Tuple, Union, Dict, Any
 
 # ---------------------------------------------------------------------
 
@@ -61,7 +61,9 @@ class ConvBlock(keras.layers.Layer):
     Args:
         filters: Integer, number of output filters. Must be positive.
         kernel_size: Integer, size of the convolution kernel. Must be positive.
+            Defaults to 3.
         strides: Integer, stride of the convolution. Must be positive.
+            Defaults to 1.
         padding: String, padding mode ('same' or 'valid'). Defaults to 'same'.
         groups: Integer, number of groups for grouped convolution. Must be positive.
             Defaults to 1.
@@ -78,6 +80,10 @@ class ConvBlock(keras.layers.Layer):
     Output shape:
         4D tensor with shape: (batch_size, new_height, new_width, filters)
         where new_height and new_width depend on strides and padding.
+
+    Raises:
+        ValueError: If filters, kernel_size, strides, or groups are not positive.
+        ValueError: If padding is not 'same' or 'valid'.
 
     Example:
         ```python
@@ -99,17 +105,17 @@ class ConvBlock(keras.layers.Layer):
     """
 
     def __init__(
-            self,
-            filters: int,
-            kernel_size: int = 3,
-            strides: int = 1,
-            padding: str = "same",
-            groups: int = 1,
-            activation: bool = True,
-            use_bias: bool = False,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
-            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            **kwargs: Any
+        self,
+        filters: int,
+        kernel_size: int = 3,
+        strides: int = 1,
+        padding: str = "same",
+        groups: int = 1,
+        activation: bool = True,
+        use_bias: bool = False,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
@@ -125,7 +131,7 @@ class ConvBlock(keras.layers.Layer):
         if padding not in ["same", "valid"]:
             raise ValueError(f"padding must be 'same' or 'valid', got {padding}")
 
-        # Store configuration
+        # Store ALL configuration parameters
         self.filters = filters
         self.kernel_size = kernel_size
         self.strides = strides
@@ -136,7 +142,7 @@ class ConvBlock(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # CREATE sub-layers in __init__ (they are unbuilt)
+        # CREATE all sub-layers in __init__ (they are unbuilt)
         self.conv = keras.layers.Conv2D(
             filters=self.filters,
             kernel_size=self.kernel_size,
@@ -168,7 +174,7 @@ class ConvBlock(keras.layers.Layer):
         # Build sub-layers in computational order for robust serialization
         self.conv.build(input_shape)
 
-        # Compute intermediate shape
+        # Compute intermediate shape for next layer
         conv_output_shape = self.conv.compute_output_shape(input_shape)
         self.bn.build(conv_output_shape)
 
@@ -178,7 +184,11 @@ class ConvBlock(keras.layers.Layer):
         # Always call parent build at the end
         super().build(input_shape)
 
-    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """Forward pass through the convolution block.
 
         Args:
@@ -257,7 +267,10 @@ class AreaAttention(keras.layers.Layer):
         4D tensor with shape: (batch_size, height, width, dim)
 
     Raises:
+        ValueError: If dim is not positive.
+        ValueError: If num_heads is not positive.
         ValueError: If dim is not divisible by num_heads.
+        ValueError: If area is not positive.
 
     Example:
         ```python
@@ -274,12 +287,12 @@ class AreaAttention(keras.layers.Layer):
     """
 
     def __init__(
-            self,
-            dim: int,
-            num_heads: int = 8,
-            area: int = 1,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
-            **kwargs: Any
+        self,
+        dim: int,
+        num_heads: int = 8,
+        area: int = 1,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
@@ -293,14 +306,14 @@ class AreaAttention(keras.layers.Layer):
         if area <= 0:
             raise ValueError(f"area must be positive, got {area}")
 
-        # Store configuration
+        # Store ALL configuration parameters
         self.dim = dim
         self.num_heads = num_heads
         self.area = area
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.head_dim = dim // num_heads
 
-        # CREATE sub-layers in __init__ (they are unbuilt)
+        # CREATE all sub-layers in __init__ (they are unbuilt)
         # Query-Key projection
         self.qk_conv = ConvBlock(
             filters=self.dim * 2,
@@ -354,7 +367,11 @@ class AreaAttention(keras.layers.Layer):
         # Always call parent build at the end
         super().build(input_shape)
 
-    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """Forward pass through area attention.
 
         Args:
@@ -411,10 +428,10 @@ class AreaAttention(keras.layers.Layer):
         return self.proj_conv(output, training=training)
 
     def _compute_attention(
-            self,
-            q: keras.KerasTensor,
-            k: keras.KerasTensor,
-            v: keras.KerasTensor
+        self,
+        q: keras.KerasTensor,
+        k: keras.KerasTensor,
+        v: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Compute scaled dot-product attention.
 
@@ -511,6 +528,9 @@ class AttentionBlock(keras.layers.Layer):
     Output shape:
         4D tensor with shape: (batch_size, height, width, dim)
 
+    Raises:
+        ValueError: If dim, num_heads, mlp_ratio, or area are not positive.
+
     Example:
         ```python
         # Basic attention block
@@ -531,13 +551,13 @@ class AttentionBlock(keras.layers.Layer):
     """
 
     def __init__(
-            self,
-            dim: int,
-            num_heads: int = 8,
-            mlp_ratio: float = 1.2,
-            area: int = 1,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
-            **kwargs: Any
+        self,
+        dim: int,
+        num_heads: int = 8,
+        mlp_ratio: float = 1.2,
+        area: int = 1,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
@@ -551,7 +571,7 @@ class AttentionBlock(keras.layers.Layer):
         if area <= 0:
             raise ValueError(f"area must be positive, got {area}")
 
-        # Store configuration
+        # Store ALL configuration parameters
         self.dim = dim
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
@@ -559,7 +579,7 @@ class AttentionBlock(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.mlp_hidden_dim = int(dim * mlp_ratio)
 
-        # CREATE sub-layers in __init__ (they are unbuilt)
+        # CREATE all sub-layers in __init__ (they are unbuilt)
         # Attention layer
         self.attn = AreaAttention(
             dim=self.dim,
@@ -595,14 +615,18 @@ class AttentionBlock(keras.layers.Layer):
         self.attn.build(input_shape)
         self.mlp1.build(input_shape)
 
-        # Compute intermediate shape
+        # Compute intermediate shape for mlp2
         mlp1_output_shape = self.mlp1.compute_output_shape(input_shape)
         self.mlp2.build(mlp1_output_shape)
 
         # Always call parent build at the end
         super().build(input_shape)
 
-    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """Forward pass through attention block.
 
         Args:
@@ -677,6 +701,9 @@ class Bottleneck(keras.layers.Layer):
     Output shape:
         4D tensor with shape: (batch_size, height, width, filters)
 
+    Raises:
+        ValueError: If filters is not positive.
+
     Note:
         The shortcut connection is only applied when shortcut=True and the
         input channels match the output filters.
@@ -696,11 +723,11 @@ class Bottleneck(keras.layers.Layer):
     """
 
     def __init__(
-            self,
-            filters: int,
-            shortcut: bool = True,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
-            **kwargs: Any
+        self,
+        filters: int,
+        shortcut: bool = True,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
@@ -708,12 +735,12 @@ class Bottleneck(keras.layers.Layer):
         if filters <= 0:
             raise ValueError(f"filters must be positive, got {filters}")
 
-        # Store configuration
+        # Store ALL configuration parameters
         self.filters = filters
         self.shortcut = shortcut
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
 
-        # CREATE sub-layers in __init__ (they are unbuilt)
+        # CREATE all sub-layers in __init__ (they are unbuilt)
         self.cv1 = ConvBlock(
             filters=self.filters,
             kernel_size=3,
@@ -738,14 +765,18 @@ class Bottleneck(keras.layers.Layer):
         # Build sub-layers in computational order for robust serialization
         self.cv1.build(input_shape)
 
-        # Compute intermediate shape
+        # Compute intermediate shape for cv2
         cv1_output_shape = self.cv1.compute_output_shape(input_shape)
         self.cv2.build(cv1_output_shape)
 
         # Always call parent build at the end
         super().build(input_shape)
 
-    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """Forward pass through bottleneck.
 
         Args:
@@ -819,6 +850,10 @@ class C3k2Block(keras.layers.Layer):
     Output shape:
         4D tensor with shape: (batch_size, height, width, filters)
 
+    Raises:
+        ValueError: If filters is not positive.
+        ValueError: If n is negative.
+
     Example:
         ```python
         # Basic C3k2 block
@@ -834,12 +869,12 @@ class C3k2Block(keras.layers.Layer):
     """
 
     def __init__(
-            self,
-            filters: int,
-            n: int = 1,
-            shortcut: bool = True,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
-            **kwargs: Any
+        self,
+        filters: int,
+        n: int = 1,
+        shortcut: bool = True,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
@@ -849,14 +884,14 @@ class C3k2Block(keras.layers.Layer):
         if n < 0:
             raise ValueError(f"n must be non-negative, got {n}")
 
-        # Store configuration
+        # Store ALL configuration parameters
         self.filters = filters
         self.n = n
         self.shortcut = shortcut
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.hidden_filters = filters // 2
 
-        # CREATE sub-layers in __init__ (they are unbuilt)
+        # CREATE all sub-layers in __init__ (they are unbuilt)
         self.cv1 = ConvBlock(
             filters=self.hidden_filters,
             kernel_size=1,
@@ -871,7 +906,7 @@ class C3k2Block(keras.layers.Layer):
             name="cv2"
         )
 
-        # Create bottleneck layers
+        # Create bottleneck layers - store as list attributes for proper serialization
         self.bottlenecks = []
         for i in range(self.n):
             bottleneck = Bottleneck(
@@ -902,7 +937,7 @@ class C3k2Block(keras.layers.Layer):
         # Compute intermediate shape for bottlenecks
         cv1_output_shape = self.cv1.compute_output_shape(input_shape)
 
-        # Build bottleneck layers
+        # Build bottleneck layers sequentially
         current_shape = cv1_output_shape
         for bottleneck in self.bottlenecks:
             bottleneck.build(current_shape)
@@ -917,7 +952,11 @@ class C3k2Block(keras.layers.Layer):
         # Always call parent build at the end
         super().build(input_shape)
 
-    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """Forward pass through C3k2 block.
 
         Args:
@@ -996,6 +1035,11 @@ class A2C2fBlock(keras.layers.Layer):
     Output shape:
         4D tensor with shape: (batch_size, height, width, filters)
 
+    Raises:
+        ValueError: If filters is not positive.
+        ValueError: If n is negative.
+        ValueError: If area is not positive.
+
     Example:
         ```python
         # Basic A2C2f block
@@ -1011,12 +1055,12 @@ class A2C2fBlock(keras.layers.Layer):
     """
 
     def __init__(
-            self,
-            filters: int,
-            n: int = 1,
-            area: int = 1,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
-            **kwargs: Any
+        self,
+        filters: int,
+        n: int = 1,
+        area: int = 1,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
@@ -1028,14 +1072,14 @@ class A2C2fBlock(keras.layers.Layer):
         if area <= 0:
             raise ValueError(f"area must be positive, got {area}")
 
-        # Store configuration
+        # Store ALL configuration parameters
         self.filters = filters
         self.n = n
         self.area = area
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.hidden_filters = filters // 2
 
-        # CREATE sub-layers in __init__ (they are unbuilt)
+        # CREATE all sub-layers in __init__ (they are unbuilt)
         self.cv1 = ConvBlock(
             filters=self.hidden_filters,
             kernel_size=1,
@@ -1043,7 +1087,7 @@ class A2C2fBlock(keras.layers.Layer):
             name="cv1"
         )
 
-        # Create attention blocks as individual attributes for proper serialization
+        # Create attention blocks as individual list attributes for proper serialization
         # Each pair has two attention blocks: first and second
         self.attention_first_blocks = []
         self.attention_second_blocks = []
@@ -1085,7 +1129,7 @@ class A2C2fBlock(keras.layers.Layer):
         # Compute intermediate shape for attention blocks
         cv1_output_shape = self.cv1.compute_output_shape(input_shape)
 
-        # Build attention blocks
+        # Build attention blocks sequentially
         current_shape = cv1_output_shape
         for i in range(self.n):
             # Build first attention block
@@ -1106,7 +1150,11 @@ class A2C2fBlock(keras.layers.Layer):
         # Always call parent build at the end
         super().build(input_shape)
 
-    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """Forward pass through A2C2f block.
 
         Args:
@@ -1158,3 +1206,5 @@ class A2C2fBlock(keras.layers.Layer):
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
         })
         return config
+
+# ---------------------------------------------------------------------

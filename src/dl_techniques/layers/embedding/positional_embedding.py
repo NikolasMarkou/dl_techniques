@@ -34,9 +34,16 @@ The operational flow of the layer is as follows:
 import keras
 from keras import ops
 from keras import layers
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Union, Tuple
 
 # ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class PositionalEmbedding(keras.layers.Layer):
@@ -46,15 +53,20 @@ class PositionalEmbedding(keras.layers.Layer):
     the model to understand the position of elements in the sequence. The embeddings
     are learned during training and can capture complex positional relationships.
 
+    This layer follows the modern Keras 3 pattern where sub-layers are created in
+    __init__() and weights are created in build() for robust serialization.
+
     Args:
-        max_seq_len: int, maximum sequence length that this layer can handle.
-        dim: int, embedding dimension. Must match the last dimension of input.
-        dropout: float, dropout rate applied after adding positional embeddings.
-            Default is 0.0 (no dropout).
-        pos_initializer: str or Initializer, initializer for positional embeddings.
+        max_seq_len: Integer, maximum sequence length that this layer can handle.
+            Must be positive.
+        dim: Integer, embedding dimension. Must match the last dimension of input
+            and be positive.
+        dropout: Float, dropout rate applied after adding positional embeddings.
+            Must be in [0, 1]. Default is 0.0 (no dropout).
+        pos_initializer: String or Initializer, initializer for positional embeddings.
             Default is "truncated_normal".
-        scale: float, standard deviation for truncated normal initialization when
-            using default initializer. Default is 0.02.
+        scale: Float, standard deviation for truncated normal initialization when
+            using default initializer. Must be positive. Default is 0.02.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
@@ -63,21 +75,34 @@ class PositionalEmbedding(keras.layers.Layer):
     Output shape:
         3D tensor with shape: `(batch_size, seq_len, dim)` (same as input).
 
-    Returns:
-        A tensor with positional embeddings added to the input.
-
     Raises:
-        ValueError: If input sequence length exceeds max_seq_len during runtime.
+        ValueError: If max_seq_len, dim, or scale are not positive.
+        ValueError: If dropout is not in [0, 1].
+        ValueError: If input dimension doesn't match expected dim during build.
 
     Example:
-        >>> # Create positional embedding layer
-        >>> pos_embed = PositionalEmbedding(max_seq_len=512, dim=256)
-        >>> # Input sequence
-        >>> x = tf.random.normal([32, 128, 256])  # batch_size=32, seq_len=128, dim=256
-        >>> # Add positional information
-        >>> output = pos_embed(x)
-        >>> print(output.shape)
-        (32, 128, 256)
+        ```python
+        # Create positional embedding layer
+        pos_embed = PositionalEmbedding(max_seq_len=512, dim=256)
+
+        # Input sequence
+        inputs = keras.Input(shape=(128, 256))  # seq_len=128, dim=256
+
+        # Add positional information
+        output = pos_embed(inputs)
+        print(output.shape)  # (None, 128, 256)
+
+        # With dropout for regularization
+        pos_embed_dropout = PositionalEmbedding(
+            max_seq_len=512,
+            dim=256,
+            dropout=0.1
+        )
+        output_dropout = pos_embed_dropout(inputs)
+
+        # In a model
+        model = keras.Model(inputs, output_dropout)
+        ```
     """
 
     def __init__(
@@ -101,7 +126,7 @@ class PositionalEmbedding(keras.layers.Layer):
         if scale <= 0:
             raise ValueError(f"scale must be positive, got {scale}")
 
-        # Store configuration
+        # Store ALL configuration parameters
         self.max_seq_len = max_seq_len
         self.dim = dim
         self.dropout_rate = dropout
@@ -116,20 +141,21 @@ class PositionalEmbedding(keras.layers.Layer):
             # Use custom scale for string specification
             self.pos_initializer = keras.initializers.TruncatedNormal(stddev=self.scale)
 
-        # Will be initialized in build()
-        self.pos_embedding = None
-        self.dropout = None
-        self._build_input_shape = None
+        # CREATE sub-layer in __init__ (modern Keras 3 pattern)
+        self.dropout = layers.Dropout(self.dropout_rate, name="pos_dropout")
 
-    def build(self, input_shape: tuple) -> None:
-        """Build the layer by creating weights and sublayers.
+        # Weight will be initialized in build()
+        self.pos_embedding = None
+
+        logger.info(f"Initialized PositionalEmbedding with max_seq_len={self.max_seq_len}, "
+                    f"dim={self.dim}, dropout={self.dropout_rate}")
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the layer by creating weights and building sub-layers.
 
         Args:
-            input_shape: Shape tuple of the input tensor.
+            input_shape: Shape tuple of the input tensor (batch_size, seq_len, dim).
         """
-        # Store for serialization
-        self._build_input_shape = input_shape
-
         # Validate input shape
         if len(input_shape) != 3:
             raise ValueError(
@@ -141,7 +167,7 @@ class PositionalEmbedding(keras.layers.Layer):
                 f"Input dimension {input_shape[-1]} does not match expected dim {self.dim}"
             )
 
-        # Create positional embeddings
+        # Create positional embeddings weight
         self.pos_embedding = self.add_weight(
             name="pos_embedding",
             shape=(1, self.max_seq_len, self.dim),
@@ -149,10 +175,14 @@ class PositionalEmbedding(keras.layers.Layer):
             trainable=True,
         )
 
-        # Create dropout layer
-        self.dropout = layers.Dropout(self.dropout_rate)
+        # CRITICAL: Explicitly build sub-layers for robust serialization
+        # Dropout doesn't change shape, so we can use input_shape
+        self.dropout.build(input_shape)
 
+        # Always call parent build at the end
         super().build(input_shape)
+
+        logger.info(f"Built PositionalEmbedding with input_shape={input_shape}")
 
     def call(
             self,
@@ -173,10 +203,6 @@ class PositionalEmbedding(keras.layers.Layer):
         input_shape = ops.shape(inputs)
         seq_len = input_shape[1]
 
-        # Runtime validation - this creates a dynamic check
-        # In practice, this should be handled at the model level
-        # but we include it for robustness
-
         # Slice positional embeddings to match sequence length
         positions = ops.slice(
             self.pos_embedding,
@@ -192,7 +218,7 @@ class PositionalEmbedding(keras.layers.Layer):
 
         return outputs
 
-    def compute_output_shape(self, input_shape: tuple) -> tuple:
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
         Args:
@@ -207,7 +233,7 @@ class PositionalEmbedding(keras.layers.Layer):
         """Get layer configuration for serialization.
 
         Returns:
-            Dictionary containing the layer configuration.
+            Dictionary containing ALL __init__ parameters for proper serialization.
         """
         config = super().get_config()
         config.update({
@@ -219,23 +245,5 @@ class PositionalEmbedding(keras.layers.Layer):
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration for serialization.
-
-        Returns:
-            Dictionary containing build configuration.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from configuration.
-
-        Args:
-            config: Dictionary containing build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------

@@ -8,14 +8,13 @@ from typing import Optional, Any, Dict, Tuple, Union, List
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 from .perceiver_attention import PerceiverAttention
 
 # ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
-class PerceiverBlock(keras.layers.Layer):
+class PerceiverTransformerBlock(keras.layers.Layer):
     """Complete Perceiver transformer block with cross-attention.
 
     This block implements a complete Perceiver transformer layer that combines:

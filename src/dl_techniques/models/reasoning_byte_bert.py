@@ -47,7 +47,7 @@ from typing import Optional, Union, Dict, Any, List, Tuple
 
 from ..utils.logger import logger
 from ..layers.norms.rms_norm import RMSNorm
-from ..layers.blt_transformer_blocks import (
+from ..layers.byte_latent_transformer_blocks import (
     ByteTokenizer, EntropyModel, DynamicPatcher,
     LocalEncoder, PatchPooling
 )

@@ -32,7 +32,7 @@ from dl_techniques.models.acc_unet import (
 
 from dl_techniques.layers.hanc_block import HANCBlock
 from dl_techniques.layers.res_path import ResPath
-from dl_techniques.layers.mlfc_layer import MLFCLayer
+from dl_techniques.layers.multi_level_feature_compilation import MLFCLayer
 
 
 class TestAccUNetConfigurations:

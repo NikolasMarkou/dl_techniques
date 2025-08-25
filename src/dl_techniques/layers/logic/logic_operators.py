@@ -8,7 +8,9 @@ from typing import List, Optional, Union, Any, Dict, Tuple
 
 from dl_techniques.utils.logger import logger
 
+
 # ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class LearnableLogicOperator(keras.layers.Layer):
@@ -32,6 +34,7 @@ class LearnableLogicOperator(keras.layers.Layer):
             selection during training.
         temperature_init: Float, initial temperature value. Higher values lead to
             more uniform operation selection, lower values lead to sharper selection.
+            Must be positive.
         operation_initializer: Initializer for the operation weights. If None,
             uses 'random_uniform'.
         temperature_initializer: Initializer for the temperature parameter. If None,
@@ -77,7 +80,7 @@ class LearnableLogicOperator(keras.layers.Layer):
             use_temperature: bool = True,
             temperature_init: float = 1.0,
             operation_initializer: Union[str, keras.initializers.Initializer] = "random_uniform",
-            temperature_initializer: Union[str, keras.initializers.Initializer] = keras.initializers.Constant(1.0),
+            temperature_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -98,34 +101,46 @@ class LearnableLogicOperator(keras.layers.Layer):
         if temperature_init <= 0:
             raise ValueError("temperature_init must be positive.")
 
+        # Store ALL configuration parameters
         self.operation_types = operation_types
         self.use_temperature = use_temperature
         self.temperature_init = temperature_init
         self.num_operations = len(operation_types)
         self.operation_initializer = keras.initializers.get(operation_initializer)
-        self.temperature_initializer = keras.initializers.get(temperature_initializer)
 
-        # Initialize weight attributes
+        # Set default initializer if not provided or if 'constant' is specified
+        if temperature_initializer is None or temperature_initializer == "constant":
+            self.temperature_initializer = keras.initializers.Constant(temperature_init)
+        else:
+            self.temperature_initializer = keras.initializers.get(temperature_initializer)
+
+        # Initialize weight attributes - these will be created in build()
         self.operation_weights = None
         self.temperature = None
-        self._build_input_shape = None
 
         logger.info(
             f"LearnableLogicOperator initialized with operations: {operation_types}, "
             f"use_temperature: {use_temperature}, temperature_init: {temperature_init}"
         )
 
-    def build(self, input_shape: Union[Tuple[int, ...], List[Tuple[int, ...]]]) -> None:
+    def build(self, input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]) -> None:
         """Build the layer weights.
 
         Args:
             input_shape: Shape of the input tensor(s). Can be a single shape tuple
                 or a list of shape tuples for multiple inputs.
         """
-        self._build_input_shape = input_shape
+        # A single shape can be a list (e.g., from serialization), but a list
+        # of shapes will be a list of lists/tuples/TensorShapes.
+        # We differentiate by checking if the list's elements are dimensions (int/None).
+        is_list_of_shapes = (
+            isinstance(input_shape, list)
+            and input_shape
+            and not isinstance(input_shape[0], (int, type(None)))
+        )
 
         # Validate input shapes for binary operations
-        if isinstance(input_shape, list):
+        if is_list_of_shapes:
             if len(input_shape) == 2:
                 if input_shape[0] != input_shape[1]:
                     raise ValueError(
@@ -134,7 +149,7 @@ class LearnableLogicOperator(keras.layers.Layer):
                     )
             elif len(input_shape) > 2:
                 raise ValueError(
-                    f"LearnableLogicOperator supports at most 2 inputs, got {len(input_shape)}"
+                    f"Expected 1 or 2 inputs, got {len(input_shape)}"
                 )
 
         # Create learnable operation selection weights
@@ -147,12 +162,10 @@ class LearnableLogicOperator(keras.layers.Layer):
 
         # Create temperature parameter if enabled
         if self.use_temperature:
-            # Use constant initializer with temperature_init value
-            temp_initializer = keras.initializers.Constant(self.temperature_init)
             self.temperature = self.add_weight(
                 name="temperature",
                 shape=(),
-                initializer=temp_initializer,
+                initializer=self.temperature_initializer,
                 trainable=True,
             )
 
@@ -267,7 +280,7 @@ class LearnableLogicOperator(keras.layers.Layer):
         # Compute operation selection probabilities
         if self.use_temperature:
             # Clamp temperature to prevent division by zero
-            temp = ops.maximum(self.temperature, 0.1)
+            temp = ops.maximum(self.temperature, 1e-7)
             operation_probs = ops.softmax(ops.divide(self.operation_weights, temp))
         else:
             operation_probs = ops.softmax(self.operation_weights)
@@ -308,8 +321,8 @@ class LearnableLogicOperator(keras.layers.Layer):
 
     def compute_output_shape(
             self,
-            input_shape: Union[Tuple[int, ...], List[Tuple[int, ...]]]
-    ) -> Tuple[int, ...]:
+            input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
+    ) -> Tuple[Optional[int], ...]:
         """Compute output shape.
 
         Args:
@@ -318,14 +331,15 @@ class LearnableLogicOperator(keras.layers.Layer):
         Returns:
             Output shape tuple.
         """
-        if isinstance(input_shape, list):
-            # Convert to list for manipulation, then back to tuple
-            shape_list = list(input_shape[0])
-            return tuple(shape_list)
+        is_list_of_shapes = (
+            isinstance(input_shape, list)
+            and input_shape
+            and not isinstance(input_shape[0], (int, type(None)))
+        )
+        if is_list_of_shapes:
+            return input_shape[0]
         else:
-            # Convert to list for manipulation, then back to tuple
-            shape_list = list(input_shape)
-            return tuple(shape_list)
+            return input_shape
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
@@ -342,22 +356,3 @@ class LearnableLogicOperator(keras.layers.Layer):
             "temperature_initializer": keras.initializers.serialize(self.temperature_initializer),
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration for serialization.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a configuration.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
-# ---------------------------------------------------------------------

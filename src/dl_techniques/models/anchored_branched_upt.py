@@ -8,7 +8,7 @@ from keras import ops
 from ..layers.geometric import (
     ContinuousSinCosEmbed,
     ContinuousRoPE,
-    PerceiverBlock,
+    PerceiverTransformerBlock,
     SupernodePooling,
     TransformerBlock
 )
@@ -140,7 +140,7 @@ class AnchoredBranchedUPT(keras.Model):
             elif block_type == "p":
                 # Perceiver block (cross attention to geometry)
                 self.shared_blocks.append(
-                    PerceiverBlock(
+                    PerceiverTransformerBlock(
                         dim=self.dim,
                         num_heads=self.num_heads,
                         dropout=self.dropout_rate,
@@ -269,7 +269,7 @@ class AnchoredBranchedUPT(keras.Model):
         # Shared weight blocks
         x = combined_features
         for i, block in enumerate(self.shared_blocks):
-            if isinstance(block, PerceiverBlock):
+            if isinstance(block, PerceiverTransformerBlock):
                 # Cross attention to geometry
                 x = block(x, geometry_features, training=training)
             elif isinstance(block, TransformerBlock) and block.attention_class == "shared_cross":

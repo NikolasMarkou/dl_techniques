@@ -300,3 +300,5 @@ class BertEmbeddings(keras.layers.Layer):
     def from_config(cls, config: Dict[str, Any]) -> 'BertEmbeddings':
         """Create layer from configuration."""
         return cls(**{k: v for k, v in config.items() if k != 'name'})
+
+# ---------------------------------------------------------------------

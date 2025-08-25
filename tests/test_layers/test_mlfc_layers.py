@@ -21,7 +21,7 @@ import keras
 from keras import ops
 import tensorflow as tf
 
-from dl_techniques.layers.mlfc_layer import MLFCLayer
+from dl_techniques.layers.multi_level_feature_compilation import MLFCLayer
 
 
 class TestMLFCLayer:

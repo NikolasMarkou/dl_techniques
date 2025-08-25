@@ -8,7 +8,9 @@ from typing import List, Optional, Union, Any, Dict, Tuple
 
 from dl_techniques.utils.logger import logger
 
+
 # ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class LearnableArithmeticOperator(keras.layers.Layer):
@@ -92,8 +94,8 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             use_scaling: bool = True,
             scaling_init: float = 1.0,
             operation_initializer: Union[str, keras.initializers.Initializer] = "random_uniform",
-            temperature_initializer: Union[str, keras.initializers.Initializer] = keras.initializers.Constant(1.0),
-            scaling_initializer: Union[str, keras.initializers.Initializer] = keras.initializers.Constant(1.0),
+            temperature_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
+            scaling_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
             epsilon: float = 1e-7,
             power_clip_range: Tuple[float, float] = (1e-7, 10.0),
             exponent_clip_range: Tuple[float, float] = (-2.0, 2.0),
@@ -129,6 +131,7 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         if exponent_clip_range[1] <= exponent_clip_range[0]:
             raise ValueError("exponent_clip_range must be (min, max) with min < max.")
 
+        # Store ALL configuration parameters
         self.operation_types = operation_types
         self.use_temperature = use_temperature
         self.temperature_init = temperature_init
@@ -136,17 +139,26 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         self.scaling_init = scaling_init
         self.num_operations = len(operation_types)
         self.operation_initializer = keras.initializers.get(operation_initializer)
-        self.temperature_initializer = keras.initializers.get(temperature_initializer)
-        self.scaling_initializer = keras.initializers.get(scaling_initializer)
+
+        # Set default initializers if not provided
+        if temperature_initializer is None or temperature_initializer == "constant":
+            self.temperature_initializer = keras.initializers.Constant(temperature_init)
+        else:
+            self.temperature_initializer = keras.initializers.get(temperature_initializer)
+
+        if scaling_initializer is None or scaling_initializer == "constant":
+            self.scaling_initializer = keras.initializers.Constant(scaling_init)
+        else:
+            self.scaling_initializer = keras.initializers.get(scaling_initializer)
+
         self.epsilon = epsilon
         self.power_clip_range = power_clip_range
         self.exponent_clip_range = exponent_clip_range
 
-        # Initialize weight attributes
+        # Initialize weight attributes - these will be created in build()
         self.operation_weights = None
         self.temperature = None
         self.scaling_factor = None
-        self._build_input_shape = None
 
         logger.info(
             f"LearnableArithmeticOperator initialized with operations: {operation_types}, "
@@ -154,27 +166,23 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             f"use_scaling: {use_scaling}, scaling_init: {scaling_init}"
         )
 
-    def build(self, input_shape: Union[Tuple[int, ...], List[Tuple[int, ...]]]) -> None:
+    def build(self, input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]) -> None:
         """Build the layer weights.
 
         Args:
             input_shape: Shape of the input tensor(s). Can be a single shape tuple
                 or a list of shape tuples for multiple inputs.
         """
-        self._build_input_shape = input_shape
-
         # Validate input shapes for binary operations
         if isinstance(input_shape, list):
-            if len(input_shape) == 2:
-                if input_shape[0] != input_shape[1]:
+            # To distinguish a list of shapes from a single shape deserialized as a list (e.g., [None, 32]),
+            # we check if the first element is iterable (like a tuple, list, or TensorShape).
+            if len(input_shape) == 2 and input_shape[0] is not None and hasattr(input_shape[0], '__iter__'):
+                if list(input_shape[0]) != list(input_shape[1]):
                     raise ValueError(
                         f"Input tensors must have the same shape for binary operations. "
                         f"Got shapes: {input_shape[0]} and {input_shape[1]}"
                     )
-            elif len(input_shape) > 2:
-                raise ValueError(
-                    f"LearnableArithmeticOperator supports at most 2 inputs, got {len(input_shape)}"
-                )
 
         # Create learnable operation selection weights
         self.operation_weights = self.add_weight(
@@ -186,29 +194,26 @@ class LearnableArithmeticOperator(keras.layers.Layer):
 
         # Create temperature parameter if enabled
         if self.use_temperature:
-            temp_initializer = keras.initializers.Constant(self.temperature_init)
             self.temperature = self.add_weight(
                 name="temperature",
                 shape=(),
-                initializer=temp_initializer,
+                initializer=self.temperature_initializer,
                 trainable=True,
             )
 
         # Create scaling factor if enabled
         if self.use_scaling:
-            scaling_initializer = keras.initializers.Constant(self.scaling_init)
             self.scaling_factor = self.add_weight(
                 name="scaling_factor",
                 shape=(),
-                initializer=scaling_initializer,
+                initializer=self.scaling_initializer,
                 trainable=True,
             )
 
         super().build(input_shape)
 
     def _safe_divide(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        An improved epsilon-based safe division.
+        """Safe division with epsilon-based numerical stability.
 
         This method modifies the denominator to avoid zero by ensuring its
         magnitude is at least epsilon.
@@ -216,19 +221,18 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         Args:
             x1: Numerator tensor.
             x2: Denominator tensor.
-            epsilon: A small float to add to the denominator's magnitude.
 
         Returns:
-            Result of the division.
+            Result of the safe division.
         """
-        # Get the sign of the denominator, treating 0 as positive.
+        # Get the sign of the denominator, treating 0 as positive
         sign_x2 = ops.sign(x2)
         # If x2 is 0, ops.sign(x2) is 0. We want the sign to be 1 in this case
         # so that we add epsilon.
-        sign_x2 = ops.where(ops.equal(sign_x2, 0.), ops.ones_like(sign_x2), sign_x2)
+        sign_x2 = ops.where(ops.equal(sign_x2, 0.0), ops.ones_like(sign_x2), sign_x2)
 
-        # New denominator has its magnitude clamped to be at least epsilon.
-        safe_x2 = sign_x2 * ops.maximum(ops.abs(x2), 1-6)
+        # New denominator has its magnitude clamped to be at least epsilon
+        safe_x2 = sign_x2 * ops.maximum(ops.abs(x2), self.epsilon)
 
         return ops.divide(x1, safe_x2)
 
@@ -305,7 +309,7 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         # Compute operation selection probabilities
         if self.use_temperature:
             # Clamp temperature to prevent division by zero
-            temp = ops.maximum(self.temperature, 0.1)
+            temp = ops.maximum(self.temperature, 1e-7)
             operation_probs = ops.softmax(ops.divide(self.operation_weights, temp))
         else:
             operation_probs = ops.softmax(self.operation_weights)
@@ -354,8 +358,8 @@ class LearnableArithmeticOperator(keras.layers.Layer):
 
     def compute_output_shape(
             self,
-            input_shape: Union[Tuple[int, ...], List[Tuple[int, ...]]]
-    ) -> Tuple[int, ...]:
+            input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
+    ) -> Tuple[Optional[int], ...]:
         """Compute output shape.
 
         Args:
@@ -365,13 +369,9 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             Output shape tuple.
         """
         if isinstance(input_shape, list):
-            # Convert to list for manipulation, then back to tuple
-            shape_list = list(input_shape[0])
-            return tuple(shape_list)
+            return input_shape[0]
         else:
-            # Convert to list for manipulation, then back to tuple
-            shape_list = list(input_shape)
-            return tuple(shape_list)
+            return input_shape
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
@@ -394,22 +394,5 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             "exponent_clip_range": self.exponent_clip_range,
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration for serialization.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a configuration.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------

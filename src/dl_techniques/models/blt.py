@@ -171,7 +171,7 @@ from typing import Optional, Union, Dict, Any
 # ---------------------------------------------------------------------
 
 from ..utils.logger import logger
-from ..layers.blt_transformer_blocks import (
+from ..layers.byte_latent_transformer_blocks import (
     ByteTokenizer, EntropyModel,
     DynamicPatcher, LocalDecoder,
     LocalEncoder, GlobalTransformer

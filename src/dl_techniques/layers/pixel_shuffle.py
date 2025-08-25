@@ -6,7 +6,8 @@ of spatial tokens in vision transformers while preserving spatial information by
 it into channel dimensions. This technique is crucial for efficient vision-language models
 and multi-scale vision processing.
 
-## Mathematical Foundation
+Mathematical Foundation
+-----------------------
 
 The pixel shuffle operation performs a space-to-depth transformation on vision transformer
 tokens arranged as [CLS_token, spatial_tokens]. Given an input with spatial dimensions
@@ -24,7 +25,8 @@ Mathematical transformation:
 
 where s is the scale_factor and B is batch size.
 
-## Key Features
+Key Features
+------------
 
 - **Token-aware design**: Handles CLS tokens separately from spatial tokens
 - **Efficient processing**: Reduces computational complexity for subsequent layers
@@ -32,143 +34,31 @@ where s is the scale_factor and B is batch size.
 - **Flexible scaling**: Configurable scale factors for different reduction needs
 - **Runtime validation**: Optional validation of spatial dimension compatibility
 
-## Use Cases in Vision Transformers
+Use Cases in Vision Transformers
+---------------------------------
 
-### 1. Vision-Language Models
-Reducing spatial tokens before cross-attention with text:
-```python
-# Input: [batch, 197, 768] (196 spatial + 1 CLS, 14×14 spatial)
-pixel_shuffle = PixelShuffle(scale_factor=2)
-# Output: [batch, 50, 3072] (49 spatial + 1 CLS, 7×7 spatial)
-```
+Vision-Language Models: Reducing spatial tokens before cross-attention with text
+Hierarchical Processing: Creating multi-scale representations
+Computational Efficiency: Reducing tokens before expensive operations
 
-### 2. Hierarchical Processing
-Creating multi-scale representations:
-```python
-# Stage 1: Full resolution
-tokens_high = input_tokens  # [B, 197, 768]
+Implementation Details
+----------------------
 
-# Stage 2: Reduced resolution with more channels
-shuffle_2x = PixelShuffle(scale_factor=2)
-tokens_mid = shuffle_2x(tokens_high)  # [B, 50, 3072]
-
-# Stage 3: Further reduced resolution
-shuffle_4x = PixelShuffle(scale_factor=2)  # Applied to already shuffled tokens
-tokens_low = shuffle_4x(tokens_mid)  # [B, 14, 12288]
-```
-
-### 3. Computational Efficiency
-Reducing tokens before expensive operations:
-```python
-# Before expensive cross-attention
-shuffled_tokens = PixelShuffle(scale_factor=2)(vision_tokens)
-cross_attention_output = cross_attention(shuffled_tokens, text_tokens)
-```
-
-## Implementation Details
-
-### Spatial Token Arrangement
 The layer assumes spatial tokens are arranged in row-major order representing
-a square spatial grid:
-```
-Token indices for 3×3 spatial grid:
-[CLS] [0] [1] [2] [3] [4] [5] [6] [7] [8]
-
-Spatial arrangement:
-[0] [1] [2]
-[3] [4] [5]
-[6] [7] [8]
-```
-
-### Pixel Shuffle Operation
-For scale_factor=2, each 2×2 spatial block becomes 4 channels:
-```
-Input spatial (2×2):     Output channels:
-[a] [b]          →       [a, b, c, d] (concatenated)
-[c] [d]
-```
-
-### Memory Layout
-The operation preserves all information while changing memory layout:
-- **Before**: Many tokens, fewer channels per token
-- **After**: Fewer tokens, more channels per token
-- **Total parameters**: Unchanged (H*W*C = (H/s)*(W/s)*C*s²)
-
-## Performance Considerations
-
-### Computational Complexity
-- **Spatial complexity**: Reduced by factor of s² for subsequent layers
-- **Channel complexity**: Increased by factor of s² but affects fewer operations
-- **Memory usage**: Identical total memory, different layout
-- **Cache efficiency**: May improve due to spatial locality
-
-### Recommended Scale Factors
-- **scale_factor=2**: Most common, good balance of reduction and information density
-- **scale_factor=4**: Aggressive reduction for very high-resolution inputs
-- **scale_factor=1**: Identity operation, useful for architectural flexibility
-
-## Integration Examples
-
-### Basic Usage
-```python
-# Create layer
-pixel_shuffle = PixelShuffle(scale_factor=2)
-
-# Apply to vision transformer tokens
-reduced_tokens = pixel_shuffle(vision_tokens)
-
-# Use in model
-model = keras.Sequential([
-    # ... vision transformer layers ...
-    PixelShuffle(scale_factor=2),
-    # ... subsequent processing with fewer tokens ...
-])
-```
-
-### With Validation
-```python
-# Strict validation for development
-pixel_shuffle = PixelShuffle(
-    scale_factor=2,
-    validate_spatial_dims=True  # Validates perfect square and divisibility
-)
-
-# Relaxed validation for production
-pixel_shuffle = PixelShuffle(
-    scale_factor=2,
-    validate_spatial_dims=False  # Faster, assumes valid inputs
-)
-```
-
-## References
-
-The pixel shuffle concept is adapted from super-resolution literature and extended
-for vision transformer token processing:
-
-1. Shi, W., et al. "Real-time single image and video super-resolution using an
-   efficient sub-pixel convolutional neural network." CVPR 2016.
-2. Liu, Z., et al. "Swin Transformer: Hierarchical Vision Transformer using
-   Shifted Windows." ICCV 2021.
-3. Radford, A., et al. "Learning Transferable Visual Models From Natural Language
-   Supervision." ICML 2021.
-
-## Notes
-
-- The layer assumes square spatial arrangements (H = W)
-- CLS tokens are preserved and not affected by the shuffle operation
-- Input validation can be disabled for performance in production environments
-- The operation is fully differentiable and suitable for end-to-end training
+a square spatial grid. For scale_factor=2, each 2×2 spatial block becomes 4 channels.
+The operation preserves all information while changing memory layout.
 """
 
 import keras
 from keras import ops
-from typing import Optional, Tuple, Any
+from typing import Optional, Tuple, Any, Dict
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PixelShuffle(keras.layers.Layer):
-    """Pixel shuffle operation for reducing spatial tokens in vision transformers.
+    """
+    Pixel shuffle operation for reducing spatial tokens in vision transformers.
 
     Implements pixel shuffle to reduce the number of visual tokens by rearranging
     spatial information into channel dimensions, enabling more efficient processing
@@ -179,42 +69,68 @@ class PixelShuffle(keras.layers.Layer):
     spatial tokens represent a square spatial grid.
 
     Args:
-        scale_factor: Factor by which to reduce spatial dimensions. Must be a positive
-            integer that evenly divides the spatial dimensions. Default: 2.
-        validate_spatial_dims: Whether to validate that spatial dimensions are
-            perfect squares and divisible by scale_factor. Default: True.
+        scale_factor: Integer, factor by which to reduce spatial dimensions. Must be a
+            positive integer that evenly divides the spatial dimensions. Defaults to 2.
+        validate_spatial_dims: Boolean, whether to validate that spatial dimensions are
+            perfect squares and divisible by scale_factor. Defaults to True.
         **kwargs: Additional keyword arguments for the Layer base class.
 
+    Input shape:
+        3D tensor with shape: `(batch_size, num_tokens, channels)` where
+        num_tokens = 1 + H*W (CLS token + spatial tokens).
+
+    Output shape:
+        3D tensor with shape: `(batch_size, 1 + (H//scale_factor)*(W//scale_factor),
+        channels*scale_factor^2)`.
+
     Example:
-        >>> # Input: [batch, 197, 768] (196 spatial tokens + 1 CLS token, 14x14 spatial)
-        >>> pixel_shuffle = PixelShuffle(scale_factor=2)
-        >>> # Output: [batch, 50, 3072] (49 spatial tokens + 1 CLS token, 7x7 spatial)
+        ```python
+        # Input: [batch, 197, 768] (196 spatial tokens + 1 CLS token, 14x14 spatial)
+        pixel_shuffle = PixelShuffle(scale_factor=2)
+        # Output: [batch, 50, 3072] (49 spatial tokens + 1 CLS token, 7x7 spatial)
+
+        # Basic usage
+        inputs = keras.Input(shape=(197, 768))
+        outputs = PixelShuffle(scale_factor=2)(inputs)
+
+        # With validation disabled for performance
+        fast_shuffle = PixelShuffle(scale_factor=2, validate_spatial_dims=False)
+        ```
 
     Raises:
         ValueError: If scale_factor is not a positive integer.
         ValueError: If spatial dimensions are not compatible with scale_factor
             when validate_spatial_dims is True.
+
+    Note:
+        The layer assumes square spatial arrangements (H = W) and that CLS tokens
+        are preserved and not affected by the shuffle operation. The operation is
+        fully differentiable and suitable for end-to-end training.
     """
 
     def __init__(
-            self,
-            scale_factor: int = 2,
-            validate_spatial_dims: bool = True,
-            **kwargs: Any
+        self,
+        scale_factor: int = 2,
+        validate_spatial_dims: bool = True,
+        **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
+        # Validate inputs
         if not isinstance(scale_factor, int) or scale_factor <= 0:
             raise ValueError(
                 f"scale_factor must be a positive integer, got {scale_factor}"
             )
 
+        # Store ALL configuration
         self.scale_factor = scale_factor
         self.validate_spatial_dims = validate_spatial_dims
-        self._build_input_shape = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer.
+        """
+        Validate input shape and build the layer.
+
+        This layer creates no weights, only validates input compatibility.
 
         Args:
             input_shape: Shape tuple of the input tensor.
@@ -222,15 +138,13 @@ class PixelShuffle(keras.layers.Layer):
         Raises:
             ValueError: If input shape is invalid or incompatible with scale_factor.
         """
-        self._build_input_shape = input_shape
-
         # Validate input shape
         if len(input_shape) != 3:
             raise ValueError(
                 f"Expected 3D input (batch, seq_len, channels), got shape {input_shape}"
             )
 
-        # Validate spatial dimensions if enabled and known
+        # Validate spatial dimensions if enabled and known at build time
         if self.validate_spatial_dims and input_shape[1] is not None:
             seq_len = input_shape[1]
             spatial_len = seq_len - 1  # Subtract CLS token
@@ -257,22 +171,27 @@ class PixelShuffle(keras.layers.Layer):
                     f"({self.scale_factor})"
                 )
 
+        # Always call parent build at the end
         super().build(input_shape)
 
-    def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """Apply pixel shuffle operation.
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Apply pixel shuffle operation.
 
         Args:
             inputs: Input tensor of shape [batch, num_tokens, channels] where
                 num_tokens = 1 + H*W (CLS token + spatial tokens).
+            training: Boolean indicating training mode (unused for this layer).
 
         Returns:
             Shuffled tensor with reduced spatial tokens of shape
             [batch, 1 + (H//scale_factor)*(W//scale_factor), channels*scale_factor^2].
-
-        Raises:
-            ValueError: If runtime spatial dimensions are incompatible.
         """
+        # Identity operation for scale_factor=1
         if self.scale_factor == 1:
             return inputs
 
@@ -317,7 +236,8 @@ class PixelShuffle(keras.layers.Layer):
         return ops.concatenate([cls_token_expanded, shuffled], axis=1)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
+        """
+        Compute the output shape of the layer.
 
         Args:
             input_shape: Shape of the input tensor.
@@ -342,11 +262,12 @@ class PixelShuffle(keras.layers.Layer):
 
         return tuple([batch_size, new_seq_len, new_channels])
 
-    def get_config(self) -> dict:
-        """Get layer configuration for serialization.
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Get layer configuration for serialization.
 
         Returns:
-            Dictionary containing the layer configuration.
+            Dictionary containing all layer configuration parameters.
         """
         config = super().get_config()
         config.update({
@@ -354,22 +275,5 @@ class PixelShuffle(keras.layers.Layer):
             "validate_spatial_dims": self.validate_spatial_dims,
         })
         return config
-
-    def get_build_config(self) -> dict:
-        """Get build configuration for serialization.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: dict) -> None:
-        """Build layer from configuration.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------

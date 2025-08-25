@@ -55,11 +55,10 @@ from keras import ops
 from typing import Optional, Tuple, Dict, Any, List, Union
 
 # ---------------------------------------------------------------------
-# local imports
+# Local imports - assumed to exist as per instructions
 # ---------------------------------------------------------------------
 from ..utils.logger import logger
-
-from .yolo12 import ConvBlock
+from .yolo12_blocks import ConvBlock
 from .squeeze_excitation import SqueezeExcitation
 
 # ---------------------------------------------------------------------
@@ -87,7 +86,6 @@ class YOLOv12DetectionHead(keras.layers.Layer):
         kernel_initializer: String or Initializer, initializer for kernel weights.
             Defaults to 'he_normal'.
         kernel_regularizer: Optional Regularizer, regularizer for kernel weights. Defaults to None.
-        name: Optional string, layer name.
         **kwargs: Additional keyword arguments for Layer base class.
 
     Input shape:
@@ -99,6 +97,10 @@ class YOLOv12DetectionHead(keras.layers.Layer):
     Output shape:
         Tensor with shape (batch_size, total_anchors, 4*reg_max + num_classes)
         where total_anchors is the sum of anchors from all three scales.
+
+    Raises:
+        ValueError: If num_classes or reg_max is not positive.
+        ValueError: If bbox_channels or cls_channels length is not 3.
 
     Example:
         ```python
@@ -117,38 +119,25 @@ class YOLOv12DetectionHead(keras.layers.Layer):
         features = [p3_features, p4_features, p5_features]
         detections = head(features)
         ```
-
-    Raises:
-        ValueError: If num_classes or reg_max is not positive.
-        ValueError: If bbox_channels or cls_channels length is not 3.
     """
 
     def __init__(
-            self,
-            num_classes: int = 80,
-            reg_max: int = 16,
-            bbox_channels: Optional[List[int]] = None,
-            cls_channels: Optional[List[int]] = None,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
-            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            name: Optional[str] = None,
-            **kwargs: Any
+        self,
+        num_classes: int = 80,
+        reg_max: int = 16,
+        bbox_channels: Optional[List[int]] = None,
+        cls_channels: Optional[List[int]] = None,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        **kwargs: Any
     ) -> None:
-        super().__init__(name=name, **kwargs)
+        super().__init__(**kwargs)
 
         # Validate inputs
         if num_classes <= 0:
             raise ValueError(f"num_classes must be positive, got {num_classes}")
         if reg_max <= 0:
             raise ValueError(f"reg_max must be positive, got {reg_max}")
-
-        # Store configuration
-        self.num_classes = num_classes
-        self.reg_max = reg_max
-        self.bbox_channels = bbox_channels
-        self.cls_channels = cls_channels
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # Validate channel lists if provided
         if bbox_channels is not None:
@@ -163,24 +152,32 @@ class YOLOv12DetectionHead(keras.layers.Layer):
             if any(c <= 0 for c in cls_channels):
                 raise ValueError("All cls_channels must be positive")
 
-        # CREATE sub-layers in __init__ (following modern Keras 3 pattern)
-        # We create 3 branches for 3 scales, they will be built in build()
+        # Store configuration - ALL parameters from __init__
+        self.num_classes = num_classes
+        self.reg_max = reg_max
+        self.bbox_channels = bbox_channels
+        self.cls_channels = cls_channels
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+
+        # CREATE all sub-layers in __init__ (Modern Keras 3 pattern)
+        # Initialize but don't build - building happens in build() method
         self.bbox_branches = []
         self.cls_branches = []
 
         for i in range(3):  # 3 scales: P3, P4, P5
-            # Create bbox branch (will be built in build())
-            bbox_branch = keras.Sequential(name=f"{self.name}_bbox_branch_{i}")
+            # Create bbox branch as Sequential - will be populated in build()
+            bbox_branch = keras.Sequential(name=f"bbox_branch_{i}")
             self.bbox_branches.append(bbox_branch)
 
-            # Create classification branch (will be built in build())
-            cls_branch = keras.Sequential(name=f"{self.name}_cls_branch_{i}")
+            # Create classification branch as Sequential - will be populated in build()
+            cls_branch = keras.Sequential(name=f"cls_branch_{i}")
             self.cls_branches.append(cls_branch)
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
         """Build detection head branches for each input scale.
 
-        Following modern Keras 3 pattern: explicitly build all sub-layers.
+        Following modern Keras 3 pattern: explicitly build all sub-layers for robust serialization.
 
         Args:
             input_shape: List of shape tuples for each input feature map.
@@ -189,11 +186,12 @@ class YOLOv12DetectionHead(keras.layers.Layer):
         Raises:
             ValueError: If input_shape is not a list of 3 shapes.
         """
+        # Validate input structure
         if not isinstance(input_shape, list):
-            raise ValueError("DetectionHead expects a list of input shapes")
+            raise ValueError("YOLOv12DetectionHead expects a list of input shapes")
 
         if len(input_shape) != 3:
-            raise ValueError(f"DetectionHead expects exactly 3 input feature maps, got {len(input_shape)}")
+            raise ValueError(f"YOLOv12DetectionHead expects exactly 3 input feature maps, got {len(input_shape)}")
 
         logger.info(f"Building YOLOv12DetectionHead with {len(input_shape)} scales")
 
@@ -217,7 +215,7 @@ class YOLOv12DetectionHead(keras.layers.Layer):
 
             logger.info(f"Scale {i}: input_channels={in_channels}, bbox_channels={bbox_c}, cls_channels={cls_c}")
 
-            # Build bbox branch layers
+            # Populate bbox branch layers
             self.bbox_branches[i].add(ConvBlock(
                 filters=bbox_c,
                 kernel_size=3,
@@ -240,7 +238,7 @@ class YOLOv12DetectionHead(keras.layers.Layer):
                 name=f"bbox_{i}_pred"
             ))
 
-            # Build classification branch layers with depthwise separable convolutions
+            # Populate classification branch layers with depthwise separable convolutions
             self.cls_branches[i].add(ConvBlock(
                 filters=in_channels,
                 kernel_size=3,
@@ -280,16 +278,19 @@ class YOLOv12DetectionHead(keras.layers.Layer):
             ))
 
             # CRITICAL: Explicitly build each sub-layer for robust serialization
-            self.bbox_branches[i].build(shape)
-            self.cls_branches[i].build(shape)
+            try:
+                self.bbox_branches[i].build(shape)
+                self.cls_branches[i].build(shape)
+            except Exception as e:
+                raise ValueError(f"Failed to build detection head branches for scale {i}: {e}")
 
         # Always call parent build at the end
         super().build(input_shape)
 
     def call(
-            self,
-            inputs: List[keras.KerasTensor],
-            training: Optional[bool] = None
+        self,
+        inputs: List[keras.KerasTensor],
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass through detection head.
 
@@ -306,7 +307,7 @@ class YOLOv12DetectionHead(keras.layers.Layer):
             ValueError: If inputs is not a list of exactly 3 tensors.
         """
         if not isinstance(inputs, list) or len(inputs) != 3:
-            raise ValueError("DetectionHead expects exactly 3 input feature maps")
+            raise ValueError("YOLOv12DetectionHead expects exactly 3 input feature maps")
 
         outputs = []
 
@@ -317,7 +318,7 @@ class YOLOv12DetectionHead(keras.layers.Layer):
             # Get classification predictions
             cls_pred = self.cls_branches[i](x, training=training)
 
-            # Reshape predictions
+            # Reshape predictions for concatenation
             batch_size = ops.shape(x)[0]
             h = ops.shape(x)[1]
             w = ops.shape(x)[2]
@@ -329,7 +330,7 @@ class YOLOv12DetectionHead(keras.layers.Layer):
             output = ops.concatenate([bbox_pred, cls_pred], axis=-1)
             outputs.append(output)
 
-        # Concatenate all scales
+        # Concatenate all scales along anchor dimension
         return ops.concatenate(outputs, axis=1)
 
     def compute_output_shape(self, input_shape: List[Tuple[Optional[int], ...]]) -> Tuple[Optional[int], ...]:
@@ -339,11 +340,12 @@ class YOLOv12DetectionHead(keras.layers.Layer):
             input_shape: List of input shape tuples.
 
         Returns:
-            Output shape tuple.
+            Output shape tuple (batch_size, total_anchors, 4*reg_max + num_classes).
         """
         if not isinstance(input_shape, list) or len(input_shape) != 3:
             return (None, None, 4 * self.reg_max + self.num_classes)
 
+        # Calculate total anchors across all scales
         total_anchors = 0
         for shape in input_shape:
             if shape[1] is not None and shape[2] is not None:
@@ -358,7 +360,7 @@ class YOLOv12DetectionHead(keras.layers.Layer):
         """Get layer configuration for serialization.
 
         Returns:
-            Dictionary containing the layer configuration.
+            Dictionary containing ALL layer configuration parameters.
         """
         config = super().get_config()
         config.update({
@@ -401,7 +403,6 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
             Defaults to 'he_normal'.
         kernel_regularizer: Optional Regularizer, regularizer for kernel weights.
             Defaults to None.
-        name: Optional string, layer name.
         **kwargs: Additional keyword arguments for Layer base class.
 
     Input shape:
@@ -412,6 +413,12 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
 
     Output shape:
         Tensor with shape (batch_size, target_height, target_width, num_classes)
+
+    Raises:
+        ValueError: If num_classes is not positive.
+        ValueError: If intermediate_filters has fewer than 2 elements.
+        ValueError: If dropout_rate is not between 0 and 1.
+        ValueError: If target_size is provided but not a tuple of 2 positive integers.
 
     Example:
         ```python
@@ -430,27 +437,20 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
         features = [p3_features, p4_features, p5_features]
         segmentation = head(features)
         ```
-
-    Raises:
-        ValueError: If num_classes is not positive.
-        ValueError: If intermediate_filters has fewer than 2 elements.
-        ValueError: If dropout_rate is not between 0 and 1.
-        ValueError: If target_size is provided but not a tuple of 2 positive integers.
     """
 
     def __init__(
-            self,
-            num_classes: int = 1,
-            intermediate_filters: List[int] = [128, 64, 32, 16],
-            target_size: Optional[Tuple[int, int]] = None,
-            use_attention: bool = True,
-            dropout_rate: float = 0.1,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
-            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            name: Optional[str] = None,
-            **kwargs: Any
+        self,
+        num_classes: int = 1,
+        intermediate_filters: List[int] = [128, 64, 32, 16],
+        target_size: Optional[Tuple[int, int]] = None,
+        use_attention: bool = True,
+        dropout_rate: float = 0.1,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        **kwargs: Any
     ) -> None:
-        super().__init__(name=name, **kwargs)
+        super().__init__(**kwargs)
 
         # Validate inputs
         if num_classes <= 0:
@@ -465,7 +465,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
             if any(s <= 0 for s in target_size):
                 raise ValueError("target_size values must be positive")
 
-        # Store configuration
+        # Store ALL configuration parameters from __init__
         self.num_classes = num_classes
         self.intermediate_filters = intermediate_filters
         self.target_size = target_size
@@ -474,15 +474,82 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # CREATE sub-layers in __init__ (following modern Keras 3 pattern)
+        # CREATE all sub-layers in __init__ (Modern Keras 3 pattern)
         self.upconv_blocks = []
         self.skip_convs = []
         self.attention_blocks = []
+        self.final_conv = None
+        self.dropout = None
 
-        # Create upsampling blocks for each stage
+        # Create upsampling blocks - will be populated in build()
         for i, filters in enumerate(intermediate_filters):
-            # Upsampling block
-            upconv_block = keras.Sequential([
+            upconv_block = keras.Sequential(name=f"upconv_block_{i}")
+            self.upconv_blocks.append(upconv_block)
+
+        # Create skip connection processing blocks for first 2 stages
+        for i in range(min(2, len(intermediate_filters))):
+            skip_conv = keras.Sequential(name=f"skip_conv_{i}")
+            self.skip_convs.append(skip_conv)
+
+            if use_attention:
+                # Attention will be created as SqueezeExcitation in build()
+                self.attention_blocks.append(None)
+
+        # Final segmentation output layer - will be created in build()
+        self.final_conv = keras.layers.Conv2D(
+            filters=self.num_classes,
+            kernel_size=1,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            name="final_conv"
+        )
+
+        # Dropout for regularization
+        if self.dropout_rate > 0:
+            self.dropout = keras.layers.Dropout(self.dropout_rate, name="dropout")
+
+        # Store computed target size (will be set in build)
+        self._computed_target_size = None
+
+    def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
+        """Build segmentation head with progressive upsampling to full resolution.
+
+        Following modern Keras 3 pattern: explicitly build all sub-layers for robust serialization.
+
+        Args:
+            input_shape: List of shape tuples for input feature maps.
+                Expected: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
+
+        Raises:
+            ValueError: If input_shape is not a list of 3 shapes.
+        """
+        if not isinstance(input_shape, list) or len(input_shape) != 3:
+            raise ValueError("YOLOv12SegmentationHead expects 3 input feature maps")
+
+        # Compute target size if not provided
+        if self.target_size is None:
+            # P3 has shape (B, H/8, W/8, C), so original size is (H, W) = (H/8 * 8, W/8 * 8)
+            p3_shape = input_shape[0]  # (B, H/8, W/8, C1)
+            if p3_shape[1] is not None and p3_shape[2] is not None:
+                self._computed_target_size = (p3_shape[1] * 8, p3_shape[2] * 8)
+            else:
+                # Fallback for dynamic shapes
+                self._computed_target_size = (256, 256)
+                logger.warning("Could not infer target size from input shape, using (256, 256)")
+        else:
+            self._computed_target_size = self.target_size
+
+        logger.info(f"Building YOLOv12SegmentationHead:")
+        logger.info(f"  Input shapes: {input_shape}")
+        logger.info(f"  Target output size: {self._computed_target_size}")
+        logger.info(f"  Upsampling stages: {len(self.intermediate_filters)}")
+
+        p3_shape, p4_shape, p5_shape = input_shape
+
+        # Populate and build upsampling blocks
+        for i, filters in enumerate(self.intermediate_filters):
+            # Clear any existing layers and add new ones
+            self.upconv_blocks[i] = keras.Sequential([
                 keras.layers.Conv2DTranspose(
                     filters=filters,
                     kernel_size=3,
@@ -505,97 +572,41 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
                 keras.layers.BatchNormalization(name=f"upconv_{i}_refine_bn"),
                 keras.layers.Activation("silu", name=f"upconv_{i}_refine_silu")
             ], name=f"upconv_block_{i}")
-            self.upconv_blocks.append(upconv_block)
 
-            # Skip connection processing (only for first 2 stages: P5->P4, P4->P3)
-            if i < 2:
-                skip_conv = keras.Sequential([
-                    keras.layers.Conv2D(
-                        filters=filters,
-                        kernel_size=1,
-                        kernel_initializer=self.kernel_initializer,
-                        kernel_regularizer=self.kernel_regularizer,
-                        name=f"skip_{i}_conv"
-                    ),
-                    keras.layers.BatchNormalization(name=f"skip_{i}_bn"),
-                    keras.layers.Activation("silu", name=f"skip_{i}_silu")
-                ], name=f"skip_conv_{i}")
-                self.skip_convs.append(skip_conv)
+        # Populate and build skip connection processing blocks
+        for i in range(len(self.skip_convs)):
+            filters = self.intermediate_filters[i]
 
-                # Attention block for feature fusion
-                if self.use_attention:
-                    attention_block = SqueezeExcitation(
-                        reduction_ratio=0.25,
-                        name=f"attention_{i}"
-                    )
-                    self.attention_blocks.append(attention_block)
+            # Clear any existing layers and add new ones
+            self.skip_convs[i] = keras.Sequential([
+                keras.layers.Conv2D(
+                    filters=filters,
+                    kernel_size=1,
+                    kernel_initializer=self.kernel_initializer,
+                    kernel_regularizer=self.kernel_regularizer,
+                    name=f"skip_{i}_conv"
+                ),
+                keras.layers.BatchNormalization(name=f"skip_{i}_bn"),
+                keras.layers.Activation("silu", name=f"skip_{i}_silu")
+            ], name=f"skip_conv_{i}")
 
-        # Final segmentation output layer
-        self.final_conv = keras.layers.Conv2D(
-            filters=self.num_classes,
-            kernel_size=1,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="final_conv"
-        )
+            # Create attention blocks if enabled
+            if self.use_attention:
+                self.attention_blocks[i] = SqueezeExcitation(
+                    reduction_ratio=0.25,
+                    name=f"attention_{i}"
+                )
 
-        # Dropout for regularization
-        if self.dropout_rate > 0:
-            self.dropout = keras.layers.Dropout(self.dropout_rate, name="dropout")
-        else:
-            self.dropout = None
+        # Build layers with correct shapes accounting for data flow
+        current_shape = p5_shape  # Start from deepest features
 
-        # Store computed target size (will be set in build)
-        self._computed_target_size = None
+        # Build first upconv block (P5 -> P4 scale)
+        try:
+            self.upconv_blocks[0].build(current_shape)
+        except Exception as e:
+            raise ValueError(f"Failed to build upconv_block_0: {e}")
 
-    def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
-        """Build segmentation head with progressive upsampling to full resolution.
-
-        Following modern Keras 3 pattern: explicitly build all sub-layers.
-
-        Args:
-            input_shape: List of shape tuples for input feature maps.
-                Expected: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
-
-        Raises:
-            ValueError: If input_shape is not a list of 3 shapes.
-        """
-        if not isinstance(input_shape, list) or len(input_shape) != 3:
-            raise ValueError("SegmentationHead expects 3 input feature maps")
-
-        # Compute target size if not provided
-        if self.target_size is None:
-            # P3 has shape (B, H/8, W/8, C), so original size is (H, W) = (H/8 * 8, W/8 * 8)
-            p3_shape = input_shape[0]  # (B, H/8, W/8, C1)
-            if p3_shape[1] is not None and p3_shape[2] is not None:
-                self._computed_target_size = (p3_shape[1] * 8, p3_shape[2] * 8)
-            else:
-                # Fallback for dynamic shapes
-                self._computed_target_size = (256, 256)
-                logger.warning("Could not infer target size from input shape, using (256, 256)")
-        else:
-            self._computed_target_size = self.target_size
-
-        logger.info(f"Building YOLOv12SegmentationHead:")
-        logger.info(f"  Input shapes: {input_shape}")
-        logger.info(f"  Target output size: {self._computed_target_size}")
-        logger.info(f"  Upsampling stages: {len(self.intermediate_filters)}")
-
-        # Build upsampling blocks with correct input shapes accounting for concatenation
-        # input_shape: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
-        p3_shape, p4_shape, p5_shape = input_shape
-
-        # Stage progression accounting for concatenation:
-        # P5(1024) -> upconv[0] -> 128, concat with P4(128) -> 256
-        # 256 -> upconv[1] -> 64, concat with P3(64) -> 128
-        # 128 -> upconv[2] -> 32
-        # 32 -> upconv[3] -> 16
-
-        # Stage 0: P5 -> P4 scale
-        current_shape = p5_shape
-        self.upconv_blocks[0].build(current_shape)
-
-        # After upconv[0]: (B, H/16, W/16, intermediate_filters[0])
+        # Update shape after upconvolution
         upconv0_output_shape = (
             current_shape[0],
             current_shape[1] * 2 if current_shape[1] is not None else None,
@@ -605,23 +616,33 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
 
         # Build skip connection for P4 fusion
         if len(self.skip_convs) > 0:
-            self.skip_convs[0].build(p4_shape)
+            try:
+                self.skip_convs[0].build(p4_shape)
+            except Exception as e:
+                raise ValueError(f"Failed to build skip_conv_0: {e}")
 
             # After concatenation: upconv0_output + P4_processed
-            concat_channels = self.intermediate_filters[0] + self.intermediate_filters[0]  # Both output same channels
-            concat_shape = (upconv0_output_shape[0], upconv0_output_shape[1], upconv0_output_shape[2], concat_channels)
+            concat_channels = self.intermediate_filters[0] * 2  # Both have same channels
+            concat_shape = (upconv0_output_shape[0], upconv0_output_shape[1],
+                           upconv0_output_shape[2], concat_channels)
 
             # Build attention if enabled
-            if len(self.attention_blocks) > 0:
-                self.attention_blocks[0].build(concat_shape)
+            if self.attention_blocks[0] is not None:
+                try:
+                    self.attention_blocks[0].build(concat_shape)
+                except Exception as e:
+                    raise ValueError(f"Failed to build attention_0: {e}")
 
             current_shape = concat_shape
 
-        # Stage 1: P4 scale -> P3 scale (if we have more than 1 upconv block)
+        # Build second upconv block (P4 scale -> P3 scale) if exists
         if len(self.upconv_blocks) > 1:
-            self.upconv_blocks[1].build(current_shape)
+            try:
+                self.upconv_blocks[1].build(current_shape)
+            except Exception as e:
+                raise ValueError(f"Failed to build upconv_block_1: {e}")
 
-            # After upconv[1]: (B, H/8, W/8, intermediate_filters[1])
+            # Update shape after upconvolution
             upconv1_output_shape = (
                 current_shape[0],
                 current_shape[1] * 2 if current_shape[1] is not None else None,
@@ -631,23 +652,33 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
 
             # Build skip connection for P3 fusion
             if len(self.skip_convs) > 1:
-                self.skip_convs[1].build(p3_shape)
+                try:
+                    self.skip_convs[1].build(p3_shape)
+                except Exception as e:
+                    raise ValueError(f"Failed to build skip_conv_1: {e}")
 
                 # After concatenation: upconv1_output + P3_processed
-                concat_channels = self.intermediate_filters[1] + self.intermediate_filters[1]
-                concat_shape = (upconv1_output_shape[0], upconv1_output_shape[1], upconv1_output_shape[2], concat_channels)
+                concat_channels = self.intermediate_filters[1] * 2
+                concat_shape = (upconv1_output_shape[0], upconv1_output_shape[1],
+                               upconv1_output_shape[2], concat_channels)
 
                 # Build attention if enabled
-                if len(self.attention_blocks) > 1:
-                    self.attention_blocks[1].build(concat_shape)
+                if self.attention_blocks[1] is not None:
+                    try:
+                        self.attention_blocks[1].build(concat_shape)
+                    except Exception as e:
+                        raise ValueError(f"Failed to build attention_1: {e}")
 
                 current_shape = concat_shape
             else:
                 current_shape = upconv1_output_shape
 
-        # Additional upsampling stages (no more skip connections)
+        # Build remaining upsampling stages
         for i in range(2, len(self.upconv_blocks)):
-            self.upconv_blocks[i].build(current_shape)
+            try:
+                self.upconv_blocks[i].build(current_shape)
+            except Exception as e:
+                raise ValueError(f"Failed to build upconv_block_{i}: {e}")
 
             # Update current shape for next stage
             current_shape = (
@@ -658,24 +689,30 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
             )
 
         # Build final layers
-        self.final_conv.build(current_shape)
+        try:
+            self.final_conv.build(current_shape)
+        except Exception as e:
+            raise ValueError(f"Failed to build final_conv: {e}")
 
         if self.dropout is not None:
-            self.dropout.build(current_shape)
+            try:
+                self.dropout.build(current_shape)
+            except Exception as e:
+                raise ValueError(f"Failed to build dropout: {e}")
 
         # Always call parent build at the end
         super().build(input_shape)
 
     def call(
-            self,
-            inputs: List[keras.KerasTensor],
-            training: Optional[bool] = None
+        self,
+        inputs: List[keras.KerasTensor],
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass through segmentation head.
 
         Args:
             inputs: List of feature maps [P3, P4, P5] from backbone.
-                   Expected shapes: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
+                Expected shapes: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
             training: Boolean, whether in training mode.
 
         Returns:
@@ -684,8 +721,8 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
         Raises:
             ValueError: If inputs is not a list of exactly 3 tensors.
         """
-        if len(inputs) != 3:
-            raise ValueError("SegmentationHead expects exactly 3 input feature maps")
+        if not isinstance(inputs, list) or len(inputs) != 3:
+            raise ValueError("YOLOv12SegmentationHead expects exactly 3 input feature maps")
 
         p3, p4, p5 = inputs  # P3: H/8, P4: H/16, P5: H/32
 
@@ -701,7 +738,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
             x = ops.concatenate([x, p4_processed], axis=-1)
 
             # Apply attention if enabled
-            if len(self.attention_blocks) > 0:
+            if self.attention_blocks[0] is not None:
                 x = self.attention_blocks[0](x, training=training)
 
         # Stage 1: P4 scale (H/16) -> P3 scale (H/8)
@@ -714,7 +751,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
                 x = ops.concatenate([x, p3_processed], axis=-1)
 
                 # Apply attention if enabled
-                if len(self.attention_blocks) > 1:
+                if self.attention_blocks[1] is not None:
                     x = self.attention_blocks[1](x, training=training)
 
         # Additional upsampling stages to reach full resolution
@@ -723,7 +760,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
 
         # Ensure exact target size with resize
         if self._computed_target_size is not None:
-            x = ops.image.resize(
+            x = keras.ops.image.resize(
                 x,
                 size=self._computed_target_size,
                 interpolation="bilinear"
@@ -745,7 +782,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
             input_shape: List of input shape tuples.
 
         Returns:
-            Output shape tuple.
+            Output shape tuple (batch_size, target_height, target_width, num_classes).
         """
         if not isinstance(input_shape, list) or len(input_shape) != 3:
             return (None, None, None, self.num_classes)
@@ -768,7 +805,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
         """Get layer configuration for serialization.
 
         Returns:
-            Dictionary containing the layer configuration.
+            Dictionary containing ALL layer configuration parameters.
         """
         config = super().get_config()
         config.update({
@@ -810,7 +847,6 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
             Defaults to 'he_normal'.
         kernel_regularizer: Optional Regularizer, regularizer for kernel weights.
             Defaults to None.
-        name: Optional string, layer name.
         **kwargs: Additional keyword arguments for Layer base class.
 
     Input shape:
@@ -821,6 +857,12 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
 
     Output shape:
         Tensor with shape (batch_size, num_classes)
+
+    Raises:
+        ValueError: If num_classes is not positive.
+        ValueError: If hidden_dims is empty.
+        ValueError: If pooling_types is empty or contains invalid values.
+        ValueError: If dropout_rate is not between 0 and 1.
 
     Example:
         ```python
@@ -839,27 +881,20 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
         features = [p3_features, p4_features, p5_features]
         classification = head(features)
         ```
-
-    Raises:
-        ValueError: If num_classes is not positive.
-        ValueError: If hidden_dims is empty.
-        ValueError: If pooling_types is empty or contains invalid values.
-        ValueError: If dropout_rate is not between 0 and 1.
     """
 
     def __init__(
-            self,
-            num_classes: int = 1,
-            hidden_dims: List[int] = [512, 256],
-            pooling_types: List[str] = ["avg", "max"],
-            use_attention: bool = True,
-            dropout_rate: float = 0.3,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
-            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            name: Optional[str] = None,
-            **kwargs: Any
+        self,
+        num_classes: int = 1,
+        hidden_dims: List[int] = [512, 256],
+        pooling_types: List[str] = ["avg", "max"],
+        use_attention: bool = True,
+        dropout_rate: float = 0.3,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        **kwargs: Any
     ) -> None:
-        super().__init__(name=name, **kwargs)
+        super().__init__(**kwargs)
 
         # Validate inputs
         if num_classes <= 0:
@@ -879,7 +914,7 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
             if pool_type not in valid_pooling_types:
                 raise ValueError(f"Invalid pooling type: {pool_type}. Must be one of {valid_pooling_types}")
 
-        # Store configuration
+        # Store ALL configuration parameters from __init__
         self.num_classes = num_classes
         self.hidden_dims = hidden_dims
         self.pooling_types = pooling_types
@@ -888,7 +923,7 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # CREATE sub-layers in __init__ (following modern Keras 3 pattern)
+        # CREATE all sub-layers in __init__ (Modern Keras 3 pattern)
         self.pooling_layers = []
         self.attention_pooling = None
         self.dense_layers = []
@@ -901,6 +936,8 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
                 pool_layer = keras.layers.GlobalAveragePooling2D(name=f"{pool_type}_pool")
             elif pool_type == "max":
                 pool_layer = keras.layers.GlobalMaxPooling2D(name=f"{pool_type}_pool")
+            else:
+                raise ValueError(f"Unknown pooling type: {pool_type}")
 
             self.pooling_layers.append(pool_layer)
 
@@ -931,7 +968,7 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
         """Build classification head.
 
-        Following modern Keras 3 pattern: explicitly build all sub-layers.
+        Following modern Keras 3 pattern: explicitly build all sub-layers for robust serialization.
 
         Args:
             input_shape: List of shape tuples for input feature maps.
@@ -941,26 +978,30 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
             ValueError: If input_shape is not a list of 3 shapes.
         """
         if not isinstance(input_shape, list) or len(input_shape) != 3:
-            raise ValueError("ClassificationHead expects 3 input feature maps")
+            raise ValueError("YOLOv12ClassificationHead expects 3 input feature maps")
 
         logger.info(f"Building YOLOv12ClassificationHead with pooling types: {self.pooling_types}")
 
-        # Build pooling layers - they don't need explicit building, but we call it for consistency
-        for pool_layer in self.pooling_layers:
-            # Global pooling layers adapt to any spatial input size
-            pool_layer.build(input_shape[0])  # Any input shape works for global pooling
+        # Build pooling layers - global pooling adapts to any spatial input size
+        for i, pool_layer in enumerate(self.pooling_layers):
+            try:
+                # Global pooling layers work with any input shape
+                pool_layer.build(input_shape[0])  # Any input shape works for global pooling
+            except Exception as e:
+                raise ValueError(f"Failed to build pooling layer {i}: {e}")
 
         # Calculate total feature dimension after concatenating all scales and pooling types
-        total_dim = sum(shape[-1] for shape in input_shape if shape[-1] is not None) * len(self.pooling_types)
+        total_dim = 0
+        for shape in input_shape:
+            if shape[-1] is not None:
+                total_dim += shape[-1]
+        total_dim *= len(self.pooling_types)
 
-        if total_dim == 0:  # Handle case where channels are unknown
-            total_dim = None
+        logger.info(f"Total feature dimension: {total_dim if total_dim > 0 else 'Dynamic'}")
 
-        logger.info(f"Total feature dimension: {total_dim}")
-
-        # Build attention pooling if enabled
-        if self.use_attention and total_dim is not None:
-            attention_dim = total_dim // 4
+        # Build attention pooling if enabled and dimensions are known
+        if self.use_attention and total_dim > 0:
+            attention_dim = max(total_dim // 4, 16)  # Ensure minimum dimension
 
             self.attention_pooling = keras.Sequential([
                 keras.layers.Dense(
@@ -981,27 +1022,43 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
 
             # Build attention pooling
             attention_input_shape = (input_shape[0][0], total_dim)
-            self.attention_pooling.build(attention_input_shape)
+            try:
+                self.attention_pooling.build(attention_input_shape)
+            except Exception as e:
+                raise ValueError(f"Failed to build attention_pooling: {e}")
 
         # Build dense layers
-        current_input_shape = (input_shape[0][0], total_dim)
+        current_input_dim = total_dim if total_dim > 0 else None
+        current_input_shape = (input_shape[0][0], current_input_dim)
+
         for i, dense_layer in enumerate(self.dense_layers):
-            dense_layer.build(current_input_shape)
-            current_input_shape = (input_shape[0][0], self.hidden_dims[i])
+            try:
+                dense_layer.build(current_input_shape)
+            except Exception as e:
+                raise ValueError(f"Failed to build dense_layer_{i}: {e}")
+
+            current_input_dim = self.hidden_dims[i]
+            current_input_shape = (input_shape[0][0], current_input_dim)
 
             if i < len(self.dropout_layers):
-                self.dropout_layers[i].build(current_input_shape)
+                try:
+                    self.dropout_layers[i].build(current_input_shape)
+                except Exception as e:
+                    raise ValueError(f"Failed to build dropout_layer_{i}: {e}")
 
         # Build final layer
-        self.final_dense.build(current_input_shape)
+        try:
+            self.final_dense.build(current_input_shape)
+        except Exception as e:
+            raise ValueError(f"Failed to build final_dense: {e}")
 
         # Always call parent build at the end
         super().build(input_shape)
 
     def call(
-            self,
-            inputs: List[keras.KerasTensor],
-            training: Optional[bool] = None
+        self,
+        inputs: List[keras.KerasTensor],
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass through classification head.
 
@@ -1016,8 +1073,8 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
         Raises:
             ValueError: If inputs is not a list of exactly 3 tensors.
         """
-        if len(inputs) != 3:
-            raise ValueError("ClassificationHead expects exactly 3 input feature maps")
+        if not isinstance(inputs, list) or len(inputs) != 3:
+            raise ValueError("YOLOv12ClassificationHead expects exactly 3 input feature maps")
 
         # Apply different pooling operations to each scale
         pooled_features = []
@@ -1054,7 +1111,7 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
             input_shape: List of input shape tuples.
 
         Returns:
-            Output shape tuple.
+            Output shape tuple (batch_size, num_classes).
         """
         if not isinstance(input_shape, list) or len(input_shape) != 3:
             return (None, self.num_classes)
@@ -1066,7 +1123,7 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
         """Get layer configuration for serialization.
 
         Returns:
-            Dictionary containing the layer configuration.
+            Dictionary containing ALL layer configuration parameters.
         """
         config = super().get_config()
         config.update({

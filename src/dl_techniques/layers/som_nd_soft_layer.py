@@ -66,7 +66,13 @@ import keras
 from keras import ops
 from typing import Tuple, Optional, Union, Dict, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -83,80 +89,71 @@ class SoftSOMLayer(keras.layers.Layer):
     of the grid, allowing independent spatial reasoning in each dimension while
     maintaining differentiability for gradient-based optimization.
 
-    Parameters
-    ----------
-    grid_shape : Tuple[int, ...]
-        The shape of the SOM neuron grid (e.g., (10, 10) for 2D, (5, 5, 5) for 3D).
-    input_dim : int
-        The dimensionality of the input data vectors.
-    temperature : float, optional
-        Temperature parameter for softmax operations. Lower values create sharper
-        distributions (more like hard assignments), higher values create smoother
-        distributions. Defaults to 1.0.
-    use_per_dimension_softmax : bool, optional
-        Whether to use per-dimension softmax (True) or global softmax (False).
-        Per-dimension allows independent spatial reasoning. Defaults to True.
-    use_reconstruction_loss : bool, optional
-        Whether to add reconstruction loss as a regularization term. Defaults to True.
-    reconstruction_weight : float, optional
-        Weight for the reconstruction loss term. Defaults to 1.0.
-    topological_weight : float, optional
-        Weight for topological preservation regularization. Defaults to 0.1.
-    kernel_initializer : Union[str, keras.initializers.Initializer], optional
-        Initialization method for the SOM weights. Defaults to 'glorot_uniform'.
-    kernel_regularizer : Optional[keras.regularizers.Regularizer], optional
-        Optional regularizer for the weight parameters. Defaults to None.
-    name : str, optional
-        The name of the layer. Defaults to None.
-    **kwargs : Any
-        Additional keyword arguments for the base layer.
+    Args:
+        grid_shape: Tuple of integers defining the shape of the SOM neuron grid
+            (e.g., (10, 10) for 2D, (5, 5, 5) for 3D). Must contain positive integers.
+        input_dim: Integer, the dimensionality of the input data vectors. Must be positive.
+        temperature: Float, temperature parameter for softmax operations. Lower values
+            create sharper distributions (more like hard assignments), higher values
+            create smoother distributions. Must be positive. Defaults to 1.0.
+        use_per_dimension_softmax: Boolean, whether to use per-dimension softmax (True)
+            or global softmax (False). Per-dimension allows independent spatial reasoning.
+            Defaults to True.
+        use_reconstruction_loss: Boolean, whether to add reconstruction loss as a
+            regularization term. Defaults to True.
+        reconstruction_weight: Float, weight for the reconstruction loss term.
+            Defaults to 1.0.
+        topological_weight: Float, weight for topological preservation regularization.
+            Defaults to 0.1.
+        kernel_initializer: String or keras.initializers.Initializer, initialization
+            method for the SOM weights. Defaults to 'glorot_uniform'.
+        kernel_regularizer: Optional keras.regularizers.Regularizer for the weight
+            parameters. Defaults to None.
+        **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
-        A 2D tensor with shape: `(batch_size, input_dim)`.
+        2D tensor with shape: `(batch_size, input_dim)`.
 
     Output shape:
-        A 2D tensor with shape: `(batch_size, input_dim)` representing the
+        2D tensor with shape: `(batch_size, input_dim)` representing the
         soft reconstruction of the input through the SOM.
 
-    Returns
-    -------
-    keras.KerasTensor
-        Soft reconstruction of the input with shape (batch_size, input_dim).
+    Raises:
+        ValueError: If grid_shape contains non-positive integers.
+        ValueError: If input_dim is not positive.
+        ValueError: If temperature is not positive.
 
-    Raises
-    ------
-    ValueError
-        If grid_shape contains non-positive integers.
-    ValueError
-        If input_dim is not positive.
-    ValueError
-        If temperature is not positive.
+    Example:
+        ```python
+        # Create and use in a model
+        soft_som = SoftSOMLayer(
+            grid_shape=(8, 8),
+            input_dim=128,
+            temperature=0.5,
+            use_per_dimension_softmax=True
+        )
 
-    Example
-    -------
-    >>> # Create and use in a model
-    >>> soft_som = SoftSOMLayer(
-    ...     grid_shape=(8, 8),
-    ...     input_dim=128,
-    ...     temperature=0.5,
-    ...     use_per_dimension_softmax=True
-    ... )
-    >>>
-    >>> # Build a simple autoencoder with Soft SOM
-    >>> encoder = keras.Sequential([
-    ...     keras.layers.Dense(256, activation='relu'),
-    ...     keras.layers.Dense(128, activation='relu'),
-    ...     soft_som
-    ... ])
-    >>>
-    >>> decoder = keras.Sequential([
-    ...     keras.layers.Dense(256, activation='relu'),
-    ...     keras.layers.Dense(784, activation='sigmoid')
-    ... ])
-    >>>
-    >>> # End-to-end differentiable training
-    >>> autoencoder = keras.Sequential([encoder, decoder])
-    >>> autoencoder.compile(optimizer='adam', loss='mse')
+        # Build a simple autoencoder with Soft SOM
+        encoder = keras.Sequential([
+            keras.layers.Dense(256, activation='relu'),
+            keras.layers.Dense(128, activation='relu'),
+            soft_som
+        ])
+
+        decoder = keras.Sequential([
+            keras.layers.Dense(256, activation='relu'),
+            keras.layers.Dense(784, activation='sigmoid')
+        ])
+
+        # End-to-end differentiable training
+        autoencoder = keras.Sequential([encoder, decoder])
+        autoencoder.compile(optimizer='adam', loss='mse')
+        ```
+
+    Note:
+        This implementation follows the modern Keras 3 pattern where weight variables
+        are created in build() and all configuration is stored for serialization.
+        The layer is fully differentiable and can be trained with standard optimizers.
     """
 
     def __init__(
@@ -170,11 +167,10 @@ class SoftSOMLayer(keras.layers.Layer):
         topological_weight: float = 0.1,
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-        name: Optional[str] = None,
         **kwargs: Any
     ) -> None:
         """Initialize the Soft SOM layer."""
-        super().__init__(name=name, **kwargs)
+        super().__init__(**kwargs)
 
         # Validation
         if not all(isinstance(d, int) and d > 0 for d in grid_shape):
@@ -184,6 +180,7 @@ class SoftSOMLayer(keras.layers.Layer):
         if temperature <= 0:
             raise ValueError("temperature must be positive.")
 
+        # Store ALL configuration parameters for serialization
         self.grid_shape = grid_shape
         self.grid_dim = len(grid_shape)
         self.input_dim = input_dim
@@ -193,37 +190,28 @@ class SoftSOMLayer(keras.layers.Layer):
         self.reconstruction_weight = reconstruction_weight
         self.topological_weight = topological_weight
 
-        # Store serialization configs
-        self._kernel_initializer_config = kernel_initializer
-        self._kernel_regularizer_config = kernel_regularizer
-
+        # Store initializers and regularizers for serialization
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # Layers will be initialized in build()
+        # Initialize weight attributes - actual weights created in build()
         self.weights_map = None
         self.grid_positions = None
 
-        # Store build input shape for serialization
-        self._build_input_shape = None
-
-    def build(self, input_shape: Tuple) -> None:
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Build the Soft SOM layer by creating trainable weight parameters.
 
-        Parameters
-        ----------
-        input_shape : Tuple
-            Shape of the input tensor.
+        Creates the SOM weight map and grid position coordinates for training.
+
+        Args:
+            input_shape: Shape tuple of the input tensor.
+
+        Raises:
+            ValueError: If input shape doesn't match expected dimensions.
         """
-        # Store input shape for serialization
-        self._build_input_shape = input_shape
-
-        # Convert to list for manipulation
-        input_shape_list = list(input_shape)
-
         # Verify input shape
-        if len(input_shape_list) != 2 or input_shape_list[-1] != self.input_dim:
+        if len(input_shape) != 2 or input_shape[-1] != self.input_dim:
             raise ValueError(
                 f"Expected input shape (batch_size, {self.input_dim}), "
                 f"got {input_shape}"
@@ -252,9 +240,7 @@ class SoftSOMLayer(keras.layers.Layer):
         """
         Create N-dimensional grid position coordinates.
 
-        Returns
-        -------
-        keras.KerasTensor
+        Returns:
             Grid positions with shape (*grid_shape, grid_dim).
         """
         coord_ranges = [ops.cast(ops.arange(d), "float32") for d in self.grid_shape]
@@ -270,16 +256,11 @@ class SoftSOMLayer(keras.layers.Layer):
         """
         Forward pass with soft competitive learning.
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch_size, input_dim).
-        training : bool, optional
-            Whether in training mode (affects regularization).
+        Args:
+            inputs: Input tensor of shape (batch_size, input_dim).
+            training: Boolean indicating whether in training mode (affects regularization).
 
-        Returns
-        -------
-        keras.KerasTensor
+        Returns:
             Soft reconstruction of inputs with shape (batch_size, input_dim).
         """
         # Compute soft assignments using per-dimension or global softmax
@@ -303,21 +284,15 @@ class SoftSOMLayer(keras.layers.Layer):
         """
         Compute soft assignments using per-dimension softmax.
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch_size, input_dim).
+        Args:
+            inputs: Input tensor of shape (batch_size, input_dim).
 
-        Returns
-        -------
-        keras.KerasTensor
+        Returns:
             Soft assignment weights of shape (batch_size, *grid_shape).
         """
         # Compute squared distances from inputs to all neurons
         # inputs: (batch_size, input_dim)
         # weights_map: (*grid_shape, input_dim)
-
-        batch_size = ops.shape(inputs)[0]
 
         # Expand inputs: (batch_size, 1, 1, ..., input_dim)
         expanded_inputs = inputs
@@ -342,14 +317,10 @@ class SoftSOMLayer(keras.layers.Layer):
         """
         Apply softmax separately along each spatial dimension.
 
-        Parameters
-        ----------
-        distances : keras.KerasTensor
-            Distance tensor of shape (batch_size, *grid_shape).
+        Args:
+            distances: Distance tensor of shape (batch_size, *grid_shape).
 
-        Returns
-        -------
-        keras.KerasTensor
+        Returns:
             Combined soft assignments of shape (batch_size, *grid_shape).
         """
         # Apply softmax along each grid dimension independently
@@ -379,14 +350,10 @@ class SoftSOMLayer(keras.layers.Layer):
         """
         Apply global softmax over all neurons.
 
-        Parameters
-        ----------
-        distances : keras.KerasTensor
-            Distance tensor of shape (batch_size, *grid_shape).
+        Args:
+            distances: Distance tensor of shape (batch_size, *grid_shape).
 
-        Returns
-        -------
-        keras.KerasTensor
+        Returns:
             Global soft assignments of shape (batch_size, *grid_shape).
         """
         # Flatten spatial dimensions
@@ -403,14 +370,10 @@ class SoftSOMLayer(keras.layers.Layer):
         """
         Reconstruct inputs using soft assignments.
 
-        Parameters
-        ----------
-        soft_assignments : keras.KerasTensor
-            Soft assignment weights of shape (batch_size, *grid_shape).
+        Args:
+            soft_assignments: Soft assignment weights of shape (batch_size, *grid_shape).
 
-        Returns
-        -------
-        keras.KerasTensor
+        Returns:
             Reconstructed inputs of shape (batch_size, input_dim).
         """
         # soft_assignments: (batch_size, *grid_shape)
@@ -441,16 +404,11 @@ class SoftSOMLayer(keras.layers.Layer):
         """
         Compute reconstruction loss (MSE between input and reconstruction).
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Original inputs.
-        reconstruction : keras.KerasTensor
-            Reconstructed inputs.
+        Args:
+            inputs: Original inputs.
+            reconstruction: Reconstructed inputs.
 
-        Returns
-        -------
-        keras.KerasTensor
+        Returns:
             Scalar reconstruction loss.
         """
         mse = ops.mean(ops.square(inputs - reconstruction))
@@ -460,14 +418,10 @@ class SoftSOMLayer(keras.layers.Layer):
         """
         Compute topological preservation loss to maintain spatial organization.
 
-        Parameters
-        ----------
-        soft_assignments : keras.KerasTensor
-            Soft assignment weights of shape (batch_size, *grid_shape).
+        Args:
+            soft_assignments: Soft assignment weights of shape (batch_size, *grid_shape).
 
-        Returns
-        -------
-        keras.KerasTensor
+        Returns:
             Scalar topological loss.
         """
         # Encourage neighboring neurons to have similar activation patterns
@@ -505,9 +459,7 @@ class SoftSOMLayer(keras.layers.Layer):
         """
         Get the learned weight map.
 
-        Returns
-        -------
-        keras.KerasTensor
+        Returns:
             Weight map of shape (*grid_shape, input_dim).
         """
         return self.weights_map
@@ -516,36 +468,33 @@ class SoftSOMLayer(keras.layers.Layer):
         """
         Get soft assignments for given inputs.
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch_size, input_dim).
+        Args:
+            inputs: Input tensor of shape (batch_size, input_dim).
 
-        Returns
-        -------
-        keras.KerasTensor
+        Returns:
             Soft assignments of shape (batch_size, *grid_shape).
         """
         return self._compute_soft_assignments(inputs)
 
-    def compute_output_shape(self, input_shape: Tuple) -> Tuple:
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """
         Compute output shape (same as input for reconstruction).
 
-        Parameters
-        ----------
-        input_shape : Tuple
-            Input tensor shape.
+        Args:
+            input_shape: Input tensor shape.
 
-        Returns
-        -------
-        Tuple
+        Returns:
             Output tensor shape (same as input).
         """
-        return input_shape
+        return tuple(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
+        """
+        Get layer configuration for serialization.
+
+        Returns:
+            Dictionary containing the layer configuration.
+        """
         config = super().get_config()
         config.update({
             'grid_shape': self.grid_shape,
@@ -555,33 +504,9 @@ class SoftSOMLayer(keras.layers.Layer):
             'use_reconstruction_loss': self.use_reconstruction_loss,
             'reconstruction_weight': self.reconstruction_weight,
             'topological_weight': self.topological_weight,
-            'kernel_initializer': self._kernel_initializer_config,
-            'kernel_regularizer': self._kernel_regularizer_config,
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration."""
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build from configuration."""
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "SoftSOMLayer":
-        """Create layer from configuration."""
-        # Handle complex object deserialization
-        if 'kernel_initializer' in config:
-            if isinstance(config['kernel_initializer'], dict):
-                config['kernel_initializer'] = keras.initializers.deserialize(
-                    config['kernel_initializer']
-                )
-        if 'kernel_regularizer' in config:
-            if isinstance(config['kernel_regularizer'], dict):
-                config['kernel_regularizer'] = keras.regularizers.deserialize(
-                    config['kernel_regularizer']
-                )
-
-        return cls(**config)
+# ---------------------------------------------------------------------
