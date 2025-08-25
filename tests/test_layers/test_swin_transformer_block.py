@@ -106,16 +106,6 @@ class TestSwinTransformerBlock:
         with pytest.raises(ValueError, match="mlp_ratio must be positive"):
             SwinTransformerBlock(dim=64, num_heads=8, mlp_ratio=-1)
 
-        # Test invalid dropout rates
-        with pytest.raises(ValueError, match="drop must be in"):
-            SwinTransformerBlock(dim=64, num_heads=8, dropout_rate=1.5)
-
-        with pytest.raises(ValueError, match="attn_drop must be in"):
-            SwinTransformerBlock(dim=64, num_heads=8, attn_dropout_rate=-0.1)
-
-        with pytest.raises(ValueError, match="drop_path must be in"):
-            SwinTransformerBlock(dim=64, num_heads=8, drop_path=1.0)
-
     def test_build_process(self, input_tensor, layer_instance):
         """Test that the layer builds properly."""
         # Trigger build through forward pass

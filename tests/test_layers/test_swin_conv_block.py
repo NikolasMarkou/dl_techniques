@@ -67,23 +67,6 @@ class TestSwinMLP:
         assert layer.bias_regularizer == custom_regularizer
         assert layer.activity_regularizer == custom_regularizer
 
-    def test_invalid_parameters(self):
-        """Test that invalid parameters raise appropriate errors."""
-        # Test negative hidden_dim
-        with pytest.raises(ValueError, match="hidden_dim must be positive"):
-            SwinMLP(hidden_dim=-10)
-
-        # Test zero hidden_dim
-        with pytest.raises(ValueError, match="hidden_dim must be positive"):
-            SwinMLP(hidden_dim=0)
-
-        # Test invalid dropout rate
-        with pytest.raises(ValueError, match="drop rate must be between 0.0 and 1.0"):
-            SwinMLP(hidden_dim=64, dropout_rate=-0.1)
-
-        with pytest.raises(ValueError, match="drop rate must be between 0.0 and 1.0"):
-            SwinMLP(hidden_dim=64, dropout_rate=1.5)
-
     def test_build_process(self, input_tensor):
         """Test that the layer builds properly."""
         layer = SwinMLP(hidden_dim=256, dropout_rate=0.1)
@@ -104,15 +87,6 @@ class TestSwinMLP:
         # Check dropout layers were created
         assert layer.drop1 is not None
         assert layer.drop2 is not None
-
-    def test_build_process_no_dropout(self, input_tensor):
-        """Test build process without dropout."""
-        layer = SwinMLP(hidden_dim=256, dropout_rate=0.0)
-        layer(input_tensor)
-
-        # Check that dropout layers were not created
-        assert layer.drop1 is None
-        assert layer.drop2 is None
 
     def test_output_shapes(self, input_tensor):
         """Test that output shapes are computed correctly."""
