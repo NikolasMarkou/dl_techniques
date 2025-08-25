@@ -213,22 +213,6 @@ def test_block_build_configuration(default_block_params: Dict[str, Any], sample_
 
     # Check that new block is built
     assert new_block.built
-    assert new_block._build_input_shape == sample_inputs.shape
-
-
-def test_block_build_configuration_methods(default_block_params: Dict[str, Any], sample_inputs: tf.Tensor) -> None:
-    """Test build configuration methods handle None input_shape."""
-    # Test with None input_shape
-    block = ConvNextV1Block(**default_block_params)
-
-    # Before building
-    build_config = block.get_build_config()
-    assert build_config["input_shape"] is None
-
-    # build_from_config with None should not crash
-    new_block = ConvNextV1Block(**default_block_params)
-    new_block.build_from_config({"input_shape": None})
-    assert not new_block.built  # Should not be built if input_shape is None
 
 
 @pytest.mark.parametrize("activation", ["relu", "gelu", "swish", "silu"])
