@@ -14,7 +14,7 @@ This implementation uses only Keras operations for full backend compatibility
 
 Usage:
     ```python
-    from dl_techniques.layers.norms.band_rms_ood import BandRMSOOD
+    from dl_techniques.layers.experimental.band_rms_ood import BandRMSOOD
 
     # Basic usage
     layer = BandRMSOOD(max_band_width=0.1, confidence_type='magnitude')
@@ -29,15 +29,21 @@ Usage:
 
     # Access shell distances for OOD detection
     shell_distance = layer.get_shell_distance()
-    ood_score = ops.reduce_mean(shell_distance)
+    ood_score = keras.ops.reduce_mean(shell_distance)
     ```
 """
 
 import keras
 from keras import ops
-from typing import Optional, Any, Dict, Tuple, List
+from typing import Optional, Any, Dict, Tuple, List, Literal
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -50,63 +56,100 @@ class BandRMSOOD(keras.layers.Layer):
     encouraged toward the outer shell while low-confidence samples remain in
     inner regions, enabling geometric OOD detection.
 
+    The layer processes inputs through a multi-stage pipeline:
+    1. **RMS Normalization**: Projects features to unit norm
+    2. **Confidence Estimation**: Estimates sample confidence using specified method
+    3. **Shell Scaling**: Applies confidence-driven scaling to create shells
+    4. **OOD Detection**: Provides shell distances for OOD detection
+
     Args:
-        max_band_width: Maximum band width (α) controlling shell thickness.
-            Range: [0.01, 0.5]. Smaller values create tighter shells.
-        confidence_type: Method for confidence estimation:
+        max_band_width: Float, maximum band width (α) controlling shell thickness.
+            Range: [0.01, 0.5]. Smaller values create tighter shells. Defaults to 0.1.
+        confidence_type: Literal, method for confidence estimation. Options:
             - 'magnitude': Use feature L2 norm as confidence proxy
             - 'entropy': Use feature entropy for uncertainty estimation
             - 'prediction': Use model prediction confidence (requires external signal)
-        confidence_weight: Weight controlling confidence influence on shell placement.
-            Range: [0.1, 3.0]. Higher values increase confidence sensitivity.
-        shell_preference_weight: Loss weight for shell preference regularization.
+            Defaults to 'magnitude'.
+        confidence_weight: Float, weight controlling confidence influence on shell placement.
+            Range: [0.1, 3.0]. Higher values increase confidence sensitivity. Defaults to 1.0.
+        shell_preference_weight: Float, loss weight for shell preference regularization.
             Range: [0.001, 0.1]. Encourages high-confidence samples to outer shell.
-        axis: Axis for normalization. Default -1 for feature axis.
-        epsilon: Small value to avoid division by zero.
-        momentum: Momentum for running statistics (magnitude-based confidence).
-        name: Layer name.
-        **kwargs: Additional layer arguments.
+            Defaults to 0.01.
+        axis: Integer, axis for normalization. Defaults to -1 for feature axis.
+        epsilon: Float, small value to avoid division by zero. Defaults to 1e-7.
+        momentum: Float, momentum for running statistics (magnitude-based confidence).
+            Range: [0.0, 1.0]. Defaults to 0.99.
+        **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
-        Any shape with features along the specified axis.
+        N-D tensor with shape: `(batch_size, ..., input_dim)` where features
+        are along the specified axis.
 
     Output shape:
-        Same as input shape.
+        N-D tensor with shape: `(batch_size, ..., input_dim)` (same as input).
 
     Returns:
-        Normalized features with shell constraints. Use get_shell_distance()
+        Normalized features with shell constraints. Use `get_shell_distance()`
         to access shell distances for OOD detection.
 
+    Raises:
+        ValueError: If max_band_width is not in [0.01, 0.5].
+        ValueError: If confidence_type is not one of ['magnitude', 'entropy', 'prediction'].
+        ValueError: If confidence_weight is not in [0.1, 3.0].
+
     Example:
-        >>> # Create layer
-        >>> layer = BandRMSOOD(max_band_width=0.1, confidence_type='magnitude')
-        >>>
-        >>> # Apply to features
-        >>> features = tf.random.normal((32, 128))
-        >>> normalized = layer(features)
-        >>>
-        >>> # Get OOD score
-        >>> shell_distances = layer.get_shell_distance()
-        >>> ood_score = tf.reduce_mean(shell_distances, axis=-1)
-        >>>
-        >>> print(f"Features shape: {features.shape}")
-        >>> print(f"Normalized shape: {normalized.shape}")
-        >>> print(f"OOD scores shape: {ood_score.shape}")
+        ```python
+        # Basic usage
+        inputs = keras.Input(shape=(128,))
+        normalized = BandRMSOOD(
+            max_band_width=0.1,
+            confidence_type='magnitude'
+        )(inputs)
+        model = keras.Model(inputs=inputs, outputs=normalized)
+
+        # Apply to features and get OOD scores
+        features = keras.random.normal((32, 128))
+        layer = BandRMSOOD(max_band_width=0.1, confidence_type='magnitude')
+        normalized = layer(features)
+
+        # Get OOD score
+        shell_distances = layer.get_shell_distance()
+        ood_score = keras.ops.reduce_mean(shell_distances, axis=-1)
+
+        print(f"Features shape: {features.shape}")
+        print(f"Normalized shape: {normalized.shape}")
+        print(f"OOD scores shape: {ood_score.shape}")
+
+        # Advanced configuration
+        layer = BandRMSOOD(
+            max_band_width=0.2,
+            confidence_type='entropy',
+            confidence_weight=1.5,
+            shell_preference_weight=0.02,
+            momentum=0.95,
+            name='ood_detection_layer'
+        )
+        ```
+
+    Notes:
+        - Higher shell distances indicate more likely OOD samples
+        - The layer maintains internal state for confidence and shell calculations
+        - Use `get_ood_detection_stats()` for comprehensive analysis
+        - Magnitude-based confidence uses running statistics updated during training
     """
 
     def __init__(
         self,
         max_band_width: float = 0.1,
-        confidence_type: str = 'magnitude',
+        confidence_type: Literal['magnitude', 'entropy', 'prediction'] = 'magnitude',
         confidence_weight: float = 1.0,
         shell_preference_weight: float = 0.01,
         axis: int = -1,
         epsilon: float = 1e-7,
         momentum: float = 0.99,
-        name: Optional[str] = None,
         **kwargs: Any
     ) -> None:
-        super().__init__(name=name, **kwargs)
+        super().__init__(**kwargs)
 
         # Validate arguments
         if not 0.01 <= max_band_width <= 0.5:
@@ -118,7 +161,10 @@ class BandRMSOOD(keras.layers.Layer):
         if not 0.1 <= confidence_weight <= 3.0:
             raise ValueError(f"confidence_weight must be in [0.1, 3.0], got {confidence_weight}")
 
-        # Store configuration
+        if not 0.0 <= momentum <= 1.0:
+            raise ValueError(f"momentum must be in [0.0, 1.0], got {momentum}")
+
+        # Store configuration parameters
         self.max_band_width = max_band_width
         self.confidence_type = confidence_type
         self.confidence_weight = confidence_weight
@@ -127,29 +173,30 @@ class BandRMSOOD(keras.layers.Layer):
         self.epsilon = epsilon
         self.momentum = momentum
 
-        # Internal state for OOD detection
+        # Initialize weight attributes - created in build()
         self.band_param = None
+        self.mag_mean = None
+        self.mag_std = None
+
+        # Internal state for OOD detection (updated in call())
         self.shell_distances = None
         self.confidences = None
         self.current_shell_radii = None
-        self._build_input_shape = None
-
-        # Running statistics for magnitude-based confidence
-        self.mag_mean = None
-        self.mag_std = None
 
         # External confidence signal (for prediction-based confidence)
         self.external_confidence = None
 
-    def build(self, input_shape: Tuple[int, ...]) -> None:
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the layer weights and statistics.
+        Build the layer and create weight variables.
+
+        This method creates the learnable band parameter and running statistics
+        for magnitude-based confidence normalization.
 
         Args:
-            input_shape: Shape of the input tensor.
+            input_shape: Shape tuple (tuple of integers), indicating the
+                input shape of the layer.
         """
-        self._build_input_shape = input_shape
-
         # Learnable band parameter (sigmoid-activated for [0,1] range)
         self.band_param = self.add_weight(
             name="band_param",
@@ -175,7 +222,7 @@ class BandRMSOOD(keras.layers.Layer):
 
         super().build(input_shape)
 
-    def set_external_confidence(self, confidence) -> None:
+    def set_external_confidence(self, confidence: keras.KerasTensor) -> None:
         """
         Set external confidence signal for prediction-based confidence.
 
@@ -184,13 +231,17 @@ class BandRMSOOD(keras.layers.Layer):
         """
         self.external_confidence = confidence
 
-    def estimate_confidence(self, features, training: Optional[bool] = None):
+    def estimate_confidence(
+        self,
+        features: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """
         Estimate confidence based on the specified method.
 
         Args:
             features: Input features before normalization.
-            training: Whether in training mode.
+            training: Boolean, whether in training mode.
 
         Returns:
             Confidence scores in range [0, 1], where higher values indicate
@@ -205,15 +256,26 @@ class BandRMSOOD(keras.layers.Layer):
         else:
             raise ValueError(f"Unknown confidence type: {self.confidence_type}")
 
-    def _magnitude_confidence(self, features, training: Optional[bool] = None):
+    def _magnitude_confidence(
+        self,
+        features: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """
         Compute magnitude-based confidence using feature L2 norm.
 
         Higher magnitude indicates more confident, organized features.
+
+        Args:
+            features: Input features.
+            training: Whether in training mode.
+
+        Returns:
+            Magnitude-based confidence scores.
         """
         magnitude = ops.norm(features, axis=self.axis, keepdims=True)
 
-        if training:
+        if training and self.mag_mean is not None and self.mag_std is not None:
             # Update running statistics during training
             batch_mean = ops.mean(magnitude)
             batch_var = ops.var(magnitude)
@@ -227,17 +289,27 @@ class BandRMSOOD(keras.layers.Layer):
                 self.momentum * self.mag_std + (1 - self.momentum) * batch_std
             )
 
+        # Use current statistics for normalization
+        current_mean = self.mag_mean if self.mag_mean is not None else ops.mean(magnitude)
+        current_std = self.mag_std if self.mag_std is not None else ops.std(magnitude)
+
         # Normalize magnitude and convert to confidence
-        normalized_mag = (magnitude - self.mag_mean) / (self.mag_std + self.epsilon)
+        normalized_mag = (magnitude - current_mean) / (current_std + self.epsilon)
         confidence = ops.sigmoid(normalized_mag)
 
         return confidence
 
-    def _entropy_confidence(self, features):
+    def _entropy_confidence(self, features: keras.KerasTensor) -> keras.KerasTensor:
         """
         Compute entropy-based confidence using feature uncertainty.
 
         Lower entropy indicates more organized, confident features.
+
+        Args:
+            features: Input features.
+
+        Returns:
+            Entropy-based confidence scores.
         """
         # Use absolute values for entropy computation
         abs_features = ops.abs(features)
@@ -260,11 +332,17 @@ class BandRMSOOD(keras.layers.Layer):
 
         return confidence
 
-    def _prediction_confidence(self, features):
+    def _prediction_confidence(self, features: keras.KerasTensor) -> keras.KerasTensor:
         """
         Use external prediction confidence signal.
 
         Falls back to magnitude-based confidence if no external signal is available.
+
+        Args:
+            features: Input features.
+
+        Returns:
+            Prediction-based confidence scores.
         """
         if self.external_confidence is not None:
             # Reshape external confidence to match feature dimensions
@@ -285,9 +363,9 @@ class BandRMSOOD(keras.layers.Layer):
 
     def apply_shell_scaling(
         self,
-        normalized_features,
-        confidence
-    ) -> Tuple:
+        normalized_features: keras.KerasTensor,
+        confidence: keras.KerasTensor
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
         """
         Apply confidence-driven shell scaling to normalized features.
 
@@ -318,16 +396,20 @@ class BandRMSOOD(keras.layers.Layer):
 
         return scaled_features, shell_distance, shell_radius
 
-    def call(self, inputs, training: Optional[bool] = None):
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """
         Forward pass with confidence-driven shell scaling.
 
         Args:
-            inputs: Input tensor.
-            training: Whether in training mode.
+            inputs: Input tensor with shape (..., input_dim).
+            training: Boolean, whether in training mode.
 
         Returns:
-            Normalized features with shell constraints.
+            Normalized features with shell constraints, same shape as input.
         """
         # Step 1: RMS normalization (project to unit norm)
         rms = ops.sqrt(
@@ -350,19 +432,19 @@ class BandRMSOOD(keras.layers.Layer):
 
         return scaled_features
 
-    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """
         Compute output shape (unchanged from input).
 
         Args:
-            input_shape: Shape of the input tensor.
+            input_shape: Shape tuple of the input tensor.
 
         Returns:
-            Output shape (same as input).
+            Output shape tuple (same as input shape).
         """
         return input_shape
 
-    def get_shell_distance(self):
+    def get_shell_distance(self) -> Optional[keras.KerasTensor]:
         """
         Get current shell distances for OOD detection.
 
@@ -372,7 +454,7 @@ class BandRMSOOD(keras.layers.Layer):
         """
         return self.shell_distances
 
-    def get_confidences(self):
+    def get_confidences(self) -> Optional[keras.KerasTensor]:
         """
         Get current confidence estimates.
 
@@ -382,7 +464,7 @@ class BandRMSOOD(keras.layers.Layer):
         """
         return self.confidences
 
-    def get_shell_radii(self):
+    def get_shell_radii(self) -> Optional[keras.KerasTensor]:
         """
         Get current shell radii.
 
@@ -392,15 +474,15 @@ class BandRMSOOD(keras.layers.Layer):
         """
         return self.current_shell_radii
 
-    def compute_shell_preference_loss(self, confidence_threshold: float = 0.7):
+    def compute_shell_preference_loss(self, confidence_threshold: float = 0.7) -> keras.KerasTensor:
         """
         Compute shell preference loss to encourage high-confidence samples to outer shell.
 
         Args:
-            confidence_threshold: Confidence threshold for high-confidence samples.
+            confidence_threshold: Float, confidence threshold for high-confidence samples.
 
         Returns:
-            Shell preference loss (scalar).
+            Shell preference loss (scalar tensor).
         """
         if self.shell_distances is None or self.confidences is None:
             return ops.convert_to_tensor(0.0, dtype=self.dtype)
@@ -423,15 +505,15 @@ class BandRMSOOD(keras.layers.Layer):
         weighted_loss = confidence_weights * ops.square(high_conf_distances)
         return ops.mean(weighted_loss)
 
-    def compute_separation_loss(self, confidence_threshold: float = 0.7):
+    def compute_separation_loss(self, confidence_threshold: float = 0.7) -> keras.KerasTensor:
         """
         Compute separation loss to encourage separation between high/low confidence samples.
 
         Args:
-            confidence_threshold: Threshold separating high and low confidence.
+            confidence_threshold: Float, threshold separating high and low confidence.
 
         Returns:
-            Separation loss (scalar).
+            Separation loss (scalar tensor).
         """
         if self.shell_distances is None or self.confidences is None:
             return ops.convert_to_tensor(0.0, dtype=self.dtype)
@@ -476,17 +558,18 @@ class BandRMSOOD(keras.layers.Layer):
 
         Returns:
             Dictionary containing various statistics for analysis.
+            Returns empty dict if no forward pass has been performed.
         """
         if self.shell_distances is None or self.confidences is None:
             return {}
 
         stats = {
-            'mean_shell_distance': ops.mean(self.shell_distances),
-            'std_shell_distance': ops.std(self.shell_distances),
-            'mean_confidence': ops.mean(self.confidences),
-            'std_confidence': ops.std(self.confidences),
-            'mean_shell_radius': ops.mean(self.current_shell_radii),
-            'shell_utilization': ops.std(self.current_shell_radii),  # Higher = better utilization
+            'mean_shell_distance': float(ops.mean(self.shell_distances)),
+            'std_shell_distance': float(ops.std(self.shell_distances)),
+            'mean_confidence': float(ops.mean(self.confidences)),
+            'std_confidence': float(ops.std(self.confidences)),
+            'mean_shell_radius': float(ops.mean(self.current_shell_radii)),
+            'shell_utilization': float(ops.std(self.current_shell_radii)),  # Higher = better utilization
         }
 
         # Confidence-shell correlation
@@ -502,7 +585,7 @@ class BandRMSOOD(keras.layers.Layer):
         shell_var = ops.mean(ops.square(shell_flat - shell_mean))
 
         correlation = numerator / (ops.sqrt(conf_var * shell_var) + self.epsilon)
-        stats['confidence_shell_correlation'] = correlation
+        stats['confidence_shell_correlation'] = float(correlation)
 
         return stats
 
@@ -511,7 +594,8 @@ class BandRMSOOD(keras.layers.Layer):
         Get layer configuration for serialization.
 
         Returns:
-            Dictionary containing the layer configuration.
+            Dictionary containing ALL constructor parameters needed for
+            layer reconstruction.
         """
         config = super().get_config()
         config.update({
@@ -525,29 +609,10 @@ class BandRMSOOD(keras.layers.Layer):
         })
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """
-        Get build configuration for serialization.
 
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """
-        Build the layer from a configuration.
-
-        Args:
-            config: Build configuration dictionary.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
-
-# ==============================================================================
+# ---------------------------------------------------------------------
 # MULTI-LAYER OOD DETECTOR
-# ==============================================================================
+# ---------------------------------------------------------------------
 
 class MultiLayerOODDetector:
     """
@@ -559,7 +624,7 @@ class MultiLayerOODDetector:
 
     Args:
         model: Keras model containing BandRMS-OOD layers.
-        layer_weights: Weights for combining signals from different layers.
+        layer_weights: Optional list of weights for combining signals from different layers.
             If None, uses uniform weighting.
         aggregation_method: Method for aggregating multi-layer signals:
             - 'weighted_average': Weighted average of layer distances
@@ -567,17 +632,19 @@ class MultiLayerOODDetector:
             - 'consensus': Majority voting across layers
 
     Example:
-        >>> # Create detector
-        >>> detector = MultiLayerOODDetector(model, layer_weights=[0.3, 0.4, 0.3])
-        >>>
-        >>> # Fit threshold on ID data
-        >>> detector.fit_threshold(id_validation_data, fpr_target=0.05)
-        >>>
-        >>> # Detect OOD samples
-        >>> ood_predictions, ood_scores = detector.predict_ood(test_data)
-        >>>
-        >>> # Evaluate performance
-        >>> auroc = detector.evaluate_detection(id_test_data, ood_test_data)
+        ```python
+        # Create detector
+        detector = MultiLayerOODDetector(model, layer_weights=[0.3, 0.4, 0.3])
+
+        # Fit threshold on ID data
+        detector.fit_threshold(id_validation_data, fpr_target=0.05)
+
+        # Detect OOD samples
+        ood_predictions, ood_scores = detector.predict_ood(test_data)
+
+        # Evaluate performance
+        auroc = detector.evaluate_detection(id_test_data, ood_test_data)
+        ```
     """
 
     def __init__(
@@ -630,7 +697,7 @@ class MultiLayerOODDetector:
 
         return ood_layers
 
-    def compute_ood_scores(self, data) -> Any:
+    def compute_ood_scores(self, data: keras.KerasTensor) -> keras.KerasTensor:
         """
         Compute OOD scores for input data.
 
@@ -686,7 +753,7 @@ class MultiLayerOODDetector:
 
     def fit_threshold(
         self,
-        id_data,
+        id_data: keras.KerasTensor,
         fpr_target: float = 0.05,
         batch_size: Optional[int] = None
     ) -> None:
@@ -729,7 +796,7 @@ class MultiLayerOODDetector:
         logger.info(f"ID score statistics: mean={ops.mean(id_scores):.6f}, "
                    f"std={ops.std(id_scores):.6f}")
 
-    def predict_ood(self, data) -> Tuple:
+    def predict_ood(self, data: keras.KerasTensor) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
         Predict OOD for input data.
 
@@ -750,8 +817,8 @@ class MultiLayerOODDetector:
 
     def evaluate_detection(
         self,
-        id_data,
-        ood_data
+        id_data: keras.KerasTensor,
+        ood_data: keras.KerasTensor
     ) -> Dict[str, float]:
         """
         Evaluate OOD detection performance.
@@ -815,3 +882,5 @@ class MultiLayerOODDetector:
             'ood_mean': float(ops.mean(ood_scores)),
             'ood_std': float(ops.std(ood_scores))
         }
+
+# ---------------------------------------------------------------------

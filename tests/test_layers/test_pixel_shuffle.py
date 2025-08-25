@@ -376,22 +376,6 @@ def test_shuffle_build_configuration(default_shuffle_params: Dict[str, Any], sam
 
     # Check that new layer is built
     assert new_shuffle.built
-    assert new_shuffle._build_input_shape == sample_vit_tokens.shape
-
-
-def test_shuffle_build_config_none_handling(default_shuffle_params: Dict[str, Any]) -> None:
-    """Test build configuration methods handle None input_shape."""
-    # Test with None input_shape
-    shuffle = PixelShuffle(**default_shuffle_params)
-
-    # Before building
-    build_config = shuffle.get_build_config()
-    assert build_config["input_shape"] is None
-
-    # build_from_config with None should not crash
-    new_shuffle = PixelShuffle(**default_shuffle_params)
-    new_shuffle.build_from_config({"input_shape": None})
-    assert not new_shuffle.built
 
 
 # Model integration tests

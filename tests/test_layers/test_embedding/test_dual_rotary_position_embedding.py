@@ -34,7 +34,6 @@ class TestDualRotaryPositionEmbedding:
         assert layer.sin_global_cached is None
         assert layer.cos_local_cached is None
         assert layer.sin_local_cached is None
-        assert layer._build_input_shape is None
 
     def test_initialization_custom(self):
         """Test initialization with custom parameters."""

@@ -43,7 +43,7 @@ The `OrthoBlock` processes inputs through a four-stage pipeline:
 """
 
 import keras
-from typing import Optional, Union, Any
+from typing import Optional, Union, Any, Tuple
 
 # ---------------------------------------------------------------------
 # Local imports
@@ -77,19 +77,25 @@ class OrthoBlock(keras.layers.Layer):
 
     Args:
         units: Integer, dimensionality of the output space (number of neurons).
+            Must be positive.
         activation: Activation function to use. If `None`, no activation is applied.
-            Can be string name of activation or callable.
+            Can be string name of activation or callable. Defaults to None.
         use_bias: Boolean, whether the dense layer uses a bias vector.
+            Defaults to True.
         ortho_reg_factor: Float, strength of the orthonormal regularization applied
             to the dense layer weights. Higher values enforce stronger orthogonality.
+            Must be non-negative. Defaults to 0.01.
         kernel_initializer: Initializer for the dense layer kernel weights matrix.
-            If `None`, the default initializer ("glorot_uniform") will be used.
-        bias_initializer: Initializer for the bias vector. If `None`, the default
-            initializer ("zeros") will be used.
+            Defaults to 'glorot_uniform'.
+        bias_initializer: Initializer for the bias vector. Defaults to 'zeros'.
+        kernel_regularizer: Optional regularizer for the kernel weights.
+            Defaults to None.
         bias_regularizer: Optional regularizer for the bias vector.
+            Defaults to None.
         scale_initial_value: Float, initial value for the constrained scale
-            parameters. Should be between 0.0 and 1.0.
-        **kwargs: Additional keyword arguments for the Layer base class (e.g., name, dtype).
+            parameters. Should be between 0.0 and 1.0. Defaults to 0.5.
+        **kwargs: Additional keyword arguments for the Layer base class
+            (e.g., name, dtype).
 
     Input shape:
         N-D tensor with shape: `(batch_size, ..., input_dim)`.
@@ -109,19 +115,22 @@ class OrthoBlock(keras.layers.Layer):
         ValueError: If `scale_initial_value` is not between 0.0 and 1.0.
 
     Example:
-        >>> # Basic usage
-        >>> x = keras.Input(shape=(128,))
-        >>> y = OrthoBlock(units=64, activation='relu')(x)
-        >>> model = keras.Model(inputs=x, outputs=y)
+        ```python
+        # Basic usage
+        inputs = keras.Input(shape=(128,))
+        outputs = OrthoBlock(units=64, activation='relu')(inputs)
+        model = keras.Model(inputs=inputs, outputs=outputs)
 
-        >>> # With custom regularization
-        >>> ortho_layer = OrthoBlock(
-        ...     units=32,
-        ...     activation='gelu',
-        ...     ortho_reg_factor=0.02,
-        ...     scale_initial_value=0.3
-        ... )
-        >>> output = ortho_layer(input_tensor)
+        # With custom regularization
+        ortho_layer = OrthoBlock(
+            units=32,
+            activation='gelu',
+            ortho_reg_factor=0.02,
+            scale_initial_value=0.3,
+            kernel_regularizer=keras.regularizers.L2(1e-4)
+        )
+        output = ortho_layer(input_tensor)
+        ```
 
     Notes:
         - The orthonormal regularization encourages the weight matrix to have
@@ -142,6 +151,7 @@ class OrthoBlock(keras.layers.Layer):
         ortho_reg_factor: float = 0.01,
         kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         scale_initial_value: float = 0.5,
         **kwargs: Any
@@ -157,42 +167,25 @@ class OrthoBlock(keras.layers.Layer):
             raise ValueError(f"scale_initial_value must be between 0.0 and 1.0, got {scale_initial_value}")
 
         # Store configuration parameters
-        activation_str = activation if activation is not None else "linear"
         self.units = units
-        self.activation = keras.activations.get(activation_str)
+        self.activation = keras.activations.get(activation)
         self.use_bias = use_bias
         self.ortho_reg_factor = ortho_reg_factor
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.scale_initial_value = scale_initial_value
 
-        # Create orthonormal regularizer
+        # CREATE orthonormal regularizer
         self.ortho_reg = SoftOrthonormalConstraintRegularizer(
             lambda_coefficient=self.ortho_reg_factor
         )
-        # Sublayers - to be initialized in build()
-        self.dense = None
-        self.norm = None
-        self.constrained_scale = None
-        self._build_input_shape = None
 
-        logger.debug(f"Initialized OrthoBlock with {units} units and ortho_reg_factor={ortho_reg_factor}")
-
-    def build(self, input_shape):
-        """Build the layer and its sublayers.
-
-        Args:
-            input_shape: Shape tuple (tuple of integers) or list of shape tuples,
-                indicating the input shape of the layer.
-        """
-        logger.debug(f"Building OrthoBlock with input_shape: {input_shape}")
-        self._build_input_shape = input_shape
-
-        # Build Dense sublayer with orthonormal regularization
+        # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
         self.dense = keras.layers.Dense(
             units=self.units,
-            activation=None,  # Explicitly set to None (not linear)
+            activation=None,  # No activation in dense layer - applied at the end
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
@@ -201,10 +194,14 @@ class OrthoBlock(keras.layers.Layer):
             name="ortho_dense"
         )
 
-        # Build rms normalization layer
-        self.norm = RMSNorm(axis=-1, name="norm_rms", use_scale=False)
+        # RMS normalization layer
+        self.norm = RMSNorm(
+            axis=-1,
+            use_scale=False,  # We use our own constrained scaling
+            name="norm_rms"
+        )
 
-        # Build constrained scale layer
+        # Constrained scale layer
         self.constrained_scale = LearnableMultiplier(
             multiplier_type="CHANNEL",
             initializer=keras.initializers.Constant(self.scale_initial_value),
@@ -213,7 +210,21 @@ class OrthoBlock(keras.layers.Layer):
             name="constrained_scale"
         )
 
-        # Build all sublayers sequentially to ensure proper shape propagation
+        logger.debug(f"Initialized OrthoBlock with {units} units and ortho_reg_factor={ortho_reg_factor}")
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the layer and its sub-layers.
+
+        This method explicitly builds each sub-layer to ensure proper
+        serialization and weight management following modern Keras 3 patterns.
+
+        Args:
+            input_shape: Shape tuple (tuple of integers), indicating the
+                input shape of the layer.
+        """
+        logger.debug(f"Building OrthoBlock with input_shape: {input_shape}")
+
+        # BUILD sub-layers in computational order to ensure proper shape propagation
         self.dense.build(input_shape)
         dense_output_shape = self.dense.compute_output_shape(input_shape)
 
@@ -222,57 +233,63 @@ class OrthoBlock(keras.layers.Layer):
 
         self.constrained_scale.build(norm_output_shape)
 
+        # Always call parent build at the end
         super().build(input_shape)
         logger.debug("OrthoBlock build completed successfully")
 
-    def call(self, inputs, training=None):
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """Forward computation through the orthogonal block.
 
         Args:
-            inputs: Input tensor or list/tuple of input tensors.
+            inputs: Input tensor with shape (..., input_dim).
             training: Boolean indicating whether the layer should behave in
                 training mode or inference mode.
 
         Returns:
-            Output tensor after applying the full orthogonal block computation.
+            Output tensor after applying the full orthogonal block computation
+            with shape (..., units).
         """
-        # Dense projection with orthonormal regularization
+        # Step 1: Dense projection with orthonormal regularization
         z = self.dense(inputs, training=training)
 
-        # normalization to stabilize activations
+        # Step 2: RMS normalization to stabilize activations
         z_norm = self.norm(z, training=training)
 
-        # Constrained scaling for gating
+        # Step 3: Constrained scaling for learnable feature gating
         z_scaled = self.constrained_scale(z_norm, training=training)
 
-        # Apply final activation function
+        # Step 4: Apply final activation function
         outputs = self.activation(z_scaled)
 
         return outputs
 
-    def compute_output_shape(self, input_shape):
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
         Args:
-            input_shape: Shape of the input.
+            input_shape: Shape tuple of the input.
 
         Returns:
-            Output shape tuple.
+            Output shape tuple where the last dimension is replaced with units.
         """
-        # Convert to list for consistent manipulation
-        input_shape_list = list(input_shape)
+        # Convert to list for manipulation
+        output_shape = list(input_shape)
 
         # Replace last dimension with units
-        output_shape_list = input_shape_list[:-1] + [self.units]
+        output_shape[-1] = self.units
 
-        # Return as tuple for consistency
-        return tuple(output_shape_list)
+        return tuple(output_shape)
 
-    def get_config(self):
+    def get_config(self) -> dict[str, Any]:
         """Returns the layer's configuration for serialization.
 
         Returns:
-            Dictionary containing the layer configuration.
+            Dictionary containing ALL constructor parameters needed for
+            layer reconstruction.
         """
         config = super().get_config()
         config.update({
@@ -282,27 +299,10 @@ class OrthoBlock(keras.layers.Layer):
             "ortho_reg_factor": self.ortho_reg_factor,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
-            "scale_initial_value": self.scale_initial_value
+            "scale_initial_value": self.scale_initial_value,
         })
         return config
-
-    def get_build_config(self):
-        """Returns the config needed to build the layer from a config.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config):
-        """Builds the layer from a config created with get_build_config.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-            logger.debug("OrthoBlock rebuilt from config successfully")
 
 # ---------------------------------------------------------------------

@@ -9,9 +9,10 @@ This module implements a sophisticated memory system that combines:
 """
 
 import keras
-from keras import ops
-from typing import Optional, Dict, List, Tuple, Union, Any
 import numpy as np
+from keras import ops
+from typing import Optional, Dict, List, Tuple, Any
+
 from dataclasses import dataclass
 
 from dl_techniques.utils.logger import logger
