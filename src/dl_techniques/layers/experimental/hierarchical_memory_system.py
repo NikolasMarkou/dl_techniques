@@ -184,7 +184,7 @@ class HierarchicalMemorySystem(keras.layers.Layer):
         decay_function: Optional[Callable] = None,
         sigma: float = 1.0,
         neighborhood_function: str = 'gaussian',
-        weights_initializer: Union[str, keras.initializers.Initializer] = 'random',
+        weights_initializer: Union[str, keras.initializers.Initializer] = 'he_uniform',
         regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:

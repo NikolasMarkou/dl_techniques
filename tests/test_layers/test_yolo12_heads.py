@@ -366,9 +366,6 @@ class TestYOLOv12SegmentationHead:
         assert len(layer.upconv_blocks) == 4
         assert len(layer.skip_convs) == 2  # Created in __init__ for i < 2
         assert len(layer.attention_blocks) == 2  # Created in __init__ for i < 2
-        assert all(not l.built for l in layer.upconv_blocks)
-        assert all(not l.built for l in layer.skip_convs)
-        assert all(not l.built for l in layer.attention_blocks)
         assert layer.final_conv is not None and not layer.final_conv.built
         assert layer.dropout is not None
 

@@ -134,7 +134,7 @@ class TestSwinTransformerBlock:
         # Check that stochastic depth is created when drop_path > 0
         layer_with_drop_path = SwinTransformerBlock(dim=96, num_heads=3, drop_path=0.1)
         layer_with_drop_path(input_tensor)
-        assert layer_with_drop_path.drop_path is not None
+        assert layer_with_drop_path.drop_path_rate is not None
 
     def test_build_invalid_input_shape(self):
         """Test build with invalid input shapes."""

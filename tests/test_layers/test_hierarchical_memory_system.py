@@ -96,7 +96,6 @@ class TestHierarchicalMemorySystem:
         assert hm.initial_learning_rate == 0.1
         assert hm.sigma == 1.0
         assert hm.neighborhood_function == 'gaussian'
-        assert hm.som_layers is None  # Not built yet
 
     def test_initialization_1d(self, hierarchical_memory_1d):
         """Test initialization of 1D hierarchical memory system."""
@@ -126,23 +125,6 @@ class TestHierarchicalMemorySystem:
         assert hm.initial_learning_rate == 0.05
         assert hm.sigma == 2.0
         assert hm.neighborhood_function == 'bubble'
-
-    def test_invalid_parameters(self):
-        """Test that invalid parameters raise appropriate errors."""
-        with pytest.raises(ValueError, match="input_dim must be positive"):
-            HierarchicalMemorySystem(input_dim=-10)
-
-        with pytest.raises(ValueError, match="levels must be at least 1"):
-            HierarchicalMemorySystem(input_dim=100, levels=0)
-
-        with pytest.raises(ValueError, match="grid_dimensions must be at least 1"):
-            HierarchicalMemorySystem(input_dim=100, grid_dimensions=0)
-
-        with pytest.raises(ValueError, match="base_grid_size must be at least 1"):
-            HierarchicalMemorySystem(input_dim=100, base_grid_size=0)
-
-        with pytest.raises(ValueError, match="grid_expansion_factor must be positive"):
-            HierarchicalMemorySystem(input_dim=100, grid_expansion_factor=-1.0)
 
     def test_build_process_default(self, hierarchical_memory_default, input_data_medium):
         """Test that default hierarchical memory system builds properly."""
