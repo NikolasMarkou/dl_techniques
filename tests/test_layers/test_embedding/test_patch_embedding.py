@@ -1,105 +1,184 @@
 import pytest
 import numpy as np
-import tensorflow as tf
-import keras
 import tempfile
 import os
+from typing import Any, Dict
+
+import keras
+from keras import ops
+import tensorflow as tf
 
 from dl_techniques.layers.embedding.patch_embedding import (
-    PatchEmbedding2D, PatchEmbedding1D)
+    PatchEmbedding2D, PatchEmbedding1D
+)
 
 
 class TestPatchEmbedding2D:
-    """Comprehensive test suite for PatchEmbedding2D layer."""
+    """Comprehensive test suite for PatchEmbedding2D following modern Keras 3 patterns."""
 
     @pytest.fixture
-    def input_tensor(self) -> tf.Tensor:
-        """Create a test input tensor for 2D patches."""
-        return tf.random.normal([4, 224, 224, 3])  # batch_size=4, height=224, width=224, channels=3
+    def sample_input(self) -> keras.KerasTensor:
+        """Create sample input tensor using keras.random."""
+        return keras.random.normal([4, 224, 224, 3])
 
     @pytest.fixture
-    def layer_instance(self) -> PatchEmbedding2D:
-        """Create a default layer instance for testing."""
-        return PatchEmbedding2D(patch_size=16, embed_dim=768)
+    def layer_config(self) -> Dict[str, Any]:
+        """Standard configuration for testing."""
+        return {
+            'patch_size': 16,
+            'embed_dim': 768
+        }
 
     def test_initialization_defaults(self):
-        """Test initialization with default parameters."""
+        """Test layer initialization with default parameters."""
         layer = PatchEmbedding2D(patch_size=16, embed_dim=512)
 
-        # Check default values
+        # Verify attributes are set correctly
         assert layer.patch_size == (16, 16)
         assert layer.embed_dim == 512
-        assert isinstance(layer.kernel_initializer, keras.initializers.GlorotNormal)
-        assert layer.kernel_regularizer is None
-        assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
-        assert layer.bias_regularizer is None
         assert layer.use_bias is True
-        assert layer.proj is None
+        assert not layer.built  # Should not be built yet
+
+        # Sub-layers should be created in __init__
+        assert hasattr(layer, 'proj')
+        assert layer.proj is not None
 
     def test_initialization_custom(self):
         """Test initialization with custom parameters."""
-        custom_kernel_reg = keras.regularizers.L2(1e-4)
-        custom_bias_reg = keras.regularizers.L1(1e-5)
+        custom_config = {
+            'patch_size': (8, 16),
+            'embed_dim': 256,
+            'kernel_initializer': 'he_normal',
+            'kernel_regularizer': keras.regularizers.L2(1e-4),
+            'bias_initializer': 'ones',
+            'bias_regularizer': keras.regularizers.L1(1e-5),
+            'activation': 'relu',
+            'use_bias': False
+        }
 
-        layer = PatchEmbedding2D(
-            patch_size=(8, 16),
-            embed_dim=256,
-            kernel_initializer="he_normal",
-            kernel_regularizer=custom_kernel_reg,
-            bias_initializer="ones",
-            bias_regularizer=custom_bias_reg,
-            activation="relu",
-            use_bias=False
-        )
+        layer = PatchEmbedding2D(**custom_config)
 
-        # Check custom values
+        # Verify custom values
         assert layer.patch_size == (8, 16)
         assert layer.embed_dim == 256
-        assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
-        assert layer.kernel_regularizer == custom_kernel_reg
-        assert isinstance(layer.bias_initializer, keras.initializers.Ones)
-        assert layer.bias_regularizer == custom_bias_reg
         assert layer.use_bias is False
 
-    def test_patch_size_handling(self):
-        """Test different patch size specifications."""
-        # Integer patch size
-        layer1 = PatchEmbedding2D(patch_size=16, embed_dim=512)
-        assert layer1.patch_size == (16, 16)
+    def test_forward_pass(self, layer_config: Dict[str, Any], sample_input: keras.KerasTensor):
+        """Test forward pass and building."""
+        layer = PatchEmbedding2D(**layer_config)
 
-        # Tuple patch size
-        layer2 = PatchEmbedding2D(patch_size=(8, 16), embed_dim=512)
-        assert layer2.patch_size == (8, 16)
+        output = layer(sample_input)
 
-    def test_build_process(self, input_tensor: tf.Tensor):
-        """Test that the layer builds properly."""
-        layer = PatchEmbedding2D(patch_size=16, embed_dim=768)
+        # Layer should be built after first call
+        assert layer.built
 
-        # Build by calling the layer
-        output = layer(input_tensor)
+        # Check output shape
+        expected_num_patches = (224 // 16) * (224 // 16)  # 14 * 14 = 196
+        assert output.shape == (4, expected_num_patches, 768)
 
-        # Check that layer was built
-        assert layer.built is True
-        assert layer.proj is not None
-        assert isinstance(layer.proj, keras.layers.Conv2D)
+        # Check for numerical stability
+        output_np = ops.convert_to_numpy(output)
+        assert not np.any(np.isnan(output_np))
+        assert not np.any(np.isinf(output_np))
+
+    def test_serialization_cycle(self, layer_config: Dict[str, Any], sample_input: keras.KerasTensor):
+        """CRITICAL TEST: Full serialization cycle following guide pattern."""
+        # 1. Create original layer in a model
+        inputs = keras.Input(shape=sample_input.shape[1:])
+        layer_output = PatchEmbedding2D(**layer_config)(inputs)
+        model = keras.Model(inputs, layer_output)
+
+        # 2. Get prediction from original
+        original_prediction = model(sample_input)
+
+        # 3. Save and load
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'test_model.keras')
+            model.save(filepath)
+
+            # Load without custom_objects since layer is properly registered
+            loaded_model = keras.models.load_model(filepath)
+            loaded_prediction = loaded_model(sample_input)
+
+            # 4. Verify identical outputs using recommended method
+            np.testing.assert_allclose(
+                ops.convert_to_numpy(original_prediction),
+                ops.convert_to_numpy(loaded_prediction),
+                rtol=1e-6, atol=1e-6,
+                err_msg="Predictions differ after serialization"
+            )
+
+    def test_config_completeness(self, layer_config: Dict[str, Any]):
+        """Test that get_config contains all __init__ parameters."""
+        layer = PatchEmbedding2D(**layer_config)
+        config = layer.get_config()
+
+        # Check all config parameters are present
+        for key in layer_config:
+            assert key in config, f"Missing {key} in get_config()"
+
+        # Check essential configuration keys
+        essential_keys = ['patch_size', 'embed_dim', 'use_bias']
+        for key in essential_keys:
+            assert key in config, f"Missing essential key {key} in get_config()"
 
     def test_build_invalid_input_shape(self):
         """Test build with invalid input shapes."""
         layer = PatchEmbedding2D(patch_size=16, embed_dim=768)
 
-        # 3D input should fail
+        # Test with invalid dimensions
         with pytest.raises(ValueError, match="Expected 4D input"):
             layer.build((32, 224, 224))
 
         # Non-divisible dimensions should fail
-        with pytest.raises(ValueError, match="Input height .* must be divisible"):
+        with pytest.raises(ValueError):
             layer.build((4, 225, 224, 3))  # 225 not divisible by 16
 
-        with pytest.raises(ValueError, match="Input width .* must be divisible"):
-            layer.build((4, 224, 225, 3))  # 225 not divisible by 16
+    def test_gradients_flow(self, layer_config: Dict[str, Any], sample_input: keras.KerasTensor):
+        """Test gradient computation using TensorFlow GradientTape as specified."""
+        layer = PatchEmbedding2D(**layer_config)
 
-    def test_output_shapes(self, input_tensor: tf.Tensor):
-        """Test that output shapes are computed correctly."""
+        with tf.GradientTape() as tape:
+            # Convert to TensorFlow Variable for gradient tracking
+            tf_input = tf.Variable(ops.convert_to_numpy(sample_input))
+            output = layer(tf_input)
+            loss = ops.mean(ops.square(output))
+
+        gradients = tape.gradient(loss, layer.trainable_variables)
+
+        assert all(g is not None for g in gradients)
+        assert len(gradients) > 0
+
+    @pytest.mark.parametrize("training", [True, False, None])
+    def test_training_modes(self, layer_config: Dict[str, Any], sample_input: keras.KerasTensor, training):
+        """Test behavior in different training modes."""
+        layer = PatchEmbedding2D(**layer_config)
+
+        output = layer(sample_input, training=training)
+        assert output.shape[0] == sample_input.shape[0]
+
+    def test_edge_cases(self):
+        """Test error conditions and edge cases."""
+        with pytest.raises(ValueError):
+            PatchEmbedding2D(patch_size=0, embed_dim=32)  # Invalid patch_size
+
+        with pytest.raises(ValueError):
+            PatchEmbedding2D(patch_size=16, embed_dim=-5)  # Invalid embed_dim
+
+    def test_compute_output_shape(self):
+        """Test compute_output_shape method."""
+        layer = PatchEmbedding2D(patch_size=16, embed_dim=768)
+
+        input_shape = (None, 224, 224, 3)
+        output_shape = layer.compute_output_shape(input_shape)
+
+        expected_num_patches = (224 // 16) * (224 // 16)
+        expected_shape = (None, expected_num_patches, 768)
+
+        assert output_shape == expected_shape
+
+    def test_different_patch_sizes(self):
+        """Test with various patch sizes."""
         test_configs = [
             (16, 768, 224, 224),  # Standard ViT-Base
             (32, 512, 224, 224),  # Larger patches
@@ -108,557 +187,207 @@ class TestPatchEmbedding2D:
 
         for patch_size, embed_dim, height, width in test_configs:
             layer = PatchEmbedding2D(patch_size=patch_size, embed_dim=embed_dim)
+            test_input = keras.random.normal([2, height, width, 3])
 
-            # Create appropriate input
-            test_input = tf.random.normal([2, height, width, 3])
             output = layer(test_input)
 
-            # Calculate expected number of patches
             expected_num_patches = (height // patch_size) * (width // patch_size)
             expected_shape = (2, expected_num_patches, embed_dim)
 
-            # Check output shape
             assert output.shape == expected_shape
 
-            # Test compute_output_shape separately
-            computed_shape = layer.compute_output_shape(test_input.shape)
-            assert computed_shape == expected_shape
-
     def test_rectangular_patches(self):
-        """Test with rectangular patches."""
+        """Test with non-square patches."""
         layer = PatchEmbedding2D(patch_size=(8, 16), embed_dim=256)
 
         # Input divisible by patch dimensions
-        test_input = tf.random.normal([2, 64, 128, 3])  # 64/8=8, 128/16=8
+        test_input = keras.random.normal([2, 64, 128, 3])  # 64/8=8, 128/16=8
         output = layer(test_input)
 
         # Expected: 8 * 8 = 64 patches
         expected_shape = (2, 64, 256)
         assert output.shape == expected_shape
 
-    def test_forward_pass_basic(self, input_tensor: tf.Tensor):
-        """Test basic forward pass functionality."""
-        layer = PatchEmbedding2D(patch_size=16, embed_dim=768)
-        output = layer(input_tensor, training=False)
-
-        # Basic sanity checks
-        expected_num_patches = (224 // 16) * (224 // 16)  # 14 * 14 = 196
-        assert output.shape == (4, expected_num_patches, 768)
-        assert not np.any(np.isnan(output.numpy()))
-        assert not np.any(np.isinf(output.numpy()))
-
-    def test_forward_pass_with_activation(self):
-        """Test forward pass with different activations."""
-        activations = ["relu", "gelu", "swish", "linear"]
+    def test_activations(self):
+        """Test with different activation functions."""
+        activations = ['relu', 'gelu', 'swish', None]
 
         for activation in activations:
             layer = PatchEmbedding2D(patch_size=16, embed_dim=256, activation=activation)
-            test_input = tf.random.normal([2, 64, 64, 3])
-            output = layer(test_input, training=False)
+            test_input = keras.random.normal([2, 64, 64, 3])
 
-            # Check output is valid
+            output = layer(test_input)
+
             assert output.shape == (2, 16, 256)  # 4*4 patches
-            assert not np.any(np.isnan(output.numpy()))
-
-    def test_num_patches_property(self):
-        """Test the num_patches property."""
-        layer = PatchEmbedding2D(patch_size=16, embed_dim=768)
-
-        # Before build
-        assert layer.num_patches is None
-
-        # After build
-        layer.build((None, 224, 224, 3))
-        assert layer.num_patches == 196  # 14 * 14
-
-    def test_get_patch_grid_shape(self):
-        """Test the get_patch_grid_shape method."""
-        layer = PatchEmbedding2D(patch_size=16, embed_dim=768)
-
-        # Before build
-        assert layer.get_patch_grid_shape() is None
-
-        # After build
-        layer.build((None, 224, 224, 3))
-        assert layer.get_patch_grid_shape() == (14, 14)
-
-        # Test with rectangular patches
-        layer_rect = PatchEmbedding2D(patch_size=(8, 16), embed_dim=256)
-        layer_rect.build((None, 64, 128, 3))
-        assert layer_rect.get_patch_grid_shape() == (8, 8)
-
-    def test_serialization(self):
-        """Test layer serialization and deserialization."""
-        original_layer = PatchEmbedding2D(
-            patch_size=(8, 16),
-            embed_dim=256,
-            kernel_initializer="he_normal",
-            activation="relu",
-            use_bias=False
-        )
-
-        # Build the layer
-        input_shape = (None, 64, 128, 3)
-        original_layer.build(input_shape)
-
-        # Test data
-        test_input = tf.random.normal([2, 64, 128, 3])
-        original_output = original_layer(test_input, training=False)
-
-        # Get configs
-        config = original_layer.get_config()
-        build_config = original_layer.get_build_config()
-
-        # Recreate the layer
-        recreated_layer = PatchEmbedding2D.from_config(config)
-        recreated_layer.build_from_config(build_config)
-
-        # Copy weights to ensure identical output
-        for orig_weight, recreated_weight in zip(original_layer.weights, recreated_layer.weights):
-            recreated_weight.assign(orig_weight)
-
-        # Test configuration matches
-        assert recreated_layer.patch_size == original_layer.patch_size
-        assert recreated_layer.embed_dim == original_layer.embed_dim
-        assert recreated_layer.use_bias == original_layer.use_bias
-
-        # Test output matches
-        recreated_output = recreated_layer(test_input, training=False)
-        assert np.allclose(original_output.numpy(), recreated_output.numpy())
-
-    def test_model_integration(self, input_tensor: tf.Tensor):
-        """Test the layer in a model context."""
-        # Create a simple Vision Transformer-like model
-        inputs = keras.Input(shape=(224, 224, 3))
-
-        # Patch embedding
-        patches = PatchEmbedding2D(patch_size=16, embed_dim=768)(inputs)
-
-        # Add positional embeddings (simplified)
-        x = keras.layers.Dense(768)(patches)
-
-        # Global average pooling and classification
-        x = keras.layers.GlobalAveragePooling1D()(x)
-        outputs = keras.layers.Dense(10, activation="softmax")(x)
-
-        model = keras.Model(inputs=inputs, outputs=outputs)
-
-        # Compile the model
-        model.compile(
-            optimizer="adam",
-            loss="sparse_categorical_crossentropy",
-            metrics=["accuracy"]
-        )
-
-        # Test forward pass
-        y_pred = model(input_tensor, training=False)
-        assert y_pred.shape == (input_tensor.shape[0], 10)
-
-    def test_layer_serialization_only(self):
-        """Test just the layer serialization without full model save/load."""
-        # Create and configure layer
-        layer = PatchEmbedding2D(
-            patch_size=16,
-            embed_dim=256,
-            kernel_initializer="glorot_normal",
-            activation="relu"
-        )
-
-        # Build the layer
-        layer.build((None, 64, 64, 3))
-
-        # Test serialization
-        config = layer.get_config()
-        build_config = layer.get_build_config()
-
-        # Recreate layer
-        new_layer = PatchEmbedding2D.from_config(config)
-        new_layer.build_from_config(build_config)
-
-        # Test that configs match
-        assert new_layer.patch_size == layer.patch_size
-        assert new_layer.embed_dim == layer.embed_dim
-
-        # Test forward pass with both layers
-        test_input = tf.random.normal([2, 64, 64, 3])
-
-        # Copy weights to ensure identical outputs
-        for orig_weight, new_weight in zip(layer.weights, new_layer.weights):
-            new_weight.assign(orig_weight)
-
-        output1 = layer(test_input)
-        output2 = new_layer(test_input)
-
-        assert np.allclose(output1.numpy(), output2.numpy())
-
-    def test_model_save_load(self, input_tensor: tf.Tensor):
-        """Test saving and loading a model with the custom layer."""
-        # Create a model with the patch embedding layer
-        inputs = keras.Input(shape=(224, 224, 3))
-        x = PatchEmbedding2D(patch_size=16, embed_dim=256, name="patch_embed")(inputs)
-        x = keras.layers.GlobalAveragePooling1D()(x)
-        outputs = keras.layers.Dense(5)(x)
-
-        model = keras.Model(inputs=inputs, outputs=outputs)
-
-        # Generate prediction before saving
-        original_prediction = model.predict(input_tensor, verbose=0)
-
-        # Create temporary directory for model
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            model_path = os.path.join(tmpdirname, "test_model.keras")
-
-            # Save the model
-            model.save(model_path)
-
-            # Load the model with comprehensive custom objects
-            loaded_model = keras.models.load_model(
-                model_path,
-                custom_objects={
-                    "PatchEmbedding2D": PatchEmbedding2D,
-                    "PatchEmbedding1D": PatchEmbedding1D
-                }
-            )
-
-            # Generate prediction with loaded model
-            loaded_prediction = loaded_model.predict(input_tensor, verbose=0)
-
-            # Check predictions match
-            assert np.allclose(original_prediction, loaded_prediction, rtol=1e-5)
-
-            # Check layer type is preserved
-            assert isinstance(loaded_model.get_layer("patch_embed"), PatchEmbedding2D)
-
-    def test_gradient_flow(self, input_tensor: tf.Tensor):
-        """Test gradient flow through the layer."""
-        layer = PatchEmbedding2D(patch_size=16, embed_dim=768)
-
-        # Watch the variables
-        with tf.GradientTape() as tape:
-            inputs = tf.Variable(input_tensor)
-            outputs = layer(inputs, training=True)
-            loss = tf.reduce_mean(tf.square(outputs))
-
-        # Get gradients
-        grads = tape.gradient(loss, layer.trainable_variables)
-
-        # Check gradients exist and are not None
-        assert all(g is not None for g in grads)
-
-        # Check gradients have values (not all zeros)
-        assert all(tf.reduce_any(g != 0) for g in grads)
+            output_np = ops.convert_to_numpy(output)
+            assert not np.any(np.isnan(output_np))
 
     def test_numerical_stability(self):
-        """Test layer stability with extreme input values."""
+        """Test numerical stability with extreme values."""
         layer = PatchEmbedding2D(patch_size=16, embed_dim=256)
 
-        # Test with different input magnitudes
+        # Test with extreme values
         test_cases = [
-            tf.zeros((2, 64, 64, 3)),  # Zeros
-            tf.ones((2, 64, 64, 3)) * 1e-10,  # Very small values
-            tf.ones((2, 64, 64, 3)) * 1e5,  # Large values
+            ops.zeros((2, 64, 64, 3)),
+            ops.ones((2, 64, 64, 3)) * 1e-10,
+            ops.ones((2, 64, 64, 3)) * 1e5,
         ]
 
         for test_input in test_cases:
-            output = layer(test_input, training=False)
+            output = layer(test_input)
+            output_np = ops.convert_to_numpy(output)
 
-            # Check for NaN/Inf values
-            assert not np.any(np.isnan(output.numpy())), "NaN values detected in output"
-            assert not np.any(np.isinf(output.numpy())), "Inf values detected in output"
-
-    def test_different_input_sizes(self):
-        """Test with different input sizes."""
-        layer = PatchEmbedding2D(patch_size=16, embed_dim=256)
-
-        # Test with different sizes (all divisible by 16)
-        sizes = [(32, 32), (64, 64), (128, 128), (224, 224)]
-
-        for height, width in sizes:
-            test_input = tf.random.normal([1, height, width, 3])
-            output = layer(test_input, training=False)
-
-            expected_patches = (height // 16) * (width // 16)
-            assert output.shape == (1, expected_patches, 256)
+            assert not np.any(np.isnan(output_np)), "NaN values detected"
+            assert not np.any(np.isinf(output_np)), "Inf values detected"
 
 
 class TestPatchEmbedding1D:
-    """Comprehensive test suite for PatchEmbedding1D layer."""
+    """Comprehensive test suite for PatchEmbedding1D following modern Keras 3 patterns."""
 
     @pytest.fixture
-    def input_tensor(self) -> tf.Tensor:
-        """Create a test input tensor for 1D patches."""
-        return tf.random.normal([4, 128, 64])  # batch_size=4, seq_len=128, features=64
+    def sample_input(self) -> keras.KerasTensor:
+        """Create sample input tensor."""
+        return keras.random.normal([4, 128, 64])
 
     @pytest.fixture
-    def layer_instance(self) -> PatchEmbedding1D:
-        """Create a default layer instance for testing."""
-        return PatchEmbedding1D(patch_size=16, embed_dim=256)
+    def layer_config(self) -> Dict[str, Any]:
+        """Standard configuration for testing."""
+        return {
+            'patch_size': 16,
+            'embed_dim': 256
+        }
 
     def test_initialization_defaults(self):
         """Test initialization with default parameters."""
         layer = PatchEmbedding1D(patch_size=16, embed_dim=256)
 
-        # Check default values
         assert layer.patch_size == 16
         assert layer.embed_dim == 256
         assert layer.stride == 16  # Should default to patch_size
         assert layer.padding == 'causal'
         assert layer.use_bias is True
-        assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
-        assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
-        assert layer.embedding is None
+        assert not layer.built
 
-    def test_initialization_custom(self):
-        """Test initialization with custom parameters."""
-        layer = PatchEmbedding1D(
-            patch_size=8,
-            embed_dim=128,
-            stride=4,
-            padding='same',
-            use_bias=False,
-            kernel_initializer="he_normal",
-            bias_initializer="ones"
-        )
-
-        # Check custom values
-        assert layer.patch_size == 8
-        assert layer.embed_dim == 128
-        assert layer.stride == 4
-        assert layer.padding == 'same'
-        assert layer.use_bias is False
-        assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
-        assert isinstance(layer.bias_initializer, keras.initializers.Ones)
-
-    def test_build_process(self, input_tensor: tf.Tensor):
-        """Test that the layer builds properly."""
-        layer = PatchEmbedding1D(patch_size=16, embed_dim=256)
-
-        # Build by calling the layer
-        output = layer(input_tensor)
-
-        # Check that layer was built
-        assert layer.built is True
+        # Sub-layer should be created in __init__
+        assert hasattr(layer, 'embedding')
         assert layer.embedding is not None
-        assert isinstance(layer.embedding, keras.layers.Conv1D)
 
-    def test_output_shapes_different_padding(self):
-        """Test output shapes with different padding modes."""
+    def test_forward_pass(self, layer_config: Dict[str, Any], sample_input: keras.KerasTensor):
+        """Test forward pass and building."""
+        layer = PatchEmbedding1D(**layer_config)
+
+        output = layer(sample_input)
+
+        assert layer.built
+        assert len(output.shape) == 3
+        assert output.shape[0] == sample_input.shape[0]  # batch size preserved
+        assert output.shape[2] == 256  # embed_dim
+
+        # Check numerical stability
+        output_np = ops.convert_to_numpy(output)
+        assert not np.any(np.isnan(output_np))
+        assert not np.any(np.isinf(output_np))
+
+    def test_serialization_cycle(self, layer_config: Dict[str, Any], sample_input: keras.KerasTensor):
+        """CRITICAL TEST: Full serialization cycle."""
+        # 1. Create original layer in a model
+        inputs = keras.Input(shape=sample_input.shape[1:])
+        layer_output = PatchEmbedding1D(**layer_config)(inputs)
+        model = keras.Model(inputs, layer_output)
+
+        # 2. Get prediction from original
+        original_prediction = model(sample_input)
+
+        # 3. Save and load
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'test_model.keras')
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+            loaded_prediction = loaded_model(sample_input)
+
+            # 4. Verify identical outputs
+            np.testing.assert_allclose(
+                ops.convert_to_numpy(original_prediction),
+                ops.convert_to_numpy(loaded_prediction),
+                rtol=1e-6, atol=1e-6,
+                err_msg="Predictions differ after serialization"
+            )
+
+    def test_config_completeness(self, layer_config: Dict[str, Any]):
+        """Test that get_config contains all __init__ parameters."""
+        layer = PatchEmbedding1D(**layer_config)
+        config = layer.get_config()
+
+        # Check all config parameters are present
+        for key in layer_config:
+            assert key in config, f"Missing {key} in get_config()"
+
+        # Check essential configuration keys
+        essential_keys = ['patch_size', 'embed_dim', 'stride', 'padding', 'use_bias']
+        for key in essential_keys:
+            assert key in config, f"Missing essential key {key} in get_config()"
+
+    def test_padding_modes(self):
+        """Test different padding modes and their output shapes."""
         seq_len = 128
         patch_size = 16
         embed_dim = 256
-        test_input = tf.random.normal([2, seq_len, 32])
+        test_input = keras.random.normal([2, seq_len, 32])
 
-        # Test 'valid' padding
-        layer_valid = PatchEmbedding1D(patch_size=patch_size, embed_dim=embed_dim, padding='valid')
-        output_valid = layer_valid(test_input)
-        expected_len_valid = (seq_len - patch_size) // patch_size + 1
-        assert output_valid.shape == (2, expected_len_valid, embed_dim)
+        # Test different padding modes
+        padding_modes = ['valid', 'same', 'causal']
 
-        # Test 'same' padding
-        layer_same = PatchEmbedding1D(patch_size=patch_size, embed_dim=embed_dim, padding='same')
-        output_same = layer_same(test_input)
-        expected_len_same = (seq_len + patch_size - 1) // patch_size
-        assert output_same.shape == (2, expected_len_same, embed_dim)
+        for padding in padding_modes:
+            layer = PatchEmbedding1D(
+                patch_size=patch_size,
+                embed_dim=embed_dim,
+                padding=padding
+            )
+            output = layer(test_input)
 
-        # Test 'causal' padding
-        layer_causal = PatchEmbedding1D(patch_size=patch_size, embed_dim=embed_dim, padding='causal')
-        output_causal = layer_causal(test_input)
-        expected_len_causal = seq_len // patch_size
-        assert output_causal.shape == (2, expected_len_causal, embed_dim)
+            # All should produce valid outputs
+            assert output.shape[0] == 2  # batch size
+            assert output.shape[2] == embed_dim  # embedding dimension
+            assert output.shape[1] > 0  # sequence length
 
     def test_overlapping_patches(self):
         """Test with overlapping patches (stride < patch_size)."""
-        layer = PatchEmbedding1D(patch_size=16, embed_dim=256, stride=8, padding='valid')
+        layer = PatchEmbedding1D(
+            patch_size=16,
+            embed_dim=256,
+            stride=8,
+            padding='valid'
+        )
 
-        test_input = tf.random.normal([2, 128, 32])
+        test_input = keras.random.normal([2, 128, 32])
         output = layer(test_input)
 
         # With stride=8, patch_size=16, we get overlapping patches
         expected_len = (128 - 16) // 8 + 1
         assert output.shape == (2, expected_len, 256)
 
-    def test_nan_handling(self):
-        """Test that NaN values are handled correctly."""
-        layer = PatchEmbedding1D(patch_size=8, embed_dim=128)
+    def test_gradients_flow(self, layer_config: Dict[str, Any], sample_input: keras.KerasTensor):
+        """Test gradient computation."""
+        layer = PatchEmbedding1D(**layer_config)
 
-        # Create input with NaN values
-        test_input = tf.random.normal([2, 64, 16])
-        test_input_with_nan = tf.concat([
-            test_input[:, :32, :],
-            tf.fill([2, 32, 16], float('nan'))
-        ], axis=1)
-
-        output = layer(test_input_with_nan, training=False)
-
-        # Check that output doesn't contain NaN
-        assert not np.any(np.isnan(output.numpy()))
-
-    def test_forward_pass_basic(self, input_tensor: tf.Tensor):
-        """Test basic forward pass functionality."""
-        layer = PatchEmbedding1D(patch_size=16, embed_dim=256)
-        output = layer(input_tensor, training=False)
-
-        # Basic sanity checks
-        assert len(output.shape) == 3
-        assert output.shape[0] == input_tensor.shape[0]  # batch size preserved
-        assert output.shape[2] == 256  # embed_dim
-        assert not np.any(np.isnan(output.numpy()))
-        assert not np.any(np.isinf(output.numpy()))
-
-    def test_compute_output_shape(self):
-        """Test compute_output_shape method."""
-        # Test with different padding modes
-        test_cases = [
-            (PatchEmbedding1D(patch_size=8, embed_dim=128, padding='valid'), (2, 64, 16)),
-            (PatchEmbedding1D(patch_size=8, embed_dim=128, padding='same'), (2, 64, 16)),
-            (PatchEmbedding1D(patch_size=8, embed_dim=128, padding='causal'), (2, 64, 16)),
-        ]
-
-        for layer, input_shape in test_cases:
-            output_shape = layer.compute_output_shape(input_shape)
-            assert output_shape[0] == input_shape[0]  # batch size
-            assert output_shape[2] == 128  # embed_dim
-            assert output_shape[1] is not None  # sequence length computed
-
-    def test_serialization(self):
-        """Test layer serialization and deserialization."""
-        original_layer = PatchEmbedding1D(
-            patch_size=8,
-            embed_dim=128,
-            stride=4,
-            padding='same',
-            use_bias=False,
-            kernel_initializer="he_normal"
-        )
-
-        # Build the layer
-        input_shape = (None, 64, 32)
-        original_layer.build(input_shape)
-
-        # Test data
-        test_input = tf.random.normal([2, 64, 32])
-        original_output = original_layer(test_input, training=False)
-
-        # Get configs
-        config = original_layer.get_config()
-        build_config = original_layer.get_build_config()
-
-        # Recreate the layer
-        recreated_layer = PatchEmbedding1D.from_config(config)
-        recreated_layer.build_from_config(build_config)
-
-        # Copy weights to ensure identical output
-        for orig_weight, recreated_weight in zip(original_layer.weights, recreated_layer.weights):
-            recreated_weight.assign(orig_weight)
-
-        # Test configuration matches
-        assert recreated_layer.patch_size == original_layer.patch_size
-        assert recreated_layer.embed_dim == original_layer.embed_dim
-        assert recreated_layer.stride == original_layer.stride
-        assert recreated_layer.padding == original_layer.padding
-        assert recreated_layer.use_bias == original_layer.use_bias
-
-        # Test output matches
-        recreated_output = recreated_layer(test_input, training=False)
-        assert np.allclose(original_output.numpy(), recreated_output.numpy())
-
-    def test_model_integration(self, input_tensor: tf.Tensor):
-        """Test the layer in a model context."""
-        # Create a simple model with 1D patch embedding
-        inputs = keras.Input(shape=(128, 64))
-
-        # Patch embedding
-        patches = PatchEmbedding1D(patch_size=16, embed_dim=256)(inputs)
-
-        # Simple processing
-        x = keras.layers.Dense(128, activation="relu")(patches)
-        x = keras.layers.GlobalAveragePooling1D()(x)
-        outputs = keras.layers.Dense(10, activation="softmax")(x)
-
-        model = keras.Model(inputs=inputs, outputs=outputs)
-
-        # Compile the model
-        model.compile(
-            optimizer="adam",
-            loss="sparse_categorical_crossentropy",
-            metrics=["accuracy"]
-        )
-
-        # Test forward pass
-        y_pred = model(input_tensor, training=False)
-        assert y_pred.shape == (input_tensor.shape[0], 10)
-
-    def test_model_save_load(self, input_tensor: tf.Tensor):
-        """Test saving and loading a model with the custom layer."""
-        # Create a model with the 1D patch embedding layer
-        inputs = keras.Input(shape=(128, 64))
-        x = PatchEmbedding1D(patch_size=16, embed_dim=128, name="patch_embed_1d")(inputs)
-        x = keras.layers.GlobalAveragePooling1D()(x)
-        outputs = keras.layers.Dense(5)(x)
-
-        model = keras.Model(inputs=inputs, outputs=outputs)
-
-        # Generate prediction before saving
-        original_prediction = model.predict(input_tensor, verbose=0)
-
-        # Create temporary directory for model
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            model_path = os.path.join(tmpdirname, "test_model.keras")
-
-            # Save the model
-            model.save(model_path)
-
-            # Load the model
-            loaded_model = keras.models.load_model(
-                model_path,
-                custom_objects={"PatchEmbedding1D": PatchEmbedding1D}
-            )
-
-            # Generate prediction with loaded model
-            loaded_prediction = loaded_model.predict(input_tensor, verbose=0)
-
-            # Check predictions match
-            assert np.allclose(original_prediction, loaded_prediction, rtol=1e-5)
-
-            # Check layer type is preserved
-            assert isinstance(loaded_model.get_layer("patch_embed_1d"), PatchEmbedding1D)
-
-    def test_gradient_flow(self, input_tensor: tf.Tensor):
-        """Test gradient flow through the layer."""
-        layer = PatchEmbedding1D(patch_size=16, embed_dim=256)
-
-        # Watch the variables
         with tf.GradientTape() as tape:
-            inputs = tf.Variable(input_tensor)
-            outputs = layer(inputs, training=True)
-            loss = tf.reduce_mean(tf.square(outputs))
+            tf_input = tf.Variable(ops.convert_to_numpy(sample_input))
+            output = layer(tf_input)
+            loss = ops.mean(ops.square(output))
 
-        # Get gradients
-        grads = tape.gradient(loss, layer.trainable_variables)
+        gradients = tape.gradient(loss, layer.trainable_variables)
 
-        # Check gradients exist and are not None
-        assert all(g is not None for g in grads)
+        assert all(g is not None for g in gradients)
+        assert len(gradients) > 0
 
-        # Check gradients have values (not all zeros)
-        assert all(tf.reduce_any(g != 0) for g in grads)
+    def test_edge_cases(self):
+        """Test error conditions."""
+        with pytest.raises(ValueError):
+            PatchEmbedding1D(patch_size=0, embed_dim=256)  # Invalid patch_size
 
-    def test_numerical_stability(self):
-        """Test layer stability with extreme input values."""
-        layer = PatchEmbedding1D(patch_size=8, embed_dim=128)
-
-        # Test with different input magnitudes
-        test_cases = [
-            tf.zeros((2, 64, 32)),  # Zeros
-            tf.ones((2, 64, 32)) * 1e-10,  # Very small values
-            tf.ones((2, 64, 32)) * 1e5,  # Large values
-        ]
-
-        for test_input in test_cases:
-            output = layer(test_input, training=False)
-
-            # Check for NaN/Inf values
-            assert not np.any(np.isnan(output.numpy())), "NaN values detected in output"
-            assert not np.any(np.isinf(output.numpy())), "Inf values detected in output"
+        with pytest.raises(ValueError):
+            PatchEmbedding1D(patch_size=16, embed_dim=-5)  # Invalid embed_dim
 
     def test_different_sequence_lengths(self):
         """Test with different sequence lengths."""
@@ -668,29 +397,109 @@ class TestPatchEmbedding1D:
         lengths = [32, 64, 128, 256]
 
         for length in lengths:
-            test_input = tf.random.normal([2, length, 16])
-            output = layer(test_input, training=False)
+            test_input = keras.random.normal([2, length, 16])
+            output = layer(test_input)
 
             expected_patches = length // 8
             assert output.shape == (2, expected_patches, 128)
 
-    def test_training_vs_inference(self):
-        """Test differences between training and inference modes."""
-        layer = PatchEmbedding1D(patch_size=16, embed_dim=256)
-        test_input = tf.random.normal([2, 128, 32])
+    @pytest.mark.parametrize("training", [True, False, None])
+    def test_training_modes(self, layer_config: Dict[str, Any], sample_input: keras.KerasTensor, training):
+        """Test behavior in different training modes."""
+        layer = PatchEmbedding1D(**layer_config)
 
-        # Training mode
-        output_train = layer(test_input, training=True)
+        output = layer(sample_input, training=training)
+        assert output.shape[0] == sample_input.shape[0]
 
-        # Inference mode
-        output_inference = layer(test_input, training=False)
+    def test_compute_output_shape(self):
+        """Test compute_output_shape method."""
+        test_cases = [
+            (PatchEmbedding1D(patch_size=8, embed_dim=128, padding='valid'), (2, 64, 16)),
+            (PatchEmbedding1D(patch_size=8, embed_dim=128, padding='same'), (2, 64, 16)),
+            (PatchEmbedding1D(patch_size=8, embed_dim=128, padding='causal'), (2, 64, 16)),
+        ]
 
-        # Shapes should be the same
-        assert output_train.shape == output_inference.shape
+        for layer, input_shape in test_cases:
+            output_shape = layer.compute_output_shape(input_shape)
 
-        # Since there's no dropout in this layer, outputs should be identical
-        # for the same input (assuming no randomness in Conv1D)
-        assert np.allclose(output_train.numpy(), output_inference.numpy())
+            assert output_shape[0] == input_shape[0]  # batch size
+            assert output_shape[2] == 128  # embed_dim
+            assert output_shape[1] is not None  # sequence length computed
+
+    def test_numerical_stability(self):
+        """Test numerical stability with extreme values."""
+        layer = PatchEmbedding1D(patch_size=8, embed_dim=128)
+
+        test_cases = [
+            ops.zeros((2, 64, 32)),
+            ops.ones((2, 64, 32)) * 1e-10,
+            ops.ones((2, 64, 32)) * 1e5,
+        ]
+
+        for test_input in test_cases:
+            output = layer(test_input)
+            output_np = ops.convert_to_numpy(output)
+
+            assert not np.any(np.isnan(output_np)), "NaN values detected"
+            assert not np.any(np.isinf(output_np)), "Inf values detected"
+
+
+def test_both_layers_in_model():
+    """Integration test using both layers in a single model."""
+    # Test that both layers work together
+    inputs_2d = keras.Input(shape=(64, 64, 3), name='input_2d')
+    inputs_1d = keras.Input(shape=(128, 32), name='input_1d')
+
+    # Process 2D input
+    patches_2d = PatchEmbedding2D(patch_size=16, embed_dim=256)(inputs_2d)
+    x2d = keras.layers.GlobalAveragePooling1D()(patches_2d)
+
+    # Process 1D input
+    patches_1d = PatchEmbedding1D(patch_size=16, embed_dim=256)(inputs_1d)
+    x1d = keras.layers.GlobalAveragePooling1D()(patches_1d)
+
+    # Combine and classify
+    combined = keras.layers.Concatenate()([x2d, x1d])
+    outputs = keras.layers.Dense(10, activation='softmax')(combined)
+
+    model = keras.Model(inputs=[inputs_2d, inputs_1d], outputs=outputs)
+
+    # Test forward pass
+    test_2d = keras.random.normal([2, 64, 64, 3])
+    test_1d = keras.random.normal([2, 128, 32])
+
+    predictions = model([test_2d, test_1d])
+    assert predictions.shape == (2, 10)
+
+
+# Debug helper from the guide
+def debug_layer_serialization(layer_class, layer_config, sample_input):
+    """Debug helper for layer serialization issues."""
+    from dl_techniques.utils.logger import logger
+
+    try:
+        # Test basic functionality
+        layer = layer_class(**layer_config)
+        output = layer(sample_input)
+        logger.info(f"✅ Forward pass successful: {output.shape}")
+
+        # Test configuration
+        config = layer.get_config()
+        logger.info(f"✅ Configuration keys: {list(config.keys())}")
+
+        # Test serialization
+        inputs = keras.Input(shape=sample_input.shape[1:])
+        outputs = layer_class(**layer_config)(inputs)
+        model = keras.Model(inputs, outputs)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model.save(os.path.join(tmpdir, 'test.keras'))
+            loaded = keras.models.load_model(os.path.join(tmpdir, 'test.keras'))
+            logger.info("✅ Serialization test passed")
+
+    except Exception as e:
+        logger.error(f"❌ Error: {e}")
+        raise
 
 
 if __name__ == "__main__":

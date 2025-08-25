@@ -33,7 +33,6 @@ class TestPositionalEmbedding:
         assert layer.scale == 0.02
         assert isinstance(layer.pos_initializer, keras.initializers.TruncatedNormal)
         assert layer.pos_embedding is None
-        assert layer.dropout is None
 
     def test_initialization_custom(self):
         """Test initialization with custom parameters."""

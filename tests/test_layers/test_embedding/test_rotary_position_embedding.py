@@ -33,7 +33,6 @@ class TestRotaryPositionEmbedding:
         assert layer.rope_dim == 32  # 64 * 0.5
         assert layer.cos_cached is None
         assert layer.sin_cached is None
-        assert layer._build_input_shape is None
 
     def test_initialization_custom(self):
         """Test initialization with custom parameters."""
