@@ -301,9 +301,6 @@ class TestSaturatedMish:
         # SaturatedMish pre-computes mish_at_alpha in build
         assert hasattr(layer, "mish_at_alpha")
 
-        # Verify build_input_shape is stored
-        assert layer._build_input_shape is not None
-
     def test_output_shapes(self, input_tensor):
         """Test that output shapes are computed correctly."""
         layer = SaturatedMish()

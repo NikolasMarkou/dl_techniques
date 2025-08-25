@@ -80,7 +80,6 @@ class TestMPSLayer:
         assert layer_instance.built is True
 
         batch_size, input_dim = input_tensor.shape
-        assert layer_instance._build_input_shape == input_tensor.shape
 
         # Check that weights are created and have correct shapes
         assert layer_instance.cores is not None

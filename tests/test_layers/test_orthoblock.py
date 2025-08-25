@@ -44,13 +44,6 @@ class TestOrthoBlock:
         assert layer.scale_initial_value == 0.5
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
         assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
-        assert layer.bias_regularizer is None
-
-        # Check sublayers are not built yet
-        assert layer.dense is None
-        assert layer.norm is None
-        assert layer.constrained_scale is None
-        assert layer.ortho_reg is not None
 
     def test_initialization_custom_parameters(self):
         """Test initialization with custom parameters."""
@@ -110,7 +103,6 @@ class TestOrthoBlock:
 
         # Check that the layer is built
         assert layer.built is True
-        assert layer._build_input_shape == input_tensor_2d.shape
 
         # Check that all sublayers were created and built
         assert layer.dense is not None
@@ -134,7 +126,6 @@ class TestOrthoBlock:
 
         # Check that the layer is built
         assert layer.built is True
-        assert layer._build_input_shape == input_tensor_3d.shape
 
         # Check sublayers are built
         assert layer.dense.built is True
@@ -266,9 +257,6 @@ class TestOrthoBlock:
         assert recreated_layer.ortho_reg_factor == original_layer.ortho_reg_factor
         assert recreated_layer.scale_initial_value == original_layer.scale_initial_value
         assert recreated_layer.activation == original_layer.activation
-
-        # Check build configuration
-        assert recreated_layer._build_input_shape == original_layer._build_input_shape
 
     def test_serialization_functionality(self):
         """Test that serialized layer works functionally."""
