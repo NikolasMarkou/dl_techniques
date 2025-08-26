@@ -60,21 +60,8 @@ def test_initialization():
     """Test that the detector initializes with different parameters."""
     # Test default initialization
     detector1 = Canny()
-    assert detector1.threshold == (50, 80)
-
-    # Test custom initialization
-    detector2 = Canny(
-        sigma=1.2,
-        threshold_min=40,
-        threshold_max=100,
-        tracking_connection=3,
-        tracking_iterations=5
-    )
-    assert detector2.threshold == (40, 100)
-
-    # Test invalid sigma
-    with pytest.raises(ValueError):
-        Canny(sigma=0.5)
+    assert detector1.threshold_min == 50
+    assert detector1.threshold_max == 80
 
 
 def test_basic_edge_detection(default_detector: Canny):

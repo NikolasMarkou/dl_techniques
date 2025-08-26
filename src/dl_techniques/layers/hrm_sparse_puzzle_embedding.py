@@ -37,107 +37,244 @@ Internal State:
 """
 
 import keras
-from typing import Optional, Union
+from typing import Optional, Union, Tuple, Any, Dict
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class SparsePuzzleEmbedding(keras.layers.Layer):
     """
-    Sparse embedding layer for puzzle identifiers.
+    Sparse embedding layer optimized for large-scale puzzle identifier lookups with training efficiency.
 
-    This layer creates embeddings for puzzle identifiers that are updated
-    sparsely during training. During inference, it uses the full embedding table.
+    This layer implements a specialized embedding mechanism designed for scenarios with very large
+    vocabulary sizes (e.g., millions of puzzle identifiers) where sparse updates are crucial for
+    training efficiency. It maintains a dual-mode operation that optimizes both inference speed
+    and training memory usage through intelligent caching mechanisms.
+
+    **Intent**: Provide memory-efficient embedding lookups for large categorical vocabularies,
+    specifically designed for puzzle-based reasoning tasks where only a small subset of embeddings
+    are actively updated in each training batch, enabling scalable training on massive datasets.
+
+    **Architecture & Operation**:
+    ```
+    Training Mode (training=True):
+    Input IDs → Embedding Lookup → Cache (local_embeddings, local_ids) → Output Embeddings
+
+    Inference Mode (training=False):
+    Input IDs → Direct Embedding Lookup → Output Embeddings
+    ```
+
+    **Dual-Mode Behavior**:
+
+    **Training Mode**:
+    - Performs standard embedding lookup from main table
+    - **Caches** current batch embeddings and IDs in local non-trainable variables
+    - Enables external sparse gradient update mechanisms
+    - Optimizes memory usage by isolating active embeddings
+
+    **Inference Mode**:
+    - Direct lookup from main embedding table
+    - No caching overhead for maximum speed
+    - Standard embedding layer behavior
+
+    **Training Optimization**:
+    The caching mechanism enables external training loops to:
+    - Gather gradients only for active embeddings (local_embeddings)
+    - Apply sparse updates directly to main table using cached IDs
+    - Avoid full embedding matrix operations during backpropagation
 
     Args:
-        num_embeddings: Number of puzzle identifiers
-        embedding_dim: Dimension of embeddings
-        batch_size: Batch size for training (used for local embeddings)
-        embeddings_initializer: Initializer for embedding weights
-        embeddings_regularizer: Regularizer for embedding weights
-        **kwargs: Additional layer arguments
+        num_embeddings: Integer, total number of puzzle identifiers in vocabulary.
+            Must be positive. This defines the size of the main embedding table.
+        embedding_dim: Integer, dimensionality of embedding vectors.
+            Must be positive. All embeddings will have this dimension.
+        batch_size: Integer, expected batch size for training.
+            Must be positive. Used to size local caching arrays for efficiency.
+        embeddings_initializer: String or Initializer, method to initialize main embeddings.
+            Defaults to 'zeros'. Consider 'random_normal' for better initial diversity.
+        embeddings_regularizer: Optional Regularizer, L1/L2 regularization for embeddings.
+            Helps prevent overfitting on large embedding tables. Defaults to None.
+        **kwargs: Additional Layer base class arguments.
+
+    Input shape:
+        1D integer tensor with shape: `(batch_size,)`.
+        Values should be valid indices in range [0, num_embeddings).
+
+    Output shape:
+        2D tensor with shape: `(batch_size, embedding_dim)`.
+        Each input ID mapped to its corresponding embedding vector.
+
+    Attributes:
+        embeddings: Main trainable embedding table, shape (num_embeddings, embedding_dim).
+        local_embeddings: Non-trainable cache for current batch embeddings during training.
+        local_ids: Non-trainable cache for current batch IDs during training.
+
+    Example:
+        ```python
+        # Large-scale puzzle embedding (1M puzzles, 768-dim embeddings)
+        embedding_layer = SparsePuzzleEmbedding(
+            num_embeddings=1_000_000,
+            embedding_dim=768,
+            batch_size=32,
+            embeddings_initializer='random_normal'
+        )
+
+        # Puzzle IDs as input
+        puzzle_ids = keras.random.randint((32,), 0, 1_000_000)  # Random puzzle IDs
+        embeddings = embedding_layer(puzzle_ids, training=True)
+        print(embeddings.shape)  # (32, 768)
+
+        # Inference mode (no caching overhead)
+        test_embeddings = embedding_layer(puzzle_ids, training=False)
+
+        # Access cached data for sparse updates (during training)
+        if hasattr(embedding_layer, 'local_embeddings'):
+            cached_embeddings = embedding_layer.local_embeddings  # Current batch embeddings
+            cached_ids = embedding_layer.local_ids              # Corresponding IDs
+        ```
+
+    Note:
+        This layer is optimized for training scenarios where external mechanisms handle
+        sparse gradient updates. The caching functionality provides the necessary data
+        structures for implementing efficient sparse training loops while maintaining
+        standard Keras layer compatibility.
     """
 
     def __init__(
-            self,
-            num_embeddings: int,
-            embedding_dim: int,
-            batch_size: int,
-            embeddings_initializer: Union[str, keras.initializers.Initializer] = "zeros",
-            embeddings_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            **kwargs
-    ):
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        batch_size: int,
+        embeddings_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+        embeddings_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
 
+        # Validate inputs
+        if num_embeddings <= 0:
+            raise ValueError(f"num_embeddings must be positive, got {num_embeddings}")
+        if embedding_dim <= 0:
+            raise ValueError(f"embedding_dim must be positive, got {embedding_dim}")
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
+
+        # Store configuration
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.batch_size = batch_size
-        self.embeddings_initializer = embeddings_initializer
-        self.embeddings_regularizer = embeddings_regularizer
+        self.embeddings_initializer = keras.initializers.get(embeddings_initializer)
+        self.embeddings_regularizer = keras.regularizers.get(embeddings_regularizer)
 
-        # Main embedding table
+        # Initialize weight attributes - created in build()
+        self.embeddings = None
+        self.local_embeddings = None
+        self.local_ids = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Create the embedding weights and caching variables.
+
+        This method creates:
+        1. Main trainable embedding table for all puzzle identifiers
+        2. Local non-trainable cache for current batch embeddings (training optimization)
+        3. Local non-trainable cache for current batch IDs (training optimization)
+
+        Args:
+            input_shape: Shape of input tensor, expected to be (batch_size,).
+        """
+        # Validate input shape
+        if len(input_shape) != 1:
+            raise ValueError(f"Expected 1D input (batch_size,), got shape {input_shape}")
+
+        # Main embedding table - trainable weights for all puzzle identifiers
         self.embeddings = self.add_weight(
             name="embeddings",
-            shape=(num_embeddings, embedding_dim),
+            shape=(self.num_embeddings, self.embedding_dim),
             initializer=self.embeddings_initializer,
             regularizer=self.embeddings_regularizer,
             trainable=True
         )
 
-        # Local embeddings for training (non-trainable, used for caching)
+        # Local embeddings cache for current batch during training - non-trainable
         self.local_embeddings = self.add_weight(
             name="local_embeddings",
-            shape=(batch_size, embedding_dim),
+            shape=(self.batch_size, self.embedding_dim),
             initializer="zeros",
             trainable=False
         )
 
-        # Local IDs for tracking which embeddings are cached
+        # Local IDs cache for tracking which embeddings are cached - non-trainable
         self.local_ids = self.add_weight(
             name="local_ids",
-            shape=(batch_size,),
+            shape=(self.batch_size,),
             initializer="zeros",
             trainable=False,
             dtype="int32"
         )
 
-    def build(self, input_shape):
-        """Build layer."""
         super().build(input_shape)
 
-    def call(self, inputs, training=None):
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """
-        Forward pass through sparse embedding.
+        Forward pass through sparse embedding with mode-dependent behavior.
 
         Args:
-            inputs: Puzzle identifier indices (batch_size,)
-            training: Whether in training mode
+            inputs: Integer tensor of puzzle IDs with shape (batch_size,).
+                    Values must be in range [0, num_embeddings).
+            training: Boolean indicating training mode. When True, enables caching
+                     for sparse update optimization.
 
         Returns:
-            Embeddings for the puzzle identifiers (batch_size, embedding_dim)
+            Embedding tensor with shape (batch_size, embedding_dim).
         """
+        # Validate input range (basic check)
+        inputs = keras.ops.cast(inputs, "int32")
+
         if not training:
-            # During inference, directly use the embedding table
+            # Inference Mode: Direct lookup from main embedding table
+            # No caching overhead for maximum performance
             return keras.ops.take(self.embeddings, inputs, axis=0)
 
-        # During training, cache embeddings in local storage for efficiency
-        # This mimics the sparse embedding behavior from the original code
+        # Training Mode: Lookup + caching for sparse update optimization
 
-        # Copy embeddings from main table to local cache
-        embeddings = keras.ops.take(self.embeddings, inputs, axis=0)
+        # Standard embedding lookup from main table
+        embeddings_output = keras.ops.take(self.embeddings, inputs, axis=0)
 
-        # Update local cache (for potential sparse updates later)
-        self.local_embeddings.assign(embeddings)
-        self.local_ids.assign(keras.ops.cast(inputs, "int32"))
+        # Cache current batch embeddings and IDs for external sparse updates
+        # This enables external training mechanisms to:
+        # 1. Gather gradients only for these specific embeddings
+        # 2. Apply sparse updates directly to main table using cached IDs
+        # 3. Avoid operations on the entire embedding matrix
 
-        return embeddings
+        self.local_embeddings.assign(embeddings_output)
+        self.local_ids.assign(inputs)
 
-    def compute_output_shape(self, input_shape):
-        """Compute output shape."""
+        return embeddings_output
+
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute output shape by appending embedding dimension.
+
+        Args:
+            input_shape: Input shape tuple (batch_size,).
+
+        Returns:
+            Output shape tuple (batch_size, embedding_dim).
+        """
         return input_shape + (self.embedding_dim,)
 
-    def get_config(self):
-        """Get layer configuration."""
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Return configuration for serialization.
+
+        Returns:
+            Dictionary containing all initialization parameters.
+        """
         config = super().get_config()
         config.update({
             "num_embeddings": self.num_embeddings,
@@ -148,14 +285,4 @@ class SparsePuzzleEmbedding(keras.layers.Layer):
         })
         return config
 
-    def get_build_config(self):
-        """Get build configuration."""
-        return {"input_shape": getattr(self, "_build_input_shape", None)}
-
-    def build_from_config(self, config):
-        """Build from configuration."""
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
 # ---------------------------------------------------------------------
-

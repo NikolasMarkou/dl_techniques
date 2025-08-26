@@ -1,345 +1,336 @@
-import tensorflow as tf
-from dataclasses import dataclass
-from typing import Optional, Union, List, Tuple, Any
+import keras
+import tensorflow as tf  # For backend-specific ops not in keras.ops
+import numpy as np
+from typing import Optional, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
 
-# Constants for mathematical operations
-math_ops = tf.math
-PI = tf.cast(math_ops.angle(tf.constant(-1, dtype=tf.complex64)), tf.float32)
+@keras.saving.register_keras_serializable()
+class Canny(keras.layers.Layer):
+    """Keras implementation of the Canny edge detection algorithm.
 
+    This layer performs Canny edge detection, a multi-stage algorithm used to
+    detect a wide range of edges in images. The process includes Gaussian
+    smoothing, gradient calculation, non-maximum suppression, double
+    thresholding, and edge tracking by hysteresis.
 
-@dataclass(eq=False, order=False, frozen=True)
-class _Node:
-    """Internal node structure for kernel management.
+    **Intent**: Provide a robust, serializable, and modern Keras 3 implementation
+    of the Canny algorithm that can be integrated into neural network models or
+    used as a standalone image processing layer.
+
+    **Architecture & Stages**:
+    ```
+    Input Image [B, H, W, 1]
+           ↓
+    1. Noise Reduction (Gaussian Filter)
+           ↓
+    2. Gradient Calculation (Sobel Operator)
+           ↓ (Magnitude & Angle)
+    3. Non-Maximum Suppression
+           ↓
+    4. Double Thresholding (Strong & Weak Edges)
+           ↓
+    5. Hysteresis Edge Tracking
+           ↓
+    Output Edge Map [B, H, W, 1]
+    ```
+
+    **Mathematical Operations**:
+    1. **Smoothing**: `I_smooth = I * G(σ)` where `G` is a Gaussian kernel.
+    2. **Gradients**: `Gx = I_smooth * S_x`, `Gy = I_smooth * S_y`.
+       Magnitude `G = sqrt(Gx² + Gy²)`, Angle `θ = atan2(Gy, Gx)`.
+    3. **Suppression**: Discard pixels that are not local maxima in the
+       direction of the gradient.
+    4. **Thresholding**: Classify edges as strong (`> threshold_max`),
+       weak (`> threshold_min`), or non-edges.
+    5. **Hysteresis**: Connect weak edges to strong edges iteratively.
+
+    Args:
+        sigma (float): Standard deviation for the Gaussian kernel. A larger
+            sigma corresponds to more blurring and detection of larger-scale
+            edges. Must be >= 0.8. Defaults to 0.8.
+        threshold_min (int): The lower threshold for the double thresholding
+            stage. Pixels with gradient magnitude below this are discarded.
+            Defaults to 50.
+        threshold_max (int): The upper threshold for the double thresholding
+            stage. Pixels above this are considered strong edges.
+            Defaults to 80.
+        tracking_connection (int): The connectivity size (kernel size) for the final
+            hysteresis edge tracking stage. Determines the neighborhood for
+            connecting weak edges to strong ones. Defaults to 5.
+        tracking_iterations (int): The maximum number of iterations for the
+            hysteresis tracking. Prevents infinite loops in edge connection.
+            Defaults to 3.
+        **kwargs: Additional arguments for the `keras.layers.Layer` base class.
+
+    Input shape:
+        4D tensor with shape: `(batch_size, height, width, 1)`.
+        The input image should be a single-channel (grayscale) tensor.
+
+    Output shape:
+        4D tensor with the same shape as the input:
+        `(batch_size, height, width, 1)`.
+        The output is a binary edge map where `1.0` represents an edge and
+        `0.0` represents the background.
 
     Attributes:
-        name: Identifier for the kernel
-        kernel: The actual kernel tensor
-        carry: Additional data (primarily used for angle ranges in edge detection)
+        gaussian_kernel (keras.Variable): Non-trainable weight for Gaussian smoothing.
+        sobel_kernel (keras.Variable): Non-trainable weight for Sobel gradient calculation.
+        angle_kernel (keras.Variable): Non-trainable weights for non-maximum suppression.
+        dilation_kernel (keras.Variable): Non-trainable weight for hysteresis tracking.
+
+    Example:
+        ```python
+        # Create a Canny edge detection layer
+        canny_layer = Canny(sigma=1.0, threshold_min=40, threshold_max=90)
+
+        # Apply to an input image
+        # Note: Input tensor should be float type
+        input_image = keras.random.uniform(shape=(1, 256, 256, 1)) * 255.0
+        edge_map = canny_layer(input_image)
+
+        # Use within a Keras model
+        inputs = keras.Input(shape=(256, 256, 1))
+        outputs = Canny()(inputs)
+        model = keras.Model(inputs, outputs)
+        model.summary()
+        ```
+
+    Raises:
+        ValueError: If `sigma` is less than 0.8 or if `threshold_min` is
+            not less than `threshold_max`.
     """
-    __slots__ = ('name', 'kernel', 'carry')
-    name: str
-    kernel: tf.Tensor
-    carry: Any
 
-    def __repr__(self) -> str:
-        return self.name
+    def __init__(
+            self,
+            sigma: float = 0.8,
+            threshold_min: int = 50,
+            threshold_max: int = 80,
+            tracking_connection: int = 5,
+            tracking_iterations: int = 3,
+            **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
 
-
-class kernels:
-    """Manages the kernels required for Canny edge detection.
-
-    This class handles the creation and cycling of various kernels used in the
-    edge detection process, including Gaussian smoothing, Sobel operators,
-    and specialized angle detection kernels.
-    """
-
-    def __init__(self, sigma: float = 0.8, con: int = 5):
-        """
-        Initialize kernel manager with given parameters.
-
-        Args:
-            sigma: Standard deviation for Gaussian kernel (must be >= 0.8)
-            con: Connection size for dilation kernel
-
-        Raises:
-            ValueError: If sigma < 0.8
-        """
-        self.items: List[_Node] = []
         if sigma < 0.8:
-            raise ValueError('minimum kernel size need to be size of 3 --> sigma > 0.8')
+            raise ValueError(
+                "Minimum kernel size needs to be 3, which requires sigma >= 0.8. "
+                f"Received sigma={sigma}."
+            )
+        if threshold_min >= threshold_max:
+            raise ValueError(
+                f"threshold_min ({threshold_min}) must be less than "
+                f"threshold_max ({threshold_max})."
+            )
+
+        # Store all configuration parameters
         self.sigma = sigma
-        self.con = con
-        self.build()
+        self.threshold_min = float(threshold_min)
+        self.threshold_max = float(threshold_max)
+        self.tracking_connection = tracking_connection
+        self.tracking_iterations = tracking_iterations
 
-    def __repr__(self) -> str:
-        return str(self.items)
+        # Static data for angle calculations, not a weight.
+        self.angle_ranges = [
+            [157.5, 22.5], [22.5, 67.5], [67.5, 112.5], [112.5, 157.5]
+        ]
 
-    def __next__(self) -> _Node:
-        """Cycles through kernels in a rotating fashion."""
-        tmp = self.items.pop()
-        self.items.insert(0, tmp)
-        return tmp
+        # Initialize weight attributes - created in build()
+        self.gaussian_kernel = None
+        self.sobel_kernel = None
+        self.angle_kernel = None
+        self.dilation_kernel = None
 
-    def build(self):
-        """Constructs all required kernels for edge detection."""
-        # Calculate Gaussian kernel size
+    def _build_gaussian_kernel(self) -> np.ndarray:
+        """Creates a 2D Gaussian kernel for image smoothing."""
         kernel_size = int(((((self.sigma - 0.8) / 0.3) + 1) * 2) + 1)
         kernel_size += 1 if (kernel_size % 2) == 0 else 0
 
-        # Build Gaussian kernel
-        gaussian_kernel = self._build_gaussian_kernel(kernel_size)
+        ax = np.arange(-kernel_size // 2 + 1.0, kernel_size // 2 + 1.0)
+        xx, yy = np.meshgrid(ax, ax)
 
-        # Build Sobel kernel for gradient detection
-        sobel_kernel = self._build_sobel_kernel()
+        normal = 1 / (2.0 * np.pi * (self.sigma ** 2))
+        kernel = np.exp(-((xx ** 2) + (yy ** 2)) / (2.0 * (self.sigma ** 2))) * normal
+        kernel = kernel / np.sum(kernel)
 
-        # Build directional kernels for angle detection
-        ang_kernel = self._build_angle_kernels()
+        return kernel.reshape((kernel_size, kernel_size, 1, 1))
 
-        # Build dilation kernel for edge tracking
-        dilation_kernel = tf.ones(shape=(self.con, self.con, 1), dtype=tf.float32)
+    def _build_sobel_kernel(self) -> np.ndarray:
+        """Creates Sobel kernels for Gx and Gy gradient computation."""
+        # Gx kernel: detects vertical edges
+        gx_kernel = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
+        # Gy kernel: detects horizontal edges
+        gy_kernel = np.array([[1, 2, 1], [0, 0, 0], [-1, -2, -1]])
+        # Stack to shape (H, W, in_channels, out_channels) -> (3, 3, 1, 2)
+        return np.stack([gx_kernel, gy_kernel], axis=-1).reshape((3, 3, 1, 2))
 
-        # Store all kernels with their metadata
-        self.items = [
-            _Node('gaussian_kernel', gaussian_kernel, None),
-            _Node('sobel_kernel', sobel_kernel, None),
-            _Node('ang_kernel', ang_kernel,
-                  [[157.5, 22.5], [22.5, 67.5], [67.5, 112.5], [112.5, 157.5]]),
-            _Node('dilation_kernel', dilation_kernel, None)
-        ]
-        self.items.reverse()
+    def _build_angle_kernels(self) -> np.ndarray:
+        """Creates kernels for angle-specific non-maximum suppression."""
+        inf = np.inf
+        # Kernels for 0°, 45°, 90°, 135° detection
+        k0 = np.array([[[-inf], [-inf], [-inf]], [[0.0], [0.0], [0.0]], [[-inf], [-inf], [-inf]]])
+        k45 = np.array([[[-inf], [-inf], [0.0]], [[-inf], [0.0], [-inf]], [[0.0], [-inf], [-inf]]])
+        k90 = np.array([[[-inf], [0.0], [-inf]], [[-inf], [0.0], [-inf]], [[-inf], [0.0], [-inf]]])
+        k135 = np.array([[[0.0], [-inf], [-inf]], [[-inf], [0.0], [-inf]], [[-inf], [-inf], [0.0]]])
+        # Concatenate on the last axis to create a (3, 3, 4) filter
+        # for tf.nn.dilation2d, where depth matches input channels.
+        return np.concatenate([k0, k45, k90, k135], axis=-1).astype(np.float32)
 
-    def _build_gaussian_kernel(self, kernel_size: int) -> tf.Tensor:
-        """Creates 2D Gaussian kernel for image smoothing."""
-        ax = tf.range(-kernel_size // 2 + 1.0, kernel_size // 2 + 1.0)
-        xx, yy = tf.meshgrid(ax, ax)
-        normal = 1 / (2.0 * PI * (self.sigma ** 2))
-        kernel = tf.exp(-((xx ** 2) + (yy ** 2)) / (2.0 * (self.sigma ** 2))) * normal
-        kernel = kernel / tf.reduce_sum(kernel)
-        return tf.reshape(kernel, shape=(kernel_size, kernel_size, 1, 1))
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Create the layer's non-trainable weights (kernels)."""
+        # 1. Gaussian Kernel
+        gaussian_val = self._build_gaussian_kernel()
+        self.gaussian_kernel = self.add_weight(
+            name="gaussian_kernel", shape=gaussian_val.shape,
+            initializer=keras.initializers.Constant(gaussian_val),
+            trainable=False,
+        )
 
-    def _build_sobel_kernel(self) -> tf.Tensor:
-        """Creates Sobel kernels for gradient computation."""
-        return tf.constant([
-            [[[-1, -1]], [[0, -2]], [[1, -1]]],
-            [[[-2, 0]], [[0, 0]], [[2, 0]]],
-            [[[-1, 1]], [[0, 2]], [[1, 1]]]
-        ], dtype=tf.float32)
+        # 2. Sobel Kernel
+        sobel_val = self._build_sobel_kernel()
+        self.sobel_kernel = self.add_weight(
+            name="sobel_kernel", shape=sobel_val.shape,
+            initializer=keras.initializers.Constant(sobel_val),
+            trainable=False,
+        )
 
-    def _build_angle_kernels(self) -> tf.Tensor:
-        """Creates kernels for angle-specific edge detection."""
-        inf = float('inf')
-        kernels = [
-            # 0° detection
-            tf.constant([
-                [[-inf], [-inf], [-inf]],
-                [[0.0], [0.0], [0.0]],
-                [[-inf], [-inf], [-inf]]
-            ], dtype=tf.float32),
-            # 45° detection
-            tf.constant([
-                [[-inf], [-inf], [0.0]],
-                [[-inf], [0.0], [-inf]],
-                [[0.0], [-inf], [-inf]]
-            ], dtype=tf.float32),
-            # 90° detection
-            tf.constant([
-                [[-inf], [0.0], [-inf]],
-                [[-inf], [0.0], [-inf]],
-                [[-inf], [0.0], [-inf]]
-            ], dtype=tf.float32),
-            # 135° detection
-            tf.constant([
-                [[0.0], [-inf], [-inf]],
-                [[-inf], [0.0], [-inf]],
-                [[-inf], [-inf], [0.0]]
-            ], dtype=tf.float32)
-        ]
-        return tf.concat(kernels, axis=-1)
+        # 3. Angle Kernels for NMS
+        angle_val = self._build_angle_kernels()
+        self.angle_kernel = self.add_weight(
+            name="angle_kernel", shape=angle_val.shape,
+            initializer=keras.initializers.Constant(angle_val),
+            trainable=False,
+        )
 
-    @staticmethod
-    def pad(X: tf.Tensor,
-            b: Optional[Union[int, List[int]]] = None,
-            h: Optional[Union[int, List[int]]] = None,
-            w: Optional[Union[int, List[int]]] = None,
-            d: Optional[Union[int, List[int]]] = None,
-            **kwargs) -> tf.Tensor:
-        """
-        Pads the input tensor along specified dimensions.
+        # 4. Dilation Kernel for Hysteresis
+        self.dilation_kernel = self.add_weight(
+            name="dilation_kernel", shape=(self.tracking_connection, self.tracking_connection, 1),
+            initializer=keras.initializers.Ones(), trainable=False,
+        )
 
-        Args:
-            X: Input tensor of rank 4
-            b: Padding for batch dimension
-            h: Padding for height dimension
-            w: Padding for width dimension
-            d: Padding for depth dimension
-            **kwargs: Additional arguments for tf.pad
+        super().build(input_shape)
 
-        Returns:
-            Padded tensor
-        """
-        assert len(X.get_shape()) == 4
-        if not any([b, h, w, d]):
-            return X
+    def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
+        """Perform Canny edge detection on the input image tensor."""
+        original_dtype = inputs.dtype
 
-        paddings = []
-        for arg in [b, h, w, d]:
-            if arg is None:
-                paddings.append([0, 0])
-            else:
-                arg = [arg, arg] if isinstance(arg, int) else list(arg)
-                paddings.append(arg)
+        # Stage 1: Noise reduction
+        x_smooth = keras.ops.conv(inputs, self.gaussian_kernel, padding="same")
 
-        return tf.pad(X, tf.constant(paddings, dtype=tf.int32), **kwargs)
+        # Stage 2: Gradient calculation
+        grad_xy = keras.ops.conv(x_smooth, self.sobel_kernel, padding="same")
+        grad_x, grad_y = keras.ops.split(grad_xy, 2, axis=-1)
 
-
-class Canny(tf.Module):
-    """TensorFlow implementation of the Canny edge detection algorithm."""
-
-    def __init__(self,
-                 sigma: float = 0.8,
-                 threshold_min: int = 50,
-                 threshold_max: int = 80,
-                 tracking_con: int = 5,
-                 tracking_iterations: int = 3,
-                 **kwargs):
-        """
-        Initialize Canny edge detector.
-
-        Args:
-            sigma: Standard deviation for Gaussian smoothing
-            threshold_min: Lower threshold for edge detection
-            threshold_max: Upper threshold for edge detection
-            tracking_con: Connection size for edge tracking
-            tracking_iterations: Maximum iterations for hysteresis tracking
-        """
-        super().__init__()
-        self.kernels = kernels(sigma, tracking_con)
-        self.threshold = (threshold_min, threshold_max)
-        self.tracking_iter = tracking_iterations
-
-    @tf.function(autograph=False,
-                 reduce_retracing=True,
-                 input_signature=[
-                     tf.TensorSpec(shape=[None, None, None, 1], dtype=tf.float32)
-                 ])
-    def __call__(self, X: tf.Tensor) -> tf.Tensor:
-        """
-        Perform Canny edge detection on input image.
-
-        Args:
-            X: Input image tensor [batch, height, width, 1]
-
-        Returns:
-            Binary edge map tensor of same shape as input
-        """
-        d_type = X.dtype
-        kernels_ = self.kernels
-
-        # Stage 1: Noise reduction with Gaussian filtering
-        with tf.name_scope('noise_reduction'):
-            gaussian_kernel = next(kernels_).kernel
-            Xg = tf.nn.convolution(X, gaussian_kernel, padding='SAME')
-
-        # Stage 2: Gradient calculation using Sobel operators
-        with tf.name_scope('gradient'):
-            sobel_kernel = next(kernels_).kernel
-            Gxy = tf.nn.convolution(Xg, sobel_kernel, padding='SAME')
-            gx, gy = tf.split(Gxy, [1, 1], axis=-1)
-            theta = ((math_ops.atan2(gx, gy) * 180 / PI) + 90) % 180
-            Gxy = tf.clip_by_value(
-                math_ops.sqrt((gx ** 2) + (gy ** 2)),
-                0, 255.
-            )
+        theta = (keras.ops.arctan2(grad_y, grad_x) * (180 / np.pi) + 90) % 180
+        grad_mag = keras.ops.clip(
+            keras.ops.sqrt(grad_x ** 2 + grad_y ** 2), 0.0, 255.0
+        )
 
         # Stage 3: Non-maximum suppression
-        with tf.name_scope('non_maximum_suppression'):
-            angle_kernel = next(kernels_)
-            angle_X = self._compute_angle_responses(theta, Gxy, angle_kernel)
-            max_pool_ang = tf.nn.dilation2d(
-                kernels_.pad(angle_X, h=1, w=1, constant_values=0.0),
-                angle_kernel.kernel,
-                strides=(1, 1, 1, 1),
-                padding='VALID',
-                data_format='NHWC',
-                dilations=(1, 1, 1, 1)
-            )
+        angle_responses = self._compute_angle_responses(theta, grad_mag)
+        max_pool_angle = tf.nn.dilation2d(
+            angle_responses, self.angle_kernel, strides=(1, 1, 1, 1),
+            padding='SAME', data_format='NHWC', dilations=(1, 1, 1, 1)
+        )
 
         # Stage 4: Double thresholding
-        with tf.name_scope('double_thresholding'):
-            edge_candidates = self._apply_double_threshold(
-                max_pool_ang, angle_X, Gxy
-            )
+        strong_edges, weak_edges = self._apply_double_threshold(
+            max_pool_angle, angle_responses, grad_mag
+        )
 
         # Stage 5: Edge tracking by hysteresis
-        with tf.name_scope('dilation_tracking'):
-            final_edges = self._track_edges(edge_candidates, kernels_)
+        final_edges = self._track_edges(strong_edges, weak_edges)
 
-        return tf.cast(final_edges, dtype=d_type)
+        return keras.ops.cast(final_edges, dtype=original_dtype)
 
-    def _compute_angle_responses(self,
-                                 theta: tf.Tensor,
-                                 Gxy: tf.Tensor,
-                                 angle_kernel: _Node) -> tf.Tensor:
-        """Compute angle-specific edge responses."""
-        angle_responses = []
-
-        # Handle 0° case specially (wrapping around 180°)
-        low, high = angle_kernel.carry[0]
-        tmp = math_ops.logical_or(
-            math_ops.greater_equal(theta, low),
-            math_ops.less_equal(theta, high)
+    def _compute_angle_responses(
+            self, theta: keras.KerasTensor, grad_mag: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """Compute angle-specific edge responses for suppression."""
+        angle_masks = []
+        low, high = self.angle_ranges[0]
+        mask = keras.ops.logical_or(
+            keras.ops.greater_equal(theta, low),
+            keras.ops.less_equal(theta, high)
         )
-        angle_responses.append(tmp)
+        angle_masks.append(mask)
 
-        # Handle other angles
-        for low, high in angle_kernel.carry[1:]:
-            tmp = math_ops.logical_and(
-                math_ops.greater_equal(theta, low),
-                math_ops.less(theta, high)
+        for low, high in self.angle_ranges[1:]:
+            mask = keras.ops.logical_and(
+                keras.ops.greater_equal(theta, low),
+                keras.ops.less(theta, high)
             )
-            angle_responses.append(tmp)
+            angle_masks.append(mask)
 
-        return tf.cast(tf.concat(angle_responses, -1), tf.float32) * Gxy
-
-    def _apply_double_threshold(self,
-                                max_pool_ang: tf.Tensor,
-                                angle_X: tf.Tensor,
-                                Gxy: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-        """Apply double thresholding to identify strong and weak edges."""
-        threshold_min, threshold_max = self.threshold
-
-        # Find initial edge candidates
-        edge_ = tf.where(
-            math_ops.logical_and(
-                math_ops.equal(max_pool_ang, angle_X),
-                max_pool_ang > threshold_min
-            ),
-            Gxy, 0.0
+        stacked_masks = keras.ops.cast(
+            keras.ops.concatenate(angle_masks, axis=-1), dtype=grad_mag.dtype
         )
-        edge_ = tf.expand_dims(tf.reduce_max(edge_, axis=-1), -1)
+        return stacked_masks * grad_mag
 
-        # Separate into strong and weak edges
-        edge_sure = tf.where(edge_ >= threshold_max, 1.0, 0.0)
-        edge_weak = tf.where(
-            math_ops.logical_and(
-                edge_ >= threshold_min,
-                edge_ < threshold_max
-            ),
-            1.0, 0.0
+    def _apply_double_threshold(
+            self, max_pool_angle: tf.Tensor, angle_responses: tf.Tensor, grad_mag: tf.Tensor
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
+        """Apply double thresholding to find strong and weak edges."""
+        suppressed = keras.ops.where(
+            keras.ops.equal(max_pool_angle, angle_responses), grad_mag, 0.0
+        )
+        edge_candidates = keras.ops.expand_dims(
+            keras.ops.max(suppressed, axis=-1), axis=-1
         )
 
-        return edge_sure, edge_weak
+        strong = keras.ops.cast(
+            keras.ops.greater_equal(edge_candidates, self.threshold_max),
+            self.compute_dtype
+        )
+        weak = keras.ops.cast(
+            keras.ops.logical_and(
+                keras.ops.greater_equal(edge_candidates, self.threshold_min),
+                keras.ops.less(edge_candidates, self.threshold_max)
+            ), self.compute_dtype
+        )
+        return strong, weak
 
-    def _track_edges(self,
-                     edge_candidates: Tuple[tf.Tensor, tf.Tensor],
-                     kernels_: kernels) -> tf.Tensor:
-        """Track edges using hysteresis."""
-        edge_sure, edge_weak = edge_candidates
-        hysteresis_kernel = next(kernels_).kernel
+    def _track_edges(
+            self, strong_edges: tf.Tensor, weak_edges: tf.Tensor
+    ) -> keras.KerasTensor:
+        """Track edges using hysteresis with a tf.while_loop."""
 
-        def check(curr: tf.Tensor, cond: tf.Tensor) -> tf.Tensor:
-            return cond
+        def loop_cond(current, has_changed):
+            return has_changed
 
-        def main_(curr: tf.Tensor, cond: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-            prev = tf.identity(curr)
-            dilation = tf.nn.dilation2d(
-                curr,
-                hysteresis_kernel,
-                strides=(1, 1, 1, 1),
-                padding='SAME',
-                data_format='NHWC',
-                dilations=(1, 1, 1, 1)
+        def loop_body(current, has_changed):
+            previous = tf.identity(current)
+            dilated = tf.nn.dilation2d(
+                current, self.dilation_kernel, strides=(1, 1, 1, 1),
+                padding='SAME', data_format='NHWC', dilations=(1, 1, 1, 1)
             )
-            curr = (dilation * edge_weak) + edge_sure - 1
-            return curr, math_ops.reduce_max(curr - prev) != 0
+            newly_strong = dilated * weak_edges
+            current = keras.ops.clip(strong_edges + newly_strong, 0.0, 1.0)
+            has_changed = keras.ops.any(keras.ops.not_equal(current, previous))
+            return current, has_changed
 
-        # Iteratively track edges
-        edge, _ = tf.while_loop(
-            check, main_,
-            loop_vars=(edge_sure, True),
-            maximum_iterations=self.tracking_iter
+        final_edges, _ = tf.while_loop(
+            loop_cond, loop_body, loop_vars=(strong_edges, tf.constant(True)),
+            maximum_iterations=self.tracking_iterations
         )
+        return final_edges
 
-        return tf.where(edge + edge_sure > 0, 1.0, 0.0)
+    def get_config(self) -> Dict[str, Any]:
+        """Return the configuration of the layer for serialization."""
+        config = super().get_config()
+        config.update({
+            "sigma": self.sigma,
+            "threshold_min": int(self.threshold_min),
+            "threshold_max": int(self.threshold_max),
+            "tracking_con": self.tracking_connection,
+            "tracking_iterations": self.tracking_iterations,
+        })
+        return config
+
+    def compute_output_shape(
+            self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """The output shape is the same as the input shape."""
+        return input_shape
+
+# ---------------------------------------------------------------------
