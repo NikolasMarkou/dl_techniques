@@ -322,7 +322,7 @@ class Canny(keras.layers.Layer):
             "sigma": self.sigma,
             "threshold_min": int(self.threshold_min),
             "threshold_max": int(self.threshold_max),
-            "tracking_con": self.tracking_connection,
+            "tracking_connection": self.tracking_connection,
             "tracking_iterations": self.tracking_iterations,
         })
         return config

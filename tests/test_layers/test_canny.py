@@ -117,10 +117,6 @@ class TestCannyLayer:
             filepath = os.path.join(tmpdir, 'test_canny_model.keras')
             model.save(filepath)
 
-            # This should fail with "Unrecognized keyword arguments passed to Canny: {'tracking_con': 5}"
-            with pytest.raises(TypeError, match="tracking_con"):
-                keras.models.load_model(filepath)
-
     def test_config_completeness(self, layer_config: Dict[str, Any]):
         """Test that get_config contains all __init__ parameters."""
         layer = Canny(**layer_config)
@@ -129,7 +125,7 @@ class TestCannyLayer:
         # Check all config parameters are present
         expected_keys = {
             'sigma', 'threshold_min', 'threshold_max',
-            'tracking_con', 'tracking_iterations'  # Note: get_config uses 'tracking_con'
+            'tracking_connection', 'tracking_iterations'  # Note: get_config uses 'tracking_con'
         }
 
         for key in expected_keys:
@@ -139,7 +135,7 @@ class TestCannyLayer:
         assert config['sigma'] == layer_config['sigma']
         assert config['threshold_min'] == int(layer_config['threshold_min'])
         assert config['threshold_max'] == int(layer_config['threshold_max'])
-        assert config['tracking_con'] == layer_config['tracking_connection']
+        assert config['tracking_connection'] == layer_config['tracking_connection']
         assert config['tracking_iterations'] == layer_config['tracking_iterations']
 
     def test_config_parameter_name_mismatch(self, layer_config: Dict[str, Any]):
@@ -150,9 +146,7 @@ class TestCannyLayer:
         config = layer.get_config()
 
         # The bug: config saves 'tracking_con' instead of 'tracking_connection'
-        assert 'tracking_con' in config
-        assert 'tracking_connection' not in config
-        assert config['tracking_con'] == layer_config['tracking_connection']
+        assert config['tracking_connection'] == layer_config['tracking_connection']
 
     def test_gradients_flow_expected_behavior(self, layer_config: Dict[str, Any], sample_input: keras.KerasTensor):
         """Test gradient computation - documents expected non-differentiable behavior."""
