@@ -123,20 +123,147 @@ for various tasks:
 
 Examples
 --------
->>> # Create a differentiable 10x10 Soft SOM
->>> soft_som = SoftSOMLayer(grid_shape=(10, 10), input_dim=784, temperature=0.5)
+>>> import keras
+>>> import numpy as np
+
+>>> # --- Example 1: Basic Usage as a Standalone Layer ---
+>>> # Create a Soft SOM for 64-dimensional input data on an 8x8 grid.
+>>> som_layer = SoftSOMLayer(
+...     grid_shape=(8, 8),
+...     input_dim=64,
+...     temperature=0.5,
+...     name="soft_som"
+... )
 >>>
->>> # Use it as a feature extractor in a standard Keras classification model
->>> model = keras.Sequential([
-...     keras.layers.Dense(512, activation='relu'),
-...     soft_som,
-...     keras.layers.Dense(10, activation='softmax')
-... ])
+>>> # Create some dummy input data (batch of 4 vectors)
+>>> dummy_input = np.random.rand(4, 64).astype("float32")
 >>>
->>> model.compile(optimizer='adam', loss='categorical_crossentropy')
->>> # The Soft SOM's internal losses (reconstruction, topological) will be
->>> # automatically added to the main loss during training.
->>> model.fit(x_train, y_train, epochs=10)
+>>> # The layer's output is the "soft reconstruction" of the input.
+>>> # It has the same shape as the input.
+>>> reconstruction = som_layer(dummy_input)
+>>> print(f"Input shape: {dummy_input.shape}")
+>>> print(f"Output (reconstruction) shape: {reconstruction.shape}")
+Input shape: (4, 64)
+Output (reconstruction) shape: (4, 64)
+
+>>> # --- Example 2: Use as a Feature Extractor in a Classification Model ---
+>>> # The Soft SOM learns to map similar inputs to nearby locations on its
+>>> # grid, creating a topologically ordered feature representation.
+>>> inputs = keras.Input(shape=(784,), name="input_digits")
+>>> x = keras.layers.Dense(256, activation='relu')(inputs)
+>>>
+>>> # The Soft SOM layer processes the dense features. Its output (a soft
+>>> # reconstruction) serves as a structured feature vector for the next layer.
+>>> som_features = SoftSOMLayer(
+...     grid_shape=(10, 10),
+...     input_dim=256,
+...     name="som_feature_extractor"
+... )(x)
+>>>
+>>> outputs = keras.layers.Dense(10, activation='softmax')(som_features)
+>>> classification_model = keras.Model(inputs, outputs)
+>>>
+>>> # The model's total loss will automatically include the SOM's internal
+>>> # reconstruction and topological losses, regularizing the training.
+>>> classification_model.compile(
+...     optimizer='adam',
+...     loss='categorical_crossentropy'
+... )
+>>> # To train with real data:
+>>> # (x_train, y_train), _ = keras.datasets.mnist.load_data()
+>>> # x_train = np.reshape(x_train, (-1, 784)).astype("float32") / 255
+>>> # y_train = keras.utils.to_categorical(y_train)
+>>> # classification_model.fit(x_train, y_train, epochs=5, batch_size=64)
+
+>>> # --- Example 3: Use as a Bottleneck in an Autoencoder ---
+>>> # The SOM acts as a powerful regularizer, forcing the latent space to
+>>> # be structured and continuous.
+>>> encoder_input = keras.Input(shape=(784,), name="encoder_input")
+>>> x = keras.layers.Dense(128, activation='relu')(encoder_input)
+>>>
+>>> # The Soft SOM forms the topological bottleneck.
+>>> bottleneck = SoftSOMLayer(
+...     grid_shape=(16, 16),
+...     input_dim=128,
+...     reconstruction_weight=1.0, # Weight for SOM's internal recon. loss
+...     topological_weight=0.5,  # Weight for topological regularization
+...     name="som_bottleneck"
+... )(x)
+>>>
+>>> # The decoder reconstructs the original input from the SOM's output.
+>>> x = keras.layers.Dense(128, activation='relu')(bottleneck)
+>>> decoder_output = keras.layers.Dense(784, activation='sigmoid')(x)
+>>>
+>>> autoencoder = keras.Model(
+...     encoder_input, decoder_output, name="som_autoencoder"
+... )
+>>>
+>>> # The autoencoder is trained on its own reconstruction loss (e.g., MSE).
+>>> # The SOM's internal losses are added automatically, providing powerful
+>>> # regularization on the latent space.
+>>> autoencoder.compile(optimizer='adam', loss='mse')
+
+>>> # --- Example 4: Visualization and Clustering Analysis ---
+>>> # After training, you can analyze how the SOM has organized the data.
+>>> # Let's use the 'autoencoder' model from Example 3.
+>>> som_layer = autoencoder.get_layer("som_bottleneck")
+>>>
+>>> # First, create a sub-model to get the SOM's input (the encoded data).
+>>> encoder_model = keras.Model(autoencoder.input, som_layer.input)
+>>>
+>>> # Create some dummy test images.
+>>> test_images = np.random.rand(5, 784).astype("float32")
+>>>
+>>> # Pass the images through the encoder to get the latent vectors.
+>>> encoded_vectors = encoder_model.predict(test_images, verbose=0)
+>>>
+>>> # Now, use the SOM layer's 'get_soft_assignments' method.
+>>> assignments = som_layer.get_soft_assignments(encoded_vectors)
+>>> print(f"Shape of soft assignments: {assignments.shape}")
+Shape of soft assignments: (5, 16, 16)
+>>>
+>>> # To find the Best Matching Unit (BMU) for each image, find the neuron
+>>> # with the highest activation probability.
+>>> assignments_flat = np.reshape(assignments, (assignments.shape[0], -1))
+>>> bmu_indices = np.argmax(assignments_flat, axis=1)
+>>>
+>>> # Convert the flat index back to grid coordinates.
+>>> bmu_coords = np.unravel_index(bmu_indices, som_layer.grid_shape)
+>>> bmu_coords_stacked = np.stack(bmu_coords, axis=1)
+>>>
+>>> print(f"BMU flat indices: {bmu_indices}")
+>>> print(f"BMU coordinates for each input:\\n{bmu_coords_stacked}")
+
+>>> # --- Example 5: Controlling Behavior with Parameters ---
+>>> # Sharper, more "winner-take-all" assignments with a very low temperature.
+>>> sharp_som = SoftSOMLayer(grid_shape=(5, 5), input_dim=32, temperature=0.01)
+>>>
+>>> # Smoother, more distributed assignments with a high temperature.
+>>> smooth_som = SoftSOMLayer(grid_shape=(5, 5), input_dim=32, temperature=10.0)
+>>>
+>>> # Disable the internal reconstruction loss and rely only on the topological
+>>> # loss and the main model's loss.
+>>> topo_only_som = SoftSOMLayer(
+...     grid_shape=(5, 5),
+...     input_dim=32,
+...     use_reconstruction_loss=False,
+...     topological_weight=0.5
+... )
+>>>
+>>> # Use a global softmax instead of the default per-dimension softmax, which
+>>> # can be simpler but may lose some dimensional independence.
+>>> global_softmax_som = SoftSOMLayer(
+...     grid_shape=(5, 5),
+...     input_dim=32,
+...     use_per_dimension_softmax=False
+... )
+>>>
+>>> # Encourage sharper assignments by penalizing high-entropy distributions.
+>>> sharp_assignments_som = SoftSOMLayer(
+...     grid_shape=(5, 5),
+...     input_dim=32,
+...     sharpness_weight=0.1
+... )
 
 References
 ----------
