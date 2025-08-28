@@ -215,7 +215,7 @@ class TestSoftSOMLayer:
 
     def test_build_with_wrong_input_shape(self, soft_som_2d):
         """Test that building with wrong input shape raises error."""
-        with pytest.raises(ValueError, match="Expected input shape"):
+        with pytest.raises(ValueError, match="Expected input_dim="):
             soft_som_2d.build((64, 100))  # Wrong input dimension
 
     # =============================================================================
