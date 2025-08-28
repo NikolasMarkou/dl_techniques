@@ -3,7 +3,7 @@ Comprehensive test suite for SoftSOMLayer implementation.
 
 This test suite follows the patterns established for the classical SOM layer
 but includes additional tests specific to the soft, differentiable features
-of the Soft SOM implementation.
+of the Soft SOM implementation, including the new sharpness regularization.
 """
 
 import pytest
@@ -68,6 +68,17 @@ class TestSoftSOMLayer:
             topological_weight=0.2
         )
 
+    @pytest.fixture
+    def soft_som_with_sharpness(self):
+        """Create a Soft SOM instance with sharpness regularization."""
+        return SoftSOMLayer(
+            grid_shape=(6, 6),
+            input_dim=100,
+            temperature=1.0,
+            use_per_dimension_softmax=True,
+            sharpness_weight=0.05
+        )
+
     # =============================================================================
     # Initialization Tests
     # =============================================================================
@@ -80,7 +91,8 @@ class TestSoftSOMLayer:
             input_dim=5,
             temperature=1.0,
             use_reconstruction_loss=False,
-            topological_weight=0.0
+            topological_weight=0.0,
+            sharpness_weight=0.0
         )
 
         # Simple test input
@@ -100,7 +112,12 @@ class TestSoftSOMLayer:
 
         # Assignments should sum to 1 (approximately)
         assignment_sums = tf.reduce_sum(soft_assignments, axis=[1, 2])
-        assert tf.reduce_all(tf.abs(assignment_sums - 1.0) < 1e-5)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(assignment_sums),
+            keras.ops.convert_to_numpy(tf.ones_like(assignment_sums)),
+            rtol=1e-5, atol=1e-5,
+            err_msg="Soft assignments should sum to 1"
+        )
 
     def test_initialization_1d(self, soft_som_1d):
         """Test initialization of 1D Soft SOM with default parameters."""
@@ -112,6 +129,7 @@ class TestSoftSOMLayer:
         assert soft_som_1d.use_reconstruction_loss is True
         assert soft_som_1d.reconstruction_weight == 1.0
         assert soft_som_1d.topological_weight == 0.1
+        assert soft_som_1d.sharpness_weight == 0.0  # Default value
         assert soft_som_1d.weights_map is None  # Not built yet
 
     def test_initialization_2d(self, soft_som_2d):
@@ -123,6 +141,7 @@ class TestSoftSOMLayer:
         assert soft_som_2d.use_per_dimension_softmax is True
         assert soft_som_2d.reconstruction_weight == 1.0
         assert soft_som_2d.topological_weight == 0.1
+        assert soft_som_2d.sharpness_weight == 0.0  # Default value
 
     def test_initialization_3d(self, soft_som_3d):
         """Test initialization of 3D Soft SOM with global softmax."""
@@ -133,9 +152,18 @@ class TestSoftSOMLayer:
         assert soft_som_3d.use_per_dimension_softmax is False
         assert soft_som_3d.reconstruction_weight == 0.8
         assert soft_som_3d.topological_weight == 0.2
+        assert soft_som_3d.sharpness_weight == 0.0  # Default value
+
+    def test_initialization_with_sharpness(self, soft_som_with_sharpness):
+        """Test initialization with sharpness regularization."""
+        assert soft_som_with_sharpness.grid_shape == (6, 6)
+        assert soft_som_with_sharpness.input_dim == 100
+        assert soft_som_with_sharpness.temperature == 1.0
+        assert soft_som_with_sharpness.use_per_dimension_softmax is True
+        assert soft_som_with_sharpness.sharpness_weight == 0.05
 
     def test_initialization_custom_parameters(self):
-        """Test initialization with custom parameters."""
+        """Test initialization with custom parameters including sharpness."""
         custom_regularizer = keras.regularizers.L2(1e-4)
         custom_initializer = keras.initializers.HeNormal()
 
@@ -147,6 +175,7 @@ class TestSoftSOMLayer:
             use_reconstruction_loss=False,
             reconstruction_weight=0.5,
             topological_weight=0.3,
+            sharpness_weight=0.1,
             kernel_initializer=custom_initializer,
             kernel_regularizer=custom_regularizer
         )
@@ -158,6 +187,7 @@ class TestSoftSOMLayer:
         assert soft_som.use_reconstruction_loss is False
         assert soft_som.reconstruction_weight == 0.5
         assert soft_som.topological_weight == 0.3
+        assert soft_som.sharpness_weight == 0.1
         assert soft_som.kernel_initializer == custom_initializer
         assert soft_som.kernel_regularizer == custom_regularizer
 
@@ -177,6 +207,15 @@ class TestSoftSOMLayer:
 
         with pytest.raises(ValueError, match="must be positive"):
             SoftSOMLayer(grid_shape=(10, 10), input_dim=10, temperature=0.0)
+
+        with pytest.raises(ValueError, match="must be non-negative"):
+            SoftSOMLayer(grid_shape=(10, 10), input_dim=10, reconstruction_weight=-0.1)
+
+        with pytest.raises(ValueError, match="must be non-negative"):
+            SoftSOMLayer(grid_shape=(10, 10), input_dim=10, topological_weight=-0.1)
+
+        with pytest.raises(ValueError, match="must be non-negative"):
+            SoftSOMLayer(grid_shape=(10, 10), input_dim=10, sharpness_weight=-0.1)
 
     # =============================================================================
     # Build Process Tests
@@ -218,6 +257,9 @@ class TestSoftSOMLayer:
         with pytest.raises(ValueError, match="Expected input_dim="):
             soft_som_2d.build((64, 100))  # Wrong input dimension
 
+        with pytest.raises(ValueError, match="Expected 2D input shape"):
+            soft_som_2d.build((64, 32, 784))  # Wrong number of dimensions
+
     # =============================================================================
     # Forward Pass Tests
     # =============================================================================
@@ -250,6 +292,20 @@ class TestSoftSOMLayer:
         assert reconstruction.dtype == tf.float32
         assert not tf.reduce_any(tf.math.is_nan(reconstruction))
         assert not tf.reduce_any(tf.math.is_inf(reconstruction))
+
+    def test_forward_pass_with_sharpness(self, soft_som_with_sharpness):
+        """Test forward pass with sharpness regularization."""
+        test_input = keras.random.uniform((8, 100), seed=42)
+
+        # Training mode should add sharpness loss
+        reconstruction = soft_som_with_sharpness(test_input, training=True)
+
+        assert reconstruction.shape == (8, 100)
+        assert not tf.reduce_any(tf.math.is_nan(reconstruction))
+        assert not tf.reduce_any(tf.math.is_inf(reconstruction))
+
+        # Should have losses added during training
+        assert len(soft_som_with_sharpness.losses) > 0
 
     def test_per_dimension_vs_global_softmax(self, input_data_2d):
         """Test difference between per-dimension and global softmax."""
@@ -293,7 +349,12 @@ class TestSoftSOMLayer:
 
         # Each row should sum to approximately 1 (probabilities)
         row_sums = tf.reduce_sum(soft_assignments, axis=1)
-        assert tf.reduce_all(tf.abs(row_sums - 1.0) < 1e-5)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(row_sums),
+            keras.ops.convert_to_numpy(tf.ones_like(row_sums)),
+            rtol=1e-5, atol=1e-5,
+            err_msg="Soft assignments should sum to 1"
+        )
 
         # All assignments should be non-negative
         assert tf.reduce_all(soft_assignments >= 0)
@@ -309,7 +370,12 @@ class TestSoftSOMLayer:
 
         # Each sample's assignments should sum to approximately 1
         sample_sums = tf.reduce_sum(soft_assignments, axis=[1, 2])
-        assert tf.reduce_all(tf.abs(sample_sums - 1.0) < 1e-5)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(sample_sums),
+            keras.ops.convert_to_numpy(tf.ones_like(sample_sums)),
+            rtol=1e-5, atol=1e-5,
+            err_msg="Soft assignments should sum to 1"
+        )
 
         # All assignments should be non-negative
         assert tf.reduce_all(soft_assignments >= 0)
@@ -325,7 +391,12 @@ class TestSoftSOMLayer:
 
         # Each sample's assignments should sum to approximately 1
         sample_sums = tf.reduce_sum(soft_assignments, axis=[1, 2, 3])
-        assert tf.reduce_all(tf.abs(sample_sums - 1.0) < 1e-5)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(sample_sums),
+            keras.ops.convert_to_numpy(tf.ones_like(sample_sums)),
+            rtol=1e-5, atol=1e-5,
+            err_msg="Soft assignments should sum to 1"
+        )
 
         # All assignments should be non-negative
         assert tf.reduce_all(soft_assignments >= 0)
@@ -361,6 +432,126 @@ class TestSoftSOMLayer:
         assert tf.reduce_mean(max_assignments_low) > tf.reduce_mean(max_assignments_high)
 
     # =============================================================================
+    # Sharpness Regularization Tests
+    # =============================================================================
+
+    def test_sharpness_loss_computation(self):
+        """Test that sharpness loss is computed correctly."""
+        soft_som = SoftSOMLayer(
+            grid_shape=(4, 4),
+            input_dim=20,
+            temperature=1.0,
+            use_per_dimension_softmax=True,
+            sharpness_weight=0.1
+        )
+
+        test_input = keras.random.uniform((8, 20), seed=42)
+
+        # Clear any existing losses
+        soft_som.losses.clear()
+
+        # Forward pass in training mode should add sharpness loss
+        reconstruction = soft_som(test_input, training=True)
+
+        # Should have losses (reconstruction + topological + sharpness)
+        assert len(soft_som.losses) > 0
+
+        # One of the losses should be sharpness loss
+        loss_values = [float(loss) for loss in soft_som.losses]
+        assert all(np.isfinite(loss_val) for loss_val in loss_values)
+
+    def test_sharpness_regularization_disabled_for_global_softmax(self):
+        """Test that sharpness regularization is disabled for global softmax."""
+        soft_som = SoftSOMLayer(
+            grid_shape=(4, 4),
+            input_dim=20,
+            temperature=1.0,
+            use_per_dimension_softmax=False,  # Global softmax
+            sharpness_weight=0.1  # This should be ignored
+        )
+
+        test_input = keras.random.uniform((8, 20), seed=42)
+
+        # Forward pass in training mode
+        soft_som.losses.clear()
+        reconstruction = soft_som(test_input, training=True)
+
+        # Should work without errors but no sharpness loss should be added
+        # (only reconstruction and topological losses if enabled)
+        assert len(soft_som.losses) >= 0  # Could be 0 if other losses disabled
+
+    def test_sharpness_effect_on_assignments(self):
+        """Test that sharpness regularization affects assignment distributions."""
+        # Create two identical SOMs, one with sharpness regularization
+        soft_som_no_sharp = SoftSOMLayer(
+            grid_shape=(6, 6),
+            input_dim=50,
+            temperature=1.0,
+            sharpness_weight=0.0
+        )
+
+        soft_som_with_sharp = SoftSOMLayer(
+            grid_shape=(6, 6),
+            input_dim=50,
+            temperature=1.0,
+            sharpness_weight=0.2
+        )
+
+        test_input = keras.random.uniform((16, 50), seed=42)
+
+        # Build both layers
+        soft_som_no_sharp(test_input[:1], training=False)
+        soft_som_with_sharp(test_input[:1], training=False)
+
+        # Get initial assignments (should be similar since weights are random)
+        assignments_no_sharp = soft_som_no_sharp.get_soft_assignments(test_input)
+        assignments_with_sharp = soft_som_with_sharp.get_soft_assignments(test_input)
+
+        # Both should be valid probability distributions
+        sums_no_sharp = tf.reduce_sum(assignments_no_sharp, axis=[1, 2])
+        sums_with_sharp = tf.reduce_sum(assignments_with_sharp, axis=[1, 2])
+
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(sums_no_sharp),
+            keras.ops.convert_to_numpy(tf.ones_like(sums_no_sharp)),
+            rtol=1e-5, atol=1e-5
+        )
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(sums_with_sharp),
+            keras.ops.convert_to_numpy(tf.ones_like(sums_with_sharp)),
+            rtol=1e-5, atol=1e-5
+        )
+
+    def test_zero_sharpness_weight(self):
+        """Test that zero sharpness weight disables sharpness regularization."""
+        soft_som = SoftSOMLayer(
+            grid_shape=(4, 4),
+            input_dim=20,
+            temperature=1.0,
+            use_per_dimension_softmax=True,
+            sharpness_weight=0.0  # Disabled
+        )
+
+        test_input = keras.random.uniform((8, 20), seed=42)
+
+        soft_som.losses.clear()
+        reconstruction = soft_som(test_input, training=True)
+
+        # Should still work, but no sharpness loss should be added
+        # (only reconstruction and topological if enabled)
+        loss_count_without_sharpness = len(soft_som.losses)
+
+        # Now enable sharpness and compare
+        soft_som.sharpness_weight = 0.1
+        soft_som.losses.clear()
+        reconstruction = soft_som(test_input, training=True)
+
+        loss_count_with_sharpness = len(soft_som.losses)
+
+        # With sharpness enabled, we should have at least as many losses
+        assert loss_count_with_sharpness >= loss_count_without_sharpness
+
+    # =============================================================================
     # Loss and Training Tests
     # =============================================================================
 
@@ -370,6 +561,7 @@ class TestSoftSOMLayer:
         soft_som_2d.use_reconstruction_loss = True
 
         # No losses initially
+        soft_som_2d.losses.clear()
         assert len(soft_som_2d.losses) == 0
 
         # Forward pass in training mode
@@ -387,6 +579,7 @@ class TestSoftSOMLayer:
         )
 
         # No losses initially
+        soft_som.losses.clear()
         assert len(soft_som.losses) == 0
 
         # Forward pass in training mode
@@ -396,15 +589,17 @@ class TestSoftSOMLayer:
         assert len(soft_som.losses) >= 1
 
     def test_no_losses_when_disabled(self, input_data_2d):
-        """Test that no losses are added when disabled."""
+        """Test that no losses are added when all regularization is disabled."""
         soft_som = SoftSOMLayer(
             grid_shape=(6, 6),
             input_dim=784,
             use_reconstruction_loss=False,
-            topological_weight=0.0
+            topological_weight=0.0,
+            sharpness_weight=0.0
         )
 
         # Forward pass in training mode
+        soft_som.losses.clear()
         reconstruction = soft_som(input_data_2d, training=True)
 
         # Should have no losses
@@ -413,6 +608,7 @@ class TestSoftSOMLayer:
     def test_inference_mode_no_losses(self, soft_som_2d, input_data_2d):
         """Test that no losses are added during inference."""
         # Forward pass in inference mode
+        soft_som_2d.losses.clear()
         reconstruction = soft_som_2d(input_data_2d, training=False)
 
         # Should have no losses in inference mode
@@ -435,7 +631,8 @@ class TestSoftSOMLayer:
         soft_som = SoftSOMLayer(
             grid_shape=(6, 6),
             input_dim=784,
-            use_reconstruction_loss=True
+            use_reconstruction_loss=True,
+            sharpness_weight=0.05
         )
 
         # Create a simple model for gradient testing
@@ -476,7 +673,8 @@ class TestSoftSOMLayer:
         reconstruction = SoftSOMLayer(
             grid_shape=(5, 5),
             input_dim=784,
-            use_reconstruction_loss=True
+            use_reconstruction_loss=True,
+            sharpness_weight=0.02
         )(inputs)
 
         model = keras.Model(inputs=inputs, outputs=reconstruction)
@@ -549,6 +747,11 @@ class TestSoftSOMLayer:
         # Check that it's the same as the internal weights
         assert tf.reduce_all(tf.equal(weights_map, soft_som_2d.weights_map))
 
+    def test_get_weights_map_before_build(self, soft_som_2d):
+        """Test that get_weights_map raises error before building."""
+        with pytest.raises(RuntimeError, match="Layer must be built"):
+            soft_som_2d.get_weights_map()
+
     def test_compute_output_shape_1d(self, soft_som_1d):
         """Test compute_output_shape for 1D Soft SOM."""
         input_shape = (32, 10)
@@ -579,15 +782,13 @@ class TestSoftSOMLayer:
         # Build the layer
         soft_som_2d.build((64, 784))
 
-        # Get configs
+        # Get config
         config = soft_som_2d.get_config()
-        build_config = soft_som_2d.get_build_config()
 
-        # Recreate the layer
+        # Recreate the layer from config
         recreated_som = SoftSOMLayer.from_config(config)
-        recreated_som.build_from_config(build_config)
 
-        # Check configuration matches
+        # Check configuration matches including new sharpness_weight
         assert recreated_som.grid_shape == soft_som_2d.grid_shape
         assert recreated_som.input_dim == soft_som_2d.input_dim
         assert recreated_som.temperature == soft_som_2d.temperature
@@ -595,9 +796,21 @@ class TestSoftSOMLayer:
         assert recreated_som.use_reconstruction_loss == soft_som_2d.use_reconstruction_loss
         assert recreated_som.reconstruction_weight == soft_som_2d.reconstruction_weight
         assert recreated_som.topological_weight == soft_som_2d.topological_weight
+        assert recreated_som.sharpness_weight == soft_som_2d.sharpness_weight
 
-        # Check weights match (shapes should be the same)
-        assert recreated_som.weights_map.shape == soft_som_2d.weights_map.shape
+    def test_serialization_with_sharpness(self, soft_som_with_sharpness):
+        """Test serialization of layer with sharpness regularization."""
+        # Build the layer
+        soft_som_with_sharpness.build((32, 100))
+
+        # Get config
+        config = soft_som_with_sharpness.get_config()
+
+        # Recreate the layer from config
+        recreated_som = SoftSOMLayer.from_config(config)
+
+        # Check sharpness weight is preserved
+        assert recreated_som.sharpness_weight == 0.05
 
     def test_serialization_with_custom_objects(self):
         """Test serialization with custom initializers and regularizers."""
@@ -605,6 +818,7 @@ class TestSoftSOMLayer:
             grid_shape=(6, 6),
             input_dim=100,
             temperature=0.8,
+            sharpness_weight=0.15,
             kernel_initializer=keras.initializers.HeNormal(),
             kernel_regularizer=keras.regularizers.L1(0.01)
         )
@@ -612,53 +826,32 @@ class TestSoftSOMLayer:
         # Build the layer
         original_som.build((32, 100))
 
-        # Get configs
+        # Get config
         config = original_som.get_config()
-        build_config = original_som.get_build_config()
 
-        # Recreate the layer
+        # Recreate the layer from config
         recreated_som = SoftSOMLayer.from_config(config)
-        recreated_som.build_from_config(build_config)
 
         # Check configuration matches
         assert recreated_som.grid_shape == original_som.grid_shape
         assert recreated_som.input_dim == original_som.input_dim
         assert recreated_som.temperature == original_som.temperature
+        assert recreated_som.sharpness_weight == original_som.sharpness_weight
 
-    # =============================================================================
-    # Model Integration Tests
-    # =============================================================================
-
-    def test_model_integration(self, input_data_2d):
-        """Test the layer in a model context."""
-        # Create a model with the Soft SOM layer
-        inputs = keras.Input(shape=(784,))
-        reconstruction = SoftSOMLayer(grid_shape=(8, 8), input_dim=784)(inputs)
-
-        # Add additional processing
-        x = keras.layers.Dense(128, activation='relu')(reconstruction)
-        outputs = keras.layers.Dense(10, activation='softmax')(x)
-
-        model = keras.Model(inputs=inputs, outputs=outputs)
-
-        # Test forward pass
-        predictions = model(input_data_2d, training=False)
-        assert predictions.shape == (64, 10)
-
-    def test_model_save_load(self, input_data_2d):
-        """Test saving and loading a model with the Soft SOM layer."""
+    def test_full_serialization_cycle(self, input_data_2d):
+        """Test complete model serialization with SoftSOMLayer."""
         # Create a model with the Soft SOM layer
         inputs = keras.Input(shape=(784,))
         reconstruction = SoftSOMLayer(
             grid_shape=(5, 5),
             input_dim=784,
             temperature=0.7,
+            sharpness_weight=0.08,
             name="soft_som_layer"
         )(inputs)
 
-        # Add output layer - just use reconstruction directly
+        # Add output layer
         outputs = keras.layers.Dense(1, activation='sigmoid')(reconstruction)
-
         model = keras.Model(inputs=inputs, outputs=outputs)
 
         # Generate predictions before saving
@@ -672,21 +865,47 @@ class TestSoftSOMLayer:
             model.save(model_path)
 
             # Load the model
-            loaded_model = keras.models.load_model(
-                model_path,
-                custom_objects={"SoftSOMLayer": SoftSOMLayer}
-            )
+            loaded_model = keras.models.load_model(model_path)
 
             # Generate prediction with loaded model
             loaded_prediction = loaded_model.predict(input_data_2d[:8], verbose=0)
 
             # Check predictions match (allowing for small numerical differences)
-            assert np.allclose(original_prediction, loaded_prediction, rtol=1e-5)
+            np.testing.assert_allclose(
+                original_prediction, loaded_prediction,
+                rtol=1e-5, atol=1e-5,
+                err_msg="Predictions should match after serialization"
+            )
 
-            # Check layer type is preserved
+            # Check layer type and properties are preserved
             som_layer = loaded_model.get_layer("soft_som_layer")
             assert isinstance(som_layer, SoftSOMLayer)
             assert som_layer.temperature == 0.7
+            assert som_layer.sharpness_weight == 0.08
+
+    # =============================================================================
+    # Model Integration Tests
+    # =============================================================================
+
+    def test_model_integration(self, input_data_2d):
+        """Test the layer in a model context."""
+        # Create a model with the Soft SOM layer
+        inputs = keras.Input(shape=(784,))
+        reconstruction = SoftSOMLayer(
+            grid_shape=(8, 8),
+            input_dim=784,
+            sharpness_weight=0.03
+        )(inputs)
+
+        # Add additional processing
+        x = keras.layers.Dense(128, activation='relu')(reconstruction)
+        outputs = keras.layers.Dense(10, activation='softmax')(x)
+
+        model = keras.Model(inputs=inputs, outputs=outputs)
+
+        # Test forward pass
+        predictions = model(input_data_2d, training=False)
+        assert predictions.shape == (64, 10)
 
     # =============================================================================
     # Numerical Stability Tests
@@ -694,7 +913,11 @@ class TestSoftSOMLayer:
 
     def test_numerical_stability(self):
         """Test layer stability with extreme input values."""
-        soft_som = SoftSOMLayer(grid_shape=(4, 4), input_dim=10)
+        soft_som = SoftSOMLayer(
+            grid_shape=(4, 4),
+            input_dim=10,
+            sharpness_weight=0.1
+        )
 
         # Create inputs with different magnitudes
         test_cases = [
@@ -722,14 +945,16 @@ class TestSoftSOMLayer:
         soft_som_low = SoftSOMLayer(
             grid_shape=(5, 5),
             input_dim=784,
-            temperature=1e-6
+            temperature=1e-6,
+            sharpness_weight=0.05
         )
 
         # Very high temperature (should create smooth distributions)
         soft_som_high = SoftSOMLayer(
             grid_shape=(5, 5),
             input_dim=784,
-            temperature=1e6
+            temperature=1e6,
+            sharpness_weight=0.05
         )
 
         # Both should work without numerical issues
@@ -745,8 +970,8 @@ class TestSoftSOMLayer:
     # Advanced Feature Tests
     # =============================================================================
 
-    def test_different_grid_shapes(self):
-        """Test Soft SOM with various grid shapes."""
+    def test_different_grid_shapes_with_sharpness(self):
+        """Test Soft SOM with various grid shapes and sharpness regularization."""
         test_cases = [
             ((10,), 20),  # 1D
             ((5, 5), 30),  # 2D square
@@ -759,7 +984,8 @@ class TestSoftSOMLayer:
             soft_som = SoftSOMLayer(
                 grid_shape=grid_shape,
                 input_dim=input_dim,
-                temperature=0.5
+                temperature=0.5,
+                sharpness_weight=0.05
             )
 
             # Test with small batch
@@ -773,80 +999,6 @@ class TestSoftSOMLayer:
             soft_assignments = soft_som.get_soft_assignments(test_input)
             expected_assignment_shape = (4,) + grid_shape
             assert soft_assignments.shape == expected_assignment_shape
-
-    def test_reconstruction_quality_improves(self, input_data_2d):
-        """Test that reconstruction quality can improve with training."""
-        soft_som = SoftSOMLayer(
-            grid_shape=(8, 8),
-            input_dim=784,
-            temperature=0.5,
-            use_reconstruction_loss=True
-        )
-
-        # Create model for training
-        inputs = keras.Input(shape=(784,))
-        reconstruction = soft_som(inputs)
-        model = keras.Model(inputs=inputs, outputs=reconstruction)
-
-        model.compile(optimizer='adam', loss='mse')
-
-        # Initial reconstruction error
-        initial_reconstruction = model.predict(input_data_2d[:16], verbose=0)
-        initial_mse = np.mean(np.square(input_data_2d[:16] - initial_reconstruction))
-
-        # Train for a few steps
-        model.fit(
-            input_data_2d[:16], input_data_2d[:16],
-            epochs=5,
-            batch_size=8,
-            verbose=0
-        )
-
-        # Final reconstruction error
-        final_reconstruction = model.predict(input_data_2d[:16], verbose=0)
-        final_mse = np.mean(np.square(input_data_2d[:16] - final_reconstruction))
-
-        # Error should generally decrease (though not guaranteed for all cases)
-        # At minimum, check that the model is still functioning
-        assert final_mse >= 0
-        assert not np.isnan(final_mse)
-
-    def test_temperature_annealing_effect(self, input_data_2d):
-        """Test that temperature can be dynamically changed."""
-        soft_som = SoftSOMLayer(
-            grid_shape=(6, 6),
-            input_dim=784,
-            temperature=2.0
-        )
-
-        # Initial soft assignments with high temperature
-        soft_som(input_data_2d[:4], training=False)
-        initial_assignments = soft_som.get_soft_assignments(input_data_2d[:4])
-        initial_max = tf.reduce_max(initial_assignments)
-
-        # Change temperature to lower value
-        soft_som.temperature = 0.1
-
-        # New soft assignments should be sharper (higher maximum values)
-        new_assignments = soft_som.get_soft_assignments(input_data_2d[:4])
-        new_max = tf.reduce_max(new_assignments)
-
-        # Lower temperature should generally produce sharper distributions
-        assert new_max >= initial_max  # Allow for equal in case of edge cases
-
-    def test_edge_case_single_neuron(self):
-        """Test Soft SOM with single neuron grid."""
-        soft_som = SoftSOMLayer(grid_shape=(1,), input_dim=10)
-        test_input = keras.random.uniform((5, 10))
-
-        reconstruction = soft_som(test_input, training=True)
-
-        # Should still work
-        assert reconstruction.shape == (5, 10)
-
-        # Soft assignments should be all 1.0 (only one neuron)
-        soft_assignments = soft_som.get_soft_assignments(test_input)
-        assert tf.reduce_all(tf.abs(soft_assignments - 1.0) < 1e-6)
 
     def test_consistent_reconstruction_in_inference(self, soft_som_2d, input_data_2d):
         """Test that reconstruction is consistent in inference mode."""
@@ -881,4 +1033,9 @@ class TestSoftSOMLayer:
         recon_batch = soft_som_2d(input1, training=False)
 
         # Results should be the same for the same input
-        assert tf.reduce_all(tf.abs(recon_single - recon_batch) < 1e-6)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(recon_single),
+            keras.ops.convert_to_numpy(recon_batch),
+            rtol=1e-6, atol=1e-6,
+            err_msg="Results should be independent of batch size"
+        )

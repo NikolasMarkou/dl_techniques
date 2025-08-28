@@ -221,6 +221,10 @@ class SoftSOMLayer(keras.layers.Layer):
         topological_weight: Float, weight for topological preservation regularization.
             Encourages neighboring neurons to have similar activation patterns.
             Must be non-negative. Defaults to 0.1.
+        sharpness_weight: Float, weight for entropy-based sharpness regularization.
+            Encourages sharper (more decisive) softmax distributions by penalizing
+            high-entropy assignments. Higher values promote more winner-take-all
+            behavior. Must be non-negative. Defaults to 0.0 (disabled).
         kernel_initializer: String or keras.initializers.Initializer, initialization
             method for the SOM weight map. Defaults to 'glorot_uniform'.
         kernel_regularizer: Optional keras.regularizers.Regularizer for weight
@@ -249,7 +253,8 @@ class SoftSOMLayer(keras.layers.Layer):
             temperature=0.5,
             use_per_dimension_softmax=True,
             reconstruction_weight=1.0,
-            topological_weight=0.1
+            topological_weight=0.1,
+            sharpness_weight=0.05  # Encourage sharper assignments
         )
 
         # Use as feature extractor in classification model
@@ -279,7 +284,7 @@ class SoftSOMLayer(keras.layers.Layer):
         ValueError: If grid_shape contains non-positive integers.
         ValueError: If input_dim is not positive.
         ValueError: If temperature is not positive.
-        ValueError: If reconstruction_weight or topological_weight is negative.
+        ValueError: If reconstruction_weight, topological_weight, or sharpness_weight is negative.
 
     Note:
         This layer adds regularization losses during training that are automatically
@@ -296,6 +301,7 @@ class SoftSOMLayer(keras.layers.Layer):
         use_reconstruction_loss: bool = True,
         reconstruction_weight: float = 1.0,
         topological_weight: float = 0.1,
+        sharpness_weight: float = 0.0,
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
@@ -314,6 +320,8 @@ class SoftSOMLayer(keras.layers.Layer):
             raise ValueError("reconstruction_weight must be non-negative.")
         if topological_weight < 0:
             raise ValueError("topological_weight must be non-negative.")
+        if sharpness_weight < 0:
+            raise ValueError("sharpness_weight must be non-negative.")
 
         # Store ALL configuration parameters for serialization
         self.grid_shape = grid_shape
@@ -324,6 +332,7 @@ class SoftSOMLayer(keras.layers.Layer):
         self.use_reconstruction_loss = use_reconstruction_loss
         self.reconstruction_weight = reconstruction_weight
         self.topological_weight = topological_weight
+        self.sharpness_weight = sharpness_weight
 
         # Store initializers and regularizers for serialization
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -422,8 +431,8 @@ class SoftSOMLayer(keras.layers.Layer):
             Soft reconstruction tensor of shape (batch_size, input_dim) representing
             the weighted combination of prototype vectors based on soft assignments.
         """
-        # Compute soft assignments using per-dimension or global softmax
-        soft_assignments = self._compute_soft_assignments(inputs)
+        # Compute soft assignments and get intermediate softmax results for regularization
+        soft_assignments, dim_softmaxes = self._compute_soft_assignments(inputs)
 
         # Perform soft reconstruction
         reconstruction = self._soft_reconstruction(soft_assignments)
@@ -438,9 +447,16 @@ class SoftSOMLayer(keras.layers.Layer):
                 topo_loss = self._topological_loss(soft_assignments)
                 self.add_loss(self.topological_weight * topo_loss)
 
+            # Add sharpness loss for encouraging decisive assignments
+            if (self.sharpness_weight > 0 and
+                self.use_per_dimension_softmax and
+                dim_softmaxes is not None):
+                sharp_loss = self._sharpness_loss(dim_softmaxes)
+                self.add_loss(self.sharpness_weight * sharp_loss)
+
         return reconstruction
 
-    def _compute_soft_assignments(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
+    def _compute_soft_assignments(self, inputs: keras.KerasTensor) -> Tuple[keras.KerasTensor, Optional[list]]:
         """
         Compute soft assignments between inputs and prototype vectors.
 
@@ -452,8 +468,10 @@ class SoftSOMLayer(keras.layers.Layer):
             inputs: Input tensor of shape (batch_size, input_dim).
 
         Returns:
-            Soft assignment weights of shape (batch_size, *grid_shape) where each
-            value represents the probability of assignment to that grid neuron.
+            Tuple containing:
+            - Soft assignment weights of shape (batch_size, *grid_shape).
+            - List of per-dimension softmax tensors for sharpness loss, or None
+              if global softmax is used.
         """
         # Compute squared distances from inputs to all neurons
         # inputs: (batch_size, input_dim)
@@ -477,9 +495,10 @@ class SoftSOMLayer(keras.layers.Layer):
         if self.use_per_dimension_softmax:
             return self._per_dimension_softmax(squared_distances)
         else:
-            return self._global_softmax(squared_distances)
+            global_assignments = self._global_softmax(squared_distances)
+            return global_assignments, None
 
-    def _per_dimension_softmax(self, distances: keras.KerasTensor) -> keras.KerasTensor:
+    def _per_dimension_softmax(self, distances: keras.KerasTensor) -> Tuple[keras.KerasTensor, list]:
         """
         Apply softmax separately along each spatial dimension of the grid.
 
@@ -490,8 +509,9 @@ class SoftSOMLayer(keras.layers.Layer):
             distances: Distance tensor of shape (batch_size, *grid_shape).
 
         Returns:
-            Combined soft assignments of shape (batch_size, *grid_shape) where
-            probabilities are derived from per-dimension softmax operations.
+            Tuple containing:
+            - Combined soft assignments of shape (batch_size, *grid_shape).
+            - List of per-dimension softmax tensors for entropy calculation.
         """
         # Apply softmax along each grid dimension independently
         dim_softmaxes = []
@@ -514,7 +534,7 @@ class SoftSOMLayer(keras.layers.Layer):
         total = ops.sum(combined, axis=spatial_axes, keepdims=True)
         combined = combined / (total + 1e-8)
 
-        return combined
+        return combined, dim_softmaxes
 
     def _global_softmax(self, distances: keras.KerasTensor) -> keras.KerasTensor:
         """
@@ -634,6 +654,44 @@ class SoftSOMLayer(keras.layers.Layer):
 
         return topo_loss
 
+    def _sharpness_loss(self, dim_softmaxes: list) -> keras.KerasTensor:
+        """
+        Compute entropy-based sharpness loss to encourage peaky distributions.
+
+        This loss penalizes high-entropy (flat) softmax distributions along each
+        spatial dimension, pushing the model towards more confident, one-hot-like
+        assignments. Lower entropy means sharper, more decisive distributions.
+
+        The entropy formula used is: H(p) = -Σ(p * log(p))
+
+        Args:
+            dim_softmaxes: List of per-dimension softmax tensors, each of shape
+                (batch_size, *grid_shape) with softmax applied along one spatial axis.
+
+        Returns:
+            Scalar sharpness loss representing the average entropy across all
+            spatial dimensions and batch samples.
+        """
+        if not dim_softmaxes:
+            return ops.convert_to_tensor(0.0, dtype="float32")
+
+        total_entropy = ops.convert_to_tensor(0.0, dtype="float32")
+
+        for dim_idx, softmax_tensor in enumerate(dim_softmaxes):
+            # The spatial axis along which softmax was computed
+            spatial_axis = dim_idx + 1
+
+            # Compute entropy: H(p) = -Σ(p * log(p))
+            # Add small epsilon for numerical stability
+            log_probs = ops.log(softmax_tensor + 1e-9)
+            entropy = -ops.sum(softmax_tensor * log_probs, axis=spatial_axis)
+
+            # Average entropy across batch and remaining spatial dimensions
+            total_entropy += ops.mean(entropy)
+
+        # Return average entropy across all spatial dimensions
+        return total_entropy / len(dim_softmaxes)
+
     def get_weights_map(self) -> keras.KerasTensor:
         """
         Get the learned prototype weight map.
@@ -662,7 +720,8 @@ class SoftSOMLayer(keras.layers.Layer):
             Soft assignments of shape (batch_size, *grid_shape) representing
             the probability distribution over grid neurons for each input.
         """
-        return self._compute_soft_assignments(inputs)
+        soft_assignments, _ = self._compute_soft_assignments(inputs)
+        return soft_assignments
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """
@@ -698,6 +757,7 @@ class SoftSOMLayer(keras.layers.Layer):
             'use_reconstruction_loss': self.use_reconstruction_loss,
             'reconstruction_weight': self.reconstruction_weight,
             'topological_weight': self.topological_weight,
+            'sharpness_weight': self.sharpness_weight,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
         })
