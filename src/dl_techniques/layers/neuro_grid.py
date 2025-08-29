@@ -865,8 +865,9 @@ class NeuroGrid(keras.layers.Layer):
 
         # Build einsum equation dynamically based on grid dimensions
         batch_idx = 'b'
-        grid_indices = ''.join([chr(ord('i') + j) for j in range(self.n_dims)])
-        latent_idx = 'l'
+        # Fix: Use alphabet letters that don't conflict and handle higher dimensions
+        grid_indices = ''.join([chr(ord('i') + j) for j in range(min(self.n_dims, 23))])  # Limit to available letters
+        latent_idx = 'z'  # Use 'z' to avoid conflicts
 
         # joint_prob indices: batch + grid dimensions
         joint_indices = batch_idx + grid_indices
@@ -877,11 +878,19 @@ class NeuroGrid(keras.layers.Layer):
         # output indices: batch + latent
         output_indices = batch_idx + latent_idx
 
-        # Einsum equation: e.g., 'bijk,ijkl->bl' for 3D grid
+        # Einsum equation: e.g., 'bijk,ijkz->bz' for 3D grid
         equation = f"{joint_indices},{grid_indices_with_latent}->{output_indices}"
 
-        # Perform weighted sum with numerical stability
-        output = keras.ops.einsum(equation, joint_prob, self.grid_weights)
+        # For very high dimensional grids, fall back to manual computation
+        if self.n_dims > 6:  # Einsum becomes inefficient/problematic for very high dims
+            # Reshape for manual computation
+            batch_size = keras.ops.shape(joint_prob)[0]
+            joint_flat = keras.ops.reshape(joint_prob, (batch_size, self.total_grid_size))
+            grid_flat = keras.ops.reshape(self.grid_weights, (self.total_grid_size, self.latent_dim))
+            output = keras.ops.matmul(joint_flat, grid_flat)
+        else:
+            # Use einsum for lower dimensional grids
+            output = keras.ops.einsum(equation, joint_prob, self.grid_weights)
 
         return output
 
@@ -1031,14 +1040,12 @@ class NeuroGrid(keras.layers.Layer):
         joint_prob_flat = keras.ops.reshape(joint_prob, (keras.ops.shape(joint_prob)[0], -1))
         max_positions = keras.ops.argmax(joint_prob_flat, axis=-1)
 
-        # Count activation frequencies
+        # Fix: Replace scatter_update with proper counting using one-hot
         activation_counts = keras.ops.zeros((self.total_grid_size,))
-        for i in range(self.total_grid_size):
-            mask = keras.ops.equal(max_positions, i)
-            count = keras.ops.sum(keras.ops.cast(mask, 'float32'))
-            activation_counts = keras.ops.scatter_update(
-                activation_counts, [[i]], keras.ops.expand_dims(count, 0)
-            )
+
+        # Convert positions to one-hot and sum
+        one_hot_positions = keras.ops.one_hot(max_positions, self.total_grid_size)
+        activation_counts = keras.ops.sum(one_hot_positions, axis=0)
 
         # Total activations per position (sum of all probabilities)
         total_activation = keras.ops.sum(joint_prob_flat, axis=0)
@@ -1713,9 +1720,12 @@ class NeuroGrid(keras.layers.Layer):
         high_quality_mask = quality_scores >= quality_threshold
         low_quality_mask = quality_scores < quality_threshold
 
-        # Filter inputs based on quality
-        high_quality_inputs = keras.ops.boolean_mask(inputs, high_quality_mask)
-        low_quality_inputs = keras.ops.boolean_mask(inputs, low_quality_mask)
+        # Fix: Replace keras.ops.boolean_mask with proper tensor indexing
+        high_quality_indices = keras.ops.where(high_quality_mask)[:, 0]
+        low_quality_indices = keras.ops.where(low_quality_mask)[:, 0]
+
+        high_quality_inputs = keras.ops.take(inputs, high_quality_indices, axis=0)
+        low_quality_inputs = keras.ops.take(inputs, low_quality_indices, axis=0)
 
         return {
             'high_quality_inputs': high_quality_inputs,

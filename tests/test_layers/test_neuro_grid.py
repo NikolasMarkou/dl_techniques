@@ -620,8 +620,7 @@ class TestNeuroGrid:
         ([4], 1),
         ([8, 6], 2),
         ([5, 4, 3], 3),
-        # NOTE: Commenting out 4D test due to einsum bug in implementation
-        # ([3, 3, 3, 3], 4)
+         ([3, 3, 3, 3], 4)
     ])
     def test_different_grid_dimensions(self, grid_shape, expected_dims):
         """Test layers with different grid dimensionalities."""
