@@ -165,16 +165,16 @@ class NeuroGridAutoencoderExperiment:
             temperature=self.temperature,
             learnable_temperature=False,
             entropy_regularizer_strength=0.01,  # Encourage focused addressing
-            kernel_regularizer=SoftOrthonormalConstraintRegularizer(0.1, 0.01, 0.0),
-            grid_regularizer=SoftOrthonormalConstraintRegularizer(0.1, 0.01, 0.0),
+            kernel_regularizer=SoftOrthonormalConstraintRegularizer(0.1, 0.0, 0.0),
+            grid_regularizer=SoftOrthonormalConstraintRegularizer(0.1, 0.0, 0.0),
             name="neurogrid_bottleneck"
         )
         neurogrid_output = self.neurogrid_layer(encoder_output)
 
         # --- DECODER ---
-        # Define the decoder layers once to ensure weight sharing
         decoder_layers_seq = [
             layers.Dense(7 * 7 * 64, name='decoder_dense'),
+            layers.BatchNormalization(name='decoder_bn0'),
             layers.Reshape((7, 7, 64), name='decoder_reshape'),
             layers.UpSampling2D(size=(2, 2), interpolation='nearest', name='decoder_upsample1'),
             layers.Conv2D(32, 3, padding='same', activation='linear', name='decoder_conv1'),
@@ -901,9 +901,13 @@ class NeuroGridAutoencoderExperiment:
                     quality_threshold=threshold,
                     quality_measure='overall_quality'
                 )
+                # Convert tensor shapes to Python integers
+                high_quality_shape = keras.ops.convert_to_numpy(keras.ops.shape(filtered['high_quality_inputs']))
+                low_quality_shape = keras.ops.convert_to_numpy(keras.ops.shape(filtered['low_quality_inputs']))
+
                 filtering_results[threshold] = {
-                    'high_quality_count': keras.ops.shape(filtered['high_quality_inputs'])[0],
-                    'low_quality_count': keras.ops.shape(filtered['low_quality_inputs'])[0],
+                    'high_quality_count': int(high_quality_shape[0]),
+                    'low_quality_count': int(low_quality_shape[0]),
                     'quality_scores': keras.ops.convert_to_numpy(filtered['quality_scores'])
                 }
 
@@ -1113,9 +1117,9 @@ def main() -> None:
         grid_shape=(4, 4),
         latent_dim=32,
         temperature=0.8,
-        conv_activation='relu',
+        conv_activation='silu',
         batch_size=128,
-        epochs=100,
+        epochs=200,
         learning_rate=0.001,
         output_dir='results'
     )
