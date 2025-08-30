@@ -208,8 +208,8 @@ class MultiNeuroGridAutoencoderExperiment:
                 temperature=self.temperature,
                 learnable_temperature=False,
                 entropy_regularizer_strength=0.01,  # Encourage focused addressing
-                kernel_regularizer=None,
-                grid_regularizer=None,
+                kernel_regularizer=SoftOrthonormalConstraintRegularizer(0.1, 0.0, 1e-3),
+                grid_regularizer=SoftOrthonormalConstraintRegularizer(0.1, 0.0, 1e-3),
                 name=f"neurogrid_layer_{i}"
             )
             self.neurogrid_layers.append(neurogrid_layer)
@@ -723,7 +723,7 @@ Total Parameters: {self.model.count_params():,}
             # Apply transformations up to the target layer
             for i in range(layer_idx):
                 neurogrid_layer = self.neurogrid_layers[i]
-                layer_transformed = neurogrid_layer.predict(layer_input, verbose=0)
+                layer_transformed = neurogrid_layer(layer_input)
                 if self.use_residual_connections and i > 0:
                     layer_input = layer_input + layer_transformed
                 else:
@@ -1301,7 +1301,7 @@ Most Active Position: {np.unravel_index(np.argmax(activation_counts_grid), self.
             layer_input = self.encoder.predict(test_sample, verbose=0)
             for i in range(layer_idx):
                 neurogrid_layer = self.neurogrid_layers[i]
-                layer_transformed = neurogrid_layer.predict(layer_input, verbose=0)
+                layer_transformed = neurogrid_layer(layer_input)
                 if self.use_residual_connections and i > 0:
                     layer_input = layer_input + layer_transformed
                 else:
@@ -1436,7 +1436,7 @@ Threshold 0.7: {high_quality_counts[2]:,} high ({high_quality_counts[2] / sample
                 })
 
                 # Update input for next layer
-                layer_transformed = neurogrid_layer.predict(layer_input, verbose=0)
+                layer_transformed = neurogrid_layer(layer_input)
                 if self.use_residual_connections and layer_idx > 0:
                     layer_input = layer_input + layer_transformed
                 else:
@@ -1499,7 +1499,7 @@ Threshold 0.7: {high_quality_counts[2]:,} high ({high_quality_counts[2] / sample
                 representations.append((f'layer_{layer_idx}_input', layer_input))
 
                 # Apply transformation
-                layer_transformed = neurogrid_layer.predict(layer_input, verbose=0)
+                layer_transformed = neurogrid_layer(layer_input)
                 representations.append((f'layer_{layer_idx}_output', layer_transformed))
 
                 # Apply residual connection
