@@ -224,7 +224,7 @@ class MultiNeuroGridAutoencoderExperiment:
             else:
                 neurogrid_output = neurogrid_transformed
 
-            neurogrid_output = BatchNormalization()(neurogrid_output)
+            neurogrid_output = layers.BatchNormalization()(neurogrid_output)
 
         # --- DECODER ---
         decoder_layers_seq = [
