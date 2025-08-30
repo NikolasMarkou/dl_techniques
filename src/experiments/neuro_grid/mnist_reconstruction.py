@@ -1110,8 +1110,8 @@ class NeuroGridAutoencoderExperiment:
 def main() -> None:
     """Run the enhanced NeuroGrid convolutional autoencoder experiment."""
     experiment = NeuroGridAutoencoderExperiment(
-        grid_shape=(6, 6),
-        latent_dim=64,
+        grid_shape=(4, 4),
+        latent_dim=32,
         temperature=0.8,
         conv_activation='relu',
         batch_size=128,
