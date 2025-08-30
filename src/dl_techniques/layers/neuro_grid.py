@@ -226,7 +226,10 @@ from typing import List, Tuple, Optional, Union, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
+from ..utils.logger import logger
+from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
+from ..initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
+
 
 # ---------------------------------------------------------------------
 
@@ -618,15 +621,16 @@ class NeuroGrid(keras.layers.Layer):
             self,
             grid_shape: Union[List[int], Tuple[int, ...]],
             latent_dim: int,
+            use_bias: bool = False,
             temperature: float = 1.0,
-            learnable_temperature: bool = True,
+            learnable_temperature: bool = False,
             entropy_regularizer_strength: float = 0.0,
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
             bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-            grid_initializer: Union[str, keras.initializers.Initializer] = 'random_normal',
+            grid_initializer: Union[str, keras.initializers.Initializer] = OrthogonalHypersphereInitializer(),
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            grid_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            grid_regularizer: Optional[keras.regularizers.Regularizer] = SoftOrthonormalConstraintRegularizer(0.1, 0.0, 0.001),
             epsilon: float = 1e-7,
             **kwargs: Any
     ) -> None:
@@ -654,6 +658,7 @@ class NeuroGrid(keras.layers.Layer):
         self.entropy_regularizer_strength = entropy_regularizer_strength
         self.epsilon = epsilon
         self.n_dims = len(self.grid_shape)
+        self.use_bias = use_bias
         self.total_grid_size = int(np.prod(self.grid_shape))
 
         # Store initializers and regularizers
@@ -670,6 +675,7 @@ class NeuroGrid(keras.layers.Layer):
             # Create Dense layer without activation (we'll apply softmax manually with temperature)
             layer = keras.layers.Dense(
                 units=dim_size,
+                use_bias=self.use_bias,
                 activation=None,  # No activation, we'll apply temperature-controlled softmax
                 kernel_initializer=self.kernel_initializer,
                 bias_initializer=self.bias_initializer,
@@ -919,6 +925,7 @@ class NeuroGrid(keras.layers.Layer):
         """Return configuration for serialization."""
         config = super().get_config()
         config.update({
+            'use_bias': self.use_bias,
             'grid_shape': list(self.grid_shape),
             'latent_dim': self.latent_dim,
             'temperature': self.initial_temperature,
