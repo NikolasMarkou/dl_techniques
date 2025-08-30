@@ -912,7 +912,7 @@ Total Parameters: {self.model.count_params():,}
                 self.visualize_single_layer_utilization(layer_idx, utilization_stats, sample_size)
 
                 # Apply transformation for next layer
-                layer_transformed = neurogrid_layer.predict(layer_input, verbose=0, batch_size=self.batch_size)
+                layer_transformed = neurogrid_layer(layer_input)
                 if self.use_residual_connections and layer_idx > 0:
                     layer_input = layer_input + layer_transformed
                 else:
@@ -1727,8 +1727,8 @@ def main() -> None:
     """Run the Multi-NeuroGrid autoencoder experiment."""
     experiment = MultiNeuroGridAutoencoderExperiment(
         num_neurogrid_layers=3,
-        grid_shapes=[(6, 6), (4, 4), (8, 8)],  # Different grid sizes per layer
-        latent_dim=64,
+        grid_shapes=[(3, 3), (4, 4), (5, 5)],  # Different grid sizes per layer
+        latent_dim=32,
         use_residual_connections=True,
         temperature=0.8,
         conv_activation='silu',
