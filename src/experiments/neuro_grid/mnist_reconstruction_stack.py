@@ -208,8 +208,8 @@ class MultiNeuroGridAutoencoderExperiment:
                 temperature=self.temperature,
                 learnable_temperature=False,
                 entropy_regularizer_strength=0.01,  # Encourage focused addressing
-                kernel_regularizer=SoftOrthonormalConstraintRegularizer(0.1, 0.0, 0.0),
-                grid_regularizer=SoftOrthonormalConstraintRegularizer(0.1, 0.0, 0.0),
+                kernel_regularizer=None,
+                grid_regularizer=None,
                 name=f"neurogrid_layer_{i}"
             )
             self.neurogrid_layers.append(neurogrid_layer)
@@ -223,6 +223,8 @@ class MultiNeuroGridAutoencoderExperiment:
                     [neurogrid_output, neurogrid_transformed])
             else:
                 neurogrid_output = neurogrid_transformed
+
+            neurogrid_output = BatchNormalization()(neurogrid_output)
 
         # --- DECODER ---
         decoder_layers_seq = [
