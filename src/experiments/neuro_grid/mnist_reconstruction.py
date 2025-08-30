@@ -1093,7 +1093,7 @@ class NeuroGridAutoencoderExperiment:
             self.save_experiment_summary()
 
             logger.info("=" * 60)
-            logger.info("ENHANCED CONV EXPERIMENT COMPLETED SUCCESSFULLY")
+            logger.info("EXPERIMENT COMPLETED SUCCESSFULLY")
             logger.info(f"All results saved to: {self.experiment_dir}")
             logger.info("Generated visualizations:")
             logger.info("  - training_progress.png")
@@ -1112,7 +1112,7 @@ class NeuroGridAutoencoderExperiment:
 
 
 def main() -> None:
-    """Run the enhanced NeuroGrid convolutional autoencoder experiment."""
+    """Run the NeuroGrid autoencoder experiment."""
     experiment = NeuroGridAutoencoderExperiment(
         grid_shape=(4, 4),
         latent_dim=32,
