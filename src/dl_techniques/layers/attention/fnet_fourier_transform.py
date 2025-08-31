@@ -248,3 +248,5 @@ class FNetFourierTransform(keras.layers.Layer):
             'epsilon': self.epsilon,
         })
         return config
+
+# ---------------------------------------------------------------------
