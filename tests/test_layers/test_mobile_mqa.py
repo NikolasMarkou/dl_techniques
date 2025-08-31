@@ -12,9 +12,7 @@ import keras
 import tempfile
 import os
 import tensorflow as tf
-from typing import Tuple, Optional, List
 
-# Import the layer to test
 from dl_techniques.layers.attention.mobile_mqa import MobileMQA
 
 
