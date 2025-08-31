@@ -45,24 +45,15 @@ class FNetFourierTransform(keras.layers.Layer):
            ↓
     Extract real part: ℜ(result) → Real[batch, seq_len, hidden_dim]
            ↓
+    (If masked) Zero out masked positions
+           ↓
     Output(shape=[batch, seq_len, hidden_dim])
     ```
 
-    **Mathematical Operation**:
-        y = ℜ(F_h(F_seq(x)))
-
-    Where:
-    - F_seq: 1D DFT along sequence dimension (axis=1)
-    - F_h: 1D DFT along hidden dimension (axis=2)
-    - ℜ: Real part extraction
-    - Order of operations is commutative due to DFT properties
-
     **Key Properties**:
-    - **Parameter-free**: Zero learnable weights, reducing model complexity
-    - **Efficient**: O(N log N) theoretical complexity vs O(N²) for attention
-    - **Global mixing**: Every position influenced by every other position
-    - **Structured**: Uses mathematical properties rather than learned patterns
-    - **Hardware optimized**: Can leverage efficient DFT implementations
+    - **Masking Support**: Propagates masks and zeros out masked timesteps in the output.
+    - **Parameter-free**: Zero learnable weights, reducing model complexity.
+    - **Efficient**: O(N log N) theoretical complexity vs O(N²) for attention.
 
     Args:
         implementation: Strategy for computing DFT. Options:
@@ -80,49 +71,6 @@ class FNetFourierTransform(keras.layers.Layer):
     Output shape:
         3D tensor with shape: `(batch_size, sequence_length, hidden_dim)`.
         Shape is preserved through the Fourier transform operation.
-
-    Attributes:
-        dft_matrix_seq: Cached DFT matrix for sequence dimension, shape (seq_len, seq_len, 2).
-        dft_matrix_hidden: Cached DFT matrix for hidden dimension, shape (hidden_dim, hidden_dim, 2).
-
-    Example:
-        ```python
-        # Basic usage - drop-in replacement for self-attention
-        fourier_layer = FNetFourierTransform()
-        inputs = keras.Input(shape=(512, 768))  # BERT-base dimensions
-        mixed = fourier_layer(inputs)  # Same shape: (batch, 512, 768)
-
-        # Disable normalization for experimentation
-        fourier_unnorm = FNetFourierTransform(normalize_dft=False)
-
-        # In transformer-style architecture
-        def create_fnet_block(hidden_dim: int, intermediate_dim: int) -> keras.Model:
-            inputs = keras.Input(shape=(None, hidden_dim))
-
-            # FNet mixing (replaces multi-head attention)
-            mixed = FNetFourierTransform()(inputs)
-            mixed = keras.layers.LayerNormalization()(inputs + mixed)
-
-            # Standard feed-forward network
-            ff = keras.layers.Dense(intermediate_dim, activation='gelu')(mixed)
-            ff = keras.layers.Dense(hidden_dim)(ff)
-            outputs = keras.layers.LayerNormalization()(mixed + ff)
-
-            return keras.Model(inputs, outputs)
-
-        # Create encoder block
-        encoder_block = create_fnet_block(768, 3072)
-        ```
-
-    Performance Notes:
-        - Matrix implementation provides consistent performance across backends
-        - Most efficient for sequences up to ~2048 tokens
-        - Memory usage is O(seq_len² + hidden_dim²) for matrix storage
-        - Consider model sharding for very large hidden dimensions
-
-    References:
-        - FNet: Mixing Tokens with Fourier Transforms (https://arxiv.org/abs/2105.03824)
-        - Discrete Fourier Transform: https://en.wikipedia.org/wiki/Discrete_Fourier_transform
 
     Raises:
         ValueError: If input is not 3D or dimensions are unknown at build time.
@@ -145,7 +93,6 @@ class FNetFourierTransform(keras.layers.Layer):
                 f"implementation must be one of {valid_implementations}, "
                 f"got '{implementation}'"
             )
-
         if epsilon <= 0:
             raise ValueError(f"epsilon must be positive, got {epsilon}")
 
@@ -153,6 +100,7 @@ class FNetFourierTransform(keras.layers.Layer):
         self.implementation = implementation
         self.normalize_dft = normalize_dft
         self.epsilon = epsilon
+        self.supports_masking = True
 
         # DFT matrices (created in build())
         self.dft_matrix_seq = None
@@ -201,38 +149,14 @@ class FNetFourierTransform(keras.layers.Layer):
         super().build(input_shape)
 
     def _create_dft_matrix(self, size: int, name: str) -> keras.Variable:
-        """
-        Create a DFT matrix as a non-trainable variable.
-
-        Computes the discrete Fourier transform matrix:
-        W[n,k] = exp(-2πi*n*k/N) * normalization_factor
-
-        Stored as real tensor of shape (N, N, 2) where last dimension is [real, imag].
-
-        Args:
-            size: Matrix size (N×N for N-point DFT).
-            name: Variable name for debugging and serialization.
-
-        Returns:
-            Keras variable containing the complex DFT matrix.
-        """
-        # Compute normalization factor
+        """Create a DFT matrix as a non-trainable variable."""
         norm_factor = 1.0 / np.sqrt(size) if self.normalize_dft else 1.0
-
-        # Create index arrays for vectorized computation
-        n = np.arange(size, dtype=np.float32)[:, np.newaxis]  # [N, 1]
-        k = np.arange(size, dtype=np.float32)[np.newaxis, :]  # [1, N]
-
-        # Compute phase angles: -2πnk/N
-        angles = -2.0 * np.pi * n * k / size  # [N, N]
-
-        # Compute complex DFT matrix elements
-        dft_real = np.cos(angles) * norm_factor  # Real part
-        dft_imag = np.sin(angles) * norm_factor  # Imaginary part
-
-        # Stack to create complex tensor: [N, N, 2] where dim 2 is [real, imag]
-        dft_complex = np.stack([dft_real, dft_imag], axis=-1)  # [N, N, 2]
-
+        n = np.arange(size, dtype=np.float32)[:, np.newaxis]
+        k = np.arange(size, dtype=np.float32)[np.newaxis, :]
+        angles = -2.0 * np.pi * n * k / size
+        dft_real = np.cos(angles) * norm_factor
+        dft_imag = np.sin(angles) * norm_factor
+        dft_complex = np.stack([dft_real, dft_imag], axis=-1)
         return self.add_weight(
             name=name,
             shape=(size, size, 2),
@@ -245,29 +169,11 @@ class FNetFourierTransform(keras.layers.Layer):
             matrix: keras.KerasTensor,
             vector: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Efficient complex matrix-vector multiplication using real arithmetic.
-
-        Computes (C + iD) @ (A + iB) = (CA - DB) + i(CB + DA) where:
-        - matrix (A + iB): [M, N, 2] complex matrix
-        - vector (C + iD): [..., N, 2] complex vector(s)
-        - result: [..., M, 2] complex result(s)
-
-        Args:
-            matrix: Complex matrix with shape (M, N, 2).
-            vector: Complex vector(s) with shape (..., N, 2).
-
-        Returns:
-            Complex result with shape (..., M, 2).
-        """
-        # Extract real and imaginary components
-        a, b = matrix[..., 0], matrix[..., 1]  # Matrix real, imag parts
-        c, d = vector[..., 0], vector[..., 1]  # Vector real, imag parts
-
-        # Complex multiplication: (c + id)(a + ib) = (ca - db) + i(cb + da)
+        """Efficient complex matrix-vector multiplication using real arithmetic."""
+        a, b = matrix[..., 0], matrix[..., 1]
+        c, d = vector[..., 0], vector[..., 1]
         real_part = ops.matmul(c, a) - ops.matmul(d, b)
         imag_part = ops.matmul(c, b) + ops.matmul(d, a)
-
         return ops.stack([real_part, imag_part], axis=-1)
 
     def _apply_dft_along_axis(
@@ -276,77 +182,58 @@ class FNetFourierTransform(keras.layers.Layer):
             dft_matrix: keras.Variable,
             axis: int
     ) -> keras.KerasTensor:
-        """
-        Apply DFT matrix multiplication along specified axis.
-
-        Args:
-            inputs_complex: Complex input tensor with shape (..., 2).
-            dft_matrix: DFT matrix with shape (N, N, 2).
-            axis: Target axis for DFT application (-1 or -2).
-
-        Returns:
-            Complex tensor after DFT transformation.
-        """
-        if axis == -2:  # Sequence dimension
-            # inputs_complex: [batch, seq, hidden, 2]
-            # Rearrange for matrix multiplication: [batch, hidden, seq, 2]
+        """Apply DFT matrix multiplication along specified axis."""
+        if axis == -2:
             inputs_transposed = ops.transpose(inputs_complex, [0, 2, 1, 3])
-
-            # Apply DFT: [batch, hidden, seq, 2] @ [seq, seq, 2] -> [batch, hidden, seq, 2]
             result = self._complex_matmul(dft_matrix, inputs_transposed)
-
-            # Transpose back to original layout: [batch, seq, hidden, 2]
             return ops.transpose(result, [0, 2, 1, 3])
-
-        elif axis == -1:  # Hidden dimension
-            # inputs_complex: [batch, seq, hidden, 2]
-            # Apply DFT: [batch, seq, hidden, 2] @ [hidden, hidden, 2] -> [batch, seq, hidden, 2]
+        elif axis == -1:
             return self._complex_matmul(dft_matrix, inputs_complex)
-
         else:
-            raise ValueError(f"Unsupported axis {axis}. Expected -1 (hidden) or -2 (sequence).")
+            raise ValueError(f"Unsupported axis {axis}. Expected -1 or -2.")
 
     def call(
             self,
             inputs: keras.KerasTensor,
+            mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
         Apply 2D Fourier Transform for token mixing.
-
-        Performs the core FNet operation: applies 1D DFT along sequence dimension,
-        then 1D DFT along hidden dimension, and returns the real part.
-
-        Args:
-            inputs: Input embeddings with shape [batch_size, seq_length, hidden_dim].
-            training: Training mode flag (unused but kept for consistency).
-
-        Returns:
-            Token-mixed embeddings with identical shape to input.
         """
-        # Validate input dimensions match build-time dimensions
-        input_shape = ops.shape(inputs)
-        seq_len, hidden_dim = input_shape[1], input_shape[2]
-
         # Convert real input to complex representation
-        # Add zero imaginary part: [batch, seq, hidden] -> [batch, seq, hidden, 2]
         zeros_like_input = ops.zeros_like(inputs)
         inputs_complex = ops.stack([inputs, zeros_like_input], axis=-1)
 
-        # Apply first DFT along sequence dimension (axis=-2)
+        # Apply first DFT along sequence dimension
         after_seq_dft = self._apply_dft_along_axis(
             inputs_complex, self.dft_matrix_seq, axis=-2
         )
 
-        # Apply second DFT along hidden dimension (axis=-1)
-        # Note: We could extract real part here, but keeping complex gives better accuracy
+        # Apply second DFT along hidden dimension
         after_hidden_dft = self._apply_dft_along_axis(
             after_seq_dft, self.dft_matrix_hidden, axis=-1
         )
 
-        # Extract real part as final result (following paper)
-        # Shape: [batch, seq, hidden, 2] -> [batch, seq, hidden]
-        return after_hidden_dft[..., 0]
+        # Extract real part as final result
+        output = after_hidden_dft[..., 0]
+
+        # Apply mask to zero out padded tokens after mixing
+        if mask is not None:
+            # Expand mask from [batch, seq_len] to [batch, seq_len, 1]
+            mask_expanded = ops.expand_dims(mask, axis=-1)
+            # Ensure mask is same dtype and multiply
+            output *= ops.cast(mask_expanded, output.dtype)
+
+        return output
+
+    def compute_mask(
+        self,
+        inputs: keras.KerasTensor,
+        mask: Optional[keras.KerasTensor] = None
+    ) -> Optional[keras.KerasTensor]:
+        """Propagate the input mask."""
+        return mask
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Fourier transform preserves input shape."""
@@ -361,5 +248,3 @@ class FNetFourierTransform(keras.layers.Layer):
             'epsilon': self.epsilon,
         })
         return config
-
-# ---------------------------------------------------------------------
