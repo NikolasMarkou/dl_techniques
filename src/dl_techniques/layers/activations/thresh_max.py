@@ -52,8 +52,8 @@ def differentiable_step(
 def _compute_threshmax(
         x: keras.KerasTensor,
         axis: int,
-        epsilon: float,
-        slope: float = 10.0
+        epsilon: float = 1e-5,
+        slope: float = 10.0,
 ) -> keras.KerasTensor:
     """Internal computation for ThreshMax activation using differentiable step function.
 
