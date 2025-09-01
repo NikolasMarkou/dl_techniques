@@ -1,0 +1,193 @@
+# EoMT: From "Rocket Engine" to "Elegant Unit"
+
+## The Evolution of Vision Transformer Segmentation
+
+*"Why build a rocket engine full of bolted-on subsystems when one elegant unit does the job?"*
+
+```
+====================================================================================================
+                          TRADITIONAL APPROACH (Mask2Former/OneFormer)
+                                    "The Rocket Engine"
+====================================================================================================
+
+Input Image                                                          Performance:
+(640x640x3)                                                         - 29 FPS (ViT-L)
+     |                                                              - 57.1 PQ
+     v                                                              - 349M parameters
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                 │
+│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐       │
+│  │                 │    │                 │    │                 │    │                 │       │
+│  │   Vision        │    │   ViT-Adapter   │    │  Pixel Decoder  │    │  Transformer    │       │
+│  │   Transformer   │◄──►│                 │◄──►│                 │◄──►│    Decoder      │       │
+│  │   (Backbone)    │    │  - Multi-scale  │    │  - Multi-scale  │    │  - Cross-Attn   │       │
+│  │                 │    │    Features     │    │    Fusion       │    │  - Self-Attn    │       │
+│  │  - Patch Embed  │    │  - Deformable   │    │  - Deformable   │    │  - Masked Attn  │       │
+│  │  - Positional   │    │    Attention    │    │    Attention    │    │  - J=6 Layers   │       │
+│  │  - L=24 Layers  │    │  - CNN Features │    │  - Feature      │    │  - 200 Queries  │       │
+│  │                 │    │                 │    │    Enhancement  │    │                 │       │
+│  └─────────────────┘    └─────────────────┘    └─────────────────┘    └─────────────────┘       │
+│                                                                                                 │
+│                     Complex Pipeline with Multiple Task-Specific Components                     │
+│                                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────────────────────┘
+     |                           |                           |                           |
+     v                           v                           v                           v
+Single-scale                Multi-scale                 Enhanced                    Object Queries
+Features                   Features                    Features                    + Predictions
+(F16)                    (F4,F8,F16,F32)           (F4,F8,F16,F32)                     |
+                                                                                       v
+                                                                                 ┌─────────────┐
+                                                                                 │   Output    │
+                                                                                 │ Class + Mask│
+                                                                                 │ Predictions │
+                                                                                 └─────────────┘
+
+====================================================================================================
+                                    EOMT APPROACH
+                                  "The Elegant Unit"
+====================================================================================================
+
+Input Image                                                          Performance:
+(640x640x3)                                                         - 128 FPS (ViT-L)
+     |                                                              - 56.0 PQ
+     v                                                              - 316M parameters
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                 │
+│                            ┌─────────────────────────────────────────────┐                      │
+│                            │                                             │                      │
+│                            │           Vision Transformer                │                      │
+│                            │                                             │                      │
+│                            │  ┌─────────────────┐  ┌─────────────────┐   │                      │
+│                            │  │                 │  │                 │   │                      │
+│                            │  │   L1 Blocks     │  │   L2 Blocks     │   │                      │
+│                            │  │  (Patches Only) │  │(Patches+Queries)│   │                      │
+│                            │  │                 │  │                 │   │                      │
+│                            │  │ - Patch Embed   │  │ - Joint         │   │                      │
+│                            │  │ - Positional    │  │   Processing    │   │                      │
+│                            │  │ - 20 Layers     │  │ - 4 Layers      │   │                      │
+│                            │  │                 │  │ - Masked Attn   │   │                      │
+│                            │  │                 │  │   (Training)    │   │                      │
+│                            │  └─────────────────┘  └─────────────────┘   │                      │
+│                            │           |                    |            │                      │
+│                            │           v                    v            │                      │
+│                            │    Patch Tokens         Query Tokens        │                      │
+│                            │                              |              │                      │
+│                            │                              v              │                      │
+│                            │                     ┌─────────────────┐     │                      │
+│                            │                     │   Mask Module   │     │                      │
+│                            │                     │   - Class Head  │     │                      │
+│                            │                     │   - Mask MLP    │     │                      │
+│                            │                     │   - Dot Product │     │                      │
+│                            │                     └─────────────────┘     │                      │
+│                            └─────────────────────────────────────────────┘                      │
+│                                                                                                 │
+│                              Simple Architecture with Minimal Components                        │
+│                                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────────────────────┘
+                                                     |
+                                                     v
+                                               ┌─────────────┐
+                                               │   Output    │
+                                               │ Class + Mask│
+                                               │ Predictions │
+                                               └─────────────┘
+
+====================================================================================================
+                                    KEY INNOVATIONS
+====================================================================================================
+
+ARCHITECTURAL SIMPLIFICATION:
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                 │
+│  REMOVED COMPONENTS:                           ADDED COMPONENTS:                                │
+│  ├─ ViT-Adapter                                ├─ Learnable Query Tokens (100-200)              │
+│  ├─ Pixel Decoder                              ├─ Simple Mask Module                            │
+│  ├─ Transformer Decoder                        └─ Mask Annealing Strategy                       │
+│  ├─ Multi-scale Processing                                                                      │
+│  └─ Complex Cross-Attention                                                                     │
+│                                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+TRAINING STRATEGY - MASK ANNEALING:
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                 │
+│  Epoch 0    ████████████████████████████████████████████████████████████████  100% Masked       │
+│  Epoch 3    ████████████████████████████████████████████████████████████████   90% Masked       │
+│  Epoch 6    ████████████████████████████████████████████████████████████████   50% Masked       │
+│  Epoch 9    ████████████████████████████████████████████████████████████████   10% Masked       │
+│  Epoch 12   ████████████████████████████████████████████████████████████████    0% Masked       │
+│                                                                                                 │
+│  Benefits: Initial convergence help → Efficient inference without masking                       │
+│                                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+PERFORMANCE COMPARISON:
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                 │
+│  Model          │  FPS   │  PQ    │  Params  │  GFLOPs │  Complexity                            │
+│  ─────────────────────────────────────────────────────────────────────────────────────────────  │
+│  Mask2Former    │   29   │  57.1  │  349M    │   830   │  High (Multiple Modules)               │
+│  EoMT           │  128   │  56.0  │  316M    │   669   │  Low (Single ViT)                      │
+│                 │        │        │          │         │                                        │
+│  Improvement    │  4.4x  │ -1.1   │  -33M    │  -161   │  Significantly Simplified              │
+│                 │        │        │          │         │                                        │
+└─────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+SCALING BENEFITS:
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                 │
+│  Model Size  │  Traditional Gap  │  EoMT Performance  │  Insight                                │
+│  ─────────────────────────────────────────────────────────────────────────────────────────────  │
+│  ViT-Small   │     -5.8 PQ      │     High Speed     │  Small models need complexity            │
+│  ViT-Base    │     -3.8 PQ      │     Balanced       │  Medium models show promise              │
+│  ViT-Large   │     -1.1 PQ      │     Competitive    │  Large models make complexity            │
+│  ViT-Giant   │     -0.7 PQ      │     Near-Parity    │  unnecessary                             │
+│                                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+====================================================================================================
+                                    IMPLEMENTATION
+====================================================================================================
+
+CORE COMPONENTS:
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                 │
+│  dl_techniques.models.eomt.EoMT:                                                                │
+│  ├─ create_eomt_model()           # Factory function for different sizes                        │
+│  ├─ EoMTLayer()                   # Core transformer layer with masking                         │
+│  ├─ MaskModule()                  # Simple prediction head                                      │
+│  └─ MaskAnnealingCallback()       # Training strategy implementation                            │
+│                                                                                                 │
+│  Usage:                                                                                         │
+│  model = create_eomt_model(num_classes=21, model_size="large")                                  │
+│  trainer = EoMTTrainer(model, learning_rate=1e-4)                                               │
+│  history = trainer.train(train_ds, val_ds, epochs=12)                                           │
+│                                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+SUPPORTED TASKS:
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                 │
+│  ├─ Semantic Segmentation     (100 queries, per-pixel classification)                           │
+│  ├─ Instance Segmentation     (200 queries, individual object instances)                        │
+│  └─ Panoptic Segmentation     (200 queries, semantic + instance combined)                       │
+│                                                                                                 │
+│  All tasks use the same unified architecture with different query counts                        │
+│                                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+====================================================================================================
+                                       CONCLUSION
+====================================================================================================
+
+"Your ViT is Secretly an Image Segmentation Model" - Kerssies et al., CVPR 2025
+
+The key insight: With sufficient scale and pre-training (DINOv2), Vision Transformers can handle
+segmentation tasks without complex architectural modifications. EoMT proves that simplicity wins
+when foundation models provide the necessary inductive biases through pre-training.
+
+Developed at Eindhoven University of Technology
+Integrated into Hugging Face Transformers
+Highlighted at CVPR 2025 - Top Computer Vision Conference
+```
