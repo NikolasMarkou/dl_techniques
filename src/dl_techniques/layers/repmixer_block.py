@@ -1,6 +1,4 @@
 """
-RepMixer Block Implementation for dl_techniques Framework
-
 This module provides the RepMixer block, an efficient feature mixing component
 that combines token mixing and channel mixing operations for vision models.
 """
@@ -18,7 +16,7 @@ from .mobile_one_block import MobileOneBlock
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="dl_techniques.layers")
+@keras.saving.register_keras_serializable()
 class RepMixerBlock(keras.layers.Layer):
     """
     RepMixer block for efficient feature mixing in vision models.
@@ -330,8 +328,9 @@ class RepMixerBlock(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="dl_techniques.layers")
+@keras.saving.register_keras_serializable()
 class ConvolutionalStem(keras.layers.Layer):
     """
     Convolutional stem for FastVLM using MobileOne blocks.
