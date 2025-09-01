@@ -6,10 +6,12 @@ from typing import Optional, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from .positional_embedding import PositionalEmbedding
+from .embedding.positional_embedding import PositionalEmbedding
+from .embedding.rotary_position_embedding import RotaryPositionEmbedding
+
 from .hrm_reasoning_module import HierarchicalReasoningModule
 from .hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
-from .rotary_position_embedding import RotaryPositionEmbedding
+
 from .byte_latent_transformer_blocks import (
     ByteTokenizer, EntropyModel,
     DynamicPatcher, LocalEncoder,

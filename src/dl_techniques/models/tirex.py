@@ -17,9 +17,9 @@ from typing import Optional, Union, List, Any, Tuple
 from ..utils.logger import logger
 from ..layers.norms import RMSNorm
 from ..layers.standard_scaler import StandardScaler
-from ..layers.patch_embedding import PatchEmbedding1D
 from ..layers.ffn.residual_block import ResidualBlock
 from ..layers.time_series.quantile_head import QuantileHead
+from ..layers.embedding.patch_embedding import PatchEmbedding1D
 from ..layers.time_series.mixed_sequential_block import MixedSequentialBlock
 
 # ---------------------------------------------------------------------

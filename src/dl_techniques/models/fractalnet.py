@@ -40,7 +40,7 @@ Typical Usage:
 """
 
 import keras
-from typing import Optional, Tuple, Union, Dict, Any, List, Callable
+from typing import Optional, Tuple, Union, Dict, Any, List
 
 # ---------------------------------------------------------------------
 # local imports

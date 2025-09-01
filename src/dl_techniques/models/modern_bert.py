@@ -1,7 +1,7 @@
 import keras
 from dataclasses import dataclass
 from keras import ops, initializers
-from typing import Optional, Union, Any, Dict, Tuple
+from typing import Optional, Any, Dict, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -9,7 +9,7 @@ from typing import Optional, Union, Any, Dict, Tuple
 
 from ..utils.logger import logger
 from ..layers.transformer import TransformerLayer
-from ..layers.rotary_position_embedding import RotaryPositionEmbedding
+from ..layers.embedding.rotary_position_embedding import RotaryPositionEmbedding
 
 
 # ---------------------------------------------------------------------
@@ -180,11 +180,6 @@ class ModernBertEmbeddings(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class ModernBertAttention(keras.layers.Layer):
-    """
-    ModernBERT attention layer with RoPE and sliding window support.
-    ... (rest of the class is correct) ...
-    """
-
     def __init__(
             self,
             config: ModernBertConfig,
@@ -274,7 +269,6 @@ class ModernBertAttention(keras.layers.Layer):
             training=training
         )
 
-    # ... from_config, get_config, etc. remain the same ...
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
@@ -295,8 +289,8 @@ class ModernBertAttention(keras.layers.Layer):
         bert_config = ModernBertConfig.from_dict(config['config'])
         return cls(config=bert_config, is_global=config['is_global'])
 
+# ---------------------------------------------------------------------
 
-# ... ModernBertFFN and ModernBertTransformerLayer are correct ...
 @keras.saving.register_keras_serializable()
 class ModernBertFFN(keras.layers.Layer):
     """
@@ -361,14 +355,10 @@ class ModernBertFFN(keras.layers.Layer):
         bert_config = ModernBertConfig.from_dict(config['config'])
         return cls(config=bert_config)
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class ModernBertTransformerLayer(keras.layers.Layer):
-    """
-    A single ModernBERT encoder layer with pre-normalization.
-    ... (rest of the class is correct) ...
-    """
-
     def __init__(self, config: ModernBertConfig, is_global: bool, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.config = config
@@ -418,6 +408,7 @@ class ModernBertTransformerLayer(keras.layers.Layer):
         bert_config = ModernBertConfig.from_dict(config['config'])
         return cls(config=bert_config, is_global=config['is_global'])
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class ModernBERT(keras.Model):
@@ -539,7 +530,8 @@ class ModernBERT(keras.Model):
         bert_config = ModernBertConfig.from_dict(config['config'])
         return cls(config=bert_config, add_pooling_layer=config.get('add_pooling_layer', True))
 
-# Factory functions for common configurations
+# ---------------------------------------------------------------------
+
 def create_modern_bert_base() -> ModernBertConfig:
     """
     Create configuration for ModernBERT-base model.
@@ -713,3 +705,5 @@ def create_modern_bert_for_sequence_output(
 
     logger.info(f"Created ModernBERT sequence model with {model.count_params()} parameters")
     return model
+
+# ---------------------------------------------------------------------

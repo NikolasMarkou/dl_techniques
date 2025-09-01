@@ -11,8 +11,8 @@ from ..layers.norms.rms_norm import RMSNorm
 from ..layers.ffn.swiglu_ffn import SwiGLUFFN
 from ..layers.transformer import TransformerLayer
 from ..layers.tokenizers.bpe import TokenEmbedding
-from ..layers.patch_embedding import PatchEmbedding2D
-from ..layers.positional_embedding import PositionalEmbedding
+from ..layers.embedding.patch_embedding import PatchEmbedding2D
+from ..layers.embedding.positional_embedding import PositionalEmbedding
 from ..layers.attention.multi_head_attention import MultiHeadAttention
 from ..layers.attention.shared_weights_cross_attention import SharedWeightsCrossAttention
 

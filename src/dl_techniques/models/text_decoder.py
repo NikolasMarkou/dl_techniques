@@ -9,7 +9,6 @@ from ..utils.logger import logger
 from .bert import BertEmbeddings, BertConfig
 from ..layers.transformer import TransformerLayer
 
-
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()

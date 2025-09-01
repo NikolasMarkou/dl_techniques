@@ -57,7 +57,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Callable, Literal
 
 from ..utils.logger import logger
 from ..layers.transformer import TransformerLayer
-from ..layers.patch_embedding import PatchEmbedding2D
+from ..layers.embedding.patch_embedding import PatchEmbedding2D
 
 # ---------------------------------------------------------------------
 

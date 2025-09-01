@@ -11,22 +11,22 @@ The experiment uses a 3-level CNN architecture on the MNIST dataset.
 """
 
 import os
-from typing import Dict, List, Tuple, Optional, Any
+import keras
 import numpy as np
 import tensorflow as tf
-import keras
+from typing import Dict, List, Optional, Any
 from keras.api.datasets import mnist
 from keras.api.layers import (
     Conv2D, MaxPooling2D, Dense, Flatten, Input, BatchNormalization, Dropout
 )
-import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
+import matplotlib.pyplot as plt
 from dataclasses import dataclass
 
-# Import the regularizers
-from dl_techniques.regularizers.tri_state_preference import get_tri_state_regularizer
 from dl_techniques.utils.logger import logger
+from dl_techniques.regularizers.tri_state_preference import TriStatePreferenceRegularizer
+
 
 # Set random seeds for reproducibility
 RANDOM_SEED = 42
@@ -79,8 +79,8 @@ class RegularizerExperiment:
         return {
             'baseline': None,
             'l2': keras.regularizers.L2(0.01),
-            'tri_state_4.0': get_tri_state_regularizer(multiplier=self.config.regularizer_multiplier, scale=4.0),
-            'tri_state_8.0': get_tri_state_regularizer(multiplier=self.config.regularizer_multiplier, scale=8.0),
+            'tri_state_4.0': TriStatePreferenceRegularizer(multiplier=self.config.regularizer_multiplier, scale=4.0),
+            'tri_state_8.0': TriStatePreferenceRegularizer(multiplier=self.config.regularizer_multiplier, scale=8.0),
         }
 
     def create_model(self,

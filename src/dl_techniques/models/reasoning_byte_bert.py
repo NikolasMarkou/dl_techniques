@@ -51,10 +51,10 @@ from ..layers.byte_latent_transformer_blocks import (
     ByteTokenizer, EntropyModel, DynamicPatcher,
     LocalEncoder, PatchPooling
 )
-from ..layers.positional_embedding import PositionalEmbedding
 from ..layers.hrm_reasoning_module import HierarchicalReasoningModule
 from ..layers.hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
-from ..layers.rotary_position_embedding import RotaryPositionEmbedding
+from ..layers.embedding.positional_embedding import PositionalEmbedding
+from ..layers.embedding.rotary_position_embedding import RotaryPositionEmbedding
 
 # ---------------------------------------------------------------------
 

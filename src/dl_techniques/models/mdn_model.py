@@ -85,7 +85,7 @@ from typing import List, Union, Optional, Dict, Any, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from ..layers.mdn_layer import (
+from ..layers.statistics.mdn_layer import (
     MDNLayer,
     get_uncertainty,
     get_point_estimate,

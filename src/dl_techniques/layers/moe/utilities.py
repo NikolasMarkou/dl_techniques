@@ -16,9 +16,8 @@ from dataclasses import dataclass, asdict
 from typing import Dict, List, Tuple, Optional, Any, Union
 
 
-from .layer import MixtureOfExperts, MoEConfig
 from dl_techniques.utils.logger import logger
-
+from .layer import MixtureOfExperts, MoEConfig
 
 @dataclass
 class ExpertUtilizationStats:

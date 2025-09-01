@@ -44,7 +44,7 @@ from typing import Optional, Tuple, Union, Dict, Any
 
 from ..utils.logger import logger
 from ..layers.transformer import TransformerLayer
-from ..layers.positional_embedding import PositionalEmbedding
+from ..layers.embedding.positional_embedding import PositionalEmbedding
 
 # ---------------------------------------------------------------------
 

@@ -23,8 +23,8 @@ from typing import Optional, Tuple, Dict, Any, Union
 from ..utils.logger import logger
 from ..layers.norms.rms_norm import RMSNorm
 from ..layers.transformer import TransformerLayer
-from ..layers.patch_embedding import PatchEmbedding2D
-from ..layers.positional_embedding import PositionalEmbedding
+from ..layers.embedding.patch_embedding import PatchEmbedding2D
+from ..layers.embedding.positional_embedding import PositionalEmbedding
 
 # ---------------------------------------------------------------------
 
