@@ -1,7 +1,7 @@
 import math
 import keras
 from keras import ops
-from typing import Optional, Union, Tuple, Dict, Any
+from typing import Optional, Union, Tuple, Dict, Any, List
 
 # ---------------------------------------------------------------------
 # local imports
@@ -215,7 +215,6 @@ class MobileClipModel(keras.Model):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
         if embed_dim <= 0:
             raise ValueError(f"embed_dim must be positive, got {embed_dim}")
         if not isinstance(image_config, dict):
@@ -223,35 +222,37 @@ class MobileClipModel(keras.Model):
         if not isinstance(text_config, dict):
             raise TypeError("text_config must be a dictionary")
 
-        # Store configuration
         self.embed_dim = embed_dim
         self.image_config = image_config.copy()
         self.text_config = text_config.copy()
         self.logit_scale_init = logit_scale_init
         self.output_dict = output_dict
 
-        # Ensure projection dims match embed_dim
-        self.image_config['projection_dim'] = embed_dim
-        self.text_config['projection_dim'] = embed_dim
+        image_constructor_config = self.image_config.copy()
+        text_constructor_config = self.text_config.copy()
 
-        # CREATE sub-models in __init__
-        self.image_encoder = MobileClipImageEncoder(
-            **self.image_config,
-            name='image_encoder'
-        )
+        text_constructor_config.pop('model_name', None)
 
-        self.text_encoder = MobileClipTextEncoder(
-            **self.text_config,
-            name='text_encoder'
-        )
+        image_constructor_config['projection_dim'] = embed_dim
+        text_constructor_config['projection_dim'] = embed_dim
 
-        # Create learnable logit scale parameter
+        self.image_encoder = MobileClipImageEncoder(**image_constructor_config, name='image_encoder')
+        self.text_encoder = MobileClipTextEncoder(**text_constructor_config, name='text_encoder')
+
         self.logit_scale = self.add_weight(
             name='logit_scale',
             shape=(),
             initializer=keras.initializers.Constant(self.logit_scale_init),
             trainable=True,
         )
+
+    def build(self, input_shape: Dict[str, Union[Tuple[int, ...], List[int]]]) -> None:
+        """Build the model and its sub-components."""
+        if "image" in input_shape and hasattr(self.image_encoder, 'build'):
+            self.image_encoder.build(input_shape["image"])
+        if "text" in input_shape and hasattr(self.text_encoder, 'build'):
+            self.text_encoder.build(input_shape["text"])
+        self.built = True
 
     def encode_image(
             self,
@@ -261,14 +262,6 @@ class MobileClipModel(keras.Model):
     ) -> keras.KerasTensor:
         """
         Encode images to embedding vectors.
-
-        Args:
-            image: Input images tensor.
-            normalize: Whether to L2-normalize the embeddings.
-            training: Training mode flag.
-
-        Returns:
-            Image embeddings tensor.
         """
         features = self.image_encoder(image, training=training)
         if normalize:
@@ -283,14 +276,6 @@ class MobileClipModel(keras.Model):
     ) -> keras.KerasTensor:
         """
         Encode text tokens to embedding vectors.
-
-        Args:
-            text: Input text tokens tensor.
-            normalize: Whether to L2-normalize the embeddings.
-            training: Training mode flag.
-
-        Returns:
-            Text embeddings tensor.
         """
         features = self.text_encoder(text, training=training)
         if normalize:
@@ -304,29 +289,15 @@ class MobileClipModel(keras.Model):
     ) -> Union[Dict[str, keras.KerasTensor], Tuple[keras.KerasTensor, ...]]:
         """
         Forward pass for the MobileClip model.
-
-        Args:
-            inputs: Dictionary containing 'image' and/or 'text' tensors.
-            training: Training mode flag.
-
-        Returns:
-            Model outputs as dictionary or tuple based on output_dict setting.
         """
         image = inputs.get('image')
         text = inputs.get('text')
 
-        # Encode modalities if present
-        image_features = None
-        if image is not None:
-            image_features = self.encode_image(image, normalize=True, training=training)
+        image_features = self.encode_image(image, normalize=True, training=training) if image is not None else None
+        text_features = self.encode_text(text, normalize=True, training=training) if text is not None else None
 
-        text_features = None
-        if text is not None:
-            text_features = self.encode_text(text, normalize=True, training=training)
-
-        # Get scaled logit temperature
         logit_scale = ops.exp(self.logit_scale)
-        logit_scale = ops.clip(logit_scale, 0.0, 100.0)  # Prevent explosion
+        logit_scale = ops.clip(logit_scale, 0.0, 100.0)
 
         if self.output_dict:
             return {
@@ -345,24 +316,6 @@ class MobileClipModel(keras.Model):
     ) -> "MobileClipModel":
         """
         Create a Mobile CLIP model from a predefined variant.
-
-        Args:
-            variant: String, one of "b", "s0", "s1", "s2"
-            **kwargs: Additional arguments passed to the constructor
-
-        Returns:
-            MobileClipModel instance
-
-        Raises:
-            ValueError: If variant is not recognized
-
-        Example:
-            >>> # Create Mobile CLIP Base model
-            >>> model = MobileClipModel.from_variant("b")
-            >>> # Create Mobile CLIP S0 model
-            >>> model = MobileClipModel.from_variant("s0")
-            >>> # Override default parameters
-            >>> model = MobileClipModel.from_variant("s1", output_dict=False)
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -371,12 +324,8 @@ class MobileClipModel(keras.Model):
             )
 
         config = cls.MODEL_VARIANTS[variant].copy()
-
         logger.info(f"Creating Mobile CLIP-{variant.upper()} model")
-
-        # Allow kwargs to override default configuration
         config.update(kwargs)
-
         return cls(**config)
 
     def get_config(self) -> Dict[str, Any]:
@@ -393,21 +342,12 @@ class MobileClipModel(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "MobileClipModel":
-        """Create model from configuration.
-
-        Args:
-            config: Configuration dictionary
-
-        Returns:
-            MobileClipModel instance
-        """
+        """Create model from configuration."""
         return cls(**config)
 
     def summary(self, **kwargs):
         """Print model summary with additional information."""
         super().summary(**kwargs)
-
-        # Print additional model information
         logger.info(f"Mobile CLIP configuration:")
         logger.info(f"  - Embed dimension: {self.embed_dim}")
         logger.info(f"  - Image backbone: {self.image_config.get('backbone_name', 'Unknown')}")
@@ -431,33 +371,10 @@ def create_mobile_clip_model(
 ) -> MobileClipModel:
     """
     Convenience function to create Mobile CLIP models.
-
-    Args:
-        variant: String, model variant ("b", "s0", "s1", "s2")
-        pretrained: Boolean, whether to load pretrained weights (not implemented)
-        **kwargs: Additional arguments passed to the model constructor
-
-    Returns:
-        MobileClipModel instance
-
-    Raises:
-        ValueError: If variant is not recognized
-
-    Example:
-        >>> # Create Mobile CLIP S0 model (default)
-        >>> model = create_mobile_clip_model("s0")
-        >>>
-        >>> # Create Mobile CLIP Base model
-        >>> model = create_mobile_clip_model("b")
-        >>>
-        >>> # Create with custom parameters
-        >>> model = create_mobile_clip_model("s1", output_dict=False)
     """
     if pretrained:
         logger.warning("Pretrained weights are not yet implemented")
-
     model = MobileClipModel.from_variant(variant, **kwargs)
-
     return model
 
 
@@ -479,6 +396,3 @@ def create_mobile_clip_s1(**kwargs: Any) -> MobileClipModel:
 def create_mobile_clip_s2(**kwargs: Any) -> MobileClipModel:
     """Create a Mobile CLIP S2 model."""
     return create_mobile_clip_model("s2", **kwargs)
-
-
-# ---------------------------------------------------------------------
