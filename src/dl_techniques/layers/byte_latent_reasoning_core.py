@@ -523,3 +523,5 @@ class ByteLatentReasoningCore(keras.layers.Layer):
             "embeddings_regularizer": keras.regularizers.serialize(self.embeddings_regularizer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
         })
+
+# ---------------------------------------------------------------------
