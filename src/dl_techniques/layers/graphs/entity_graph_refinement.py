@@ -475,7 +475,8 @@ class EntityGraphRefinement(keras.layers.Layer):
         # Log entity extraction statistics for monitoring
         if training:
             avg_active_entities = ops.mean(ops.sum(entity_mask, axis=1))
-            logger.debug(f"Entity extraction: average {avg_active_entities:.2f} active entities per batch")
+            # FIX: Removed unsupported formatting for symbolic tensor
+            logger.debug(f"Entity extraction: average active entities (tensor): {avg_active_entities}")
 
         return extracted_entities, entity_mask
 
@@ -620,8 +621,9 @@ class EntityGraphRefinement(keras.layers.Layer):
             # Log sparsification statistics for monitoring
             avg_gate_value = ops.mean(gates)
             sparsity_ratio = ops.mean(ops.cast(gates < 0.1, 'float32'))
-            logger.debug(f"Sparsification: avg gate value {avg_gate_value:.3f}, "
-                        f"sparsity ratio {sparsity_ratio:.3f}")
+            # FIX: Removed unsupported formatting for symbolic tensors
+            logger.debug(f"Sparsification: avg gate value (tensor): {avg_gate_value}, "
+                        f"sparsity ratio (tensor): {sparsity_ratio}")
 
         return sparsified_graph
 
@@ -742,8 +744,9 @@ class EntityGraphRefinement(keras.layers.Layer):
             )
             self.add_loss(activity_loss)
 
-            logger.debug(f"Added regularization losses: sparsity={sparsity_loss:.6f}, "
-                        f"activity={activity_loss:.6f}")
+            # FIX: Removed unsupported formatting for symbolic tensors
+            logger.debug(f"Added regularization losses: sparsity (tensor)={sparsity_loss}, "
+                        f"activity (tensor)={activity_loss}")
 
         logger.debug("EntityGraphRefinement forward pass completed")
         return entities, final_graph, entity_mask
