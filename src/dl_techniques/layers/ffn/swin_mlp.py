@@ -1,6 +1,7 @@
 import keras
 from typing import Tuple, Optional, Dict, Any, Union, Callable
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class SwinMLP(keras.layers.Layer):
@@ -297,3 +298,5 @@ class SwinMLP(keras.layers.Layer):
             "activity_regularizer": keras.regularizers.serialize(self.activity_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

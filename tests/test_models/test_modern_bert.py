@@ -35,7 +35,7 @@ from dl_techniques.models.modern_bert import (
     create_modern_bert_large,
 )
 from dl_techniques.layers.transformer import TransformerLayer
-from dl_techniques.layers.rotary_position_embedding import RotaryPositionEmbedding
+from dl_techniques.layers.embedding.rotary_position_embedding import RotaryPositionEmbedding
 
 # Helper for comparing tensors
 def allclose(a, b, rtol=1e-5, atol=1e-8):

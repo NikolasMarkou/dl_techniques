@@ -30,7 +30,8 @@ def create_cbam_model(
     inputs = keras.Input(shape=input_shape)
 
     x = layers.Conv2D(
-        64, 3,
+        filters=64,
+        kernel_size=3,
         activation='relu',
         padding='same',
         kernel_initializer=kernel_initializer,
@@ -38,7 +39,7 @@ def create_cbam_model(
     )(inputs)
     x = layers.BatchNormalization()(x)
     x = CBAM(
-        64,
+        channels=64,
         channel_kernel_initializer=kernel_initializer,
         spatial_kernel_initializer=kernel_initializer,
         channel_kernel_regularizer=kernel_regularizer,
@@ -46,7 +47,8 @@ def create_cbam_model(
     )(x)
 
     x = layers.Conv2D(
-        128, 3,
+        filters=128,
+        kernel_size=3,
         activation='relu',
         padding='same',
         kernel_initializer=kernel_initializer,
@@ -54,7 +56,7 @@ def create_cbam_model(
     )(x)
     x = layers.BatchNormalization()(x)
     x = CBAM(
-        128,
+        channels=128,
         channel_kernel_initializer=kernel_initializer,
         spatial_kernel_initializer=kernel_initializer,
         channel_kernel_regularizer=kernel_regularizer,
@@ -63,7 +65,7 @@ def create_cbam_model(
 
     x = layers.GlobalAveragePooling2D()(x)
     outputs = layers.Dense(
-        num_classes,
+        units=num_classes,
         activation='softmax',
         kernel_initializer=kernel_initializer,
         kernel_regularizer=kernel_regularizer

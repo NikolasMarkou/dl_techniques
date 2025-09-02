@@ -17,7 +17,7 @@ from .components import Embeddings
 
 
 @keras.saving.register_keras_serializable()
-class Bert(keras.Model):
+class BERT(keras.Model):
     """
     BERT (Bidirectional Encoder Representations from Transformers) model.
 
@@ -390,7 +390,7 @@ def create_bert_for_classification(
     logger.info(f"Creating BERT classification model with {num_labels} labels")
 
     # Create base BERT model with pooling
-    bert = Bert(**config, add_pooling_layer=True, name="bert")
+    bert = BERT(**config, add_pooling_layer=True, name="bert")
 
     # Define inputs using Keras Functional API
     input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
@@ -475,7 +475,7 @@ def create_bert_for_sequence_output(
     logger.info("Creating BERT model for sequence output tasks")
 
     # Create base BERT model without pooling
-    bert = Bert(**config, add_pooling_layer=False, name="bert")
+    bert = BERT(**config, add_pooling_layer=False, name="bert")
 
     # Define inputs
     input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")

@@ -98,10 +98,10 @@ from .attention.differential_attention import DifferentialMultiHeadAttention
 # Type definitions for enhanced type safety
 # ---------------------------------------------------------------------
 
-AttentionType = Literal['multi_head_attention', 'window_attention', 'group_query_attention', 'differential_attention']
-NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'dynamic_tanh']
 NormalizationPosition = Literal['post', 'pre']
 FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'residual', 'swin_mlp']
+NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'dynamic_tanh']
+AttentionType = Literal['multi_head_attention', 'window_attention', 'group_query_attention', 'differential_attention']
 
 # ---------------------------------------------------------------------
 

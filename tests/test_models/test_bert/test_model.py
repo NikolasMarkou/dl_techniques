@@ -22,7 +22,7 @@ import os
 from typing import Dict, Any
 
 from dl_techniques.models.bert.model import (
-    Bert,
+    BERT,
     create_bert_for_classification,
     create_bert_for_sequence_output,
     create_bert_base_uncased,
@@ -39,7 +39,7 @@ class TestBERTModelInitialization:
         """Test basic BERT model initialization."""
         config_dict = create_bert_base_uncased()
         config_dict.update(hidden_size=256, num_layers=6, num_heads=8)
-        model = Bert(**config_dict)
+        model = BERT(**config_dict)
 
         assert model.hidden_size == 256
         assert model.num_layers == 6
@@ -59,7 +59,7 @@ class TestBERTModelInitialization:
     def test_initialization_without_pooling(self):
         """Test BERT model initialization without pooling layer."""
         config_dict = create_bert_base_uncased()
-        model = Bert(**config_dict, add_pooling_layer=False)
+        model = BERT(**config_dict, add_pooling_layer=False)
 
         assert model.add_pooling_layer is False
         assert model.pooler is None
@@ -72,19 +72,19 @@ class TestBERTModelInitialization:
         with pytest.raises(ValueError, match="hidden_size.*must be divisible by num_heads"):
             config_copy = config_dict.copy()
             config_copy.update(hidden_size=100, num_heads=12)
-            Bert(**config_copy)
+            BERT(**config_copy)
 
         # Test negative hidden_size
         with pytest.raises(ValueError, match="hidden_size must be positive"):
             config_copy = config_dict.copy()
             config_copy.update(hidden_size=-100)
-            Bert(**config_copy)
+            BERT(**config_copy)
 
         # Test invalid dropout rates
         with pytest.raises(ValueError, match="hidden_dropout_prob must be between"):
             config_copy = config_dict.copy()
             config_copy.update(hidden_dropout_prob=1.5)
-            Bert(**config_copy)
+            BERT(**config_copy)
 
     def test_initialization_with_custom_config(self):
         """Test BERT model initialization with custom configuration."""
@@ -99,7 +99,7 @@ class TestBERTModelInitialization:
             "normalization_type": "rms_norm",
             "normalization_position": "pre"
         }
-        model = Bert(**config_dict)
+        model = BERT(**config_dict)
 
         assert model.vocab_size == 25000
         assert model.hidden_size == 512
@@ -125,7 +125,7 @@ class TestBERTModelBuilding:
 
     def test_build_basic_functionality(self, basic_config):
         """Test basic building functionality."""
-        model = Bert(**basic_config)
+        model = BERT(**basic_config)
         batch_size, seq_length = 2, 32
         input_ids = ops.cast(
             keras.random.uniform(
@@ -150,7 +150,7 @@ class TestBERTModelBuilding:
 
     def test_build_without_pooling_layer(self, basic_config):
         """Test building BERT model without pooling layer."""
-        model = Bert(**basic_config, add_pooling_layer=False)
+        model = BERT(**basic_config, add_pooling_layer=False)
         input_ids = ops.cast(
             keras.random.uniform((2, 32), minval=1, maxval=basic_config['vocab_size']),
             dtype='int32'
@@ -162,7 +162,7 @@ class TestBERTModelBuilding:
 
     def test_transformer_layers_configuration(self, basic_config):
         """Test that TransformerLayers are configured correctly."""
-        model = Bert(**basic_config)
+        model = BERT(**basic_config)
         input_ids = ops.cast(
             keras.random.uniform((1, 16), minval=1, maxval=basic_config['vocab_size']),
             dtype='int32'
@@ -180,7 +180,7 @@ class TestBERTModelForwardPass:
     """Test BERT model forward pass functionality."""
 
     @pytest.fixture
-    def built_model(self) -> Bert:
+    def built_model(self) -> BERT:
         """Create a built BERT model for testing."""
         config_dict = {
             "vocab_size": 1000,
@@ -190,7 +190,7 @@ class TestBERTModelForwardPass:
             "intermediate_size": 1024,
             "max_position_embeddings": 128
         }
-        model = Bert(**config_dict)
+        model = BERT(**config_dict)
         sample_input = ops.cast(
             keras.random.uniform((1, 16), minval=1, maxval=config_dict['vocab_size']),
             dtype='int32'
@@ -242,7 +242,7 @@ class TestBERTModelForwardPass:
     def test_forward_pass_no_pooling(self):
         """Test forward pass without pooling layer."""
         config_dict = {"vocab_size": 1000, "hidden_size": 256, "num_layers": 2, "num_heads": 8}
-        model = Bert(**config_dict, add_pooling_layer=False)
+        model = BERT(**config_dict, add_pooling_layer=False)
         input_ids = ops.cast(
             keras.random.uniform((2, 16), minval=1, maxval=config_dict['vocab_size']), dtype='int32'
         )
@@ -260,7 +260,7 @@ class TestBERTModelSerialization:
             "intermediate_size": 2048, "hidden_dropout_prob": 0.15,
             "normalization_type": "rms_norm"
         }
-        model = Bert(**config_dict)
+        model = BERT(**config_dict)
         model_config = model.get_config()
         assert isinstance(model_config, dict)
         assert model_config['vocab_size'] == 25000
@@ -275,7 +275,7 @@ class TestBERTModelSerialization:
             "vocab_size": 1000, "hidden_size": 256, "num_layers": 2, "num_heads": 8,
             "intermediate_size": 512
         }
-        model = Bert(**config_dict, add_pooling_layer=True)
+        model = BERT(**config_dict, add_pooling_layer=True)
         input_ids = ops.cast(
             keras.random.uniform((2, 16), minval=1, maxval=config_dict['vocab_size']), dtype='int32'
         )
@@ -310,7 +310,7 @@ class TestBERTEdgeCases:
 
     def test_minimum_sequence_length(self, config_dict):
         """Test BERT with minimum sequence length."""
-        model = Bert(**config_dict)
+        model = BERT(**config_dict)
         input_ids = ops.cast([[42]], dtype='int32')
         sequence_output, pooled_output = model(input_ids, training=False)
         assert sequence_output.shape == (1, 1, 128)
@@ -318,7 +318,7 @@ class TestBERTEdgeCases:
 
     def test_single_sample_batch(self, config_dict):
         """Test BERT with batch size of 1."""
-        model = Bert(**config_dict)
+        model = BERT(**config_dict)
         input_ids = ops.cast(
             keras.random.uniform((1, 32), minval=1, maxval=1000), dtype='int32'
         )
@@ -423,7 +423,7 @@ class TestBERTAdvancedFeatures:
             size="base", ffn_type="swiglu", use_stochastic_depth=True
         )
         config_dict.update(num_layers=2, hidden_size=256, num_heads=8, vocab_size=1000)
-        model = Bert(**config_dict)
+        model = BERT(**config_dict)
         input_ids = ops.cast(
             keras.random.uniform((2, 16), minval=1, maxval=config_dict['vocab_size']), dtype='int32'
         )
@@ -435,7 +435,7 @@ class TestBERTAdvancedFeatures:
         base_config = {"vocab_size": 1000, "hidden_size": 128, "num_layers": 2, "num_heads": 8}
         for ffn_type in ["mlp", "swiglu"]:
             config_dict = {**base_config, "ffn_type": ffn_type}
-            model = Bert(**config_dict, add_pooling_layer=False)
+            model = BERT(**config_dict, add_pooling_layer=False)
             input_ids = ops.cast(keras.random.uniform((2, 16), minval=1, maxval=1000), dtype='int32')
             output = model(input_ids, training=False)
             assert output.shape == (2, 16, 128)

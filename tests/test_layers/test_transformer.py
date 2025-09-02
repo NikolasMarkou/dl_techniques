@@ -7,12 +7,9 @@ import tempfile
 import os
 from typing import Any, Dict
 
-# --- Import Layer to be Tested ---
+
 from dl_techniques.layers.transformer import TransformerLayer
 
-
-# This test file assumes all custom sub-layers are installed and available,
-# as requested. This simplifies the testing logic by removing conditional skips.
 
 # --- Test Class ---
 class TestTransformerLayer:

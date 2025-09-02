@@ -4,9 +4,6 @@ FNet: Fourier Transform-based Attention Replacement
 This module implements the FNet architecture from "FNet: Mixing Tokens with Fourier Transforms"
 (Lee-Thorp et al., 2021), which replaces self-attention with parameter-free Fourier transforms
 for efficient token mixing in transformer-style architectures.
-
-The implementation follows modern Keras 3 best practices and provides both the core
-Fourier transform layer and a complete encoder block ready for use in larger models.
 """
 
 import keras
