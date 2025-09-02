@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any, Tuple, List
 # ---------------------------------------------------------------------
 
 from ..utils.logger import logger
-from .bert import BertEmbeddings, BertConfig
+from .bert.components import Embeddings
 from ..layers.transformer import TransformerLayer
 
 # ---------------------------------------------------------------------
@@ -159,22 +159,17 @@ class TextDecoder(keras.layers.Layer):
 
         # CREATE all sublayers in __init__ (following modern Keras 3 pattern)
         try:
-            # Create BERT embeddings configuration
-            bert_config = BertConfig(
+            # Create embeddings layer
+            self.embeddings = Embeddings(
                 vocab_size=self.vocab_size,
                 hidden_size=self.hidden_dim,
-                num_heads=self.num_heads,
                 max_position_embeddings=self.max_position_embeddings,
                 type_vocab_size=self.type_vocab_size,
+                num_heads=self.num_heads,
                 hidden_dropout_prob=self.dropout,
                 initializer_range=self.initializer_range,
                 layer_norm_eps=self.layer_norm_eps,
-                normalization_type=self.normalization_type
-            )
-
-            # Create embeddings layer
-            self.embeddings = BertEmbeddings(
-                config=bert_config,
+                normalization_type=self.normalization_type,
                 name='embeddings'
             )
 

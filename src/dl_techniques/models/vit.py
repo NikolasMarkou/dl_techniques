@@ -7,9 +7,6 @@ feature extraction, and transfer learning.
 
 The model supports different scales and configurations similar to the original
 "An Image is Worth 16x16 Words" paper and its variants.
-
-This implementation uses the generic TransformerLayer from dl-techniques.layers.transformer
-for maximum flexibility and consistency with the framework.
 """
 
 import keras
@@ -36,9 +33,6 @@ class ViT(keras.Model):
     This model implements the complete Vision Transformer architecture with support
     for different scales and configurations. It can be used for classification,
     feature extraction, and other vision tasks.
-
-    The model uses the generic TransformerLayer from dl-techniques for maximum
-    flexibility and consistency with the framework standards.
 
     Args:
         input_shape: Input image shape (height, width, channels).

@@ -25,8 +25,8 @@ from typing import Optional, Union, Any, Dict, Tuple, Literal, Callable
 
 from .norms.rms_norm import RMSNorm
 from .norms.band_rms import BandRMS
+from .norms.dynamic_tanh import DynamicTanh
 from .stochastic_depth import StochasticDepth
-from .activations.dynamic_tanh import DynamicTanh
 
 from .ffn.mlp import MLPBlock
 from .ffn.glu_ffn import GLUFFN
@@ -58,7 +58,7 @@ class TransformerLayer(keras.layers.Layer):
     Generic transformer layer with configurable attention, normalization, FFN, and stochastic depth.
 
     This layer implements a standard transformer block with:
-    - Configurable multi-head attention mechanisms
+    - Configurable attention mechanisms
     - Configurable feed-forward network
     - Residual connections
     - Configurable normalization

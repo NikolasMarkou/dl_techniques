@@ -74,9 +74,9 @@ class Embeddings(keras.layers.Layer):
             hidden_size: int,
             max_position_embeddings: int,
             type_vocab_size: int,
-            initializer_range: float,
-            layer_norm_eps: float,
-            hidden_dropout_prob: float,
+            initializer_range: float = 0.02,
+            layer_norm_eps: float = 1e-8,
+            hidden_dropout_prob: float = 0.0,
             normalization_type: str = "layer_norm",
             **kwargs: Any
     ) -> None:

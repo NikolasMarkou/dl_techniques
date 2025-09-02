@@ -9,7 +9,7 @@ import keras
 import os
 import tempfile
 
-from dl_techniques.layers.activations.dynamic_tanh import DynamicTanh
+from dl_techniques.layers.norms.dynamic_tanh import DynamicTanh
 
 
 class TestDynamicTanh:

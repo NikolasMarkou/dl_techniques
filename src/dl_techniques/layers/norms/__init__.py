@@ -3,6 +3,7 @@ from .band_logit_norm import BandLogitNorm
 from .logit_norm import LogitNorm
 from .rms_norm import RMSNorm
 from .max_logit_norm import MaxLogitNorm, DecoupledMaxLogit, DMLPlus
+from .factory import create_normalization_layer
 
 __all__ = [
     BandRMS,
@@ -12,4 +13,5 @@ __all__ = [
     MaxLogitNorm,
     DecoupledMaxLogit,
     DMLPlus,
+    create_normalization_layer
 ]
