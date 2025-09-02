@@ -1,44 +1,16 @@
 """
 Dual Rotary Position Embedding (RoPE) Layer Implementation for Gemma3-style Models.
 
-This module implements the dual RoPE mechanism used in Gemma3 models, where two
-different RoPE configurations are maintained:
-- Global RoPE: Higher theta_base for full attention (long-range dependencies)
-- Local RoPE: Lower theta_base for sliding attention (local dependencies)
-
-The layer pre-computes both sets of cos/sin tables and applies the appropriate
-one based on the rope_type parameter during the forward pass.
-
-Mathematical Foundation:
-=======================
-
-The dual RoPE applies the same rotary transformation as standard RoPE, but with
-two different frequency bases:
-
-For Global RoPE (full attention):
-    θᵢ = 1 / (1,000,000^(2i/d)) - slower frequency changes, better for long sequences
-
-For Local RoPE (sliding attention):
-    θᵢ = 1 / (10,000^(2i/d)) - faster frequency changes, better for local patterns
-
-The rotation is applied as:
-    [x₂ᵢ']   [cos(mθᵢ)  -sin(mθᵢ)] [x₂ᵢ]
-    [x₂ᵢ₊₁'] = [sin(mθᵢ)   cos(mθᵢ)] [x₂ᵢ₊₁]
-
-Where m is the position index and i is the dimension pair index.
-
-References:
-===========
-1. Gemma3 Technical Report: https://storage.googleapis.com/deepmind-media/gemma/gemma-3-report.pdf
-2. RoFormer: Enhanced Transformer with Rotary Position Embedding
-   https://arxiv.org/abs/2104.09864
+This module implements the dual RoPE mechanism used in Gemma3 models, providing
+separate RoPE configurations for global and local attention patterns with
+different frequency bases for optimal long-range and local dependencies.
 """
 
 import keras
-from typing import Optional, Any, Tuple, Literal
+from typing import Optional, Any, Tuple, Literal, Dict
 
 # ---------------------------------------------------------------------
-# local imports
+# Local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
@@ -47,30 +19,62 @@ from dl_techniques.utils.logger import logger
 
 RopeType = Literal['global', 'local']
 
-
 # ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
 class DualRotaryPositionEmbedding(keras.layers.Layer):
-    """Dual Rotary Position Embedding layer for Gemma3-style attention mechanisms.
+    """
+    Dual Rotary Position Embedding layer for Gemma3-style attention mechanisms.
 
-    This layer implements dual RoPE configurations as used in Gemma3 models:
-    - Global RoPE: Higher theta_base (typically 1,000,000) for full attention
-    - Local RoPE: Lower theta_base (typically 10,000) for sliding attention
+    This layer maintains two separate RoPE configurations optimized for different
+    attention patterns: global RoPE with higher theta_base for full attention and
+    long-range dependencies, and local RoPE with lower theta_base for sliding
+    attention and local pattern modeling.
 
-    The layer pre-computes both sets of cos/sin tables and applies the appropriate
-    one based on the rope_type parameter during the forward pass.
+    **Intent**: Enable efficient dual-scale positional encoding for transformer
+    models that use both global and local attention mechanisms, providing optimal
+    frequency characteristics for each attention type.
+
+    **Architecture**:
+    ```
+    Input(shape=[batch, heads, seq_len, head_dim])
+           ↓
+    Select: Global RoPE | Local RoPE (based on rope_type)
+           ↓                  ↓
+    Rotate(high_freq)    Rotate(low_freq)
+           ↓                  ↓
+    Output(shape=[batch, heads, seq_len, head_dim])
+    ```
+
+    **Mathematical Operation**:
+        Applies rotation transformation using selected frequency base:
+        ```
+        Global: θᵢ = 1/(1,000,000^(2i/d)) - slower frequencies for long-range
+        Local:  θᵢ = 1/(10,000^(2i/d))     - faster frequencies for local patterns
+
+        [x'ᵢ] = [cos(mθᵢ)  -sin(mθᵢ)] [xᵢ]
+        [x'ⱼ]   [sin(mθᵢ)   cos(mθᵢ)] [xⱼ]
+        ```
+        where m is position and i,j are paired dimensions
+
+    **Key Features**:
+    - Dual frequency bases for different attention scales
+    - Pre-computed cos/sin tables for both configurations
+    - Runtime selection between global/local RoPE
+    - Full head dimension rotation (unlike partial RoPE)
+    - Optimized for Gemma3-style architectures
 
     Args:
-        head_dim: Integer, the dimensionality of each attention head. Must be positive and even.
-        max_seq_len: Integer, maximum sequence length for which to precompute
-            rotary embeddings. Must be positive.
-        global_theta_base: Float, base frequency for global RoPE computation.
-            Higher values provide better long-range modeling. Default is 1_000_000.0.
-        local_theta_base: Float, base frequency for local RoPE computation.
-            Lower values provide better local pattern modeling. Default is 10_000.0.
-        **kwargs: Additional keyword arguments for the Layer base class.
+        head_dim: Integer, dimensionality of each attention head. Must be positive
+            and even for proper complex pair rotation.
+        max_seq_len: Integer, maximum sequence length for precomputing tables.
+            Must be positive.
+        global_theta_base: Float, base frequency for global RoPE. Higher values
+            provide better long-range modeling. Defaults to 1,000,000.0.
+        local_theta_base: Float, base frequency for local RoPE. Lower values
+            provide better local patterns. Defaults to 10,000.0.
+        **kwargs: Additional Layer base class arguments.
 
     Input shape:
         4D tensor with shape: `(batch_size, num_heads, seq_len, head_dim)`
@@ -79,38 +83,63 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         4D tensor with shape: `(batch_size, num_heads, seq_len, head_dim)`
         Same as input shape.
 
-    Raises:
-        ValueError: If head_dim is not positive or even, if max_seq_len is not positive,
-            if theta_base values are not positive, or if input shape is invalid.
+    Attributes:
+        cos_global_cached: Non-trainable weight with global cosine values.
+        sin_global_cached: Non-trainable weight with global sine values.
+        cos_local_cached: Non-trainable weight with local cosine values.
+        sin_local_cached: Non-trainable weight with local sine values.
 
     Example:
         ```python
-        # Create dual RoPE layer
+        # Create dual RoPE layer for Gemma3-style model
         dual_rope = DualRotaryPositionEmbedding(
             head_dim=256,
-            max_seq_len=4096
+            max_seq_len=4096,
+            global_theta_base=1_000_000.0,  # For full attention
+            local_theta_base=10_000.0       # For sliding attention
         )
 
-        # Apply global RoPE for full attention
         queries = keras.random.normal([2, 8, 512, 256])
         keys = keras.random.normal([2, 8, 512, 256])
 
+        # Apply global RoPE for full attention mechanisms
         q_global = dual_rope(queries, rope_type='global')
         k_global = dual_rope(keys, rope_type='global')
 
-        # Apply local RoPE for sliding attention
+        # Apply local RoPE for sliding window attention
         q_local = dual_rope(queries, rope_type='local')
         k_local = dual_rope(keys, rope_type='local')
+
+        # Can switch dynamically based on attention pattern
+        rope_type = 'global' if use_full_attention else 'local'
+        q_rotated = dual_rope(queries, rope_type=rope_type)
         ```
+
+    Raises:
+        ValueError: If head_dim is not positive or even.
+        ValueError: If max_seq_len is not positive.
+        ValueError: If theta_base values are not positive.
+        ValueError: If rope_type is not 'global' or 'local'.
+        ValueError: If input sequence length exceeds max_seq_len.
+
+    Note:
+        This layer creates four cos/sin lookup tables (global and local pairs).
+        Memory usage scales with max_seq_len * head_dim * 4. For very long
+        sequences, consider sequence chunking or dynamic table computation.
+
+    References:
+        Gemma3 Technical Report: Google DeepMind
+        RoFormer: Enhanced Transformer with Rotary Position Embedding
+        https://arxiv.org/abs/2104.09864
     """
 
     def __init__(
-            self,
-            head_dim: int,
-            max_seq_len: int,
-            global_theta_base: float = 1_000_000.0,
-            local_theta_base: float = 10_000.0,
-            **kwargs: Any
+        self,
+        head_dim: int,
+        max_seq_len: int,
+        global_theta_base: float = 1_000_000.0,
+        local_theta_base: float = 10_000.0,
+        **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
@@ -126,7 +155,7 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         if local_theta_base <= 0:
             raise ValueError(f"local_theta_base must be positive, got {local_theta_base}")
 
-        # Store ALL configuration - NO weights created here
+        # Store ALL configuration parameters
         self.head_dim = head_dim
         self.max_seq_len = max_seq_len
         self.global_theta_base = global_theta_base
@@ -139,14 +168,17 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         self.sin_local_cached = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer by creating cos/sin tables for both RoPE configurations.
+        """
+        Create cos/sin lookup tables for both global and local RoPE configurations.
+
+        This is called automatically when the layer first processes input.
+        Creates efficient dual cache tables for both RoPE variants.
 
         Args:
-            input_shape: Shape tuple indicating the input shape of the layer.
-                Expected: (batch_size, num_heads, seq_len, head_dim)
+            input_shape: Expected shape (batch_size, num_heads, seq_len, head_dim)
 
         Raises:
-            ValueError: If input shape is invalid or incompatible with layer configuration.
+            ValueError: If input shape is not 4D or head_dim doesn't match.
         """
         # Validate input shape
         if len(input_shape) != 4:
@@ -162,30 +194,31 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
                 f"layer head_dim ({self.head_dim})"
             )
 
-        # Build both RoPE caches
-        self._build_global_rope_cache()
-        self._build_local_rope_cache()
+        # Create both RoPE cache tables
+        self._create_global_rope_cache()
+        self._create_local_rope_cache()
 
+        # Always call parent build at the end
         super().build(input_shape)
 
-    def _build_rope_cache(self, theta_base: float, cache_prefix: str) -> Tuple[Any, Any]:
-        """Build cos/sin cache for a given theta_base.
+    def _create_rope_cache_tables(self, theta_base: float, cache_prefix: str) -> Tuple[Any, Any]:
+        """Create cos/sin cache tables for a given theta_base configuration.
 
         Args:
             theta_base: Base frequency for RoPE computation.
-            cache_prefix: Prefix for the cache weight names ('global' or 'local').
+            cache_prefix: Prefix for cache weight names ('global' or 'local').
 
         Returns:
             Tuple of (cos_cache, sin_cache) weights.
         """
-        # Calculate the frequency dimension (half of head_dim for complex pairs)
+        # Calculate frequency dimension (half of head_dim for complex pairs)
         freq_dim = self.head_dim // 2
 
-        # Create frequency tensor: 1 / (theta_base ^ (2i / head_dim)) for i in [0, freq_dim)
+        # Create frequency tensor: 1 / (theta_base ^ (2i / head_dim))
         inv_freq = 1.0 / (
-                theta_base ** (
+            theta_base ** (
                 keras.ops.arange(0, freq_dim, dtype='float32') * 2.0 / self.head_dim
-        )
+            )
         )
 
         # Position indices: [0, 1, 2, ..., max_seq_len-1]
@@ -195,15 +228,15 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         # Shape: (max_seq_len, freq_dim)
         freqs = keras.ops.outer(positions, inv_freq)
 
-        # Duplicate frequencies to match head_dim (as done in original Gemma3)
+        # Duplicate frequencies to match full head_dim (Gemma3 approach)
         # Shape: (max_seq_len, head_dim)
         freqs_full = keras.ops.concatenate([freqs, freqs], axis=1)
 
-        # Create cos and sin tables
+        # Compute cos and sin tables
         cos_table = keras.ops.cos(freqs_full)
         sin_table = keras.ops.sin(freqs_full)
 
-        # Store as non-trainable weights for proper serialization
+        # Create layer weights using add_weight for proper serialization
         cos_cache = self.add_weight(
             name=f'cos_{cache_prefix}_cached',
             shape=cos_table.shape,
@@ -225,104 +258,105 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
 
         return cos_cache, sin_cache
 
-    def _build_global_rope_cache(self) -> None:
-        """Build cos/sin cache for global RoPE configuration."""
-        self.cos_global_cached, self.sin_global_cached = self._build_rope_cache(
+    def _create_global_rope_cache(self) -> None:
+        """Create cos/sin cache for global RoPE configuration."""
+        self.cos_global_cached, self.sin_global_cached = self._create_rope_cache_tables(
             theta_base=self.global_theta_base,
             cache_prefix='global'
         )
 
-    def _build_local_rope_cache(self) -> None:
-        """Build cos/sin cache for local RoPE configuration."""
-        self.cos_local_cached, self.sin_local_cached = self._build_rope_cache(
+    def _create_local_rope_cache(self) -> None:
+        """Create cos/sin cache for local RoPE configuration."""
+        self.cos_local_cached, self.sin_local_cached = self._create_rope_cache_tables(
             theta_base=self.local_theta_base,
             cache_prefix='local'
         )
 
     def call(
-            self,
-            inputs: keras.KerasTensor,
-            rope_type: RopeType = 'global',
-            training: Optional[bool] = None,
-            **kwargs: Any
+        self,
+        inputs: keras.KerasTensor,
+        rope_type: RopeType = 'global',
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Apply dual rotary position embedding to input tensor.
 
         Args:
-            inputs: Input tensor with shape (batch_size, num_heads, seq_len, head_dim)
-            rope_type: Type of RoPE to apply - 'global' for full attention,
-                'local' for sliding attention. Defaults to 'global'.
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
-            **kwargs: Additional keyword arguments (unused).
+            inputs: Input tensor with shape (batch_size, num_heads, seq_len, head_dim).
+            rope_type: Type of RoPE to apply. 'global' for full attention with
+                long-range modeling, 'local' for sliding attention with local patterns.
+                Defaults to 'global'.
+            training: Boolean indicating training mode (not used in this layer).
 
         Returns:
-            Output tensor with same shape as input, with appropriate RoPE applied.
+            Output tensor with same shape, appropriate RoPE transformation applied.
 
         Raises:
-            ValueError: If rope_type is not 'global' or 'local', or if sequence
-                length exceeds max_seq_len.
+            ValueError: If rope_type is invalid or sequence length exceeds max_seq_len.
         """
         # Validate rope_type
         if rope_type not in ['global', 'local']:
-            raise ValueError(f"rope_type must be 'global' or 'local', got {rope_type}")
+            raise ValueError(f"rope_type must be 'global' or 'local', got '{rope_type}'")
 
         # Get sequence length from input
         seq_len = keras.ops.shape(inputs)[2]
 
-        # Ensure sequence length doesn't exceed our cached values
-        if seq_len > self.max_seq_len:
+        # Validate sequence length at build time if known
+        seq_len_static = inputs.shape[2]
+        if seq_len_static is not None and seq_len_static > self.max_seq_len:
             raise ValueError(
-                f"Input sequence length ({seq_len}) exceeds max_seq_len ({self.max_seq_len}). "
+                f"Input sequence length ({seq_len_static}) exceeds max_seq_len ({self.max_seq_len}). "
                 f"Please increase max_seq_len or truncate the input."
             )
 
-        return self._apply_rope(inputs, seq_len, rope_type)
+        return self._apply_dual_rope_rotation(inputs, seq_len, rope_type)
 
-    def _apply_rope(self, x: keras.KerasTensor, seq_len: int, rope_type: RopeType) -> keras.KerasTensor:
-        """Apply rotary position embedding using the specified RoPE type.
+    def _apply_dual_rope_rotation(
+        self,
+        x: keras.KerasTensor,
+        seq_len: keras.KerasTensor,
+        rope_type: RopeType
+    ) -> keras.KerasTensor:
+        """Apply rotary position embedding using specified RoPE configuration.
 
         Args:
             x: Input tensor with shape (batch_size, num_heads, seq_len, head_dim)
-            seq_len: Current sequence length
+            seq_len: Current sequence length tensor
             rope_type: Type of RoPE to apply ('global' or 'local')
 
         Returns:
-            Tensor with RoPE applied using the appropriate configuration
+            Tensor with appropriate RoPE transformation applied
         """
-        # Select appropriate cos/sin caches
+        # Select appropriate cos/sin caches based on rope_type
         if rope_type == 'global':
             cos = self.cos_global_cached[:seq_len]  # Shape: (seq_len, head_dim)
             sin = self.sin_global_cached[:seq_len]  # Shape: (seq_len, head_dim)
         else:  # rope_type == 'local'
-            cos = self.cos_local_cached[:seq_len]  # Shape: (seq_len, head_dim)
-            sin = self.sin_local_cached[:seq_len]  # Shape: (seq_len, head_dim)
+            cos = self.cos_local_cached[:seq_len]   # Shape: (seq_len, head_dim)
+            sin = self.sin_local_cached[:seq_len]   # Shape: (seq_len, head_dim)
 
-        # Apply RoPE transformation following Gemma3 approach:
-        # Split into two halves and apply rotation
-        x1 = x[..., : self.head_dim // 2]  # First half
-        x2 = x[..., self.head_dim // 2:]  # Second half
+        # Apply RoPE transformation following Gemma3 approach
+        # Split into two halves for rotation
+        half_dim = self.head_dim // 2
+        x1 = x[..., :half_dim]     # First half
+        x2 = x[..., half_dim:]     # Second half
 
         # Expand cos/sin to match input batch and head dimensions
         # From: (seq_len, head_dim) -> (1, 1, seq_len, head_dim)
         cos = keras.ops.expand_dims(keras.ops.expand_dims(cos, 0), 0)
         sin = keras.ops.expand_dims(keras.ops.expand_dims(sin, 0), 0)
 
-        # Apply the rotary transformation: rotation matrix in 2D
-        # [x1', x2'] = [x1*cos - x2*sin, x1*sin + x2*cos]
-        # But we need to rearrange due to the way frequencies are duplicated
-
-        # Create rotated version: [-x2, x1] (equivalent to 90-degree rotation)
+        # Apply rotary transformation using complex rotation approach
+        # Create rotated version: [-x2, x1] (90-degree rotation)
         rotated = keras.ops.concatenate([-x2, x1], axis=-1)
 
         # Apply final rotation: x*cos + rotated*sin
         x_rotated = (x * cos) + (rotated * sin)
 
-        # Ensure output dtype matches input
+        # Ensure output dtype matches input dtype
         return keras.ops.cast(x_rotated, x.dtype)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
+        """Compute output shape - identical to input shape.
 
         Args:
             input_shape: Shape of the input tensor.
@@ -330,14 +364,14 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         Returns:
             Output shape tuple (same as input shape).
         """
-        # Dual RoPE doesn't change the shape, just applies rotational transformations
+        # Dual RoPE preserves tensor shape while applying rotational transformations
         return input_shape
 
-    def get_config(self) -> dict[str, Any]:
-        """Return the layer configuration for serialization.
+    def get_config(self) -> Dict[str, Any]:
+        """Return configuration for serialization.
 
         Returns:
-            Dictionary containing the layer configuration.
+            Dictionary containing ALL __init__ parameters for proper serialization.
         """
         config = super().get_config()
         config.update({
