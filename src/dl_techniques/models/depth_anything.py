@@ -39,10 +39,10 @@ from typing import Dict, Tuple, Optional, Union, Any, List
 # ---------------------------------------------------------------------
 
 from ..utils.logger import logger
-from ..layers.dense_prediction_transformer_decoder import DPTDecoder
 from ..layers.strong_augmentation import StrongAugmentation
 from ..losses.affine_invariant_loss import AffineInvariantLoss
 from ..losses.feature_alignment_loss import FeatureAlignmentLoss
+from ..layers.dense_prediction_transformer_decoder import DPTDecoder
 
 # ---------------------------------------------------------------------
 

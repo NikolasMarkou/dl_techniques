@@ -14,8 +14,6 @@ from typing import Any, Dict, Tuple
 import keras
 import tensorflow as tf
 
-# Import the layers to test
-# Note: Assuming these imports work as per instructions
 from dl_techniques.layers.repmixer_block import RepMixerBlock, ConvolutionalStem
 
 
