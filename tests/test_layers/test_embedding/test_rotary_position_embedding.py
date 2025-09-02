@@ -8,7 +8,7 @@ from dl_techniques.layers.embedding.rotary_position_embedding import RotaryPosit
 
 
 class TestRotaryPositionEmbedding:
-    """Test suite for RotaryPositionEmbedding layer implementation."""
+    """Comprehensive test suite for RotaryPositionEmbedding layer implementation."""
 
     @pytest.fixture
     def input_tensor(self):
@@ -148,8 +148,9 @@ class TestRotaryPositionEmbedding:
         output = layer_instance(input_tensor)
 
         # Basic sanity checks
-        assert not np.any(np.isnan(output.numpy()))
-        assert not np.any(np.isinf(output.numpy()))
+        output_numpy = keras.ops.convert_to_numpy(output)
+        assert not np.any(np.isnan(output_numpy))
+        assert not np.any(np.isinf(output_numpy))
 
         # Check output shape
         assert output.shape == input_tensor.shape
@@ -157,12 +158,22 @@ class TestRotaryPositionEmbedding:
         # Test with training=False
         output_inference = layer_instance(input_tensor, training=False)
         assert output_inference.shape == input_tensor.shape
-        assert np.allclose(output.numpy(), output_inference.numpy())
+
+        # Use keras.ops.convert_to_numpy for comparison
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(output),
+            keras.ops.convert_to_numpy(output_inference),
+            rtol=1e-6, atol=1e-6
+        )
 
         # Test with training=True
         output_training = layer_instance(input_tensor, training=True)
         assert output_training.shape == input_tensor.shape
-        assert np.allclose(output.numpy(), output_training.numpy())
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(output),
+            keras.ops.convert_to_numpy(output_training),
+            rtol=1e-6, atol=1e-6
+        )
 
     def test_sequence_length_limits(self, layer_instance):
         """Test sequence length validation."""
@@ -199,7 +210,8 @@ class TestRotaryPositionEmbedding:
             output = layer(test_input)
 
             # Check output is valid
-            assert not np.any(np.isnan(output.numpy()))
+            output_numpy = keras.ops.convert_to_numpy(output)
+            assert not np.any(np.isnan(output_numpy))
             assert output.shape == test_input.shape
 
             # Check rope_dim calculation
@@ -227,7 +239,8 @@ class TestRotaryPositionEmbedding:
             output = layer(test_input)
 
             # Check output is valid
-            assert not np.any(np.isnan(output.numpy()))
+            output_numpy = keras.ops.convert_to_numpy(output)
+            assert not np.any(np.isnan(output_numpy))
             assert output.shape == test_input.shape
 
     def test_rotary_transformation_properties(self):
@@ -241,7 +254,8 @@ class TestRotaryPositionEmbedding:
         output = layer(test_input)
 
         # Basic checks
-        assert not np.any(np.isnan(output.numpy()))
+        output_numpy = keras.ops.convert_to_numpy(output)
+        assert not np.any(np.isnan(output_numpy))
         assert output.shape == test_input.shape
 
         # The rotated dimensions should have similar magnitude (rotations preserve norm)
@@ -254,7 +268,11 @@ class TestRotaryPositionEmbedding:
         output_norms = keras.ops.sqrt(keras.ops.sum(keras.ops.square(output_rope_part), axis=-1))
 
         # Allow small numerical differences
-        assert np.allclose(input_norms.numpy(), output_norms.numpy(), rtol=1e-5)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(input_norms),
+            keras.ops.convert_to_numpy(output_norms),
+            rtol=1e-5, atol=1e-5
+        )
 
     def test_position_dependency(self):
         """Test that output depends on position."""
@@ -274,17 +292,26 @@ class TestRotaryPositionEmbedding:
         pos_2 = output[0, 0, 2, :rope_dim]
 
         # Positions should be different (not all close)
-        assert not np.allclose(pos_0.numpy(), pos_1.numpy(), rtol=1e-3)
-        assert not np.allclose(pos_1.numpy(), pos_2.numpy(), rtol=1e-3)
+        pos_0_numpy = keras.ops.convert_to_numpy(pos_0)
+        pos_1_numpy = keras.ops.convert_to_numpy(pos_1)
+        pos_2_numpy = keras.ops.convert_to_numpy(pos_2)
+
+        assert not np.allclose(pos_0_numpy, pos_1_numpy, rtol=1e-3)
+        assert not np.allclose(pos_1_numpy, pos_2_numpy, rtol=1e-3)
 
         # But the non-rotated dimensions should remain the same
         if rope_dim < head_dim:
             pos_0_pass = output[0, 0, 0, rope_dim:]
             pos_1_pass = output[0, 0, 1, rope_dim:]
-            assert np.allclose(pos_0_pass.numpy(), pos_1_pass.numpy())
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(pos_0_pass),
+                keras.ops.convert_to_numpy(pos_1_pass),
+                rtol=1e-6, atol=1e-6
+            )
 
-    def test_serialization(self):
-        """Test serialization and deserialization of the layer."""
+    def test_serialization_cycle(self):
+        """Test full serialization cycle for the layer."""
+        # Create original layer with custom config
         original_layer = RotaryPositionEmbedding(
             head_dim=128,
             max_seq_len=1024,
@@ -292,30 +319,32 @@ class TestRotaryPositionEmbedding:
             rope_percentage=0.25,
         )
 
-        # Build the layer
-        input_shape = (None, 8, 256, 128)
-        original_layer.build(input_shape)
+        # Create test input and get original prediction
+        test_input = keras.random.normal([2, 4, 100, 128])
+        original_output = original_layer(test_input)
 
-        # Get configs
+        # Test get_config completeness
         config = original_layer.get_config()
-        build_config = original_layer.get_build_config()
 
-        # Recreate the layer
+        # Verify all parameters are in config
+        assert config['head_dim'] == 128
+        assert config['max_seq_len'] == 1024
+        assert config['rope_theta'] == 50000.0
+        assert config['rope_percentage'] == 0.25
+
+        # Recreate layer from config
         recreated_layer = RotaryPositionEmbedding.from_config(config)
-        recreated_layer.build_from_config(build_config)
 
-        # Check configuration matches
-        assert recreated_layer.head_dim == original_layer.head_dim
-        assert recreated_layer.max_seq_len == original_layer.max_seq_len
-        assert recreated_layer.rope_theta == original_layer.rope_theta
-        assert recreated_layer.rope_percentage == original_layer.rope_percentage
-        assert recreated_layer.rope_dim == original_layer.rope_dim
+        # Test that recreated layer produces same output
+        recreated_output = recreated_layer(test_input)
 
-        # Check weights match (shapes and values)
-        assert len(recreated_layer.weights) == len(original_layer.weights)
-        for w1, w2 in zip(original_layer.weights, recreated_layer.weights):
-            assert w1.shape == w2.shape
-            assert np.allclose(w1.numpy(), w2.numpy())
+        # Check outputs match
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(original_output),
+            keras.ops.convert_to_numpy(recreated_output),
+            rtol=1e-6, atol=1e-6,
+            err_msg="Outputs should match after serialization"
+        )
 
     def test_model_integration(self, input_tensor):
         """Test the layer in a model context."""
@@ -339,8 +368,8 @@ class TestRotaryPositionEmbedding:
         y_pred = model(input_tensor, training=False)
         assert y_pred.shape == (input_tensor.shape[0], 10)
 
-    def test_model_save_load(self, input_tensor):
-        """Test saving and loading a model with the RoPE layer."""
+    def test_model_save_load_cycle(self, input_tensor):
+        """Test complete save/load cycle for model with RoPE layer."""
         # Create a model with the RoPE layer
         inputs = keras.Input(shape=input_tensor.shape[1:])
         x = RotaryPositionEmbedding(head_dim=64, max_seq_len=512, name="rope_layer")(inputs)
@@ -362,18 +391,17 @@ class TestRotaryPositionEmbedding:
             model.save(model_path)
 
             # Load the model
-            loaded_model = keras.models.load_model(
-                model_path,
-                custom_objects={
-                    "RotaryPositionEmbedding": RotaryPositionEmbedding
-                }
-            )
+            loaded_model = keras.models.load_model(model_path)
 
             # Generate prediction with loaded model
             loaded_prediction = loaded_model.predict(input_tensor, verbose=0)
 
             # Check predictions match
-            assert np.allclose(original_prediction, loaded_prediction, rtol=1e-5)
+            np.testing.assert_allclose(
+                original_prediction, loaded_prediction,
+                rtol=1e-5, atol=1e-5,
+                err_msg="Predictions should match after model save/load"
+            )
 
             # Check layer type is preserved
             assert isinstance(loaded_model.get_layer("rope_layer"), RotaryPositionEmbedding)
@@ -392,12 +420,13 @@ class TestRotaryPositionEmbedding:
             keras.random.normal((batch_size, num_heads, seq_len, head_dim)) * 100  # Large random values
         ]
 
-        for test_input in test_cases:
+        for i, test_input in enumerate(test_cases):
             output = layer(test_input)
 
             # Check for NaN/Inf values
-            assert not np.any(np.isnan(output.numpy())), "NaN values detected in output"
-            assert not np.any(np.isinf(output.numpy())), "Inf values detected in output"
+            output_numpy = keras.ops.convert_to_numpy(output)
+            assert not np.any(np.isnan(output_numpy)), f"NaN values detected in test case {i}"
+            assert not np.any(np.isinf(output_numpy)), f"Inf values detected in test case {i}"
 
     def test_cache_building(self):
         """Test that cos/sin cache is built correctly."""
@@ -413,8 +442,8 @@ class TestRotaryPositionEmbedding:
         assert layer.sin_cached.shape == expected_shape
 
         # Check that cached values are reasonable
-        cos_values = layer.cos_cached.numpy()
-        sin_values = layer.sin_cached.numpy()
+        cos_values = keras.ops.convert_to_numpy(layer.cos_cached)
+        sin_values = keras.ops.convert_to_numpy(layer.sin_cached)
 
         # All values should be in [-1, 1] range
         assert np.all(cos_values >= -1.0) and np.all(cos_values <= 1.0)
@@ -438,17 +467,56 @@ class TestRotaryPositionEmbedding:
         # Should not crash and should return input unchanged
         output = layer(test_input)
         assert output.shape == test_input.shape
-        # When rope_dim = 0, output should be identical to input
-        assert np.allclose(output.numpy(), test_input.numpy())
 
-    def test_odd_head_dim_warning(self):
-        """Test that odd head_dim produces a warning."""
-        # This test would need to capture logging output in a real implementation
-        # For now, just test that it doesn't crash
+        # When rope_dim = 0, output should be identical to input
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(output),
+            keras.ops.convert_to_numpy(test_input),
+            rtol=1e-6, atol=1e-6
+        )
+
+    def test_odd_head_dim_handling(self):
+        """Test that odd head_dim is handled correctly."""
+        # This should work without crashing (warning may be logged)
         layer = RotaryPositionEmbedding(head_dim=63, max_seq_len=128)  # Odd head_dim
 
         test_input = keras.random.normal([2, 4, 50, 63])
         output = layer(test_input)
 
         assert output.shape == test_input.shape
-        assert not np.any(np.isnan(output.numpy()))
+        output_numpy = keras.ops.convert_to_numpy(output)
+        assert not np.any(np.isnan(output_numpy))
+
+    def test_rope_dim_adjustment_for_even(self):
+        """Test that rope_dim is adjusted to be even."""
+        # Test case where rope_percentage results in odd rope_dim
+        layer = RotaryPositionEmbedding(
+            head_dim=65,  # Odd head_dim
+            max_seq_len=128,
+            rope_percentage=0.5  # 65 * 0.5 = 32.5 -> 32 (even)
+        )
+
+        # rope_dim should be adjusted to be even
+        assert layer.rope_dim % 2 == 0
+
+        test_input = keras.random.normal([2, 4, 50, 65])
+        output = layer(test_input)
+
+        assert output.shape == test_input.shape
+        output_numpy = keras.ops.convert_to_numpy(output)
+        assert not np.any(np.isnan(output_numpy))
+
+    def test_different_sequence_lengths(self):
+        """Test layer with different sequence lengths."""
+        layer = RotaryPositionEmbedding(head_dim=64, max_seq_len=512)
+
+        sequence_lengths = [1, 10, 50, 100, 256, 511]  # Various lengths < max_seq_len
+
+        for seq_len in sequence_lengths:
+            test_input = keras.random.normal([2, 4, seq_len, 64])
+            output = layer(test_input)
+
+            assert output.shape == test_input.shape
+            output_numpy = keras.ops.convert_to_numpy(output)
+            assert not np.any(np.isnan(output_numpy))
+            assert not np.any(np.isinf(output_numpy))
