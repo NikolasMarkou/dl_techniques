@@ -8,8 +8,9 @@ from typing import Optional, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from ..utils.logger import logger
-from ..layers.transformer import TransformerLayer
-from ..layers.embedding.rotary_position_embedding import RotaryPositionEmbedding
+from dl_techniques.layers.ffn.geglu_ffn import GeGLUFFN
+from dl_techniques.layers.transformer import TransformerLayer
+from dl_techniques.layers.embedding.rotary_position_embedding import RotaryPositionEmbedding
 
 
 # ---------------------------------------------------------------------
