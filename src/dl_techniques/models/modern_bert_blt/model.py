@@ -42,7 +42,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from .components import BertBltEmbeddings
+from .components import ModernBertBltEmbeddings
 from ..modern_bert.components import ModernBertEncoderLayer
 
 # ---------------------------------------------------------------------
@@ -141,7 +141,7 @@ class ModernBertBLT(keras.Model):
         # --- Layer Definition ---
 
         # BLT Embeddings (without absolute position embeddings)
-        self.embeddings = BertBltEmbeddings(
+        self.embeddings = ModernBertBltEmbeddings(
             vocab_size=self.vocab_size,
             hidden_size=self.hidden_size,
             # -----------------------------------------------------------------

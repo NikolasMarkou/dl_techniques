@@ -1,12 +1,7 @@
 import keras
-from keras import ops, initializers, layers
+from keras import ops
 from typing import Optional, Any, Dict, Tuple, List
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from ..modern_bert.components import ModernBertEncoderLayer
 
 # ---------------------------------------------------------------------
 # Component 1: Byte-Level Tokenizer
@@ -54,6 +49,8 @@ class ByteTokenizer(keras.layers.Layer):
         self.bos_token_id = 1
         self.eos_token_id = 2
         self.unk_token_id = 3
+        # FIX: This layer has no weights and should not be trainable.
+        self.trainable = False
 
     def text_to_bytes(
         self, text: str, add_bos: bool, add_eos: bool
@@ -63,7 +60,8 @@ class ByteTokenizer(keras.layers.Layer):
         if add_bos:
             tokens = [self.bos_token_id] + tokens
         if add_eos:
-            tokens = [self.eos_token_id] + tokens
+            # FIX: Use append to add the token to the end, not the beginning.
+            tokens.append(self.eos_token_id)
         return tokens
 
     def tokens_to_text(self, token_ids: List[int]) -> str:
@@ -215,7 +213,7 @@ class HashNGramEmbedding(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class BertBltEmbeddings(keras.layers.Layer):
+class ModernBertBltEmbeddings(keras.layers.Layer):
     """
     Combines byte, positional, and optional hash n-gram embeddings.
 
