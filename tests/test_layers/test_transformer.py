@@ -100,9 +100,11 @@ class TestTransformerLayer:
     # ===============================================
     # 2. Forward Pass and Core Behavior Tests
     # ===============================================
-    @pytest.mark.parametrize("attention_type", ['multi_head_attention', 'window_attention', 'group_query_attention',
+    @pytest.mark.parametrize("attention_type", ['multi_head_attention',
+                                                'window_attention',
+                                                'group_query_attention',
                                                 'differential_attention'])
-    @pytest.mark.parametrize("ffn_type", ['mlp', 'swiglu', 'differential', 'glu', 'residual', 'swin_mlp'])
+    @pytest.mark.parametrize("ffn_type", ['mlp', 'swiglu', 'differential', 'geglu', 'glu', 'residual', 'swin_mlp'])
     @pytest.mark.parametrize("normalization_position", ['pre', 'post'])
     def test_forward_pass_combinations(self, attention_type, ffn_type, normalization_position, sample_input):
         """Tests the forward pass across a comprehensive matrix of configurations."""
@@ -168,8 +170,11 @@ class TestTransformerLayer:
     # ===============================================
     # 3. Serialization Test (The Gold Standard)
     # ===============================================
-    @pytest.mark.parametrize("attention_type", ['multi_head_attention', 'window_attention', 'group_query_attention'])
-    @pytest.mark.parametrize("ffn_type", ['mlp', 'swiglu'])
+    @pytest.mark.parametrize("attention_type", ['multi_head_attention',
+                                                'window_attention',
+                                                'group_query_attention',
+                                                'differential_attention'])
+    @pytest.mark.parametrize("ffn_type", ['mlp', 'swiglu', 'differential', 'geglu', 'glu', 'residual', 'swin_mlp'])
     @pytest.mark.parametrize("normalization_position", ['pre', 'post'])
     def test_full_serialization_cycle(self, attention_type, ffn_type, normalization_position, sample_input):
         """Performs a full model save/load cycle, the most reliable test for serialization."""

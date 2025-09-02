@@ -11,61 +11,6 @@ A key feature of this implementation is its flexibility. It is designed to serve
 versatile component for research and development, allowing for easy experimentation
 with different attention mechanisms, normalization techniques and feed-forward network architectures.
 
-Enhanced with configurable Stochastic Depth for improved training of deep networks.
-
-Architectural Design (Configurable Normalization):
-
-This implementation supports both "post-normalization" (Post-LN) and "pre-normalization"
-(Pre-LN) architectures, configurable via the `normalization_position` parameter.
-
-**Post-Normalization (Post-LN)**: Used in the original "Attention Is All You Need" paper.
-- Operational flow: `output = Norm(SubLayer(x) + x)`
-- Flow: SubLayer -> Add residual -> Normalize
-
-**Pre-Normalization (Pre-LN)**: Often more stable for training deep networks.
-- Operational flow: `output = x + SubLayer(Norm(x))`
-- Flow: Normalize -> SubLayer -> Add residual
-
-The full flow through the layer depends on normalization position:
-
-**Post-LN Flow:**
-1.  **Self-Attention Block:** Attention(x) -> StochasticDepth -> Add residual -> LayerNorm
-2.  **Feed-Forward Block:** FFN(attn_out) -> StochasticDepth -> Add residual -> LayerNorm
-
-**Pre-LN Flow:**
-1.  **Self-Attention Block:** LayerNorm(x) -> Attention -> StochasticDepth -> Add residual
-2.  **Feed-Forward Block:** LayerNorm(attn_out) -> FFN -> StochasticDepth -> Add residual
-
-**Attention Mechanism Options:**
-The attention mechanism can be one of several configurable architectures:
-- 'multi_head_attention': Standard multi-head self-attention (default)
-- 'window_attention': Windowed attention for efficient processing
-- 'group_query_attention': Grouped query attention for reduced parameters
-- 'differential_attention': Differential attention with noise cancellation
-- Custom attention layers can be easily added
-
-**Feed-Forward Network Options:**
-The FFN can be one of several configurable architectures:
-- 'mlp': Standard MLP with intermediate expansion
-- 'swiglu': SwiGLU activation with gating mechanism
-- 'differential': Differential FFN with separate positive/negative pathways
-- 'glu': Gated Linear Unit with sigmoid gating
-- 'residual': Residual block with skip connections
-- 'swin_mlp': Swin Transformer MLP variant
-
-Configurable Components:
-
-Major strengths of this layer include:
-- `attention_type`: Choose from various attention mechanisms
-- `attention_args`: Dictionary of custom arguments for attention layer
-- `normalization_type`: Easily swap normalization functions (layer_norm, rms_norm, etc.)
-- `normalization_position`: Choose between post-LN and pre-LN architectures
-- `ffn_type`: Choose from various feed-forward architectures for different use cases
-- `ffn_args`: Dictionary of custom arguments for FFN layer
-- `use_stochastic_depth`: Enable stochastic depth regularization for deep networks
-- `stochastic_depth_rate`: Control the drop path rate for stochastic depth
-- Full parameter control for both attention and FFN components
-
 This configurability makes the layer an excellent tool for architectural experimentation
 and for building custom Transformer variants.
 """
@@ -86,6 +31,7 @@ from .activations.dynamic_tanh import DynamicTanh
 from .ffn.mlp import MLPBlock
 from .ffn.glu_ffn import GLUFFN
 from .ffn.swin_mlp import SwinMLP
+from .ffn.geglu_ffn import GeGLUFFN
 from .ffn.swiglu_ffn import SwiGLUFFN
 from .ffn.diff_ffn import DifferentialFFN
 from .ffn.residual_block import ResidualBlock
@@ -99,7 +45,7 @@ from .attention.differential_attention import DifferentialMultiHeadAttention
 # ---------------------------------------------------------------------
 
 NormalizationPosition = Literal['post', 'pre']
-FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'residual', 'swin_mlp']
+FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp']
 NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'dynamic_tanh']
 AttentionType = Literal['multi_head_attention', 'window_attention', 'group_query_attention', 'differential_attention']
 
@@ -148,6 +94,7 @@ class TransformerLayer(keras.layers.Layer):
             - 'swiglu': SwiGLU activation with gating mechanism
             - 'differential': Differential FFN with separate pathways
             - 'glu': Gated Linear Unit with sigmoid gating
+            - 'geglu': GELU-based Gated Linear Unit (GeGLU) Feed Forward Network
             - 'residual': Residual block with skip connections
             - 'swin_mlp': Swin Transformer MLP variant
         ffn_args: Optional dictionary of custom arguments for FFN layer.
@@ -396,7 +343,7 @@ class TransformerLayer(keras.layers.Layer):
                 'ffn_multiple_of': self.ffn_multiple_of,
                 'name': name
             }
-        elif self.ffn_type in ['differential', 'glu', 'residual', 'swin_mlp']:
+        elif self.ffn_type in ['differential', 'geglu', 'glu', 'residual', 'swin_mlp']:
             default_params = {
                 'hidden_dim': self.intermediate_size,
                 'output_dim': self.hidden_size,
@@ -421,6 +368,8 @@ class TransformerLayer(keras.layers.Layer):
                 return DifferentialFFN(**params)
             elif self.ffn_type == 'glu':
                 return GLUFFN(**params)
+            elif self.ffn_type == 'geglu':
+                return GeGLUFFN(**params)
             elif self.ffn_type == 'residual':
                 return ResidualBlock(**params)
             elif self.ffn_type == 'swin_mlp':
