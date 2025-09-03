@@ -217,23 +217,19 @@ class GeGLUFFN(keras.layers.Layer):
         if input_shape[-1] is None:
             raise ValueError("Last dimension of input must be defined")
 
-        try:
-            # Build sub-layers in computational order
-            self.input_proj.build(input_shape)
+        # Build sub-layers in computational order
+        self.input_proj.build(input_shape)
 
-            # Shape after input projection and splitting
-            intermediate_shape = (*input_shape[:-1], self.hidden_dim)
+        # Shape after input projection and splitting
+        intermediate_shape = (*input_shape[:-1], self.hidden_dim)
 
-            # Build remaining layers
-            self.dropout.build(intermediate_shape)
-            self.output_proj.build(intermediate_shape)
+        # Build remaining layers
+        self.dropout.build(intermediate_shape)
+        self.output_proj.build(intermediate_shape)
 
-            # Always call parent build at the end
-            super().build(input_shape)
+        # Always call parent build at the end
+        super().build(input_shape)
 
-        except Exception as e:
-            logger.error(f"Failed to build GeGLUFFN: {e}")
-            raise ValueError(f"Failed to build GeGLUFFN: {e}")
 
     def call(
         self,

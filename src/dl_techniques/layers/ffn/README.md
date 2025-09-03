@@ -44,7 +44,7 @@ mlp = create_ffn_layer('mlp', hidden_dim=512, output_dim=256)
 # Create modern SwiGLU for transformers
 swiglu = create_ffn_layer(
     'swiglu',
-    d_model=768,
+    output_dim=768,
     ffn_expansion_factor=4,
     dropout_rate=0.1
 )
@@ -88,7 +88,7 @@ from dl_techniques.layers.ffn import validate_ffn_config
 
 # Validate configuration before creation
 try:
-    validate_ffn_config('swiglu', d_model=768, ffn_expansion_factor=4)
+    validate_ffn_config('swiglu', output_dim=768, ffn_expansion_factor=4)
     print("Configuration is valid")
 except ValueError as e:
     print(f"Validation error: {e}")
@@ -111,13 +111,13 @@ mlp = create_ffn_layer(
 ```
 
 ### SwiGLUFFN
-**Required:** `d_model`  
+**Required:** `output_dim`  
 **Optional:** `ffn_expansion_factor` (default: 4), `ffn_multiple_of` (default: 256), `dropout_rate` (default: 0.0), `use_bias` (default: False)
 
 ```python
 swiglu = create_ffn_layer(
     'swiglu',
-    d_model=768,
+    output_dim=768,
     ffn_expansion_factor=8,
     ffn_multiple_of=128,
     dropout_rate=0.1
@@ -204,7 +204,7 @@ from dl_techniques.layers.ffn import MLPBlock, SwiGLUFFN, GeGLUFFN
 
 # Direct instantiation (bypasses factory validation and defaults)
 mlp = MLPBlock(hidden_dim=512, output_dim=256, activation='relu')
-swiglu = SwiGLUFFN(d_model=768, ffn_expansion_factor=4)
+swiglu = SwiGLUFFN(output_dim=768, ffn_expansion_factor=4)
 geglu = GeGLUFFN(hidden_dim=2048, output_dim=768)
 ```
 
@@ -305,7 +305,7 @@ Example configuration file:
 {
     "ffn": {
         "type": "swiglu",
-        "d_model": 768,
+        "output_dim": 768,
         "ffn_expansion_factor": 4,
         "dropout_rate": 0.1,
         "name": "transformer_ffn"
@@ -327,7 +327,7 @@ create_ffn_layer('mlp', hidden_dim=512)  # Missing output_dim
 ```python
 # Will raise ValueError for invalid ranges
 create_ffn_layer('mlp', hidden_dim=-100, output_dim=256)  # Negative hidden_dim
-create_ffn_layer('swiglu', d_model=768, dropout_rate=1.5)  # Invalid dropout rate
+create_ffn_layer('swiglu', output_dim=768, dropout_rate=1.5)  # Invalid dropout rate
 ```
 
 ### Activation Function Validation
@@ -344,7 +344,7 @@ The factory provides detailed logging for debugging:
 Shows all parameters passed to each layer:
 ```
 INFO Creating swiglu FFN layer with parameters:
-INFO   d_model: 768
+INFO   output_dim: 768
 INFO   dropout_rate: 0.1
 INFO   ffn_expansion_factor: 4
 INFO   name: 'ffn_layer'
@@ -400,7 +400,7 @@ def create_production_ffn(ffn_type, **params):
 # Store FFN configurations for experiment tracking
 ffn_configs = {
     'baseline': {'type': 'mlp', 'hidden_dim': 2048, 'output_dim': 768},
-    'modern': {'type': 'swiglu', 'd_model': 768, 'ffn_expansion_factor': 4},
+    'modern': {'type': 'swiglu', 'output_dim': 768, 'ffn_expansion_factor': 4},
     'efficient': {'type': 'glu', 'hidden_dim': 1024, 'output_dim': 768}
 }
 
@@ -464,7 +464,7 @@ def create_adaptive_ffn(model_size, efficiency_priority=False):
     if efficiency_priority:
         return create_ffn_layer('glu', hidden_dim=512, output_dim=256)
     elif model_size == 'large':
-        return create_ffn_layer('swiglu', d_model=1024, ffn_expansion_factor=8)
+        return create_ffn_layer('swiglu', output_dim=1024, ffn_expansion_factor=8)
     else:
         return create_ffn_layer('mlp', hidden_dim=2048, output_dim=768)
 ```
@@ -475,16 +475,16 @@ def create_adaptive_ffn(model_size, efficiency_priority=False):
 class MultiFFNLayer(keras.layers.Layer):
     """Layer using multiple FFN types in parallel."""
     
-    def __init__(self, d_model, **kwargs):
+    def __init__(self, output_dim, **kwargs):
         super().__init__(**kwargs)
-        self.d_model = d_model
+        self.output_dim = output_dim
         
         # Create multiple FFN branches
-        self.ffn_standard = create_ffn_layer('mlp', hidden_dim=d_model*4, output_dim=d_model)
-        self.ffn_gated = create_ffn_layer('geglu', hidden_dim=d_model*4, output_dim=d_model)
-        self.ffn_residual = create_ffn_layer('residual', hidden_dim=d_model*2, output_dim=d_model)
+        self.ffn_standard = create_ffn_layer('mlp', hidden_dim=output_dim*4, output_dim=output_dim)
+        self.ffn_gated = create_ffn_layer('geglu', hidden_dim=output_dim*4, output_dim=output_dim)
+        self.ffn_residual = create_ffn_layer('residual', hidden_dim=output_dim*2, output_dim=output_dim)
         
-        self.output_projection = keras.layers.Dense(d_model)
+        self.output_projection = keras.layers.Dense(output_dim)
     
     def call(self, inputs):
         # Process through all FFN branches
@@ -528,7 +528,7 @@ Literal type defining valid FFN type strings: `'mlp'`, `'swiglu'`, `'differentia
 if ffn_type == 'mlp':
     ffn = MLPBlock(hidden_dim=hidden_dim, output_dim=output_dim, activation=activation)
 elif ffn_type == 'swiglu':
-    ffn = SwiGLUFFN(d_model=d_model, ffn_expansion_factor=expansion)
+    ffn = SwiGLUFFN(output_dim=output_dim, ffn_expansion_factor=expansion)
 # ... many more cases
 ```
 

@@ -59,7 +59,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
     'swiglu': {
         'class': SwiGLUFFN,
         'description': 'SwiGLU Feed-Forward Network with gating mechanism',
-        'required_params': ['d_model'],
+        'required_params': ['output_dim'],
         'optional_params': {
             'ffn_expansion_factor': 4,
             'ffn_multiple_of': 256,
@@ -242,10 +242,10 @@ def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:
         if output_dim <= 0:
             raise ValueError(f"output_dim must be positive, got {output_dim}")
 
-    if 'd_model' in kwargs:
-        d_model = kwargs['d_model']
-        if d_model <= 0:
-            raise ValueError(f"d_model must be positive, got {d_model}")
+    if 'output_dim' in kwargs:
+        output_dim = kwargs['output_dim']
+        if output_dim <= 0:
+            raise ValueError(f"output_dim must be positive, got {output_dim}")
 
     # Validate SwiGLU specific parameters
     if ffn_type == 'swiglu':
@@ -322,7 +322,7 @@ def create_ffn_layer(
         # Create SwiGLU with custom parameters
         swiglu = create_ffn_layer(
             'swiglu',
-            d_model=768,
+            output_dim=768,
             ffn_expansion_factor=4,
             dropout_rate=0.1,
             name='swiglu_ffn'

@@ -27,7 +27,7 @@ class SwiGLUFFN(keras.layers.Layer):
         1. Projects input to hidden dimension using two parallel Dense layers
         2. Applies SiLU activation to gate projection
         3. Element-wise multiplication of activated gate and up projection
-        4. Projects back to model dimension
+        4. Projects back to output dimension
         5. Optional dropout for regularization
 
     Mathematical formulation:
@@ -39,10 +39,10 @@ class SwiGLUFFN(keras.layers.Layer):
     Where ⊗ denotes element-wise multiplication.
 
     Args:
-        d_model: Integer, model dimension (input/output feature size).
-            Must be positive.
+        output_dim: Integer, output dimension (model dimension).
+            Must be positive. This determines both input and output feature size.
         ffn_expansion_factor: Integer, factor by which to expand the hidden
-            dimension relative to d_model. Must be positive. Defaults to 4.
+            dimension relative to output_dim. Must be positive. Defaults to 4.
         ffn_multiple_of: Integer, round hidden dimension to this multiple
             for hardware efficiency. Must be positive. Defaults to 256.
         dropout_rate: Float, dropout probability applied to the output.
@@ -58,26 +58,26 @@ class SwiGLUFFN(keras.layers.Layer):
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
-        N-D tensor with shape: (..., d_model)
+        N-D tensor with shape: (..., output_dim)
 
     Output shape:
-        N-D tensor with shape: (..., d_model)
+        N-D tensor with shape: (..., output_dim)
 
     Attributes:
         gate_proj: Dense layer for gate projection with SiLU activation.
         up_proj: Dense layer for up projection (linear).
-        down_proj: Dense layer for down projection back to d_model.
+        down_proj: Dense layer for down projection back to output_dim.
         dropout: Dropout layer for regularization.
         hidden_dim: Computed hidden dimension after applying expansion and rounding.
 
     Example:
         ```python
         # Basic usage
-        ffn = SwiGLUFFN(d_model=512)
+        ffn = SwiGLUFFN(output_dim=512)
 
         # Custom configuration
         ffn = SwiGLUFFN(
-            d_model=768,
+            output_dim=768,
             ffn_expansion_factor=8,  # Larger expansion
             ffn_multiple_of=128,     # Hardware-friendly multiple
             dropout_rate=0.1,        # Regularization
@@ -85,10 +85,10 @@ class SwiGLUFFN(keras.layers.Layer):
         )
 
         # In a transformer block
-        inputs = keras.Input(shape=(seq_len, d_model))
+        inputs = keras.Input(shape=(seq_len, output_dim))
         x = MultiHeadAttention(...)(inputs)
         x = keras.layers.LayerNormalization()(inputs + x)
-        ffn_out = SwiGLUFFN(d_model=d_model)(x)
+        ffn_out = SwiGLUFFN(output_dim=output_dim)(x)
         outputs = keras.layers.LayerNormalization()(x + ffn_out)
         model = keras.Model(inputs, outputs)
         ```
@@ -99,7 +99,7 @@ class SwiGLUFFN(keras.layers.Layer):
         - Touvron, H., et al. (2023). "LLaMA: Open and Efficient Foundation Language Models."
 
     Raises:
-        ValueError: If d_model, ffn_expansion_factor, or ffn_multiple_of are not positive,
+        ValueError: If output_dim, ffn_expansion_factor, or ffn_multiple_of are not positive,
                    or if dropout_rate is not in [0, 1].
 
     Note:
@@ -111,7 +111,7 @@ class SwiGLUFFN(keras.layers.Layer):
 
     def __init__(
             self,
-            d_model: int,
+            output_dim: int,
             ffn_expansion_factor: int = 4,
             ffn_multiple_of: int = 256,
             dropout_rate: float = 0.0,
@@ -125,10 +125,10 @@ class SwiGLUFFN(keras.layers.Layer):
         super().__init__(**kwargs)
 
         # Validate inputs
-        self._validate_inputs(d_model, ffn_expansion_factor, ffn_multiple_of, dropout_rate)
+        self._validate_inputs(output_dim, ffn_expansion_factor, ffn_multiple_of, dropout_rate)
 
         # Store configuration
-        self.d_model = d_model
+        self.output_dim = output_dim
         self.ffn_expansion_factor = ffn_expansion_factor
         self.ffn_multiple_of = ffn_multiple_of
         self.dropout_rate = dropout_rate
@@ -166,9 +166,9 @@ class SwiGLUFFN(keras.layers.Layer):
                 name='up_proj'
             )
 
-            # Down projection: back to model dimension
+            # Down projection: back to output dimension
             self.down_proj = keras.layers.Dense(
-                self.d_model,
+                self.output_dim,
                 use_bias=self.use_bias,
                 kernel_initializer=self.kernel_initializer,
                 bias_initializer=self.bias_initializer,
@@ -193,12 +193,12 @@ class SwiGLUFFN(keras.layers.Layer):
                 f"incompatible parameters or missing dependencies. Original error: {e}"
             )
 
-        logger.info(f"SwiGLUFFN initialized: d_model={d_model}, "
+        logger.info(f"SwiGLUFFN initialized: output_dim={output_dim}, "
                    f"hidden_dim={self.hidden_dim}, expansion_factor={ffn_expansion_factor}")
 
     def _validate_inputs(
             self,
-            d_model: int,
+            output_dim: int,
             ffn_expansion_factor: int,
             ffn_multiple_of: int,
             dropout_rate: float
@@ -207,7 +207,7 @@ class SwiGLUFFN(keras.layers.Layer):
         Validate initialization parameters.
 
         Args:
-            d_model: Model dimension to validate.
+            output_dim: Output dimension to validate.
             ffn_expansion_factor: Expansion factor to validate.
             ffn_multiple_of: Multiple constraint to validate.
             dropout_rate: Dropout rate to validate.
@@ -215,8 +215,8 @@ class SwiGLUFFN(keras.layers.Layer):
         Raises:
             ValueError: If any parameter is invalid.
         """
-        if d_model <= 0:
-            raise ValueError(f"d_model must be positive, got {d_model}")
+        if output_dim <= 0:
+            raise ValueError(f"output_dim must be positive, got {output_dim}")
         if ffn_expansion_factor <= 0:
             raise ValueError(f"ffn_expansion_factor must be positive, got {ffn_expansion_factor}")
         if ffn_multiple_of <= 0:
@@ -229,14 +229,14 @@ class SwiGLUFFN(keras.layers.Layer):
         Calculate hidden dimension using the 2/3 rule from PaLM paper.
 
         The hidden dimension is calculated as:
-        1. Start with d_model * expansion_factor * 2/3
+        1. Start with output_dim * expansion_factor * 2/3
         2. Round up to the nearest multiple of ffn_multiple_of
 
         Returns:
             Calculated hidden dimension as integer.
         """
         # Apply 2/3 rule for optimal parameter allocation
-        hidden_dim = int(self.d_model * self.ffn_expansion_factor * 2 / 3)
+        hidden_dim = int(self.output_dim * self.ffn_expansion_factor * 2 / 3)
 
         # Round up to multiple for hardware efficiency
         hidden_dim = self.ffn_multiple_of * (
@@ -282,15 +282,15 @@ class SwiGLUFFN(keras.layers.Layer):
         1. Parallel projections to hidden dimension (gate and up)
         2. Apply SiLU activation to gate projection
         3. Element-wise multiplication of activated gate and up projection
-        4. Project back to model dimension
+        4. Project back to output dimension
         5. Apply dropout if configured
 
         Args:
-            inputs: Input tensor of shape (..., d_model).
+            inputs: Input tensor of shape (..., output_dim).
             training: Boolean indicating training mode for dropout.
 
         Returns:
-            Output tensor of shape (..., d_model).
+            Output tensor of shape (..., output_dim).
         """
         # SwiGLU formula: SiLU(xW₁ + b₁) ⊗ (xW₂ + b₂)
         # where ⊗ denotes element-wise multiplication
@@ -305,7 +305,7 @@ class SwiGLUFFN(keras.layers.Layer):
         # Element-wise multiplication (gating mechanism)
         hidden = gate_activated * up
 
-        # Project back to model dimension
+        # Project back to output dimension
         output = self.down_proj(hidden)
 
         # Apply dropout if specified
@@ -336,7 +336,7 @@ class SwiGLUFFN(keras.layers.Layer):
         """
         config = super().get_config()
         config.update({
-            "d_model": self.d_model,
+            "output_dim": self.output_dim,
             "ffn_expansion_factor": self.ffn_expansion_factor,
             "ffn_multiple_of": self.ffn_multiple_of,
             "dropout_rate": self.dropout_rate,
