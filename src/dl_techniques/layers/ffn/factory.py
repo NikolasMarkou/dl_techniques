@@ -141,7 +141,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'use_bias': True,
             'out_dim': None,
             'activation': 'gelu',
-            'drop_rate': 0.0,
+            'dropout_rate': 0.0,
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',
             'kernel_regularizer': None,
