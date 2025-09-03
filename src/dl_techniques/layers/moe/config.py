@@ -1,113 +1,96 @@
 """
 Configuration classes for Mixture of Experts (MoE) models.
 
-This module provides comprehensive configuration dataclasses for MoE components,
-enabling flexible and reproducible model architectures.
+This module provides simplified configuration dataclasses for MoE components,
+focused exclusively on FFN experts and leveraging the dl_techniques FFN factory.
 """
 
 import keras
 from dataclasses import dataclass, field
 from typing import Optional, Union, Dict, Any, Literal
 
-# Import FFNType for consistency with TransformerLayer
-FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp']
-
 
 @dataclass
 class ExpertConfig:
     """
-    Configuration for individual expert networks in MoE models.
+    Simplified configuration for FFN expert networks in MoE models.
 
-    This dataclass defines the architecture and behavior of expert networks,
-    supporting various expert types including FFN, attention, and convolutional experts.
+    This dataclass defines FFN expert configuration by leveraging the existing
+    dl_techniques FFN factory system, eliminating parameter duplication and
+    ensuring consistency with the broader framework.
 
     Args:
-        expert_type: Type of expert network ('ffn', 'attention', 'conv2d').
-        hidden_dim: Hidden dimension size for expert networks.
-        output_dim: Output dimension size. If None, defaults to input dimension.
-        activation: Activation function for expert networks.
-        dropout_rate: Dropout probability for regularization.
-        use_bias: Whether to include bias terms in linear layers.
-        kernel_initializer: Weight initialization strategy.
-        bias_initializer: Bias initialization strategy.
-        kernel_regularizer: Regularization applied to weights.
-        bias_regularizer: Regularization applied to biases.
+        ffn_config: Dictionary containing FFN configuration that will be passed
+            directly to the FFN factory's create_ffn_from_config() function.
+            This should include 'type' and any FFN-specific parameters.
+            Example: {"type": "swiglu", "d_model": 768, "ffn_expansion_factor": 4}
 
-        # FFN-specific parameters
-        ffn_type: The type of FFN architecture to use when expert_type is 'ffn'.
-            Follows the same options as TransformerLayer (e.g., 'mlp', 'swiglu').
-        intermediate_size: Intermediate layer size for FFN experts.
-        ffn_expansion_factor: Expansion factor for SwiGLU FFN.
-        ffn_multiple_of: Multiple constraint for SwiGLU FFN.
-
-        # Attention-specific parameters
-        num_heads: Number of attention heads for attention experts.
-        head_dim: Dimension per attention head.
-
-        # Conv2D-specific parameters
-        filters: Number of filters for convolutional experts.
-        kernel_size: Kernel size for convolutional experts.
-        strides: Stride configuration for convolutional experts.
-        padding: Padding configuration for convolutional experts.
+        use_bias: Whether to include bias terms in any additional linear layers
+            (not part of the FFN itself). Defaults to True.
+        kernel_initializer: Weight initialization strategy for any additional layers.
+        bias_initializer: Bias initialization strategy for any additional layers.
+        kernel_regularizer: Regularization applied to weights in additional layers.
+        bias_regularizer: Regularization applied to biases in additional layers.
 
     Example:
         ```python
-        # MoE with SwiGLU FFN experts
-        ffn_config = ExpertConfig(
-            expert_type='ffn',
-            ffn_type='swiglu', # Use SwiGLU for experts
-            hidden_dim=768,
+        # SwiGLU FFN expert configuration
+        config = ExpertConfig(
+            ffn_config={
+                "type": "swiglu",
+                "d_model": 768,
+                "ffn_expansion_factor": 4,
+                "dropout_rate": 0.1
+            }
         )
 
-        # Attention expert configuration
-        attn_config = ExpertConfig(
-            expert_type='attention',
-            hidden_dim=768,
-            num_heads=12,
-            head_dim=64
+        # Standard MLP expert configuration
+        config = ExpertConfig(
+            ffn_config={
+                "type": "mlp",
+                "hidden_dim": 2048,
+                "output_dim": 768,
+                "activation": "gelu",
+                "dropout_rate": 0.1
+            }
+        )
+
+        # GeGLU expert with custom initialization
+        config = ExpertConfig(
+            ffn_config={
+                "type": "geglu",
+                "hidden_dim": 3072,
+                "output_dim": 768
+            },
+            kernel_initializer="he_normal"
         )
         ```
+
+    Note:
+        All FFN-specific validation and parameter handling is delegated to the
+        FFN factory system, ensuring consistency across the framework and
+        eliminating code duplication.
     """
-    expert_type: Literal['ffn', 'attention', 'conv2d'] = 'ffn'
-    hidden_dim: int = 768
-    output_dim: Optional[int] = None
-    activation: Union[str, callable] = 'gelu'
-    dropout_rate: float = 0.1
+    ffn_config: Dict[str, Any] = field(default_factory=dict)
+
+    # Additional layer parameters (not part of FFN itself)
     use_bias: bool = True
     kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform'
     bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros'
     kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None
     bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None
 
-    # FFN-specific parameters
-    ffn_type: FFNType = 'mlp'
-    intermediate_size: Optional[int] = None
-    ffn_expansion_factor: int = 4
-    ffn_multiple_of: int = 256
-
-    # Attention-specific parameters
-    num_heads: int = 8
-    head_dim: Optional[int] = None
-
-    # Conv2D-specific parameters
-    filters: Optional[int] = None
-    kernel_size: Union[int, tuple] = 3
-    strides: Union[int, tuple] = 1
-    padding: str = 'same'
-
     def __post_init__(self):
-        """Initialize derived parameters after dataclass creation."""
-        if self.output_dim is None:
-            self.output_dim = self.hidden_dim
-
-        if self.expert_type == 'ffn' and self.ffn_type == 'mlp' and self.intermediate_size is None:
-            self.intermediate_size = 4 * self.hidden_dim
-
-        if self.expert_type == 'attention' and self.head_dim is None:
-            self.head_dim = self.hidden_dim // self.num_heads
-
-        if self.expert_type == 'conv2d' and self.filters is None:
-            self.filters = self.hidden_dim
+        """Validate FFN configuration after dataclass creation."""
+        if not self.ffn_config:
+            # Provide sensible default FFN configuration
+            self.ffn_config = {
+                "type": "mlp",
+                "hidden_dim": 2048,
+                "output_dim": 512
+            }
+        elif 'type' not in self.ffn_config:
+            raise ValueError("ffn_config must contain 'type' field specifying FFN type")
 
 
 @dataclass
@@ -184,18 +167,17 @@ class GatingConfig:
 @dataclass
 class MoEConfig:
     """
-    Complete configuration for Mixture of Experts models.
+    Complete configuration for Mixture of Experts models focused on FFN experts.
 
-    This dataclass combines expert and gating configurations with additional
-    MoE-specific parameters to define complete MoE architectures.
+    This dataclass combines expert and gating configurations with MoE-specific
+    parameters to define complete MoE architectures using FFN experts exclusively.
 
     Args:
-        num_experts: Total number of expert networks.
-        expert_config: Configuration for individual expert networks.
+        num_experts: Total number of FFN expert networks.
+        expert_config: Configuration for FFN expert networks.
         gating_config: Configuration for the gating network.
 
         # System-level parameters
-        expert_parallel: Whether to use expert parallelism.
         jitter_noise: Standard deviation for expert capacity jittering.
         drop_tokens: Whether to drop tokens when expert capacity is exceeded.
         use_residual_connection: Whether to add residual connection for dropped tokens.
@@ -205,21 +187,34 @@ class MoEConfig:
         eval_capacity_factor: Capacity factor during evaluation.
 
         # Advanced features
-        hierarchical_routing: Whether to use hierarchical routing.
-        num_routing_levels: Number of levels in hierarchical routing.
         routing_dtype: Data type for routing computations.
 
     Example:
         ```python
-        # Standard MoE configuration with SwiGLU experts
+        # Standard FFN MoE with SwiGLU experts
         moe_config = MoEConfig(
             num_experts=8,
             expert_config=ExpertConfig(
-                expert_type='ffn',
-                ffn_type='swiglu',
-                hidden_dim=768
+                ffn_config={
+                    "type": "swiglu",
+                    "d_model": 768,
+                    "ffn_expansion_factor": 4
+                }
             ),
             gating_config=GatingConfig(gating_type='linear', top_k=2)
+        )
+
+        # MoE with standard MLP experts
+        moe_config = MoEConfig(
+            num_experts=16,
+            expert_config=ExpertConfig(
+                ffn_config={
+                    "type": "mlp",
+                    "hidden_dim": 2048,
+                    "output_dim": 768,
+                    "activation": "gelu"
+                }
+            )
         )
         ```
     """
@@ -228,7 +223,6 @@ class MoEConfig:
     gating_config: GatingConfig = field(default_factory=GatingConfig)
 
     # System-level parameters
-    expert_parallel: bool = False
     jitter_noise: float = 0.01
     drop_tokens: bool = True
     use_residual_connection: bool = True
@@ -238,8 +232,6 @@ class MoEConfig:
     eval_capacity_factor: Optional[float] = None
 
     # Advanced features
-    hierarchical_routing: bool = False
-    num_routing_levels: int = 2
     routing_dtype: str = 'float32'
 
     def __post_init__(self):
@@ -256,14 +248,11 @@ class MoEConfig:
             'num_experts': self.num_experts,
             'expert_config': self.expert_config.__dict__,
             'gating_config': self.gating_config.__dict__,
-            'expert_parallel': self.expert_parallel,
             'jitter_noise': self.jitter_noise,
             'drop_tokens': self.drop_tokens,
             'use_residual_connection': self.use_residual_connection,
             'train_capacity_factor': self.train_capacity_factor,
             'eval_capacity_factor': self.eval_capacity_factor,
-            'hierarchical_routing': self.hierarchical_routing,
-            'num_routing_levels': self.num_routing_levels,
             'routing_dtype': self.routing_dtype
         }
 
@@ -278,55 +267,3 @@ class MoEConfig:
             gating_config=gating_config,
             **config_dict
         )
-
-
-# Pre-defined configurations for common use cases
-DEFAULT_MOE_CONFIG = MoEConfig()
-
-LARGE_MOE_CONFIG = MoEConfig(
-    num_experts=16,
-    expert_config=ExpertConfig(
-        expert_type='ffn',
-        ffn_type='swiglu',
-        hidden_dim=1024,
-        dropout_rate=0.1
-    ),
-    gating_config=GatingConfig(
-        gating_type='linear',
-        top_k=2,
-        capacity_factor=1.5,
-        aux_loss_weight=0.1
-    )
-)
-
-ATTENTION_MOE_CONFIG = MoEConfig(
-    num_experts=8,
-    expert_config=ExpertConfig(
-        expert_type='attention',
-        hidden_dim=768,
-        num_heads=12,
-        head_dim=64
-    ),
-    gating_config=GatingConfig(
-        gating_type='cosine',
-        top_k=1,
-        embedding_dim=256,
-        temperature=0.1
-    )
-)
-
-VISION_MOE_CONFIG = MoEConfig(
-    num_experts=6,
-    expert_config=ExpertConfig(
-        expert_type='conv2d',
-        hidden_dim=256,
-        filters=256,
-        kernel_size=3
-    ),
-    gating_config=GatingConfig(
-        gating_type='linear',
-        top_k=1,
-        capacity_factor=1.0,
-        add_noise=False
-    )
-)

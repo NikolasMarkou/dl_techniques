@@ -6,20 +6,20 @@ inputs are distributed to expert networks, including linear gating, cosine
 similarity gating, and SoftMoE approaches.
 """
 
-
 import keras
-from keras import ops
 from abc import ABC, abstractmethod
-from keras import layers, initializers
+from keras import ops, layers, initializers
 from typing import Optional, Union, Tuple, Any, Dict
 
 
+@keras.saving.register_keras_serializable()
 class BaseGating(layers.Layer, ABC):
     """
     Abstract base class for MoE gating networks.
 
     This class defines the interface for all gating implementations,
     ensuring consistent behavior across different routing strategies.
+    Follows modern Keras 3 patterns with proper serialization support.
 
     Args:
         num_experts: Number of expert networks to route to.
@@ -35,8 +35,12 @@ class BaseGating(layers.Layer, ABC):
     ) -> None:
         """Initialize the base gating layer."""
         super().__init__(name=name, **kwargs)
+
+        # Validate inputs
+        if num_experts <= 0:
+            raise ValueError(f"num_experts must be positive, got {num_experts}")
+
         self.num_experts = num_experts
-        self._built_input_shape = None
 
     @abstractmethod
     def call(
@@ -59,16 +63,16 @@ class BaseGating(layers.Layer, ABC):
         """
         pass
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get build configuration for serialization."""
-        return {"input_shape": self._built_input_shape}
+    def get_config(self) -> Dict[str, Any]:
+        """Get configuration for serialization."""
+        config = super().get_config()
+        config.update({
+            'num_experts': self.num_experts,
+        })
+        return config
 
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the gating network from configuration."""
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
-
+@keras.saving.register_keras_serializable()
 class LinearGating(BaseGating):
     """
     Linear gating network with optional noise and top-k selection.
@@ -79,13 +83,22 @@ class LinearGating(BaseGating):
 
     Args:
         num_experts: Number of expert networks.
-        top_k: Number of experts to select per token.
+        top_k: Number of experts to select per token. Must be <= num_experts.
         use_bias: Whether to use bias in the linear transformation.
-        add_noise: Whether to add noise to gating logits.
+        add_noise: Whether to add noise to gating logits during training.
         noise_std: Standard deviation of the noise.
-        kernel_initializer: Weight initialization strategy.
+        kernel_initializer: Weight initialization strategy for gate weights.
         bias_initializer: Bias initialization strategy.
         **kwargs: Additional keyword arguments.
+
+    Input shape:
+        N-D tensor with shape: `(batch_size, ..., input_dim)`.
+
+    Output shape:
+        Tuple of:
+        - expert_weights: `(batch_size, ..., num_experts)`
+        - expert_indices: `(batch_size, ..., top_k)`
+        - auxiliary_info: Dict with routing statistics
 
     Example:
         ```python
@@ -95,6 +108,9 @@ class LinearGating(BaseGating):
             add_noise=True,
             noise_std=1.0
         )
+
+        inputs = keras.Input(shape=(512, 768))
+        weights, indices, info = gating(inputs)
         ```
     """
 
@@ -112,6 +128,12 @@ class LinearGating(BaseGating):
         """Initialize the linear gating network."""
         super().__init__(num_experts=num_experts, **kwargs)
 
+        # Validate inputs
+        if top_k <= 0 or top_k > num_experts:
+            raise ValueError(f"top_k must be between 1 and {num_experts}, got {top_k}")
+        if noise_std < 0:
+            raise ValueError(f"noise_std must be non-negative, got {noise_std}")
+
         self.top_k = top_k
         self.use_bias = use_bias
         self.add_noise = add_noise
@@ -119,34 +141,30 @@ class LinearGating(BaseGating):
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
 
-        # Sublayers initialized in build()
-        self.gate_dense = None
-        self.noise_dense = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the linear gating layers."""
-        self._built_input_shape = input_shape
-
-        # Main gating transformation
+        # CREATE sublayers in __init__ (unbuilt)
         self.gate_dense = layers.Dense(
-            units=self.num_experts,
-            use_bias=self.use_bias,
+            units=num_experts,
+            use_bias=use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             name='gate_dense'
         )
 
-        # Noise transformation (if enabled)
-        if self.add_noise:
+        if add_noise:
             self.noise_dense = layers.Dense(
-                units=self.num_experts,
+                units=num_experts,
                 use_bias=False,
                 kernel_initializer='zeros',
                 name='noise_dense'
             )
+        else:
+            self.noise_dense = None
 
-        # Build sublayers
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the linear gating layers."""
+        # BUILD all sublayers explicitly
         self.gate_dense.build(input_shape)
+
         if self.noise_dense is not None:
             self.noise_dense.build(input_shape)
 
@@ -158,11 +176,9 @@ class LinearGating(BaseGating):
             training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """Forward pass through the linear gating network."""
-        batch_size = ops.shape(inputs)[0]
-        seq_len = ops.shape(inputs)[1] if len(ops.shape(inputs)) > 2 else 1
-
-        # Reshape to 2D for processing
         original_shape = ops.shape(inputs)
+
+        # Reshape to 2D for processing if needed
         if len(original_shape) > 2:
             inputs_flat = ops.reshape(inputs, (-1, original_shape[-1]))
         else:
@@ -172,7 +188,7 @@ class LinearGating(BaseGating):
         gate_logits = self.gate_dense(inputs_flat)
 
         # Add noise during training
-        if self.add_noise and training:
+        if self.add_noise and training and self.noise_dense is not None:
             noise_logits = self.noise_dense(inputs_flat)
             noise = keras.random.normal(
                 shape=ops.shape(noise_logits),
@@ -181,21 +197,16 @@ class LinearGating(BaseGating):
                 dtype=inputs.dtype
             )
             # Apply softplus to ensure positive noise std
-            noise_std = ops.softplus(noise_logits) * self.noise_std / (self.num_experts ** 2)
+            noise_std = ops.softplus(noise_logits) * self.noise_std
             gate_logits = gate_logits + noise * noise_std
 
         # Top-k selection
         if self.top_k < self.num_experts:
             top_k_logits, top_k_indices = ops.top_k(gate_logits, k=self.top_k)
 
-            # Create mask for selected experts
-            mask = ops.zeros_like(gate_logits)
-            for i in range(self.top_k):
-                mask = ops.scatter_update(
-                    mask,
-                    ops.expand_dims(top_k_indices[:, i], axis=-1),
-                    1.0
-                )
+            # Create mask for selected experts using one_hot
+            top_k_one_hot = ops.one_hot(top_k_indices, self.num_experts, dtype=gate_logits.dtype)
+            mask = ops.sum(top_k_one_hot, axis=-2)
 
             # Apply mask to logits (set non-selected to -inf)
             masked_logits = ops.where(
@@ -214,17 +225,22 @@ class LinearGating(BaseGating):
                 (ops.shape(gate_logits)[0], self.num_experts)
             )
 
-        # Reshape back to original batch structure
+        # Reshape back to original batch structure if needed
         if len(original_shape) > 2:
             new_shape = list(original_shape[:-1]) + [self.num_experts]
             expert_weights = ops.reshape(expert_weights, new_shape)
-            expert_indices = ops.reshape(expert_indices, new_shape)
+            if self.top_k < self.num_experts:
+                new_indices_shape = list(original_shape[:-1]) + [self.top_k]
+                expert_indices = ops.reshape(expert_indices, new_indices_shape)
+            else:
+                expert_indices = ops.reshape(expert_indices, new_shape)
 
         # Prepare auxiliary information for load balancing loss
+        raw_gate_probs = ops.softmax(gate_logits, axis=-1)
         auxiliary_info = {
             'gate_logits': gate_logits,
             'expert_weights': expert_weights,
-            'raw_gate_probs': ops.softmax(gate_logits, axis=-1)
+            'raw_gate_probs': raw_gate_probs
         }
 
         return expert_weights, expert_indices, auxiliary_info
@@ -233,7 +249,6 @@ class LinearGating(BaseGating):
         """Get configuration for serialization."""
         config = super().get_config()
         config.update({
-            'num_experts': self.num_experts,
             'top_k': self.top_k,
             'use_bias': self.use_bias,
             'add_noise': self.add_noise,
@@ -244,6 +259,7 @@ class LinearGating(BaseGating):
         return config
 
 
+@keras.saving.register_keras_serializable()
 class CosineGating(BaseGating):
     """
     Cosine similarity-based gating network.
@@ -256,10 +272,16 @@ class CosineGating(BaseGating):
         num_experts: Number of expert networks.
         embedding_dim: Dimension of expert embeddings.
         top_k: Number of experts to select per token.
-        temperature: Temperature parameter for softmax.
-        learnable_temperature: Whether temperature is learnable.
+        temperature: Temperature parameter for softmax scaling.
+        learnable_temperature: Whether temperature is a learnable parameter.
         kernel_initializer: Weight initialization strategy.
         **kwargs: Additional keyword arguments.
+
+    Input shape:
+        N-D tensor with shape: `(batch_size, ..., input_dim)`.
+
+    Output shape:
+        Same as LinearGating output format.
 
     Example:
         ```python
@@ -267,7 +289,8 @@ class CosineGating(BaseGating):
             num_experts=8,
             embedding_dim=256,
             top_k=1,
-            temperature=0.1
+            temperature=0.1,
+            learnable_temperature=True
         )
         ```
     """
@@ -285,30 +308,35 @@ class CosineGating(BaseGating):
         """Initialize the cosine gating network."""
         super().__init__(num_experts=num_experts, **kwargs)
 
+        # Validate inputs
+        if embedding_dim <= 0:
+            raise ValueError(f"embedding_dim must be positive, got {embedding_dim}")
+        if top_k <= 0 or top_k > num_experts:
+            raise ValueError(f"top_k must be between 1 and {num_experts}, got {top_k}")
+        if temperature <= 0:
+            raise ValueError(f"temperature must be positive, got {temperature}")
+
         self.embedding_dim = embedding_dim
         self.top_k = top_k
         self.temperature = temperature
         self.learnable_temperature = learnable_temperature
         self.kernel_initializer = initializers.get(kernel_initializer)
 
-        # Sublayers initialized in build()
-        self.linear_projection = None
-        self.expert_embeddings = None
-        self.temperature_param = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the cosine gating layers."""
-        self._built_input_shape = input_shape
-
-        # Linear projection to embedding space
+        # CREATE sublayers in __init__
         self.linear_projection = layers.Dense(
-            units=self.embedding_dim,
+            units=embedding_dim,
             use_bias=False,
             kernel_initializer=self.kernel_initializer,
             name='linear_projection'
         )
 
-        # Expert embeddings
+        # Weight attributes created in build()
+        self.expert_embeddings = None
+        self.temperature_param = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the cosine gating layers."""
+        # CREATE weights in build()
         self.expert_embeddings = self.add_weight(
             name='expert_embeddings',
             shape=(self.embedding_dim, self.num_experts),
@@ -316,7 +344,6 @@ class CosineGating(BaseGating):
             trainable=True
         )
 
-        # Temperature parameter
         if self.learnable_temperature:
             self.temperature_param = self.add_weight(
                 name='temperature',
@@ -324,10 +351,8 @@ class CosineGating(BaseGating):
                 initializer=initializers.Constant(value=self.temperature),
                 trainable=True
             )
-        else:
-            self.temperature_param = self.temperature
 
-        # Build sublayers
+        # BUILD sublayers explicitly
         self.linear_projection.build(input_shape)
 
         super().build(input_shape)
@@ -338,8 +363,9 @@ class CosineGating(BaseGating):
             training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """Forward pass through the cosine gating network."""
-        # Reshape to 2D for processing
         original_shape = ops.shape(inputs)
+
+        # Reshape to 2D for processing if needed
         if len(original_shape) > 2:
             inputs_flat = ops.reshape(inputs, (-1, original_shape[-1]))
         else:
@@ -348,33 +374,24 @@ class CosineGating(BaseGating):
         # Project input to embedding space
         projected_inputs = self.linear_projection(inputs_flat)
 
-        # Normalize projected inputs
-        projected_inputs_norm = ops.l2_normalize(projected_inputs, axis=-1)
-
-        # Normalize expert embeddings
-        expert_embeddings_norm = ops.l2_normalize(self.expert_embeddings, axis=0)
+        # Normalize projected inputs and expert embeddings
+        projected_inputs_norm = ops.normalize(projected_inputs, axis=-1)
+        expert_embeddings_norm = ops.normalize(self.expert_embeddings, axis=0)
 
         # Compute cosine similarities
         cosine_similarities = ops.matmul(projected_inputs_norm, expert_embeddings_norm)
 
         # Apply temperature
-        if self.learnable_temperature:
-            gate_logits = cosine_similarities * self.temperature_param
-        else:
-            gate_logits = cosine_similarities * self.temperature_param
+        temperature_value = self.temperature_param if self.learnable_temperature else self.temperature
+        gate_logits = cosine_similarities * temperature_value
 
         # Top-k selection
         if self.top_k < self.num_experts:
             top_k_logits, top_k_indices = ops.top_k(gate_logits, k=self.top_k)
 
-            # Create mask for selected experts
-            mask = ops.zeros_like(gate_logits)
-            for i in range(self.top_k):
-                mask = ops.scatter_update(
-                    mask,
-                    ops.expand_dims(top_k_indices[:, i], axis=-1),
-                    1.0
-                )
+            # Create mask for selected experts using one_hot
+            top_k_one_hot = ops.one_hot(top_k_indices, self.num_experts, dtype=gate_logits.dtype)
+            mask = ops.sum(top_k_one_hot, axis=-2)
 
             # Apply mask to logits
             masked_logits = ops.where(
@@ -393,18 +410,23 @@ class CosineGating(BaseGating):
                 (ops.shape(gate_logits)[0], self.num_experts)
             )
 
-        # Reshape back to original batch structure
+        # Reshape back to original batch structure if needed
         if len(original_shape) > 2:
             new_shape = list(original_shape[:-1]) + [self.num_experts]
             expert_weights = ops.reshape(expert_weights, new_shape)
-            expert_indices = ops.reshape(expert_indices, new_shape)
+            if self.top_k < self.num_experts:
+                new_indices_shape = list(original_shape[:-1]) + [self.top_k]
+                expert_indices = ops.reshape(expert_indices, new_indices_shape)
+            else:
+                expert_indices = ops.reshape(expert_indices, new_shape)
 
         # Prepare auxiliary information
+        raw_gate_probs = ops.softmax(gate_logits, axis=-1)
         auxiliary_info = {
             'gate_logits': gate_logits,
             'expert_weights': expert_weights,
             'cosine_similarities': cosine_similarities,
-            'raw_gate_probs': ops.softmax(gate_logits, axis=-1)
+            'raw_gate_probs': raw_gate_probs
         }
 
         return expert_weights, expert_indices, auxiliary_info
@@ -413,7 +435,6 @@ class CosineGating(BaseGating):
         """Get configuration for serialization."""
         config = super().get_config()
         config.update({
-            'num_experts': self.num_experts,
             'embedding_dim': self.embedding_dim,
             'top_k': self.top_k,
             'temperature': self.temperature,
@@ -423,6 +444,7 @@ class CosineGating(BaseGating):
         return config
 
 
+@keras.saving.register_keras_serializable()
 class SoftMoEGating(BaseGating):
     """
     SoftMoE gating that creates soft input slots for experts.
@@ -436,6 +458,12 @@ class SoftMoEGating(BaseGating):
         num_slots: Number of input slots per expert.
         kernel_initializer: Weight initialization strategy.
         **kwargs: Additional keyword arguments.
+
+    Input shape:
+        3D tensor with shape: `(batch_size, seq_len, hidden_dim)`.
+
+    Output shape:
+        Same format as other gating mechanisms, but includes soft slot information.
 
     Example:
         ```python
@@ -456,27 +484,31 @@ class SoftMoEGating(BaseGating):
         """Initialize the SoftMoE gating network."""
         super().__init__(num_experts=num_experts, **kwargs)
 
+        # Validate inputs
+        if num_slots <= 0:
+            raise ValueError(f"num_slots must be positive, got {num_slots}")
+
         self.num_slots = num_slots
         self.kernel_initializer = initializers.get(kernel_initializer)
 
-        # Sublayers initialized in build()
-        self.phi_dense = None  # For computing slot attention weights
-        self.slot_embeddings = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the SoftMoE gating layers."""
-        self._built_input_shape = input_shape
-        hidden_dim = input_shape[-1]
-
-        # Dense layer for computing attention weights
+        # CREATE sublayers in __init__
         self.phi_dense = layers.Dense(
-            units=self.num_experts * self.num_slots,
+            units=num_experts * num_slots,
             use_bias=True,
             kernel_initializer=self.kernel_initializer,
             name='phi_dense'
         )
 
-        # Learnable slot embeddings
+        # Weight attributes created in build()
+        self.slot_embeddings = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the SoftMoE gating layers."""
+        hidden_dim = input_shape[-1]
+        if hidden_dim is None:
+            raise ValueError("Hidden dimension must be known for SoftMoE")
+
+        # CREATE weights
         self.slot_embeddings = self.add_weight(
             name='slot_embeddings',
             shape=(self.num_experts, self.num_slots, hidden_dim),
@@ -484,7 +516,7 @@ class SoftMoEGating(BaseGating):
             trainable=True
         )
 
-        # Build sublayers
+        # BUILD sublayers explicitly
         self.phi_dense.build(input_shape)
 
         super().build(input_shape)
@@ -507,16 +539,14 @@ class SoftMoEGating(BaseGating):
         phi_weights = ops.softmax(phi_logits, axis=1)  # [batch, seq_len, num_experts, num_slots]
 
         # Compute soft input slots for each expert
-        # inputs: [batch, seq_len, hidden_dim]
-        # phi_weights: [batch, seq_len, num_experts, num_slots]
-        inputs_expanded = ops.expand_dims(inputs, axis=2)  # [batch, seq_len, 1, hidden_dim]
-        phi_weights_expanded = ops.expand_dims(phi_weights, axis=-1)  # [batch, seq_len, num_experts, num_slots, 1]
+        inputs_expanded = ops.expand_dims(ops.expand_dims(inputs, axis=2), axis=3)  # [b, s, 1, 1, h]
+        phi_weights_expanded = ops.expand_dims(phi_weights, axis=-1)  # [b, s, e, l, 1]
 
         # Weighted sum to create slots
         soft_slots = ops.sum(
-            inputs_expanded * phi_weights_expanded,
+            inputs_expanded * phi_weights_expanded,  # Broadcasts to [b, s, e, l, h]
             axis=1
-        )  # [batch, num_experts, num_slots, hidden_dim]
+        )  # Sum over s -> [b, e, l, h]
 
         # Flatten slots for expert processing
         expert_inputs = ops.reshape(
@@ -525,7 +555,7 @@ class SoftMoEGating(BaseGating):
         )
 
         # For SoftMoE, all experts are used with equal weight
-        expert_weights = ops.ones((batch_size, seq_len, self.num_experts)) / self.num_experts
+        expert_weights = ops.ones((batch_size, seq_len, self.num_experts), dtype=inputs.dtype) / self.num_experts
         expert_indices = ops.arange(self.num_experts, dtype='int32')
         expert_indices = ops.broadcast_to(
             expert_indices[None, None, :],
@@ -537,7 +567,9 @@ class SoftMoEGating(BaseGating):
             'phi_weights': phi_weights,
             'soft_slots': soft_slots,
             'expert_inputs': expert_inputs,
-            'expert_weights': expert_weights
+            'expert_weights': expert_weights,
+            'gate_logits': phi_logits,  # For z-loss computation
+            'raw_gate_probs': ops.softmax(phi_logits, axis=-1)
         }
 
         return expert_weights, expert_indices, auxiliary_info
@@ -546,7 +578,6 @@ class SoftMoEGating(BaseGating):
         """Get configuration for serialization."""
         config = super().get_config()
         config.update({
-            'num_experts': self.num_experts,
             'num_slots': self.num_slots,
             'kernel_initializer': initializers.serialize(self.kernel_initializer)
         })
@@ -573,16 +604,6 @@ def compute_auxiliary_loss(
 
     Returns:
         Auxiliary load balancing loss scalar.
-
-    Example:
-        ```python
-        aux_loss = compute_auxiliary_loss(
-            expert_weights=expert_weights,
-            gate_probs=gate_probs,
-            num_experts=8,
-            aux_loss_weight=0.01
-        )
-        ```
     """
     # Compute fraction of tokens dispatched to each expert
     expert_mask = ops.cast(expert_weights > 0, expert_weights.dtype)
@@ -613,14 +634,6 @@ def compute_z_loss(
 
     Returns:
         Router z-loss scalar.
-
-    Example:
-        ```python
-        z_loss = compute_z_loss(
-            gate_logits=gate_logits,
-            z_loss_weight=1e-3
-        )
-        ```
     """
     # Compute logsumexp for each token
     logsumexp = ops.logsumexp(gate_logits, axis=-1, keepdims=False)  # [batch, seq_len]
@@ -653,13 +666,27 @@ def create_gating(gating_type: str, num_experts: int, **kwargs) -> BaseGating:
 
         # Create cosine gating
         gating = create_gating('cosine', num_experts=8, embedding_dim=256)
+
+        # Create SoftMoE gating
+        gating = create_gating('softmoe', num_experts=8, num_slots=4)
         ```
     """
     if gating_type == 'linear':
-        return LinearGating(num_experts=num_experts, **kwargs)
+        linear_keys = ['top_k', 'use_bias', 'add_noise', 'noise_std',
+                       'kernel_initializer', 'bias_initializer']
+        linear_kwargs = {k: v for k, v in kwargs.items() if k in linear_keys}
+        return LinearGating(num_experts=num_experts, **linear_kwargs)
     elif gating_type == 'cosine':
-        return CosineGating(num_experts=num_experts, **kwargs)
+        cosine_keys = ['embedding_dim', 'top_k', 'temperature',
+                       'learnable_temperature', 'kernel_initializer']
+        cosine_kwargs = {k: v for k, v in kwargs.items() if k in cosine_keys}
+        return CosineGating(num_experts=num_experts, **cosine_kwargs)
     elif gating_type == 'softmoe':
-        return SoftMoEGating(num_experts=num_experts, **kwargs)
+        softmoe_keys = ['num_slots', 'kernel_initializer']
+        softmoe_kwargs = {k: v for k, v in kwargs.items() if k in softmoe_keys}
+        return SoftMoEGating(num_experts=num_experts, **softmoe_kwargs)
     else:
-        raise ValueError(f"Unsupported gating type: {gating_type}")
+        raise ValueError(
+            f"Unsupported gating type: {gating_type}. "
+            f"Supported types: ['linear', 'cosine', 'softmoe']"
+        )
