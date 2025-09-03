@@ -11,6 +11,19 @@ from keras import ops
 from abc import ABC, abstractmethod
 from typing import Optional, Union, Tuple, Any, Dict
 from keras import layers, initializers, regularizers, activations
+import inspect
+
+# Import FFN types to be used as experts
+from dl_techniques.layers.ffn.mlp import MLPBlock
+from dl_techniques.layers.ffn.glu_ffn import GLUFFN
+from dl_techniques.layers.ffn.swin_mlp import SwinMLP
+from dl_techniques.layers.ffn.geglu_ffn import GeGLUFFN
+from dl_techniques.layers.ffn.swiglu_ffn import SwiGLUFFN
+from dl_techniques.layers.ffn.diff_ffn import DifferentialFFN
+from dl_techniques.layers.ffn.residual_block import ResidualBlock
+
+from .config import FFNType
+
 
 class BaseExpert(layers.Layer, ABC):
     """
@@ -73,142 +86,161 @@ class BaseExpert(layers.Layer, ABC):
 
 class FFNExpert(BaseExpert):
     """
-    Feed-Forward Network expert for MoE layers.
+    A flexible Feed-Forward Network expert for MoE layers.
 
-    This expert implements a standard FFN with configurable intermediate size,
-    activation function, and regularization. It's the most common expert type
-    in Transformer-based MoE models.
+    This expert acts as a container that can instantiate various FFN architectures
+    (e.g., MLP, SwiGLU) based on configuration. This allows MoE layers to leverage
+    the same advanced FFN implementations as the standard Transformer blocks.
 
     Args:
+        ffn_type: The type of FFN architecture to use.
         hidden_dim: Output dimension of the expert.
-        intermediate_size: Intermediate layer dimension.
+        intermediate_size: Intermediate layer dimension for MLP-style FFNs.
         activation: Activation function to use.
         dropout_rate: Dropout probability for regularization.
-        use_bias: Whether to use bias terms.
-        kernel_initializer: Weight initialization strategy.
-        bias_initializer: Bias initialization strategy.
-        kernel_regularizer: Regularization for weights.
-        bias_regularizer: Regularization for biases.
-        **kwargs: Additional keyword arguments.
+        ffn_expansion_factor: Expansion factor for SwiGLU FFN.
+        ffn_multiple_of: Multiple constraint for SwiGLU FFN.
+        **kwargs: Additional keyword arguments for the specific FFN block.
 
     Example:
         ```python
+        # Create a SwiGLU expert
         expert = FFNExpert(
+            ffn_type='swiglu',
             hidden_dim=768,
-            intermediate_size=3072,
-            activation='gelu',
-            dropout_rate=0.1
         )
         ```
     """
 
     def __init__(
             self,
-            hidden_dim: int,
-            intermediate_size: int = 3072,
+            ffn_type: FFNType = 'mlp',
+            hidden_dim: int = 768,
+            intermediate_size: Optional[int] = None,
             activation: Union[str, callable] = 'gelu',
             dropout_rate: float = 0.1,
-            use_bias: bool = True,
-            kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
-            bias_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
+            ffn_expansion_factor: int = 4,
+            ffn_multiple_of: int = 256,
             **kwargs: Any
     ) -> None:
         """Initialize the FFN expert."""
-        super().__init__(**kwargs)
+        name = kwargs.pop('name', None)
+        super().__init__(name=name)
 
+        self.ffn_type = ffn_type
         self.hidden_dim = hidden_dim
         self.intermediate_size = intermediate_size
         self.activation = activation
         self.dropout_rate = dropout_rate
-        self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.ffn_expansion_factor = ffn_expansion_factor
+        self.ffn_multiple_of = ffn_multiple_of
+        self.kwargs = kwargs
 
-        # Sublayers initialized in build()
-        self.dense1 = None
-        self.dense2 = None
-        self.activation_fn = None
-        self.dropout = None
+        self.ffn_block = None  # To be instantiated in build()
+
+        self.ffn_map = {
+            'mlp': MLPBlock,
+            'swiglu': SwiGLUFFN,
+            'differential': DifferentialFFN,
+            'glu': GLUFFN,
+            'geglu': GeGLUFFN,
+            'residual': ResidualBlock,
+            'swin_mlp': SwinMLP,
+        }
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the FFN expert layers."""
+        """Build the internal FFN block based on the specified type."""
         self._built_input_shape = input_shape
 
-        # First dense layer (expansion)
-        self.dense1 = layers.Dense(
-            units=self.intermediate_size,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name='dense1'
-        )
+        params = self._get_ffn_params()
+        try:
+            ffn_class = self.ffn_map.get(self.ffn_type)
+            if ffn_class is None:
+                raise ValueError(f"Unknown FFN type for expert: {self.ffn_type}")
 
-        # Second dense layer (projection)
-        self.dense2 = layers.Dense(
-            units=self.hidden_dim,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name='dense2'
-        )
+            self.ffn_block = ffn_class(**params)
 
-        # Activation function
-        self.activation_fn = activations.get(self.activation)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"Failed to create expert FFN of type '{self.ffn_type}'. "
+                f"Check for parameter incompatibility. Custom args: {list(params.keys())}. "
+                f"Original error: {e}"
+            )
 
-        # Dropout layer
-        if self.dropout_rate > 0:
-            self.dropout = layers.Dropout(rate=self.dropout_rate, name='dropout')
-
-        # Build sublayers
-        self.dense1.build(input_shape)
-        intermediate_shape = self.dense1.compute_output_shape(input_shape)
-        self.dense2.build(intermediate_shape)
-
+        self.ffn_block.build(input_shape)
         super().build(input_shape)
 
+    def _get_ffn_params(self) -> Dict[str, Any]:
+        """Get parameters for the specific FFN layer, filtering for valid arguments."""
+        ffn_class = self.ffn_map.get(self.ffn_type)
+        if ffn_class is None:
+            raise ValueError(f"Cannot get params for unknown FFN type: {self.ffn_type}")
+
+        # Start with base parameters derived from FFNExpert's attributes
+        if self.ffn_type == 'mlp':
+            params = {
+                'hidden_dim': self.intermediate_size,
+                'output_dim': self.hidden_dim,
+                'activation': self.activation,
+                'dropout_rate': self.dropout_rate,
+            }
+        elif self.ffn_type == 'swiglu':
+            params = {
+                'd_model': self.hidden_dim,
+                'ffn_expansion_factor': self.ffn_expansion_factor,
+                'ffn_multiple_of': self.ffn_multiple_of,
+            }
+        elif self.ffn_type == 'differential':
+             params = {
+                'hidden_dim': self.intermediate_size,
+                'output_dim': self.hidden_dim,
+                'branch_activation': self.activation,
+                'dropout_rate': self.dropout_rate,
+            }
+        elif self.ffn_type == 'swin_mlp':
+             params = {
+                'hidden_dim': self.intermediate_size,
+                'out_dim': self.hidden_dim,
+                'activation': self.activation,
+                'dropout_rate': self.dropout_rate,
+            }
+        else: # Generic params for other FFNs (glu, geglu, residual)
+            params = {
+                'hidden_dim': self.intermediate_size,
+                'output_dim': self.hidden_dim,
+                'activation': self.activation,
+                'dropout_rate': self.dropout_rate,
+            }
+
+        # Filter the generic kwargs to only include what's valid for the target FFN class
+        valid_args = set(inspect.signature(ffn_class.__init__).parameters.keys())
+        filtered_kwargs = {k: v for k, v in self.kwargs.items() if k in valid_args}
+
+        # Update the params with the filtered kwargs, allowing overrides
+        params.update(filtered_kwargs)
+        return params
+
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        """Forward pass through the FFN expert."""
-        # First transformation with activation
-        x = self.dense1(inputs)
-        x = self.activation_fn(x)
-
-        # Apply dropout if configured
-        if self.dropout is not None:
-            x = self.dropout(x, training=training)
-
-        # Second transformation (projection)
-        outputs = self.dense2(x)
-
-        return outputs
+        """Forward pass through the FFN block."""
+        return self.ffn_block(inputs, training=training)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute output shape of the FFN expert."""
-        output_shape = list(input_shape)
-        output_shape[-1] = self.hidden_dim
-        return tuple(output_shape)
+        """Compute output shape by delegating to the internal FFN block."""
+        return self.ffn_block.compute_output_shape(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
         """Get configuration for serialization."""
         config = super().get_config()
         config.update({
+            'ffn_type': self.ffn_type,
             'hidden_dim': self.hidden_dim,
             'intermediate_size': self.intermediate_size,
             'activation': self.activation,
             'dropout_rate': self.dropout_rate,
-            'use_bias': self.use_bias,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer)
+            'ffn_expansion_factor': self.ffn_expansion_factor,
+            'ffn_multiple_of': self.ffn_multiple_of
         })
+        config.update(self.kwargs)
         return config
 
 
@@ -253,7 +285,8 @@ class AttentionExpert(BaseExpert):
             **kwargs: Any
     ) -> None:
         """Initialize the attention expert."""
-        super().__init__(**kwargs)
+        name = kwargs.pop('name', None)
+        super().__init__(name=name)
 
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
@@ -434,7 +467,8 @@ class Conv2DExpert(BaseExpert):
             **kwargs: Any
     ) -> None:
         """Initialize the Conv2D expert."""
-        super().__init__(**kwargs)
+        name = kwargs.pop('name', None)
+        super().__init__(name=name)
 
         self.filters = filters
         self.kernel_size = kernel_size
@@ -520,8 +554,8 @@ def create_expert(expert_type: str, **kwargs) -> BaseExpert:
 
     Example:
         ```python
-        # Create FFN expert
-        expert = create_expert('ffn', hidden_dim=768, intermediate_size=3072)
+        # Create SwiGLU FFN expert
+        expert = create_expert('ffn', ffn_type='swiglu', hidden_dim=768)
 
         # Create attention expert
         expert = create_expert('attention', hidden_dim=768, num_heads=12)

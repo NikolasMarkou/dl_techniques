@@ -9,6 +9,10 @@ import keras
 from dataclasses import dataclass, field
 from typing import Optional, Union, Dict, Any, Literal
 
+# Import FFNType for consistency with TransformerLayer
+FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp']
+
+
 @dataclass
 class ExpertConfig:
     """
@@ -30,7 +34,11 @@ class ExpertConfig:
         bias_regularizer: Regularization applied to biases.
 
         # FFN-specific parameters
+        ffn_type: The type of FFN architecture to use when expert_type is 'ffn'.
+            Follows the same options as TransformerLayer (e.g., 'mlp', 'swiglu').
         intermediate_size: Intermediate layer size for FFN experts.
+        ffn_expansion_factor: Expansion factor for SwiGLU FFN.
+        ffn_multiple_of: Multiple constraint for SwiGLU FFN.
 
         # Attention-specific parameters
         num_heads: Number of attention heads for attention experts.
@@ -44,12 +52,11 @@ class ExpertConfig:
 
     Example:
         ```python
-        # FFN expert configuration
+        # MoE with SwiGLU FFN experts
         ffn_config = ExpertConfig(
             expert_type='ffn',
+            ffn_type='swiglu', # Use SwiGLU for experts
             hidden_dim=768,
-            intermediate_size=3072,
-            activation='gelu'
         )
 
         # Attention expert configuration
@@ -73,7 +80,10 @@ class ExpertConfig:
     bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None
 
     # FFN-specific parameters
+    ffn_type: FFNType = 'mlp'
     intermediate_size: Optional[int] = None
+    ffn_expansion_factor: int = 4
+    ffn_multiple_of: int = 256
 
     # Attention-specific parameters
     num_heads: int = 8
@@ -90,7 +100,7 @@ class ExpertConfig:
         if self.output_dim is None:
             self.output_dim = self.hidden_dim
 
-        if self.expert_type == 'ffn' and self.intermediate_size is None:
+        if self.expert_type == 'ffn' and self.ffn_type == 'mlp' and self.intermediate_size is None:
             self.intermediate_size = 4 * self.hidden_dim
 
         if self.expert_type == 'attention' and self.head_dim is None:
@@ -201,28 +211,15 @@ class MoEConfig:
 
     Example:
         ```python
-        # Standard MoE configuration
+        # Standard MoE configuration with SwiGLU experts
         moe_config = MoEConfig(
             num_experts=8,
-            expert_config=ExpertConfig(expert_type='ffn', hidden_dim=768),
-            gating_config=GatingConfig(gating_type='linear', top_k=2)
-        )
-
-        # Large-scale MoE with expert parallelism
-        large_moe_config = MoEConfig(
-            num_experts=64,
             expert_config=ExpertConfig(
                 expert_type='ffn',
-                hidden_dim=2048,
-                intermediate_size=8192
+                ffn_type='swiglu',
+                hidden_dim=768
             ),
-            gating_config=GatingConfig(
-                gating_type='cosine',
-                top_k=1,
-                aux_loss_weight=0.1
-            ),
-            expert_parallel=True,
-            drop_tokens=True
+            gating_config=GatingConfig(gating_type='linear', top_k=2)
         )
         ```
     """
@@ -290,8 +287,8 @@ LARGE_MOE_CONFIG = MoEConfig(
     num_experts=16,
     expert_config=ExpertConfig(
         expert_type='ffn',
+        ffn_type='swiglu',
         hidden_dim=1024,
-        intermediate_size=4096,
         dropout_rate=0.1
     ),
     gating_config=GatingConfig(

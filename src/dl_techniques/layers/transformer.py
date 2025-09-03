@@ -9,13 +9,15 @@ for enabling the training of very deep networks.
 
 A key feature of this implementation is its flexibility. It is designed to serve as a
 versatile component for research and development, allowing for easy experimentation
-with different attention mechanisms, normalization techniques and feed-forward network architectures.
+with different attention mechanisms, normalization techniques and feed-forward network architectures,
+including Mixture of Experts (MoE).
 
 This configurability makes the layer an excellent tool for architectural experimentation
 and for building custom Transformer variants.
 """
 
 import keras
+import warnings
 from keras import layers, initializers, regularizers
 from typing import Optional, Union, Any, Dict, Tuple, Literal, Callable
 
@@ -40,6 +42,9 @@ from .attention.window_attention import WindowAttention
 from .attention.group_query_attention import GroupedQueryAttention
 from .attention.differential_attention import DifferentialMultiHeadAttention
 
+# MoE Integration
+from .moe import MixtureOfExperts, MoEConfig, ExpertConfig, GatingConfig
+
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
 # ---------------------------------------------------------------------
@@ -59,7 +64,7 @@ class TransformerLayer(keras.layers.Layer):
 
     This layer implements a standard transformer block with:
     - Configurable attention mechanisms
-    - Configurable feed-forward network
+    - Configurable feed-forward network (including Mixture of Experts)
     - Residual connections
     - Configurable normalization
     - Optional stochastic depth regularization
@@ -69,6 +74,7 @@ class TransformerLayer(keras.layers.Layer):
         hidden_size: Integer, hidden size of the layer.
         num_heads: Integer, number of attention heads.
         intermediate_size: Integer, size of the intermediate (feed-forward) layer.
+            Ignored if `moe_config` is provided.
         attention_type: AttentionType, type of attention mechanism to use.
             Available options:
             - 'multi_head_attention': Standard multi-head self-attention (default)
@@ -89,6 +95,7 @@ class TransformerLayer(keras.layers.Layer):
             - 'post': Post-normalization (original Transformer, default)
             - 'pre': Pre-normalization (often more stable for deep networks)
         ffn_type: FFNType, type of feed-forward network to use.
+            Ignored if `moe_config` is provided.
             Available options:
             - 'mlp': Standard MLP with intermediate expansion (default)
             - 'swiglu': SwiGLU activation with gating mechanism
@@ -98,7 +105,12 @@ class TransformerLayer(keras.layers.Layer):
             - 'residual': Residual block with skip connections
             - 'swin_mlp': Swin Transformer MLP variant
         ffn_args: Optional dictionary of custom arguments for FFN layer.
-            These will override default parameters for the specific FFN type.
+            Ignored if `moe_config` is provided.
+        moe_config: Optional[Union[MoEConfig, Dict]], configuration for a Mixture of Experts layer.
+            If provided, this will replace the standard FFN block with an MoE layer.
+            The `ffn_type`, `ffn_args`, and `intermediate_size` parameters will be ignored.
+            Can be either an MoEConfig instance or a dictionary that will be converted to MoEConfig.
+            Defaults to None.
         dropout_rate: Float, dropout rate. Defaults to 0.1.
         attention_dropout_rate: Float, attention-specific dropout rate. Defaults to 0.1.
         use_stochastic_depth: Boolean, whether to use stochastic depth regularization.
@@ -135,20 +147,39 @@ class TransformerLayer(keras.layers.Layer):
 
     Example:
         ```python
-        # Standard multi-head attention with custom dropout
+        # Standard transformer layer
         inputs = keras.Input(shape=(128, 768))
         layer = TransformerLayer(
             hidden_size=768,
             num_heads=12,
             intermediate_size=3072,
-            attention_type='multi_head_attention',
-            attention_args={'dropout': 0.2},  # Custom attention dropout
             normalization_position='pre',
             ffn_type='swiglu',
             use_stochastic_depth=True,
             stochastic_depth_rate=0.1
         )
         outputs = layer(inputs)
+
+        # Using a Mixture of Experts layer with SwiGLU experts
+        from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
+
+        moe_config = MoEConfig(
+            num_experts=8,
+            expert_config=ExpertConfig(
+                expert_type='ffn',
+                ffn_type='swiglu',  # Use SwiGLU for the experts
+                hidden_dim=768      # Should match TransformerLayer's hidden_size
+            ),
+            gating_config=GatingConfig(top_k=2)
+        )
+
+        moe_layer = TransformerLayer(
+            hidden_size=768,
+            num_heads=12,
+            intermediate_size=3072,  # Ignored when moe_config is provided
+            moe_config=moe_config
+        )
+        outputs_moe = moe_layer(inputs)
         ```
     """
 
@@ -163,6 +194,7 @@ class TransformerLayer(keras.layers.Layer):
             normalization_position: NormalizationPosition = 'post',
             ffn_type: FFNType = 'mlp',
             ffn_args: Optional[Dict[str, Any]] = None,
+            moe_config: Optional[Union[MoEConfig, Dict[str, Any]]] = None,
             dropout_rate: float = 0.1,
             attention_dropout_rate: float = 0.1,
             use_stochastic_depth: bool = False,
@@ -184,6 +216,20 @@ class TransformerLayer(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
+        # --- Input Validation (early) ---
+        if hidden_size <= 0:
+            raise ValueError(f"hidden_size must be positive, got {hidden_size}")
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
+        if hidden_size % num_heads != 0:
+            raise ValueError(
+                f"hidden_size ({hidden_size}) must be divisible by num_heads ({num_heads})"
+            )
+        if intermediate_size <= 0 and moe_config is None:
+            raise ValueError(
+                f"intermediate_size must be positive when moe_config is None, got {intermediate_size}"
+            )
+
         # --- Configuration Storage ---
         self.hidden_size = hidden_size
         self.num_heads = num_heads
@@ -194,6 +240,7 @@ class TransformerLayer(keras.layers.Layer):
         self.normalization_position = normalization_position
         self.ffn_type = ffn_type
         self.ffn_args = ffn_args or {}
+        self.moe_config = moe_config
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
         self.use_stochastic_depth = use_stochastic_depth
@@ -202,8 +249,8 @@ class TransformerLayer(keras.layers.Layer):
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_regularizer = kernel_regularizer
+        self.bias_regularizer = bias_regularizer
         self.ffn_expansion_factor = ffn_expansion_factor
         self.ffn_multiple_of = ffn_multiple_of
         self.window_size = window_size
@@ -212,23 +259,51 @@ class TransformerLayer(keras.layers.Layer):
         self.attention_norm_alpha = attention_norm_alpha
         self.ffn_norm_alpha = ffn_norm_alpha
 
-        # --- Input Validation ---
-        if hidden_size <= 0:
-            raise ValueError(f"hidden_size must be positive, got {hidden_size}")
-        if num_heads <= 0:
-            raise ValueError(f"num_heads must be positive, got {num_heads}")
-        if hidden_size % num_heads != 0:
-            raise ValueError(
-                f"hidden_size ({hidden_size}) must be divisible by num_heads ({num_heads})"
-            )
+        # --- Handle MoE Configuration ---
+        # Convert dict to MoEConfig if needed
+        if isinstance(self.moe_config, dict):
+            self.moe_config = MoEConfig.from_dict(self.moe_config)
+
+        # Validate and adjust MoE config if provided
+        if self.moe_config is not None:
+            # Issue warning about ignored parameters
+            if self.ffn_type != 'mlp' or self.ffn_args:
+                warnings.warn(
+                    "moe_config is provided, so `ffn_type`, `ffn_args`, and `intermediate_size` "
+                    "parameters of TransformerLayer will be ignored. The FFN will be a "
+                    "MixtureOfExperts layer configured by `moe_config`."
+                )
+
+            # Ensure expert hidden_dim matches transformer's hidden_size
+            if hasattr(self.moe_config.expert_config, 'hidden_dim'):
+                if self.moe_config.expert_config.hidden_dim != self.hidden_size:
+                    warnings.warn(
+                        f"Adjusting moe_config.expert_config.hidden_dim from "
+                        f"{self.moe_config.expert_config.hidden_dim} to {self.hidden_size} "
+                        f"to match TransformerLayer's hidden_size for consistency."
+                    )
+                    self.moe_config.expert_config.hidden_dim = self.hidden_size
+
+            # If expert_config doesn't have intermediate_size set and it's FFN type,
+            # use TransformerLayer's intermediate_size as a sensible default
+            if (self.moe_config.expert_config.expert_type == 'ffn' and
+                self.moe_config.expert_config.intermediate_size is None):
+                self.moe_config.expert_config.intermediate_size = self.intermediate_size
 
         # --- Create Sub-layers (unbuilt) ---
-        # Per Keras best practices, all sub-layers are created in __init__
+        # Following best practices: all sub-layers created in __init__
+
+        # Normalization layers
         self.attention_norm = self._create_normalization_layer('attention_norm', 'attention')
         self.output_norm = self._create_normalization_layer('output_norm', 'ffn')
+
+        # Attention layer
         self.attention = self._create_attention_layer('attention')
+
+        # Feed-forward network (or MoE)
         self.ffn_layer = self._create_ffn_layer('ffn')
 
+        # Dropout layers
         self.dropout = layers.Dropout(self.dropout_rate, name='dropout')
         self.attention_dropout = layers.Dropout(self.attention_dropout_rate, name='attention_dropout')
 
@@ -246,7 +321,16 @@ class TransformerLayer(keras.layers.Layer):
             )
 
     def _create_normalization_layer(self, name: str, layer_type: str = 'attention') -> keras.layers.Layer:
-        """Create a normalization layer based on the specified type."""
+        """
+        Create a normalization layer based on the specified type.
+
+        Args:
+            name: Name for the layer.
+            layer_type: Type of layer ('attention' or 'ffn') for DynamicTanh alpha selection.
+
+        Returns:
+            Normalization layer instance.
+        """
         if self.normalization_type == 'layer_norm':
             return layers.LayerNormalization(epsilon=1e-12, name=name)
         elif self.normalization_type == 'rms_norm':
@@ -262,7 +346,15 @@ class TransformerLayer(keras.layers.Layer):
             raise ValueError(f"Unknown normalization type: {self.normalization_type}")
 
     def _get_attention_params(self, name: str) -> Dict[str, Any]:
-        """Get parameters for attention layer creation, merging defaults with custom args."""
+        """
+        Get parameters for attention layer creation, merging defaults with custom args.
+
+        Args:
+            name: Name for the attention layer.
+
+        Returns:
+            Dictionary of parameters for attention layer creation.
+        """
         # Define default parameters for each attention type
         if self.attention_type == 'multi_head_attention':
             default_params = {
@@ -306,7 +398,15 @@ class TransformerLayer(keras.layers.Layer):
         return {**default_params, **self.attention_args}
 
     def _create_attention_layer(self, name: str) -> keras.layers.Layer:
-        """Create an attention layer based on the specified type."""
+        """
+        Create an attention layer based on the specified type.
+
+        Args:
+            name: Name for the attention layer.
+
+        Returns:
+            Attention layer instance.
+        """
         params = self._get_attention_params(name)
         try:
             if self.attention_type == 'multi_head_attention':
@@ -327,36 +427,83 @@ class TransformerLayer(keras.layers.Layer):
             )
 
     def _get_ffn_params(self, name: str) -> Dict[str, Any]:
-        """Get parameters for FFN layer creation, merging defaults with custom args."""
+        """
+        Get parameters for FFN layer creation, merging defaults with custom args.
+
+        Args:
+            name: Name for the FFN layer.
+
+        Returns:
+            Dictionary of parameters for FFN layer creation.
+        """
+        # Base parameters common to most FFN types
+        base_params = {
+            'name': name
+        }
+
         if self.ffn_type == 'mlp':
             default_params = {
                 'hidden_dim': self.intermediate_size,
                 'output_dim': self.hidden_size,
                 'activation': self.activation,
                 'dropout_rate': self.dropout_rate,
-                'name': name
             }
         elif self.ffn_type == 'swiglu':
             default_params = {
                 'd_model': self.hidden_size,
                 'ffn_expansion_factor': self.ffn_expansion_factor,
                 'ffn_multiple_of': self.ffn_multiple_of,
-                'name': name
             }
-        elif self.ffn_type in ['differential', 'geglu', 'glu', 'residual', 'swin_mlp']:
+        elif self.ffn_type == 'differential':
+            default_params = {
+                'hidden_dim': self.intermediate_size,
+                'output_dim': self.hidden_size,
+                'branch_activation': self.activation,  # Note: different parameter name
+                'dropout_rate': self.dropout_rate,
+            }
+        elif self.ffn_type in ['geglu', 'glu']:
             default_params = {
                 'hidden_dim': self.intermediate_size,
                 'output_dim': self.hidden_size,
                 'activation': self.activation,
                 'dropout_rate': self.dropout_rate,
-                'name': name
+            }
+        elif self.ffn_type == 'residual':
+            default_params = {
+                'hidden_dim': self.intermediate_size,
+                'output_dim': self.hidden_size,
+                'activation': self.activation,
+                'dropout_rate': self.dropout_rate,
+            }
+        elif self.ffn_type == 'swin_mlp':
+            default_params = {
+                'hidden_dim': self.intermediate_size,
+                'out_dim': self.hidden_size,  # Note: different parameter name
+                'activation': self.activation,
+                'dropout_rate': self.dropout_rate,
             }
         else:
             raise ValueError(f"Unknown FFN type: {self.ffn_type}")
-        return {**default_params, **self.ffn_args}
+
+        # Merge base, default, and custom parameters
+        params = {**base_params, **default_params, **self.ffn_args}
+        return params
 
     def _create_ffn_layer(self, name: str) -> keras.layers.Layer:
-        """Create a feed-forward network layer based on the specified type."""
+        """
+        Create a feed-forward network layer based on the specified type or MoE config.
+
+        Args:
+            name: Name for the FFN layer.
+
+        Returns:
+            FFN or MoE layer instance.
+        """
+        # If MoE config is provided, create a MixtureOfExperts layer
+        if self.moe_config is not None:
+            return MixtureOfExperts(config=self.moe_config, name=name)
+
+        # Otherwise, create standard FFN based on type
         params = self._get_ffn_params(name)
         try:
             if self.ffn_type == 'mlp':
@@ -364,7 +511,6 @@ class TransformerLayer(keras.layers.Layer):
             elif self.ffn_type == 'swiglu':
                 return SwiGLUFFN(**params)
             elif self.ffn_type == 'differential':
-                params['branch_activation'] = params.pop('activation') # remap
                 return DifferentialFFN(**params)
             elif self.ffn_type == 'glu':
                 return GLUFFN(**params)
@@ -373,7 +519,6 @@ class TransformerLayer(keras.layers.Layer):
             elif self.ffn_type == 'residual':
                 return ResidualBlock(**params)
             elif self.ffn_type == 'swin_mlp':
-                params['out_dim'] = params.pop('output_dim') # remap
                 return SwinMLP(**params)
             else:
                 raise ValueError(f"Unknown FFN type: {self.ffn_type}")
@@ -384,8 +529,16 @@ class TransformerLayer(keras.layers.Layer):
                 f"Original error: {e}"
             )
 
-    def build(self, input_shape: Tuple[int, ...]) -> None:
-        """Builds all sub-layers with appropriate shapes."""
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build all sub-layers with appropriate shapes.
+
+        CRITICAL: For composite layers with sub-layers, explicitly build each sub-layer
+        for robust serialization per Modern Keras 3 best practices.
+
+        Args:
+            input_shape: Shape tuple of input tensor.
+        """
         # Validate input shape
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D input shape, got {len(input_shape)}D: {input_shape}")
@@ -394,18 +547,24 @@ class TransformerLayer(keras.layers.Layer):
                 f"Input feature dimension ({input_shape[-1]}) must match hidden_size ({self.hidden_size})"
             )
 
-        # Build all sub-layers. Since this is a standard Transformer block
-        # where the shape is preserved, we can pass `input_shape` to all.
+        # Build normalization layers
         self.attention_norm.build(input_shape)
         self.output_norm.build(input_shape)
-        self.ffn_layer.build(input_shape)
 
+        # Build attention layer
         # Handle special build signature for Keras's MultiHeadAttention
         if self.attention_type == 'multi_head_attention':
             self.attention.build(query_shape=input_shape, value_shape=input_shape)
         else:
-            # Other custom attention layers expect a single input_shape
+            # Custom attention layers expect a single input_shape
             self.attention.build(input_shape)
+
+        # Build FFN/MoE layer
+        self.ffn_layer.build(input_shape)
+
+        # Build dropout layers (no-op but for completeness)
+        self.dropout.build(input_shape)
+        self.attention_dropout.build(input_shape)
 
         # Build stochastic depth layers if they exist
         if self.attention_stochastic_depth is not None:
@@ -423,35 +582,66 @@ class TransformerLayer(keras.layers.Layer):
             layer_idx: int = 0,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass of the transformer layer."""
+        """
+        Forward pass of the transformer layer.
+
+        Args:
+            inputs: Input tensor of shape (batch_size, sequence_length, hidden_size).
+            attention_mask: Optional attention mask tensor. Shape depends on attention type:
+                - For padding mask: (batch_size, sequence_length)
+                - For causal mask: (sequence_length, sequence_length)
+                - For full mask: (batch_size, num_heads, sequence_length, sequence_length)
+            layer_idx: Layer index for certain attention types (e.g., differential attention).
+            training: Boolean flag for training mode.
+
+        Returns:
+            Output tensor of shape (batch_size, sequence_length, hidden_size).
+        """
         residual = inputs
 
+        # Process attention mask for MultiHeadAttention if needed
         mha_attention_mask = attention_mask
         if self.attention_type == 'multi_head_attention' and mha_attention_mask is not None:
-            mask_shape = mha_attention_mask.shape
-            if len(mask_shape) == 2:
-                # This heuristic differentiates between a (batch_size, seq_len) padding mask
-                # and a (seq_len, seq_len) causal mask. It's robust because even if
-                # batch_size == seq_len, a square mask is almost always a causal mask,
-                # which Keras's MHA handles correctly without expansion.
+            mask_shape = keras.ops.shape(mha_attention_mask)
+            ndim = len(mask_shape)
+
+            if ndim == 2:
+                # Check if it's a padding mask (batch_size, seq_len) or causal mask (seq_len, seq_len)
+                # If batch_size != seq_len, it's definitely a padding mask
+                # If they're equal, assume it's a causal mask (more common in transformers)
                 if mask_shape[0] != mask_shape[1]:
+                    # Padding mask: expand to (batch_size, 1, 1, seq_len)
                     mha_attention_mask = mha_attention_mask[:, None, None, :]
 
         if self.normalization_position == 'pre':
             # --- Pre-Normalization: Normalize -> SubLayer -> StochasticDepth -> Add ---
+
             # 1. Attention block
             x = self.attention_norm(inputs, training=training)
 
+            # Apply attention based on type
             if self.attention_type == 'multi_head_attention':
-                x = self.attention(query=x, value=x, key=x, attention_mask=mha_attention_mask, training=training)
+                x = self.attention(
+                    query=x,
+                    value=x,
+                    key=x,
+                    attention_mask=mha_attention_mask,
+                    training=training
+                )
             elif self.attention_type == 'differential_attention':
                 x = self.attention(x, mask=attention_mask, layer_idx=layer_idx, training=training)
             else:
-                x = self.attention(x, training=training) # Assume custom layers handle masks internally if needed
+                # Assume custom layers handle masks internally if needed
+                x = self.attention(x, training=training)
 
+            # Apply dropout
+            x = self.attention_dropout(x, training=training)
+
+            # Apply stochastic depth if enabled
             if self.attention_stochastic_depth is not None:
                 x = self.attention_stochastic_depth(x, training=training)
 
+            # Add residual
             attention_output = x + residual
 
             # 2. FFN block
@@ -459,42 +649,81 @@ class TransformerLayer(keras.layers.Layer):
             x = self.output_norm(attention_output, training=training)
             x = self.ffn_layer(x, training=training)
 
+            # Apply dropout
+            x = self.dropout(x, training=training)
+
+            # Apply stochastic depth if enabled
             if self.ffn_stochastic_depth is not None:
                 x = self.ffn_stochastic_depth(x, training=training)
 
+            # Add residual
             layer_output = x + residual
-        else: # Post-normalization
+
+        else:  # Post-normalization
             # --- Post-Normalization: SubLayer -> StochasticDepth -> Add -> Normalize ---
+
             # 1. Attention block
+            # Apply attention based on type
             if self.attention_type == 'multi_head_attention':
-                x = self.attention(query=inputs, value=inputs, key=inputs, attention_mask=mha_attention_mask, training=training)
+                x = self.attention(
+                    query=inputs,
+                    value=inputs,
+                    key=inputs,
+                    attention_mask=mha_attention_mask,
+                    training=training
+                )
             elif self.attention_type == 'differential_attention':
                 x = self.attention(inputs, mask=attention_mask, layer_idx=layer_idx, training=training)
             else:
                 x = self.attention(inputs, training=training)
 
+            # Apply dropout
+            x = self.attention_dropout(x, training=training)
+
+            # Apply stochastic depth if enabled
             if self.attention_stochastic_depth is not None:
                 x = self.attention_stochastic_depth(x, training=training)
 
+            # Add and normalize
             attention_output = self.attention_norm(x + residual, training=training)
 
             # 2. FFN block
             residual = attention_output
             x = self.ffn_layer(attention_output, training=training)
 
+            # Apply dropout
+            x = self.dropout(x, training=training)
+
+            # Apply stochastic depth if enabled
             if self.ffn_stochastic_depth is not None:
                 x = self.ffn_stochastic_depth(x, training=training)
 
+            # Add and normalize
             layer_output = self.output_norm(x + residual, training=training)
 
         return layer_output
 
-    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
-        """Compute the output shape of the layer."""
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape of the layer.
+
+        Args:
+            input_shape: Shape tuple of input tensor.
+
+        Returns:
+            Shape tuple of output tensor (same as input for transformer layer).
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
+        """
+        Get layer configuration for serialization.
+
+        Returns all __init__ parameters for proper reconstruction.
+
+        Returns:
+            Configuration dictionary with all parameters.
+        """
         config = super().get_config()
         config.update({
             'hidden_size': self.hidden_size,
@@ -506,6 +735,7 @@ class TransformerLayer(keras.layers.Layer):
             'normalization_position': self.normalization_position,
             'ffn_type': self.ffn_type,
             'ffn_args': self.ffn_args,
+            'moe_config': self.moe_config.to_dict() if self.moe_config else None,
             'dropout_rate': self.dropout_rate,
             'attention_dropout_rate': self.attention_dropout_rate,
             'use_stochastic_depth': self.use_stochastic_depth,

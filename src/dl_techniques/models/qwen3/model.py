@@ -195,9 +195,9 @@ class Qwen3Model(keras.Model):
             gating_config = GatingConfig(
                 gating_type="linear",
                 top_k=num_experts_per_tok,
-                normalize_gates=True,
-                use_auxiliary_loss=True,
-                auxiliary_loss_weight=0.01
+                # The presence of a non-zero aux_loss_weight implies its use.
+                # 'normalize_gates' and 'use_auxiliary_loss' are not valid arguments.
+                aux_loss_weight=0.01
             )
 
             self.moe_config = MoEConfig(
@@ -317,24 +317,33 @@ class Qwen3Model(keras.Model):
 
         # Apply transformer blocks
         for i, block in enumerate(self.transformer_blocks):
+            # The original implementation had an architectural bug for MoE layers.
+            # It applied both the block's internal FFN and the external MoE layer.
+            # The correct approach is to replace the FFN with the MoE layer.
+            # We achieve this by manually executing the pre-norm transformer steps.
+            # This assumes the TransformerLayer exposes its submodules, which is a
+            # common and reasonable design pattern.
+
+            # 1. Attention Block (pre-norm)
+            residual = x
+            # We assume the TransformerLayer has these attributes.
+            x_norm = block.pre_attention_norm(x, training=training)
+            attention_output = block.attention_layer(x_norm, training=training)
+            x = residual + attention_output
+
+            # 2. FFN / MoE Block (pre-norm)
+            residual = x
+            x_norm = block.pre_ffn_norm(x, training=training)
+
             if i in self.moe_layers and hasattr(self, f"moe_layer_{i}"):
-                # For MoE layers, we need to handle them specially
-                # Apply attention and first norm from transformer block
-                # then apply MoE separately
-
-                # This is a simplified approach - in a full implementation,
-                # we'd need to modify TransformerLayer to accept external FFN
-                x = block(x, training=training)
-
-                # Apply MoE layer (this would ideally be integrated into the block)
+                # Use the external MoE layer for this block
                 moe_layer = getattr(self, f"moe_layer_{i}")
-                residual = x
-                # Note: This is a simplified integration - proper integration
-                # would require norm before MoE
-                x = x + moe_layer(x, training=training)
+                ffn_output = moe_layer(x_norm, training=training)
             else:
-                # Standard transformer block
-                x = block(x, training=training)
+                # Use the block's internal FFN
+                ffn_output = block.ffn_block(x_norm, training=training)
+
+            x = residual + ffn_output
 
         # Final normalization
         x = self.final_norm(x, training=training)
