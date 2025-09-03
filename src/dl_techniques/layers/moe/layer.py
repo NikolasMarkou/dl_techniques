@@ -340,23 +340,33 @@ class MixtureOfExperts(keras.layers.Layer):
                 training=training
             )
 
-        # Compute and add auxiliary losses during training
-        # Use ops.cond to handle training flag in graph mode
-        if training is not None:
-            def compute_losses():
-                self._compute_auxiliary_losses(gating_info, total_tokens)
-                # Return a dummy value
-                return 0.0
+        # Compute and add auxiliary losses during training.
+        # This logic is conditional on the `training` argument.
+        # In Keras 3, `if training:` is the idiomatic way to handle this,
+        # as it will be correctly handled by graph compilation.
+        self._auxiliary_losses = []
+        if training:
+            # Standard auxiliary loss for load balancing
+            if self.gating_config.aux_loss_weight > 0 and 'raw_gate_probs' in gating_info:
+                aux_loss = compute_auxiliary_loss(
+                    expert_weights=gating_info['expert_weights'],
+                    gate_probs=gating_info['raw_gate_probs'],
+                    num_experts=self.num_experts,
+                    aux_loss_weight=self.gating_config.aux_loss_weight
+                )
+                self._auxiliary_losses.append(aux_loss)
+                self.add_loss(aux_loss)
+                logger.debug(f"Added auxiliary loss: {aux_loss}")
 
-            def skip_losses():
-                # Clear any previous auxiliary losses
-                self._auxiliary_losses = []
-                return 0.0
-
-            ops.cond(training, compute_losses, skip_losses)
-        elif training is True:
-            # Explicit True passed
-            self._compute_auxiliary_losses(gating_info, total_tokens)
+            # Router z-loss for entropy regularization
+            if self.gating_config.z_loss_weight > 0 and 'gate_logits' in gating_info:
+                z_loss = compute_z_loss(
+                    gate_logits=gating_info['gate_logits'],
+                    z_loss_weight=self.gating_config.z_loss_weight
+                )
+                self._auxiliary_losses.append(z_loss)
+                self.add_loss(z_loss)
+                logger.debug(f"Added z-loss: {z_loss}")
 
         return outputs
 
@@ -567,36 +577,6 @@ class MixtureOfExperts(keras.layers.Layer):
             outputs = ops.sum(weighted_outputs, axis=1)  # [batch, output_dim]
 
         return outputs
-
-    def _compute_auxiliary_losses(
-        self,
-        gating_info: Dict[str, keras.KerasTensor],
-        total_tokens: int
-    ) -> None:
-        """Compute and add auxiliary losses for load balancing."""
-        self._auxiliary_losses = []
-
-        # Standard auxiliary loss for load balancing
-        if self.gating_config.aux_loss_weight > 0 and 'raw_gate_probs' in gating_info:
-            aux_loss = compute_auxiliary_loss(
-                expert_weights=gating_info['expert_weights'],
-                gate_probs=gating_info['raw_gate_probs'],
-                num_experts=self.num_experts,
-                aux_loss_weight=self.gating_config.aux_loss_weight
-            )
-            self._auxiliary_losses.append(aux_loss)
-            self.add_loss(aux_loss)
-            logger.debug(f"Added auxiliary loss: {aux_loss}")
-
-        # Router z-loss for entropy regularization
-        if self.gating_config.z_loss_weight > 0 and 'gate_logits' in gating_info:
-            z_loss = compute_z_loss(
-                gate_logits=gating_info['gate_logits'],
-                z_loss_weight=self.gating_config.z_loss_weight
-            )
-            self._auxiliary_losses.append(z_loss)
-            self.add_loss(z_loss)
-            logger.debug(f"Added z-loss: {z_loss}")
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the MoE layer."""

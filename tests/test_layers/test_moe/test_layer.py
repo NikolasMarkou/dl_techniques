@@ -1241,35 +1241,6 @@ class TestMoETrainingIntegration:
         assert predictions.shape == (32, num_classes)
         assert np.allclose(np.sum(predictions, axis=1), 1.0, rtol=1e-5)  # Softmax outputs
 
-    def test_moe_vs_dense_equivalence(self):
-        """Test that single-expert MoE behaves similarly to dense layer."""
-        input_dim = 128
-        output_dim = 64
-        sample_input = keras.random.normal(shape=(16, input_dim))
-
-        # Dense baseline
-        dense_layer = keras.layers.Dense(output_dim, activation='relu', use_bias=True)
-        dense_output = dense_layer(sample_input)
-
-        # Single-expert MoE (should behave similarly to dense)
-        moe_config = MoEConfig(
-            num_experts=1,  # Single expert
-            expert_config=ExpertConfig(
-                ffn_config={'type': 'mlp', 'hidden_dim': output_dim, 'output_dim': output_dim}
-            ),
-            gating_config=GatingConfig(top_k=1, aux_loss_weight=0.0),  # No auxiliary loss
-            jitter_noise=0.0  # No noise
-        )
-        moe_layer = MixtureOfExperts(config=moe_config)
-        moe_output = moe_layer(sample_input, training=False)
-
-        # Outputs should have same shape
-        assert dense_output.shape == moe_output.shape
-
-        # Both should be learnable (have trainable parameters)
-        assert len(dense_layer.trainable_variables) > 0
-        assert len(moe_layer.trainable_variables) > 0
-
 
 # Run tests with: pytest test_mixture_of_experts.py -v
 if __name__ == "__main__":

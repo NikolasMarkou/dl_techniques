@@ -597,20 +597,24 @@ def compute_auxiliary_loss(
     to prevent expert collapse and improve hardware utilization.
 
     Args:
-        expert_weights: Expert selection weights [batch, seq_len, num_experts].
-        gate_probs: Raw gating probabilities [batch, seq_len, num_experts].
+        expert_weights: Expert selection weights [batch, ..., num_experts].
+        gate_probs: Raw gating probabilities [batch, ..., num_experts].
         num_experts: Total number of experts.
         aux_loss_weight: Weight for the auxiliary loss.
 
     Returns:
         Auxiliary load balancing loss scalar.
     """
+    # Determine axes for token-wise mean calculation (all but the last axis)
+    num_token_axes = len(ops.shape(expert_weights)) - 1
+    token_axes = list(range(num_token_axes))
+
     # Compute fraction of tokens dispatched to each expert
     expert_mask = ops.cast(expert_weights > 0, expert_weights.dtype)
-    tokens_per_expert = ops.mean(expert_mask, axis=(0, 1))  # [num_experts]
+    tokens_per_expert = ops.mean(expert_mask, axis=token_axes)  # [num_experts]
 
     # Compute average gate probability for each expert
-    avg_gate_probs = ops.mean(gate_probs, axis=(0, 1))  # [num_experts]
+    avg_gate_probs = ops.mean(gate_probs, axis=token_axes)  # [num_experts]
 
     # Auxiliary loss = N * sum(f_i * P_i) where f_i is fraction, P_i is avg prob
     aux_loss = num_experts * ops.sum(tokens_per_expert * avg_gate_probs)
