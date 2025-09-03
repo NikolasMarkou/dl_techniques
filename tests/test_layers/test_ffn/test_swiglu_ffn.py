@@ -335,8 +335,8 @@ class TestSwiGLUFFN:
             model.save(filepath)
 
             # Load without custom_objects (thanks to registration decorator)
-            loadeoutput_dim = keras.models.loaoutput_dim(filepath)
-            loaded_prediction = loadeoutput_dim(sample_input)
+            loaded_model = keras.models.load_model(filepath)
+            loaded_prediction = loaded_model(sample_input)
 
             # Verify identical predictions
             np.testing.assert_allclose(
@@ -360,8 +360,8 @@ class TestSwiGLUFFN:
             filepath = os.path.join(tmpdir, 'test_swiglu_custom.keras')
             model.save(filepath)
 
-            loadeoutput_dim = keras.models.loaoutput_dim(filepath)
-            loaded_prediction = loadeoutput_dim(sample_input)
+            loaded_model = keras.models.load_model(filepath)
+            loaded_prediction = loaded_model(sample_input)
 
             # Verify predictions match
             np.testing.assert_allclose(
@@ -371,7 +371,7 @@ class TestSwiGLUFFN:
             )
 
             # Verify loaded layer has correct configuration
-            loaded_layer = loadeoutput_dim.layers[1]  # First layer is Input
+            loaded_layer = loaded_model.layers[1]  # First layer is Input
             assert loaded_layer.output_dim == custom_layer_config['output_dim']
             assert loaded_layer.ffn_expansion_factor == custom_layer_config['ffn_expansion_factor']
             assert loaded_layer.dropout_rate == custom_layer_config['dropout_rate']
