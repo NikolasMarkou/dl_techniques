@@ -450,17 +450,25 @@ class MixtureOfExperts(keras.layers.Layer):
             if len(ops.shape(expert_token_indices)) > 1:
                 expert_token_indices = ops.reshape(expert_token_indices, (-1,))
 
-            if ops.shape(expert_token_indices)[0] > 0:
+            # Use ops.cond to handle the conditional update in graph mode
+            def update_outputs():
                 # Get current values at these indices
                 current_values = ops.take(outputs, expert_token_indices, axis=0)
                 # Add the weighted expert output
                 updated_values = current_values + weighted_output
                 # Scatter update back
-                outputs = ops.scatter_update(
+                return ops.scatter_update(
                     outputs,
                     ops.expand_dims(expert_token_indices, 1),
                     updated_values
                 )
+
+            def no_update():
+                return outputs
+
+            # Check if we have any tokens to update
+            has_tokens = ops.greater(ops.shape(expert_token_indices)[0], 0)
+            outputs = ops.cond(has_tokens, update_outputs, no_update)
 
         # Handle dropped tokens with residual connection if enabled
         if self.use_residual_connection and self.drop_tokens:
@@ -482,17 +490,25 @@ class MixtureOfExperts(keras.layers.Layer):
             if len(ops.shape(unprocessed_indices)) > 1:
                 unprocessed_indices = ops.reshape(unprocessed_indices, (-1,))
 
-            if ops.shape(unprocessed_indices)[0] > 0:
+            # Use ops.cond for residual update
+            def update_residuals():
                 # Get current values at these indices
                 current_values_unprocessed = ops.take(outputs, unprocessed_indices, axis=0)
                 # Add residual
                 updated_values_unprocessed = current_values_unprocessed + residual_output
                 # Scatter update back
-                outputs = ops.scatter_update(
+                return ops.scatter_update(
                     outputs,
                     ops.expand_dims(unprocessed_indices, 1),
                     updated_values_unprocessed
                 )
+
+            def no_residual():
+                return outputs
+
+            # Check if we have any unprocessed tokens
+            has_unprocessed = ops.greater(ops.shape(unprocessed_indices)[0], 0)
+            outputs = ops.cond(has_unprocessed, update_residuals, no_residual)
 
         # Reshape back to original batch structure
         if len(original_shape) > 2:
