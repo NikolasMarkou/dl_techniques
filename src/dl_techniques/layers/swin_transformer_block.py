@@ -230,7 +230,7 @@ class SwinTransformerBlock(keras.layers.Layer):
         self.mlp = SwinMLP(
             hidden_dim=mlp_hidden_dim,
             use_bias=self.use_bias,
-            out_dim=self.dim,
+            output_dim=self.dim,
             activation=self.activation,
             dropout_rate=self.dropout_rate,
             kernel_initializer=self.kernel_initializer,

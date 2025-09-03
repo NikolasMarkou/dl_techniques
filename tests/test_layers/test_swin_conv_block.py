@@ -31,7 +31,7 @@ class TestSwinMLP:
 
         # Check default values
         assert layer.hidden_dim == 128
-        assert layer.out_dim is None
+        assert layer.output_dim is None
         assert layer.activation == "gelu"
         assert layer.dropout_rate == 0.0
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
@@ -46,7 +46,7 @@ class TestSwinMLP:
 
         layer = SwinMLP(
             hidden_dim=256,
-            out_dim=64,
+            output_dim=64,
             activation="relu",
             dropout_rate=0.2,
             kernel_initializer="he_normal",
@@ -58,7 +58,7 @@ class TestSwinMLP:
 
         # Check custom values
         assert layer.hidden_dim == 256
-        assert layer.out_dim == 64
+        assert layer.output_dim == 64
         assert layer.activation == "relu"
         assert layer.dropout_rate == 0.2
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
@@ -96,14 +96,14 @@ class TestSwinMLP:
             (512, 32),  # Another custom output dim
         ]
 
-        for hidden_dim, out_dim in test_cases:
-            layer = SwinMLP(hidden_dim=hidden_dim, out_dim=out_dim)
+        for hidden_dim, output_dim in test_cases:
+            layer = SwinMLP(hidden_dim=hidden_dim, output_dim=output_dim)
             output = layer(input_tensor)
 
             # Check output shape
             expected_shape = list(input_tensor.shape)
-            if out_dim is not None:
-                expected_shape[-1] = out_dim
+            if output_dim is not None:
+                expected_shape[-1] = output_dim
             expected_shape = tuple(expected_shape)
 
             assert output.shape == expected_shape
@@ -125,7 +125,7 @@ class TestSwinMLP:
         controlled_input = keras.ops.ones([2, 4, 8])
         deterministic_layer = SwinMLP(
             hidden_dim=16,
-            out_dim=4,
+            output_dim=4,
             kernel_initializer="ones",
             bias_initializer="zeros",
             activation="linear"
@@ -146,7 +146,7 @@ class TestSwinMLP:
 
             # Check output is valid
             assert not np.any(np.isnan(output.numpy()))
-            assert output.shape == input_tensor.shape  # Same shape since out_dim is None
+            assert output.shape == input_tensor.shape  # Same shape since output_dim is None
 
     def test_dropout_behavior(self, input_tensor):
         """Test dropout behavior during training vs inference."""
@@ -166,7 +166,7 @@ class TestSwinMLP:
         """Test serialization and deserialization of the layer."""
         original_layer = SwinMLP(
             hidden_dim=256,
-            out_dim=64,
+            output_dim=64,
             activation="relu",
             dropout_rate=0.1,
             kernel_initializer="he_normal",
@@ -187,7 +187,7 @@ class TestSwinMLP:
 
         # Check configuration matches
         assert recreated_layer.hidden_dim == original_layer.hidden_dim
-        assert recreated_layer.out_dim == original_layer.out_dim
+        assert recreated_layer.output_dim == original_layer.output_dim
         assert recreated_layer.activation == original_layer.activation
         assert recreated_layer.dropout_rate == original_layer.dropout_rate
 
@@ -202,7 +202,7 @@ class TestSwinMLP:
         inputs = keras.Input(shape=input_tensor.shape[1:])
         x = SwinMLP(hidden_dim=256)(inputs)
         x = keras.layers.LayerNormalization()(x)
-        x = SwinMLP(hidden_dim=128, out_dim=64)(x)
+        x = SwinMLP(hidden_dim=128, output_dim=64)(x)
         x = keras.layers.GlobalAveragePooling1D()(x)
         outputs = keras.layers.Dense(10)(x)
 
@@ -273,7 +273,7 @@ class TestSwinMLP:
 
     def test_shape_handling(self):
         """Test shape handling with different input formats."""
-        layer = SwinMLP(hidden_dim=64, out_dim=32)
+        layer = SwinMLP(hidden_dim=64, output_dim=32)
 
         # Test with tuple shape
         tuple_shape = (None, 16, 128)
@@ -285,7 +285,7 @@ class TestSwinMLP:
         output_shape = layer.compute_output_shape(list_shape)
         assert output_shape == (None, 16, 32)
 
-        # Test without out_dim (should preserve input shape)
+        # Test without output_dim (should preserve input shape)
         layer_no_out = SwinMLP(hidden_dim=64)
         output_shape = layer_no_out.compute_output_shape(tuple_shape)
         assert output_shape == tuple_shape
@@ -328,7 +328,7 @@ class TestSwinMLP:
             test_input = keras.random.normal(shape)
             output = layer(test_input)
 
-            # Output should have same shape as input (no out_dim specified)
+            # Output should have same shape as input (no output_dim specified)
             assert output.shape == test_input.shape
 
     def test_training_vs_inference_mode(self, input_tensor):
@@ -351,7 +351,7 @@ class TestSwinMLP:
 
     def test_layer_weights_structure(self, input_tensor):
         """Test that layer weights have expected structure."""
-        layer = SwinMLP(hidden_dim=256, out_dim=64)
+        layer = SwinMLP(hidden_dim=256, output_dim=64)
         layer(input_tensor)  # Build the layer
 
         # Should have weights from two dense layers
@@ -376,7 +376,7 @@ class TestSwinMLPEdgeCases:
 
     def test_very_small_hidden_dim(self):
         """Test with very small hidden dimension."""
-        layer = SwinMLP(hidden_dim=1, out_dim=1)
+        layer = SwinMLP(hidden_dim=1, output_dim=1)
         test_input = keras.random.normal([2, 3, 4])
 
         output = layer(test_input)
