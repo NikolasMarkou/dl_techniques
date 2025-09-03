@@ -250,71 +250,54 @@ class MixtureOfExperts(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass through the MoE layer."""
         original_shape = ops.shape(inputs)
-        batch_size = original_shape[0]
 
-        # Handle different input shapes
-        if len(original_shape) > 2:
-            # Sequence input: flatten to (batch_size * seq_len, hidden_dim)
-            seq_len = original_shape[1]
-            hidden_dim = original_shape[-1]
-            inputs_flat = ops.reshape(inputs, (batch_size * seq_len, hidden_dim))
-            total_tokens = batch_size * seq_len
+        # Get all dimensions except the last (feature) dimension
+        # This handles inputs of any rank: 2D, 3D, 4D, etc.
+        *batch_dims, hidden_dim = [original_shape[i] for i in range(len(original_shape))]
+
+        # Calculate total number of tokens (all dims except features)
+        if len(batch_dims) == 0:
+            # Edge case: 1D input (just features)
+            batch_dims = [1]
+            total_tokens = 1
+            inputs_reshaped = ops.expand_dims(inputs, axis=0)
         else:
-            # Single token input: (batch_size, hidden_dim)
-            hidden_dim = original_shape[-1]
-            inputs_flat = inputs
-            total_tokens = batch_size
-            seq_len = 1
+            # Product of all batch dimensions
+            total_tokens = ops.prod(ops.stack(batch_dims))
+            # Flatten all batch dimensions into a single token dimension
+            inputs_reshaped = ops.reshape(inputs, (total_tokens, hidden_dim))
 
-        # Determine gating input and expert processing input, applying jitter noise if in training.
+        # For SoftMoE, we need the original multi-dimensional input
+        # For hard routing, we use the flattened version
         if self.gating_config.gating_type == 'softmoe':
+            # SoftMoE requires at least 3D input (batch, seq, features)
             if len(original_shape) < 3:
-                raise ValueError(f"SoftMoE gating requires a 3D input, but got {original_shape}")
+                raise ValueError(
+                    f"SoftMoE gating requires at least a 3D input (batch, seq, features), "
+                    f"but got shape {original_shape}"
+                )
             gating_input = inputs
+            inputs_flat = inputs_reshaped
+        else:
+            # Hard routing uses flattened input
+            gating_input = inputs_reshaped
+            inputs_flat = inputs_reshaped
 
-            # Use ops.cond for conditional noise addition to work in graph mode
+        # Apply jitter noise if in training
+        if training and self.jitter_noise > 0:
             def add_noise():
                 noise = keras.random.uniform(
-                    shape=original_shape, minval=-self.jitter_noise, maxval=self.jitter_noise, dtype=inputs.dtype
+                    shape=ops.shape(gating_input),
+                    minval=-self.jitter_noise,
+                    maxval=self.jitter_noise,
+                    dtype=gating_input.dtype
                 )
-                return inputs + noise
+                return gating_input + noise
 
             def no_noise():
-                return inputs
+                return gating_input
 
-            # Handle training mode properly for graph execution
-            if training is not None and self.jitter_noise > 0:
-                gating_input = ops.cond(
-                    training,
-                    add_noise,
-                    no_noise
-                )
-            else:
-                gating_input = inputs
-
-        else:  # Hard routing
-            gating_input = inputs_flat
-
-            # Use ops.cond for conditional noise addition to work in graph mode
-            def add_noise_flat():
-                noise = keras.random.uniform(
-                    shape=ops.shape(inputs_flat), minval=-self.jitter_noise, maxval=self.jitter_noise,
-                    dtype=inputs_flat.dtype
-                )
-                return inputs_flat + noise
-
-            def no_noise_flat():
-                return inputs_flat
-
-            # Handle training mode properly for graph execution
-            if training is not None and self.jitter_noise > 0:
-                gating_input = ops.cond(
-                    training,
-                    add_noise_flat,
-                    no_noise_flat
-                )
-            else:
-                gating_input = inputs_flat
+            gating_input = ops.cond(training, add_noise, no_noise)
 
         # Compute gating decisions
         expert_weights, expert_indices, gating_info = self.gating_network(
@@ -323,7 +306,6 @@ class MixtureOfExperts(keras.layers.Layer):
 
         # Process based on gating type
         if self.gating_config.gating_type == 'softmoe':
-            # SoftMoE: use pre-computed expert inputs from gating
             outputs = self._process_softmoe(
                 expert_inputs=gating_info['expert_inputs'],
                 expert_weights=expert_weights,
@@ -331,22 +313,20 @@ class MixtureOfExperts(keras.layers.Layer):
                 training=training
             )
         else:
-            # Traditional hard routing (linear, cosine)
+            # Traditional hard routing
             outputs = self._process_hard_routing(
-                inputs_flat=gating_input,  # Experts process the same (noisy) tokens as the router
+                inputs_flat=inputs_flat,
                 expert_weights=expert_weights,
                 expert_indices=expert_indices,
-                original_shape=original_shape,
+                batch_dims=batch_dims,
+                hidden_dim=hidden_dim,
+                total_tokens=total_tokens,
                 training=training
             )
 
-        # Compute and add auxiliary losses during training.
-        # This logic is conditional on the `training` argument.
-        # In Keras 3, `if training:` is the idiomatic way to handle this,
-        # as it will be correctly handled by graph compilation.
+        # Compute and add auxiliary losses during training
         self._auxiliary_losses = []
         if training:
-            # Standard auxiliary loss for load balancing
             if self.gating_config.aux_loss_weight > 0 and 'raw_gate_probs' in gating_info:
                 aux_loss = compute_auxiliary_loss(
                     expert_weights=gating_info['expert_weights'],
@@ -358,7 +338,6 @@ class MixtureOfExperts(keras.layers.Layer):
                 self.add_loss(aux_loss)
                 logger.debug(f"Added auxiliary loss: {aux_loss}")
 
-            # Router z-loss for entropy regularization
             if self.gating_config.z_loss_weight > 0 and 'gate_logits' in gating_info:
                 z_loss = compute_z_loss(
                     gate_logits=gating_info['gate_logits'],
@@ -375,12 +354,12 @@ class MixtureOfExperts(keras.layers.Layer):
             inputs_flat: keras.KerasTensor,
             expert_weights: keras.KerasTensor,
             expert_indices: keras.KerasTensor,
-            original_shape: Tuple[int, ...],
+            batch_dims: list,
+            hidden_dim: int,
+            total_tokens: int,
             training: bool
     ) -> keras.KerasTensor:
         """Process inputs through FFN experts using hard routing."""
-        total_tokens = ops.shape(inputs_flat)[0]
-        hidden_dim = ops.shape(inputs_flat)[-1]
 
         # Determine output dimension from FFN expert configuration
         ffn_config = self.expert_config.ffn_config
@@ -389,17 +368,18 @@ class MixtureOfExperts(keras.layers.Layer):
         # Get expert capacity for current training phase
         expert_capacity = self._expert_capacity_train if training else self._expert_capacity_eval
 
-        # Reshape weights if they have a sequence dimension
-        if len(ops.shape(expert_weights)) > 2:  # (batch, seq, experts)
-            weights_flat = ops.reshape(expert_weights, (-1, self.num_experts))
-        else:  # (tokens, experts)
+        # Flatten expert weights if needed
+        weights_shape = ops.shape(expert_weights)
+        if len(weights_shape) > 2:
+            # Weights have multiple batch dimensions, flatten them
+            weights_flat = ops.reshape(expert_weights, (total_tokens, self.num_experts))
+        else:
             weights_flat = expert_weights
 
-        # Collect outputs from all experts
+        # Process each expert
         expert_outputs_list = []
         expert_masks_list = []
 
-        # Process each expert separately
         for expert_id in range(self.num_experts):
             # Find tokens assigned to this expert
             initial_mask = ops.any(
@@ -407,61 +387,53 @@ class MixtureOfExperts(keras.layers.Layer):
                 axis=-1
             )
 
-            # Get number of tokens assigned to this expert
-            num_assigned_tokens = ops.sum(ops.cast(initial_mask, 'int32'))
-
-             # Apply capacity constraints if enabled
+            # Apply capacity constraints if enabled
             if self.drop_tokens and expert_capacity > 0:
-                # Get indices where mask is True. `ops.where` on 1D input returns shape (N, 1).
+                # Get number of tokens assigned
+                num_assigned = ops.sum(ops.cast(initial_mask, 'int32'))
+
+                # Get indices of assigned tokens
                 token_indices = ops.reshape(ops.where(initial_mask), (-1,))
 
-                # Use conditional logic to handle capacity
                 def apply_capacity():
-                    # Take only the first `expert_capacity` token indices.
+                    # Select first expert_capacity tokens
                     selected_indices = token_indices[:expert_capacity]
-
-                    # Create updates with a static shape.
                     updates = ops.ones((expert_capacity,), dtype='bool')
-
-                    # Use scatter to create a boolean mask of shape (total_tokens,)
-                    # with `True` at the positions of the selected tokens.
                     return ops.scatter(
                         ops.expand_dims(selected_indices, 1),
                         updates,
                         (total_tokens,)
                     )
+
                 def no_capacity():
                     return initial_mask
 
-                # Apply capacity constraint conditionally
                 final_tokens_mask = ops.cond(
-                    num_assigned_tokens > expert_capacity,
+                    num_assigned > expert_capacity,
                     apply_capacity,
                     no_capacity
                 )
             else:
                 final_tokens_mask = initial_mask
 
-            # Get tokens for this expert
-            # `ops.where` on 1D input returns shape (N, 1), so reshape.
+            # Process tokens through expert
             expert_token_indices = ops.reshape(ops.where(final_tokens_mask), (-1,))
-
-            # Extract tokens for this expert
             num_expert_tokens = ops.shape(expert_token_indices)[0]
 
-            # Create a padded tensor for expert input to handle empty case
             def process_expert():
                 expert_tokens = ops.take(inputs_flat, expert_token_indices, axis=0)
                 expert_output = self.experts[expert_id](expert_tokens, training=training)
 
                 # Apply weights
-                expert_token_weights = ops.take(weights_flat[:, expert_id], expert_token_indices, axis=0)
+                expert_token_weights = ops.take(
+                    weights_flat[:, expert_id],
+                    expert_token_indices,
+                    axis=0
+                )
                 weighted_output = expert_output * ops.expand_dims(expert_token_weights, axis=-1)
 
-                # Create full-size output tensor with zeros
+                # Scatter to full size
                 full_output = ops.zeros((total_tokens, output_dim), dtype=inputs_flat.dtype)
-
-                # Scatter the expert's output to the right positions
                 full_output = ops.scatter(
                     ops.expand_dims(expert_token_indices, 1),
                     weighted_output,
@@ -472,7 +444,6 @@ class MixtureOfExperts(keras.layers.Layer):
             def empty_expert():
                 return ops.zeros((total_tokens, output_dim), dtype=inputs_flat.dtype)
 
-            # Process conditionally based on whether expert has tokens
             expert_output = ops.cond(
                 num_expert_tokens > 0,
                 process_expert,
@@ -482,87 +453,86 @@ class MixtureOfExperts(keras.layers.Layer):
             expert_outputs_list.append(expert_output)
             expert_masks_list.append(final_tokens_mask)
 
-        # Stack the tensors into a single tensor
-        stacked_tensors = ops.stack(expert_outputs_list, axis=0)
-        # Sum along the new axis (axis=0) to get the final result
-        outputs = ops.sum(stacked_tensors, axis=0, keepdims=False)
+        # Sum expert outputs
+        outputs = ops.sum(ops.stack(expert_outputs_list, axis=0), axis=0)
 
-        # Handle dropped tokens with residual connection if enabled
-        if self.use_residual_connection and self.drop_tokens:
-            # Combine all expert masks to find processed tokens
-            processed_mask = ops.logical_or(expert_masks_list[0], expert_masks_list[0])
-            for mask in expert_masks_list[1:]:
+        # Handle dropped tokens with residual connection
+        if self.use_residual_connection and self.drop_tokens and hidden_dim == output_dim:
+            # Find unprocessed tokens
+            processed_mask = ops.zeros((total_tokens,), dtype='bool')
+            for mask in expert_masks_list:
                 processed_mask = ops.logical_or(processed_mask, mask)
 
             unprocessed_mask = ops.logical_not(processed_mask)
 
-            if hidden_dim == output_dim:
-                # Add residual for unprocessed tokens
-                residual = ops.where(
-                    ops.expand_dims(unprocessed_mask, -1),
-                    inputs_flat,
-                    ops.zeros_like(inputs_flat)
-                )
-                if output_dim != hidden_dim:
-                    # Pad or slice to match dimensions
-                    residual = residual[..., :output_dim]
-                outputs = outputs + residual
+            # Add residual for unprocessed tokens
+            residual = ops.where(
+                ops.expand_dims(unprocessed_mask, -1),
+                inputs_flat,
+                ops.zeros_like(inputs_flat)
+            )
+            outputs = outputs + residual[..., :output_dim]
 
         # Reshape back to original batch structure
-        if len(original_shape) > 2:
-            new_shape = list(original_shape[:-1]) + [output_dim]
-            outputs = ops.reshape(outputs, new_shape)
+        output_shape = batch_dims + [output_dim]
+        outputs = ops.reshape(outputs, output_shape)
 
         return outputs
 
     def _process_softmoe(
-        self,
-        expert_inputs: keras.KerasTensor,
-        expert_weights: keras.KerasTensor,
-        original_shape: Tuple[int, ...],
-        training: bool
+            self,
+            expert_inputs: keras.KerasTensor,
+            expert_weights: keras.KerasTensor,
+            original_shape: Tuple[int, ...],
+            training: bool
     ) -> keras.KerasTensor:
         """Process inputs through FFN experts using SoftMoE routing."""
-        batch_size = original_shape[0]
 
-        # Determine output dimension from FFN configuration
+        # For SoftMoE, we need to handle the multi-dimensional case more carefully
+        # expert_inputs shape: [batch, num_experts, slots * hidden_dim]
+        # expert_weights shape: depends on input dimensions
+
+        # Get output dimension
         ffn_config = self.expert_config.ffn_config
         output_dim = ffn_config.get('output_dim', original_shape[-1])
 
-        # Process each expert's soft inputs
+        # Process each expert
         expert_outputs = []
-
         for expert_id in range(self.num_experts):
-            # Get expert's soft input slots
-            expert_input = expert_inputs[:, expert_id, :]  # [batch, slots * hidden_dim]
-
-            # Process through FFN expert
+            expert_input = expert_inputs[:, expert_id, :]
             expert_output = self.experts[expert_id](expert_input, training=training)
             expert_outputs.append(expert_output)
 
-        # Stack expert outputs
-        expert_outputs_stacked = ops.stack(expert_outputs, axis=1)  # [batch, num_experts, output_dim]
+        # Stack expert outputs: [batch, num_experts, output_dim]
+        expert_outputs_stacked = ops.stack(expert_outputs, axis=1)
 
-        # Weight and combine expert outputs
-        if len(original_shape) > 2:
-            # Sequence input case
+        # Combine based on weights
+        # The weight shape needs to match the input dimensions
+        if len(original_shape) == 3:
+            # 3D input: (batch, seq, features)
+            batch_size = original_shape[0]
             seq_len = original_shape[1]
-            expert_weights_reshaped = ops.reshape(
+
+            # Reshape weights to [batch, seq, num_experts, 1]
+            weights_reshaped = ops.reshape(
                 expert_weights,
                 (batch_size, seq_len, self.num_experts, 1)
             )
+
+            # Expand expert outputs to match
             expert_outputs_expanded = ops.expand_dims(
                 expert_outputs_stacked, axis=1
             )  # [batch, 1, num_experts, output_dim]
 
             # Weighted combination
-            weighted_outputs = expert_outputs_expanded * expert_weights_reshaped
-            outputs = ops.sum(weighted_outputs, axis=2)  # [batch, seq_len, output_dim]
+            weighted_outputs = expert_outputs_expanded * weights_reshaped
+            outputs = ops.sum(weighted_outputs, axis=2)  # [batch, seq, output_dim]
         else:
-            # Single token input case
+            # Handle other dimensional cases
+            # For now, fall back to simpler handling
             expert_weights_expanded = ops.expand_dims(expert_weights, axis=-1)
             weighted_outputs = expert_outputs_stacked * expert_weights_expanded
-            outputs = ops.sum(weighted_outputs, axis=1)  # [batch, output_dim]
+            outputs = ops.sum(weighted_outputs, axis=1)
 
         return outputs
 

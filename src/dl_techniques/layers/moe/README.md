@@ -91,7 +91,7 @@ from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 expert_config = ExpertConfig(
     ffn_config={
         "type": "swiglu",           # FFN type
-        "d_model": 768,             # Model dimension
+        "output_dim": 768,             # Model dimension
         "ffn_expansion_factor": 4   # Expansion ratio
     }
 )
@@ -186,7 +186,7 @@ moe_layer = create_ffn_moe(
     num_experts=8,
     ffn_config={
         "type": "swiglu",
-        "d_model": 768,
+        "output_dim": 768,
         "ffn_expansion_factor": 4
     },
     top_k=2,
@@ -233,7 +233,7 @@ def create_transformer_with_moe():
         num_experts=8,
         ffn_config={
             "type": "swiglu",
-            "d_model": 768,
+            "output_dim": 768,
             "ffn_expansion_factor": 4
         },
         top_k=2
@@ -537,7 +537,7 @@ efficient_config = MoEConfig(
     expert_config=ExpertConfig(
         ffn_config={
             "type": "swiglu",     # Efficient gated FFN
-            "d_model": 512,       # Moderate size
+            "output_dim": 512,       # Moderate size
             "ffn_expansion_factor": 2  # Lower expansion
         }
     ),
@@ -733,7 +733,7 @@ moe_layer = create_ffn_moe(
     num_experts=8,
     ffn_config={
         "type": "swiglu",
-        "d_model": hidden_dim,
+        "output_dim": hidden_dim,
         "ffn_expansion_factor": 4
     },
     top_k=2,

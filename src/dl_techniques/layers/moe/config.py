@@ -23,7 +23,7 @@ class ExpertConfig:
         ffn_config: Dictionary containing FFN configuration that will be passed
             directly to the FFN factory's create_ffn_from_config() function.
             This should include 'type' and any FFN-specific parameters.
-            Example: {"type": "swiglu", "d_model": 768, "ffn_expansion_factor": 4}
+            Example: {"type": "swiglu", "output_dim": 768, "ffn_expansion_factor": 4}
 
         use_bias: Whether to include bias terms in any additional linear layers
             (not part of the FFN itself). Defaults to True.
@@ -38,7 +38,7 @@ class ExpertConfig:
         config = ExpertConfig(
             ffn_config={
                 "type": "swiglu",
-                "d_model": 768,
+                "output_dim": 768,
                 "ffn_expansion_factor": 4,
                 "dropout_rate": 0.1
             }
@@ -197,7 +197,7 @@ class MoEConfig:
             expert_config=ExpertConfig(
                 ffn_config={
                     "type": "swiglu",
-                    "d_model": 768,
+                    "output_dim": 768,
                     "ffn_expansion_factor": 4
                 }
             ),

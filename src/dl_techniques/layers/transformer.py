@@ -30,13 +30,8 @@ from .norms.band_rms import BandRMS
 from .norms.dynamic_tanh import DynamicTanh
 from .stochastic_depth import StochasticDepth
 
-from .ffn.mlp import MLPBlock
-from .ffn.glu_ffn import GLUFFN
-from .ffn.swin_mlp import SwinMLP
-from .ffn.geglu_ffn import GeGLUFFN
-from .ffn.swiglu_ffn import SwiGLUFFN
-from .ffn.diff_ffn import DifferentialFFN
-from .ffn.residual_block import ResidualBlock
+# FFN Integration - Use the factory for creating FFN layers
+from .ffn.factory import create_ffn_from_config
 
 from .attention.window_attention import WindowAttention
 from .attention.group_query_attention import GroupedQueryAttention
@@ -166,9 +161,11 @@ class TransformerLayer(keras.layers.Layer):
         moe_config = MoEConfig(
             num_experts=8,
             expert_config=ExpertConfig(
-                expert_type='ffn',
-                ffn_type='swiglu',  # Use SwiGLU for the experts
-                hidden_dim=768      # Should match TransformerLayer's hidden_size
+                ffn_config={
+                    "type": "swiglu",      # Use SwiGLU for the experts
+                    "output_dim": 768,     # Should match TransformerLayer's hidden_size
+                    "ffn_expansion_factor": 4
+                }
             ),
             gating_config=GatingConfig(top_k=2)
         )
@@ -274,21 +271,25 @@ class TransformerLayer(keras.layers.Layer):
                     "MixtureOfExperts layer configured by `moe_config`."
                 )
 
-            # Ensure expert hidden_dim matches transformer's hidden_size
-            if hasattr(self.moe_config.expert_config, 'hidden_dim'):
-                if self.moe_config.expert_config.hidden_dim != self.hidden_size:
-                    warnings.warn(
-                        f"Adjusting moe_config.expert_config.hidden_dim from "
-                        f"{self.moe_config.expert_config.hidden_dim} to {self.hidden_size} "
-                        f"to match TransformerLayer's hidden_size for consistency."
-                    )
-                    self.moe_config.expert_config.hidden_dim = self.hidden_size
+            ffn_config = self.moe_config.expert_config.ffn_config
 
-            # If expert_config doesn't have intermediate_size set and it's FFN type,
-            # use TransformerLayer's intermediate_size as a sensible default
-            if (self.moe_config.expert_config.expert_type == 'ffn' and
-                self.moe_config.expert_config.intermediate_size is None):
-                self.moe_config.expert_config.intermediate_size = self.intermediate_size
+            # Ensure expert output_dim matches transformer's hidden_size
+            if 'output_dim' in ffn_config and ffn_config['output_dim'] != self.hidden_size:
+                warnings.warn(
+                    f"Adjusting moe_config.expert_config.ffn_config['output_dim'] from "
+                    f"{ffn_config['output_dim']} to {self.hidden_size} "
+                    f"to match TransformerLayer's hidden_size for consistency."
+                )
+                ffn_config['output_dim'] = self.hidden_size
+            elif 'output_dim' not in ffn_config:
+                ffn_config['output_dim'] = self.hidden_size
+
+            # If expert_config is for an MLP-like FFN and doesn't have its intermediate size set,
+            # use TransformerLayer's intermediate_size as a sensible default.
+            ffn_type = ffn_config.get('type')
+            if ffn_type in ['mlp', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp']:
+                if 'hidden_dim' not in ffn_config:
+                    ffn_config['hidden_dim'] = self.intermediate_size
 
         # --- Create Sub-layers (unbuilt) ---
         # Following best practices: all sub-layers created in __init__
@@ -426,9 +427,9 @@ class TransformerLayer(keras.layers.Layer):
                 f"Original error: {e}"
             )
 
-    def _get_ffn_params(self, name: str) -> Dict[str, Any]:
+    def _get_ffn_config(self, name: str) -> Dict[str, Any]:
         """
-        Get parameters for FFN layer creation, merging defaults with custom args.
+        Get configuration dictionary for FFN layer creation via factory.
 
         Args:
             name: Name for the FFN layer.
@@ -436,58 +437,35 @@ class TransformerLayer(keras.layers.Layer):
         Returns:
             Dictionary of parameters for FFN layer creation.
         """
-        # Base parameters common to most FFN types
-        base_params = {
-            'name': name
+        config = {
+            'type': self.ffn_type,
+            'name': name,
+            'dropout_rate': self.dropout_rate
         }
 
-        if self.ffn_type == 'mlp':
-            default_params = {
-                'hidden_dim': self.intermediate_size,
+        # Map TransformerLayer's generic parameters to FFN-specific ones
+        if self.ffn_type == 'swiglu':
+            config.update({
                 'output_dim': self.hidden_size,
-                'activation': self.activation,
-                'dropout_rate': self.dropout_rate,
-            }
-        elif self.ffn_type == 'swiglu':
-            default_params = {
-                'd_model': self.hidden_size,
                 'ffn_expansion_factor': self.ffn_expansion_factor,
                 'ffn_multiple_of': self.ffn_multiple_of,
-            }
+            })
         elif self.ffn_type == 'differential':
-            default_params = {
+            config.update({
                 'hidden_dim': self.intermediate_size,
                 'output_dim': self.hidden_size,
-                'branch_activation': self.activation,  # Note: different parameter name
-                'dropout_rate': self.dropout_rate,
-            }
-        elif self.ffn_type in ['geglu', 'glu']:
-            default_params = {
-                'hidden_dim': self.intermediate_size,
-                'output_dim': self.hidden_size,
-                'activation': self.activation,
-                'dropout_rate': self.dropout_rate,
-            }
-        elif self.ffn_type == 'residual':
-            default_params = {
+                'branch_activation': self.activation,
+            })
+        elif self.ffn_type in ['mlp', 'glu', 'geglu', 'residual', 'swin_mlp']:
+            config.update({
                 'hidden_dim': self.intermediate_size,
                 'output_dim': self.hidden_size,
                 'activation': self.activation,
-                'dropout_rate': self.dropout_rate,
-            }
-        elif self.ffn_type == 'swin_mlp':
-            default_params = {
-                'hidden_dim': self.intermediate_size,
-                'out_dim': self.hidden_size,  # Note: different parameter name
-                'activation': self.activation,
-                'dropout_rate': self.dropout_rate,
-            }
-        else:
-            raise ValueError(f"Unknown FFN type: {self.ffn_type}")
+            })
 
-        # Merge base, default, and custom parameters
-        params = {**base_params, **default_params, **self.ffn_args}
-        return params
+        # User-provided args override everything.
+        config.update(self.ffn_args)
+        return config
 
     def _create_ffn_layer(self, name: str) -> keras.layers.Layer:
         """
@@ -503,25 +481,10 @@ class TransformerLayer(keras.layers.Layer):
         if self.moe_config is not None:
             return MixtureOfExperts(config=self.moe_config, name=name)
 
-        # Otherwise, create standard FFN based on type
-        params = self._get_ffn_params(name)
+        # Otherwise, create standard FFN using the factory
+        config = self._get_ffn_config(name)
         try:
-            if self.ffn_type == 'mlp':
-                return MLPBlock(**params)
-            elif self.ffn_type == 'swiglu':
-                return SwiGLUFFN(**params)
-            elif self.ffn_type == 'differential':
-                return DifferentialFFN(**params)
-            elif self.ffn_type == 'glu':
-                return GLUFFN(**params)
-            elif self.ffn_type == 'geglu':
-                return GeGLUFFN(**params)
-            elif self.ffn_type == 'residual':
-                return ResidualBlock(**params)
-            elif self.ffn_type == 'swin_mlp':
-                return SwinMLP(**params)
-            else:
-                raise ValueError(f"Unknown FFN type: {self.ffn_type}")
+            return create_ffn_from_config(config)
         except (TypeError, ValueError) as e:
             raise ValueError(
                 f"Failed to create {self.ffn_type} layer. "
