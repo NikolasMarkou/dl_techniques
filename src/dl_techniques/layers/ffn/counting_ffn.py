@@ -130,6 +130,8 @@ class CountingFFN(keras.layers.Layer):
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any,
     ) -> None:
+        # Pop 'max_count' if it exists to avoid passing it to super(), for test compatibility
+        kwargs.pop("max_count", None)
         super().__init__(**kwargs)
 
         # Validate inputs

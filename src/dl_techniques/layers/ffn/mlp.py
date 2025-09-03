@@ -1,7 +1,4 @@
 """
-MLP Block Transformers
-=================================
-
 This module implements the standard MLP (Multi-Layer Perceptron) block
 commonly used in transformer architectures.
 
@@ -59,6 +56,8 @@ class MLPBlock(keras.layers.Layer):
             for the bias vectors. Defaults to 'zeros'.
         kernel_regularizer: Optional regularizer for the dense layer kernels.
             Can be string name ('l2') or Regularizer instance. Defaults to None.
+        bias_regularizer: Optional regularizer for the dense layer biases.
+            Can be string name ('l1') or Regularizer instance. Defaults to None.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
@@ -121,6 +120,7 @@ class MLPBlock(keras.layers.Layer):
         kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         **kwargs: Any
     ) -> None:
         """
@@ -135,6 +135,7 @@ class MLPBlock(keras.layers.Layer):
             kernel_initializer: Initializer for the dense layer kernels.
             bias_initializer: Initializer for the bias vectors.
             kernel_regularizer: Optional regularizer for the dense layer kernels.
+            bias_regularizer: Optional regularizer for the dense layer biases.
             **kwargs: Additional keyword arguments for the Layer base class.
         """
         super().__init__(**kwargs)
@@ -156,6 +157,7 @@ class MLPBlock(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Get activation function once
         self.activation_fn = keras.activations.get(activation)
@@ -168,6 +170,7 @@ class MLPBlock(keras.layers.Layer):
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="fc1"
         )
 
@@ -177,6 +180,7 @@ class MLPBlock(keras.layers.Layer):
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="fc2"
         )
 
@@ -294,7 +298,6 @@ class MLPBlock(keras.layers.Layer):
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------

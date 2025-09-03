@@ -89,6 +89,8 @@ class GLUFFN(keras.layers.Layer):
             Defaults to 'zeros'.
         kernel_regularizer: Optional regularizer applied to kernel weights of
             all Dense layers for preventing overfitting. Defaults to None.
+        bias_regularizer: Optional regularizer applied to bias weights of
+            all Dense layers. Defaults to None.
         **kwargs: Additional keyword arguments for Layer base class (name, dtype, etc.).
 
     Input shape:
@@ -172,6 +174,7 @@ class GLUFFN(keras.layers.Layer):
         kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
         bias_initializer: Union[str, initializers.Initializer] = 'zeros',
         kernel_regularizer: Optional[regularizers.Regularizer] = None,
+        bias_regularizer: Optional[regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
         """Initialize the GLU FFN layer with comprehensive parameter validation."""
@@ -194,6 +197,8 @@ class GLUFFN(keras.layers.Layer):
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.bias_regularizer = regularizers.get(bias_regularizer)
+
 
         # CREATE all sub-layers in __init__ (following Modern Keras 3 patterns)
         # All layers are unbuilt at this point - building happens in build()
@@ -202,6 +207,7 @@ class GLUFFN(keras.layers.Layer):
             "kernel_initializer": self.kernel_initializer,
             "bias_initializer": self.bias_initializer,
             "kernel_regularizer": self.kernel_regularizer,
+            "bias_regularizer": self.bias_regularizer,
         }
 
         self.gate_proj = layers.Dense(
@@ -325,6 +331,7 @@ class GLUFFN(keras.layers.Layer):
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'bias_initializer': initializers.serialize(self.bias_initializer),
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
         })
         return config
 
