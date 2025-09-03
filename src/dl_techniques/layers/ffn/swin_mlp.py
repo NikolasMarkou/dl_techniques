@@ -40,7 +40,7 @@ class SwinMLP(keras.layers.Layer):
         activation: String or callable, activation function. Supports Keras
             activation names ('gelu', 'relu', 'swish') or custom callables.
             Defaults to 'gelu'.
-        drop_rate: Float, dropout rate applied after activation and before
+        dropout_rate: Float, dropout rate applied after activation and before
             output. Must be between 0.0 and 1.0. Defaults to 0.0.
         kernel_initializer: String or Initializer, initializer for Dense layer
             kernels. Defaults to 'glorot_uniform'.
@@ -113,7 +113,7 @@ class SwinMLP(keras.layers.Layer):
         use_bias: bool = True,
         out_dim: Optional[int] = None,
         activation: Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = "gelu",
-        drop_rate: float = 0.0,
+        dropout_rate: float = 0.0,
         kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
@@ -126,8 +126,8 @@ class SwinMLP(keras.layers.Layer):
         # Validate parameters
         if hidden_dim <= 0:
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
-        if not 0.0 <= drop_rate <= 1.0:
-            raise ValueError(f"drop_rate must be between 0.0 and 1.0, got {drop_rate}")
+        if not 0.0 <= dropout_rate <= 1.0:
+            raise ValueError(f"dropout_rate must be between 0.0 and 1.0, got {dropout_rate}")
         if out_dim is not None and out_dim <= 0:
             raise ValueError(f"out_dim must be positive when specified, got {out_dim}")
 
@@ -136,7 +136,7 @@ class SwinMLP(keras.layers.Layer):
         self.use_bias = use_bias
         self.out_dim = out_dim
         self.activation = activation
-        self.drop_rate = drop_rate
+        self.dropout_rate = dropout_rate
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
@@ -160,8 +160,8 @@ class SwinMLP(keras.layers.Layer):
         self.act = keras.layers.Activation(self.activation, name="act")
 
         # Dropout layers (created even if rate=0.0 for consistent serialization)
-        self.drop1 = keras.layers.Dropout(self.drop_rate, name="drop1")
-        self.drop2 = keras.layers.Dropout(self.drop_rate, name="drop2")
+        self.drop1 = keras.layers.Dropout(self.dropout_rate, name="drop1")
+        self.drop2 = keras.layers.Dropout(self.dropout_rate, name="drop2")
 
         # Second dense layer - units will be set in build() based on out_dim logic
         # We need to create it here but will configure the units in build()
@@ -290,7 +290,7 @@ class SwinMLP(keras.layers.Layer):
             "use_bias": self.use_bias,
             "out_dim": self.out_dim,
             "activation": self.activation,
-            "drop_rate": self.drop_rate,
+            "dropout_rate": self.dropout_rate,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),

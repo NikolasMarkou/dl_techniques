@@ -17,7 +17,7 @@ The following layers are supported by the factory system with automated paramete
 | `mlp` | `MLPBlock` | Standard MLP with intermediate expansion | General purpose feed-forward processing |
 | `swiglu` | `SwiGLUFFN` | SwiGLU with gating mechanism | Modern transformer architectures (LLaMa, Qwen) |
 | `differential` | `DifferentialFFN` | Dual-pathway processing | Enhanced feature processing |
-| `glu` | `GLUFFN` | Gated Linear Unit with sigmoid gating | Improved gradient flow |
+| `glu` | `GLUFFN` | Gated Linear Unit with configurable activation | Improved gradient flow |
 | `geglu` | `GeGLUFFN` | GELU-based Gated Linear Unit | GELU-based gated processing |
 | `residual` | `ResidualBlock` | Residual block with skip connections | Deep networks requiring gradient flow |
 | `swin_mlp` | `SwinMLP` | Swin Transformer MLP variant | Vision models and windowed attention |
@@ -112,7 +112,7 @@ mlp = create_ffn_layer(
 
 ### SwiGLUFFN
 **Required:** `d_model`  
-**Optional:** `ffn_expansion_factor` (default: 4), `ffn_multiple_of` (default: 256), `dropout_rate` (default: 0.0)
+**Optional:** `ffn_expansion_factor` (default: 4), `ffn_multiple_of` (default: 256), `dropout_rate` (default: 0.0), `use_bias` (default: False)
 
 ```python
 swiglu = create_ffn_layer(
@@ -126,7 +126,7 @@ swiglu = create_ffn_layer(
 
 ### DifferentialFFN
 **Required:** `hidden_dim`, `output_dim`  
-**Optional:** `branch_activation` (default: 'gelu'), `combination_activation` (default: 'linear'), `dropout_rate` (default: 0.0)
+**Optional:** `branch_activation` (default: 'gelu'), `gate_activation` (default: 'sigmoid'), `dropout_rate` (default: 0.0)
 
 ```python
 diff_ffn = create_ffn_layer(
@@ -134,7 +134,7 @@ diff_ffn = create_ffn_layer(
     hidden_dim=1024,
     output_dim=768,
     branch_activation='relu',
-    combination_activation='gelu'
+    gate_activation='sigmoid'
 )
 ```
 
@@ -195,12 +195,14 @@ swin_mlp = create_ffn_layer(
 
 ## Direct Layer Instantiation
 
+While the factory is the recommended approach for standardized layers, direct instantiation remains available for all layer types. This can be useful for specific use cases or when bypassing the factory is desirable.
+
 ### For Factory-Supported Layers
 
 ```python
 from dl_techniques.layers.ffn import MLPBlock, SwiGLUFFN, GeGLUFFN
 
-# Direct instantiation (bypasses factory)
+# Direct instantiation (bypasses factory validation and defaults)
 mlp = MLPBlock(hidden_dim=512, output_dim=256, activation='relu')
 swiglu = SwiGLUFFN(d_model=768, ffn_expansion_factor=4)
 geglu = GeGLUFFN(hidden_dim=2048, output_dim=768)
@@ -222,8 +224,7 @@ logic_ffn = LogicFFN(
 counting_ffn = CountingFFN(
     output_dim=512,
     count_dim=128,
-    counting_scope='local',  # 'global', 'local', or 'causal'
-    max_count=10
+    counting_scope='local'  # 'global', 'local', or 'causal'
 )
 ```
 
