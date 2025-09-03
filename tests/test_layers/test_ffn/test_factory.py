@@ -86,8 +86,8 @@ class TestFFNFactory:
             config['hidden_dim'] = 512
         if 'output_dim' in type_info['required_params']:
             config['output_dim'] = 256
-        if 'd_model' in type_info['required_params']:
-            config['d_model'] = 768
+        if 'output_dim' in type_info['required_params']:
+            config['output_dim'] = 768
 
         # Create layer
         layer = create_ffn_layer(ffn_type, **config)
@@ -97,16 +97,16 @@ class TestFFNFactory:
         assert hasattr(layer, 'call')
 
         # Test forward pass
-        # Adjust input size for d_model based layers
-        if 'd_model' in config:
-            test_input = keras.random.normal(shape=(4, 32, config['d_model']))
+        # Adjust input size for output_dim based layers
+        if 'output_dim' in config:
+            test_input = keras.random.normal(shape=(4, 32, config['output_dim']))
         else:
             test_input = keras.random.normal(shape=(4, 32, 512))  # Match hidden_dim
 
         output = layer(test_input)
 
         # Verify output shape
-        expected_output_dim = config.get('output_dim', config.get('d_model', 512))
+        expected_output_dim = config.get('output_dim', config.get('output_dim', 512))
         if ffn_type == 'swin_mlp' and 'output_dim' not in config:
              expected_output_dim = 512
         assert output.shape[-1] == expected_output_dim
@@ -127,7 +127,7 @@ class TestFFNFactory:
 
         valid_configs = [
             ('mlp', {'hidden_dim': 512, 'output_dim': 256}),
-            ('swiglu', {'d_model': 768}),
+            ('swiglu', {'output_dim': 768}),
             ('differential', {'hidden_dim': 1024, 'output_dim': 512}),
             ('glu', {'hidden_dim': 256, 'output_dim': 128}),
             ('geglu', {'hidden_dim': 512, 'output_dim': 256}),
@@ -153,7 +153,7 @@ class TestFFNFactory:
             },
             {
                 'type': 'swiglu',
-                'd_model': 768,
+                'output_dim': 768,
                 'ffn_expansion_factor': 4,
                 'dropout_rate': 0.0,
                 'name': 'test_swiglu'
@@ -175,7 +175,7 @@ class TestFFNFactory:
 
             # Test forward pass
             if config['type'] == 'swiglu':
-                test_input = keras.random.normal(shape=(2, 16, config['d_model']))
+                test_input = keras.random.normal(shape=(2, 16, config['output_dim']))
             else:
                 test_input = keras.random.normal(shape=(2, 16, 1024))
 
@@ -194,7 +194,7 @@ class TestFFNFactory:
 
         test_configs = [
             ('mlp', {'hidden_dim': 256, 'output_dim': 128}),
-            ('swiglu', {'d_model': 512, 'ffn_expansion_factor': 4}),
+            ('swiglu', {'output_dim': 512, 'ffn_expansion_factor': 4}),
             ('differential', {'hidden_dim': 256, 'output_dim': 128}),
             ('glu', {'hidden_dim': 256, 'output_dim': 128}),
             ('geglu', {'hidden_dim': 256, 'output_dim': 128}),
@@ -256,7 +256,7 @@ class TestFFNFactory:
         # Test with all SwiGLU parameters
         layer = create_ffn_layer(
             'swiglu',
-            d_model=768,
+            output_dim=768,
             ffn_expansion_factor=8,
             ffn_multiple_of=128,
             dropout_rate=0.1
@@ -328,7 +328,7 @@ class TestFFNFactory:
 
         # Test zero dimensions
         with pytest.raises(ValueError):
-            create_ffn_layer('swiglu', d_model=0)
+            create_ffn_layer('swiglu', output_dim=0)
 
     def test_config_completeness(self):
         """Test that get_config returns complete configuration."""
@@ -354,7 +354,7 @@ class TestFFNFactory:
 
         test_configs = [
             ('mlp', {'hidden_dim': 128, 'output_dim': 64}),
-            ('swiglu', {'d_model': 128}),
+            ('swiglu', {'output_dim': 128}),
             ('glu', {'hidden_dim': 128, 'output_dim': 64})
         ]
 
@@ -362,8 +362,8 @@ class TestFFNFactory:
             layer = create_ffn_layer(ffn_type, **config)
 
             # Adjust input size
-            if 'd_model' in config:
-                test_input = keras.random.normal(shape=(2, 8, config['d_model']))
+            if 'output_dim' in config:
+                test_input = keras.random.normal(shape=(2, 8, config['output_dim']))
             else:
                 test_input = keras.random.normal(shape=(2, 8, 128)) # MLP and GLU need input matching hidden_dim for this test config
 
@@ -392,7 +392,7 @@ class TestFFNFactory:
     def test_batch_size_invariance(self):
         """Test that layers work with different batch sizes."""
 
-        layer = create_ffn_layer('swiglu', d_model=512)
+        layer = create_ffn_layer('swiglu', output_dim=512)
 
         batch_sizes = [1, 4, 16, 32]
         for batch_size in batch_sizes:
@@ -429,7 +429,7 @@ class TestFFNFactory:
 
         config = {
             'type': 'swiglu',
-            'd_model': 768,
+            'output_dim': 768,
             'ffn_expansion_factor': 4,
             'dropout_rate': 0.1,
             'name': 'json_test_layer'
@@ -459,7 +459,7 @@ class TestFFNFactory:
         assert output.shape == (1, 4, 1)
 
         # Large dimensions (within reasonable limits)
-        layer = create_ffn_layer('swiglu', d_model=2048)
+        layer = create_ffn_layer('swiglu', output_dim=2048)
         test_input = keras.random.normal(shape=(1, 8, 2048))
         output = layer(test_input)
         assert output.shape == (1, 8, 2048)
@@ -628,7 +628,7 @@ class TestFFNFactory:
         """Test memory usage with large layers."""
 
         # Create relatively large FFN
-        layer = create_ffn_layer('swiglu', d_model=2048, ffn_expansion_factor=4)
+        layer = create_ffn_layer('swiglu', output_dim=2048, ffn_expansion_factor=4)
 
         # Test with moderately sized input
         test_input = keras.random.normal(shape=(8, 64, 2048))
@@ -639,7 +639,7 @@ class TestFFNFactory:
 
     @pytest.mark.parametrize("ffn_type,config", [
         ('mlp', {'hidden_dim': 64, 'output_dim': 32, 'dropout_rate': 0.5}),
-        ('swiglu', {'d_model': 128, 'dropout_rate': 0.3}),
+        ('swiglu', {'output_dim': 128, 'dropout_rate': 0.3}),
         ('glu', {'hidden_dim': 96, 'output_dim': 48, 'activation': 'swish'})
     ])
     def test_parameterized_layer_creation(self, ffn_type: str, config: Dict[str, Any]):
@@ -648,11 +648,11 @@ class TestFFNFactory:
         layer = create_ffn_layer(ffn_type, **config)
 
         # Determine input dimension
-        if 'd_model' in config:
-            input_dim = config['d_model']
-            expected_output_dim = config['d_model']
+        if 'output_dim' in config:
+            input_dim = config['output_dim']
+            expected_output_dim = config['output_dim']
         else:
-            input_dim = 64 # Use a consistent input dim for non-d_model layers
+            input_dim = 64 # Use a consistent input dim for non-output_dim layers
             expected_output_dim = config['output_dim']
 
         test_input = keras.random.normal(shape=(2, 8, input_dim))
@@ -676,7 +676,7 @@ class TestFFNFactory:
         # This test checks that providing correct parameters for each type works.
         configs = {
             'mlp': {'hidden_dim': 256, 'output_dim': 128},
-            'swiglu': {'d_model': 256},
+            'swiglu': {'output_dim': 256},
             'differential': {'hidden_dim': 256, 'output_dim': 128},
             'glu': {'hidden_dim': 256, 'output_dim': 128},
             'geglu': {'hidden_dim': 256, 'output_dim': 128},
@@ -706,8 +706,8 @@ class LayerSerializationTest:
             layer = create_ffn_layer(self.ffn_type, **self.config)
 
             # Determine input dimension for test
-            if 'd_model' in self.config:
-                input_dim = self.config['d_model']
+            if 'output_dim' in self.config:
+                input_dim = self.config['output_dim']
             else:
                 input_dim = self.config.get('hidden_dim', 512)
 
@@ -724,8 +724,8 @@ class LayerSerializationTest:
             filepath = os.path.join(self.tmpdir, 'test_model.keras')
             model.save(filepath)
 
-            loaded_model = keras.models.load_model(filepath)
-            loaded_prediction = loaded_model(sample_input)
+            lodaed_model = keras.models.load_model(filepath)
+            loaded_prediction = lodaed_model(sample_input)
 
             # Verify identical predictions
             np.testing.assert_allclose(
@@ -849,8 +849,8 @@ class TestFactoryPerformance:
         """Test memory usage is consistent between factory and direct creation."""
 
         # Create layers both ways
-        factory_layer = create_ffn_layer('swiglu', d_model=1024)
-        direct_layer = SwiGLUFFN(d_model=1024)
+        factory_layer = create_ffn_layer('swiglu', output_dim=1024)
+        direct_layer = SwiGLUFFN(output_dim=1024)
 
         # Both should have similar number of parameters
         def count_params(layer):
@@ -898,7 +898,7 @@ class TestFactoryLogging:
 
         # This would normally require debug level to be enabled
         with patch.object(logger, 'debug') as mock_debug:
-            layer = create_ffn_layer('swiglu', d_model=768)
+            layer = create_ffn_layer('swiglu', output_dim=768)
 
             # Debug logging might be called (depends on implementation)
             # Just verify it doesn't crash
@@ -911,8 +911,8 @@ class TestFactoryEdgeCases:
     def test_empty_config_with_defaults(self):
         """Test layer creation with minimal valid configuration."""
 
-        # SwiGLU only needs d_model
-        layer = create_ffn_layer('swiglu', d_model=512)
+        # SwiGLU only needs output_dim
+        layer = create_ffn_layer('swiglu', output_dim=512)
         assert layer is not None
 
         # Should use default values for other parameters

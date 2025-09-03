@@ -15,13 +15,13 @@ class TestSwiGLUFFN:
     @pytest.fixture
     def sample_input(self) -> keras.KerasTensor:
         """Create a sample input tensor for testing."""
-        return keras.random.normal([8, 64, 512])  # batch, seq_len, d_model
+        return keras.random.normal([8, 64, 512])  # batch, seq_len, output_dim
 
     @pytest.fixture
     def layer_config(self) -> Dict[str, Any]:
         """Standard layer configuration for testing."""
         return {
-            'd_model': 512,
+            'output_dim': 512,
             'ffn_expansion_factor': 4,
             'ffn_multiple_of': 256,
             'dropout_rate': 0.1
@@ -31,7 +31,7 @@ class TestSwiGLUFFN:
     def custom_layer_config(self) -> Dict[str, Any]:
         """Custom layer configuration with all parameters."""
         return {
-            'd_model': 768,
+            'output_dim': 768,
             'ffn_expansion_factor': 8,
             'ffn_multiple_of': 128,
             'dropout_rate': 0.2,
@@ -44,10 +44,10 @@ class TestSwiGLUFFN:
 
     def test_initialization_defaults(self):
         """Test layer initialization with default parameters."""
-        layer = SwiGLUFFN(d_model=512)
+        layer = SwiGLUFFN(output_dim=512)
 
         # Check stored configuration
-        assert layer.d_model == 512
+        assert layer.output_dim == 512
         assert layer.ffn_expansion_factor == 4
         assert layer.ffn_multiple_of == 256
         assert layer.dropout_rate == 0.0
@@ -76,7 +76,7 @@ class TestSwiGLUFFN:
         layer = SwiGLUFFN(**custom_layer_config)
 
         # Verify all custom parameters are stored correctly
-        assert layer.d_model == 768
+        assert layer.output_dim == 768
         assert layer.ffn_expansion_factor == 8
         assert layer.ffn_multiple_of == 128
         assert layer.dropout_rate == 0.2
@@ -93,38 +93,38 @@ class TestSwiGLUFFN:
 
     def test_parameter_validation(self):
         """Test that invalid parameters raise appropriate errors."""
-        # Test invalid d_model values
-        with pytest.raises(ValueError, match="d_model must be positive"):
-            SwiGLUFFN(d_model=0)
+        # Test invalid output_dim values
+        with pytest.raises(ValueError, match="output_dim must be positive"):
+            SwiGLUFFN(output_dim=0)
 
-        with pytest.raises(ValueError, match="d_model must be positive"):
-            SwiGLUFFN(d_model=-10)
+        with pytest.raises(ValueError, match="output_dim must be positive"):
+            SwiGLUFFN(output_dim=-10)
 
         # Test invalid ffn_expansion_factor values
         with pytest.raises(ValueError, match="ffn_expansion_factor must be positive"):
-            SwiGLUFFN(d_model=512, ffn_expansion_factor=0)
+            SwiGLUFFN(output_dim=512, ffn_expansion_factor=0)
 
         with pytest.raises(ValueError, match="ffn_expansion_factor must be positive"):
-            SwiGLUFFN(d_model=512, ffn_expansion_factor=-2)
+            SwiGLUFFN(output_dim=512, ffn_expansion_factor=-2)
 
         # Test invalid ffn_multiple_of values
         with pytest.raises(ValueError, match="ffn_multiple_of must be positive"):
-            SwiGLUFFN(d_model=512, ffn_multiple_of=0)
+            SwiGLUFFN(output_dim=512, ffn_multiple_of=0)
 
         with pytest.raises(ValueError, match="ffn_multiple_of must be positive"):
-            SwiGLUFFN(d_model=512, ffn_multiple_of=-64)
+            SwiGLUFFN(output_dim=512, ffn_multiple_of=-64)
 
         # Test invalid dropout_rate values
         with pytest.raises(ValueError, match="dropout_rate must be in \\[0, 1\\]"):
-            SwiGLUFFN(d_model=512, dropout_rate=-0.1)
+            SwiGLUFFN(output_dim=512, dropout_rate=-0.1)
 
         with pytest.raises(ValueError, match="dropout_rate must be in \\[0, 1\\]"):
-            SwiGLUFFN(d_model=512, dropout_rate=1.5)
+            SwiGLUFFN(output_dim=512, dropout_rate=1.5)
 
     def test_hidden_dimension_calculation(self):
         """Test hidden dimension calculation follows 2/3 rule and rounding."""
         test_cases = [
-            # (d_model, expansion_factor, multiple_of, expected_hidden)
+            # (output_dim, expansion_factor, multiple_of, expected_hidden)
             (512, 4, 256, 1536),  # int(512*4*2/3)=1365, rounded to 1536
             (768, 4, 256, 2048),  # int(768*4*2/3)=2048, already multiple
             (1024, 8, 512, 5632),  # int(1024*8*2/3)=5461, rounded to 5632
@@ -132,9 +132,9 @@ class TestSwiGLUFFN:
             (128, 2, 32, 192),  # int(128*2*2/3)=170, rounded to 192
         ]
 
-        for d_model, exp_factor, multiple_of, expected in test_cases:
+        for output_dim, exp_factor, multiple_of, expected in test_cases:
             layer = SwiGLUFFN(
-                d_model=d_model,
+                output_dim=output_dim,
                 ffn_expansion_factor=exp_factor,
                 ffn_multiple_of=multiple_of
             )
@@ -165,11 +165,11 @@ class TestSwiGLUFFN:
         assert len(layer.weights) == expected_weights
 
         # Verify output shape
-        assert output.shape == sample_input.shape  # SwiGLU preserves d_model
+        assert output.shape == sample_input.shape  # SwiGLU preserves output_dim
 
     def test_build_with_bias(self, sample_input):
         """Test building with bias enabled."""
-        layer = SwiGLUFFN(d_model=512, use_bias=True)
+        layer = SwiGLUFFN(output_dim=512, use_bias=True)
         output = layer(sample_input)
 
         # Should have 6 weights with bias enabled
@@ -178,7 +178,7 @@ class TestSwiGLUFFN:
 
     def test_build_explicit_sub_layer_building(self, sample_input):
         """Test that explicit sub-layer building works correctly."""
-        layer = SwiGLUFFN(d_model=256)
+        layer = SwiGLUFFN(output_dim=256)
 
         # Manually trigger build
         layer.build(sample_input.shape)
@@ -195,7 +195,7 @@ class TestSwiGLUFFN:
         expected_shapes = [
             (input_dim, hidden_dim),  # gate_proj kernel
             (input_dim, hidden_dim),  # up_proj kernel
-            (hidden_dim, layer.d_model)  # down_proj kernel
+            (hidden_dim, layer.output_dim)  # down_proj kernel
         ]
 
         actual_shapes = [tuple(w.shape) for w in layer.weights]
@@ -207,7 +207,7 @@ class TestSwiGLUFFN:
         output = layer(sample_input)
 
         # Basic sanity checks
-        assert output.shape == sample_input.shape  # Preserves d_model dimension
+        assert output.shape == sample_input.shape  # Preserves output_dim dimension
         assert not keras.ops.any(keras.ops.isnan(output))
         assert not keras.ops.any(keras.ops.isinf(output))
 
@@ -215,7 +215,7 @@ class TestSwiGLUFFN:
         """Test SwiGLU gating mechanism with controlled inputs."""
         # Use controlled initialization for deterministic behavior
         layer = SwiGLUFFN(
-            d_model=4,
+            output_dim=4,
             ffn_expansion_factor=2,
             ffn_multiple_of=2,
             dropout_rate=0.0,
@@ -246,7 +246,7 @@ class TestSwiGLUFFN:
 
     def test_dropout_training_vs_inference(self, sample_input):
         """Test dropout behavior in training vs inference modes."""
-        layer = SwiGLUFFN(d_model=512, dropout_rate=0.5)
+        layer = SwiGLUFFN(output_dim=512, dropout_rate=0.5)
 
         # Test inference mode - should be deterministic
         output_inf_1 = layer(sample_input, training=False)
@@ -269,7 +269,7 @@ class TestSwiGLUFFN:
 
     def test_zero_dropout(self, sample_input):
         """Test that zero dropout produces consistent results."""
-        layer = SwiGLUFFN(d_model=512, dropout_rate=0.0)
+        layer = SwiGLUFFN(output_dim=512, dropout_rate=0.0)
 
         # Multiple calls should produce identical results even in training mode
         output1 = layer(sample_input, training=True)
@@ -285,15 +285,15 @@ class TestSwiGLUFFN:
     def test_compute_output_shape(self):
         """Test output shape computation."""
         test_cases = [
-            # (d_model, input_shape, expected_output_shape)
+            # (output_dim, input_shape, expected_output_shape)
             (256, (None, 64, 256), (None, 64, 256)),
             (512, (8, 128, 512), (8, 128, 512)),
             (768, (4, 32, 768), (4, 32, 768)),
             (1024, (2, 16, 20, 1024), (2, 16, 20, 1024)),  # 4D input
         ]
 
-        for d_model, input_shape, expected_shape in test_cases:
-            layer = SwiGLUFFN(d_model=d_model)
+        for output_dim, input_shape, expected_shape in test_cases:
+            layer = SwiGLUFFN(output_dim=output_dim)
             computed_shape = layer.compute_output_shape(input_shape)
             assert computed_shape == expected_shape
 
@@ -304,7 +304,7 @@ class TestSwiGLUFFN:
 
         # Verify all custom parameters are in config
         expected_keys = {
-            'd_model', 'ffn_expansion_factor', 'ffn_multiple_of', 'dropout_rate',
+            'output_dim', 'ffn_expansion_factor', 'ffn_multiple_of', 'dropout_rate',
             'use_bias', 'kernel_initializer', 'bias_initializer',
             'kernel_regularizer', 'bias_regularizer'
         }
@@ -313,7 +313,7 @@ class TestSwiGLUFFN:
         assert expected_keys.issubset(config_keys)
 
         # Verify specific values
-        assert config['d_model'] == 768
+        assert config['output_dim'] == 768
         assert config['ffn_expansion_factor'] == 8
         assert config['ffn_multiple_of'] == 128
         assert config['dropout_rate'] == 0.2
@@ -335,8 +335,8 @@ class TestSwiGLUFFN:
             model.save(filepath)
 
             # Load without custom_objects (thanks to registration decorator)
-            loaded_model = keras.models.load_model(filepath)
-            loaded_prediction = loaded_model(sample_input)
+            loadeoutput_dim = keras.models.loaoutput_dim(filepath)
+            loaded_prediction = loadeoutput_dim(sample_input)
 
             # Verify identical predictions
             np.testing.assert_allclose(
@@ -360,8 +360,8 @@ class TestSwiGLUFFN:
             filepath = os.path.join(tmpdir, 'test_swiglu_custom.keras')
             model.save(filepath)
 
-            loaded_model = keras.models.load_model(filepath)
-            loaded_prediction = loaded_model(sample_input)
+            loadeoutput_dim = keras.models.loaoutput_dim(filepath)
+            loaded_prediction = loadeoutput_dim(sample_input)
 
             # Verify predictions match
             np.testing.assert_allclose(
@@ -371,26 +371,26 @@ class TestSwiGLUFFN:
             )
 
             # Verify loaded layer has correct configuration
-            loaded_layer = loaded_model.layers[1]  # First layer is Input
-            assert loaded_layer.d_model == custom_layer_config['d_model']
+            loaded_layer = loadeoutput_dim.layers[1]  # First layer is Input
+            assert loaded_layer.output_dim == custom_layer_config['output_dim']
             assert loaded_layer.ffn_expansion_factor == custom_layer_config['ffn_expansion_factor']
             assert loaded_layer.dropout_rate == custom_layer_config['dropout_rate']
 
     def test_model_integration_complex(self, sample_input):
         """Test layer integration in a complex transformer-style model."""
-        d_model = sample_input.shape[-1]
+        output_dim = sample_input.shape[-1]
         inputs = keras.Input(shape=sample_input.shape[1:])
 
         # Multi-layer transformer-style architecture
         x = inputs
         for i in range(3):  # 3 transformer blocks
             # Self-attention (simplified with dense layer for testing)
-            attn_out = keras.layers.Dense(d_model)(x)
+            attn_out = keras.layers.Dense(output_dim)(x)
             x = keras.layers.LayerNormalization()(x + attn_out)
 
             # SwiGLU FFN
             ffn_out = SwiGLUFFN(
-                d_model=d_model,
+                output_dim=output_dim,
                 ffn_expansion_factor=4,
                 dropout_rate=0.1
             )(x)
@@ -419,7 +419,7 @@ class TestSwiGLUFFN:
     def test_regularization_losses(self, sample_input):
         """Test that regularization losses are properly computed."""
         layer = SwiGLUFFN(
-            d_model=512,
+            output_dim=512,
             kernel_regularizer=keras.regularizers.L2(0.01),
             bias_regularizer=keras.regularizers.L1(0.01),
             use_bias=True
@@ -471,14 +471,14 @@ class TestSwiGLUFFN:
 
     def test_different_input_dimensions(self):
         """Test layer with different input tensor dimensions."""
-        d_model = 128
-        layer = SwiGLUFFN(d_model=d_model)
+        output_dim = 128
+        layer = SwiGLUFFN(output_dim=output_dim)
 
         test_shapes = [
-            (4, d_model),  # 2D input
-            (4, 16, d_model),  # 3D input
-            (2, 8, 16, d_model),  # 4D input
-            (1, 4, 8, 16, d_model)  # 5D input
+            (4, output_dim),  # 2D input
+            (4, 16, output_dim),  # 3D input
+            (2, 8, 16, output_dim),  # 4D input
+            (1, 4, 8, 16, output_dim)  # 5D input
         ]
 
         for shape in test_shapes:
@@ -491,7 +491,7 @@ class TestSwiGLUFFN:
 
     def test_numerical_stability(self):
         """Test layer stability with extreme input values."""
-        layer = SwiGLUFFN(d_model=64, dropout_rate=0.0)
+        layer = SwiGLUFFN(output_dim=64, dropout_rate=0.0)
 
         # Test different input value ranges
         test_cases = [
@@ -511,8 +511,8 @@ class TestSwiGLUFFN:
 
     def test_weight_structure_and_shapes(self, sample_input):
         """Test that layer weights have correct structure and shapes."""
-        d_model = sample_input.shape[-1]
-        layer = SwiGLUFFN(d_model=d_model, use_bias=True)
+        output_dim = sample_input.shape[-1]
+        layer = SwiGLUFFN(output_dim=output_dim, use_bias=True)
         layer(sample_input)  # Build the layer
 
         # Should have exactly 6 weights: gate/up/down kernels and biases
@@ -522,12 +522,12 @@ class TestSwiGLUFFN:
         # Verify weight shapes
         hidden_dim = layer.hidden_dim
         expected_shapes = [
-            (d_model, hidden_dim),  # gate_proj kernel
+            (output_dim, hidden_dim),  # gate_proj kernel
             (hidden_dim,),  # gate_proj bias
-            (d_model, hidden_dim),  # up_proj kernel
+            (output_dim, hidden_dim),  # up_proj kernel
             (hidden_dim,),  # up_proj bias
-            (hidden_dim, d_model),  # down_proj kernel
-            (d_model,)  # down_proj bias
+            (hidden_dim, output_dim),  # down_proj kernel
+            (output_dim,)  # down_proj bias
         ]
 
         actual_shapes = [tuple(w.shape) for w in layer.weights]
@@ -535,7 +535,7 @@ class TestSwiGLUFFN:
 
     def test_num_parameters_property(self, sample_input):
         """Test the num_parameters property."""
-        layer = SwiGLUFFN(d_model=256, use_bias=True)
+        layer = SwiGLUFFN(output_dim=256, use_bias=True)
 
         # Should return 0 before building
         assert layer.num_parameters == 0
@@ -544,12 +544,12 @@ class TestSwiGLUFFN:
         layer(sample_input[:, :, :256])  # Adjust input size
 
         # Calculate expected parameters
-        d_model = 256
+        output_dim = 256
         hidden_dim = layer.hidden_dim
         expected_params = (
-                d_model * hidden_dim + hidden_dim +  # gate_proj
-                d_model * hidden_dim + hidden_dim +  # up_proj
-                hidden_dim * d_model + d_model  # down_proj
+                output_dim * hidden_dim + hidden_dim +  # gate_proj
+                output_dim * hidden_dim + hidden_dim +  # up_proj
+                hidden_dim * output_dim + output_dim  # down_proj
         )
 
         assert layer.num_parameters == expected_params
@@ -560,7 +560,7 @@ class TestSwiGLUFFNEdgeCases:
 
     def test_minimal_dimensions(self):
         """Test with minimal viable dimensions."""
-        layer = SwiGLUFFN(d_model=2, ffn_expansion_factor=2, ffn_multiple_of=2)
+        layer = SwiGLUFFN(output_dim=2, ffn_expansion_factor=2, ffn_multiple_of=2)
         test_input = keras.random.normal([2, 4, 2])
 
         output = layer(test_input)
@@ -569,7 +569,7 @@ class TestSwiGLUFFNEdgeCases:
 
     def test_large_dimensions(self):
         """Test with large dimensions."""
-        layer = SwiGLUFFN(d_model=2048, ffn_expansion_factor=4, ffn_multiple_of=256)
+        layer = SwiGLUFFN(output_dim=2048, ffn_expansion_factor=4, ffn_multiple_of=256)
         test_input = keras.random.normal([1, 2, 2048])
 
         output = layer(test_input)
@@ -578,34 +578,34 @@ class TestSwiGLUFFNEdgeCases:
 
     def test_different_expansion_factors(self):
         """Test with various expansion factors."""
-        d_model = 128
+        output_dim = 128
         expansion_factors = [2, 4, 6, 8, 16]
 
         for exp_factor in expansion_factors:
             layer = SwiGLUFFN(
-                d_model=d_model,
+                output_dim=output_dim,
                 ffn_expansion_factor=exp_factor,
                 ffn_multiple_of=32
             )
-            test_input = keras.random.normal([2, 4, d_model])
+            test_input = keras.random.normal([2, 4, output_dim])
 
             output = layer(test_input)
-            assert output.shape == (2, 4, d_model)
+            assert output.shape == (2, 4, output_dim)
             assert not keras.ops.any(keras.ops.isnan(output))
 
             # Verify hidden dim increases with expansion factor
-            expected_base = int(d_model * exp_factor * 2 / 3)
+            expected_base = int(output_dim * exp_factor * 2 / 3)
             expected_hidden = 32 * ((expected_base + 32 - 1) // 32)
             assert layer.hidden_dim == expected_hidden
 
     def test_different_multiple_constraints(self):
         """Test with different multiple_of constraints."""
-        d_model = 512
+        output_dim = 512
         multiples = [32, 64, 128, 256, 512]
 
         for multiple in multiples:
             layer = SwiGLUFFN(
-                d_model=d_model,
+                output_dim=output_dim,
                 ffn_expansion_factor=4,
                 ffn_multiple_of=multiple
             )
@@ -615,7 +615,7 @@ class TestSwiGLUFFNEdgeCases:
 
     def test_single_batch_single_sequence(self):
         """Test with minimal batch and sequence dimensions."""
-        layer = SwiGLUFFN(d_model=64)
+        layer = SwiGLUFFN(output_dim=64)
         test_input = keras.random.normal([1, 1, 64])  # Single item, single step
 
         output = layer(test_input)
@@ -624,7 +624,7 @@ class TestSwiGLUFFNEdgeCases:
 
     def test_layer_reuse(self):
         """Test that the same layer instance can be reused."""
-        layer = SwiGLUFFN(d_model=128)
+        layer = SwiGLUFFN(output_dim=128)
 
         # Use the same layer with different inputs
         input1 = keras.random.normal([2, 8, 128])
@@ -642,35 +642,35 @@ class TestSwiGLUFFNEdgeCases:
 
     def test_extreme_expansion_factors(self):
         """Test with extreme expansion factors."""
-        d_model = 64
+        output_dim = 64
 
         # Very small expansion factor
-        layer_small = SwiGLUFFN(d_model=d_model, ffn_expansion_factor=1, ffn_multiple_of=16)
-        test_input = keras.random.normal([2, 4, d_model])
+        layer_small = SwiGLUFFN(output_dim=output_dim, ffn_expansion_factor=1, ffn_multiple_of=16)
+        test_input = keras.random.normal([2, 4, output_dim])
 
         output_small = layer_small(test_input)
-        assert output_small.shape == (2, 4, d_model)
+        assert output_small.shape == (2, 4, output_dim)
         assert not keras.ops.any(keras.ops.isnan(output_small))
 
         # Very large expansion factor
-        layer_large = SwiGLUFFN(d_model=d_model, ffn_expansion_factor=32, ffn_multiple_of=32)
+        layer_large = SwiGLUFFN(output_dim=output_dim, ffn_expansion_factor=32, ffn_multiple_of=32)
         output_large = layer_large(test_input)
-        assert output_large.shape == (2, 4, d_model)
+        assert output_large.shape == (2, 4, output_dim)
         assert not keras.ops.any(keras.ops.isnan(output_large))
 
     def test_hardware_optimization_multiples(self):
         """Test that common hardware-optimized multiples work correctly."""
-        d_model = 512
+        output_dim = 512
         hardware_multiples = [32, 64, 128, 256, 512, 1024]
 
         for multiple in hardware_multiples:
             layer = SwiGLUFFN(
-                d_model=d_model,
+                output_dim=output_dim,
                 ffn_expansion_factor=4,
                 ffn_multiple_of=multiple
             )
-            test_input = keras.random.normal([1, 2, d_model])
+            test_input = keras.random.normal([1, 2, output_dim])
 
             output = layer(test_input)
-            assert output.shape == (1, 2, d_model)
+            assert output.shape == (1, 2, output_dim)
             assert layer.hidden_dim % multiple == 0
