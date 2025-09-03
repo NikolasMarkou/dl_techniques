@@ -386,16 +386,20 @@ class MixtureOfExperts(keras.layers.Layer):
         ffn_config = self.expert_config.ffn_config
         output_dim = ffn_config.get('output_dim', hidden_dim)
 
-        # Initialize output tensor
-        outputs = ops.zeros((total_tokens, output_dim), dtype=inputs_flat.dtype)
-
         # Get expert capacity for current training phase
         expert_capacity = self._expert_capacity_train if training else self._expert_capacity_eval
 
-        # This will track tokens that are actually processed after capacity dropping
-        cumulative_processed_mask = ops.zeros(total_tokens, dtype='bool')
+        # Reshape weights if they have a sequence dimension
+        if len(ops.shape(expert_weights)) > 2:  # (batch, seq, experts)
+            weights_flat = ops.reshape(expert_weights, (-1, self.num_experts))
+        else:  # (tokens, experts)
+            weights_flat = expert_weights
 
-        # Process each expert separately for hard routing
+        # Collect outputs from all experts
+        expert_outputs_list = []
+        expert_masks_list = []
+
+        # Process each expert separately
         for expert_id in range(self.num_experts):
             # Find tokens assigned to this expert
             initial_mask = ops.any(
@@ -406,119 +410,103 @@ class MixtureOfExperts(keras.layers.Layer):
             # Get number of tokens assigned to this expert
             num_assigned_tokens = ops.sum(ops.cast(initial_mask, 'int32'))
 
-            # Apply capacity constraints if enabled
+             # Apply capacity constraints if enabled
             if self.drop_tokens and expert_capacity > 0:
-                def drop_fn():
-                    """Drop tokens to meet capacity."""
-                    # Get indices where mask is True
-                    token_indices = ops.where(initial_mask)
-                    # For 1D mask, ops.where returns (N, 1), flatten it
-                    if len(ops.shape(token_indices)) > 1:
-                        token_indices = ops.reshape(token_indices, (-1,))
-                    # Randomly select up to expert_capacity tokens
-                    selected_indices = keras.random.shuffle(token_indices)[:expert_capacity]
-                    # Create new mask with only selected tokens
-                    final_mask = ops.zeros_like(initial_mask, dtype='bool')
-                    # Use scatter update with proper indices
-                    updates = ops.ones(ops.shape(selected_indices)[0], dtype='bool')
-                    final_mask = ops.scatter_update(final_mask, ops.expand_dims(selected_indices, 1), updates)
-                    return final_mask
+                # Get indices where mask is True. `ops.where` on 1D input returns shape (N, 1).
+                token_indices = ops.reshape(ops.where(initial_mask), (-1,))
 
-                def keep_fn():
-                    """Keep all tokens."""
+                # Use conditional logic to handle capacity
+                def apply_capacity():
+                    # Take only the first `expert_capacity` token indices.
+                    selected_indices = token_indices[:expert_capacity]
+
+                    # Create updates with a static shape.
+                    updates = ops.ones((expert_capacity,), dtype='bool')
+
+                    # Use scatter to create a boolean mask of shape (total_tokens,)
+                    # with `True` at the positions of the selected tokens.
+                    return ops.scatter(
+                        ops.expand_dims(selected_indices, 1),
+                        updates,
+                        (total_tokens,)
+                    )
+                def no_capacity():
                     return initial_mask
 
+                # Apply capacity constraint conditionally
                 final_tokens_mask = ops.cond(
                     num_assigned_tokens > expert_capacity,
-                    drop_fn,
-                    keep_fn
+                    apply_capacity,
+                    no_capacity
                 )
             else:
                 final_tokens_mask = initial_mask
 
-            cumulative_processed_mask = ops.logical_or(cumulative_processed_mask, final_tokens_mask)
+            # Get tokens for this expert
+            # `ops.where` on 1D input returns shape (N, 1), so reshape.
+            expert_token_indices = ops.reshape(ops.where(final_tokens_mask), (-1,))
 
-            # Extract data for the tokens that will be processed by this expert
-            expert_tokens = inputs_flat[final_tokens_mask]
+            # Extract tokens for this expert
+            num_expert_tokens = ops.shape(expert_token_indices)[0]
 
-            # Reshape weights if they have a sequence dimension
-            if len(ops.shape(expert_weights)) > 2:  # (batch, seq, experts)
-                weights_flat = ops.reshape(expert_weights, (-1, self.num_experts))
-            else:  # (tokens, experts)
-                weights_flat = expert_weights
+            # Create a padded tensor for expert input to handle empty case
+            def process_expert():
+                expert_tokens = ops.take(inputs_flat, expert_token_indices, axis=0)
+                expert_output = self.experts[expert_id](expert_tokens, training=training)
 
-            weights_for_expert_col = weights_flat[:, expert_id]
-            expert_token_weights = weights_for_expert_col[final_tokens_mask]
+                # Apply weights
+                expert_token_weights = ops.take(weights_flat[:, expert_id], expert_token_indices, axis=0)
+                weighted_output = expert_output * ops.expand_dims(expert_token_weights, axis=-1)
 
-            # Process tokens through the expert (handles empty tensors gracefully)
-            expert_output = self.experts[expert_id](expert_tokens, training=training)
-            weighted_output = expert_output * ops.expand_dims(expert_token_weights, axis=-1)
+                # Create full-size output tensor with zeros
+                full_output = ops.zeros((total_tokens, output_dim), dtype=inputs_flat.dtype)
 
-            # Scatter the results back to the output tensor
-            # Get indices of True values
-            expert_token_indices = ops.where(final_tokens_mask)
-            if len(ops.shape(expert_token_indices)) > 1:
-                expert_token_indices = ops.reshape(expert_token_indices, (-1,))
-
-            # Use ops.cond to handle the conditional update in graph mode
-            def update_outputs():
-                # Get current values at these indices
-                current_values = ops.take(outputs, expert_token_indices, axis=0)
-                # Add the weighted expert output
-                updated_values = current_values + weighted_output
-                # Scatter update back
-                return ops.scatter_update(
-                    outputs,
+                # Scatter the expert's output to the right positions
+                full_output = ops.scatter(
                     ops.expand_dims(expert_token_indices, 1),
-                    updated_values
+                    weighted_output,
+                    (total_tokens, output_dim)
                 )
+                return full_output
 
-            def no_update():
-                return outputs
+            def empty_expert():
+                return ops.zeros((total_tokens, output_dim), dtype=inputs_flat.dtype)
 
-            # Check if we have any tokens to update
-            has_tokens = ops.greater(ops.shape(expert_token_indices)[0], 0)
-            outputs = ops.cond(has_tokens, update_outputs, no_update)
+            # Process conditionally based on whether expert has tokens
+            expert_output = ops.cond(
+                num_expert_tokens > 0,
+                process_expert,
+                empty_expert
+            )
+
+            expert_outputs_list.append(expert_output)
+            expert_masks_list.append(final_tokens_mask)
+
+        # Stack the tensors into a single tensor
+        stacked_tensors = ops.stack(expert_outputs_list, axis=0)
+        # Sum along the new axis (axis=0) to get the final result
+        outputs = ops.sum(stacked_tensors, axis=0, keepdims=False)
 
         # Handle dropped tokens with residual connection if enabled
         if self.use_residual_connection and self.drop_tokens:
-            unprocessed_mask = ops.logical_not(cumulative_processed_mask)
-            unprocessed_tokens = inputs_flat[unprocessed_mask]
+            # Combine all expert masks to find processed tokens
+            processed_mask = ops.logical_or(expert_masks_list[0], expert_masks_list[0])
+            for mask in expert_masks_list[1:]:
+                processed_mask = ops.logical_or(processed_mask, mask)
+
+            unprocessed_mask = ops.logical_not(processed_mask)
 
             if hidden_dim == output_dim:
-                residual_output = unprocessed_tokens
-            else:
-                # Project to correct output dimension (simple linear projection)
-                # Note: In practice, you'd want a learned projection layer here
-                residual_output = ops.zeros(
-                    (ops.shape(unprocessed_tokens)[0], output_dim),
-                    dtype=inputs_flat.dtype
+                # Add residual for unprocessed tokens
+                residual = ops.where(
+                    ops.expand_dims(unprocessed_mask, -1),
+                    inputs_flat,
+                    ops.zeros_like(inputs_flat)
                 )
-
-            # Get indices of unprocessed tokens
-            unprocessed_indices = ops.where(unprocessed_mask)
-            if len(ops.shape(unprocessed_indices)) > 1:
-                unprocessed_indices = ops.reshape(unprocessed_indices, (-1,))
-
-            # Use ops.cond for residual update
-            def update_residuals():
-                # Get current values at these indices
-                current_values_unprocessed = ops.take(outputs, unprocessed_indices, axis=0)
-                # Add residual
-                updated_values_unprocessed = current_values_unprocessed + residual_output
-                # Scatter update back
-                return ops.scatter_update(
-                    outputs,
-                    ops.expand_dims(unprocessed_indices, 1),
-                    updated_values_unprocessed
-                )
-
-            def no_residual():
-                return outputs
-
-            # Check if we have any unprocessed tokens
-            has_unprocessed = ops.greater(ops.shape(unprocessed_indices)[0], 0)
-            outputs = ops.cond(has_unprocessed, update_residuals, no_residual)
+                if output_dim != hidden_dim:
+                    # Pad or slice to match dimensions
+                    residual = residual[..., :output_dim]
+                outputs = outputs + residual
 
         # Reshape back to original batch structure
         if len(original_shape) > 2:
