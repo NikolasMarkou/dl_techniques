@@ -12,13 +12,17 @@ import numpy as np
 from keras import ops
 from typing import Optional, Tuple, Any, Dict, List
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .experts import FFNExpert
 from .config import ExpertConfig, GatingConfig, MoEConfig
 from .gating import create_gating, compute_auxiliary_loss, compute_z_loss
 
-
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class MixtureOfExperts(keras.layers.Layer):
@@ -524,6 +528,7 @@ class MixtureOfExperts(keras.layers.Layer):
         moe_config = MoEConfig.from_dict(config.pop('config'))
         return cls(config=moe_config, **config)
 
+# ---------------------------------------------------------------------
 
 def create_ffn_moe(
     num_experts: int,
@@ -603,3 +608,5 @@ def create_ffn_moe(
     )
 
     return MixtureOfExperts(config=moe_config)
+
+# ---------------------------------------------------------------------
