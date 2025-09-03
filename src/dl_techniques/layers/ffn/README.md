@@ -181,13 +181,13 @@ residual = create_ffn_layer(
 
 ### SwinMLP
 **Required:** `hidden_dim`  
-**Optional:** `out_dim` (default: None), `activation` (default: 'gelu'), `dropout_rate` (default: 0.0), `use_bias` (default: True)
+**Optional:** `output_dim` (default: None), `activation` (default: 'gelu'), `dropout_rate` (default: 0.0), `use_bias` (default: True)
 
 ```python
 swin_mlp = create_ffn_layer(
     'swin_mlp',
     hidden_dim=1024,
-    out_dim=768,
+    output_dim=768,
     dropout_rate=0.1,
     activation='gelu'
 )

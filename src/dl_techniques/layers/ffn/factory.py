@@ -139,7 +139,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'required_params': ['hidden_dim'],
         'optional_params': {
             'use_bias': True,
-            'out_dim': None,
+            'output_dim': None,
             'activation': 'gelu',
             'dropout_rate': 0.0,
             'kernel_initializer': 'glorot_uniform',

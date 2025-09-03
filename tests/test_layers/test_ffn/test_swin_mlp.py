@@ -31,7 +31,7 @@ class TestSwinMLP:
         """Custom layer configuration with regularization."""
         return {
             'hidden_dim': 512,
-            'out_dim': 128,
+            'output_dim': 128,
             'activation': 'swish',
             'dropout_rate': 0.2,
             'use_bias': True,
@@ -48,7 +48,7 @@ class TestSwinMLP:
 
         # Check stored configuration
         assert layer.hidden_dim == 128
-        assert layer.out_dim is None
+        assert layer.output_dim is None
         assert layer.activation == "gelu"
         assert layer.dropout_rate == 0.0
         assert layer.use_bias is True
@@ -74,7 +74,7 @@ class TestSwinMLP:
 
         # Verify all custom parameters are stored correctly
         assert layer.hidden_dim == 512
-        assert layer.out_dim == 128
+        assert layer.output_dim == 128
         assert layer.activation == 'swish'
         assert layer.dropout_rate == 0.2
         assert layer.use_bias is True
@@ -100,12 +100,12 @@ class TestSwinMLP:
         with pytest.raises(ValueError, match="dropout_rate must be between 0.0 and 1.0"):
             SwinMLP(hidden_dim=64, dropout_rate=1.5)
 
-        # Test invalid out_dim when specified
-        with pytest.raises(ValueError, match="out_dim must be positive when specified"):
-            SwinMLP(hidden_dim=64, out_dim=0)
+        # Test invalid output_dim when specified
+        with pytest.raises(ValueError, match="output_dim must be positive when specified"):
+            SwinMLP(hidden_dim=64, output_dim=0)
 
-        with pytest.raises(ValueError, match="out_dim must be positive when specified"):
-            SwinMLP(hidden_dim=64, out_dim=-5)
+        with pytest.raises(ValueError, match="output_dim must be positive when specified"):
+            SwinMLP(hidden_dim=64, output_dim=-5)
 
     def test_build_process(self, sample_input, layer_config):
         """Test that the layer builds properly following modern patterns."""
@@ -131,11 +131,11 @@ class TestSwinMLP:
         assert len(layer.weights) == 4  # fc1 kernel/bias + fc2 kernel/bias
 
         # Verify output shape
-        assert output.shape == sample_input.shape  # out_dim=None preserves input shape
+        assert output.shape == sample_input.shape  # output_dim=None preserves input shape
 
     def test_build_with_output_dimension(self, sample_input):
         """Test building with custom output dimension."""
-        layer = SwinMLP(hidden_dim=256, out_dim=64)
+        layer = SwinMLP(hidden_dim=256, output_dim=64)
         output = layer(sample_input)
 
         # Check output shape is correctly modified
@@ -160,7 +160,7 @@ class TestSwinMLP:
         output = layer(sample_input)
 
         # Basic sanity checks
-        assert output.shape == sample_input.shape  # No out_dim specified
+        assert output.shape == sample_input.shape  # No output_dim specified
         assert not keras.ops.any(keras.ops.isnan(output))
         assert not keras.ops.any(keras.ops.isinf(output))
 
@@ -169,7 +169,7 @@ class TestSwinMLP:
         # Create layer with linear activation and controlled initialization
         layer = SwinMLP(
             hidden_dim=16,
-            out_dim=8,
+            output_dim=8,
             activation='linear',
             dropout_rate=0.0,
             kernel_initializer='ones',
@@ -233,15 +233,15 @@ class TestSwinMLP:
     def test_compute_output_shape(self):
         """Test output shape computation."""
         test_cases = [
-            # (hidden_dim, out_dim, input_shape, expected_output_shape)
+            # (hidden_dim, output_dim, input_shape, expected_output_shape)
             (128, None, (None, 16, 64), (None, 16, 64)),
             (256, 32, (None, 16, 64), (None, 16, 32)),
             (512, 128, (4, 8, 256), (4, 8, 128)),
             (64, 16, (2, 10, 20, 32), (2, 10, 20, 16)),
         ]
 
-        for hidden_dim, out_dim, input_shape, expected_shape in test_cases:
-            layer = SwinMLP(hidden_dim=hidden_dim, out_dim=out_dim)
+        for hidden_dim, output_dim, input_shape, expected_shape in test_cases:
+            layer = SwinMLP(hidden_dim=hidden_dim, output_dim=output_dim)
             computed_shape = layer.compute_output_shape(input_shape)
             assert computed_shape == expected_shape
 
@@ -252,7 +252,7 @@ class TestSwinMLP:
 
         # Verify all custom parameters are in config
         expected_keys = {
-            'hidden_dim', 'use_bias', 'out_dim', 'activation', 'dropout_rate',
+            'hidden_dim', 'use_bias', 'output_dim', 'activation', 'dropout_rate',
             'kernel_initializer', 'bias_initializer', 'kernel_regularizer',
             'bias_regularizer', 'activity_regularizer'
         }
@@ -262,7 +262,7 @@ class TestSwinMLP:
 
         # Verify specific values
         assert config['hidden_dim'] == 512
-        assert config['out_dim'] == 128
+        assert config['output_dim'] == 128
         assert config['activation'] == 'swish'
         assert config['dropout_rate'] == 0.2
 
@@ -300,9 +300,9 @@ class TestSwinMLP:
         # Multi-layer architecture
         x = SwinMLP(hidden_dim=256, dropout_rate=0.1)(inputs)
         x = keras.layers.LayerNormalization()(x)
-        x = SwinMLP(hidden_dim=512, out_dim=128, dropout_rate=0.2)(x)
+        x = SwinMLP(hidden_dim=512, output_dim=128, dropout_rate=0.2)(x)
         x = keras.layers.LayerNormalization()(x)
-        x = SwinMLP(hidden_dim=64, out_dim=32)(x)
+        x = SwinMLP(hidden_dim=64, output_dim=32)(x)
         x = keras.layers.GlobalAveragePooling1D()(x)
         outputs = keras.layers.Dense(10, activation='softmax')(x)
 
@@ -389,7 +389,7 @@ class TestSwinMLP:
             test_input = keras.random.normal(shape)
             output = layer(test_input)
 
-            # Output should preserve input shape (no out_dim specified)
+            # Output should preserve input shape (no output_dim specified)
             assert output.shape == test_input.shape
             assert not keras.ops.any(keras.ops.isnan(output))
 
@@ -417,9 +417,9 @@ class TestSwinMLP:
         """Test that layer weights have correct structure and shapes."""
         input_dim = sample_input.shape[-1]
         hidden_dim = 256
-        out_dim = 64
+        output_dim = 64
 
-        layer = SwinMLP(hidden_dim=hidden_dim, out_dim=out_dim)
+        layer = SwinMLP(hidden_dim=hidden_dim, output_dim=output_dim)
         layer(sample_input)  # Build the layer
 
         # Should have exactly 4 weights: fc1_kernel, fc1_bias, fc2_kernel, fc2_bias
@@ -430,8 +430,8 @@ class TestSwinMLP:
         expected_shapes = [
             (input_dim, hidden_dim),  # fc1 kernel
             (hidden_dim,),            # fc1 bias
-            (hidden_dim, out_dim),    # fc2 kernel
-            (out_dim,)               # fc2 bias
+            (hidden_dim, output_dim),    # fc2 kernel
+            (output_dim,)               # fc2 bias
         ]
 
         actual_shapes = [tuple(w.shape) for w in layer.weights]
@@ -443,7 +443,7 @@ class TestSwinMLPEdgeCases:
 
     def test_minimal_dimensions(self):
         """Test with minimal viable dimensions."""
-        layer = SwinMLP(hidden_dim=1, out_dim=1)
+        layer = SwinMLP(hidden_dim=1, output_dim=1)
         test_input = keras.random.normal([2, 3, 1])
 
         output = layer(test_input)
@@ -452,7 +452,7 @@ class TestSwinMLPEdgeCases:
 
     def test_large_dimensions(self):
         """Test with large dimensions."""
-        layer = SwinMLP(hidden_dim=2048, out_dim=512)
+        layer = SwinMLP(hidden_dim=2048, output_dim=512)
         test_input = keras.random.normal([2, 4, 256])
 
         output = layer(test_input)
@@ -479,7 +479,7 @@ class TestSwinMLPEdgeCases:
 
     def test_single_batch_single_sequence(self):
         """Test with minimal batch and sequence dimensions."""
-        layer = SwinMLP(hidden_dim=32, out_dim=16)
+        layer = SwinMLP(hidden_dim=32, output_dim=16)
         test_input = keras.random.normal([1, 1, 8])  # Single item, single step
 
         output = layer(test_input)
@@ -491,7 +491,7 @@ class TestSwinMLPEdgeCases:
         # Create a layer that should approximate identity
         layer = SwinMLP(
             hidden_dim=128,  # Same as input
-            out_dim=None,    # Preserve input dim
+            output_dim=None,    # Preserve input dim
             activation='linear',
             dropout_rate=0.0,
             kernel_initializer='identity',  # Start with identity-like weights
@@ -506,7 +506,7 @@ class TestSwinMLPEdgeCases:
 
     def test_layer_reuse(self):
         """Test that the same layer instance can be reused."""
-        layer = SwinMLP(hidden_dim=64, out_dim=32)
+        layer = SwinMLP(hidden_dim=64, output_dim=32)
 
         # Use the same layer with different inputs
         input1 = keras.random.normal([2, 8, 16])

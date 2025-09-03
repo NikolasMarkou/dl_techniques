@@ -23,7 +23,7 @@ class SwinMLP(keras.layers.Layer):
     Mathematical formulation:
         h = Dense₁(x) -> activation(h) -> dropout(h) -> Dense₂(h) -> dropout(output)
 
-    Where x ∈ ℝ^(input_dim), h ∈ ℝ^(hidden_dim), output ∈ ℝ^(out_dim).
+    Where x ∈ ℝ^(input_dim), h ∈ ℝ^(hidden_dim), output ∈ ℝ^(output_dim).
 
     Key Features:
     - Flexible dimensionality with configurable hidden and output dimensions
@@ -35,7 +35,7 @@ class SwinMLP(keras.layers.Layer):
     Args:
         hidden_dim: Integer, dimension of the hidden layer. Must be positive.
         use_bias: Boolean, whether to use bias in Dense layers. Defaults to True.
-        out_dim: Optional integer, dimension of the output layer. If None, uses
+        output_dim: Optional integer, dimension of the output layer. If None, uses
             input dimension for identity output shape. Defaults to None.
         activation: String or callable, activation function. Supports Keras
             activation names ('gelu', 'relu', 'swish') or custom callables.
@@ -59,14 +59,14 @@ class SwinMLP(keras.layers.Layer):
         the last dimension.
 
     Output shape:
-        N-D tensor with shape (..., out_dim) where out_dim is specified in
-        constructor or equals input_dim if out_dim=None.
+        N-D tensor with shape (..., output_dim) where output_dim is specified in
+        constructor or equals input_dim if output_dim=None.
 
     Attributes:
         fc1: First Dense layer (expansion to hidden_dim).
         act: Activation layer.
         drop1: First Dropout layer (applied after activation).
-        fc2: Second Dense layer (contraction to out_dim).
+        fc2: Second Dense layer (contraction to output_dim).
         drop2: Second Dropout layer (applied before output).
 
     Example:
@@ -77,7 +77,7 @@ class SwinMLP(keras.layers.Layer):
         # Custom configuration
         mlp = SwinMLP(
             hidden_dim=512,
-            out_dim=128,
+            output_dim=128,
             activation='swish',
             drop_rate=0.2,
             kernel_regularizer=keras.regularizers.L2(1e-4)
@@ -98,7 +98,7 @@ class SwinMLP(keras.layers.Layer):
     Raises:
         ValueError: If hidden_dim is not positive.
         ValueError: If drop_rate is not in [0.0, 1.0].
-        ValueError: If out_dim is specified but not positive.
+        ValueError: If output_dim is specified but not positive.
 
     Note:
         This implementation creates all sub-layers during initialization and
@@ -111,7 +111,7 @@ class SwinMLP(keras.layers.Layer):
         self,
         hidden_dim: int,
         use_bias: bool = True,
-        out_dim: Optional[int] = None,
+        output_dim: Optional[int] = None,
         activation: Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = "gelu",
         dropout_rate: float = 0.0,
         kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
@@ -128,13 +128,13 @@ class SwinMLP(keras.layers.Layer):
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
         if not 0.0 <= dropout_rate <= 1.0:
             raise ValueError(f"dropout_rate must be between 0.0 and 1.0, got {dropout_rate}")
-        if out_dim is not None and out_dim <= 0:
-            raise ValueError(f"out_dim must be positive when specified, got {out_dim}")
+        if output_dim is not None and output_dim <= 0:
+            raise ValueError(f"output_dim must be positive when specified, got {output_dim}")
 
         # Store configuration parameters
         self.hidden_dim = hidden_dim
         self.use_bias = use_bias
-        self.out_dim = out_dim
+        self.output_dim = output_dim
         self.activation = activation
         self.dropout_rate = dropout_rate
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -163,7 +163,7 @@ class SwinMLP(keras.layers.Layer):
         self.drop1 = keras.layers.Dropout(self.dropout_rate, name="drop1")
         self.drop2 = keras.layers.Dropout(self.dropout_rate, name="drop2")
 
-        # Second dense layer - units will be set in build() based on out_dim logic
+        # Second dense layer - units will be set in build() based on output_dim logic
         # We need to create it here but will configure the units in build()
         self.fc2 = None  # Will be created in build() once we know output dimension
 
@@ -186,7 +186,7 @@ class SwinMLP(keras.layers.Layer):
             raise ValueError("Last dimension of input must be defined")
 
         # Determine output dimension
-        output_dim = self.out_dim if self.out_dim is not None else input_dim
+        output_dim = self.output_dim if self.output_dim is not None else input_dim
 
         # Create second dense layer now that we know the output dimension
         self.fc2 = keras.layers.Dense(
@@ -235,7 +235,7 @@ class SwinMLP(keras.layers.Layer):
                 training mode (applying dropout) or inference mode.
 
         Returns:
-            Output tensor of shape (..., out_dim) after MLP transformation.
+            Output tensor of shape (..., output_dim) after MLP transformation.
         """
         # First linear transformation (expansion)
         x = self.fc1(inputs)
@@ -262,15 +262,15 @@ class SwinMLP(keras.layers.Layer):
             input_shape: Shape tuple of the input tensor.
 
         Returns:
-            Output shape tuple with last dimension set to out_dim or input_dim.
+            Output shape tuple with last dimension set to output_dim or input_dim.
         """
         # Convert to list for manipulation
         output_shape = list(input_shape)
 
         # Set output dimension based on configuration
-        if self.out_dim is not None:
-            output_shape[-1] = self.out_dim
-        # If out_dim is None, output shape matches input shape (identity transformation)
+        if self.output_dim is not None:
+            output_shape[-1] = self.output_dim
+        # If output_dim is None, output shape matches input shape (identity transformation)
 
         return tuple(output_shape)
 
@@ -288,7 +288,7 @@ class SwinMLP(keras.layers.Layer):
         config.update({
             "hidden_dim": self.hidden_dim,
             "use_bias": self.use_bias,
-            "out_dim": self.out_dim,
+            "output_dim": self.output_dim,
             "activation": self.activation,
             "dropout_rate": self.dropout_rate,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
