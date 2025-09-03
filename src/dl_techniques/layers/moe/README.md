@@ -12,24 +12,28 @@ A production-ready Mixture of Experts implementation for the dl_techniques frame
 6. [Advanced Usage](#advanced-usage)
 7. [Integration](#integration)
 8. [API Reference](#api-reference)
-9. [Performance Considerations](#performance-considerations)
-10. [Troubleshooting](#troubleshooting)
+9. [Training Best Practices](#training-best-practices)
+10. [Performance Considerations](#performance-considerations)
+11. [Model Serialization](#model-serialization)
+12. [Troubleshooting](#troubleshooting)
+13. [Examples](#examples)
+14. [References](#references)
 
 ## Overview
 
 The MoE module implements sparse neural networks where each input is routed to a subset of expert networks, enabling:
 
-- **Computational Efficiency**: Only selected experts are activated per input
-- **Model Specialization**: Experts learn to handle specific input patterns
-- **Scalable Architecture**: Add capacity without proportional compute increase
-- **Load Balancing**: Auxiliary losses prevent expert collapse
+- **Computational Efficiency**: Only selected experts are activated per input.
+- **Model Specialization**: Experts learn to handle specific input patterns.
+- **Scalable Architecture**: Add capacity without proportional compute increase.
+- **Load Balancing**: Auxiliary losses prevent expert collapse.
 
 ### Key Components
 
-- **Expert Networks**: FFN-based specialists using dl_techniques FFN factory
-- **Gating Networks**: Routing mechanisms (linear, cosine similarity, SoftMoE)
-- **Load Balancing**: Auxiliary and z-losses for uniform expert utilization
-- **Capacity Management**: Token dropping and residual connections
+- **Expert Networks**: FFN-based specialists using the `dl_techniques` FFN factory.
+- **Gating Networks**: Routing mechanisms (linear, cosine similarity, SoftMoE).
+- **Load Balancing**: Auxiliary and z-losses for uniform expert utilization.
+- **Capacity Management**: Token dropping and residual connections for overloaded experts.
 
 ## Architecture
 
@@ -44,7 +48,7 @@ Input → Gating Network → Expert Selection → Expert Processing → Output
 
 ### Expert Types
 
-The module exclusively uses FFN experts, leveraging the dl_techniques FFN factory:
+The module exclusively uses FFN experts, leveraging the `dl_techniques` FFN factory:
 
 - **MLP**: Standard multi-layer perceptron (`type: "mlp"`)
 - **SwiGLU**: Gated linear units with SiLU activation (`type: "swiglu"`)
@@ -56,13 +60,13 @@ The module exclusively uses FFN experts, leveraging the dl_techniques FFN factor
 
 ### Gating Mechanisms
 
-- **Linear Gating**: Standard learnable routing with optional noise
-- **Cosine Gating**: Cosine similarity-based routing in hypersphere space
-- **SoftMoE**: Soft routing with weighted token slots per expert
+- **Linear Gating**: Standard learnable routing with optional noise.
+- **Cosine Gating**: Cosine similarity-based routing in a hypersphere space.
+- **SoftMoE**: Soft routing with weighted token slots per expert, eliminating token dropping.
 
 ## Installation
 
-The MoE module is part of dl_techniques and requires:
+The MoE module is part of the `dl_techniques` framework. Ensure the framework is installed, then import the necessary components:
 
 ```python
 import keras
@@ -71,9 +75,9 @@ from dl_techniques.layers.moe import MixtureOfExperts, MoEConfig, ExpertConfig, 
 
 ### Dependencies
 
-- Keras 3.8.0+
-- TensorFlow 2.18.0 (backend)
-- dl_techniques FFN module
+- Keras 3
+- A compatible backend (e.g., TensorFlow, JAX, PyTorch)
+- `dl_techniques` FFN and utility modules
 - NumPy, typing
 
 ## Configuration
@@ -125,7 +129,7 @@ class ExpertConfig:
 #### GatingConfig
 
 ```python
-@dataclass  
+@dataclass
 class GatingConfig:
     gating_type: Literal['linear', 'cosine', 'softmoe'] = 'linear'
     top_k: int = 1                    # Experts selected per token
@@ -133,17 +137,17 @@ class GatingConfig:
     add_noise: bool = True            # Exploration noise
     noise_std: float = 1.0            # Noise standard deviation
     temperature: float = 1.0          # Softmax temperature
-    
+
     # Linear gating
     use_bias: bool = False
-    
-    # Cosine gating  
+
+    # Cosine gating
     embedding_dim: int = 256
     learnable_temperature: bool = True
-    
+
     # SoftMoE
     num_slots: int = 4
-    
+
     # Load balancing
     aux_loss_weight: float = 0.01     # Auxiliary loss weight
     z_loss_weight: float = 1e-3       # Router z-loss weight
@@ -157,13 +161,13 @@ class MoEConfig:
     num_experts: int = 8
     expert_config: ExpertConfig = field(default_factory=ExpertConfig)
     gating_config: GatingConfig = field(default_factory=GatingConfig)
-    
+
     # System parameters
     jitter_noise: float = 0.01
     drop_tokens: bool = True
     use_residual_connection: bool = True
-    
-    # Training parameters  
+
+    # Training parameters
     train_capacity_factor: Optional[float] = None
     eval_capacity_factor: Optional[float] = None
     routing_dtype: str = 'float32'
@@ -177,7 +181,7 @@ class MoEConfig:
 import keras
 from dl_techniques.layers.moe import MixtureOfExperts, create_ffn_moe
 
-# Method 1: Using convenience function
+# Method 1: Using convenience function (Recommended)
 moe_layer = create_ffn_moe(
     num_experts=8,
     ffn_config={
@@ -197,14 +201,13 @@ config = MoEConfig(
     expert_config=ExpertConfig(
         ffn_config={
             "type": "mlp",
-            "hidden_dim": 2048, 
+            "hidden_dim": 2048,
             "output_dim": 768,
             "activation": "gelu"
         }
     ),
     gating_config=GatingConfig(gating_type='linear', top_k=2)
 )
-
 moe_layer = MixtureOfExperts(config)
 ```
 
@@ -214,13 +217,16 @@ moe_layer = MixtureOfExperts(config)
 import keras
 from dl_techniques.layers.moe import create_ffn_moe
 
+# Assuming vocab_size is defined
+vocab_size = 10000
+
 def create_transformer_with_moe():
     inputs = keras.Input(shape=(128, 768))
-    
+
     # Standard transformer layers
     x = keras.layers.MultiHeadAttention(num_heads=12, key_dim=64)(inputs, inputs)
     x = keras.layers.LayerNormalization()(x + inputs)
-    
+
     # Replace FFN with MoE
     residual = x
     moe_output = create_ffn_moe(
@@ -233,9 +239,12 @@ def create_transformer_with_moe():
         top_k=2
     )(x)
     x = keras.layers.LayerNormalization()(moe_output + residual)
-    
+
     outputs = keras.layers.Dense(vocab_size)(x)
     return keras.Model(inputs, outputs)
+
+model = create_transformer_with_moe()
+model.summary()
 ```
 
 ## Advanced Usage
@@ -310,9 +319,10 @@ training_config = MoETrainingConfig(
     gradient_clipping_norm=1.0
 )
 
-# Build MoE-optimized optimizer
-builder = MoEOptimizerBuilder()
-optimizer = builder.build_moe_optimizer(model, training_config)
+# Build MoE-optimized optimizer for a given model
+# model = create_transformer_with_moe()
+# builder = MoEOptimizerBuilder()
+# optimizer = builder.build_moe_optimizer(model, training_config)
 ```
 
 ### Load Balancing and Regularization
@@ -320,7 +330,7 @@ optimizer = builder.build_moe_optimizer(model, training_config)
 ```python
 config = MoEConfig(
     num_experts=16,
-    expert_config=expert_config,
+    expert_config=expert_config, # Assume expert_config is defined
     gating_config=GatingConfig(
         gating_type='linear',
         top_k=2,
@@ -331,15 +341,15 @@ config = MoEConfig(
         z_loss_weight=1e-3             # Entropy regularization
     ),
     # Token management
-    drop_tokens=True,
-    use_residual_connection=True,
+    drop_tokens=True,                  # Drop tokens if capacity exceeded
+    use_residual_connection=True,      # Add input back for dropped tokens
     jitter_noise=0.01                  # Input noise for regularization
 )
 ```
 
 ## Integration
 
-### With dl_techniques Optimization
+### With `dl_techniques` Optimization
 
 ```python
 from dl_techniques.optimization import optimizer_builder, learning_rate_schedule_builder
@@ -362,7 +372,7 @@ lr_schedule = learning_rate_schedule_builder(lr_config)
 optimizer = optimizer_builder(opt_config, lr_schedule)
 
 # Compile model with MoE layers
-model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy')
+# model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy')
 ```
 
 ### With Model Analyzer
@@ -371,26 +381,27 @@ model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy')
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig
 
 # Analyze MoE model performance
-config = AnalysisConfig(
-    analyze_weights=True,
-    analyze_training_dynamics=True,
-    save_plots=True
-)
+# config = AnalysisConfig(
+#     analyze_weights=True,
+#     analyze_training_dynamics=True,
+#     save_plots=True
+# )
 
-analyzer = ModelAnalyzer(
-    models={'moe_model': moe_model},
-    config=config,
-    output_dir='moe_analysis'
-)
-results = analyzer.analyze(data=test_data)
+# analyzer = ModelAnalyzer(
+#     models={'moe_model': moe_model},
+#     config=config,
+#     output_dir='moe_analysis'
+# )
+# results = analyzer.analyze(data=test_data)
 
-# Get expert utilization statistics
-utilization = moe_layer.get_expert_utilization()
+# Get expert utilization statistics from a specific layer
+# moe_layer = model.get_layer('mixture_of_experts_layer_name')
+# utilization = moe_layer.get_expert_utilization()
 ```
 
 ## API Reference
 
-### MixtureOfExperts Layer
+### `MixtureOfExperts` Layer
 
 ```python
 class MixtureOfExperts(keras.layers.Layer):
@@ -407,7 +418,7 @@ class MixtureOfExperts(keras.layers.Layer):
 ```python
 def create_ffn_moe(
     num_experts: int,
-    ffn_config: Dict[str, Any], 
+    ffn_config: Dict[str, Any],
     top_k: int = 1,
     gating_type: str = 'linear',
     aux_loss_weight: float = 0.01,
@@ -428,8 +439,8 @@ class FFNExpert(BaseExpert):
 
 ```python
 def create_gating(
-    gating_type: str, 
-    num_experts: int, 
+    gating_type: str,
+    num_experts: int,
     **kwargs
 ) -> BaseGating
 
@@ -439,7 +450,7 @@ class LinearGating(BaseGating):
 class CosineGating(BaseGating):
     def __init__(self, num_experts, embedding_dim=256, top_k=1, ...)
 
-class SoftMoEGating(BaseGating): 
+class SoftMoEGating(BaseGating):
     def __init__(self, num_experts, num_slots=4, ...)
 ```
 
@@ -448,7 +459,7 @@ class SoftMoEGating(BaseGating):
 ```python
 def compute_auxiliary_loss(
     expert_weights: keras.KerasTensor,
-    gate_probs: keras.KerasTensor, 
+    gate_probs: keras.KerasTensor,
     num_experts: int,
     aux_loss_weight: float = 0.01
 ) -> keras.KerasTensor
@@ -458,7 +469,6 @@ def compute_z_loss(
     z_loss_weight: float = 1e-3
 ) -> keras.KerasTensor
 ```
-
 
 ## Training Best Practices
 
@@ -483,22 +493,26 @@ training_config = MoETrainingConfig(
 
 ### Loss Monitoring
 
+The auxiliary losses (load balancing, z-loss) are automatically added to the model's loss collection. When using `model.fit()`, they are included in the total loss. In a custom training loop, you can access them via `model.losses`.
+
 ```python
-# Custom training loop with MoE loss monitoring
+# Custom training loop (TensorFlow backend example)
+import tensorflow as tf
+
 @tf.function
 def train_step(batch_x, batch_y):
     with tf.GradientTape() as tape:
         predictions = model(batch_x, training=True)
-        
+
         # Main task loss
         task_loss = loss_fn(batch_y, predictions)
-        
-        # MoE auxiliary losses (automatically added)
+
+        # MoE auxiliary losses are automatically added
         total_loss = task_loss + sum(model.losses)
-    
+
     gradients = tape.gradient(total_loss, model.trainable_variables)
     optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-    
+
     return {
         'task_loss': task_loss,
         'aux_losses': sum(model.losses),
@@ -510,9 +524,9 @@ def train_step(batch_x, batch_y):
 
 ### Memory Usage
 
-- **Expert Capacity**: Balance between load balancing and memory usage
-- **Top-K Selection**: Higher top_k increases computation but improves quality
-- **Token Dropping**: Reduces memory but may hurt performance
+- **Expert Capacity**: Balance between load balancing (`capacity_factor > 1.0`) and memory usage.
+- **Top-K Selection**: Higher `top_k` increases computation but can improve quality.
+- **Token Dropping**: `drop_tokens=True` reduces memory but may hurt performance if capacity is too low.
 
 ### Computational Efficiency
 
@@ -538,22 +552,24 @@ efficient_config = MoEConfig(
 ### Load Balancing Tuning
 
 ```python
-# Monitor expert utilization
+# Monitor expert utilization during or after training
 def monitor_expert_usage(moe_layer):
     stats = moe_layer.get_expert_utilization()
     print(f"Experts: {stats['num_experts']}")
     print(f"Routing: {stats['routing_type']}")
     print(f"Top-K: {stats['top_k']}")
-    print(f"Capacity: {stats['expert_capacity_train']}")
+    print(f"Train Capacity: {stats['expert_capacity_train']}")
 
 # Adjust auxiliary loss weights based on utilization
-# High aux_loss_weight (0.1+) for better load balancing
-# Low aux_loss_weight (0.001) for minimal interference
+# High aux_loss_weight (e.g., 0.1) for better load balancing
+# Low aux_loss_weight (e.g., 0.001) for minimal interference
 ```
 
 ## Model Serialization
 
 ### Save and Load
+
+All MoE layers are registered as Keras serializable objects, enabling seamless saving and loading.
 
 ```python
 # Save model with MoE layers
@@ -562,8 +578,8 @@ model.save('moe_model.keras')
 # Load model (automatic registration)
 loaded_model = keras.models.load_model('moe_model.keras')
 
-# Verify expert configuration preserved
-moe_layer = loaded_model.get_layer('mixture_of_experts')
+# Verify expert configuration is preserved
+moe_layer = loaded_model.get_layer('mixture_of_experts') # Adjust layer name
 utilization = moe_layer.get_expert_utilization()
 print(f"Loaded model has {utilization['num_experts']} experts")
 ```
@@ -582,9 +598,9 @@ with open('moe_config.json', 'w') as f:
 # Load and recreate
 with open('moe_config.json', 'r') as f:
     loaded_config_dict = json.load(f)
-    
+
 loaded_config = MoEConfig.from_dict(loaded_config_dict)
-moe_layer = MixtureOfExperts(loaded_config)
+recreated_moe_layer = MixtureOfExperts(loaded_config)
 ```
 
 ## Troubleshooting
@@ -592,7 +608,7 @@ moe_layer = MixtureOfExperts(loaded_config)
 ### Common Issues
 
 #### Expert Collapse
-**Symptoms**: Some experts never receive tokens, poor performance
+**Symptoms**: Some experts never receive tokens, leading to poor model performance.
 ```python
 # Solution: Increase auxiliary loss weight
 gating_config = GatingConfig(
@@ -602,18 +618,18 @@ gating_config = GatingConfig(
 ```
 
 #### Memory Issues
-**Symptoms**: OOM errors during training
+**Symptoms**: Out-of-memory (OOM) errors during training.
 ```python
 # Solution: Reduce expert capacity or enable token dropping
 config = MoEConfig(
-    train_capacity_factor=1.0,    # Reduce from 1.25
+    gating_config=GatingConfig(train_capacity_factor=1.0), # Reduce from 1.25
     drop_tokens=True,
-    use_residual_connection=True  # Handle dropped tokens
+    use_residual_connection=True  # Handle dropped tokens gracefully
 )
 ```
 
 #### Training Instability
-**Symptoms**: Loss spikes, gradient explosions
+**Symptoms**: Loss spikes, gradient explosions.
 ```python
 # Solution: Lower learning rates and add gradient clipping
 training_config = MoETrainingConfig(
@@ -624,14 +640,14 @@ training_config = MoETrainingConfig(
 ```
 
 #### Poor Expert Utilization
-**Symptoms**: Experts have very uneven usage
+**Symptoms**: Experts have very uneven usage despite load balancing loss.
 ```python
 # Solution: Tune capacity and noise parameters
 gating_config = GatingConfig(
     capacity_factor=1.5,          # More capacity
-    add_noise=True,              # Enable exploration
-    noise_std=2.0,               # Increase exploration
-    aux_loss_weight=0.05         # Stronger load balancing
+    add_noise=True,               # Enable exploration
+    noise_std=2.0,                # Increase exploration
+    aux_loss_weight=0.05          # Stronger load balancing
 )
 ```
 
@@ -640,22 +656,18 @@ gating_config = GatingConfig(
 #### Expert Utilization Analysis
 
 ```python
-def analyze_expert_usage(model, dataset):
-    """Analyze how experts are being used."""
-    
-    # Get MoE layers
-    moe_layers = [layer for layer in model.layers 
-                  if isinstance(layer, MixtureOfExperts)]
-    
+def analyze_expert_usage(model):
+    """Analyze expert usage across all MoE layers in a model."""
+    moe_layers = [layer for layer in model.layers if isinstance(layer, MixtureOfExperts)]
+
     for moe_layer in moe_layers:
         stats = moe_layer.get_expert_utilization()
         print(f"\nMoE Layer: {moe_layer.name}")
         print(f"Configuration: {stats}")
-        
-        # Check auxiliary losses
+
+        # Check auxiliary losses (only available during training call)
         if hasattr(moe_layer, '_auxiliary_losses'):
-            aux_losses = moe_layer._auxiliary_losses
-            print(f"Auxiliary losses: {len(aux_losses)}")
+            print(f"Auxiliary losses tracked: {len(moe_layer._auxiliary_losses)}")
 ```
 
 #### Validation
@@ -663,19 +675,18 @@ def analyze_expert_usage(model, dataset):
 ```python
 def validate_moe_model(model, sample_input):
     """Validate MoE model functionality."""
-    
     # Test forward pass
-    output = model(sample_input)
-    print(f"Forward pass successful: {output.shape}")
-    
-    # Test training mode
+    output = model(sample_input, training=False)
+    print(f"Inference pass successful: {output.shape}")
+
+    # Test training pass
     with tf.GradientTape() as tape:
         training_output = model(sample_input, training=True)
-        loss = keras.ops.mean(keras.ops.square(training_output))
-    
+        # Combine task loss and model's internal losses
+        loss = keras.ops.mean(keras.ops.square(training_output)) + sum(model.losses)
     gradients = tape.gradient(loss, model.trainable_variables)
-    print(f"Gradients computed: {len(gradients)} variables")
-    
+    print(f"Gradients computed for {len(gradients)} variables")
+
     # Test serialization
     try:
         model.save('test_moe.keras')
@@ -688,18 +699,18 @@ def validate_moe_model(model, sample_input):
 ### Error Messages
 
 #### "FFN configuration validation failed"
-- Check that `ffn_config` contains 'type' field
-- Verify FFN parameters match the selected type requirements
-- Use `validate_ffn_config()` from dl_techniques.layers.ffn
+- Check that `ffn_config` contains a `'type'` field (e.g., `"mlp"`, `"swiglu"`).
+- Verify FFN parameters match the selected type's requirements.
+- Use `validate_ffn_config()` from `dl_techniques.layers.ffn` for debugging.
 
-#### "Unknown gating type"
-- Supported types: 'linear', 'cosine', 'softmoe'
-- Check spelling and case sensitivity
+#### "Unsupported gating type"
+- Supported types: `'linear'`, `'cosine'`, `'softmoe'`.
+- Check for spelling errors and case sensitivity.
 
-#### "Expert capacity exceeded"
-- Increase `capacity_factor` in gating configuration
-- Enable `drop_tokens=True` and `use_residual_connection=True`
-- Reduce `top_k` to decrease expert load
+#### "Expert capacity exceeded" (if `drop_tokens=False`)
+- Increase `capacity_factor` in `GatingConfig`.
+- Enable `drop_tokens=True` and `use_residual_connection=True`.
+- Reduce `top_k` to decrease the load on each expert.
 
 ## Examples
 
@@ -707,50 +718,51 @@ def validate_moe_model(model, sample_input):
 
 ```python
 import keras
-from dl_techniques.layers.moe import create_ffn_moe
+import numpy as np
+from dl_techniques.layers.moe import create_ffn_moe, MixtureOfExperts
 from dl_techniques.optimization import optimizer_builder, learning_rate_schedule_builder
 
-# Create model with MoE
-inputs = keras.Input(shape=(128, 768))
-x = inputs
+# 1. Dummy Data
+batch_size, seq_len, hidden_dim, vocab_size = 4, 128, 768, 1000
+train_data = (np.random.rand(batch_size, seq_len, hidden_dim), np.random.randint(0, vocab_size, (batch_size, seq_len)))
+val_data = (np.random.rand(batch_size, seq_len, hidden_dim), np.random.randint(0, vocab_size, (batch_size, seq_len)))
 
-# Add MoE FFN layer
+# 2. Create model with MoE
+inputs = keras.Input(shape=(seq_len, hidden_dim))
 moe_layer = create_ffn_moe(
     num_experts=8,
     ffn_config={
         "type": "swiglu",
-        "d_model": 768,
+        "d_model": hidden_dim,
         "ffn_expansion_factor": 4
     },
     top_k=2,
-    aux_loss_weight=0.01
+    aux_loss_weight=0.01,
+    name="moe_ffn"
 )
-x = moe_layer(x)
-
+x = moe_layer(inputs)
 outputs = keras.layers.Dense(vocab_size)(x)
 model = keras.Model(inputs, outputs)
 
-# Configure optimizer for MoE
+# 3. Configure optimizer for MoE
 lr_config = {"type": "cosine_decay", "learning_rate": 1e-4, "decay_steps": 10000}
-opt_config = {"type": "adamw", "gradient_clipping_by_norm": 1.0}
-
+opt_config = {"type": "adamw", "weight_decay": 0.01}
 lr_schedule = learning_rate_schedule_builder(lr_config)
 optimizer = optimizer_builder(opt_config, lr_schedule)
 
-# Compile and train
-model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy')
-model.fit(train_data, epochs=10, validation_data=val_data)
+# 4. Compile and train
+model.compile(optimizer=optimizer, loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True))
+model.fit(train_data[0], train_data[1], epochs=3, validation_data=val_data)
 
-# Monitor expert utilization
-stats = moe_layer.get_expert_utilization()
-print(f"Expert utilization: {stats}")
+# 5. Monitor expert utilization
+stats = model.get_layer("moe_ffn").get_expert_utilization()
+print("\nExpert utilization stats:")
+print(stats)
 ```
-
-
 
 ## References
 
 - **Switch Transformer**: [Scaling to Trillion Parameter Models with Simple and Efficient Sparsity](https://arxiv.org/abs/2101.03961)
-- **GLaM**: [Efficient Scaling of Language Models with Mixture-of-Experts](https://arxiv.org/abs/2112.06905)  
+- **GLaM**: [Efficient Scaling of Language Models with Mixture-of-Experts](https://arxiv.org/abs/2112.06905)
 - **SoftMoE**: [From Sparse to Soft Mixtures of Experts](https://arxiv.org/abs/2308.00951)
-- **dl_techniques FFN Module**: See `layers/ffn/README.md` for FFN factory documentation
+- **`dl_techniques` FFN Module**: See `layers/ffn/README.md` for FFN factory documentation.
