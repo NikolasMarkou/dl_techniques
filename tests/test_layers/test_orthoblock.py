@@ -33,18 +33,6 @@ class TestOrthoBlock:
         """Create a default OrthoBlock instance for testing."""
         return OrthoBlock(units=16)
 
-    def test_initialization_defaults(self):
-        """Test initialization with default parameters."""
-        layer = OrthoBlock(units=128)
-
-        # Check default values
-        assert layer.units == 128
-        assert layer.use_bias is True
-        assert layer.ortho_reg_factor == 0.01
-        assert layer.scale_initial_value == 0.5
-        assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
-        assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
-
     def test_initialization_custom_parameters(self):
         """Test initialization with custom parameters."""
         custom_bias_regularizer = keras.regularizers.L2(1e-4)

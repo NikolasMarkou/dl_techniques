@@ -17,10 +17,12 @@ from typing import Optional, Union, Any, Tuple, Dict, Callable
 # ---------------------------------------------------------------------
 # Framework-specific imports
 # ---------------------------------------------------------------------
+
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.layers.layer_scale import LearnableMultiplier
 from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
 from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
+from dl_techniques.initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
 
 # ---------------------------------------------------------------------
 
@@ -165,11 +167,11 @@ class OrthoBlock(keras.layers.Layer):
         activation: Optional[Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]]] = None,
         use_bias: bool = True,
         ortho_reg_factor: float = 0.01,
-        kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+        kernel_initializer: Union[str, keras.initializers.Initializer] = OrthogonalHypersphereInitializer(),
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-        scale_initial_value: float = 0.5,
+        scale_initial_value: float = 0.9,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -204,7 +206,7 @@ class OrthoBlock(keras.layers.Layer):
             units=self.units,
             activation=None,  # Activation applied separately at the end
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=OrthogonalHypersphereInitializer(),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.ortho_reg,  # Orthonormal regularization
             bias_regularizer=self.bias_regularizer,
