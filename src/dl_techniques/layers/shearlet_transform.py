@@ -193,8 +193,9 @@ f = ∑_{j,k,m} ⟨f, ψ_{j,k,m}⟩ ψ_{j,k,m}
 import keras
 import numpy as np
 import tensorflow as tf
-from typing import List, Tuple, Optional, Dict, Any, Union
+from typing import List, Tuple, Optional, Dict, Any
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class ShearletTransform(keras.layers.Layer):
@@ -694,3 +695,6 @@ class ShearletTransform(keras.layers.Layer):
                 regularizer_config
             )
         return cls(**config)
+
+# ---------------------------------------------------------------------
+
