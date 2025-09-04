@@ -91,7 +91,7 @@ class OrthoBlockExperimentConfig:
     output_activation: str = 'softmax'
 
     # --- Training Parameters ---
-    epochs: int = 150
+    epochs: int = 100
     batch_size: int = 128
     learning_rate: float = 0.001
     early_stopping_patience: int = 20
@@ -137,7 +137,7 @@ class OrthoBlockExperimentConfig:
     output_dir: Path = Path("results")
     experiment_name: str = "orthoblock_effectiveness_study"
     random_seed: int = 42
-    n_runs: int = 3  # Multiple runs for statistical significance
+    n_runs: int = 1  # Multiple runs for statistical significance
 
     # --- Analysis Configuration ---
     analyzer_config: AnalysisConfig = field(default_factory=lambda: AnalysisConfig(

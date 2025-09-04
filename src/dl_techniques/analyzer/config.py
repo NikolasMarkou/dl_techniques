@@ -4,8 +4,8 @@ Configuration for Model Analyzer
 Configuration classes and plotting setup utilities.
 """
 
-import matplotlib.pyplot as plt
 import seaborn as sns
+import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
 

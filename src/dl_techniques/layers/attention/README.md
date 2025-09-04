@@ -14,7 +14,6 @@ The following layers are supported by the factory system with automated paramete
 |------|-------|-------------|----------|
 | `adaptive_multi_head` | `AdaptiveMultiHeadAttention` | MHA with adaptive temperature softmax. | Transformers where attention sharpness needs to adapt to sequence length. |
 | `anchor` | `AnchorAttention` | Hierarchical attention with anchor tokens. | Long-sequence models where full self-attention is too costly. |
-| `attention_block` | `AttentionBlock` | Vision-specific attention block for 4D tensors. | Vision transformers and hybrid CNN-transformer models. |
 | `capsule_routing` | `CapsuleRoutingSelfAttention` | Self-attention with capsule network dynamic routing. | Experimental models aiming for better contextualization. |
 | `channel` | `ChannelAttention` | Channel attention module from CBAM. | CNNs to recalibrate channel-wise feature responses. |
 | `cbam` | `CBAM` | Convolutional Block Attention Module (Channel + Spatial). | Plug-and-play attention module for any CNN to refine features. |
@@ -111,18 +110,6 @@ attn = create_attention_layer(
     dim=512,
     num_heads=8,
     dropout=0.1
-)
-```
-
-### `attention_block`
-**Required:** `dim`  
-**Optional:** `num_heads` (default: 8), `attention_type` (default: 'multi_head_attention'), `use_layer_scale` (default: True)
-```python
-attn = create_attention_layer(
-    'attention_block',
-    dim=256,
-    num_heads=4,
-    attention_type='window_attention'
 )
 ```
 
@@ -348,20 +335,6 @@ with open('model_config.json', 'r') as f:
 
 # Create attention layer from the 'attention' section of the config
 attention_layer = create_attention_from_config(config['attention'])
-```
-
-**Example `model_config.json`:**
-```json
-{
-    "model_name": "VisionTransformer-S",
-    "attention": {
-        "type": "attention_block",
-        "dim": 384,
-        "num_heads": 6,
-        "dropout_rate": 0.1
-    },
-    "ffn": { "...ffn_config..." }
-}
 ```
 
 ## Parameter Validation

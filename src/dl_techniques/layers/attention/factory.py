@@ -18,7 +18,6 @@ from dl_techniques.utils.logger import logger
 
 from .adaptive_softmax_mha import AdaptiveMultiHeadAttention
 from .anchor_attention import AnchorAttention
-from .attention_block import AttentionBlock
 from .capsule_routing_attention import CapsuleRoutingSelfAttention
 from .channel_attention import ChannelAttention
 from .convolutional_block_attention import CBAM
@@ -41,7 +40,6 @@ from .window_attention import WindowAttention
 AttentionType = Literal[
     'adaptive_multi_head',
     'anchor',
-    'attention_block',
     'capsule_routing',
     'channel',
     'cbam',
@@ -86,17 +84,6 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'bias_initializer': 'zeros', 'kernel_regularizer': None, 'bias_regularizer': None
         },
         'use_case': 'Long-sequence models where full self-attention is too costly.'
-    },
-    'attention_block': {
-        'class': AttentionBlock,
-        'description': 'Vision-specific attention block wrapping a TransformerLayer.',
-        'required_params': ['dim'],
-        'optional_params': {
-            'num_heads': 8, 'mlp_ratio': 4.0, 'attention_type': 'multi_head_attention',
-            'normalization_position': 'pre', 'dropout_rate': 0.0, 'use_layer_scale': True,
-            'layer_scale_init': 1e-4
-        },
-        'use_case': 'Vision transformers and hybrid CNN-transformer models operating on 4D tensors.'
     },
     'capsule_routing': {
         'class': CapsuleRoutingSelfAttention,

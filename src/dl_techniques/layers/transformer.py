@@ -46,9 +46,7 @@ from .moe import MixtureOfExperts, MoEConfig
 
 NormalizationPosition = Literal['post', 'pre']
 FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp']
-NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'adaptive_band_rms',
-                           'band_logit_norm', 'global_response_norm', 'logit_norm', 'max_logit_norm',
-                           'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center', 'dynamic_tanh']
+NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'adaptive_band_rms', 'dynamic_tanh']
 AttentionType = Literal['multi_head_attention', 'window_attention', 'group_query_attention', 'differential_attention']
 
 # ---------------------------------------------------------------------
@@ -87,13 +85,7 @@ class TransformerLayer(keras.layers.Layer):
             - 'rms_norm': Root Mean Square normalization
             - 'band_rms': Band-constrained RMS normalization
             - 'adaptive_band_rms': Adaptive Band RMS with log-transformed scaling
-            - 'band_logit_norm': Band-constrained logit normalization
-            - 'global_response_norm': Global Response Normalization from ConvNeXt
             - 'logit_norm': Temperature-scaled normalization for classification
-            - 'max_logit_norm': MaxLogit normalization for OOD detection
-            - 'decoupled_max_logit': Decoupled MaxLogit (DML) normalization
-            - 'dml_plus_focal': DML+ focal model variant
-            - 'dml_plus_center': DML+ center model variant
             - 'dynamic_tanh': Dynamic Tanh normalization (DyT) for normalization-free transformers
         normalization_position: NormalizationPosition, position of normalization layers.
             Available options:
