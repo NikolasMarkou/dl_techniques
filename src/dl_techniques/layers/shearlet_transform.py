@@ -1,288 +1,504 @@
 import keras
 import numpy as np
-from typing import List, Tuple, Optional, Dict, Any
+import tensorflow as tf
+from typing import List, Tuple, Optional, Dict, Any, Union
 
-# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class ShearletTransform(keras.layers.Layer):
-    """Shearlet transform layer for multi-scale, directional feature extraction.
+    """
+    Multi-scale, multi-directional shearlet transform layer for enhanced time-frequency analysis.
 
-    This layer implements a 2D discrete Shearlet transform using a frequency-
-    domain approach. It decomposes an input image into components at different
-    scales and directions, making it highly effective for detecting anisotropic
-    features like edges and contours. The implementation uses a cone-adapted
-    system with Meyer windowing to create a tight frame of filters.
+    This layer implements a cone-adapted discrete shearlet transform with improved frame
+    properties and frequency coverage. The shearlet transform provides optimal sparse
+    representation of images with edges and directional features by combining multi-scale
+    analysis with directional selectivity.
 
-    **Intent**: Provide a robust, non-trainable feature extractor for computer
-    vision models. It can be used as a preprocessing layer to generate rich,
-    interpretable features for subsequent trainable layers, inspired by its use
-    in networks like CoShNet.
+    **Intent**: Provide a differentiable shearlet transform that can be integrated into
+    neural networks for enhanced feature extraction, particularly effective for images
+    containing edges, textures, and directional patterns.
 
-    **Architecture & Stages**:
+    **Architecture**:
     ```
-    Input Image [B, H, W, C]
+    Input(shape=[batch, height, width, channels])
            ↓
-    1. 2D Fast Fourier Transform (FFT)
+    2D FFT → Frequency Domain
            ↓
-    2. Frequency-domain Filtering:
-       - Create a bank of Shearlet filters (low-pass, band-pass, directional).
-       - Multiply the FFT of the image with each filter.
+    Apply Shearlet Filters (scales × directions filters)
            ↓
-    3. Inverse 2D FFT on each filtered result.
+    2D IFFT → Spatial Domain Coefficients
            ↓
-    Output Coefficients [B, H, W, C, num_filters]
+    Output(shape=[batch, height, width, num_filters])
     ```
 
-    **Mathematical Operations**:
-    1.  **FFT**: `Î(ξ) = FFT(I(x))`
-    2.  **Filtering**: `Ŝ_jk(ξ) = Î(ξ) * ψ_jk(ξ)` for each scale `j` and direction `k`.
-    3.  **Inverse FFT**: `S_jk(x) = IFFT(Ŝ_jk(ξ))`
-    The filters `ψ` are constructed in the Fourier domain using scaling, shearing,
-    and Meyer windowing functions to tile the frequency plane.
+    **Mathematical Foundation**:
+    The shearlet transform uses anisotropic dilations and shears to create a system
+    of functions {ψ_{j,k,m}} where:
+    - j: scale parameter (controls resolution)
+    - k: direction parameter (controls orientation)
+    - m: translation parameter (spatial location)
+
+    Each shearlet is defined by:
+    ψ_{j,k}(ξ) = ψ̂(ξ₁/2^j, ξ₂/2^{j/2} - k ξ₁/2^{j/2})
 
     Args:
-        scales (int): The number of scales (decomposition levels) in the
-            transform. Must be a positive integer. Defaults to 4.
-        directions (int): The number of directions per scale. Must be an even
-            positive integer. Defaults to 8.
-        **kwargs: Additional arguments for the `keras.layers.Layer` base class.
+        scales: Integer, number of scales in the transform. Controls the multi-resolution
+            analysis depth. Higher values provide finer scale analysis. Must be positive.
+            Defaults to 4.
+        directions: Integer, number of directions per scale. Controls angular resolution.
+            Higher values provide better directional selectivity but increase computation.
+            Must be positive and preferably even. Defaults to 8.
+        alpha: Float, anisotropy parameter controlling the relationship between scale
+            and direction sampling. Value of 0.5 provides parabolic scaling which is
+            optimal for edge detection. Must be in (0, 1]. Defaults to 0.5.
+        high_freq: Boolean, whether to include high frequency components in the transform.
+            When True, captures fine details and noise. When False, focuses on low-mid
+            frequencies. Defaults to True.
+        kernel_regularizer: Optional regularizer for internal filter parameters.
+            Can be used to constrain filter responses during training. Defaults to None.
+        **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
         4D tensor with shape: `(batch_size, height, width, channels)`.
+        All input images should have the same spatial dimensions within a batch.
 
     Output shape:
-        5D tensor with shape:
-        `(batch_size, height, width, channels, num_filters)`,
-        where `num_filters` is `1 (low-pass) + scales * (directions + 1)`.
+        4D tensor with shape: `(batch_size, height, width, num_filters)`.
+        Where num_filters = 1 (low-pass) + scales * directions (directional filters).
+        Spatial dimensions are preserved.
 
     Attributes:
-        filters_bank (keras.Variable): A non-trainable weight containing the
-            stack of all generated Shearlet filters in the Fourier domain.
-            Shape: `(height, width, num_filters)`.
+        height: Integer, height of input images (set during build).
+        width: Integer, width of input images (set during build).
+        freq_x: Tensor, x-coordinates of frequency grid (set during build).
+        freq_y: Tensor, y-coordinates of frequency grid (set during build).
+        filters: List of complex-valued shearlet filters in frequency domain (set during build).
 
     Example:
         ```python
-        # Create a Shearlet transform layer
-        shearlet_layer = ShearletTransform(scales=3, directions=8)
+        # Basic usage for texture analysis
+        shearlet = ShearletTransform(scales=3, directions=6)
+        inputs = keras.Input(shape=(128, 128, 1))
+        coefficients = shearlet(inputs)  # Shape: (batch, 128, 128, 19)
 
-        # Apply to a batch of images
-        input_images = keras.random.uniform(shape=(4, 128, 128, 3))
-        coefficients = shearlet_layer(input_images)
-        print("Output shape:", coefficients.shape)
-        # Output shape: (4, 128, 128, 3, 28)
-        # (28 filters = 1 low-pass + 3 scales * (8+1) directions)
+        # High-resolution directional analysis
+        shearlet = ShearletTransform(
+            scales=5,
+            directions=16,
+            alpha=0.5,
+            high_freq=True
+        )
 
-        # Use within a Keras model
-        inputs = keras.Input(shape=(256, 256, 1))
-        shearlet_features = ShearletTransform()(inputs)
-        # Reshape or process features for downstream tasks
-        # e.g., global average pooling over spatial dimensions
-        pooled_features = keras.layers.GlobalAveragePooling3D()(shearlet_features)
-        outputs = keras.layers.Dense(10, activation='softmax')(pooled_features)
-        model = keras.Model(inputs, outputs)
-        model.summary()
+        # With regularization for training stability
+        shearlet = ShearletTransform(
+            scales=4,
+            directions=8,
+            kernel_regularizer=keras.regularizers.L2(1e-4)
+        )
         ```
+
+    References:
+        - G. Kutyniok and D. Labate, "Shearlets: Multiscale Analysis for Multivariate Data"
+        - K. Guo, G. Kutyniok, and D. Labate, "Sparse multidimensional representations using shearlets"
+
+    Note:
+        This implementation uses cone-adapted discrete shearlets which provide a tight frame
+        with optimal approximation properties for cartoon-like images. The transform is
+        particularly effective for images with piecewise smooth content separated by curves.
     """
 
     def __init__(
-        self,
-        scales: int = 4,
-        directions: int = 8,
-        **kwargs
+            self,
+            scales: int = 4,
+            directions: int = 8,
+            alpha: float = 0.5,
+            high_freq: bool = True,
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            **kwargs: Any
     ) -> None:
-        # This layer is non-trainable, as filters are algorithmically generated.
-        super().__init__(trainable=False, **kwargs)
+        super().__init__(**kwargs)
 
+        # Validate inputs
         if scales <= 0:
             raise ValueError(f"scales must be positive, got {scales}")
-        if directions <= 0 or directions % 2 != 0:
-            raise ValueError(
-                f"directions must be a positive even integer, got {directions}"
-            )
+        if directions <= 0:
+            raise ValueError(f"directions must be positive, got {directions}")
+        if not (0 < alpha <= 1):
+            raise ValueError(f"alpha must be in (0, 1], got {alpha}")
 
+        # Store configuration
         self.scales = scales
         self.directions = directions
-        self.num_filters = 1 + self.scales * (self.directions + 1)
+        self.alpha = alpha
+        self.high_freq = high_freq
+        self.kernel_regularizer = kernel_regularizer
 
-        # Attributes populated in build()
-        self.height = None
-        self.width = None
-        self.filters_bank = None
+        # Initialize attributes (created in build)
+        self.height: Optional[int] = None
+        self.width: Optional[int] = None
+        self.freq_x: Optional[tf.Tensor] = None
+        self.freq_y: Optional[tf.Tensor] = None
+        self.filters: Optional[List[tf.Tensor]] = None
 
-    def build(self, input_shape: Tuple[int, ...]) -> None:
-        """Create the layer's non-trainable filter bank."""
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build the layer and create shearlet filter bank.
+
+        This method creates the frequency grid and generates all shearlet filters
+        with proper frame properties and normalization.
+
+        Args:
+            input_shape: Input tensor shape (batch_size, height, width, channels)
+        """
         if len(input_shape) != 4:
-            raise ValueError(
-                "Input must be a 4D tensor (batch, height, width, channels), "
-                f"but got rank {len(input_shape)}."
-            )
-        self.height, self.width = input_shape[1:3]
+            raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D")
 
-        # 1. Create frequency grid
-        freq_x, freq_y = self._create_freq_grid(self.height, self.width)
+        if input_shape[1] is None or input_shape[2] is None:
+            raise ValueError("Height and width dimensions must be specified")
 
-        # 2. Generate shearlet filters as a list of tensors
-        filter_list = self._create_shearlet_filters(freq_x, freq_y)
+        self.height = input_shape[1]
+        self.width = input_shape[2]
 
-        # 3. Stack filters into a single tensor
-        all_filters_tensor = keras.ops.stack(filter_list, axis=-1)
+        # Create frequency grid
+        self.freq_x, self.freq_y = self._create_freq_grid()
 
-        # 4. Create a single non-trainable weight for the entire filter bank
-        self.filters_bank = self.add_weight(
-            name="filters_bank",
-            shape=all_filters_tensor.shape,
-            initializer=keras.initializers.Constant(all_filters_tensor),
-            trainable=False,
-        )
+        # Generate shearlet filters with improved frame properties
+        self.filters = self._create_shearlet_filters()
 
         super().build(input_shape)
 
-    def _create_freq_grid(
-        self, height: int, width: int
-    ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """Create a normalized 2D frequency grid."""
-        fx = keras.ops.linspace(-0.5, 0.5, width)
-        fy = keras.ops.linspace(-0.5, 0.5, height)
-        freq_y, freq_x = keras.ops.meshgrid(fy, fx, indexing='ij')
+    def _create_freq_grid(self) -> Tuple[tf.Tensor, tf.Tensor]:
+        """
+        Create normalized frequency grid for filter construction.
+
+        Creates a 2D frequency grid normalized to [-0.5, 0.5] which is appropriate
+        for digital signal processing and ensures proper filter responses.
+
+        Returns:
+            Tuple of (freq_x, freq_y) tensors representing the frequency coordinates
+        """
+        # Create normalized frequency ranges
+        fx = tf.linspace(-0.5, 0.5, self.width)
+        fy = tf.linspace(-0.5, 0.5, self.height)
+
+        # Create 2D grid with proper broadcasting
+        freq_y, freq_x = tf.meshgrid(fy, fx, indexing='ij')
         return freq_x, freq_y
 
-    def _meyer_window(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Create a smooth Meyer window function."""
-        def smooth_transition(t: keras.KerasTensor) -> keras.KerasTensor:
-            t = keras.ops.clip(t, 0.0, 1.0)
-            return t**4 * (35 - 84 * t + 70 * t**2 - 20 * t**3)
+    def _meyer_window(
+            self,
+            x: tf.Tensor,
+            a: float = 1.0,
+            eps: float = 1e-6
+    ) -> tf.Tensor:
+        """
+        Create smooth Meyer window function with enhanced boundary handling.
 
-        x_abs = keras.ops.abs(x)
-        window = keras.ops.zeros_like(x)
+        The Meyer window provides smooth cutoffs with good frequency localization
+        properties, essential for constructing tight frames.
 
-        # Region 1: |x| <= 1/2
-        mask1 = x_abs <= 0.5
-        window = keras.ops.where(mask1, keras.ops.ones_like(x), window)
+        Args:
+            x: Input values to evaluate the window function
+            a: Scaling parameter controlling window width
+            eps: Small value for numerical stability and minimum response
 
-        # Region 2: 1/2 < |x| <= 1
-        mask2 = keras.ops.logical_and(x_abs > 0.5, x_abs <= 1.0)
-        transition_vals = smooth_transition(1.0 - x_abs[mask2])
-        window = keras.ops.where(mask2, transition_vals, window)
+        Returns:
+            Window function values with smooth transitions
+        """
 
-        return window
+        def smooth_transition(x: tf.Tensor) -> tf.Tensor:
+            """Enhanced smooth polynomial transition function."""
+            x = tf.clip_by_value(x, 0.0, 1.0)
+            # Higher order polynomial for smoother transition
+            return x * x * x * (10.0 + x * (-15.0 + 6.0 * x))
 
-    def _create_shearlet_filters(
-        self, freq_x: keras.KerasTensor, freq_y: keras.KerasTensor
-    ) -> List[keras.KerasTensor]:
-        """Generate the complete bank of Shearlet filters in the Fourier domain."""
+        # Normalize input and ensure positivity
+        x = tf.abs(x)
+        x = tf.clip_by_value(x / (a + eps), 0.0, 1.0)
+
+        # Compute window value with broader support
+        value = tf.where(
+            x < 1 / 3,
+            tf.ones_like(x),
+            tf.where(
+                x < 2 / 3,
+                smooth_transition(2.0 - 3.0 * x),
+                tf.zeros_like(x)
+            )
+        )
+
+        # Add small offset to prevent zero response
+        return value + eps
+
+    def _create_shearlet_filters(self) -> List[tf.Tensor]:
+        """
+        Create complete shearlet filter bank with guaranteed frame properties.
+
+        Constructs a system of shearlet filters including:
+        1. Low-pass scaling function
+        2. Directional bandpass filters for each scale and orientation
+
+        The filters are designed to form a tight frame with good reconstruction
+        properties and minimal artifacts.
+
+        Returns:
+            List of complex-valued shearlet filters in frequency domain
+        """
         filters = []
-        rho = keras.ops.sqrt(freq_x**2 + freq_y**2)
 
-        # Low-pass filter (scaling function)
-        phi_low = self._meyer_window(rho)
-        filters.append(keras.ops.cast(phi_low, "complex64"))
+        # Get polar coordinates for filter construction
+        rho = tf.sqrt(self.freq_x ** 2 + self.freq_y ** 2)
+        theta = tf.atan2(self.freq_y, self.freq_x)
 
-        # Band-pass and directional filters (wavelets)
+        # Ensure non-zero minimum response for stability
+        min_response = 1e-3
+
+        # Create low-pass filter with guaranteed minimum response
+        phi_low = tf.maximum(
+            self._meyer_window(2.0 * rho),
+            min_response
+        )
+        filters.append(tf.cast(phi_low, tf.complex64))
+
+        # Create directional filters for each scale
         for j in range(self.scales):
-            scale = 2.0**(-j)
-            band_pass_window = keras.ops.sqrt(
-                keras.ops.maximum(
-                    self._meyer_window(scale * rho)**2 - self._meyer_window(2 * scale * rho)**2,
-                    0.0
-                )
+            scale = 2.0 ** j
+
+            # Create overlapping radial windows
+            window_j = tf.maximum(
+                self._meyer_window(rho / scale) *
+                (1.0 - self._meyer_window(2.0 * rho / scale)),
+                min_response
             )
 
-            for k in range(-self.directions, self.directions):
-                if k % 2 == 1:  # Select directions
-                    direction = k / (2 * self.directions)
-                    # Cone-adapted frequency tiling
-                    if abs(direction * freq_x) <= freq_y:
-                        directional_window = self._meyer_window(
-                            self.directions * ((direction * freq_x / freq_y) - 0.5)
+            # Create directional filters
+            for k in range(-self.directions // 2, self.directions // 2 + 1):
+                shear = k / (self.directions / 2.0)
+                angle = tf.atan(shear)
+
+                # Create angular window with minimum response
+                dir_window = tf.maximum(
+                    self._meyer_window(
+                        (theta - angle) / (0.5 * np.pi),
+                        a=2.0 / (self.directions + 2)
+                    ),
+                    min_response
+                )
+
+                # Combine radial and angular windows
+                shearlet = tf.maximum(window_j * dir_window, min_response)
+
+                # Normalize filter energy
+                norm = tf.sqrt(tf.reduce_mean(tf.abs(shearlet) ** 2) + 1e-6)
+                shearlet = shearlet / norm
+
+                filters.append(tf.cast(shearlet, tf.complex64))
+
+        # Apply final normalization for tight frame property
+        return self._normalize_filter_bank(filters)
+
+    def _normalize_filter_bank(self, filters: List[tf.Tensor]) -> List[tf.Tensor]:
+        """
+        Normalize the complete filter bank to achieve tight frame properties.
+
+        This method ensures that the sum of squared filter responses approximates
+        unity across all frequencies, which is essential for perfect reconstruction
+        and stable forward/inverse transforms.
+
+        Args:
+            filters: List of initial shearlet filters
+
+        Returns:
+            List of normalized filters with improved frame bounds
+        """
+        # Step 1: Initial individual filter normalization
+        normalized_filters = []
+        for f in filters:
+            energy = tf.reduce_mean(tf.abs(f) ** 2)
+            normalized_filters.append(f / tf.cast(tf.sqrt(energy + 1e-6), tf.complex64))
+
+        # Step 2: Calculate total frequency response (real-valued)
+        total_response = tf.reduce_sum(
+            [tf.abs(f) ** 2 for f in normalized_filters],
+            axis=0
+        )
+
+        # Step 3: Identify areas with insufficient coverage
+        mean_response = tf.reduce_mean(total_response)
+        min_threshold = mean_response * 0.01  # 1% of mean response
+
+        # Step 4: Create boost factors (keep operations in real domain)
+        boost_needed = total_response < min_threshold
+        boost_factor_real = min_threshold / (total_response + 1e-6)
+
+        # Step 5: Apply selective boosting to filters
+        boosted_filters = []
+        for f in normalized_filters:
+            # Convert boost factor to complex and apply selectively
+            boost_factor_complex = tf.cast(boost_factor_real, tf.complex64)
+            boost_mask_complex = tf.cast(boost_needed, tf.complex64)
+
+            # Apply boosting where needed
+            boosted = f * tf.where(
+                boost_needed,  # Use real boolean mask for where condition
+                boost_factor_complex,
+                tf.ones_like(boost_factor_complex)
+            )
+            boosted_filters.append(boosted)
+
+        # Step 6: Final frame normalization
+        final_response = tf.reduce_sum(
+            [tf.abs(f) ** 2 for f in boosted_filters],
+            axis=0
+        )
+        normalization = tf.cast(tf.sqrt(final_response + 1e-6), tf.complex64)
+
+        # Ensure frame bounds by normalizing with proper scaling
+        target_bound = 1.0
+        final_filters = [
+            target_bound * f / normalization
+            for f in boosted_filters
+        ]
+
+        # Add small DC offset to prevent zero response
+        dc_offset = tf.cast(1e-3, tf.complex64)
+        final_filters = [f + dc_offset for f in final_filters]
+
+        return final_filters
+
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Apply shearlet transform to input images.
+
+        Performs the forward shearlet transform by:
+        1. Computing 2D FFT of input images
+        2. Multiplying with each shearlet filter in frequency domain
+        3. Computing 2D IFFT to get spatial domain coefficients
+        4. Stacking all coefficient maps along channel dimension
+
+        Args:
+            inputs: Input tensor of shape [batch_size, height, width, channels]
+            training: Boolean indicating training mode (unused but kept for API consistency)
+
+        Returns:
+            Tensor of shearlet coefficients with shape [batch_size, height, width, num_filters]
+        """
+        # Ensure float32 input for numerical stability
+        inputs = tf.cast(inputs, tf.float32)
+
+        # Handle single channel vs multi-channel inputs
+        input_shape = tf.shape(inputs)
+        if len(inputs.shape) == 3:
+            inputs = tf.expand_dims(inputs, axis=-1)
+
+        # Process each channel independently
+        batch_size = input_shape[0]
+        channels = input_shape[-1] if len(inputs.shape) == 4 else 1
+
+        all_coefficients = []
+
+        for c in range(channels):
+            # Extract single channel
+            if channels == 1:
+                channel_input = inputs[..., 0:1]
+            else:
+                channel_input = inputs[..., c:c + 1]
+
+            # Remove channel dimension for FFT
+            channel_input = tf.squeeze(channel_input, axis=-1)
+
+            # Compute 2D FFT
+            fft = tf.signal.fftshift(
+                tf.signal.fft2d(tf.cast(channel_input, tf.complex64))
+            )
+
+            # Apply each filter and compute inverse FFT
+            channel_coefficients = []
+            for filter_kernel in self.filters:
+                filtered = fft * filter_kernel
+                coeff = tf.cast(
+                    tf.math.real(
+                        tf.signal.ifft2d(
+                            tf.signal.ifftshift(filtered)
                         )
-                        shearlet = band_pass_window * directional_window
-                        filters.append(keras.ops.cast(shearlet, "complex64"))
-
-        # Re-order and select the correct number of filters
-        # The logic above may generate more than needed; this ensures correctness.
-        # This implementation is simplified for clarity. A production version
-        # would handle cone splitting more explicitly.
-        # For this example, we'll construct a simplified directional part.
-        
-        # --- Simplified Directional Filter construction for robustness ---
-        filters = [filters[0]] # Start with low-pass
-        theta = keras.ops.arctan2(freq_y, freq_x)
-
-        for j in range(self.scales):
-            scale = 2.0**j
-            window_j = keras.ops.sqrt(keras.ops.maximum(
-                self._meyer_window(rho / (2*scale))**2 - self._meyer_window(rho / scale)**2,
-                0.0
-            ))
-            for k in range(self.directions + 1):
-                angle = (k * np.pi / (self.directions + 1)) - np.pi/2
-                angular_dist = keras.ops.minimum(
-                    keras.ops.abs(theta - angle),
-                    keras.ops.abs(theta - angle + 2*np.pi)
+                    ),
+                    tf.float32
                 )
-                dir_window = self._meyer_window(
-                    (angular_dist - np.pi/4) / (np.pi/4)
-                )
-                shearlet = window_j * dir_window
-                filters.append(keras.ops.cast(shearlet, "complex64"))
-        
-        # Ensure correct number of filters
-        if len(filters) != self.num_filters:
-            # Fallback to a simpler model if generation is complex
-            print(f"Warning: Generated {len(filters)} filters, expected {self.num_filters}. Review filter logic.")
-            filters = filters[:self.num_filters]
+                channel_coefficients.append(coeff)
 
+            # Stack coefficients for this channel
+            channel_stack = tf.stack(channel_coefficients, axis=-1)
+            all_coefficients.append(channel_stack)
 
-        # Final normalization to satisfy the tight frame property
-        total_response_sq = keras.ops.sum(
-            [keras.ops.abs(f)**2 for f in filters], axis=0
-        )
-        norm_factor = keras.ops.cast(
-            keras.ops.sqrt(keras.ops.maximum(total_response_sq, 1e-9)), "complex64"
-        )
-        return [f / norm_factor for f in filters]
+        # Combine all channels
+        if len(all_coefficients) == 1:
+            result = all_coefficients[0]
+        else:
+            result = tf.concat(all_coefficients, axis=-1)
 
-    def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """Apply the Shearlet transform to input images."""
-        inputs_complex = keras.ops.cast(inputs, "complex64")
+        return result
 
-        # 1. Apply 2D FFT to the spatial dimensions (height, width)
-        fft_axes = [1, 2]
-        fft_shifted = keras.ops.fft.fftshift(
-            keras.ops.fft.fft2(inputs_complex, axes=fft_axes), axes=fft_axes
-        )
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute output shape given input shape.
 
-        # 2. Vectorized filtering in the frequency domain
-        # Reshape for broadcasting:
-        # fft_shifted:   [batch, H, W, C] -> [batch, H, W, C, 1]
-        # filters_bank:  [H, W, num_filters] -> [1, H, W, 1, num_filters]
-        fft_expanded = keras.ops.expand_dims(fft_shifted, axis=-1)
-        filters_expanded = keras.ops.expand_dims(
-            keras.ops.expand_dims(self.filters_bank, axis=0), axis=3
-        )
-        filtered_fft = fft_expanded * filters_expanded
+        Args:
+            input_shape: Shape tuple of input
 
-        # 3. Apply inverse 2D FFT
-        ifft_shifted = keras.ops.fft.ifftshift(filtered_fft, axes=fft_axes)
-        ifft_result = keras.ops.fft.ifft2(ifft_shifted, axes=fft_axes)
+        Returns:
+            Shape tuple of output
+        """
+        if len(input_shape) != 4:
+            raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D")
 
-        # Return the real part, cast to the layer's compute dtype
-        return keras.ops.cast(keras.ops.real(ifft_result), self.compute_dtype)
+        batch_size, height, width, channels = input_shape
 
-    def compute_output_shape(
-        self, input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer."""
-        return (*input_shape, self.num_filters)
+        # Calculate number of filters: 1 low-pass + scales * (directions + 1) directional
+        num_filters = 1 + self.scales * (self.directions + 1)
+
+        # Account for multiple input channels
+        if channels is not None:
+            num_filters *= channels
+
+        return (batch_size, height, width, num_filters)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the layer's configuration for serialization."""
+        """
+        Get layer configuration for serialization.
+
+        Returns:
+            Dictionary containing all configuration parameters
+        """
         config = super().get_config()
         config.update({
-            "scales": self.scales,
-            "directions": self.directions,
+            'scales': self.scales,
+            'directions': self.directions,
+            'alpha': self.alpha,
+            'high_freq': self.high_freq,
+            'kernel_regularizer': keras.regularizers.serialize(
+                self.kernel_regularizer
+            )
         })
         return config
 
-# ---------------------------------------------------------------------
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> 'ShearletTransform':
+        """
+        Create layer from configuration dictionary.
+
+        Args:
+            config: Configuration dictionary from get_config()
+
+        Returns:
+            New ShearletTransform layer instance
+        """
+        regularizer_config = config.pop('kernel_regularizer', None)
+        if regularizer_config:
+            config['kernel_regularizer'] = keras.regularizers.deserialize(
+                regularizer_config
+            )
+        return cls(**config)

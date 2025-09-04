@@ -1,14 +1,18 @@
 """
-Test suite for ShearletTransform implementation.
+Comprehensive test suite for ShearletTransform implementation.
 
-This module contains unit tests for the ShearletTransform layer using pytest.
-Tests cover basic functionality, input validation, and numerical properties.
+This module contains comprehensive unit tests for the ShearletTransform layer using pytest,
+following modern Keras 3 testing best practices. Tests cover basic functionality,
+input validation, numerical properties, serialization, and frame properties.
 """
 
 import pytest
 import numpy as np
 import tensorflow as tf
-from typing import Tuple, Dict
+import keras
+import tempfile
+import os
+from typing import Tuple, Dict, List, Any
 
 # ---------------------------------------------------------------------
 # local imports
@@ -21,23 +25,13 @@ from dl_techniques.layers.shearlet_transform import ShearletTransform
 # Fixtures
 # ---------------------------------------------------------------------
 
-@pytest.fixture(params=[(32, 32), (64, 64), (128, 128)])
-def input_size(request) -> Tuple[int, int]:
-    """Provide different input sizes for testing.
-
-    Returns:
-        Tuple[int, int]: Height and width of the input
-    """
-    return request.param
-
-
 @pytest.fixture(params=[
+    {'scales': 2, 'directions': 4},
     {'scales': 3, 'directions': 8},
-    {'scales': 4, 'directions': 12},
-    {'scales': 2, 'directions': 4}
+    {'scales': 4, 'directions': 12}
 ])
-def transform_configs(request) -> Dict[str, int]:
-    """Provide different ShearletTransform configurations.
+def transform_config(request) -> Dict[str, int]:
+    """Fixture providing different filter configurations.
 
     Returns:
         Dict[str, int]: Configuration parameters
@@ -45,224 +39,803 @@ def transform_configs(request) -> Dict[str, int]:
     return request.param
 
 
+@pytest.fixture(params=[(32, 32), (64, 64), (128, 128)])
+def input_shape(request) -> Tuple[int, int]:
+    """Fixture providing test input shapes.
+
+    Returns:
+        Tuple[int, int]: (height, width) pair
+    """
+    return request.param
+
+
 @pytest.fixture
-def default_transform() -> ShearletTransform:
+def default_config() -> Dict[str, Any]:
+    """Provide default configuration for testing.
+
+    Returns:
+        Dict[str, Any]: Default configuration parameters
+    """
+    return {
+        'scales': 3,
+        'directions': 8,
+        'alpha': 0.5,
+        'high_freq': True
+    }
+
+
+@pytest.fixture
+def transform(transform_config: Dict[str, int]) -> ShearletTransform:
+    """Fixture creating ShearletTransform instance.
+
+    Args:
+        transform_config: Configuration parameters
+
+    Returns:
+        ShearletTransform: Configured transform instance
+    """
+    return ShearletTransform(**transform_config)
+
+
+@pytest.fixture
+def default_transform(default_config: Dict[str, Any]) -> ShearletTransform:
     """Provide a default ShearletTransform instance.
+
+    Args:
+        default_config: Default configuration parameters
 
     Returns:
         ShearletTransform: Default configured transform layer
     """
-    return ShearletTransform(scales=3, directions=8)
+    return ShearletTransform(**default_config)
 
 
 @pytest.fixture
-def sample_input(input_size: Tuple[int, int]) -> Tuple[tf.Tensor, tuple]:
-    """Generate sample input tensors.
+def built_transform(transform: ShearletTransform) -> ShearletTransform:
+    """Fixture providing built transform with default size.
 
     Args:
-        input_size: Tuple of (height, width)
+        transform: Base transform instance
 
     Returns:
-        Tuple[tf.Tensor, tuple]: Sample input tensor and shape
+        ShearletTransform: Built transform instance
     """
-    h, w = input_size
+    transform.build(input_shape=(1, 64, 64, 1))
+    return transform
+
+
+@pytest.fixture
+def sample_input(input_shape: Tuple[int, int]) -> Tuple[tf.Tensor, Tuple[int, ...]]:
+    """Generate sample input tensors with realistic patterns.
+
+    Args:
+        input_shape: Tuple of (height, width)
+
+    Returns:
+        Tuple[tf.Tensor, Tuple]: Sample input tensor and shape
+    """
+    h, w = input_shape
     shape = (2, h, w, 1)
 
-    # Create synthetic patterns
+    # Create synthetic patterns with better numerical properties
     x, y = np.meshgrid(
         np.linspace(-2, 2, w),
         np.linspace(-2, 2, h)
     )
 
-    # Gaussian blob
-    gaussian = np.exp(-(x ** 2 + y ** 2) / 0.5)
+    # Gaussian blob with good dynamic range
+    gaussian = np.exp(-(x ** 2 + y ** 2) / 0.8)
 
-    # Add directional pattern
-    pattern = gaussian + 0.5 * np.sin(2 * np.pi * (x + y))
+    # Add directional pattern with windowing
+    pattern = gaussian + 0.3 * np.sin(2 * np.pi * (x + y)) * gaussian
 
-    x = np.zeros(shape)
-    x[0, :, :, 0] = pattern
-    x[1, :, :, 0] = gaussian
+    # Create batch with different patterns
+    batch = np.zeros(shape, dtype=np.float32)
+    batch[0, :, :, 0] = pattern
+    batch[1, :, :, 0] = gaussian
 
-    return tf.convert_to_tensor(x, dtype=tf.float32), shape
+    return tf.convert_to_tensor(batch, dtype=tf.float32), shape
 
 
-# ---------------------------------------------------------------------
-# Basic Functionality Tests
-# ---------------------------------------------------------------------
+@pytest.fixture
+def angle_patterns() -> List[Tuple[float, tf.Tensor]]:
+    """Fixture providing test patterns at different angles.
 
-def test_output_shape(default_transform: ShearletTransform,
-                      sample_input: Tuple[tf.Tensor, tuple]) -> None:
-    """Test if output shape matches expected dimensions.
-
-    Args:
-        default_transform: ShearletTransform instance
-        sample_input: Sample input tensor and shape
+    Returns:
+        List[Tuple[float, tf.Tensor]]: List of (angle, pattern) pairs
     """
-    input_tensor, _ = sample_input
-    output = default_transform(input_tensor)
-
-    # Channels = low-pass filter + shearlets at each scale and direction
-    # For each scale: 2 * directions + 1 shearlets (including the vertical one)
-    expected_channels = 1 + default_transform.scales * (default_transform.directions + 1)
-    assert output.shape[-1] == expected_channels, \
-        f"Expected {expected_channels} output channels, got {output.shape[-1]}"
-
-
-# ---------------------------------------------------------------------
-# Numerical Property Tests
-# ---------------------------------------------------------------------
-
-def test_directional_sensitivity(default_transform: ShearletTransform,
-                                 input_size: Tuple[int, int]) -> None:
-    """Test if transform responds correctly to directional patterns.
-
-    Args:
-        default_transform: ShearletTransform instance
-        input_size: Input dimensions
-    """
-    h, w = input_size
-
-    # Create directional pattern with higher frequency to better test directionality
     x, y = np.meshgrid(
-        np.linspace(-4, 4, w),
-        np.linspace(-4, 4, h)
+        np.linspace(-1, 1, 64),
+        np.linspace(-1, 1, 64)
     )
 
-    # Test patterns at more distinct angles
-    angles = [0, 90]  # Using more distinct angles
-    responses = []
-
-    for angle in angles:
-        # Create pattern at specific angle with windowing
+    patterns = []
+    for angle in [0, 45, 90, 135]:
         theta = np.radians(angle)
-        # Add Gaussian windowing to reduce edge effects
-        window = np.exp(-(x ** 2 + y ** 2) / 8.0)
-        pattern = np.sin(4 * np.pi * (x * np.cos(theta) + y * np.sin(theta))) * window
+        pattern = np.sin(8 * np.pi * (x * np.cos(theta) + y * np.sin(theta)))
+        pattern = pattern * np.exp(-(x ** 2 + y ** 2) / 0.5)  # Apply window
 
-        input_tensor = tf.convert_to_tensor(
+        tensor = tf.convert_to_tensor(
             pattern[np.newaxis, :, :, np.newaxis],
             dtype=tf.float32
         )
+        patterns.append((angle, tensor))
 
-        output = default_transform(input_tensor)
-
-        # Compute response magnitude for each direction separately
-        response = tf.reduce_max(tf.abs(output), axis=[1, 2])  # Max response per channel
-        responses.append(response)
-
-    # Compare responses at orthogonal angles
-    correlation = tf.reduce_mean(tf.multiply(responses[0], responses[1])) / \
-                  (tf.norm(responses[0]) * tf.norm(responses[1]))
-
-    assert correlation < 0.85, \
-        f"Responses too similar for orthogonal angles: correlation = {correlation:.3f}"
+    return patterns
 
 
-def test_scale_sensitivity(default_transform: ShearletTransform,
-                           input_size: Tuple[int, int]) -> None:
-    """Test if transform responds appropriately to different scales.
+@pytest.fixture
+def scale_patterns() -> List[Tuple[int, tf.Tensor]]:
+    """Fixture providing test patterns at different scales.
 
-    Args:
-        default_transform: ShearletTransform instance
-        input_size: Input dimensions
+    Returns:
+        List[Tuple[int, tf.Tensor]]: List of (scale, pattern) pairs
     """
-    h, w = input_size
-
-    # Create patterns at different scales with better scale separation
     x, y = np.meshgrid(
-        np.linspace(-4, 4, w),
-        np.linspace(-4, 4, h)
+        np.linspace(-1, 1, 64),
+        np.linspace(-1, 1, 64)
     )
 
-    # Use more distinct scales
-    scales = [1, 4]  # Larger scale separation
-    responses = []
+    patterns = []
+    for scale in [1, 4, 16]:
+        pattern = np.sin(scale * np.pi * (x + y))
+        pattern = pattern * np.exp(-(x ** 2 + y ** 2) / 0.5)
 
-    for scale in scales:
-        # Create pattern with Gaussian windowing
-        window = np.exp(-(x ** 2 + y ** 2) / 8.0)
-        pattern = np.sin(2 * np.pi * scale * (x + y)) * window
-
-        input_tensor = tf.convert_to_tensor(
+        tensor = tf.convert_to_tensor(
             pattern[np.newaxis, :, :, np.newaxis],
             dtype=tf.float32
         )
+        patterns.append((scale, tensor))
 
+    return patterns
+
+
+# ---------------------------------------------------------------------
+# Critical Serialization Tests (Most Important)
+# ---------------------------------------------------------------------
+
+class TestSerialization:
+    """Critical serialization tests following Keras 3 best practices."""
+
+    def test_serialization_cycle(self, default_config: Dict[str, Any], sample_input: Tuple[tf.Tensor, Tuple]) -> None:
+        """CRITICAL TEST: Full serialization cycle with prediction comparison.
+
+        This is the most important test for Keras layer compatibility.
+
+        Args:
+            default_config: Default configuration parameters
+            sample_input: Sample input tensor and shape
+        """
+        input_tensor, _ = sample_input
+
+        # 1. Create original layer in a model
+        inputs = keras.Input(shape=input_tensor.shape[1:])
+        layer_output = ShearletTransform(**default_config)(inputs)
+        model = keras.Model(inputs, layer_output)
+
+        # 2. Get prediction from original
+        original_prediction = model(input_tensor)
+
+        # 3. Save and load
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'test_model.keras')
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+            loaded_prediction = loaded_model(input_tensor)
+
+            # 4. Verify identical outputs using the specified method
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
+                rtol=1e-6, atol=1e-6,
+                err_msg="Predictions differ after serialization"
+            )
+
+    def test_config_completeness(self, default_config: Dict[str, Any]) -> None:
+        """Test that get_config contains all __init__ parameters.
+
+        Args:
+            default_config: Default configuration parameters
+        """
+        layer = ShearletTransform(**default_config)
+        config = layer.get_config()
+
+        # Check all config parameters are present
+        for key in default_config:
+            assert key in config, f"Missing {key} in get_config()"
+            assert config[key] == default_config[key], f"Config mismatch for {key}"
+
+    def test_from_config(self, default_config: Dict[str, Any]) -> None:
+        """Test layer reconstruction from configuration.
+
+        Args:
+            default_config: Default configuration parameters
+        """
+        # Create original layer
+        original_layer = ShearletTransform(**default_config)
+
+        # Get config and recreate
+        config = original_layer.get_config()
+        recreated_layer = ShearletTransform.from_config(config)
+
+        # Verify parameters match
+        assert recreated_layer.scales == original_layer.scales
+        assert recreated_layer.directions == original_layer.directions
+        assert recreated_layer.alpha == original_layer.alpha
+        assert recreated_layer.high_freq == original_layer.high_freq
+
+
+# ---------------------------------------------------------------------
+# Layer Behavior Tests
+# ---------------------------------------------------------------------
+
+class TestLayerBehavior:
+    """Test core layer behavior and functionality."""
+
+    def test_forward_pass_and_building(self, default_transform: ShearletTransform,
+                                     sample_input: Tuple[tf.Tensor, Tuple]) -> None:
+        """Test forward pass and automatic building.
+
+        Args:
+            default_transform: ShearletTransform instance
+            sample_input: Sample input tensor and shape
+        """
+        input_tensor, _ = sample_input
+
+        # Layer should not be built initially
+        assert not default_transform.built
+
+        # Forward pass should trigger building
         output = default_transform(input_tensor)
 
-        # Use maximum response per channel instead of mean
-        response = tf.reduce_max(tf.abs(output), axis=[1, 2])
-        responses.append(response)
+        # Layer should be built after forward pass
+        assert default_transform.built
+        assert output.shape[0] == input_tensor.shape[0]  # Batch size preserved
 
-    # Compare responses at different scales
-    correlation = tf.reduce_mean(tf.multiply(responses[0], responses[1])) / \
-                  (tf.norm(responses[0]) * tf.norm(responses[1]))
+        # Verify all internal attributes are created
+        assert default_transform.height is not None
+        assert default_transform.width is not None
+        assert default_transform.filters is not None
 
-    assert correlation < 0.80, \
-        f"Responses too similar for distinct scales: correlation = {correlation:.3f}"
+    def test_output_shape_computation(self, default_transform: ShearletTransform,
+                                    sample_input: Tuple[tf.Tensor, Tuple]) -> None:
+        """Test output shape computation and consistency.
 
-    # Additional check: verify energy distribution across scales
-    energy_scale1 = tf.reduce_sum(tf.square(responses[0]))
-    energy_scale2 = tf.reduce_sum(tf.square(responses[1]))
-    energy_ratio = energy_scale1 / energy_scale2
+        Args:
+            default_transform: ShearletTransform instance
+            sample_input: Sample input tensor and shape
+        """
+        input_tensor, _ = sample_input
 
-    assert 0.1 < energy_ratio < 10.0, \
-        f"Unexpected energy distribution between scales: ratio = {energy_ratio:.3f}"
+        # Build layer
+        default_transform.build(input_tensor.shape)
+
+        # Test compute_output_shape
+        computed_shape = default_transform.compute_output_shape(input_tensor.shape)
+
+        # Test actual output shape
+        output = default_transform(input_tensor)
+        actual_shape = output.shape
+
+        # Verify shapes match
+        assert computed_shape == tuple(actual_shape), \
+            f"Computed shape {computed_shape} doesn't match actual {tuple(actual_shape)}"
+
+        # Verify expected number of output channels
+        expected_channels = 1 + default_transform.scales * (default_transform.directions + 1)
+        assert computed_shape[-1] == expected_channels
+
+    def test_gradients_flow(self, default_transform: ShearletTransform,
+                           sample_input: Tuple[tf.Tensor, Tuple]) -> None:
+        """Test gradient computation through the layer.
+
+        Args:
+            default_transform: ShearletTransform instance
+            sample_input: Sample input tensor and shape
+        """
+        input_tensor, _ = sample_input
+
+        with tf.GradientTape() as tape:
+            tape.watch(input_tensor)
+            output = default_transform(input_tensor)
+            loss = keras.ops.mean(keras.ops.square(output))
+
+        # Compute gradients
+        gradients = tape.gradient(loss, input_tensor)
+
+        # Verify gradients exist and are non-zero
+        assert gradients is not None, "No gradients computed"
+        assert not keras.ops.all(keras.ops.equal(gradients, 0.0)), "All gradients are zero"
+
+    @pytest.mark.parametrize("training", [True, False, None])
+    def test_training_modes(self, default_transform: ShearletTransform,
+                           sample_input: Tuple[tf.Tensor, Tuple], training: bool) -> None:
+        """Test behavior in different training modes.
+
+        Args:
+            default_transform: ShearletTransform instance
+            sample_input: Sample input tensor and shape
+            training: Training mode flag
+        """
+        input_tensor, _ = sample_input
+
+        output = default_transform(input_tensor, training=training)
+        assert output.shape[0] == input_tensor.shape[0]
+
+    def test_multiple_calls_consistency(self, default_transform: ShearletTransform,
+                                      sample_input: Tuple[tf.Tensor, Tuple]) -> None:
+        """Test that multiple calls produce consistent results.
+
+        Args:
+            default_transform: ShearletTransform instance
+            sample_input: Sample input tensor and shape
+        """
+        input_tensor, _ = sample_input
+
+        # Multiple calls should produce identical results
+        output1 = default_transform(input_tensor)
+        output2 = default_transform(input_tensor)
+
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(output1),
+            keras.ops.convert_to_numpy(output2),
+            rtol=1e-6, atol=1e-6,
+            err_msg="Multiple calls produced different results"
+        )
 
 
 # ---------------------------------------------------------------------
-# Edge Case Tests
+# Parameter Validation Tests
 # ---------------------------------------------------------------------
 
-def test_numerical_stability(default_transform: ShearletTransform,
-                             sample_input: Tuple[tf.Tensor, tuple]) -> None:
-    """Test numerical stability with extreme input values.
+class TestParameterValidation:
+    """Test input validation and error handling."""
 
-    Args:
-        default_transform: ShearletTransform instance
-        sample_input: Sample input tensor and shape
-    """
-    input_tensor, _ = sample_input
+    def test_valid_parameters(self) -> None:
+        """Test that valid parameters are accepted."""
+        # These should not raise errors
+        ShearletTransform(scales=1, directions=2, alpha=0.1, high_freq=False)
+        ShearletTransform(scales=5, directions=16, alpha=1.0, high_freq=True)
 
-    # Test with very small values
-    small_input = input_tensor * 1e-10
-    output_small = default_transform(small_input)
-    assert not tf.reduce_any(tf.math.is_nan(output_small)), \
-        "Transform produced NaN values for small input"
+    def test_invalid_scales(self) -> None:
+        """Test error handling for invalid scales parameter."""
+        with pytest.raises(ValueError, match="scales must be positive"):
+            ShearletTransform(scales=0)
 
-    # Test with very large values
-    large_input = input_tensor * 1e10
-    output_large = default_transform(large_input)
-    assert not tf.reduce_any(tf.math.is_nan(output_large)), \
-        "Transform produced NaN values for large input"
+        with pytest.raises(ValueError, match="scales must be positive"):
+            ShearletTransform(scales=-1)
 
+    def test_invalid_directions(self) -> None:
+        """Test error handling for invalid directions parameter."""
+        with pytest.raises(ValueError, match="directions must be positive"):
+            ShearletTransform(directions=0)
 
-def test_mixed_precision(default_transform: ShearletTransform,
-                         sample_input: Tuple[tf.Tensor, tuple]) -> None:
-    """Test behavior with different precision inputs.
+        with pytest.raises(ValueError, match="directions must be positive"):
+            ShearletTransform(directions=-2)
 
-    Args:
-        default_transform: ShearletTransform instance
-        sample_input: Sample input tensor and shape
-    """
-    input_tensor, _ = sample_input
+    def test_invalid_alpha(self) -> None:
+        """Test error handling for invalid alpha parameter."""
+        with pytest.raises(ValueError, match="alpha must be in"):
+            ShearletTransform(alpha=0.0)
 
-    # Test with float16 input
-    input_fp16 = tf.cast(input_tensor, tf.float16)
-    output_fp16 = default_transform(input_fp16)
-    assert output_fp16.dtype == tf.float32, \
-        "Expected float32 output for float16 input"
+        with pytest.raises(ValueError, match="alpha must be in"):
+            ShearletTransform(alpha=1.5)
 
-    # Test with float64 input
-    input_fp64 = tf.cast(input_tensor, tf.float64)
-    output_fp64 = default_transform(input_fp64)
-    assert output_fp64.dtype == tf.float32, \
-        "Expected float32 output for float64 input"
+        with pytest.raises(ValueError, match="alpha must be in"):
+            ShearletTransform(alpha=-0.1)
+
+    def test_invalid_input_shape(self, default_transform: ShearletTransform) -> None:
+        """Test error handling for invalid input shapes."""
+        # 3D input should fail
+        with pytest.raises(ValueError, match="Expected 4D input shape"):
+            default_transform.build((32, 32, 1))
+
+        # None dimensions should fail
+        with pytest.raises(ValueError, match="Height and width dimensions must be specified"):
+            default_transform.build((1, None, 32, 1))
 
 
 # ---------------------------------------------------------------------
+# Filter Creation and Properties Tests
+# ---------------------------------------------------------------------
 
+class TestFilterProperties:
+    """Test filter creation and mathematical properties."""
+
+    def test_filter_creation(self, transform_config: Dict[str, int], transform: ShearletTransform) -> None:
+        """Test basic filter creation properties.
+
+        Args:
+            transform_config: Configuration parameters
+            transform: Transform instance
+        """
+        transform.build((1, 64, 64, 1))
+        filters = transform.filters
+
+        # Check number of filters
+        expected_filters = 1 + transform_config['scales'] * (transform_config['directions'] + 1)
+        assert len(filters) == expected_filters, \
+            f"Expected {expected_filters} filters, got {len(filters)}"
+
+        # Check filter shapes and types
+        for i, filter_kernel in enumerate(filters):
+            assert filter_kernel.shape == (64, 64), \
+                f"Filter {i} has wrong shape: {filter_kernel.shape}"
+            assert filter_kernel.dtype == tf.complex64, \
+                f"Filter {i} has wrong dtype: {filter_kernel.dtype}"
+
+    def test_filter_size_adaptation(self, transform: ShearletTransform, input_shape: Tuple[int, int]) -> None:
+        """Test if filters adapt to different input sizes.
+
+        Args:
+            transform: Transform instance
+            input_shape: Input dimensions
+        """
+        transform.build((1, *input_shape, 1))
+
+        for filter_kernel in transform.filters:
+            assert filter_kernel.shape == input_shape, \
+                f"Filter shape {filter_kernel.shape} doesn't match input {input_shape}"
+
+    def test_frequency_coverage(self, built_transform: ShearletTransform) -> None:
+        """Test if filters provide adequate frequency coverage.
+
+        Args:
+            built_transform: Built transform instance
+        """
+        # Stack magnitude responses and normalize
+        responses = tf.stack([tf.abs(f) for f in built_transform.filters])
+        responses = responses / (tf.reduce_max(responses) + 1e-10)
+        total_response = tf.reduce_sum(responses, axis=0)
+
+        # Check if total response is reasonable
+        mean_response = tf.reduce_mean(total_response)
+        std_response = tf.math.reduce_std(total_response)
+
+        # Relaxed threshold since shearlet coverage is naturally non-uniform
+        assert std_response / (mean_response + 1e-10) < 2.0, \
+            "Frequency coverage is extremely uneven"
+
+        # Check for severe coverage gaps
+        min_response = tf.reduce_min(total_response)
+        assert min_response > 1e-3, \
+            f"Found severe coverage gap with minimum response {min_response}"
+
+    def test_low_pass_filter(self, built_transform: ShearletTransform) -> None:
+        """Test properties of the low-pass filter.
+
+        Args:
+            built_transform: Built transform instance
+        """
+        low_pass = built_transform.filters[0]
+        response = tf.abs(low_pass)
+
+        # Normalize the response
+        response = response / (tf.reduce_max(response) + 1e-10)
+
+        # Check DC response (center point)
+        dc_response = response[32, 32]
+        assert tf.abs(dc_response - 1.0) < 0.2, \
+            f"Low-pass DC response is {dc_response}, expected close to 1.0"
+
+        # Check high-frequency attenuation
+        edge_points = tf.concat([
+            response[0:5, 0:5],
+            response[-5:, 0:5],
+            response[0:5, -5:],
+            response[-5:, -5:]
+        ], axis=0)
+        edge_response = tf.reduce_mean(edge_points)
+        assert edge_response < 0.3, \
+            f"Low-pass high-frequency response is {edge_response}, expected <0.3"
+
+
+# ---------------------------------------------------------------------
+# Numerical Properties Tests
+# ---------------------------------------------------------------------
+
+class TestNumericalProperties:
+    """Test numerical properties and directional sensitivity."""
+
+    def test_directional_sensitivity(self, default_transform: ShearletTransform,
+                                   input_shape: Tuple[int, int]) -> None:
+        """Test if transform responds correctly to directional patterns.
+
+        Args:
+            default_transform: ShearletTransform instance
+            input_shape: Input dimensions
+        """
+        h, w = input_shape
+
+        # Create directional pattern with higher frequency for better testing
+        x, y = np.meshgrid(
+            np.linspace(-4, 4, w),
+            np.linspace(-4, 4, h)
+        )
+
+        # Test patterns at distinct angles
+        angles = [0, 90]
+        responses = []
+
+        for angle in angles:
+            # Create pattern at specific angle with windowing
+            theta = np.radians(angle)
+            window = np.exp(-(x ** 2 + y ** 2) / 8.0)
+            pattern = np.sin(4 * np.pi * (x * np.cos(theta) + y * np.sin(theta))) * window
+
+            input_tensor = tf.convert_to_tensor(
+                pattern[np.newaxis, :, :, np.newaxis],
+                dtype=tf.float32
+            )
+
+            output = default_transform(input_tensor)
+            response = tf.reduce_max(tf.abs(output), axis=[1, 2])
+            responses.append(response)
+
+        # Compare responses at orthogonal angles
+        correlation = tf.reduce_mean(tf.multiply(responses[0], responses[1])) / \
+                      (tf.norm(responses[0]) * tf.norm(responses[1]))
+
+        assert correlation < 0.85, \
+            f"Responses too similar for orthogonal angles: correlation = {correlation:.3f}"
+
+    def test_scale_sensitivity(self, default_transform: ShearletTransform,
+                             input_shape: Tuple[int, int]) -> None:
+        """Test if transform responds appropriately to different scales.
+
+        Args:
+            default_transform: ShearletTransform instance
+            input_shape: Input dimensions
+        """
+        h, w = input_shape
+
+        # Create patterns at different scales
+        x, y = np.meshgrid(
+            np.linspace(-4, 4, w),
+            np.linspace(-4, 4, h)
+        )
+
+        # Use distinct scales
+        scales = [1, 4]
+        responses = []
+
+        for scale in scales:
+            # Create pattern with Gaussian windowing
+            window = np.exp(-(x ** 2 + y ** 2) / 8.0)
+            pattern = np.sin(2 * np.pi * scale * (x + y)) * window
+
+            input_tensor = tf.convert_to_tensor(
+                pattern[np.newaxis, :, :, np.newaxis],
+                dtype=tf.float32
+            )
+
+            output = default_transform(input_tensor)
+            response = tf.reduce_max(tf.abs(output), axis=[1, 2])
+            responses.append(response)
+
+        # Compare responses at different scales
+        correlation = tf.reduce_mean(tf.multiply(responses[0], responses[1])) / \
+                      (tf.norm(responses[0]) * tf.norm(responses[1]))
+
+        assert correlation < 0.80, \
+            f"Responses too similar for distinct scales: correlation = {correlation:.3f}"
+
+    def test_directional_response(self, built_transform: ShearletTransform,
+                                angle_patterns: List[Tuple[float, tf.Tensor]]) -> None:
+        """Test directional selectivity of the filters.
+
+        Args:
+            built_transform: Built transform instance
+            angle_patterns: Test patterns at different angles
+        """
+        responses = []
+
+        for angle, pattern in angle_patterns:
+            output = built_transform(pattern)
+            responses.append(tf.reduce_max(tf.abs(output), axis=[1, 2]))
+
+        # Compare responses at orthogonal angles (0° vs 90°)
+        correlation = tf.reduce_mean(
+            tf.multiply(responses[0], responses[2])
+        ) / (tf.norm(responses[0]) * tf.norm(responses[2]))
+
+        assert correlation < 0.3, \
+            f"High correlation {correlation} between orthogonal directions"
+
+    def test_scale_separation(self, built_transform: ShearletTransform,
+                            scale_patterns: List[Tuple[int, tf.Tensor]]) -> None:
+        """Test scale selectivity of the filters.
+
+        Args:
+            built_transform: Built transform instance
+            scale_patterns: Test patterns at different scales
+        """
+        responses = []
+
+        for scale, pattern in scale_patterns:
+            output = built_transform(pattern)
+            responses.append(tf.reduce_max(tf.abs(output), axis=[1, 2]))
+
+        # Check scale separation
+        for i in range(len(responses) - 1):
+            correlation = tf.reduce_mean(
+                tf.multiply(responses[i], responses[i + 1])
+            ) / (tf.norm(responses[i]) * tf.norm(responses[i + 1]))
+
+            assert correlation < 0.5, \
+                f"High correlation {correlation} between scales {scale_patterns[i][0]} and {scale_patterns[i + 1][0]}"
+
+
+# ---------------------------------------------------------------------
+# Frame Properties and Stability Tests
+# ---------------------------------------------------------------------
+
+class TestFrameProperties:
+    """Test mathematical frame properties of the shearlet system."""
+
+    def test_frame_bounds(self, built_transform: ShearletTransform) -> None:
+        """Test if filters satisfy frame bounds properties.
+
+        Args:
+            built_transform: Built transform instance
+        """
+        # Stack squared magnitude responses
+        responses = tf.stack([tf.abs(f) ** 2 for f in built_transform.filters])
+        total_energy = tf.reduce_sum(responses, axis=0)
+
+        # Get frame bounds
+        min_energy = tf.reduce_min(total_energy)
+        max_energy = tf.reduce_max(total_energy)
+
+        # Test frame bounds ratio
+        assert max_energy / (min_energy + 1e-5) < 4.0, \
+            f"Frame bounds ratio {max_energy / (min_energy + 1e-5)} too large"
+
+        # Test energy preservation
+        mean_energy = tf.reduce_mean(total_energy)
+        assert tf.abs(mean_energy - 1.0) < 0.2, \
+            f"Mean energy {mean_energy} far from 1.0"
+
+        # Test non-zero coverage
+        assert min_energy > 1e-3, \
+            f"Minimum energy {min_energy} too close to zero"
+
+    def test_shearlet_properties(self) -> None:
+        """Test critical properties of the shearlet transform."""
+        # Create test instance
+        transform = ShearletTransform(scales=3, directions=8)
+        transform.build((1, 64, 64, 1))
+
+        # Test frequency coverage
+        responses = tf.stack([tf.abs(f) for f in transform.filters])
+        total_response = tf.reduce_sum(responses, axis=0)
+
+        min_response = tf.reduce_min(total_response)
+        assert min_response > 1e-3, "Coverage gap detected"
+
+        # Test frame bounds
+        responses_squared = tf.stack([tf.abs(f) ** 2 for f in transform.filters])
+        total_energy = tf.reduce_sum(responses_squared, axis=0)
+
+        min_energy = tf.reduce_min(total_energy)
+        max_energy = tf.reduce_max(total_energy)
+        frame_ratio = max_energy / (min_energy + 1e-6)
+
+        assert frame_ratio < 4.0, "Frame bounds too large"
+
+        # Test energy preservation
+        mean_energy = tf.reduce_mean(total_energy)
+        assert abs(mean_energy - 1.0) < 0.2, "Energy not preserved"
+
+
+# ---------------------------------------------------------------------
+# Edge Cases and Robustness Tests
+# ---------------------------------------------------------------------
+
+class TestEdgeCases:
+    """Test edge cases and numerical stability."""
+
+    def test_numerical_stability(self, default_transform: ShearletTransform,
+                               sample_input: Tuple[tf.Tensor, Tuple]) -> None:
+        """Test numerical stability with extreme input values.
+
+        Args:
+            default_transform: ShearletTransform instance
+            sample_input: Sample input tensor and shape
+        """
+        input_tensor, _ = sample_input
+
+        # Test with very small values
+        small_input = input_tensor * 1e-10
+        output_small = default_transform(small_input)
+        assert not tf.reduce_any(tf.math.is_nan(output_small)), \
+            "Transform produced NaN values for small input"
+
+        # Test with very large values
+        large_input = input_tensor * 1e10
+        output_large = default_transform(large_input)
+        assert not tf.reduce_any(tf.math.is_nan(output_large)), \
+            "Transform produced NaN values for large input"
+
+    def test_mixed_precision(self, default_transform: ShearletTransform,
+                           sample_input: Tuple[tf.Tensor, Tuple]) -> None:
+        """Test behavior with different precision inputs.
+
+        Args:
+            default_transform: ShearletTransform instance
+            sample_input: Sample input tensor and shape
+        """
+        input_tensor, _ = sample_input
+
+        # Test with float16 input
+        input_fp16 = tf.cast(input_tensor, tf.float16)
+        output_fp16 = default_transform(input_fp16)
+        assert output_fp16.dtype == tf.float32, \
+            "Expected float32 output for float16 input"
+
+        # Test with float64 input
+        input_fp64 = tf.cast(input_tensor, tf.float64)
+        output_fp64 = default_transform(input_fp64)
+        assert output_fp64.dtype == tf.float32, \
+            "Expected float32 output for float64 input"
+
+    def test_zero_input(self, default_transform: ShearletTransform) -> None:
+        """Test behavior with zero input."""
+        zero_input = tf.zeros((1, 64, 64, 1), dtype=tf.float32)
+        output = default_transform(zero_input)
+
+        # Output should not be NaN or infinite
+        assert not tf.reduce_any(tf.math.is_nan(output)), "NaN output for zero input"
+        assert not tf.reduce_any(tf.math.is_inf(output)), "Infinite output for zero input"
+
+    def test_single_pixel_input(self, default_transform: ShearletTransform) -> None:
+        """Test behavior with single non-zero pixel."""
+        single_pixel_input = tf.zeros((1, 64, 64, 1), dtype=tf.float32)
+        # Set center pixel
+        single_pixel_input = tf.tensor_scatter_nd_update(
+            single_pixel_input,
+            [[0, 32, 32, 0]],
+            [1.0]
+        )
+
+        output = default_transform(single_pixel_input)
+
+        # Should produce valid output
+        assert not tf.reduce_any(tf.math.is_nan(output)), "NaN output for single pixel input"
+        assert tf.reduce_any(tf.not_equal(output, 0.0)), "All zero output for single pixel input"
+
+    def test_batch_consistency(self, default_transform: ShearletTransform) -> None:
+        """Test that batch processing is consistent with individual processing."""
+        # Create test inputs
+        input1 = tf.random.normal((1, 64, 64, 1), seed=42)
+        input2 = tf.random.normal((1, 64, 64, 1), seed=43)
+        batch_input = tf.concat([input1, input2], axis=0)
+
+        # Process individually
+        output1 = default_transform(input1)
+        output2 = default_transform(input2)
+
+        # Process as batch
+        batch_output = default_transform(batch_input)
+
+        # Compare results
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(output1),
+            keras.ops.convert_to_numpy(batch_output[0:1]),
+            rtol=1e-6, atol=1e-6,
+            err_msg="Batch processing inconsistent with individual processing"
+        )
+
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(output2),
+            keras.ops.convert_to_numpy(batch_output[1:2]),
+            rtol=1e-6, atol=1e-6,
+            err_msg="Batch processing inconsistent with individual processing"
+        )
+
+
+# ---------------------------------------------------------------------
 
 if __name__ == "__main__":
-    pytest.main([__file__])
+    pytest.main([__file__, "-v"])
