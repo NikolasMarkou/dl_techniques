@@ -25,10 +25,10 @@ from typing import Optional, Union, Any, Dict, Tuple, Literal, Callable
 # local imports
 # ---------------------------------------------------------------------
 
-from .norms.rms_norm import RMSNorm
-from .norms.band_rms import BandRMS
-from .norms.dynamic_tanh import DynamicTanh
 from .stochastic_depth import StochasticDepth
+
+# Normalization factory for unified normalization layer creation
+from .norms import create_normalization_layer
 
 # FFN Integration - Use the factory for creating FFN layers
 from .ffn.factory import create_ffn_from_config
@@ -38,7 +38,7 @@ from .attention.group_query_attention import GroupedQueryAttention
 from .attention.differential_attention import DifferentialMultiHeadAttention
 
 # MoE Integration
-from .moe import MixtureOfExperts, MoEConfig, ExpertConfig, GatingConfig
+from .moe import MixtureOfExperts, MoEConfig
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -46,7 +46,9 @@ from .moe import MixtureOfExperts, MoEConfig, ExpertConfig, GatingConfig
 
 NormalizationPosition = Literal['post', 'pre']
 FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp']
-NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'dynamic_tanh']
+NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'adaptive_band_rms',
+                           'band_logit_norm', 'global_response_norm', 'logit_norm', 'max_logit_norm',
+                           'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center', 'dynamic_tanh']
 AttentionType = Literal['multi_head_attention', 'window_attention', 'group_query_attention', 'differential_attention']
 
 # ---------------------------------------------------------------------
@@ -61,7 +63,7 @@ class TransformerLayer(keras.layers.Layer):
     - Configurable attention mechanisms
     - Configurable feed-forward network (including Mixture of Experts)
     - Residual connections
-    - Configurable normalization
+    - Configurable normalization with custom arguments support
     - Optional stochastic depth regularization
     - Enhanced parameter control through argument dictionaries
 
@@ -84,11 +86,26 @@ class TransformerLayer(keras.layers.Layer):
             - 'batch_norm': Batch normalization
             - 'rms_norm': Root Mean Square normalization
             - 'band_rms': Band-constrained RMS normalization
+            - 'adaptive_band_rms': Adaptive Band RMS with log-transformed scaling
+            - 'band_logit_norm': Band-constrained logit normalization
+            - 'global_response_norm': Global Response Normalization from ConvNeXt
+            - 'logit_norm': Temperature-scaled normalization for classification
+            - 'max_logit_norm': MaxLogit normalization for OOD detection
+            - 'decoupled_max_logit': Decoupled MaxLogit (DML) normalization
+            - 'dml_plus_focal': DML+ focal model variant
+            - 'dml_plus_center': DML+ center model variant
             - 'dynamic_tanh': Dynamic Tanh normalization (DyT) for normalization-free transformers
         normalization_position: NormalizationPosition, position of normalization layers.
             Available options:
             - 'post': Post-normalization (original Transformer, default)
             - 'pre': Pre-normalization (often more stable for deep networks)
+        attention_norm_args: Optional dictionary of custom arguments for attention normalization layer.
+            These parameters will be passed to the normalization layer factory.
+            Example: For 'dynamic_tanh': {'alpha_init_value': 0.7, 'axis': [-1]}
+                    For 'band_rms': {'max_band_width': 0.1, 'epsilon': 1e-7}
+        ffn_norm_args: Optional dictionary of custom arguments for FFN normalization layer.
+            These parameters will be passed to the normalization layer factory.
+            Example: For 'dynamic_tanh': {'alpha_init_value': 0.15, 'axis': [-1]}
         ffn_type: FFNType, type of feed-forward network to use.
             Ignored if `moe_config` is provided.
             Available options:
@@ -121,17 +138,11 @@ class TransformerLayer(keras.layers.Layer):
             Defaults to 'zeros'.
         kernel_regularizer: Optional regularizer for kernel weights.
         bias_regularizer: Optional regularizer for bias weights.
-        ffn_expansion_factor: Integer, expansion factor for SwiGLU FFN. Defaults to 4.
-        ffn_multiple_of: Integer, multiple constraint for SwiGLU FFN. Defaults to 256.
         window_size: Integer, window size for window attention. Defaults to 8.
         n_kv_head: Integer, number of key-value heads for grouped query attention.
             Defaults to None (uses num_heads).
         lambda_init: Float, initial lambda value for differential attention.
             Only used when attention_type='differential_attention'. Defaults to 0.8.
-        attention_norm_alpha: Float, initial alpha value for DynamicTanh in attention normalization.
-            Only used when normalization_type='dynamic_tanh'. Defaults to 0.7.
-        ffn_norm_alpha: Float, initial alpha value for DynamicTanh in FFN normalization.
-            Only used when normalization_type='dynamic_tanh'. Defaults to 0.15.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
@@ -142,7 +153,7 @@ class TransformerLayer(keras.layers.Layer):
 
     Example:
         ```python
-        # Standard transformer layer
+        # Standard transformer layer with default normalization
         inputs = keras.Input(shape=(128, 768))
         layer = TransformerLayer(
             hidden_size=768,
@@ -154,6 +165,26 @@ class TransformerLayer(keras.layers.Layer):
             stochastic_depth_rate=0.1
         )
         outputs = layer(inputs)
+
+        # Using custom normalization arguments for DynamicTanh
+        layer_with_custom_norm = TransformerLayer(
+            hidden_size=768,
+            num_heads=12,
+            intermediate_size=3072,
+            normalization_type='dynamic_tanh',
+            attention_norm_args={'alpha_init_value': 0.7, 'axis': [-1]},
+            ffn_norm_args={'alpha_init_value': 0.15, 'axis': [-1]}
+        )
+
+        # Using Band RMS with custom constraints
+        layer_with_band_rms = TransformerLayer(
+            hidden_size=768,
+            num_heads=12,
+            intermediate_size=3072,
+            normalization_type='band_rms',
+            attention_norm_args={'max_band_width': 0.1, 'epsilon': 1e-7},
+            ffn_norm_args={'max_band_width': 0.05, 'epsilon': 1e-8}
+        )
 
         # Using a Mixture of Experts layer with SwiGLU experts
         from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
@@ -189,6 +220,8 @@ class TransformerLayer(keras.layers.Layer):
             attention_args: Optional[Dict[str, Any]] = None,
             normalization_type: NormalizationType = 'layer_norm',
             normalization_position: NormalizationPosition = 'post',
+            attention_norm_args: Optional[Dict[str, Any]] = None,
+            ffn_norm_args: Optional[Dict[str, Any]] = None,
             ffn_type: FFNType = 'mlp',
             ffn_args: Optional[Dict[str, Any]] = None,
             moe_config: Optional[Union[MoEConfig, Dict[str, Any]]] = None,
@@ -202,13 +235,9 @@ class TransformerLayer(keras.layers.Layer):
             bias_initializer: Union[str, initializers.Initializer] = 'zeros',
             kernel_regularizer: Optional[regularizers.Regularizer] = None,
             bias_regularizer: Optional[regularizers.Regularizer] = None,
-            ffn_expansion_factor: int = 4,
-            ffn_multiple_of: int = 256,
             window_size: int = 8,
             n_kv_head: Optional[int] = None,
             lambda_init: float = 0.8,
-            attention_norm_alpha: float = 0.7,
-            ffn_norm_alpha: float = 0.15,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -235,6 +264,8 @@ class TransformerLayer(keras.layers.Layer):
         self.attention_args = attention_args or {}
         self.normalization_type = normalization_type
         self.normalization_position = normalization_position
+        self.attention_norm_args = attention_norm_args or {}
+        self.ffn_norm_args = ffn_norm_args or {}
         self.ffn_type = ffn_type
         self.ffn_args = ffn_args or {}
         self.moe_config = moe_config
@@ -248,13 +279,9 @@ class TransformerLayer(keras.layers.Layer):
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = kernel_regularizer
         self.bias_regularizer = bias_regularizer
-        self.ffn_expansion_factor = ffn_expansion_factor
-        self.ffn_multiple_of = ffn_multiple_of
         self.window_size = window_size
         self.n_kv_head = n_kv_head if n_kv_head is not None else num_heads
         self.lambda_init = lambda_init
-        self.attention_norm_alpha = attention_norm_alpha
-        self.ffn_norm_alpha = ffn_norm_alpha
 
         # --- Handle MoE Configuration ---
         # Convert dict to MoEConfig if needed
@@ -323,28 +350,34 @@ class TransformerLayer(keras.layers.Layer):
 
     def _create_normalization_layer(self, name: str, layer_type: str = 'attention') -> keras.layers.Layer:
         """
-        Create a normalization layer based on the specified type.
+        Create a normalization layer based on the specified type using the normalization factory.
 
         Args:
             name: Name for the layer.
-            layer_type: Type of layer ('attention' or 'ffn') for DynamicTanh alpha selection.
+            layer_type: Type of layer ('attention' or 'ffn') for parameter selection.
 
         Returns:
             Normalization layer instance.
+
+        Raises:
+            ValueError: If normalization layer creation fails due to invalid parameters.
         """
-        if self.normalization_type == 'layer_norm':
-            return layers.LayerNormalization(epsilon=1e-12, name=name)
-        elif self.normalization_type == 'rms_norm':
-            return RMSNorm(name=name)
-        elif self.normalization_type == 'band_rms':
-            return BandRMS(max_band_width=0.1, name=name)
-        elif self.normalization_type == 'batch_norm':
-            return layers.BatchNormalization(epsilon=1e-12, name=name)
-        elif self.normalization_type == 'dynamic_tanh':
-            alpha_value = self.attention_norm_alpha if layer_type == 'attention' else self.ffn_norm_alpha
-            return DynamicTanh(alpha_init_value=alpha_value, name=name)
-        else:
-            raise ValueError(f"Unknown normalization type: {self.normalization_type}")
+        # Select the appropriate custom arguments based on layer type
+        custom_args = self.attention_norm_args if layer_type == 'attention' else self.ffn_norm_args
+
+        try:
+            # Use the factory to create the layer with custom arguments
+            return create_normalization_layer(
+                normalization_type=self.normalization_type,
+                name=name,
+                **custom_args
+            )
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"Failed to create {self.normalization_type} normalization layer for {layer_type}. "
+                f"Check parameter compatibility. Custom args: {list(custom_args.keys())}. "
+                f"Original error: {e}"
+            )
 
     def _get_attention_params(self, name: str) -> Dict[str, Any]:
         """
@@ -407,6 +440,9 @@ class TransformerLayer(keras.layers.Layer):
 
         Returns:
             Attention layer instance.
+
+        Raises:
+            ValueError: If attention layer creation fails due to invalid parameters.
         """
         params = self._get_attention_params(name)
         try:
@@ -447,8 +483,8 @@ class TransformerLayer(keras.layers.Layer):
         if self.ffn_type == 'swiglu':
             config.update({
                 'output_dim': self.hidden_size,
-                'ffn_expansion_factor': self.ffn_expansion_factor,
-                'ffn_multiple_of': self.ffn_multiple_of,
+                'ffn_expansion_factor': 4,
+                'ffn_multiple_of': 256,
             })
         elif self.ffn_type == 'differential':
             config.update({
@@ -476,6 +512,9 @@ class TransformerLayer(keras.layers.Layer):
 
         Returns:
             FFN or MoE layer instance.
+
+        Raises:
+            ValueError: If FFN layer creation fails due to invalid parameters.
         """
         # If MoE config is provided, create a MixtureOfExperts layer
         if self.moe_config is not None:
@@ -501,6 +540,9 @@ class TransformerLayer(keras.layers.Layer):
 
         Args:
             input_shape: Shape tuple of input tensor.
+
+        Raises:
+            ValueError: If input shape is invalid.
         """
         # Validate input shape
         if len(input_shape) != 3:
@@ -696,6 +738,8 @@ class TransformerLayer(keras.layers.Layer):
             'attention_args': self.attention_args,
             'normalization_type': self.normalization_type,
             'normalization_position': self.normalization_position,
+            'attention_norm_args': self.attention_norm_args,
+            'ffn_norm_args': self.ffn_norm_args,
             'ffn_type': self.ffn_type,
             'ffn_args': self.ffn_args,
             'moe_config': self.moe_config.to_dict() if self.moe_config else None,
@@ -709,12 +753,8 @@ class TransformerLayer(keras.layers.Layer):
             'bias_initializer': initializers.serialize(self.bias_initializer),
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
-            'ffn_expansion_factor': self.ffn_expansion_factor,
-            'ffn_multiple_of': self.ffn_multiple_of,
             'window_size': self.window_size,
             'n_kv_head': self.n_kv_head,
             'lambda_init': self.lambda_init,
-            'attention_norm_alpha': self.attention_norm_alpha,
-            'ffn_norm_alpha': self.ffn_norm_alpha,
         })
         return config
