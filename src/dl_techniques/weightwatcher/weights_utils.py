@@ -311,33 +311,32 @@ def create_weight_visualization(
 
         elif layer_type == LayerType.CONV2D:
             kh, kw, in_c, out_c = weights.shape
-
-            # For Conv2D, we'll create a grid of filters
             grid_size = int(np.ceil(np.sqrt(min(out_c, 16))))  # Limit to 16 filters for clarity
+            plt.suptitle(f"Filters for {layer.name} (Conv2D Layer) - Averaged over {in_c} Input Channels")
 
-            # Create a grid to display filters for the first input channel
             for i in range(min(out_c, grid_size * grid_size)):
-                plt.subplot(grid_size, grid_size, i + 1)
-                # Display the filter for the first input channel
-                plt.imshow(weights[:, :, 0, i], cmap=cmap)
-                plt.axis('off')
+                ax = plt.subplot(grid_size, grid_size, i + 1)
+                # Display the filter averaged over the input channels to get a
+                # comprehensive view of the filter's spatial pattern.
+                filter_visualization = np.mean(weights[:, :, :, i], axis=2)
+                ax.imshow(filter_visualization, cmap=cmap)
+                ax.axis('off')
+                ax.set_title(f"Filter {i}", fontsize=8)
 
-            plt.suptitle(f"Filters for {layer.name} (Conv2D Layer) - First Input Channel")
 
         elif layer_type == LayerType.CONV1D:
-            # For Conv1D, show filters as lines
-            kernel_size, input_dim, output_dim = weights.shape
-
-            # Show first few filters
-            num_filters_to_show = min(output_dim, 8)
+            kernel_size, in_c, out_c = weights.shape
+            num_filters_to_show = min(out_c, 8)
+            plt.suptitle(f"Filters for {layer.name} (Conv1D) - Averaged over {in_c} Input Channels")
+            
             for i in range(num_filters_to_show):
-                plt.subplot(2, 4, i + 1)
-                plt.plot(weights[:, 0, i])  # Plot first input channel
-                plt.title(f"Filter {i}")
-                plt.xlabel("Position")
-                plt.ylabel("Weight")
-
-            plt.suptitle(f"Filters for {layer.name} (Conv1D Layer)")
+                ax = plt.subplot(2, 4, i + 1)
+                # Plot the filter averaged across all input channels.
+                filter_visualization = np.mean(weights[:, :, i], axis=1)
+                ax.plot(filter_visualization)
+                ax.set_title(f"Filter {i}")
+                ax.set_xlabel("Position")
+                ax.set_ylabel("Weight")
 
         plt.tight_layout()
         return fig

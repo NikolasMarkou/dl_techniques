@@ -7,17 +7,52 @@ power-law analysis, and concentration metrics to assess training quality and mod
 
 import os
 import json
+import keras
 import tempfile
-from typing import Dict, List, Optional, Tuple, Any, Union
 import numpy as np
 import pandas as pd
-import keras
+from typing import Dict, List, Optional, Tuple, Any, Union
 
 from .weightwatcher import WeightWatcher
-from .weights_utils import save_layer_analysis_plots, compute_weight_statistics
-from .constants import DEFAULT_SAVEDIR, HIGH_CONCENTRATION_PERCENTILE
+from .weights_utils import save_layer_analysis_plots
+from .constants import HIGH_CONCENTRATION_PERCENTILE
 
 from dl_techniques.utils.logger import logger
+
+
+def _find_analyzable_layer_indices(model: keras.Model) -> List[int]:
+    """
+    Finds the indices of all layers in a model that contain weights.
+
+    This function is used to automatically detect which layers, including custom
+    layers, are suitable for analysis by checking for the presence of weight tensors.
+
+    Args:
+        model: The Keras model to inspect.
+
+    Returns:
+        A list of integer indices for layers that have weights.
+    """
+    analyzable_indices = []
+    for idx, layer in enumerate(model.layers):
+        # The most reliable way to determine if a layer is analyzable is to
+        # check if it has any weight tensors. This works for standard layers,
+        # custom layers using self.add_weight, and container layers.
+        if layer.get_weights():
+            analyzable_indices.append(idx)
+
+    if not analyzable_indices:
+        logger.warning(
+            "Could not automatically find any layers with weights in the model. "
+            "Analysis may not be possible."
+        )
+    else:
+        logger.info(
+            f"Automatically found {len(analyzable_indices)} layers with weights "
+            "for analysis."
+        )
+
+    return analyzable_indices
 
 
 def analyze_model(
@@ -36,10 +71,12 @@ def analyze_model(
 
     This function performs spectral analysis, power-law fitting, and concentration
     analysis to assess training quality, model complexity, and information concentration.
+    It can automatically detect standard, custom, and container layers with weights.
 
     Args:
         model: Keras model to analyze.
-        layers: Optional list of layer indices to analyze. If None, analyze all suitable layers.
+        layers: Optional list of layer indices to analyze. If None (default), the function
+                will automatically find all layers with weights, including custom layers.
         plot: Whether to create analysis visualizations.
         concentration_analysis: Whether to perform concentration analysis.
         randomize: Whether to analyze randomized weight matrices for comparison.
@@ -56,6 +93,19 @@ def analyze_model(
         - 'recommendations': List of analysis-based recommendations
     """
     logger.info(f"Starting comprehensive analysis of model: {model.name}")
+
+    # If no specific layers are requested, automatically find all analyzable layers.
+    # This enables support for custom layers out-of-the-box.
+    if layers is None:
+        layers = _find_analyzable_layer_indices(model)
+        if not layers:
+            logger.error("No analyzable layers found. Aborting analysis.")
+            return {
+                'analysis': pd.DataFrame(),
+                'summary': {},
+                'high_concentration_layers': [],
+                'recommendations': ["No analyzable layers were found in the model."]
+            }
 
     # Create output directory
     os.makedirs(savedir, exist_ok=True)
@@ -74,6 +124,17 @@ def analyze_model(
         savefig=os.path.join(savedir, 'plots') if plot else False
     )
 
+    if analysis_df.empty:
+        logger.warning("Analysis did not produce any results.")
+        # Return a structured empty result
+        return {
+            'analysis': pd.DataFrame(),
+            'summary': {},
+            'high_concentration_layers': [],
+            'recommendations': ["Analysis ran but did not yield any metrics. "
+                                "Check if layers meet the minimum eigenvalue criteria."]
+        }
+
     # Get summary metrics
     summary = watcher.get_summary()
 
@@ -90,12 +151,15 @@ def analyze_model(
     # Create detailed plots if requested
     if detailed_plots and plot:
         plot_dir = os.path.join(savedir, 'detailed_plots')
-        save_layer_analysis_plots(
-            model,
-            analysis_df.index.tolist(),
-            plot_dir,
-            plot_types=['weights', 'statistics']
-        )
+        # Only plot layers that were successfully analyzed
+        analyzed_layer_indices = analysis_df.index.tolist()
+        if analyzed_layer_indices:
+            save_layer_analysis_plots(
+                model,
+                analyzed_layer_indices,
+                plot_dir,
+                plot_types=['weights', 'statistics']
+            )
 
     # Save results
     results = {

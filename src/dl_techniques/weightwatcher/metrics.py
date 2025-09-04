@@ -6,11 +6,12 @@ on neural network weight matrices, including advanced concentration and localiza
 """
 
 import numpy as np
+from keras import ops
 from scipy import stats
 from scipy.linalg import eigh
-from scipy.sparse.linalg import svds, eigsh
+from scipy.sparse.linalg import svds
 from typing import Dict, List, Optional, Tuple, Union
-import keras.ops as ops
+
 
 from dl_techniques.utils.logger import logger
 from .constants import (
@@ -186,7 +187,7 @@ def calculate_matrix_entropy(singular_values: np.ndarray, N: int) -> float:
         # Calculate eigenvalues from singular values
         evals = singular_values * singular_values
 
-        # Calculate probabilities - use ops.sum for consistency
+        # Calculate probabilities
         p = evals / (np.sum(evals) + EPSILON)
 
         # Remove practically zero probabilities
@@ -430,44 +431,63 @@ def find_critical_weights(
         threshold: float = 0.1
 ) -> List[Tuple[int, int, float]]:
     """
-    Find the individual weights that contribute most to top eigenvectors.
+    Find individual weights that contribute most to top eigenvectors.
+
+    This heuristic identifies weights with large magnitudes that are located in
+    the most important rows of the weight matrix. Row importance is determined
+    by the components of the top eigenvectors of the matrix WW^T.
 
     Args:
-        weight_matrix: Weight matrix to analyze.
-        eigenvectors: Top eigenvectors.
+        weight_matrix: Weight matrix to analyze (shape n x m).
+        eigenvectors: Top eigenvectors of WW^T (left singular vectors of W), shape (n, k).
         eigenvalues: Corresponding eigenvalues.
         threshold: Contribution threshold for identifying critical weights.
 
     Returns:
-        List of tuples (i, j, contribution) for critical weights.
+        List of tuples (row_idx, col_idx, contribution) for critical weights.
     """
-    if len(eigenvectors) == 0 or len(eigenvalues) == 0:
+    if eigenvectors.size == 0 or eigenvalues.size == 0:
         return []
 
     n, m = weight_matrix.shape
-    critical_weights = []
+    critical_weights = set()  # Use a set to avoid duplicate (i, j) entries
 
-    # Calculate weight importance using eigenvector components
-    for k, (eigval, eigvec) in enumerate(zip(eigenvalues, eigenvectors.T)):
-        # Scale by eigenvalue importance
-        importance = np.abs(eigvec) * np.sqrt(eigval)
+    # Calculate an overall importance score for each row by taking a weighted
+    # average of the absolute eigenvector components.
+    row_importance = np.zeros(n)
+    total_eigenvalue_sum = np.sum(eigenvalues)
+    if total_eigenvalue_sum > EPSILON:
+        for eigval, eigvec in zip(eigenvalues, eigenvectors.T):
+            # eigvec has shape (n,)
+            row_importance += (eigval / total_eigenvalue_sum) * np.abs(eigvec)
 
-        # Find indices of high-importance components
-        high_importance_indices = np.where(importance > threshold * np.max(importance))[0]
+    # Find rows with high importance scores.
+    max_importance = np.max(row_importance)
+    if max_importance < EPSILON:
+        return []
 
-        for idx in high_importance_indices:
-            # For dense layers, convert flat index to 2D index
-            if len(weight_matrix.shape) == 2:
-                i = idx % n
-                j = idx // n if idx < n * m else 0
-                if i < n and j < m:
-                    contribution = importance[idx] * weight_matrix[i, j]
-                    critical_weights.append((i, j, float(contribution)))
+    high_importance_row_indices = np.where(row_importance > threshold * max_importance)[0]
+
+    # For each important row, find the weights with the largest magnitudes.
+    for i in high_importance_row_indices:
+        row_weights = weight_matrix[i, :]
+        max_weight_in_row = np.max(np.abs(row_weights))
+
+        if max_weight_in_row < EPSILON:
+            continue
+
+        # Find columns (weights) in this row with magnitudes above a threshold.
+        high_magnitude_col_indices = np.where(np.abs(row_weights) > threshold * max_weight_in_row)[0]
+
+        for j in high_magnitude_col_indices:
+            # Define contribution as the product of the row's importance and the weight's value.
+            contribution = row_importance[i] * weight_matrix[i, j]
+            critical_weights.add((i, j, float(contribution)))
 
     # Sort by contribution magnitude (descending)
-    critical_weights.sort(key=lambda x: abs(x[2]), reverse=True)
+    sorted_critical_weights = sorted(list(critical_weights), key=lambda x: abs(x[2]), reverse=True)
 
-    return critical_weights
+    return sorted_critical_weights
 
 
 def calculate_concentration_metrics(
