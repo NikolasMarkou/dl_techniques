@@ -1,5 +1,5 @@
 """
-FastVLM Model Implementation for dl_techniques Framework
+FastVLM Model Implementation
 
 This module provides the FastVLM (Fast Vision Language Model) architecture,
 a hybrid vision model that efficiently combines convolutional and transformer-based
@@ -15,7 +15,7 @@ from typing import Optional, Union, List, Dict, Any, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.attention.attention_block import AttentionBlock
+from .components import AttentionBlock
 from dl_techniques.layers.repmixer_block import RepMixerBlock, ConvolutionalStem
 
 # ---------------------------------------------------------------------

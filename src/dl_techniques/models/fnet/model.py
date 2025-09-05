@@ -13,7 +13,6 @@ from typing import Optional
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 from dl_techniques.layers.fnet_encoder_block import FNetEncoderBlock
 
 # ---------------------------------------------------------------------

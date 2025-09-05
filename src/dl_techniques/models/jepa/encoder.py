@@ -6,15 +6,12 @@ Keras 3.8.0 patterns with full serialization support and memory optimizations.
 """
 
 import keras
-from keras import layers, ops, initializers, activations
 import tensorflow as tf
-from typing import Optional, Union, Tuple, List, Dict, Any
+from keras import layers, ops, initializers
+from typing import Optional, Union, Tuple, Dict, Any
 import numpy as np
 
-from dl_techniques.utils.logger import logger
 from dl_techniques.layers.transformer import TransformerLayer
-from dl_techniques.layers.patch_embedding import PatchEmbedding2D
-from dl_techniques.layers.positional_embedding import PositionalEmbedding
 
 
 @keras.utils.register_keras_serializable(package="JEPA")
