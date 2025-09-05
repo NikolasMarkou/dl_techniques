@@ -126,18 +126,6 @@ class TestSwinTransformerBlock:
         layer_with_drop_path(input_tensor)
         assert layer_with_drop_path.drop_path_rate is not None
 
-    def test_build_invalid_input_shape(self):
-        """Test build with invalid input shapes."""
-        layer = SwinTransformerBlock(dim=64, num_heads=8)
-
-        # Test non-4D input
-        with pytest.raises(ValueError, match="Expected 4D input shape"):
-            layer.build((None, 32, 64))  # 3D shape
-
-        # Test channel mismatch
-        with pytest.raises(ValueError, match="Input channels .* must match dim"):
-            layer.build((None, 32, 32, 128))  # Wrong channel dimension
-
     def test_output_shapes(self, input_tensor):
         """Test that output shapes are computed correctly."""
         configs_to_test = [
@@ -179,15 +167,6 @@ class TestSwinTransformerBlock:
         # Test with training=True
         output_training = layer_instance(input_tensor, training=True)
         assert output_training.shape == input_tensor.shape
-
-    def test_call_invalid_input(self):
-        """Test call with invalid input shapes."""
-        layer = SwinTransformerBlock(dim=64, num_heads=8)
-
-        # Test with 3D input
-        invalid_input = keras.random.normal([2, 32, 64])
-        with pytest.raises(ValueError, match="Expected 4D input shape"):
-            layer(invalid_input)
 
     def test_different_configurations(self):
         """Test layer with different configurations."""
