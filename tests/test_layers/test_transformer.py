@@ -2,7 +2,7 @@ import pytest
 import numpy as np
 import tensorflow as tf
 import keras
-from keras import ops, layers, models, initializers, regularizers
+from keras import ops, layers, models
 import tempfile
 import os
 import warnings
