@@ -63,8 +63,8 @@ can mimic the following blocks:
 """
 
 import keras
-from keras import ops, layers, initializers, regularizers
 from typing import Tuple, Optional, Any, Dict, Union
+from keras import ops, layers, initializers, regularizers
 
 # ---------------------------------------------------------------------
 

@@ -377,22 +377,4 @@ def create_mobile_clip_model(
     model = MobileClipModel.from_variant(variant, **kwargs)
     return model
 
-
-def create_mobile_clip_base(**kwargs: Any) -> MobileClipModel:
-    """Create a Mobile CLIP base model with ViT-B16 encoder."""
-    return create_mobile_clip_model("b", **kwargs)
-
-
-def create_mobile_clip_s0(**kwargs: Any) -> MobileClipModel:
-    """Create a Mobile CLIP S0 model (most compact)."""
-    return create_mobile_clip_model("s0", **kwargs)
-
-
-def create_mobile_clip_s1(**kwargs: Any) -> MobileClipModel:
-    """Create a Mobile CLIP S1 model."""
-    return create_mobile_clip_model("s1", **kwargs)
-
-
-def create_mobile_clip_s2(**kwargs: Any) -> MobileClipModel:
-    """Create a Mobile CLIP S2 model."""
-    return create_mobile_clip_model("s2", **kwargs)
+# ---------------------------------------------------------------------

@@ -2,7 +2,6 @@
 Modern Relational Graph Transformer (RELGT) Implementation
 
 This module provides a modernized implementation of the Relational Graph Transformer,
-following Keras 3 best practices and reusing existing dl_techniques components.
 
 The RELGT model introduces a novel multi-element tokenization strategy for relational
 graph data and combines local attention over subgraphs with global attention to

@@ -59,8 +59,8 @@ from typing import Optional, Union, Tuple, Any, List, Dict
 # ---------------------------------------------------------------------
 
 from ..layers.res_path import ResPath
-from ..layers.multi_level_feature_compilation import MLFCLayer
 from ..layers.hanc_block import HANCBlock
+from ..layers.multi_level_feature_compilation import MLFCLayer
 
 # ---------------------------------------------------------------------
 
