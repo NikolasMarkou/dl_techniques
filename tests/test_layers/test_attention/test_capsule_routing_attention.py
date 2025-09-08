@@ -297,7 +297,7 @@ class TestCapsuleRoutingSelfAttention:
         assert recreated_layer.num_heads == original_layer.num_heads
         assert recreated_layer.key_dim == original_layer.key_dim
         assert recreated_layer.value_dim == original_layer.value_dim
-        assert recreated_layer.dropout == original_layer.dropout
+        assert recreated_layer.dropout_rate == original_layer.dropout
         assert recreated_layer.use_bias == original_layer.use_bias
         assert recreated_layer.routing_iterations == original_layer.routing_iterations
         assert recreated_layer.use_vertical_routing == original_layer.use_vertical_routing

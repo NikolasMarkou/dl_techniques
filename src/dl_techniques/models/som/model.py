@@ -103,8 +103,8 @@ from typing import Tuple, Optional, Union, List, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
-from ..layers.som_2d_layer import SOM2dLayer
+from dl_techniques.utils.logger import logger
+from dl_techniques.layers.som_2d_layer import SOM2dLayer
 
 # ---------------------------------------------------------------------
 

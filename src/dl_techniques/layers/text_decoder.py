@@ -411,3 +411,5 @@ class TextDecoder(keras.layers.Layer):
             'layer_norm_eps': self.layer_norm_eps,
         })
         return config
+
+# ---------------------------------------------------------------------

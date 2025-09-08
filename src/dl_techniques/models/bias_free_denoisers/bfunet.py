@@ -23,9 +23,7 @@ applied to the U-Net architecture with deep supervision.
 """
 
 import keras
-import tensorflow as tf
 from typing import Optional, Union, Tuple, List, Dict, Any
-from pathlib import Path
 
 
 # ---------------------------------------------------------------------

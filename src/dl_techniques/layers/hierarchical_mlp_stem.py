@@ -35,7 +35,6 @@ KEY ADVANTAGES:
    - Works with both BatchNorm (better performance) and LayerNorm (stable for small batches)
 """
 
-import math
 import keras
 from keras import ops
 from typing import Tuple, Optional, Union, Any, Dict, Callable, Literal

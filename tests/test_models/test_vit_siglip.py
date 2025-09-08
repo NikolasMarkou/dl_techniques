@@ -50,7 +50,7 @@ class TestSigLIPVisionTransformerConfig:
         assert config.depth == 12
         assert config.num_heads == 12
         assert config.mlp_ratio == 4.0
-        assert config.dropout == 0.0
+        assert config.dropout_rate == 0.0
         assert config.attention_type == 'multi_head_attention'
         assert config.normalization_type == 'layer_norm'
         assert config.normalization_position == 'post'
@@ -88,7 +88,7 @@ class TestSigLIPVisionTransformerConfig:
         assert config.depth == 24
         assert config.num_heads == 16
         assert config.mlp_ratio == 6.0
-        assert config.dropout == 0.1
+        assert config.dropout_rate == 0.1
         assert config.attention_type == 'window_attention'
         assert config.normalization_type == 'rms_norm'
         assert config.normalization_position == 'pre'
@@ -123,7 +123,7 @@ class TestSigLIPVisionTransformerConfig:
         assert restored_config.embed_dim == original_config.embed_dim
         assert restored_config.depth == original_config.depth
         assert restored_config.attention_type == original_config.attention_type
-        assert restored_config.dropout == original_config.dropout
+        assert restored_config.dropout_rate == original_config.dropout_rate
 
 
 class TestSigLIPVisionTransformerInitialization:
@@ -177,7 +177,7 @@ class TestSigLIPVisionTransformerInitialization:
         assert model.depth == 8
         assert model.num_heads == 16
         assert model.mlp_ratio == 6.0
-        assert model.dropout == 0.1
+        assert model.dropout_rate == 0.1
         assert model.attention_type == 'window_attention'
         assert model.normalization_type == 'rms_norm'
         assert model.normalization_position == 'pre'
@@ -876,7 +876,7 @@ class TestSigLIPVisionTransformerFactoryFunctions:
             dropout=0.1,
             attention_type='group_query_attention'
         )
-        assert model_base.dropout == 0.1
+        assert model_base.dropout_rate == 0.1
         assert model_base.attention_type == 'group_query_attention'
         assert model_base.embed_dim == 768  # Should keep base config
 
