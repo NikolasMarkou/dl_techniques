@@ -389,15 +389,15 @@ class VisionEncoder(keras.layers.Layer):
                 **self.norm_args
             )
 
-        # Create pooling layers if needed
-        self.global_pool = None
-        if self.output_mode == 'mean':
-            self.global_pool = layers.GlobalAveragePooling1D(name="global_avg_pool")
-        elif self.output_mode == 'max':
-            self.global_pool = layers.GlobalMaxPooling1D(name="global_max_pool")
-
-        # CLS token will be created in build()
+        # Create CLS token weight if needed (shape is independent of input)
         self.cls_token = None
+        if self.use_cls_token:
+            self.cls_token = self.add_weight(
+                name="cls_token",
+                shape=(1, 1, self.embed_dim),
+                initializer="zeros",
+                trainable=True,
+            )
 
     def _create_patch_embedding(self) -> keras.layers.Layer:
         """
@@ -538,14 +538,7 @@ class VisionEncoder(keras.layers.Layer):
                 f"got {input_shape}"
             )
 
-        # Create CLS token weight if needed
-        if self.use_cls_token:
-            self.cls_token = self.add_weight(
-                name="cls_token",
-                shape=(1, 1, self.embed_dim),
-                initializer="zeros",
-                trainable=True
-            )
+        # CLS token is created in __init__ as its shape is independent of input.
 
         # Build patch embedding layer
         self.patch_embed.build(input_shape)
@@ -562,12 +555,36 @@ class VisionEncoder(keras.layers.Layer):
         if self.norm is not None:
             self.norm.build(pos_input_shape)
 
-        # Build pooling layer if present
-        if self.global_pool is not None:
-            self.global_pool.build(pos_input_shape)
-
         # Always call parent build at the end
         super().build(input_shape)
+
+    def _get_full_sequence_features(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """Internal helper to run the full forward pass and return sequence features."""
+        batch_size = ops.shape(inputs)[0]
+        x = self.patch_embed(inputs, training=training)
+
+        # Reshape to sequence format. Shape can vary by patch embedder.
+        # Final shape should be (batch_size, num_patches, embed_dim)
+        if len(x.shape) == 4:
+            x = ops.reshape(x, [batch_size, -1, self.embed_dim])
+
+        if self.use_cls_token:
+            cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
+            x = ops.concatenate([cls_tokens, x], axis=1)
+
+        x = self.pos_embed(x, training=training)
+
+        for layer in self.transformer_layers:
+            x = layer(x, training=training)
+
+        if self.norm is not None:
+            x = self.norm(x, training=training)
+
+        return x
 
     def call(
             self,
@@ -584,45 +601,21 @@ class VisionEncoder(keras.layers.Layer):
         Returns:
             Output tensor with shape depending on output_mode configuration.
         """
-        batch_size = ops.shape(inputs)[0]
-
-        # Patch embedding
-        x = self.patch_embed(inputs, training=training)  # (batch, patch_h, patch_w, embed_dim)
-
-        # Reshape to sequence format
-        patches_h = self.img_size // self.patch_size
-        patches_w = self.img_size // self.patch_size
-        x = ops.reshape(x, [batch_size, patches_h * patches_w, self.embed_dim])
-
-        # Add CLS token if used
-        if self.use_cls_token:
-            cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
-            x = ops.concatenate([cls_tokens, x], axis=1)
-
-        # Add positional embeddings (includes dropout)
-        x = self.pos_embed(x, training=training)
-
-        # Apply transformer layers
-        for layer in self.transformer_layers:
-            x = layer(x, training=training)
-
-        # Apply final normalization if present
-        if self.norm is not None:
-            x = self.norm(x, training=training)
+        x = self._get_full_sequence_features(inputs, training=training)
 
         # Apply output mode
         if self.output_mode == 'cls':
-            # Return CLS token
-            return x[:, 0, :]  # (batch_size, embed_dim)
+            return x[:, 0, :]
         elif self.output_mode == 'mean':
-            # Global average pooling
-            return self.global_pool(x)  # (batch_size, embed_dim)
+            # Exclude CLS token from mean pooling if it exists
+            tokens_to_pool = x[:, 1:, :] if self.use_cls_token else x
+            return ops.mean(tokens_to_pool, axis=1)
         elif self.output_mode == 'max':
-            # Global max pooling
-            return self.global_pool(x)  # (batch_size, embed_dim)
+            # Exclude CLS token from max pooling if it exists
+            tokens_to_pool = x[:, 1:, :] if self.use_cls_token else x
+            return ops.max(tokens_to_pool, axis=1)
         else:  # 'none'
-            # Return full sequence
-            return x  # (batch_size, seq_len, embed_dim)
+            return x
 
     def get_cls_features(
             self,
@@ -645,27 +638,8 @@ class VisionEncoder(keras.layers.Layer):
         if not self.use_cls_token:
             raise ValueError("CLS token is not available when use_cls_token=False")
 
-        # Get full features and extract CLS token
-        features = self(inputs, training=training)  # This may return different shapes based on output_mode
-
-        # If output_mode is 'cls', features is already the CLS token
-        if self.output_mode == 'cls':
-            return features
-        else:
-            # Need to recompute with full sequence output
-            batch_size = ops.shape(inputs)[0]
-            x = self.patch_embed(inputs, training=training)
-            patches_h = self.img_size // self.patch_size
-            patches_w = self.img_size // self.patch_size
-            x = ops.reshape(x, [batch_size, patches_h * patches_w, self.embed_dim])
-            cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
-            x = ops.concatenate([cls_tokens, x], axis=1)
-            x = self.pos_embed(x, training=training)
-            for layer in self.transformer_layers:
-                x = layer(x, training=training)
-            if self.norm is not None:
-                x = self.norm(x, training=training)
-            return x[:, 0, :]
+        features = self._get_full_sequence_features(inputs, training=training)
+        return features[:, 0, :]
 
     def get_patch_features(
             self,
@@ -682,28 +656,11 @@ class VisionEncoder(keras.layers.Layer):
         Returns:
             Patch features tensor of shape [batch_size, num_patches, embed_dim].
         """
-        # Get full features and extract patch tokens
-        batch_size = ops.shape(inputs)[0]
-        x = self.patch_embed(inputs, training=training)
-        patches_h = self.img_size // self.patch_size
-        patches_w = self.img_size // self.patch_size
-        x = ops.reshape(x, [batch_size, patches_h * patches_w, self.embed_dim])
-
+        features = self._get_full_sequence_features(inputs, training=training)
         if self.use_cls_token:
-            cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
-            x = ops.concatenate([cls_tokens, x], axis=1)
-
-        x = self.pos_embed(x, training=training)
-        for layer in self.transformer_layers:
-            x = layer(x, training=training)
-        if self.norm is not None:
-            x = self.norm(x, training=training)
-
-        # Return patch tokens (skip CLS if present)
-        if self.use_cls_token:
-            return x[:, 1:, :]  # (batch_size, num_patches, embed_dim)
+            return features[:, 1:, :]
         else:
-            return x  # (batch_size, num_patches, embed_dim)
+            return features
 
     def get_spatial_features(
             self,
@@ -970,5 +927,3 @@ def create_efficient_encoder(
         ffn_type='swiglu',
         **kwargs
     )
-
-# ---------------------------------------------------------------------

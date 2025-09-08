@@ -52,9 +52,15 @@ class TestVisionEncoder:
     @pytest.fixture
     def modern_config(self) -> Dict[str, Any]:
         """Provides modern encoder configuration with advanced features."""
+        # Ensure num_patches matches window_size^2 for WindowAttention compatibility
+        window_size = 4
+        num_patches_per_dim = window_size
+        patch_size = 8
+        img_size = num_patches_per_dim * patch_size  # 4 * 8 = 32
+
         return {
-            'img_size': 64,
-            'patch_size': 8,
+            'img_size': img_size,
+            'patch_size': patch_size,
             'embed_dim': 128,
             'depth': 4,
             'num_heads': 4,
@@ -66,7 +72,7 @@ class TestVisionEncoder:
             'stochastic_depth_rate': 0.1,
             'output_mode': 'mean',
             'use_cls_token': False,
-            'attention_args': {'window_size': 4}
+            'attention_args': {'window_size': window_size}
         }
 
     @pytest.fixture
@@ -105,7 +111,10 @@ class TestVisionEncoder:
         """Tests initialization with different attention mechanisms."""
         config = {**basic_config, 'attention_type': attention_type}
         if attention_type == 'window_attention':
-            config['attention_args'] = {'window_size': 4}
+            # This makes num_patches match window_size^2
+            config['img_size'] = 16
+            config['patch_size'] = 8
+            config['attention_args'] = {'window_size': 2}
         encoder = VisionEncoder(**config)
         assert encoder.attention_type == attention_type
 
