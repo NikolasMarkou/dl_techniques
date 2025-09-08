@@ -14,7 +14,7 @@ import tensorflow as tf
 from typing import Tuple, Dict, Any
 
 # Import the new model functions
-from dl_techniques.models.bfcnn_denoiser import (
+from dl_techniques.models.bias_free_denoisers.bfcnn_denoiser import (
     create_bfcnn_denoiser,
     create_bfcnn_variant,
     BFCNN_CONFIGS

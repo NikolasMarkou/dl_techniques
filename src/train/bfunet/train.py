@@ -65,7 +65,7 @@ from dl_techniques.optimization import (
     learning_rate_schedule_builder,
     deep_supervision_schedule_builder
 )
-from dl_techniques.models.bfunet_denoiser import (
+from dl_techniques.models.bias_free_denoisers.bfunet_denoiser import (
     create_bfunet_denoiser,
     BFUNET_CONFIGS,
     create_bfunet_variant

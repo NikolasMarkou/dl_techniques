@@ -12,7 +12,7 @@ from typing import Tuple, Dict, Any, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
-from dl_techniques.models.convnext_v1 import ConvNeXtV1, create_convnext_v1
+from dl_techniques.models.convnext import ConvNeXtV1, create_convnext_v1
 
 
 # ---------------------------------------------------------------------
