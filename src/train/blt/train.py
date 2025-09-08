@@ -33,7 +33,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.blt import create_blt_model
+from dl_techniques.models.byte_latent_transformer import create_blt_model
 from dl_techniques.layers.blt import ByteTokenizer, EntropyModel
 
 
