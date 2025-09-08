@@ -604,8 +604,12 @@ class TextEncoder(keras.layers.Layer):
             self.word_embeddings.build(main_input_shape)
         if self.factorized_embed_layer is not None:
             self.factorized_embed_layer.build(main_input_shape)
-            factorized_shape = self.factorized_embed_layer.compute_output_shape(main_input_shape)
+            # Compute the symbolic output shape of the first embedding layer
+            factorized_shape = self.factorized_embed_layer.compute_output_shape(
+                main_input_shape if main_input_shape else (None, None)
+            )
             self.embed_projection_layer.build(factorized_shape)
+
 
         # Build token type embeddings if present
         if self.token_type_embeddings is not None:

@@ -710,6 +710,7 @@ class TestTextEncoder:
         """Tests that saved models maintain compatibility across versions."""
         # This test ensures that the get_config/from_config cycle preserves all functionality
         encoder = TextEncoder(**basic_config)
+        encoder.build(sample_input_ids.shape)  # Build the original encoder
 
         # Simulate save/load cycle
         config = encoder.get_config()
