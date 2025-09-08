@@ -1,16 +1,10 @@
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
-from keras import ops, layers, initializers, regularizers, activations
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.logger import logger
+from keras import layers, initializers, regularizers, activations
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="dl_techniques.layers")
+@keras.saving.register_keras_serializable()
 class MobileOneBlock(keras.layers.Layer):
     """
     MobileOne building block with structural reparameterization.

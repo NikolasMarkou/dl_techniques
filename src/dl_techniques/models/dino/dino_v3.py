@@ -5,13 +5,6 @@ This module implements the DinoV3 (Data-efficient Image Transformers) architectu
 a self-supervised Vision Transformer model that learns visual representations without
 labels through a distillation-based approach.
 
-The implementation follows the modern Keras 3 patterns:
-- All sub-layers are created in __init__()
-- Explicit building of sub-layers in build() when needed
-- Proper serialization support with get_config()
-
-Based on: "DINOv2: Learning Robust Visual Features without Supervision" (Oquab et al., 2023)
-
 Model Variants:
 --------------
 - DinoV3-Tiny: 192 dim, 12 layers, 3 heads
@@ -45,9 +38,9 @@ from typing import Optional, Union, Tuple, Dict, Any, Callable, Literal
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
-from ..layers.transformer import TransformerLayer
-from ..layers.embedding.patch_embedding import PatchEmbedding2D
+from dl_techniques.utils.logger import logger
+from dl_techniques.layers.transformer import TransformerLayer
+from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 
 # ---------------------------------------------------------------------
 

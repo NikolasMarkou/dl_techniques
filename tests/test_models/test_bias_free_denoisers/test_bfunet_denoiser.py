@@ -13,7 +13,7 @@ import numpy as np
 import tensorflow as tf
 from typing import Tuple, Dict, Any
 
-from dl_techniques.models.bias_free_denoisers.bfunet_denoiser import (
+from dl_techniques.models.bias_free_denoisers.bfunet import (
     create_bfunet_denoiser,
     create_bfunet_variant,
     BFUNET_CONFIGS

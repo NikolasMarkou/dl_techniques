@@ -20,7 +20,7 @@ from keras import ops
 from typing import List, Dict, Any
 
 from dl_techniques.layers.kan_linear import KANLinear
-from dl_techniques.models.kan import KAN, create_kan_model
+from dl_techniques.models.kan.model import KAN, create_kan_model
 from dl_techniques.utils.logger import logger
 
 
@@ -806,5 +806,4 @@ class TestPerformance:
 
 
 if __name__ == "__main__":
-    # Example of running specific test classes
-    pytest.main([__file__ + "::TestKAN", "-v"])
+    pytest.main([__file__, "-v", "--tb=short"])

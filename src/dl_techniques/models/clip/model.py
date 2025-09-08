@@ -1,12 +1,6 @@
 """
 CLIP (Contrastive Language-Image Pre-training) Model Implementation
 
-This implementation follows modern Keras 3 best practices with:
-- All configuration in __init__ parameters (no separate config class)
-- Integrated vision and text processing within the main model
-- Modern transformer architecture with RMSNorm, GroupedQueryAttention, and SwiGLU
-- Proper serialization patterns following the dl-techniques guide
-
 The model implements the contrastive learning framework that learns joint representations
 of images and text by maximizing similarity between matching pairs while minimizing
 similarity between non-matching pairs in a shared embedding space.
@@ -25,6 +19,10 @@ References:
 import keras
 from keras import layers, ops, initializers
 from typing import Optional, Any, Dict, Union, Tuple, List
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.transformer import TransformerLayer
@@ -206,8 +204,10 @@ class CLIPModel(keras.Model):
                 dropout_rate=self.dropout_rate,
                 attention_dropout_rate=self.attention_dropout_rate,
                 n_kv_head=self.vision_kv_heads,
-                ffn_expansion_factor=self.ffn_expansion_factor,
-                ffn_multiple_of=self.ffn_multiple_of,
+                ffn_args={
+                    "ffn_expansion_factor" :self.ffn_expansion_factor,
+                    "ffn_multiple_of": self.ffn_multiple_of,
+                },
                 name=f'vision_transformer_{i}'
             )
             self.vision_transformer_layers.append(transformer_layer)
@@ -242,8 +242,10 @@ class CLIPModel(keras.Model):
                 dropout_rate=self.dropout_rate,
                 attention_dropout_rate=self.attention_dropout_rate,
                 n_kv_head=self.text_kv_heads,
-                ffn_expansion_factor=self.ffn_expansion_factor,
-                ffn_multiple_of=self.ffn_multiple_of,
+                ffn_args={
+                    "ffn_expansion_factor" :self.ffn_expansion_factor,
+                    "ffn_multiple_of": self.ffn_multiple_of,
+                },
                 name=f'text_transformer_{i}'
             )
             self.text_transformer_layers.append(transformer_layer)

@@ -1,26 +1,12 @@
-"""
-Comprehensive pytest test suite for ResNet-based VAE model.
-
-This module provides extensive testing for the VAE implementation including:
-- Model initialization and parameter validation
-- Architecture building and shape consistency
-- Forward pass and backward pass functionality
-- Encoding, decoding, and sampling operations
-- Custom training and test steps
-- Serialization and deserialization
-- Error handling and edge cases
-- Performance and numerical stability
-"""
-
 import pytest
 import numpy as np
 import keras
 import tensorflow as tf
-from typing import Tuple, Dict, Any, List
+from typing import Tuple, List
 import tempfile
 import os
 
-from dl_techniques.models.vae import VAE, create_vae
+from dl_techniques.models.vae.model import VAE, create_vae
 
 
 class TestVAEInitialization:
@@ -805,5 +791,4 @@ class TestVAEIntegration:
 
 
 if __name__ == "__main__":
-    # Run tests with pytest
-    pytest.main([__file__, "-v"])
+    pytest.main([__file__, "-v", "--tb=short"])

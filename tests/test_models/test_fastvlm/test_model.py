@@ -4,7 +4,7 @@ import os
 import numpy as np
 import keras
 import tensorflow as tf
-from typing import Dict, Any, Tuple, List, Optional
+from typing import Dict, Any, Optional
 
 from dl_techniques.models.fastvlm.model import FastVLM
 
@@ -659,5 +659,4 @@ class TestFastVLMPerformance:
 
 
 if __name__ == "__main__":
-    # Run tests with: python -m pytest test_fastvlm.py -v
     pytest.main([__file__, "-v", "--tb=short"])

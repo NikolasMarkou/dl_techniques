@@ -23,7 +23,7 @@ from keras import ops
 import tempfile
 import os
 
-from dl_techniques.models.acc_unet import (
+from dl_techniques.models.accunet.model import (
     AccUNet,
     create_acc_unet,
     create_acc_unet_binary,

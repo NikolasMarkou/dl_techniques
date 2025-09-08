@@ -1070,15 +1070,16 @@ def load_cauldron_sample() -> List[Dict]:
 from typing import Dict, Optional
 import keras
 from keras import ops
-from dl_techniques.models.nanovlm import create_nanovlm_222m
+from dl_techniques.models.nano_vlm import create_nanovlm_222m
 from dl_techniques.losses.nanovlm_loss import NanoVLMLoss
 from dl_techniques.utils.datasets.vqa_dataset import VQADataProcessor, load_cauldron_sample
 from dl_techniques.optimization import optimizer_builder, learning_rate_schedule_builder
 from dl_techniques.utils.logger import logger
 
+
 def create_training_setup() -> Dict:
     """Create training configuration for nanoVLM."""
-    
+
     # Learning rate schedule configuration
     lr_config = {
         "type": "cosine_decay",
@@ -1088,7 +1089,7 @@ def create_training_setup() -> Dict:
         "decay_steps": 50000,
         "alpha": 0.0001
     }
-    
+
     # Optimizer configuration
     optimizer_config = {
         "type": "adamw",
@@ -1096,25 +1097,26 @@ def create_training_setup() -> Dict:
         "beta_2": 0.999,
         "gradient_clipping_by_norm": 1.0
     }
-    
+
     # Build components
     lr_schedule = learning_rate_schedule_builder(lr_config)
     optimizer = optimizer_builder(optimizer_config, lr_schedule)
-    
+
     return {
         "optimizer": optimizer,
         "lr_schedule": lr_schedule,
         "loss_fn": NanoVLMLoss(ignore_index=0, label_smoothing=0.1)
     }
 
+
 def setup_different_learning_rates(model: keras.Model) -> Dict:
     """Setup different learning rates for different model components."""
-    
+
     # Separate parameters
     vision_params = []
     language_params = []
     projection_params = []
-    
+
     for layer in model.layers:
         if 'vision' in layer.name.lower():
             vision_params.extend(layer.trainable_variables)
@@ -1122,59 +1124,60 @@ def setup_different_learning_rates(model: keras.Model) -> Dict:
             projection_params.extend(layer.trainable_variables)
         else:
             language_params.extend(layer.trainable_variables)
-            
+
     # Create optimizers with different learning rates
     vision_optimizer = keras.optimizers.AdamW(learning_rate=1e-5)  # Lower for pre-trained
     language_optimizer = keras.optimizers.AdamW(learning_rate=1e-5)  # Lower for pre-trained
     projection_optimizer = keras.optimizers.AdamW(learning_rate=1e-4)  # Higher for new component
-    
+
     return {
         "vision_optimizer": vision_optimizer,
-        "language_optimizer": language_optimizer, 
+        "language_optimizer": language_optimizer,
         "projection_optimizer": projection_optimizer,
         "vision_params": vision_params,
         "language_params": language_params,
         "projection_params": projection_params
     }
 
+
 @keras.utils.register_keras_serializable()
 class NanoVLMTrainer:
     """Custom trainer for nanoVLM with multi-optimizer support."""
-    
+
     def __init__(self, model: keras.Model, loss_fn: keras.losses.Loss):
         self.model = model
         self.loss_fn = loss_fn
         self.optimizers = setup_different_learning_rates(model)
-        
+
         # Metrics
         self.train_loss = keras.metrics.Mean(name='train_loss')
         self.train_accuracy = keras.metrics.SparseCategoricalAccuracy(name='train_accuracy')
-        
-    @keras.utils.register_keras_serializable()  
+
+    @keras.utils.register_keras_serializable()
     def train_step(self, batch_data):
         """Custom training step with multiple optimizers."""
         inputs, labels = batch_data
-        
+
         with keras.GradientTape() as tape:
             predictions = self.model(inputs, training=True)
             loss = self.loss_fn(labels, predictions)
-            
+
         # Compute gradients
         gradients = tape.gradient(loss, self.model.trainable_variables)
-        
+
         # Split gradients by component
         vision_grads = []
         language_grads = []
         projection_grads = []
-        
+
         for grad, var in zip(gradients, self.model.trainable_variables):
             if var in self.optimizers['vision_params']:
                 vision_grads.append(grad)
             elif var in self.optimizers['projection_params']:
-                projection_grads.append(grad) 
+                projection_grads.append(grad)
             else:
                 language_grads.append(grad)
-                
+
         # Apply gradients with respective optimizers
         if vision_grads:
             self.optimizers['vision_optimizer'].apply_gradients(
@@ -1188,91 +1191,93 @@ class NanoVLMTrainer:
             self.optimizers['projection_optimizer'].apply_gradients(
                 zip(projection_grads, self.optimizers['projection_params'])
             )
-            
+
         # Update metrics
         self.train_loss.update_state(loss)
         self.train_accuracy.update_state(labels, predictions)
-        
+
         return {
             'loss': self.train_loss.result(),
             'accuracy': self.train_accuracy.result()
         }
 
+
 def train_nanovlm():
     """Main training function for nanoVLM."""
     logger.info("Starting nanoVLM training")
-    
+
     # Create model
     model = create_nanovlm_222m()
     logger.info("Created nanoVLM-222M model")
-    
+
     # Setup training
     training_setup = create_training_setup()
     trainer = NanoVLMTrainer(model, training_setup['loss_fn'])
-    
+
     # Prepare data
     data_processor = VQADataProcessor(
         image_size=224,
         max_text_length=512,
         vocab_size=32000
     )
-    
+
     # Load sample data (replace with real dataset)
     sample_data = load_cauldron_sample()
     train_dataset = data_processor.create_tensorflow_dataset(
-        sample_data, 
+        sample_data,
         batch_size=8,  # Small batch size for demo
         shuffle=True
     )
-    
+
     # Training configuration
     epochs = 10
     steps_per_epoch = len(train_dataset)
-    
+
     logger.info(f"Training for {epochs} epochs with {steps_per_epoch} steps per epoch")
-    
+
     # Training loop
     for epoch in range(epochs):
         logger.info(f"Starting epoch {epoch + 1}/{epochs}")
-        
+
         # Reset metrics
         trainer.train_loss.reset_states()
         trainer.train_accuracy.reset_states()
-        
+
         # Train for one epoch
         for step, batch in enumerate(train_dataset):
             metrics = trainer.train_step(batch)
-            
+
             if step % 10 == 0:
                 logger.info(
                     f"Epoch {epoch + 1}, Step {step}: "
                     f"Loss = {metrics['loss']:.4f}, "
                     f"Accuracy = {metrics['accuracy']:.4f}"
                 )
-                
+
         # End of epoch logging
         logger.info(
             f"Epoch {epoch + 1} completed: "
             f"Loss = {metrics['loss']:.4f}, "
             f"Accuracy = {metrics['accuracy']:.4f}"
         )
-        
+
         # Save checkpoint
         if (epoch + 1) % 5 == 0:
             checkpoint_path = f"nanovlm_checkpoint_epoch_{epoch + 1}.keras"
             model.save(checkpoint_path)
             logger.info(f"Saved checkpoint: {checkpoint_path}")
-    
+
     # Save final model
     final_model_path = "nanovlm_final.keras"
     model.save(final_model_path)
     logger.info(f"Training completed. Final model saved: {final_model_path}")
 
+
 if __name__ == "__main__":
     # Enable mixed precision for better performance
     policy = keras.mixed_precision.Policy('mixed_float16')
     keras.mixed_precision.set_global_policy(policy)
-    
+
     train_nanovlm()
 ```
 
@@ -1392,33 +1397,34 @@ if __name__ == '__main__':
 ```python
 def analyze_model_size():
     """Analyze nanoVLM model size and memory requirements."""
-    from dl_techniques.models.nanovlm import create_nanovlm_222m
-    
+    from dl_techniques.models.nano_vlm import create_nanovlm_222m
+
     model = create_nanovlm_222m()
-    
+
     # Build model with dummy input
     dummy_inputs = {
         'images': keras.random.normal((1, 224, 224, 3)),
         'text_tokens': keras.random.uniform((1, 50), minval=0, maxval=32000, dtype='int32')
     }
-    
+
     _ = model(dummy_inputs)
-    
+
     # Analyze model
     total_params = sum(np.prod(var.shape) for var in model.trainable_variables)
-    
+
     print(f"Total parameters: {total_params:,}")
     print(f"Model size (MB): {total_params * 4 / 1024 / 1024:.2f}")
-    
+
     # Component breakdown
     vision_params = sum(np.prod(var.shape) for var in model.vision_encoder.trainable_variables)
     projection_params = sum(np.prod(var.shape) for var in model.modality_projection.trainable_variables)
     language_params = total_params - vision_params - projection_params
-    
+
     print(f"\nComponent breakdown:")
-    print(f"Vision encoder: {vision_params:,} ({vision_params/total_params*100:.1f}%)")
-    print(f"Modality projection: {projection_params:,} ({projection_params/total_params*100:.1f}%)")
-    print(f"Language decoder: {language_params:,} ({language_params/total_params*100:.1f}%)")
+    print(f"Vision encoder: {vision_params:,} ({vision_params / total_params * 100:.1f}%)")
+    print(f"Modality projection: {projection_params:,} ({projection_params / total_params * 100:.1f}%)")
+    print(f"Language decoder: {language_params:,} ({language_params / total_params * 100:.1f}%)")
+
 
 if __name__ == "__main__":
     analyze_model_size()
