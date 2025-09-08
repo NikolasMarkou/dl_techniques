@@ -1,6 +1,6 @@
 """
 Differential Multi-Head Attention Implementation
-===============================================
+=======================================================================
 
 This module implements Differential Multi-Head Attention as described in the paper:
 "DIFFERENTIAL TRANSFORMER: Amplifying attention to the relevant context while canceling noise"
@@ -10,26 +10,55 @@ layers and computes a weighted difference between them: Attention_diff = MHA1 - 
 This design amplifies relevant context signals while attenuating noise, resulting
 in more focused attention patterns.
 
-Key Concepts:
+Key Mathematical Operations:
+---------------------------
+1. **Dual Attention Process**:
+   - Attention₁(X) = MultiHeadAttention₁(Q, K, V)  # Primary patterns
+   - Attention₂(X) = MultiHeadAttention₂(Q, K, V)  # Noise patterns
+
+2. **Differential Computation**:
+   - Output = Attention₁(X) - λ(layer_idx) * Attention₂(X)
+
+3. **Adaptive Lambda**:
+   - λ(l) = (0.8 - 0.6*exp(-0.3*(l-1))) * λ_learned
+   - Bounded: λ ∈ [0.1, 0.9] for training stability
+
+Architecture Flow:
+-----------------
+```
+Input(B, L, D)
+     ↓
+┌─────────────────┐  ┌─────────────────┐
+│ MultiHeadAttn₁  │  │ MultiHeadAttn₂  │
+│ (Primary)       │  │ (Noise)         │
+└─────────────────┘  └─────────────────┘
+     ↓                        ↓
+    MHA₁(X)          λ(layer_idx) * MHA₂(X)
+     ↓                        ↓
+     └────── Subtract ────────┘
+                  ↓
+            Differential Attention
+                  ↓
+              Dense Projection
+                  ↓
+                Dropout
+                  ↓
+            Output(B, L, D)
+```
+
+Performance Benefits:
+--------------------
+- **65% efficiency**: Requires only 65% of parameters vs standard Transformer
+- **Enhanced focus**: Superior attention to relevant context
+- **Noise reduction**: Effective cancellation of irrelevant information
+- **Reduced hallucination**: Better factual accuracy in generation
+- **Quantization friendly**: Fewer activation outliers
+- **In-context learning**: More robust to order permutations
+
+References:
 -----------
-1. Dual Attention Process:
-   - Two separate multi-head attention mechanisms process the same input
-   - The first attention (MHA1) captures primary attention patterns
-   - The second attention (MHA2) identifies noise and irrelevant patterns
-   - The weighted difference (MHA1 - λ*MHA2) amplifies signal and reduces noise
-
-2. Adaptive Lambda Parameter (λ):
-   - Learnable parameter controlling balance between the two attention mechanisms
-   - Initialized based on layer depth: 0.8 - 0.6*exp(-0.3*(layer_idx - 1))
-   - Adapts during training to optimize noise cancellation effect
-   - Bounded to maintain training stability [0.1, 0.9]
-
-3. Performance Benefits:
-   - Improved focus on relevant information in input sequences
-   - Enhanced accuracy in long-context understanding
-   - Reduction in activation outliers, enabling better quantization
-   - Mitigation of hallucination in generation tasks
-   - Superior performance with fewer parameters
+Ye, T., Dong, L., Xia, Y., Sun, Y., Zhu, Y., Huang, G., & Wei, F.
+"DIFFERENTIAL TRANSFORMER: Amplifying attention to the relevant context while canceling noise"
 """
 
 import keras
