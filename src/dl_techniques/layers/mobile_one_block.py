@@ -19,19 +19,6 @@ class MobileOneBlock(keras.layers.Layer):
     high performance during training through multiple branches while achieving
     optimal inference speed through branch fusion.
 
-    **Architecture (Training)**:
-    ```
-        Input(shape=[..., H, W, C_in])
-           /     |     \
-          /      |      \
-    Conv-BN   1x1-BN   Skip-BN (optional)
-        \      |      /
-         \     |     /
-           Add + Activation
-              ↓
-        Output(shape=[..., H', W', C_out])
-    ```
-
     **Architecture (Inference after reparameterization)**:
     ```
     Input → Single Conv2D → Activation → Output
