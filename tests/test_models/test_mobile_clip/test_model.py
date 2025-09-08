@@ -215,6 +215,4 @@ class TestMobileClipModel:
         assert text_features.shape == (sample_input['text'].shape[0], model_config['embed_dim'])
 
 if __name__ == "__main__":
-    # To run this test file, save it as `test_mobile_clip_model.py`
-    # and run pytest from your terminal in the project root directory.
     pytest.main([__file__, "-v", "--tb=short"])

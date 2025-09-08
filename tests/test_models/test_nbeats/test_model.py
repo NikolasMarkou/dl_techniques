@@ -586,3 +586,6 @@ class TestNBeatsFactory:
         # Test invalid stack types (should raise error)
         with pytest.raises(ValueError):
             create_nbeats_model(stack_types=['invalid_stack_type'])
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

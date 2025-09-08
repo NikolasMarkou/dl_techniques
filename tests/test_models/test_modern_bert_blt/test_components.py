@@ -399,3 +399,6 @@ class TestModernBertBltEmbeddings:
         np.testing.assert_allclose(
             ops.convert_to_numpy(output_eval1), ops.convert_to_numpy(output_eval2)
         )
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

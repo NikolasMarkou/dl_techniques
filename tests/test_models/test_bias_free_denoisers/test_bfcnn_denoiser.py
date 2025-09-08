@@ -665,5 +665,5 @@ class TestBFCNNParameterized:
         assert model.name == f'bfcnn_{variant}'
 
 
-if __name__ == '__main__':
-    pytest.main([__file__])
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

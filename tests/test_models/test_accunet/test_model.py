@@ -653,3 +653,6 @@ class TestAccUNetErrorHandling:
             # If it fails due to memory, that's acceptable
             if "memory" not in str(e).lower() and "resource" not in str(e).lower():
                 raise  # Re-raise if it's not a memory issue
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

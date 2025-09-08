@@ -819,5 +819,5 @@ class TestBiasFreeUNetParameterized:
         assert not np.any(np.isinf(output.numpy()))
 
 
-if __name__ == '__main__':
-    pytest.main([__file__])
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

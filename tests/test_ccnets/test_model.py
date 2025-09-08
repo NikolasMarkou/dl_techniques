@@ -521,3 +521,6 @@ def run_cooperative_learning_validation():
     assert accuracy > 0.2, "Model should achieve some learning on structured data"
 
     print("Cooperative Learning Validation: PASSED")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

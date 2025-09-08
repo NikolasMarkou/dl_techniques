@@ -624,3 +624,6 @@ class TestTiRexFactory:
         small_config = TiRexCore.MODEL_VARIANTS['small']
         assert model.patch_size == small_config['patch_size']
         assert model.embed_dim == small_config['embed_dim']
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

@@ -219,3 +219,6 @@ class TestEmbeddingsLayer:
                 rtol=1e-6, atol=1e-6,
                 err_msg="Predictions differ after a save/load cycle."
             )
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

@@ -439,3 +439,6 @@ class TestBERTAdvancedFeatures:
             input_ids = ops.cast(keras.random.uniform((2, 16), minval=1, maxval=1000), dtype='int32')
             output = model(input_ids, training=False)
             assert output.shape == (2, 16, 128)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])
