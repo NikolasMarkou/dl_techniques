@@ -5,7 +5,7 @@
     <img alt="License: GPL-3.0" src="https://img.shields.io/badge/License-GPL_v3-blue.svg">
   </a>
   <img alt="Python Version" src="https://img.shields.io/badge/python-3.11+-blue.svg">
-  <img alt="Framework" src="https://img.shields.io/badge/Keras-3.x-red">
+  <img alt="Framework" src="https://img.shields.io/badge/Keras-3.8-red">
   <img alt="Backend" src="https://img.shields.io/badge/TensorFlow-2.18-orange">
   <a href="https://electiconsulting.com">
     <img alt="Sponsored by Electi Consulting" src="https://img.shields.io/badge/Sponsored%20by-Electi%20Consulting-8B1C34">
@@ -18,7 +18,7 @@
 
 **dl_techniques** is a research-first Python library built for Keras 3 and TensorFlow, developed with the support of [Electi Consulting](https://electiconsulting.com)'s AI research initiatives. It's more than a collection of layers; it's a curated toolkit for researchers and advanced practitioners to design, train, and dissect state-of-the-art neural networks. This library bridges the gap between groundbreaking research papers and practical implementation, providing faithful and efficient components that are ready for experimentation and production deployment.
 
-From novel attention mechanisms and orthonormal layers to information-theoretic loss functions and advanced model analysis tools, `dl_techniques` is your companion for pushing the boundaries of deep learning research and enterprise applications.
+From cutting-edge attention mechanisms and graph neural networks to information-theoretic loss functions and comprehensive model analysis tools, `dl_techniques` is your companion for pushing the boundaries of deep learning research and enterprise applications.
 
 ---
 
@@ -38,60 +38,150 @@ From novel attention mechanisms and orthonormal layers to information-theoretic 
 
 ## Key Features
 
-This library is a comprehensive suite of tools organized into four key pillars, developed through rigorous research and validated in real-world enterprise applications:
+This library is a comprehensive suite of tools organized into five key pillars, developed through rigorous research and validated in real-world enterprise applications:
 
 <details>
-<summary><b>1. An Arsenal of SOTA Layers & Architectures (170+ Layers)</b></summary>
+<summary><b>1. Cutting-Edge Architectures & Models (25+ Complete Models)</b></summary>
 
--   **Modern Attention Mechanisms**: A rich collection of advanced attention layers, including `DifferentialMultiHeadAttention`, `HopfieldAttention`, `GroupQueryAttention`, and `NonLocalAttention`, along with essentials like `RotaryPositionEmbedding` (RoPE).
--   **Advanced Convolutional Blocks**: State-of-the-art convolutional blocks like `ConvNeXtV1` & `V2`, the `Convolutional Block Attention Module` (CBAM), and our novel `OrthoBlock`, which combines orthonormal weights with mean-centering.
--   **Cutting-edge Layer Implementations**: Faithful and efficient implementations of recent breakthroughs like `BitLinear` layers, `Kolmogorov-Arnold Networks` (KAN), and `Capsule Networks` (CapsNet).
--   **Specialized MLP & FFN Variants**: Explore beyond the standard MLP with performance-oriented designs including `GatedMLP` (gMLP), `SwiGLU-FFN`, `DifferentialFFN`, and `PowerMLP`.
--   **Full Model Implementations**: Ready-to-use implementations of `Depth Anything`, `MobileNetV4`, `ConvNeXt`, `CoshNet`, `CapsNet`, and a modern `CLIP` model for vision-language tasks.
+**🤖 Modern Language Models:**
+- **State Space Models**: Complete `Mamba` implementation with efficient sequence modeling
+- **Modern BERT Variants**: `ModernBERT` with BLT (Block-wise Learning) and Hierarchical Reasoning integration
+- **Gemma 3**: Faithful `Gemma3-270M` implementation with dual normalization patterns
+- **Text Generation**: Advanced `TextDecoder` models with configurable architectures
+
+**🖼️ Vision & Multimodal Models:**
+- **Vision-Language Models**: `FastVLM`, `NanoVLM`, and comprehensive `CLIP` implementations
+- **Advanced Vision Transformers**: `DinoV3`, `ViT-HMLP`, `SigLIP-ViT`, and specialized encoders
+- **State-of-the-Art CNNs**: `ConvNeXtV1/V2`, `MobileNetV4`, `FractalNet`, and `CoShNet`
+- **Specialized Vision**: `DepthAnything` for monocular depth estimation, `VAE` for generative modeling
+
+**📈 Time Series & Forecasting:**
+- **TiRex**: Advanced time series forecasting with quantile prediction and mixed sequential processing
+- **N-BEATS**: Enhanced implementation with modern optimizations
+- **Specialized Components**: Adaptive lag attention, residual autocorrelation analysis
+
+**🧠 Experimental Architectures:**
+- **Graph Neural Networks**: Complete GNN implementations with multiple message-passing variants
+- **Capsule Networks**: Full `CapsNet` with dynamic routing
+- **Holographic Networks**: `HolographicMPS` with entropy-guided architecture
 </details>
 
 <details>
-<summary><b>2. Advanced Normalization & Regularization</b></summary>
+<summary><b>2. Advanced Layer Components (200+ Specialized Layers)</b></summary>
 
--   **Next-Generation Normalization**: Go beyond BatchNorm with a wide range of `RMSNorm` variants (including our novel `BandRMS` and `BandLogitNorm`), `GlobalResponseNorm` (GRN), and `LogitNorm` for stable and efficient training.
--   **Principled Orthogonal Constraints**: Improve model stability and gradient flow with `SoftOrthogonal` and `SRIP` regularizers, alongside `OrthonormalInitializer` variants that maintain critical weight matrix properties.
--   **Novel Regularizers**: Experiment with `BinaryPreference` and `TriStatePreference` regularizers that encourage weights to adopt quantized states, ideal for model compression and interpretability studies.
--   **Robust Stochastic Techniques**: A battle-tested `StochasticDepth` (DropPath) implementation for training deep networks, creating an implicit ensemble of models to prevent overfitting.
+**🔥 Next-Generation Attention:**
+- **Differential Attention**: `DifferentialMultiHeadAttention` from recent transformer advances
+- **Hopfield Networks**: Modern `HopfieldAttention` with iterative updates
+- **Specialized Variants**: `GroupQueryAttention`, `MobileMQA`, `NonLocalAttention`, `PerceiverAttention`
+- **Efficient Alternatives**: `FNetFourierTransform` for parameter-free mixing
+
+**🏭 Factory Patterns for Consistency:**
+- **Attention Factory**: Unified creation and validation of attention mechanisms
+- **Normalization Factory**: Consistent access to 15+ normalization variants
+- **FFN Factory**: Streamlined feed-forward network component management
+
+**🌐 Graph & Structural Components:**
+- **Graph Neural Networks**: Configurable GNN layers with multiple aggregation strategies
+- **Relational Graph Transformers**: `RELGT` blocks for complex relational reasoning
+- **Entity-Graph Refinement**: Hierarchical relationship learning in embedding space
+
+**🔢 Mixture of Experts (MoE):**
+- **Complete MoE System**: Configurable expert networks with multiple gating strategies
+- **Expert Types**: FFN experts, cosine gating, SoftMoE implementations
+- **Training Integration**: Specialized optimizers and auxiliary loss computation
+
+**📊 Statistics & Analysis Layers:**
+- **Mixture Density Networks**: `MDNLayer` for probabilistic predictions
+- **Normalizing Flows**: Conditional density estimation with affine coupling
+- **Time Series Analysis**: Residual ACF layers, moving statistics, quantile heads
 </details>
 
 <details>
-<summary><b>3. Specialized Loss Functions & Optimization</b></summary>
+<summary><b>3. Comprehensive Analysis & Introspection Toolkit</b></summary>
 
--   **Direct Metric Optimization**: The `AnyLoss` framework, which transforms any confusion-matrix-based classification metric (like F1-score or Balanced Accuracy) into a directly optimizable, differentiable loss function.
--   **Information-Theoretic Losses**: Mitigate Goodhart's Law and metric gaming with `GoodhartAwareLoss`, a novel loss that penalizes spurious correlations by regularizing entropy and mutual information.
--   **Task-Specific Losses**: Custom losses for `Clustering`, `Segmentation`, and contrastive learning (`CLIPContrastiveLoss`).
--   **Advanced Optimization Tools**: `WarmupSchedule` for fine-grained learning rate control and utilities for implementing `DeepSupervision` in complex, multi-scale architectures.
+**🔬 Multi-Dimensional Model Analysis:**
+- **Unified ModelAnalyzer**: Compare multiple models across 6 key dimensions simultaneously
+- **Training Dynamics**: Convergence analysis, overfitting detection, learning curve insights
+- **Weight Health Analysis**: SVD-based generalization metrics, weight distribution studies
+- **Calibration Assessment**: ECE, Brier score, reliability diagrams with confidence analysis
+
+**📈 Advanced Visualization Suite:**
+- **Publication-Ready Plots**: Automated generation of research-quality visualizations
+- **Interactive Dashboards**: Summary dashboards with pareto analysis for model selection
+- **Information Flow Tracking**: Layer-by-layer activation and gradient flow analysis
+- **Comparative Analysis**: Side-by-side model comparison with statistical significance testing
+
+**🎯 Specialized Analyzers:**
+- **Calibration Analyzer**: Deep dive into prediction confidence and reliability
+- **Information Flow Analyzer**: Effective rank analysis and activation health metrics
+- **Weight Analyzer**: Comprehensive weight statistics and distribution analysis
+- **Training Dynamics Analyzer**: Learning efficiency and convergence pattern analysis
 </details>
 
 <details>
-<summary><b>4. Deep Model Introspection & Analysis</b></summary>
+<summary><b>4. Advanced Loss Functions & Optimization (25+ Specialized Losses)</b></summary>
 
--   **Comprehensive Model Analyzer**: A unified `ModelAnalyzer` toolkit for comparing multiple models across performance, weight health, calibration quality, information flow, and training dynamics with publication-ready visualizations and automated insights.
--   **Weight & Activation Analysis**: Integrated `WeightWatcher` for SVD-based generalization analysis and detailed layer-by-layer inspection of statistics, sparsity, and effective rank.
--   **Advanced Calibration Tools**: Built-in functions to compute and visualize `Expected Calibration Error (ECE)`, `Brier Score`, and reliability diagrams to ensure your model's confidence scores are trustworthy.
--   **Robust Logging & Visualization**: A `VisualizationManager` and structured logging to consistently monitor training pipelines and generate publication-quality plots for analysis and reporting.
+**🎯 Direct Metric Optimization:**
+- **AnyLoss Framework**: Transform any confusion-matrix-based metric into differentiable loss
+- **Specialized Implementations**: `F1Loss`, `BalancedAccuracyLoss`, `GeometricMeanLoss`
+
+**🛡️ Information-Theoretic & Robust Losses:**
+- **GoodhartAwareLoss**: Combat spurious correlations with entropy regularization
+- **Calibration Losses**: `BrierScoreLoss`, `SpiegelhalterZLoss` for trustworthy predictions
+- **Uncertainty-Aware**: `FocalUncertaintyLoss` combining focal loss with uncertainty quantification
+
+**🔄 Task-Specific Loss Functions:**
+- **Vision-Language**: `CLIPContrastiveLoss`, `SigLIPContrastiveLoss`, `NanoVLMLoss`
+- **Segmentation**: Comprehensive segmentation loss suite with Dice, Focal, Tversky variants
+- **Time Series**: `MASELoss`, `SMAPELoss`, `MQLoss` for forecasting applications
+- **Generative**: `WassersteinLoss` with gradient penalty for GAN training
+
+**⚙️ Advanced Optimization Tools:**
+- **Smart Scheduling**: `WarmupSchedule` with configurable warmup strategies
+- **DeepSupervision**: Multi-scale architecture training utilities
+- **Regularization Suite**: `SoftOrthogonal`, `SRIP`, entropy-based regularizers
+</details>
+
+<details>
+<summary><b>5. Production-Ready Training Infrastructure</b></summary>
+
+**🏋️ Complete Training Pipelines:**
+- **25+ Model Training Scripts**: Ready-to-use training pipelines for all major architectures
+- **Standardized Workflows**: Consistent training, validation, and testing procedures
+- **Hyperparameter Management**: Integrated configuration and experiment tracking
+
+**🔧 Utilities & Tools:**
+- **Data Handling**: Advanced data loaders, augmentation pipelines, normalization utilities
+- **Visualization Manager**: Structured logging and plot generation system
+- **Model Serialization**: Enhanced save/load utilities with custom object support
+
+**📊 Comprehensive Testing:**
+- **600+ Unit Tests**: Extensive test coverage ensuring reliability
+- **Integration Tests**: End-to-end validation of training pipelines
+- **Performance Benchmarks**: Validation against reference implementations
 </details>
 
 ---
 
 ## Why `dl_techniques`?
 
-*   **Curated, Not Cluttered**: This isn't an unorganized collection of every paper implementation. Each component is selected for its significance, novelty, or potential for research and enterprise deployment.
-*   **Built for Research & Production**: The library is designed to make it easy to swap components, test new ideas, and analyze the results with powerful, built-in tools. Components have been validated in enterprise environments through Electi Consulting's AI implementations.
-*   **More Than Code**: We provide in-depth documentation in the `docs/` directory that explains the *why* behind the *what*. This includes deep dives into attention mechanisms, custom architectures, and the theory behind our novel loss functions.
-*   **Reliable and Tested**: With an extensive test suite and real-world validation, you can trust that these advanced components are implemented correctly and robustly for both research and production use.
-*   **Deep Introspection**: We believe that understanding *why* a model works is as important as its accuracy. Our integrated analysis tools are a first-class feature of the library, informed by practical experience in enterprise AI deployments.
+*   **Research-Driven Excellence**: Each component is selected for its significance, novelty, and potential impact, not just popularity. Components are implemented based on thorough understanding of the underlying research.
+
+*   **Enterprise-Validated**: All components have been tested and validated in real-world enterprise environments through Electi Consulting's AI implementations across finance, maritime, and healthcare industries.
+
+*   **Factory Pattern Architecture**: Innovative factory systems ensure consistency, reduce boilerplate, and make component swapping effortless for experimentation.
+
+*   **Deep Introspection First-Class**: Understanding *why* a model works is as important as its accuracy. Our integrated analysis tools provide unprecedented insights into model behavior.
+
+*   **Modern Keras 3 Design**: Built from the ground up for Keras 3 with proper type hints, Sphinx documentation, and modern Python practices.
+
+*   **Extensible by Design**: Modular architecture allows easy integration of new components while maintaining backward compatibility.
 
 ---
 
 ## Installation
 
-> **Note:** This library is built on Python 3.11+ and Keras 3.
+> **Note:** This library requires Python 3.11+ and Keras 3.8.0 with TensorFlow 2.18.0 backend.
 
 1.  **Clone the repository:**
     ```bash
@@ -100,227 +190,355 @@ This library is a comprehensive suite of tools organized into four key pillars, 
     ```
 
 2.  **Install dependencies:**
-    For standard usage, install the library and its dependencies directly. This will use `pyproject.toml` to handle the installation.
+    For standard usage, install the library and its dependencies directly:
     ```bash
     pip install .
     ```
 
 3.  **Editable Install (for developers):**
-    If you plan to contribute or modify the code, an editable install is recommended. This allows your changes to be reflected immediately without reinstalling.
+    If you plan to contribute or modify the code:
     ```bash
     pip install -e ".[dev]"
     ```
-    This command also installs development tools like `pytest` and `pylint`.
+    This installs development tools like `pytest`, `pylint`, and `black`.
+
+4.  **Verify Installation:**
+    ```bash
+    python -c "import dl_techniques; print('Installation successful!')"
+    ```
 
 ---
 
 ## Quick Start
 
-### 1. Build a Model with Custom Layers
+### 1. Build a Modern Architecture with Factory Patterns
 
-Here's how to integrate advanced components like our novel `OrthoBlock` and `GlobalResponseNorm` into a simple model:
+Use the new factory systems to easily create and swap components:
 
 ```python
-import tensorflow as tf
-from dl_techniques.layers.experimental import OrthoBlock
-from dl_techniques.layers.norms import GlobalResponseNormalization
+import keras
+from dl_techniques.layers.attention.factory import create_attention_layer
+from dl_techniques.layers.norms.factory import create_normalization_layer
+from dl_techniques.layers.ffn.factory import create_ffn_layer
 
-inputs = tf.keras.Input(shape=(64,))
-x = OrthoBlock(units=128, activation='gelu')(inputs)
-x = GlobalResponseNormalization()(x)
-outputs = tf.keras.layers.Dense(10, activation='softmax')(x)
+inputs = keras.Input(shape=(1024, 512))
 
-model = tf.keras.Model(inputs, outputs)
-model.compile(optimizer='adam', loss='categorical_crossentropy')
+# Use factories for consistent component creation
+attention = create_attention_layer(
+    'differential_mha', 
+    dim=512, 
+    num_heads=8, 
+    head_dim=64
+)
+norm = create_normalization_layer('rms_norm', epsilon=1e-6)
+ffn = create_ffn_layer('swiglu_ffn', hidden_dim=2048)
+
+# Build a modern transformer block
+x = attention(inputs)
+x = norm(x)
+x = ffn(x)
+
+model = keras.Model(inputs, x)
 model.summary()
 ```
 
-### 2. Optimize Directly for F1-Score
+### 2. Advanced Time Series Forecasting with TiRex
 
-The `AnyLoss` framework lets you directly optimize for metrics like F1-score, which is especially useful for imbalanced datasets.
+Create a state-of-the-art time series model with quantile predictions:
 
 ```python
-from dl_techniques.losses.any_loss import F1Loss
+from dl_techniques.models.tirex import create_tirex_model
 
-# ... model definition ...
+# Create a TiRex model for multivariate forecasting
+model = create_tirex_model(
+    input_shape=(100, 10),  # 100 timesteps, 10 features
+    forecast_horizon=24,
+    quantiles=[0.1, 0.5, 0.9],  # Probabilistic forecasting
+    variant='base'
+)
 
+# The model supports quantile loss and uncertainty estimation
 model.compile(
-    optimizer='adam',
-    loss=F1Loss(),  # Directly optimize for F1-score instead of a proxy like cross-entropy
-    metrics=['accuracy', 'precision', 'recall']
+    optimizer='adamw',
+    loss='quantile_loss',
+    metrics=['mae', 'mse']
 )
 ```
 
-### 3. Use a Pre-built SOTA Model
+### 3. Vision-Language Modeling with FastVLM
 
-Instantiate a complete, state-of-the-art model like `ConvNeXtV1` with just a few lines of code.
+Build a complete vision-language model:
 
 ```python
-from dl_techniques.models import create_convnext_v1
+from dl_techniques.models.fastvlm import FastVLM
 
-# Create the ConvNeXtV1 "Tiny" model for ImageNet
-model = create_convnext_v1(
-    variant='tiny',
-    num_classes=1000,
-    input_shape=(224, 224, 3)
+# Create a fast vision-language model
+vlm = FastVLM.from_variant(
+    'base',
+    vocab_size=32000,
+    max_length=512,
+    image_size=224
 )
 
-model.summary()
+# Supports both image and text inputs
+image_input = keras.Input(shape=(224, 224, 3))
+text_input = keras.Input(shape=(512,))
+
+outputs = vlm([image_input, text_input])
+model = keras.Model([image_input, text_input], outputs)
 ```
 
-### 4. Analyze and Compare Models
+### 4. Comprehensive Model Analysis
 
-Get deep insights into your models with comprehensive analysis covering training dynamics, calibration, and weight health:
+Get deep insights with our advanced analysis toolkit:
 
 ```python
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 
-# Compare multiple models and their training histories
-models = {'ResNet': resnet_model, 'ConvNext': convnext_model}
-histories = {'ResNet': resnet_history, 'ConvNext': convnext_history}
-config = AnalysisConfig(analyze_training_dynamics=True, analyze_calibration=True)
-test_data = DataInput(x_test, y_test)
+# Compare multiple models comprehensively  
+models = {'TiRex': tirex_model, 'LSTM': lstm_model, 'Transformer': transformer_model}
+histories = {'TiRex': tirex_history, 'LSTM': lstm_history, 'Transformer': transformer_history}
 
-# Initialize the analyzer
+# Configure comprehensive analysis
+config = AnalysisConfig(
+    analyze_training_dynamics=True,
+    analyze_calibration=True, 
+    analyze_weight_health=True,
+    analyze_information_flow=True,
+    save_plots=True,
+    plot_style='publication'
+)
+
+test_data = DataInput(x_test, y_test)
 analyzer = ModelAnalyzer(models, config=config, training_history=histories)
 
-# Run all configured analyses
+# Run complete analysis with publication-ready visualizations
 results = analyzer.analyze(test_data)
 
-# This generates a full suite of publication-ready visualizations and detailed insights.
+# Access detailed insights
+print(f"Best calibrated model: {min(results.calibration_metrics.items(), key=lambda x: x[1]['ece'])}")
+print(f"Training efficiency ranking: {results.training_metrics.convergence_epochs}")
+```
+
+### 5. Direct F1-Score Optimization
+
+Use the AnyLoss framework to optimize directly for your target metric:
+
+```python
+from dl_techniques.losses.any_loss import F1Loss, BalancedAccuracyLoss
+
+# For imbalanced datasets, optimize F1-score directly
+model.compile(
+    optimizer='adamw',
+    loss=F1Loss(from_logits=True),  # Direct F1 optimization
+    metrics=['accuracy', 'precision', 'recall']
+)
+
+# Or use balanced accuracy for better class balance
+model.compile(
+    optimizer='adamw',
+    loss=BalancedAccuracyLoss(from_logits=True),
+    metrics=['accuracy', 'f1_score']
+)
+```
+
+### 6. Graph Neural Networks for Relational Data
+
+Work with graph-structured data using our GNN implementations:
+
+```python
+from dl_techniques.layers.graphs import GraphNeuralNetworkLayer
+
+# Create a configurable GNN layer
+gnn = GraphNeuralNetworkLayer(
+    concept_dim=256,
+    num_layers=3,
+    message_passing='gat',  # Graph Attention Networks
+    aggregation='attention',
+    dropout_rate=0.1
+)
+
+# Use with graph-structured inputs
+node_features = keras.Input(shape=(None, 256))  # Variable number of nodes
+adjacency_matrix = keras.Input(shape=(None, None))
+
+node_embeddings = gnn([node_features, adjacency_matrix])
 ```
 
 ---
 
 ## In-Depth Documentation
 
-This library is a knowledge base as much as it is a codebase. Detailed explanations of key concepts, implementations, and experiments can be found in the `docs/` and `experiments/` directories.
+This library serves as both a practical toolkit and a knowledge repository. Comprehensive documentation covers both implementation details and theoretical foundations:
 
-### Documentation Highlights
+### Core Documentation
 
--   **[The Complete Transformer Guide (2025)](./docs/2025_attention.md)**: A meticulous, production-focused guide to implementing SOTA Transformer architectures with every detail that matters.
--   **[AnyLoss Framework](./docs/anyloss_classification_metrics_loss_functions.md)**: A deep dive into directly optimizing classification metrics like F1-score.
--   **[Chronological Guide to Neural Architectures](./docs/neural_network_architectures.md)**: An extensive, chronological list of influential neural network architectures with key references.
--   **[Band-Constrained Normalization](./docs/bcn_thesis.md)**: A thesis on a novel normalization technique that preserves magnitude information within a bounded shell.
--   **[OrthoBlock & Orthonormal Regularization](./docs/orthoblock.md)**: A novel block combining orthonormal weights with mean-centering normalization.
--   **[Mixture Density Networks (MDNs)](./docs/mdn.md)**: Theory, use cases, and best practices for probabilistic modeling.
+-   **[Complete Transformer Guide (2025)](./docs/2025_attention.md)**: Production-focused guide to implementing SOTA Transformer architectures with every critical detail
+-   **[Model Analyzer Guide](./docs/analyzer/model_analyzer_guide.md)**: Comprehensive tutorial for the advanced model analysis toolkit
+-   **[AnyLoss Framework](./docs/anyloss_classification_metrics_loss_functions.md)**: Deep dive into direct metric optimization
+-   **[Factory Pattern Usage](./docs/factories/normalization_factory_guide.md)**: How to leverage factory patterns for consistent component creation
 
-### Experiments
+### Architecture & Implementation Guides
 
-The [`experiments/`](./src/experiments/) directory contains practical scripts and results for various techniques, providing a starting point for your own research:
+-   **[Chronological Neural Architectures](./docs/neural_network_architectures.md)**: Extensive chronological guide to influential architectures with implementation notes  
+-   **[Band-Constrained Normalization](./docs/bcn_thesis.md)**: Novel normalization preserving magnitude information within bounded constraints
+-   **[OrthoBlock & Orthonormal Regularization](./docs/orthoblock.md)**: Structured feature learning with orthogonal constraints
+-   **[Mixture Density Networks](./docs/mdn.md)**: Theory and best practices for probabilistic modeling
 
--   **Goodhart's Law**: Testing `GoodhartAwareLoss` on spurious correlations in CIFAR-10.
--   **OrthoBlock**: Comparing `OrthoBlock` against baseline dense layers on CIFAR-10.
--   **Differential FFN**: Evaluating the `DifferentialFFN` layer on synthetic data.
--   **Mixture Density Networks**: Forecasting time series data with `MDN`s.
+### Specialized Topics
+
+-   **[Graph Neural Networks](./docs/graphs/gnn_guide.md)**: Implementation guide for relational data modeling
+-   **[Time Series Forecasting](./docs/time_series/forecasting_guide.md)**: Advanced techniques for temporal data
+-   **[Vision-Language Models](./docs/multimodal/vlm_guide.md)**: Building and training multimodal systems
+
+### Experimental Results
+
+The [`experiments/`](./src/experiments/) directory contains validation studies and research results:
+
+-   **Goodhart's Law Mitigation**: Testing `GoodhartAwareLoss` on spurious correlation datasets
+-   **OrthoBlock Validation**: Comparative studies against baseline architectures  
+-   **TiRex Forecasting**: Time series prediction benchmarks across multiple domains
+-   **Model Analysis Case Studies**: Real-world applications of the analysis toolkit
 
 ---
 
 ## Project Structure
 
-The repository is organized to separate the core library code, documentation, experiments, and tests.
+The repository is organized for clarity and maintainability:
 
--   **`src/dl_techniques/`**: The main library source code.
-    -   `layers/`: All custom layers, including attention, normalization, and specialized blocks.
-    -   `losses/`: Custom loss functions like `AnyLoss` and `GoodhartAwareLoss`.
-    -   `regularizers/`: Advanced regularizers like `SRIP` and `SoftOrthogonal`.
-    -   `models/`: Full implementations of architectures like `ConvNeXt`, `Depth Anything`, etc.
-    -   `utils/`: Core utilities for training, visualization, and data handling.
-    -   `weightwatcher/`: Tools for deep model analysis, including SVD-based metrics.
-    -   `analyzer/`: Comprehensive model analysis and comparison toolkit.
--   **`docs/`**: In-depth documentation, theoretical guides, and papers.
--   **`experiments/`**: Standalone scripts demonstrating library components on real tasks.
--   **`tests/`**: A comprehensive test suite using `pytest` to ensure reliability and correctness.
+```
+src/dl_techniques/
+├── layers/                 # 200+ specialized layer implementations
+│   ├── attention/         # Modern attention mechanisms with factory
+│   ├── norms/             # Advanced normalization with factory  
+│   ├── ffn/               # Feed-forward networks with factory
+│   ├── graphs/            # Graph neural network components
+│   ├── moe/               # Mixture of Experts implementation
+│   ├── time_series/       # Temporal modeling layers
+│   ├── statistics/        # Statistical and probabilistic layers
+│   └── experimental/      # Research-stage implementations
+├── models/                # 25+ complete architecture implementations
+│   ├── tirex/            # Advanced time series forecasting
+│   ├── fastvlm/          # Fast vision-language models  
+│   ├── gemma3/           # Gemma 3 language model
+│   ├── modern_bert/      # Modern BERT variants
+│   └── mamba/            # State space models
+├── losses/               # 25+ specialized loss functions
+├── analyzer/             # Comprehensive model analysis toolkit
+│   ├── analyzers/        # Individual analysis components
+│   └── visualizers/      # Publication-ready visualization
+├── utils/                # Core utilities and training infrastructure
+└── weightwatcher/        # Deep model introspection tools
+
+docs/                     # Comprehensive documentation
+experiments/              # Validation studies and research
+tests/                    # 600+ unit and integration tests
+training_pipelines/       # Ready-to-use training scripts
+```
 
 ---
 
 ## Contributing
 
-Contributions are highly welcome! If you'd like to add a new technique, improve documentation, or fix a bug, please follow these steps:
+We welcome contributions from the research community! Whether you're implementing a new technique, improving documentation, or fixing bugs:
 
-1.  **Fork** & **Clone** the repository.
-2.  **Create a Branch** for your feature or bugfix.
-3.  **Write Tests** covering your changes in the `tests/` folder.
-4.  **Run Checks**: This project uses `pre-commit` for code formatting (`black`, `isort`) and `pytest` for testing. Ensure all checks pass.
-5.  **Open a Pull Request** with a clear description of your changes and their significance.
+### Getting Started
+1.  **Fork & Clone** the repository
+2.  **Set up development environment**: `pip install -e ".[dev]"`
+3.  **Create a branch** for your feature: `git checkout -b feature/new-technique`
+4.  **Follow our standards**: Use type hints, write tests, document thoroughly
 
-**Coding Standards**:
--   Follow [PEP 8](https://peps.python.org/pep-0008/).
--   Use **type hints** for all functions and methods.
--   Write clear, concise docstrings for new layers, models, or utilities.
+### Development Standards
+-   **Code Quality**: Follow PEP 8, use `black` formatting, `isort` imports
+-   **Testing**: Write comprehensive tests with `pytest`, aim for >90% coverage
+-   **Documentation**: Sphinx-compliant docstrings, update relevant guides
+-   **Validation**: Include benchmarks or comparisons with reference implementations
+
+### Contribution Types
+-   **New Architectures**: Recent papers with solid theoretical foundations
+-   **Performance Improvements**: Optimizations maintaining numerical accuracy  
+-   **Analysis Tools**: New analyzers or visualizations for model understanding
+-   **Documentation**: Tutorials, guides, or improved API documentation
 
 ---
 
 ## License
 
-This project is licensed under the **GNU General Public License v3.0**.
+This project is licensed under **GNU General Public License v3.0**.
 
-**Important**: The GPL-3.0 is a "copyleft" license. This means that any derivative work you create and distribute that uses code from this library must also be licensed under GPL-3.0. Please review the [LICENSE](./LICENSE) file carefully before using this library in your projects, especially in a commercial context.
+**Important Considerations:**
+- **Copyleft License**: Derivative works must also use GPL-3.0
+- **Enterprise Use**: Contact us for commercial licensing options
+- **Research Use**: Fully open for academic and research applications
+
+See [LICENSE](./LICENSE) for complete details.
 
 ---
 
 ## Acknowledgments
 
-This project is proudly sponsored by **[Electi Consulting](https://electiconsulting.com)**, a leading AI and technology consultancy specializing in artificial intelligence, blockchain, and cryptography solutions for enterprise clients. The practical insights and enterprise validation of these techniques have been made possible through Electi's extensive experience in deploying AI solutions across various industries including finance, maritime, and healthcare.
+**Proudly sponsored by [Electi Consulting](https://electiconsulting.com)** - a premier AI consultancy specializing in enterprise artificial intelligence, blockchain technology, and cryptographic solutions. The practical validation and enterprise-ready nature of these components has been made possible through Electi's extensive experience deploying AI solutions across:
 
-Special thanks to the open-source community and the researchers whose groundbreaking work forms the foundation of this library.
+- **Financial Services**: High-frequency trading, risk assessment, fraud detection
+- **Maritime Industry**: Route optimization, predictive maintenance, cargo management  
+- **Healthcare**: Diagnostic assistance, treatment optimization, clinical decision support
+- **Manufacturing**: Predictive maintenance, quality control, supply chain optimization
+
+Special recognition to the open-source community and researchers whose groundbreaking work forms the foundation of this library.
 
 ---
 
 ## Citations & References
 
-This library is built upon an extensive body of research. The implementations are inspired by or directly based on numerous academic papers. The following is a categorized, but not exhaustive, list of key references that have shaped this work.
+This library builds upon extensive academic research. Our implementations are based on rigorous study of the source papers:
 
 <details>
-<summary><b>Foundational Architectures</b></summary>
+<summary><b>Core Architectures & Transformers</b></summary>
 
--   **Attention Is All You Need** (Transformers): Vaswani, A., et al. (2017).
--   **Deep Residual Learning for Image Recognition** (ResNet): He, K., et al. (2016).
--   **A ConvNet for the 2020s** (ConvNeXt): Liu, Z., et al. (2022).
--   **An Image is Worth 16x16 Words** (ViT): Dosovitskiy, A., et al. (2020).
--   **Dynamic Routing Between Capsules** (CapsNet): Sabour, S., Frosst, N., & Hinton, G. E. (2017).
+-   **Attention Is All You Need** (Transformers): Vaswani, A., et al. (2017)
+-   **DIFFERENTIAL TRANSFORMER**: Zhu, J., et al. (2025) 
+-   **Mamba: Linear-Time Sequence Modeling**: Gu, A., & Dao, T. (2023)
+-   **Modern Hopfield Networks**: Ramsauer, H., et al. (2020)
+-   **Gemma: Open Weights and Strong Performance**: Team, G., et al. (2024)
 </details>
 
 <details>
-<summary><b>Attention & Transformer Variants</b></summary>
+<summary><b>Vision & Multimodal Models</b></summary>
 
--   **DIFFERENTIAL TRANSFORMER**: Zhu, J., et al. (2025).
--   **Hopfield Networks is All You Need**: Ramsauer, H., et al. (2020).
--   **GQA: Training Generalized Multi-Query Transformer Models**: Ainslie, J., et al. (2023).
--   **RoFormer: Enhanced Transformer with Rotary Position Embedding**: Su, J., et al. (2021).
--   **GLU Variants Improve Transformer**: Shazeer, N. (2020).
+-   **A ConvNet for the 2020s** (ConvNeXt): Liu, Z., et al. (2022)
+-   **DinoV2: Learning Robust Visual Representations**: Oquab, M., et al. (2023)
+-   **Sigmoid Loss for Language Image Pre-Training** (SigLIP): Zhai, X., et al. (2023)
+-   **CLIP: Connecting Text and Images**: Radford, A., et al. (2021)
 </details>
 
 <details>
-<summary><b>Normalization & Regularization</b></summary>
+<summary><b>Graph Neural Networks & Advanced Architectures</b></summary>
 
--   **Root Mean Square Layer Normalization**: Zhang, B., & Sennrich, R. (2019).
--   **Can We Gain More from Orthogonality Regularizations in Training Deep CNNs?**: Bansal, N., et al. (2018).
--   **Decoupled Weight Decay Regularization** (AdamW): Loshchilov, I., & Hutter, F. (2019).
--   **Deep Networks with Stochastic Depth**: Huang, G., et al. (2016).
+-   **Graph Neural Networks: A Review**: Wu, Z., et al. (2020)
+-   **Graph Attention Networks**: Veličković, P., et al. (2018)
+-   **Dynamic Routing Between Capsules**: Sabour, S., et al. (2017)
+-   **Mixture of Experts**: Shazeer, N., et al. (2017)
 </details>
 
 <details>
-<summary><b>Specialized & Modern Layers</b></summary>
+<summary><b>Time Series & Forecasting</b></summary>
 
--   **KAN: Kolmogorov-Arnold Networks**: Liu, Y., et al. (2024).
--   **The Era of 1-bit LLMs** (BitLinear): Ma, S., et al. (2024).
--   **Pay Attention to MLPs** (gMLP): Liu, H., et al. (2021).
--   **PowerMLP: An Efficient Version of KAN**: Chen, Z., et al. (2024).
+-   **N-BEATS: Neural basis expansion**: Oreshkin, B. N., et al. (2019)
+-   **Temporal Fusion Transformers**: Lim, B., et al. (2021)
+-   **DeepAR: Probabilistic forecasting**: Salinas, D., et al. (2020)
 </details>
 
 <details>
 <summary><b>Loss Functions & Optimization</b></summary>
 
--   **AnyLoss: Transforming Classification Metrics into Loss Functions**: Han, D., Moniz, N., & Chawla, N. V. (2024).
--   **Mitigating Neural Network Overconfidence with Logit Normalization**: Wei, H., et al. (2022).
--   **Regularizing by Penalizing Confident Outputs**: Pereyra, G., et al. (2017).
+-   **AnyLoss: Transforming Classification Metrics**: Han, D., et al. (2024)
+-   **Focal Loss for Dense Object Detection**: Lin, T. Y., et al. (2017)
+-   **Calibration of Probabilities**: Platt, J. (1999)
+-   **Wasserstein GAN**: Arjovsky, M., et al. (2017)
 </details>
 
-<details>
-<summary><b>Generative & Contrastive Learning</b></summary>
+*Complete bibliographic information available in individual module documentation.*
 
--   **Learning Transferable Visual Models From Natural Language Supervision** (CLIP): Radford, A., et al. (2021).
--   **Mixture Density Networks**: Bishop, C. M. (1994).
--   **Denoising Diffusion Probabilistic Models**: Ho, J., Jain, A., & Abbeel, P. (2020).
-</details>
+---
+
+*Built with ❤️ for the deep learning research community*
