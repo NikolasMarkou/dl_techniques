@@ -265,7 +265,7 @@ class MixedSequentialBlock(keras.layers.Layer):
             # Map attention type to required parameters
             if self.attention_type == 'multi_head':
                 attention_kwargs.update({
-                    'embed_dim': self.embed_dim,
+                    'dim': self.embed_dim,
                     'num_heads': self.num_heads,
                     'dropout_rate': self.dropout_rate
                 })
@@ -274,19 +274,19 @@ class MixedSequentialBlock(keras.layers.Layer):
                     'dim': self.embed_dim,
                     'num_heads': self.num_heads,
                     'head_dim': self.embed_dim // self.num_heads,
-                    'dropout': self.dropout_rate
+                    'dropout_rate': self.dropout_rate
                 })
             elif self.attention_type in ['anchor', 'perceiver']:
                 attention_kwargs.update({
                     'dim': self.embed_dim,
                     'num_heads': self.num_heads,
-                    'dropout': self.dropout_rate
+                    'dropout_rate': self.dropout_rate
                 })
             elif self.attention_type == 'adaptive_multi_head':
                 attention_kwargs.update({
                     'num_heads': self.num_heads,
                     'key_dim': self.embed_dim // self.num_heads,
-                    'dropout': self.dropout_rate
+                    'dropout_rate': self.dropout_rate
                 })
             else:
                 # Default parameters for other attention types

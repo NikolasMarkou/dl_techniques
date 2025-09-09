@@ -19,9 +19,8 @@ from typing import Optional, Dict, Any, List, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.transformer import TransformerLayer
-from dl_techniques.layers.moe.config import MoEConfig, ExpertConfig, GatingConfig
 from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.layers.embedding import create_embedding_layer
+from dl_techniques.layers.moe.config import MoEConfig, ExpertConfig, GatingConfig
 
 # ---------------------------------------------------------------------
 
@@ -256,9 +255,9 @@ class Qwen3Model(keras.Model):
 
             # Create attention arguments for GroupedQueryAttention
             attention_args = {
-                'd_model': d_model,
-                'n_head': num_heads,
-                'n_kv_head': num_kv_groups,
+                'dim': d_model,
+                'num_heads': num_heads,
+                'num_kv_heads': num_kv_groups,
                 'max_seq_len': context_length,
                 'dropout_rate': dropout_rate,
                 'rope_theta': rope_theta

@@ -589,20 +589,6 @@ class TransformerLayer(keras.layers.Layer):
         """
         residual = inputs
 
-        # Process attention mask for MultiHeadAttention if needed
-        mha_attention_mask = attention_mask
-        if self.attention_type == 'multi_head_attention' and mha_attention_mask is not None:
-            mask_shape = keras.ops.shape(mha_attention_mask)
-            ndim = len(mask_shape)
-
-            if ndim == 2:
-                # Check if it's a padding mask (batch_size, seq_len) or causal mask (seq_len, seq_len)
-                # If batch_size != seq_len, it's definitely a padding mask
-                # If they're equal, assume it's a causal mask (more common in transformers)
-                if mask_shape[0] != mask_shape[1]:
-                    # Padding mask: expand to (batch_size, 1, 1, seq_len)
-                    mha_attention_mask = mha_attention_mask[:, None, None, :]
-
         if self.normalization_position == 'pre':
             # --- Pre-Normalization: Normalize -> SubLayer -> StochasticDepth -> Add ---
 
@@ -610,17 +596,11 @@ class TransformerLayer(keras.layers.Layer):
             x = self.attention_norm(inputs, training=training)
 
             # Apply attention based on type
-            if self.attention_type == 'multi_head_attention':
-                x = self.attention(
-                    x,
-                    attention_mask=mha_attention_mask,
-                    training=training
-                )
-            elif self.attention_type == 'differential_attention':
+            if self.attention_type == 'differential_attention':
                 x = self.attention(x, attention_mask=attention_mask, layer_idx=layer_idx, training=training)
             else:
                 # Assume custom layers handle masks internally if needed
-                x = self.attention(x, training=training)
+                x = self.attention(x, attention_mask=attention_mask, training=training)
 
             # Apply dropout
             x = self.attention_dropout(x, training=training)
@@ -652,20 +632,17 @@ class TransformerLayer(keras.layers.Layer):
 
             # 1. Attention block
             # Apply attention based on type
-            if self.attention_type == 'multi_head_attention':
-                x = self.attention(
-                    inputs,
-                    attention_mask=mha_attention_mask,
-                    training=training
-                )
-            elif self.attention_type == 'differential_attention':
+            if self.attention_type == 'differential_attention':
                 x = self.attention(
                     inputs,
                     attention_mask=attention_mask,
                     layer_idx=layer_idx,
                     training=training)
             else:
-                x = self.attention(inputs, training=training)
+                x = self.attention(
+                    inputs,
+                    attention_mask=attention_mask,
+                    training=training)
 
             # Apply dropout
             x = self.attention_dropout(x, training=training)
