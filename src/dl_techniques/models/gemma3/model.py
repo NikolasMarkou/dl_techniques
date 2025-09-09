@@ -161,9 +161,9 @@ class Gemma3TransformerBlock(keras.layers.Layer):
         # Create attention layer using framework factory
         self.attention = create_attention_layer(
             'group_query',
-            d_model=emb_dim,
-            n_head=num_heads,
-            n_kv_head=num_kv_groups,
+            dim=emb_dim,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_groups,
             max_seq_len=max_context_length,
             dropout_rate=dropout_rate,
             name='attention'
@@ -214,7 +214,7 @@ class Gemma3TransformerBlock(keras.layers.Layer):
 
         # This is correct: attention layer has dropout
         if mask is not None:
-            attn_output = self.attention(x, mask=mask, training=training)
+            attn_output = self.attention(x, attention_mask=mask, training=training)
         else:
             attn_output = self.attention(x, training=training)
 

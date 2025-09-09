@@ -22,9 +22,6 @@ from typing import Dict, Any, List
 
 import keras
 
-from dl_techniques.utils.logger import logger
-
-# Import the refined Gemma3 implementation
 from dl_techniques.models.gemma3.model import (
     Gemma3Model,
     Gemma3TransformerBlock,

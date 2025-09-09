@@ -399,9 +399,9 @@ class TransformerLayer(keras.layers.Layer):
             }
         elif self.attention_type == 'group_query_attention':
             default_params = {
-                'd_model': self.hidden_size,
-                'n_head': self.num_heads,
-                'n_kv_head': self.n_kv_head,
+                'dim': self.hidden_size,
+                'num_heads': self.num_heads,
+                'num_kv_heads': self.n_kv_head,
                 'dropout_rate': self.attention_dropout_rate,
                 'use_bias': self.use_bias,
                 'name': name
@@ -617,7 +617,7 @@ class TransformerLayer(keras.layers.Layer):
                     training=training
                 )
             elif self.attention_type == 'differential_attention':
-                x = self.attention(x, mask=attention_mask, layer_idx=layer_idx, training=training)
+                x = self.attention(x, attention_mask=attention_mask, layer_idx=layer_idx, training=training)
             else:
                 # Assume custom layers handle masks internally if needed
                 x = self.attention(x, training=training)
