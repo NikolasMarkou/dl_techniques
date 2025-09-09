@@ -11,27 +11,31 @@ Key Features:
     - Multi-task result aggregation
     - Memory-efficient processing of large images
     - Progress tracking and visualization
-
-File: src/dl_techniques/utils/datasets/inference_utils.py
 """
 
 import os
-import numpy as np
-import tensorflow as tf
 import keras
-from pathlib import Path
-from typing import Dict, List, Optional, Union, Any, Callable
-from dataclasses import dataclass
-import matplotlib.pyplot as plt
+import numpy as np
 from tqdm import tqdm
+import tensorflow as tf
+from pathlib import Path
+import matplotlib.pyplot as plt
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Union, Any, Callable
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.datasets.patch_transforms import (
     PatchGridGenerator, PatchInfo, PatchPrediction, DetectionResult,
-    ResultAggregator, CoordinateTransformer
+    ResultAggregator
 )
-from dl_techniques.models.yolo12_multitask import YOLOv12MultiTask
+from dl_techniques.models.yolo12.multitask import YOLOv12MultiTask
 
+# ---------------------------------------------------------------------
 
 @dataclass
 class InferenceConfig:

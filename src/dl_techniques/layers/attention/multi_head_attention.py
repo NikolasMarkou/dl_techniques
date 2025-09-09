@@ -7,7 +7,7 @@ with backend-agnostic operations and comprehensive serialization support.
 Key Features:
     - Backend-agnostic implementation using keras.ops
     - Flexible attention masking support (sequence-level, full, per-head)
-    - Proper serialization with get_config/build_from_config methods
+    - Proper serialization with modern Keras 3 patterns
     - Configurable initializers and regularizers
     - Dropout support for attention weights
     - Type-safe implementation with comprehensive documentation
@@ -34,14 +34,15 @@ Example Usage:
     output = attn(input_tensor)
 
     # With sequence-level masking (padding)
-    padding_mask = tf.ones((batch_size, seq_len))
-    padding_mask[:, 100:] = 0  # Mask positions 100 and beyond
+    padding_mask = keras.ops.ones((batch_size, seq_len))
+    padding_mask = keras.ops.slice_update(padding_mask, [0, 100],
+                                          keras.ops.zeros((batch_size, seq_len - 100)))
     output = attn(input_tensor, attention_mask=padding_mask)
 
     # With causal masking
     seq_len = input_tensor.shape[1]
-    causal_mask = tf.linalg.band_part(tf.ones((seq_len, seq_len)), -1, 0)
-    causal_mask = tf.expand_dims(causal_mask, 0)  # Add batch dimension
+    causal_mask = keras.ops.tri(seq_len)
+    causal_mask = keras.ops.expand_dims(causal_mask, 0)  # Add batch dimension
     output = attn(input_tensor, attention_mask=causal_mask)
 
     # In a model context
@@ -52,31 +53,106 @@ Example Usage:
 """
 
 import keras
-from keras import ops
 from typing import Optional, Tuple, Union, Any, Dict
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from .multi_head_cross_attention import MultiHeadCrossAttention
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class MultiHeadAttention(keras.layers.Layer):
-    """Multi-Head Self Attention mechanism optimized for vision tasks.
+    """
+    Multi-Head Self-Attention mechanism with comprehensive masking support.
 
-    This implementation uses keras.ops for backend compatibility and follows
-    the project's serialization patterns. Supports optional attention masking.
+    This layer provides a clean interface for self-attention operations by wrapping
+    the more general `MultiHeadCrossAttention` layer. It demonstrates the wrapper
+    pattern for creating specialized interfaces while maintaining robust serialization
+    and leveraging existing, well-tested implementations.
+
+    **Intent**: Provide a streamlined, user-friendly interface specifically for
+    self-attention use cases (vision transformers, sequence modeling) while
+    internally leveraging the robust `MultiHeadCrossAttention` implementation
+    with its comprehensive serialization support and flexible masking capabilities.
+
+    **Architecture**:
+    ```
+    Input [B, seq, dim]
+           ↓
+    MultiHeadCrossAttention(shared_qk_projections=True)
+           ↓ (self-attention mode)
+    Q, K, V = QKV_proj(input)
+           ↓
+    Attention(Q, K, V) + Masking
+           ↓
+    Output [B, seq, dim]
+    ```
+
+    **Wrapper Pattern Benefits**:
+    - **Simplified Interface**: Focused API for self-attention use cases
+    - **Robust Implementation**: Leverages battle-tested `MultiHeadCrossAttention`
+    - **Consistent Behavior**: Same masking and serialization as cross-attention
+    - **Maintenance**: Single source of truth for attention mechanisms
 
     Args:
-        embed_dim: Dimension of input embeddings.
-        num_heads: Number of attention heads.
-        dropout_rate: Dropout rate for attention weights.
-        kernel_initializer: Initializer for weight matrices.
-        kernel_regularizer: Regularizer for weight matrices.
-        use_bias: Whether to use bias in dense layers.
+        dim: Integer, dimension of input embeddings. Must be positive
+            and divisible by num_heads.
+        num_heads: Integer, number of attention heads. Must be positive.
+            Defaults to 8.
+        dropout_rate: Float, dropout rate for attention weights. Must be between
+            0.0 and 1.0. Defaults to 0.0.
+        kernel_initializer: String or Initializer for weight matrices.
+            Defaults to "he_normal".
+        kernel_regularizer: Optional regularizer for weight matrices.
+        use_bias: Boolean, whether to use bias in dense layers.
+            Defaults to False.
         **kwargs: Additional layer arguments.
+
+    Call arguments:
+        x: Input tensor of shape (batch_size, seq_len, dim).
+        attention_mask: Optional attention mask tensor. Supported shapes:
+            - (batch_size, seq_len): mask for each sequence position
+            - (batch_size, seq_len, seq_len): full attention mask
+            - (batch_size, num_heads, seq_len, seq_len): per-head mask
+            Values should be 1 for positions to attend to and 0 for masked positions.
+        training: Boolean indicating whether in training mode.
+
+    Returns:
+        Attention output tensor of shape (batch_size, seq_len, dim).
+
+    Raises:
+        ValueError: If dim is not divisible by num_heads.
+        ValueError: If parameters are invalid (negative values, etc.).
+
+    Example:
+        ```python
+        # Basic usage
+        attn = MultiHeadAttention(dim=512, num_heads=8, dropout_rate=0.1)
+        output = attn(input_tensor)
+
+        # With padding mask
+        padding_mask = keras.ops.ones((batch_size, seq_len))
+        masked_positions = keras.ops.zeros((batch_size, 50))
+        padding_mask = keras.ops.concatenate([
+            padding_mask[:, :-50], masked_positions
+        ], axis=1)
+        output = attn(input_tensor, attention_mask=padding_mask)
+
+        # In a Transformer block
+        inputs = keras.Input(shape=(seq_len, dim))
+        attention_output = MultiHeadAttention(
+            dim=256, num_heads=4, dropout_rate=0.1
+        )(inputs)
+        model = keras.Model(inputs=inputs, outputs=attention_output)
+        ```
     """
 
     def __init__(
         self,
-        embed_dim: int,
+        dim: int,
         num_heads: int = 8,
         dropout_rate: float = 0.0,
         kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
@@ -86,182 +162,95 @@ class MultiHeadAttention(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        if embed_dim % num_heads != 0:
-            raise ValueError(f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})")
+        # Validate inputs
+        if dim <= 0:
+            raise ValueError(f"dim must be positive, got {dim}")
+        if dim % num_heads != 0:
+            raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
 
-        self.embed_dim = embed_dim
+        # Store ALL configuration parameters
+        self.dim = dim
         self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-        self.scale = self.head_dim ** -0.5
         self.dropout_rate = dropout_rate
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.use_bias = use_bias
 
-        # Initialize to None, will be created in build()
-        self.qkv = None
-        self.proj = None
-        self.dropout = None
-        self._build_input_shape = None
+        # CREATE the underlying MultiHeadCrossAttention layer
+        # Use shared_qk_projections=True for efficient self-attention
+        self.cross_attention = MultiHeadCrossAttention(
+            dim=self.dim,
+            num_heads=self.num_heads,
+            dropout_rate=self.dropout_rate,
+            shared_qk_projections=True,  # Efficient self-attention mode
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_initializer="zeros",  # Use default bias initializer
+            name="cross_attention"
+        )
 
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer's weights.
-
-        Args:
-            input_shape: Shape of the input tensor.
+    def build(
+        self,
+        input_shape: Tuple[Optional[int], ...]
+    ) -> None:
         """
-        self._build_input_shape = input_shape
+        Build the layer by creating weight variables and building sub-layers.
 
-        # Create QKV projection layer
-        self.qkv = keras.layers.Dense(
-            self.embed_dim * 3,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            use_bias=self.use_bias,
-            name="qkv"
-        )
+        CRITICAL: Explicitly build the wrapped MultiHeadCrossAttention for
+        robust serialization. This ensures all weight variables exist before
+        weight restoration during model loading.
+        """
+        # Validate input shape
+        if isinstance(input_shape, list):
+            input_shape = tuple(input_shape)
 
-        # Create output projection layer
-        self.proj = keras.layers.Dense(
-            self.embed_dim,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            use_bias=self.use_bias,
-            name="proj"
-        )
+        if len(input_shape) != 3:
+            raise ValueError(f"Input must be 3D (batch, seq_len, dim), got shape {input_shape}")
+        if input_shape[-1] != self.dim:
+            raise ValueError(f"Input last dimension ({input_shape[-1]}) must match dim ({self.dim})")
 
-        # Create dropout layer
-        self.dropout = keras.layers.Dropout(self.dropout_rate)
+        # Build the wrapped cross-attention layer explicitly for serialization
+        self.cross_attention.build(tuple(input_shape))
 
-        # Build sublayers - handle shape conversion properly
-        self.qkv.build(input_shape)
-
-        # Convert to list for consistent manipulation
-        input_shape_list = list(input_shape)
-        proj_shape = tuple(input_shape_list[:-1] + [self.embed_dim])
-        self.proj.build(proj_shape)
-
+        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
-            self,
-            x: keras.KerasTensor,
-            attention_mask: Optional[keras.KerasTensor] = None,
-            training: Optional[bool] = None
+        self,
+        x: keras.KerasTensor,
+        attention_mask: Optional[keras.KerasTensor] = None,
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass of the layer.
-
-        Args:
-            x: Input tensor of shape (batch_size, seq_len, embed_dim).
-            attention_mask: Optional attention mask tensor. Can be:
-                - Shape (batch_size, seq_len): mask for each sequence position
-                - Shape (batch_size, seq_len, seq_len): full attention mask
-                - Shape (batch_size, num_heads, seq_len, seq_len): per-head mask
-                Values should be 1 for positions to attend to and 0 for masked positions.
-            training: Whether in training mode.
-
-        Returns:
-            Attention output tensor of shape (batch_size, seq_len, embed_dim).
         """
-        batch_size = ops.shape(x)[0]
-        seq_len = ops.shape(x)[1]
+        Forward pass through self-attention mechanism.
 
-        # Generate Q, K, V
-        qkv = self.qkv(x)  # (batch_size, seq_len, embed_dim * 3)
-        qkv = ops.reshape(qkv, (batch_size, seq_len, 3, self.num_heads, self.head_dim))
-        qkv = ops.transpose(qkv, (2, 0, 3, 1, 4))  # (3, batch_size, num_heads, seq_len, head_dim)
-
-        q, k, v = qkv[0], qkv[1], qkv[2]  # Each: (batch_size, num_heads, seq_len, head_dim)
-
-        # Compute attention scores
-        attn = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2))) * self.scale
-        # attn shape: (batch_size, num_heads, seq_len, seq_len)
-
-        # Apply attention mask if provided
-        if attention_mask is not None:
-            attn = self._apply_attention_mask(attn, attention_mask)
-
-        attn = ops.softmax(attn, axis=-1)
-        attn = self.dropout(attn, training=training)
-
-        # Apply attention to values
-        x = ops.matmul(attn, v)  # (batch_size, num_heads, seq_len, head_dim)
-        x = ops.transpose(x, (0, 2, 1, 3))  # (batch_size, seq_len, num_heads, head_dim)
-        x = ops.reshape(x, (batch_size, seq_len, self.embed_dim))
-
-        return self.proj(x)
-
-    def _apply_attention_mask(
-            self,
-            attention_scores: keras.KerasTensor,
-            attention_mask: keras.KerasTensor
-    ) -> keras.KerasTensor:
-        """Apply attention mask to attention scores.
-
-        Args:
-            attention_scores: Attention scores tensor of shape
-                (batch_size, num_heads, seq_len, seq_len).
-            attention_mask: Attention mask tensor. Supported shapes:
-                - (batch_size, seq_len): mask for each sequence position
-                - (batch_size, seq_len, seq_len): full attention mask
-                - (batch_size, num_heads, seq_len, seq_len): per-head mask
-
-        Returns:
-            Masked attention scores tensor.
+        This method delegates to the underlying MultiHeadCrossAttention layer
+        in self-attention mode (kv_input=None).
         """
-        # Convert mask to the same dtype as attention scores
-        attention_mask = ops.cast(attention_mask, attention_scores.dtype)
+        return self.cross_attention(
+            query_input=x,
+            kv_input=None,  # Self-attention: kv_input=None
+            attention_mask=attention_mask,
+            training=training
+        )
 
-        # Handle different mask shapes based on tensor rank
-        mask_ndim = len(attention_mask.shape)
-
-        if mask_ndim == 2:
-            # Shape: (batch_size, seq_len) -> (batch_size, 1, 1, seq_len)
-            # This masks the key positions
-            attention_mask = ops.expand_dims(attention_mask, axis=1)  # (batch_size, 1, seq_len)
-            attention_mask = ops.expand_dims(attention_mask, axis=1)  # (batch_size, 1, 1, seq_len)
-
-        elif mask_ndim == 3:
-            # Shape: (batch_size, seq_len, seq_len) -> (batch_size, 1, seq_len, seq_len)
-            attention_mask = ops.expand_dims(attention_mask, axis=1)  # (batch_size, 1, seq_len, seq_len)
-
-        elif mask_ndim == 4:
-            # Shape: (batch_size, num_heads, seq_len, seq_len) - already correct
-            pass
-        else:
-            raise ValueError(f"Unsupported attention_mask rank: {mask_ndim}. Expected 2, 3, or 4.")
-
-        # Create mask where 0 becomes -inf and 1 stays 0
-        mask_value = -1e9  # Large negative value for masking
-        mask = (1.0 - attention_mask) * mask_value
-
-        # Apply mask to attention scores
-        attention_scores = attention_scores + mask
-
-        return attention_scores
-
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
-
-        Args:
-            input_shape: Shape of the input.
-
-        Returns:
-            Output shape.
-        """
-        # Convert to list for consistent manipulation, then back to tuple
-        input_shape_list = list(input_shape)
-        return tuple(input_shape_list)
+    def compute_output_shape(
+        self,
+        input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Compute output shape - same as input shape for self-attention."""
+        return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Get the layer configuration.
-
-        Returns:
-            Dictionary containing the layer configuration.
-        """
+        """Return configuration for serialization - includes ALL constructor parameters."""
         config = super().get_config()
         config.update({
-            "embed_dim": self.embed_dim,
+            "dim": self.dim,
             "num_heads": self.num_heads,
             "dropout_rate": self.dropout_rate,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
@@ -269,22 +258,5 @@ class MultiHeadAttention(keras.layers.Layer):
             "use_bias": self.use_bias,
         })
         return config
-
-    def get_build_config(self) -> Dict[str, Any]:
-        """Get the build configuration.
-
-        Returns:
-            Dictionary containing the build configuration.
-        """
-        return {"input_shape": self._build_input_shape}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the layer from a config.
-
-        Args:
-            config: Dictionary containing the build configuration.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
 
 # ---------------------------------------------------------------------

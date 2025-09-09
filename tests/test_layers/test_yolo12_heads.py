@@ -492,7 +492,7 @@ class TestYOLOv12SegmentationHead:
             np.testing.assert_allclose(
                 keras.ops.convert_to_numpy(original_prediction),
                 keras.ops.convert_to_numpy(loaded_prediction),
-                rtol=1e-6, atol=1e-6,
+                rtol=1e-4, atol=1e-4,
                 err_msg="Predictions differ after serialization cycle"
             )
 

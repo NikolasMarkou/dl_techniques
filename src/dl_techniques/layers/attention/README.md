@@ -96,7 +96,7 @@ attn = create_attention_layer(
     'adaptive_multi_head',
     num_heads=8,
     key_dim=64,
-    dropout=0.1,
+    dropout_rate=0.1,
     min_temp=0.05
 )
 ```
@@ -109,7 +109,7 @@ attn = create_attention_layer(
     'anchor',
     dim=512,
     num_heads=8,
-    dropout=0.1
+    dropout_rate=0.1
 )
 ```
 
@@ -150,26 +150,26 @@ attn = create_attention_layer(
 
 ### `perceiver`
 **Required:** `dim`  
-**Optional:** `num_heads` (default: 8), `dropout` (default: 0.0)
+**Optional:** `num_heads` (default: 8), `dropout_rate` (default: 0.0)
 ```python
 attn = create_attention_layer(
     'perceiver',
     dim=256,
     num_heads=8,
-    dropout=0.1
+    dropout_rate=0.1
 )
 ```
 
 ### `differential`
 **Required:** `dim`, `num_heads`, `head_dim`  
-**Optional:** `dropout` (default: 0.0), `attention_dropout` (default: 0.0), `lambda_init` (default: 0.8)
+**Optional:** `dropout_rate` (default: 0.0), `attention_dropout_rate` (default: 0.0), `lambda_init` (default: 0.8)
 ```python
 attn = create_attention_layer(
     'differential',
     dim=512,
     num_heads=8,
     head_dim=64,
-    attention_dropout=0.1
+    attention_dropout_rate=0.1
 )
 ```
 

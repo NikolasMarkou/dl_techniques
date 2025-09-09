@@ -1,0 +1,417 @@
+import keras
+from keras import ops
+from typing import Optional, Any, Dict, Tuple, Union, List
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from ..activations.adaptive_softmax import AdaptiveTemperatureSoftmax
+
+# ---------------------------------------------------------------------
+
+
+@keras.saving.register_keras_serializable()
+class MultiHeadCrossAttention(keras.layers.Layer):
+    """
+    Unified, highly configurable multi-head attention layer with advanced features.
+
+    This layer serves as a versatile attention mechanism supporting both cross-attention
+    and self-attention modes with flexible projection strategies, comprehensive masking,
+    and optional adaptive temperature softmax for enhanced attention normalization.
+    It demonstrates modern Keras 3 best practices with robust serialization.
+
+    **Intent**: Provide a production-ready, unified attention mechanism that can serve
+    as both cross-attention (Perceiver, encoder-decoder) and self-attention (standard
+    transformer) component with advanced features including adaptive temperature softmax,
+    flexible masking, and parameter-efficient projection modes for diverse architectural
+    requirements.
+
+    **Architecture Modes**:
+
+    1. **Cross-Attention Mode (separate projections)**:
+    ```
+    Query Input [B, Q_seq, D] ──→ Q_proj ──→ Q [B, H, Q_seq, D_h]
+                                               ↓
+    KV Input [B, KV_seq, D] ────→ KV_proj ──→ K, V [B, H, KV_seq, D_h]
+                                               ↓
+    Mask [B, Q_seq, KV_seq] ────→ Apply ────→ Masked Scores
+                                               ↓
+    AdaptiveSoftmax/Softmax ────→ Attention(Q, K, V) ──→ Output [B, Q_seq, D]
+    ```
+
+    2. **Self-Attention Mode (shared projections)**:
+    ```
+    Input [B, seq, D] ──→ QKV_proj ──→ Q, K, V [B, H, seq, D_h]
+                           ↓
+    Mask [B, seq, seq] ──→ Apply ────→ Masked Scores
+                           ↓
+    AdaptiveSoftmax/Softmax ──→ Attention(Q, K, V) ──→ Output [B, seq, D]
+    ```
+
+    **Mathematical Operations**:
+    1. **Projections**: Q = X_q W_q, K = X_kv W_k, V = X_kv W_v
+    2. **Attention Scores**: S = QK^T / √d_k
+    3. **Masking**: S_masked = S + (1 - M) × (-1e9)
+    4. **Normalization**: A = AdaptiveSoftmax(S_masked) or Softmax(S_masked)
+    5. **Output**: O = proj(AV)
+
+    **Advanced Features**:
+    - **Adaptive Temperature Softmax**: Optional entropy-based dynamic temperature
+    - **Flexible Masking**: Padding, full attention, and causal mask support
+    - **Projection Modes**: Shared QKV (efficient) vs separate Q/KV (flexible)
+    - **Robust Serialization**: Full compatibility with Keras save/load
+
+    Args:
+        dim: Integer, input/output dimension. Must be positive and divisible
+            by num_heads.
+        num_heads: Integer, number of attention heads. Must be positive.
+            Defaults to 8.
+        dropout_rate: Float, dropout rate for attention weights. Must be between
+            0.0 and 1.0. Defaults to 0.0.
+        shared_qk_projections: Boolean, if True, uses a single dense layer for
+            Q, K, and V. Only valid for self-attention. Defaults to False.
+        use_bias: Boolean, whether to use bias in linear projections.
+            Defaults to True.
+        kernel_initializer: String or Initializer for kernel weights.
+            Defaults to "glorot_uniform".
+        bias_initializer: String or Initializer for bias vectors.
+            Defaults to "zeros".
+        kernel_regularizer: Optional regularizer for kernel weights.
+        bias_regularizer: Optional regularizer for bias weights.
+        use_adaptive_softmax: Boolean, if True, uses AdaptiveTemperatureSoftmax
+            instead of standard softmax for attention normalization.
+            Defaults to False.
+        min_temp: Float, minimum temperature for AdaptiveTemperatureSoftmax.
+            Only used when use_adaptive_softmax=True. Defaults to 0.1.
+        max_temp: Float, maximum temperature for AdaptiveTemperatureSoftmax.
+            Only used when use_adaptive_softmax=True. Defaults to 1.0.
+        entropy_threshold: Float, entropy threshold for AdaptiveTemperatureSoftmax.
+            Only used when use_adaptive_softmax=True. Defaults to 0.5.
+        polynomial_coeffs: Optional list of coefficients for polynomial temperature
+            function in AdaptiveTemperatureSoftmax. Only used when
+            use_adaptive_softmax=True. Defaults to None.
+        **kwargs: Additional keyword arguments for the Layer base class.
+
+    Call arguments:
+        query_input: Query tensor of shape `(batch, query_seq_len, dim)`.
+        kv_input: Optional Key-Value tensor of shape `(batch, kv_seq_len, dim)`.
+            If `None`, self-attention is performed on `query_input`.
+        attention_mask: Optional mask to prevent attention to certain positions.
+            Supports shapes: `(batch, query_seq_len, kv_seq_len)` (full mask),
+            `(batch, kv_seq_len)` (padding mask), or broadcastable shapes.
+        training: Boolean indicating training or inference mode.
+
+    Returns:
+        Output tensor with shape `(batch_size, query_seq_len, dim)`.
+
+    Raises:
+        ValueError: If `dim` is not divisible by `num_heads`, or if
+                    parameters are invalid.
+        ValueError: If `shared_qk_projections=True` is used with `kv_input`.
+
+    Example:
+        ```python
+        # Cross-Attention (Perceiver-style)
+        visual_features = keras.random.normal((2, 196, 256))
+        text_queries = keras.random.normal((2, 77, 256))
+        cross_attn = MultiHeadCrossAttention(dim=256, num_heads=8)
+        attended_text = cross_attn(text_queries, visual_features)
+        print(attended_text.shape)  # (2, 77, 256)
+
+        # Self-Attention with shared projections (parameter efficient)
+        self_attn_shared = MultiHeadCrossAttention(
+            dim=256, num_heads=8, shared_qk_projections=True
+        )
+        self_attended = self_attn_shared(visual_features)
+        print(self_attended.shape)  # (2, 196, 256)
+
+        # With adaptive temperature softmax for better normalization
+        adaptive_attn = MultiHeadCrossAttention(
+            dim=256,
+            num_heads=8,
+            use_adaptive_softmax=True,
+            min_temp=0.1,
+            max_temp=2.0
+        )
+        adaptive_output = adaptive_attn(text_queries, visual_features)
+
+        # With attention masking
+        padding_mask = ops.ones((2, 196))
+        padding_mask = ops.slice_update(padding_mask, [0, 100], ops.zeros((2, 96)))
+        masked_output = cross_attn(
+            text_queries, visual_features, attention_mask=padding_mask
+        )
+        print(masked_output.shape)  # (2, 77, 256)
+        ```
+    """
+
+    def __init__(
+            self,
+            dim: int,
+            num_heads: int = 8,
+            dropout_rate: float = 0.0,
+            shared_qk_projections: bool = False,
+            use_bias: bool = True,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+            bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            use_adaptive_softmax: bool = False,
+            min_temp: float = 0.1,
+            max_temp: float = 1.0,
+            entropy_threshold: float = 0.5,
+            polynomial_coeffs: Optional[List[float]] = None,
+            **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+
+        # Validate inputs
+        if dim <= 0:
+            raise ValueError(f"dim must be positive, got {dim}")
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
+        if dim % num_heads != 0:
+            raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
+        if use_adaptive_softmax and min_temp <= 0:
+            raise ValueError(f"min_temp must be positive, got {min_temp}")
+        if use_adaptive_softmax and max_temp <= min_temp:
+            raise ValueError(f"max_temp ({max_temp}) must be greater than min_temp ({min_temp})")
+        if use_adaptive_softmax and not (0.0 <= entropy_threshold <= 1.0):
+            raise ValueError(f"entropy_threshold must be between 0 and 1, got {entropy_threshold}")
+
+        # Store ALL configuration parameters
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = self.dim // num_heads
+        self.dropout_rate = dropout_rate
+        self.shared_qk_projections = shared_qk_projections
+        self.use_bias = use_bias
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+
+        # Adaptive temperature softmax parameters
+        self.use_adaptive_softmax = use_adaptive_softmax
+        self.min_temp = min_temp
+        self.max_temp = max_temp
+        self.entropy_threshold = entropy_threshold
+        self.polynomial_coeffs = polynomial_coeffs
+
+        # Scale factor for attention scores
+        self.scale = 1.0 / ops.sqrt(float(self.head_dim))
+
+        # CREATE sub-layers based on projection strategy
+        dense_kwargs = {
+            "use_bias": self.use_bias,
+            "kernel_initializer": self.kernel_initializer,
+            "bias_initializer": self.bias_initializer,
+            "kernel_regularizer": self.kernel_regularizer,
+            "bias_regularizer": self.bias_regularizer
+        }
+
+        if self.shared_qk_projections:
+            self.qkv_dense = keras.layers.Dense(
+                self.dim * 3, name="qkv", **dense_kwargs
+            )
+            self.q_dense, self.kv_dense = None, None
+        else:
+            self.q_dense = keras.layers.Dense(self.dim, name="q", **dense_kwargs)
+            self.kv_dense = keras.layers.Dense(self.dim * 2, name="kv", **dense_kwargs)
+            self.qkv_dense = None
+
+        self.proj_dense = keras.layers.Dense(self.dim, name="proj", **dense_kwargs)
+        self.dropout_layer = keras.layers.Dropout(
+            self.dropout_rate, name="dropout"
+        ) if self.dropout_rate > 0.0 else None
+
+        # CREATE adaptive temperature softmax layer if enabled
+        if self.use_adaptive_softmax:
+            adaptive_kwargs = {}
+            if self.polynomial_coeffs is not None:
+                adaptive_kwargs["polynomial_coeffs"] = self.polynomial_coeffs
+
+            self.adaptive_softmax = AdaptiveTemperatureSoftmax(
+                min_temp=self.min_temp,
+                max_temp=self.max_temp,
+                entropy_threshold=self.entropy_threshold,
+                name="adaptive_softmax",
+                **adaptive_kwargs
+            )
+        else:
+            self.adaptive_softmax = None
+
+    def build(
+            self,
+            input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
+    ) -> None:
+        """
+        Build the layer by creating weight variables and building sub-layers.
+
+        CRITICAL: Explicitly build each sub-layer for robust serialization.
+        This ensures weight variables exist before weight restoration during loading.
+        """
+        # Handle input shapes for both single and dual input cases
+        if isinstance(input_shape, list):
+            if len(input_shape) != 2:
+                raise ValueError(f"Expected 2 inputs for cross-attention, got {len(input_shape)}")
+            query_shape, kv_shape = input_shape
+        else:
+            query_shape = kv_shape = input_shape
+
+        # Validate input shapes
+        if len(query_shape) != 3:
+            raise ValueError(f"Query input must be 3D, got shape {query_shape}")
+        if query_shape[-1] != self.dim:
+            raise ValueError(f"Query last dimension ({query_shape[-1]}) must match dim ({self.dim})")
+
+        # Build projection layers explicitly for serialization
+        if self.shared_qk_projections:
+            self.qkv_dense.build(query_shape)
+        else:
+            self.q_dense.build(query_shape)
+            self.kv_dense.build(kv_shape)
+
+        # Build output projection layer
+        proj_input_shape = (query_shape[0], query_shape[1], self.dim)
+        self.proj_dense.build(proj_input_shape)
+
+        # Build dropout layer if exists
+        if self.dropout_layer is not None:
+            # Dropout doesn't change shape, use attention weight shape for building
+            attn_shape = (query_shape[0], self.num_heads, query_shape[1], kv_shape[1])
+            self.dropout_layer.build(attn_shape)
+
+        # Build adaptive softmax layer if exists
+        if self.adaptive_softmax is not None:
+            # AdaptiveTemperatureSoftmax can handle any shape, use attention weight shape
+            attn_shape = (query_shape[0], self.num_heads, query_shape[1], kv_shape[1])
+            self.adaptive_softmax.build(attn_shape)
+
+        # Always call parent build at the end
+        super().build(input_shape)
+
+    def _apply_attention_mask(
+            self,
+            scores: keras.KerasTensor,
+            mask: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """
+        Apply attention mask to scores tensor.
+
+        Args:
+            scores: Attention scores of shape (batch, num_heads, query_seq, kv_seq)
+            mask: Attention mask with supported shapes:
+                - (batch, kv_seq): Padding mask
+                - (batch, query_seq, kv_seq): Full attention mask
+                - Other broadcastable shapes
+
+        Returns:
+            Masked scores tensor with same shape as input scores.
+        """
+        mask = ops.cast(mask, scores.dtype)
+
+        # Expand mask dimensions to match scores shape (batch, num_heads, query_seq, kv_seq)
+        if len(mask.shape) == 2:  # Padding mask (batch, kv_seq)
+            mask = ops.expand_dims(ops.expand_dims(mask, 1), 1)  # (batch, 1, 1, kv_seq)
+        elif len(mask.shape) == 3:  # Full mask (batch, query_seq, kv_seq)
+            mask = ops.expand_dims(mask, 1)  # (batch, 1, query_seq, kv_seq)
+
+        # Apply mask: set masked positions to large negative value
+        mask_value = -1e9
+        return scores + (1.0 - mask) * mask_value
+
+    def call(
+            self,
+            query_input: keras.KerasTensor,
+            kv_input: Optional[keras.KerasTensor] = None,
+            attention_mask: Optional[keras.KerasTensor] = None,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """Forward pass through multi-head attention with optional masking and adaptive softmax."""
+        batch_size = ops.shape(query_input)[0]
+        query_seq_len = ops.shape(query_input)[1]
+
+        # Determine Q, K, V based on projection strategy
+        if self.shared_qk_projections:
+            if kv_input is not None:
+                raise ValueError(
+                    "When `shared_qk_projections=True`, `kv_input` must be None "
+                    "(self-attention mode only)."
+                )
+            # Shared projection mode for self-attention
+            qkv = self.qkv_dense(query_input)
+            qkv = ops.reshape(qkv, (batch_size, query_seq_len, 3, self.num_heads, self.head_dim))
+            qkv = ops.transpose(qkv, (2, 0, 3, 1, 4))
+            q, k, v = qkv[0], qkv[1], qkv[2]
+        else:
+            # Separate projection mode for cross-attention or self-attention
+            kv_source = kv_input if kv_input is not None else query_input
+
+            q = self.q_dense(query_input)
+            q = ops.reshape(q, (batch_size, query_seq_len, self.num_heads, self.head_dim))
+            q = ops.transpose(q, (0, 2, 1, 3))
+
+            kv_seq_len = ops.shape(kv_source)[1]
+            kv = self.kv_dense(kv_source)
+            kv = ops.reshape(kv, (batch_size, kv_seq_len, 2, self.num_heads, self.head_dim))
+            kv = ops.transpose(kv, (2, 0, 3, 1, 4))
+            k, v = kv[0], kv[1]
+
+        # Scaled dot-product attention
+        scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2))) * self.scale
+
+        # Apply attention mask if provided
+        if attention_mask is not None:
+            scores = self._apply_attention_mask(scores, attention_mask)
+
+        # Compute attention weights using adaptive or standard softmax
+        if self.use_adaptive_softmax and self.adaptive_softmax is not None:
+            attn_weights = self.adaptive_softmax(scores)
+        else:
+            attn_weights = ops.softmax(scores, axis=-1)
+
+        # Apply dropout if configured
+        if self.dropout_layer is not None:
+            attn_weights = self.dropout_layer(attn_weights, training=training)
+
+        # Apply attention to values and reshape output
+        out = ops.matmul(attn_weights, v)
+        out = ops.transpose(out, (0, 2, 1, 3))
+        out = ops.reshape(out, (batch_size, query_seq_len, self.dim))
+
+        return self.proj_dense(out)
+
+    def compute_output_shape(
+            self,
+            input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
+    ) -> Tuple[Optional[int], ...]:
+        """Compute output shape - returns query input shape."""
+        if isinstance(input_shape, list):
+            return input_shape[0]
+        return input_shape
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return configuration for serialization - includes ALL constructor parameters."""
+        config = super().get_config()
+        config.update({
+            "dim": self.dim,
+            "num_heads": self.num_heads,
+            "dropout_rate": self.dropout_rate,
+            "shared_qk_projections": self.shared_qk_projections,
+            "use_bias": self.use_bias,
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
+            # Adaptive temperature softmax parameters
+            "use_adaptive_softmax": self.use_adaptive_softmax,
+            "min_temp": self.min_temp,
+            "max_temp": self.max_temp,
+            "entropy_threshold": self.entropy_threshold,
+            "polynomial_coeffs": self.polynomial_coeffs,
+        })
+        return config

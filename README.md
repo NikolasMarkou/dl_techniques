@@ -7,15 +7,18 @@
   <img alt="Python Version" src="https://img.shields.io/badge/python-3.11+-blue.svg">
   <img alt="Framework" src="https://img.shields.io/badge/Keras-3.x-red">
   <img alt="Backend" src="https://img.shields.io/badge/TensorFlow-2.18-orange">
+  <a href="https://electiconsulting.com">
+    <img alt="Sponsored by Electi Consulting" src="https://img.shields.io/badge/Sponsored%20by-Electi%20Consulting-8B1C34">
+  </a>
 </p>
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/nikolasmarkou/dl_techniques/main/imgs/minimalist-2d-logo-with-a-left-to-right-_sSVDZkeKR4C_eovommSCFQ_mJekanaZTB2Nbe5dBKOnPQ.png" alt="Deep Learning Techniques Logo" width="350">
 </p>
 
-**dl_techniques** is a research-first Python library built for Keras 3 and TensorFlow. It's more than a collection of layers; it's a curated toolkit for researchers and advanced practitioners to design, train, and dissect state-of-the-art neural networks. This library bridges the gap between groundbreaking research papers and practical implementation, providing faithful and efficient components that are ready for experimentation.
+**dl_techniques** is a research-first Python library built for Keras 3 and TensorFlow, developed with the support of [Electi Consulting](https://electiconsulting.com)'s AI research initiatives. It's more than a collection of layers; it's a curated toolkit for researchers and advanced practitioners to design, train, and dissect state-of-the-art neural networks. This library bridges the gap between groundbreaking research papers and practical implementation, providing faithful and efficient components that are ready for experimentation and production deployment.
 
-From novel attention mechanisms and orthonormal layers to information-theoretic loss functions and advanced model analysis tools, `dl_techniques` is your companion for pushing the boundaries of deep learning.
+From novel attention mechanisms and orthonormal layers to information-theoretic loss functions and advanced model analysis tools, `dl_techniques` is your companion for pushing the boundaries of deep learning research and enterprise applications.
 
 ---
 
@@ -28,13 +31,14 @@ From novel attention mechanisms and orthonormal layers to information-theoretic 
 6.  [**Project Structure**](#project-structure): How the repository is organized.
 7.  [**Contributing**](#contributing): Join the development.
 8.  [**License**](#license): Understanding the GPL-3.0 license.
-9.  [**Citations & References**](#citations--references): The research that inspired this library.
+9.  [**Acknowledgments**](#acknowledgments): Recognition and support.
+10. [**Citations & References**](#citations--references): The research that inspired this library.
 
 ---
 
 ## Key Features
 
-This library is a comprehensive suite of tools organized into four key pillars:
+This library is a comprehensive suite of tools organized into four key pillars, developed through rigorous research and validated in real-world enterprise applications:
 
 <details>
 <summary><b>1. An Arsenal of SOTA Layers & Architectures (170+ Layers)</b></summary>
@@ -77,11 +81,11 @@ This library is a comprehensive suite of tools organized into four key pillars:
 
 ## Why `dl_techniques`?
 
-*   **Curated, Not Cluttered**: This isn't an unorganized collection of every paper implementation. Each component is selected for its significance, novelty, or potential for research.
-*   **Built for Research & Experimentation**: The library is designed to make it easy to swap components, test new ideas, and analyze the results with powerful, built-in tools.
+*   **Curated, Not Cluttered**: This isn't an unorganized collection of every paper implementation. Each component is selected for its significance, novelty, or potential for research and enterprise deployment.
+*   **Built for Research & Production**: The library is designed to make it easy to swap components, test new ideas, and analyze the results with powerful, built-in tools. Components have been validated in enterprise environments through Electi Consulting's AI implementations.
 *   **More Than Code**: We provide in-depth documentation in the `docs/` directory that explains the *why* behind the *what*. This includes deep dives into attention mechanisms, custom architectures, and the theory behind our novel loss functions.
-*   **Reliable and Tested**: With an extensive test suite, you can trust that these advanced components are implemented correctly and robustly.
-*   **Deep Introspection**: We believe that understanding *why* a model works is as important as its accuracy. Our integrated analysis tools are a first-class feature of the library.
+*   **Reliable and Tested**: With an extensive test suite and real-world validation, you can trust that these advanced components are implemented correctly and robustly for both research and production use.
+*   **Deep Introspection**: We believe that understanding *why* a model works is as important as its accuracy. Our integrated analysis tools are a first-class feature of the library, informed by practical experience in enterprise AI deployments.
 
 ---
 
@@ -252,6 +256,14 @@ Contributions are highly welcome! If you'd like to add a new technique, improve 
 This project is licensed under the **GNU General Public License v3.0**.
 
 **Important**: The GPL-3.0 is a "copyleft" license. This means that any derivative work you create and distribute that uses code from this library must also be licensed under GPL-3.0. Please review the [LICENSE](./LICENSE) file carefully before using this library in your projects, especially in a commercial context.
+
+---
+
+## Acknowledgments
+
+This project is proudly sponsored by **[Electi Consulting](https://electiconsulting.com)**, a leading AI and technology consultancy specializing in artificial intelligence, blockchain, and cryptography solutions for enterprise clients. The practical insights and enterprise validation of these techniques have been made possible through Electi's extensive experience in deploying AI solutions across various industries including finance, maritime, and healthcare.
+
+Special thanks to the open-source community and the researchers whose groundbreaking work forms the foundation of this library.
 
 ---
 

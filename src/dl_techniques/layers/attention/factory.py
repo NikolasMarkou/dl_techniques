@@ -16,12 +16,10 @@ from typing import Dict, Any, Literal, Optional
 
 from dl_techniques.utils.logger import logger
 
-from .adaptive_softmax_mha import AdaptiveMultiHeadAttention
 from .anchor_attention import AnchorAttention
 from .capsule_routing_attention import CapsuleRoutingSelfAttention
 from .channel_attention import ChannelAttention
 from .convolutional_block_attention import CBAM
-from .cross_attention_perceiver_attention import PerceiverAttention
 from .differential_attention import DifferentialMultiHeadAttention
 from .fnet_fourier_transform import FNetFourierTransform
 from .group_query_attention import GroupedQueryAttention
@@ -29,6 +27,7 @@ from .hopfield_attention import HopfieldAttention
 from .mobile_mqa import MobileMQA
 from .multi_head_attention import MultiHeadAttention
 from .non_local_attention import NonLocalAttention
+from .perceiver_attention import PerceiverAttention
 from .shared_weights_cross_attention import SharedWeightsCrossAttention
 from .spatial_attention import SpatialAttention
 from .window_attention import WindowAttention
@@ -38,12 +37,10 @@ from .window_attention import WindowAttention
 # ---------------------------------------------------------------------
 
 AttentionType = Literal[
-    'adaptive_multi_head',
     'anchor',
     'capsule_routing',
-    'channel',
     'cbam',
-    'perceiver',
+    'channel',
     'differential',
     'fnet',
     'group_query',
@@ -51,6 +48,7 @@ AttentionType = Literal[
     'mobile_mqa',
     'multi_head',
     'non_local',
+    'perceiver',
     'shared_weights_cross',
     'spatial',
     'window'
@@ -61,108 +59,85 @@ AttentionType = Literal[
 # ---------------------------------------------------------------------
 
 ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
-    'adaptive_multi_head': {
-        'class': AdaptiveMultiHeadAttention,
-        'description': 'Multi-Head Attention with adaptive temperature softmax.',
-        'required_params': ['num_heads', 'key_dim'],
-        'optional_params': {
-            'value_dim': None, 'dropout': 0.0, 'use_bias': True, 'output_shape': None,
-            'attention_axes': None, 'flash_attention': None, 'kernel_initializer': 'glorot_uniform',
-            'bias_initializer': 'zeros', 'kernel_regularizer': None, 'bias_regularizer': None,
-            'activity_regularizer': None, 'kernel_constraint': None, 'bias_constraint': None,
-            'seed': None, 'min_temp': 0.1, 'max_temp': 1.0, 'entropy_threshold': 0.5,
-            'polynomial_coeffs': None
-        },
-        'use_case': 'Transformer models where attention sharpness needs to adapt to sequence length.'
-    },
     'anchor': {
         'class': AnchorAttention,
-        'description': 'Hierarchical attention with anchor tokens for memory efficiency.',
+        'description': 'Implements a memory-efficient hierarchical attention mechanism that reduces computational complexity by designating a subset of tokens as "anchors". These anchors perform full self-attention among themselves, while the remaining "query" tokens only cross-attend to the anchors, creating a sparse and scalable attention pattern.',
         'required_params': ['dim'],
         'optional_params': {
-            'num_heads': 8, 'dropout': 0.0, 'use_bias': True, 'kernel_initializer': 'glorot_uniform',
-            'bias_initializer': 'zeros', 'kernel_regularizer': None, 'bias_regularizer': None
+            'num_heads': 8, 'dropout_rate': 0.0, 'use_bias': True,
+            'kernel_initializer': 'glorot_uniform', 'bias_initializer': 'zeros',
+            'kernel_regularizer': None, 'bias_regularizer': None
         },
-        'use_case': 'Long-sequence models where full self-attention is too costly.'
+        'use_case': 'Ideal for models processing very long sequences (e.g., high-resolution images, long documents, or audio) where the quadratic complexity of standard self-attention is computationally prohibitive. It offers a trade-off between expressive power and efficiency.'
     },
     'capsule_routing': {
         'class': CapsuleRoutingSelfAttention,
-        'description': 'Self-attention with capsule network-style dynamic routing.',
+        'description': 'Extends standard multi-head attention by incorporating the dynamic routing mechanism from Capsule Networks. It organizes attention weights into vertical (head-wise) and horizontal (token-wise) capsules, iteratively refining them to achieve a more robust and contextually aware attention distribution.',
         'required_params': ['num_heads'],
         'optional_params': {
-            'key_dim': None, 'value_dim': None, 'dropout': 0.0, 'use_bias': True,
+            'key_dim': None, 'value_dim': None, 'dropout_rate': 0.0, 'use_bias': True,
             'kernel_initializer': 'glorot_uniform', 'bias_initializer': 'zeros',
             'kernel_regularizer': None, 'bias_regularizer': None, 'activity_regularizer': None,
             'routing_iterations': 3, 'use_vertical_routing': True, 'use_horizontal_routing': True,
             'use_positional_routing': True, 'epsilon': 1e-8
         },
-        'use_case': 'Experimental models aiming for better contextualization through routing.'
-    },
-    'channel': {
-        'class': ChannelAttention,
-        'description': 'Channel attention module from CBAM.',
-        'required_params': ['channels'],
-        'optional_params': {
-            'ratio': 8, 'kernel_initializer': 'glorot_uniform', 'kernel_regularizer': None,
-            'use_bias': False
-        },
-        'use_case': 'CNN architectures to recalibrate channel-wise feature responses.'
+        'use_case': 'Primarily for experimental architectures and research aimed at improving contextual representation by modeling part-whole relationships. Suitable for tasks requiring robust feature grouping and disambiguation, such as complex scene understanding or nuanced language interpretation.'
     },
     'cbam': {
         'class': CBAM,
-        'description': 'Convolutional Block Attention Module (Channel + Spatial).',
+        'description': 'Implements the Convolutional Block Attention Module, a lightweight and effective attention mechanism for CNNs. It sequentially applies channel attention (to focus on "what" is important) and spatial attention (to focus on "where" it is important), refining feature maps for improved representation.',
         'required_params': ['channels'],
         'optional_params': {
             'ratio': 8, 'kernel_size': 7, 'channel_kernel_initializer': 'glorot_uniform',
             'spatial_kernel_initializer': 'glorot_uniform', 'channel_kernel_regularizer': None,
             'spatial_kernel_regularizer': None, 'channel_use_bias': False, 'spatial_use_bias': True
         },
-        'use_case': 'Plug-and-play attention module for any CNN to refine feature maps.'
+        'use_case': 'A versatile, plug-and-play module for any Convolutional Neural Network (CNN). It can be inserted into existing architectures (like ResNet, MobileNet) to enhance feature representation with minimal computational overhead, often leading to performance gains in image classification, object detection, and segmentation.'
     },
-    'perceiver': {
-        'class': PerceiverAttention,
-        'description': 'Cross-attention mechanism from the Perceiver architecture.',
-        'required_params': ['dim'],
+    'channel': {
+        'class': ChannelAttention,
+        'description': 'Implements the channel attention submodule from CBAM. It generates channel-wise attention weights by aggregating spatial information using both average and max pooling, then processing it through a shared Multi-Layer Perceptron (MLP). This allows the network to selectively emphasize more informative feature channels.',
+        'required_params': ['channels'],
         'optional_params': {
-            'num_heads': 8, 'dropout': 0.0, 'use_bias': True, 'kernel_initializer': 'glorot_uniform',
-            'bias_initializer': 'zeros', 'kernel_regularizer': None, 'bias_regularizer': None
+            'ratio': 8, 'kernel_initializer': 'glorot_uniform',
+            'kernel_regularizer': None, 'use_bias': False
         },
-        'use_case': 'Cross-modal attention (e.g., text to image) and latent bottleneck models.'
+        'use_case': 'Used within CNN architectures to explicitly model inter-channel relationships and recalibrate feature responses. It is a lightweight method to boost performance by allowing the model to focus on the most relevant channels for a given task, without altering spatial features.'
     },
     'differential': {
         'class': DifferentialMultiHeadAttention,
-        'description': 'Dual multi-head attention to amplify signal and cancel noise.',
+        'description': 'Implements Differential Attention, a mechanism that uses two parallel multi-head attention layers to distinguish between primary context (signal) and irrelevant information (noise). The final output is a weighted difference between the two, effectively amplifying relevant signals while actively canceling out noise.',
         'required_params': ['dim', 'num_heads', 'head_dim'],
         'optional_params': {
-            'dropout': 0.0, 'attention_dropout': 0.0, 'lambda_init': 0.8,
+            'dropout_rate': 0.0, 'attention_dropout_rate': 0.0, 'lambda_init': 0.8,
             'kernel_initializer': 'glorot_uniform', 'kernel_regularizer': None,
             'bias_initializer': 'zeros', 'bias_regularizer': None, 'activity_regularizer': None
         },
-        'use_case': 'Transformers requiring improved focus and reduced hallucination.'
+        'use_case': 'Designed for transformer models where enhanced focus and noise reduction are critical. Particularly effective for generative tasks to reduce hallucination and improve factual accuracy, and for any sequence modeling task that benefits from a cleaner, more focused context representation.'
     },
     'fnet': {
         'class': FNetFourierTransform,
-        'description': 'Parameter-free token mixing using Fourier Transforms instead of attention.',
+        'description': 'A parameter-free token mixing layer that replaces the self-attention mechanism with a 2D Fourier Transform. It applies DFTs along both the sequence and hidden dimensions to mix information efficiently, offering a non-learnable alternative to attention that has O(N log N) complexity.',
         'required_params': [],
         'optional_params': {
             'implementation': 'matrix', 'normalize_dft': True, 'epsilon': 1e-12
         },
-        'use_case': 'Efficient replacement for self-attention in sequence models (e.g., FNet, F-GPT).'
+        'use_case': 'An extremely efficient drop-in replacement for self-attention in transformer-like architectures. Ideal for models where speed and parameter efficiency are paramount, such as on-device deployment or pre-training on massive datasets where O(N²) complexity is a bottleneck.'
     },
     'group_query': {
         'class': GroupedQueryAttention,
-        'description': 'Grouped Query Attention with shared K/V heads for efficiency.',
-        'required_params': ['d_model', 'n_head', 'n_kv_head'],
+        'description': 'Implements Grouped Query Attention (GQA), an efficient compromise between multi-head and multi-query attention. It reduces the number of Key and Value heads, which are then shared across groups of Query heads, significantly reducing the size of the KV cache during inference.',
+        'required_params': ['dim', 'num_heads', 'num_kv_heads'],
         'optional_params': {
             'max_seq_len': 2048, 'dropout_rate': 0.0, 'rope_percentage': 1.0,
             'rope_theta': 10000.0, 'use_bias': False, 'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros', 'kernel_regularizer': None, 'bias_regularizer': None
         },
-        'use_case': 'Large language models where K/V cache size is a bottleneck.'
+        'use_case': 'Essential for large language models (LLMs) where the Key-Value cache is a major memory bottleneck during autoregressive decoding. GQA allows for much longer context windows and faster inference with minimal degradation in model quality compared to standard MHA.'
     },
     'hopfield': {
         'class': HopfieldAttention,
-        'description': 'Modern Hopfield Network with iterative updates for pattern retrieval.',
+        'description': 'A Modern Hopfield Network that functions as a content-addressable memory, using a transformer-style attention mechanism as its update rule. It can iteratively refine a query state to retrieve the most similar stored pattern (Key-Value pair), converging to a stable fixed point.',
         'required_params': ['num_heads', 'key_dim'],
         'optional_params': {
             'value_dim': None, 'dropout_rate': 0.0, 'use_bias': True,
@@ -170,31 +145,31 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'kernel_regularizer': None, 'bias_regularizer': None, 'activity_regularizer': None,
             'normalize_patterns': True, 'update_steps_max': 0, 'update_steps_eps': 1e-4
         },
-        'use_case': 'Associative memory tasks; setting update_steps_max=0 mimics standard attention.'
+        'use_case': 'Ideal for associative memory, pattern completion, and noise correction tasks. Setting `update_steps_max=0` makes it behave like a standard attention layer, while `update_steps_max > 0` enables its powerful pattern retrieval and cleaning capabilities.'
     },
     'mobile_mqa': {
         'class': MobileMQA,
-        'description': 'Mobile-optimized Multi-Query Attention for 4D vision tensors.',
+        'description': 'An implementation of Multi-Query Attention (MQA) highly optimized for 4D vision tensors on mobile and edge devices. It uses a single, shared Key and Value projection for all query heads to dramatically reduce memory bandwidth, with an optional spatial downsampling step for further efficiency.',
         'required_params': ['dim'],
         'optional_params': {
             'num_heads': 8, 'use_downsampling': False, 'kernel_initializer': 'he_normal',
             'kernel_regularizer': None
         },
-        'use_case': 'Efficient attention in vision models for mobile and edge devices.'
+        'use_case': 'Designed for efficient attention in mobile-first vision models (e.g., MobileViT). Its reduced memory I/O makes it well-suited for deployment on hardware with limited memory bandwidth, such as mobile GPUs and accelerators.'
     },
     'multi_head': {
         'class': MultiHeadAttention,
-        'description': 'Standard Multi-Head Self-Attention.',
-        'required_params': ['embed_dim'],
+        'description': 'A streamlined implementation of the standard Multi-Head Self-Attention mechanism. As a wrapper around a more general cross-attention layer, it provides a clean, focused interface for the common use case where a sequence attends to itself.',
+        'required_params': ['dim'],
         'optional_params': {
             'num_heads': 8, 'dropout_rate': 0.0, 'kernel_initializer': 'he_normal',
             'kernel_regularizer': None, 'use_bias': False
         },
-        'use_case': 'General-purpose self-attention in vision and sequence models.'
+        'use_case': 'The foundational building block for most Transformer architectures (e.g., ViT, BERT). It is the default choice for capturing rich, contextual relationships within a single sequence in both vision and NLP tasks.'
     },
     'non_local': {
         'class': NonLocalAttention,
-        'description': 'Non-local attention block for capturing long-range dependencies in CNNs.',
+        'description': 'Implements the Non-local Neural Network block, a self-attention mechanism tailored for 4D computer vision tensors. It captures long-range spatial dependencies by computing the response at each position as a weighted sum of features at all other positions, overcoming the limited receptive field of convolutions.',
         'required_params': ['attention_channels'],
         'optional_params': {
             'kernel_size': (7, 7), 'use_bias': False, 'normalization': 'batch',
@@ -203,39 +178,50 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'bias_initializer': 'zeros', 'kernel_regularizer': None, 'bias_regularizer': None,
             'activity_regularizer': None
         },
-        'use_case': 'Augmenting CNNs with global context reasoning for vision tasks.'
+        'use_case': 'Used to augment CNNs with global context reasoning. It can be inserted into deep vision models to help with tasks that require understanding relationships between distant parts of an image, such as video analysis, instance segmentation, and pose estimation.'
     },
-    'shared_weights_cross': {
-        'class': SharedWeightsCrossAttention,
-        'description': 'Cross-attention between modalities with shared weights for efficiency.',
+    'perceiver': {
+        'class': PerceiverAttention,
+        'description': 'Implements the cross-attention mechanism from the Perceiver architecture. It is designed to process inputs from different modalities by attending from a smaller, fixed-size latent query array to a larger, potentially multi-modal, byte array. This decouples network depth from input size.',
         'required_params': ['dim'],
         'optional_params': {
             'num_heads': 8, 'dropout_rate': 0.0, 'use_bias': True,
             'kernel_initializer': 'glorot_uniform', 'bias_initializer': 'zeros',
             'kernel_regularizer': None, 'bias_regularizer': None
         },
-        'use_case': 'Multi-modal learning where different data types exchange information.'
+        'use_case': 'Core component for Perceiver-style models that handle large and multi-modal inputs. Perfect for tasks like image classification from raw pixels, language modeling from text, or fusing audio-visual data by attending from a latent space to the raw inputs.'
+    },
+    'shared_weights_cross': {
+        'class': SharedWeightsCrossAttention,
+        'description': 'An efficient cross-attention layer where two distinct modalities attend to each other using a single, shared set of projection weights. This design significantly reduces parameters while enabling bidirectional information flow between the two input sequences.',
+        'required_params': ['dim'],
+        'optional_params': {
+            'num_heads': 8, 'dropout_rate': 0.0, 'use_bias': True,
+            'kernel_initializer': 'glorot_uniform', 'bias_initializer': 'zeros',
+            'kernel_regularizer': None, 'bias_regularizer': None
+        },
+        'use_case': 'Excellent for parameter-efficient multi-modal fusion tasks where two data streams need to interact, such as fusing image and text features, or combining different sensor readings in a robotics application. The shared weights make it suitable for models with tight parameter budgets.'
     },
     'spatial': {
         'class': SpatialAttention,
-        'description': 'Spatial attention module from CBAM.',
+        'description': 'Implements the spatial attention submodule from CBAM. It generates a 2D spatial attention map by applying average and max pooling along the channel axis and passing the result through a convolution layer. This highlights the most spatially significant regions in a feature map.',
         'required_params': [],
         'optional_params': {
-            'kernel_size': 7, 'kernel_initializer': 'glorot_uniform', 'kernel_regularizer': None,
-            'use_bias': True
+            'kernel_size': 7, 'kernel_initializer': 'glorot_uniform',
+            'kernel_regularizer': None, 'use_bias': True
         },
-        'use_case': 'CNN architectures to highlight spatially significant feature regions.'
+        'use_case': 'Used within CNNs to help the network focus on the most informative spatial locations. It is effective at improving object detection and segmentation performance by suppressing irrelevant background features and emphasizing salient object regions.'
     },
     'window': {
         'class': WindowAttention,
-        'description': 'Windowed Multi-Head Attention from Swin Transformer.',
+        'description': 'Implements the windowed multi-head self-attention from the Swin Transformer. It mitigates the quadratic complexity of global self-attention by partitioning the input into non-overlapping windows and computing attention locally within each window, using a learnable relative position bias for spatial awareness.',
         'required_params': ['dim', 'window_size', 'num_heads'],
         'optional_params': {
             'qkv_bias': True, 'qk_scale': None, 'attn_dropout_rate': 0.0,
             'proj_dropout_rate': 0.0, 'proj_bias': True, 'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros', 'kernel_regularizer': None, 'bias_regularizer': None
         },
-        'use_case': 'Vision transformers like Swin, providing efficient local attention.'
+        'use_case': 'The core computational block for Swin-style vision transformers. Its linear complexity with respect to image size makes it highly scalable for high-resolution vision tasks like image classification, object detection, and semantic segmentation.'
     }
 }
 
@@ -292,21 +278,25 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
         )
 
     # Common parameter validation
-    dim_params = ['dim', 'embed_dim', 'd_model', 'channels']
+    dim_params = ['dim', 'channels', 'attention_channels']
     for p in dim_params:
         if p in kwargs and kwargs[p] <= 0:
             raise ValueError(f"Parameter '{p}' must be positive, got {kwargs[p]}")
 
-    head_params = ['num_heads', 'n_head']
+    head_params = ['num_heads', 'num_kv_heads']
     for p in head_params:
         if p in kwargs and kwargs[p] <= 0:
             raise ValueError(f"Parameter '{p}' must be positive, got {kwargs[p]}")
 
-    dropout_params = ['dropout', 'dropout_rate', 'attention_dropout', 'attn_dropout_rate', 'proj_dropout_rate']
+    dropout_params = [
+        'dropout_rate', 'attention_dropout_rate',
+        'attn_dropout_rate', 'proj_dropout_rate'
+    ]
     for p in dropout_params:
         if p in kwargs and not (0.0 <= kwargs[p] <= 1.0):
             raise ValueError(f"Parameter '{p}' must be between 0.0 and 1.0, got {kwargs[p]}")
 
+# ---------------------------------------------------------------------
 
 def create_attention_layer(
         attention_type: AttentionType,
@@ -335,7 +325,7 @@ def create_attention_layer(
     Example:
         ```python
         # Create a standard multi-head attention layer
-        mha = create_attention_layer('multi_head', embed_dim=256, num_heads=8)
+        mha = create_attention_layer('multi_head', dim=256, num_heads=8)
 
         # Create a CBAM block for a CNN
         cbam = create_attention_layer('cbam', channels=128, ratio=16)
@@ -343,9 +333,9 @@ def create_attention_layer(
         # Create a Grouped Query Attention layer for an LLM
         gqa = create_attention_layer(
             'group_query',
-            d_model=1024,
-            n_head=16,
-            n_kv_head=4,
+            dim=1024,
+            num_heads=16,
+            num_kv_heads=4,
             name='gqa_block_1'
         )
         ```
@@ -385,6 +375,7 @@ def create_attention_layer(
         logger.error(error_msg)
         raise ValueError(error_msg) from e
 
+# ---------------------------------------------------------------------
 
 def create_attention_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     """
@@ -420,3 +411,5 @@ def create_attention_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     config_copy = config.copy()
     attention_type = config_copy.pop('type')
     return create_attention_layer(attention_type, **config_copy)
+
+# ---------------------------------------------------------------------

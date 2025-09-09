@@ -27,13 +27,12 @@ from typing import Optional, Union, Any, Dict, Tuple, Literal, Callable
 
 from .stochastic_depth import StochasticDepth
 
-# Normalization factory for unified normalization layer creation
-from .norms import create_normalization_layer
 
-# FFN Integration - Use the factory for creating FFN layers
+from .norms import create_normalization_layer
 from .ffn.factory import create_ffn_from_config
 
 from .attention.window_attention import WindowAttention
+from .attention.multi_head_attention import MultiHeadAttention
 from .attention.group_query_attention import GroupedQueryAttention
 from .attention.differential_attention import DifferentialMultiHeadAttention
 
@@ -384,12 +383,11 @@ class TransformerLayer(keras.layers.Layer):
         # Define default parameters for each attention type
         if self.attention_type == 'multi_head_attention':
             default_params = {
+                'dim': self.hidden_size,
                 'num_heads': self.num_heads,
-                'key_dim': self.hidden_size // self.num_heads,
-                'dropout': self.attention_dropout_rate,
+                'dropout_rate': self.attention_dropout_rate,
                 'use_bias': self.use_bias,
                 'kernel_initializer': self.kernel_initializer,
-                'bias_initializer': self.bias_initializer,
                 'name': name
             }
         elif self.attention_type == 'window_attention':
@@ -413,7 +411,7 @@ class TransformerLayer(keras.layers.Layer):
                 'dim': self.hidden_size,
                 'num_heads': self.num_heads,
                 'head_dim': self.hidden_size // self.num_heads,
-                'dropout': self.dropout_rate,
+                'dropout_rate': self.dropout_rate,
                 'lambda_init': self.lambda_init,
                 'name': name
             }
@@ -439,7 +437,7 @@ class TransformerLayer(keras.layers.Layer):
         params = self._get_attention_params(name)
         try:
             if self.attention_type == 'multi_head_attention':
-                return layers.MultiHeadAttention(**params)
+                return MultiHeadAttention(**params)
             elif self.attention_type == 'window_attention':
                 return WindowAttention(**params)
             elif self.attention_type == 'group_query_attention':
@@ -549,12 +547,7 @@ class TransformerLayer(keras.layers.Layer):
         self.output_norm.build(input_shape)
 
         # Build attention layer
-        # Handle special build signature for Keras's MultiHeadAttention
-        if self.attention_type == 'multi_head_attention':
-            self.attention.build(query_shape=input_shape, value_shape=input_shape)
-        else:
-            # Custom attention layers expect a single input_shape
-            self.attention.build(input_shape)
+        self.attention.build(input_shape)
 
         # Build FFN/MoE layer
         self.ffn_layer.build(input_shape)
@@ -619,9 +612,7 @@ class TransformerLayer(keras.layers.Layer):
             # Apply attention based on type
             if self.attention_type == 'multi_head_attention':
                 x = self.attention(
-                    query=x,
-                    value=x,
-                    key=x,
+                    x,
                     attention_mask=mha_attention_mask,
                     training=training
                 )
@@ -663,14 +654,16 @@ class TransformerLayer(keras.layers.Layer):
             # Apply attention based on type
             if self.attention_type == 'multi_head_attention':
                 x = self.attention(
-                    query=inputs,
-                    value=inputs,
-                    key=inputs,
+                    inputs,
                     attention_mask=mha_attention_mask,
                     training=training
                 )
             elif self.attention_type == 'differential_attention':
-                x = self.attention(inputs, mask=attention_mask, layer_idx=layer_idx, training=training)
+                x = self.attention(
+                    inputs,
+                    attention_mask=attention_mask,
+                    layer_idx=layer_idx,
+                    training=training)
             else:
                 x = self.attention(inputs, training=training)
 

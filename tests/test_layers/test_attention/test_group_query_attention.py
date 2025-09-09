@@ -4,6 +4,9 @@ Comprehensive test suite for GroupedQueryAttention layer.
 Tests cover initialization, build process, forward pass, serialization,
 integration, and edge cases following dl-techniques testing standards
 and modern Keras 3 patterns.
+
+Updated to match the current GroupedQueryAttention implementation with
+correct parameter names and attributes.
 """
 
 import pytest
@@ -12,7 +15,7 @@ import keras
 import tempfile
 import os
 import tensorflow as tf
-from typing import Tuple, Optional, List
+from typing import List
 
 # Import the layer to test
 from dl_techniques.layers.attention.group_query_attention import GroupedQueryAttention
@@ -24,15 +27,15 @@ class TestGroupedQueryAttention:
     @pytest.fixture
     def input_tensor(self):
         """Create a test input tensor."""
-        return keras.random.normal([4, 32, 512])  # (batch, seq_len, d_model)
+        return keras.random.normal([4, 32, 512])  # (batch, seq_len, dim)
 
     @pytest.fixture
     def basic_layer(self):
         """Create a basic GQA layer for testing."""
         return GroupedQueryAttention(
-            d_model=512,
-            n_head=8,
-            n_kv_head=2,
+            dim=512,
+            num_heads=8,
+            num_kv_heads=2,
             max_seq_len=128
         )
 
@@ -43,16 +46,16 @@ class TestGroupedQueryAttention:
     def test_initialization_defaults(self):
         """Test initialization with default parameters."""
         layer = GroupedQueryAttention(
-            d_model=512,
-            n_head=8,
-            n_kv_head=2,
+            dim=512,
+            num_heads=8,
+            num_kv_heads=2,
             max_seq_len=128
         )
 
         # Check basic parameters
-        assert layer.d_model == 512
-        assert layer.n_head == 8
-        assert layer.n_kv_head == 2
+        assert layer.dim == 512
+        assert layer.num_heads == 8
+        assert layer.num_kv_heads == 2
         assert layer.max_seq_len == 128
         assert layer.dropout_rate == 0.0
         assert layer.rope_percentage == 1.0
@@ -61,7 +64,7 @@ class TestGroupedQueryAttention:
 
         # Check derived parameters
         assert layer.head_dim == 64  # 512 // 8
-        assert layer.n_group == 4    # 8 // 2
+        assert layer.num_groups == 4    # 8 // 2
 
         # Check sub-layers exist (created in __init__)
         assert layer.w_q is not None
@@ -77,9 +80,9 @@ class TestGroupedQueryAttention:
     def test_initialization_custom_parameters(self):
         """Test initialization with custom parameters."""
         layer = GroupedQueryAttention(
-            d_model=768,
-            n_head=12,
-            n_kv_head=4,
+            dim=768,
+            num_heads=12,
+            num_kv_heads=4,
             max_seq_len=256,
             dropout_rate=0.1,
             rope_percentage=0.5,
@@ -89,16 +92,16 @@ class TestGroupedQueryAttention:
             bias_initializer='ones'
         )
 
-        assert layer.d_model == 768
-        assert layer.n_head == 12
-        assert layer.n_kv_head == 4
+        assert layer.dim == 768
+        assert layer.num_heads == 12
+        assert layer.num_kv_heads == 4
         assert layer.max_seq_len == 256
         assert layer.dropout_rate == 0.1
         assert layer.rope_percentage == 0.5
         assert layer.rope_theta == 50000.0
         assert layer.use_bias is True
         assert layer.head_dim == 64  # 768 // 12
-        assert layer.n_group == 3    # 12 // 4
+        assert layer.num_groups == 3    # 12 // 4
 
         # Check initializers are set correctly
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
@@ -106,52 +109,52 @@ class TestGroupedQueryAttention:
 
     def test_invalid_parameters(self):
         """Test that invalid parameters raise appropriate errors."""
-        # d_model not divisible by n_head
-        with pytest.raises(ValueError, match="d_model.*must be divisible by n_head"):
-            GroupedQueryAttention(d_model=513, n_head=8, n_kv_head=2, max_seq_len=128)
+        # dim not divisible by num_heads
+        with pytest.raises(ValueError, match="dim.*must be divisible by num_heads"):
+            GroupedQueryAttention(dim=513, num_heads=8, num_kv_heads=2, max_seq_len=128)
 
-        # n_head not divisible by n_kv_head
-        with pytest.raises(ValueError, match="n_head.*must be divisible by n_kv_head"):
-            GroupedQueryAttention(d_model=504, n_head=7, n_kv_head=2, max_seq_len=128)
+        # num_heads not divisible by num_kv_heads
+        with pytest.raises(ValueError, match="num_heads.*must be divisible by num_kv_heads"):
+            GroupedQueryAttention(dim=504, num_heads=7, num_kv_heads=2, max_seq_len=128)
 
-        # Negative d_model
-        with pytest.raises(ValueError, match="d_model must be positive"):
-            GroupedQueryAttention(d_model=-512, n_head=8, n_kv_head=2, max_seq_len=128)
+        # Negative dim
+        with pytest.raises(ValueError, match="dim must be positive"):
+            GroupedQueryAttention(dim=-512, num_heads=8, num_kv_heads=2, max_seq_len=128)
 
-        # Negative n_head
-        with pytest.raises(ValueError, match="n_head must be positive"):
-            GroupedQueryAttention(d_model=512, n_head=0, n_kv_head=2, max_seq_len=128)
+        # Negative num_heads
+        with pytest.raises(ValueError, match="num_heads must be positive"):
+            GroupedQueryAttention(dim=512, num_heads=0, num_kv_heads=2, max_seq_len=128)
 
-        # Negative n_kv_head
-        with pytest.raises(ValueError, match="n_kv_head must be positive"):
-            GroupedQueryAttention(d_model=512, n_head=8, n_kv_head=0, max_seq_len=128)
+        # Negative num_kv_heads
+        with pytest.raises(ValueError, match="num_kv_heads must be positive"):
+            GroupedQueryAttention(dim=512, num_heads=8, num_kv_heads=0, max_seq_len=128)
 
         # Negative max_seq_len
         with pytest.raises(ValueError, match="max_seq_len must be positive"):
-            GroupedQueryAttention(d_model=512, n_head=8, n_kv_head=2, max_seq_len=-1)
+            GroupedQueryAttention(dim=512, num_heads=8, num_kv_heads=2, max_seq_len=-1)
 
         # Negative rope_theta
         with pytest.raises(ValueError, match="rope_theta must be positive"):
             GroupedQueryAttention(
-                d_model=512, n_head=8, n_kv_head=2, max_seq_len=128, rope_theta=-1.0
+                dim=512, num_heads=8, num_kv_heads=2, max_seq_len=128, rope_theta=-1.0
             )
 
         # Invalid dropout rate
         with pytest.raises(ValueError, match="dropout_rate must be in"):
             GroupedQueryAttention(
-                d_model=512, n_head=8, n_kv_head=2, max_seq_len=128, dropout_rate=1.5
+                dim=512, num_heads=8, num_kv_heads=2, max_seq_len=128, dropout_rate=1.5
             )
 
         # Invalid rope_percentage (too high)
         with pytest.raises(ValueError, match="rope_percentage must be in"):
             GroupedQueryAttention(
-                d_model=512, n_head=8, n_kv_head=2, max_seq_len=128, rope_percentage=2.0
+                dim=512, num_heads=8, num_kv_heads=2, max_seq_len=128, rope_percentage=2.0
             )
 
-        # Negative rope_percentage
+        # rope_percentage = 0 (should be > 0)
         with pytest.raises(ValueError, match="rope_percentage must be in"):
             GroupedQueryAttention(
-                d_model=512, n_head=8, n_kv_head=2, max_seq_len=128, rope_percentage=-0.1
+                dim=512, num_heads=8, num_kv_heads=2, max_seq_len=128, rope_percentage=0.0
             )
 
     # =========================================================================
@@ -188,16 +191,16 @@ class TestGroupedQueryAttention:
         basic_layer(input_tensor)
 
         # Check projection dimensions
-        assert basic_layer.w_q.units == basic_layer.n_head * basic_layer.head_dim  # 8 * 64 = 512
-        assert basic_layer.w_k.units == basic_layer.n_kv_head * basic_layer.head_dim  # 2 * 64 = 128
-        assert basic_layer.w_v.units == basic_layer.n_kv_head * basic_layer.head_dim  # 2 * 64 = 128
-        assert basic_layer.w_o.units == basic_layer.d_model  # 512
+        assert basic_layer.w_q.units == basic_layer.num_heads * basic_layer.head_dim  # 8 * 64 = 512
+        assert basic_layer.w_k.units == basic_layer.num_kv_heads * basic_layer.head_dim  # 2 * 64 = 128
+        assert basic_layer.w_v.units == basic_layer.num_kv_heads * basic_layer.head_dim  # 2 * 64 = 128
+        assert basic_layer.w_o.units == basic_layer.dim  # 512
 
     def test_bias_configuration(self):
         """Test bias configuration in sublayers."""
         # Test with use_bias=False
         layer_no_bias = GroupedQueryAttention(
-            d_model=512, n_head=8, n_kv_head=2, max_seq_len=128, use_bias=False
+            dim=512, num_heads=8, num_kv_heads=2, max_seq_len=128, use_bias=False
         )
         inputs = keras.random.normal([2, 16, 512])
         layer_no_bias(inputs)
@@ -209,7 +212,7 @@ class TestGroupedQueryAttention:
 
         # Test with use_bias=True
         layer_with_bias = GroupedQueryAttention(
-            d_model=512, n_head=8, n_kv_head=2, max_seq_len=128, use_bias=True
+            dim=512, num_heads=8, num_kv_heads=2, max_seq_len=128, use_bias=True
         )
         layer_with_bias(inputs)
 
@@ -224,9 +227,9 @@ class TestGroupedQueryAttention:
         bias_reg = keras.regularizers.L1(1e-5)
 
         layer = GroupedQueryAttention(
-            d_model=256,
-            n_head=4,
-            n_kv_head=2,
+            dim=256,
+            num_heads=4,
+            num_kv_heads=2,
             max_seq_len=64,
             kernel_initializer='he_normal',
             bias_initializer='zeros',
@@ -272,10 +275,10 @@ class TestGroupedQueryAttention:
             (8, 128, 512),  # Larger batch, longer sequence
         ]
 
-        for batch_size, seq_len, d_model in test_shapes:
-            inputs = keras.random.normal([batch_size, seq_len, d_model])
+        for batch_size, seq_len, dim in test_shapes:
+            inputs = keras.random.normal([batch_size, seq_len, dim])
             output = basic_layer(inputs)
-            assert output.shape == (batch_size, seq_len, d_model)
+            assert output.shape == (batch_size, seq_len, dim)
 
     def test_training_vs_inference_mode(self, basic_layer, input_tensor):
         """Test different behavior in training vs inference mode."""
@@ -290,7 +293,7 @@ class TestGroupedQueryAttention:
 
         # With dropout > 0, outputs might be different
         layer_with_dropout = GroupedQueryAttention(
-            d_model=512, n_head=8, n_kv_head=2, max_seq_len=128, dropout_rate=0.5
+            dim=512, num_heads=8, num_kv_heads=2, max_seq_len=128, dropout_rate=0.5
         )
 
         train_out = layer_with_dropout(input_tensor, training=True)
@@ -309,9 +312,9 @@ class TestGroupedQueryAttention:
         mask = np.repeat(mask, batch_size, axis=0)
         mask = keras.ops.convert_to_tensor(mask, dtype=keras.backend.floatx())
 
-        # Test with mask
-        output_masked = basic_layer(inputs, mask=mask)
-        output_unmasked = basic_layer(inputs, mask=None)
+        # Test with mask (note: parameter name is 'attention_mask')
+        output_masked = basic_layer(inputs, attention_mask=mask)
+        output_unmasked = basic_layer(inputs, attention_mask=None)
 
         assert output_masked.shape == output_unmasked.shape
         # Outputs should be different when mask is applied
@@ -329,7 +332,7 @@ class TestGroupedQueryAttention:
         output, attention_weights = basic_layer(input_tensor, return_attention_weights=True)
 
         batch_size, seq_len = input_tensor.shape[0], input_tensor.shape[1]
-        expected_attn_shape = (batch_size, basic_layer.n_head, seq_len, seq_len)
+        expected_attn_shape = (batch_size, basic_layer.num_heads, seq_len, seq_len)
 
         assert output.shape == input_tensor.shape
         assert attention_weights.shape == expected_attn_shape
@@ -364,7 +367,7 @@ class TestGroupedQueryAttention:
     def test_grouped_attention_property(self):
         """Test that GQA correctly groups query heads with shared K,V heads."""
         layer = GroupedQueryAttention(
-            d_model=512, n_head=8, n_kv_head=2, max_seq_len=64
+            dim=512, num_heads=8, num_kv_heads=2, max_seq_len=64
         )
 
         inputs = keras.random.normal([1, 16, 512])
@@ -372,21 +375,21 @@ class TestGroupedQueryAttention:
         # Get attention weights
         _, attention_weights = layer(inputs, return_attention_weights=True)
 
-        # attention_weights shape: (batch, n_head, seq_len, seq_len)
+        # attention_weights shape: (batch, num_heads, seq_len, seq_len)
         assert attention_weights.shape == (1, 8, 16, 16)
 
-        # With n_head=8 and n_kv_head=2, we should have 4 groups
+        # With num_heads=8 and num_kv_heads=2, we should have 4 groups
         # Each group of 4 query heads should attend to the same K,V
-        assert layer.n_group == 4
+        assert layer.num_groups == 4
 
     def test_kv_head_reduction_efficiency(self):
         """Test that GQA reduces K,V parameters correctly."""
         # Compare parameter counts
         full_mha = GroupedQueryAttention(
-            d_model=512, n_head=8, n_kv_head=8, max_seq_len=64  # Full MHA
+            dim=512, num_heads=8, num_kv_heads=8, max_seq_len=64  # Full MHA
         )
         gqa = GroupedQueryAttention(
-            d_model=512, n_head=8, n_kv_head=2, max_seq_len=64  # GQA
+            dim=512, num_heads=8, num_kv_heads=2, max_seq_len=64  # GQA
         )
 
         inputs = keras.random.normal([1, 16, 512])
@@ -416,16 +419,16 @@ class TestGroupedQueryAttention:
             (768, 12, 6),  # 2 groups
         ]
 
-        for d_model, n_head, n_kv_head in configs:
+        for dim, num_heads, num_kv_heads in configs:
             layer = GroupedQueryAttention(
-                d_model=d_model, n_head=n_head, n_kv_head=n_kv_head, max_seq_len=64
+                dim=dim, num_heads=num_heads, num_kv_heads=num_kv_heads, max_seq_len=64
             )
 
-            inputs = keras.random.normal([2, 16, d_model])
+            inputs = keras.random.normal([2, 16, dim])
             output = layer(inputs)
 
-            assert output.shape == (2, 16, d_model)
-            assert layer.n_group == n_head // n_kv_head
+            assert output.shape == (2, 16, dim)
+            assert layer.num_groups == num_heads // num_kv_heads
 
     # =========================================================================
     # Serialization Tests (Modern Keras 3 Pattern)
@@ -436,7 +439,7 @@ class TestGroupedQueryAttention:
         config = basic_layer.get_config()
 
         expected_keys = {
-            'd_model', 'n_head', 'n_kv_head', 'max_seq_len',
+            'dim', 'num_heads', 'num_kv_heads', 'max_seq_len',
             'dropout_rate', 'rope_percentage', 'rope_theta', 'use_bias',
             'kernel_initializer', 'bias_initializer', 'kernel_regularizer', 'bias_regularizer'
         }
@@ -445,9 +448,9 @@ class TestGroupedQueryAttention:
         assert expected_keys.issubset(set(config.keys()))
 
         # Check values match initialization
-        assert config['d_model'] == 512
-        assert config['n_head'] == 8
-        assert config['n_kv_head'] == 2
+        assert config['dim'] == 512
+        assert config['num_heads'] == 8
+        assert config['num_kv_heads'] == 2
         assert config['max_seq_len'] == 128
         assert config['dropout_rate'] == 0.0
         assert config['rope_percentage'] == 1.0
@@ -458,9 +461,9 @@ class TestGroupedQueryAttention:
         """Test complete serialization cycle using modern Keras 3 pattern."""
         # Create original layer
         original_layer = GroupedQueryAttention(
-            d_model=512,
-            n_head=8,
-            n_kv_head=2,
+            dim=512,
+            num_heads=8,
+            num_kv_heads=2,
             max_seq_len=128,
             dropout_rate=0.1,
             use_bias=True,
@@ -473,9 +476,9 @@ class TestGroupedQueryAttention:
         # Create model for serialization testing
         inputs = keras.Input(shape=input_tensor.shape[1:])
         outputs = GroupedQueryAttention(
-            d_model=512,
-            n_head=8,
-            n_kv_head=2,
+            dim=512,
+            num_heads=8,
+            num_kv_heads=2,
             max_seq_len=128,
             dropout_rate=0.1,
             use_bias=True,
@@ -505,9 +508,9 @@ class TestGroupedQueryAttention:
     def test_config_completeness(self):
         """Test that get_config contains all __init__ parameters."""
         layer_config = {
-            'd_model': 256,
-            'n_head': 4,
-            'n_kv_head': 2,
+            'dim': 256,
+            'num_heads': 4,
+            'num_kv_heads': 2,
             'max_seq_len': 64,
             'dropout_rate': 0.1,
             'rope_percentage': 0.8,
@@ -533,7 +536,7 @@ class TestGroupedQueryAttention:
         # Create a simple model using GQA
         inputs = keras.layers.Input(shape=(32, 512))
         x = GroupedQueryAttention(
-            d_model=512, n_head=8, n_kv_head=2, max_seq_len=128
+            dim=512, num_heads=8, num_kv_heads=2, max_seq_len=128
         )(inputs)
         x = keras.layers.LayerNormalization()(x)
         x = keras.layers.Dense(256, activation='relu')(x)
@@ -554,7 +557,7 @@ class TestGroupedQueryAttention:
         # Create model with GQA
         inputs = keras.layers.Input(shape=(32, 512))
         x = GroupedQueryAttention(
-            d_model=512, n_head=8, n_kv_head=2, max_seq_len=128, name='gqa'
+            dim=512, num_heads=8, num_kv_heads=2, max_seq_len=128, name='gqa'
         )(inputs)
         x = keras.layers.GlobalAveragePooling1D()(x)
         outputs = keras.layers.Dense(5)(x)
@@ -584,9 +587,9 @@ class TestGroupedQueryAttention:
             # Check layer type is preserved
             gqa_layer = loaded_model.get_layer('gqa')
             assert isinstance(gqa_layer, GroupedQueryAttention)
-            assert gqa_layer.d_model == 512
-            assert gqa_layer.n_head == 8
-            assert gqa_layer.n_kv_head == 2
+            assert gqa_layer.dim == 512
+            assert gqa_layer.num_heads == 8
+            assert gqa_layer.num_kv_heads == 2
 
     # =========================================================================
     # Edge Cases and Error Handling
@@ -595,7 +598,7 @@ class TestGroupedQueryAttention:
     def test_numerical_stability(self):
         """Test layer stability with extreme input values."""
         layer = GroupedQueryAttention(
-            d_model=128, n_head=4, n_kv_head=2, max_seq_len=64
+            dim=128, num_heads=4, num_kv_heads=2, max_seq_len=64
         )
 
         # Test with different input magnitudes
@@ -637,7 +640,7 @@ class TestGroupedQueryAttention:
     def test_variable_sequence_lengths(self):
         """Test handling of different sequence lengths."""
         layer = GroupedQueryAttention(
-            d_model=256, n_head=4, n_kv_head=2, max_seq_len=128
+            dim=256, num_heads=4, num_kv_heads=2, max_seq_len=128
         )
 
         sequence_lengths = [1, 8, 32, 64, 128]
@@ -649,11 +652,11 @@ class TestGroupedQueryAttention:
 
     def test_rope_percentage_variations(self):
         """Test different RoPE percentage configurations."""
-        rope_percentages = [0.1, 0.25, 0.5, 0.75, 1.0]  # Removed 0.0 since it's not valid
+        rope_percentages = [0.1, 0.25, 0.5, 0.75, 1.0]  # rope_percentage must be > 0.0
 
         for rope_pct in rope_percentages:
             layer = GroupedQueryAttention(
-                d_model=256, n_head=4, n_kv_head=2,
+                dim=256, num_heads=4, num_kv_heads=2,
                 max_seq_len=64, rope_percentage=rope_pct
             )
 
@@ -670,22 +673,22 @@ class TestGroupedQueryAttention:
 
     def test_memory_efficiency_comparison(self):
         """Test that GQA uses less memory than full MHA for K,V projections."""
-        d_model, seq_len = 512, 128
+        dim, seq_len = 512, 128
 
         # Full MHA (baseline)
         full_mha = GroupedQueryAttention(
-            d_model=d_model, n_head=8, n_kv_head=8, max_seq_len=seq_len
+            dim=dim, num_heads=8, num_kv_heads=8, max_seq_len=seq_len
         )
 
         # GQA variants
         gqa_4_groups = GroupedQueryAttention(
-            d_model=d_model, n_head=8, n_kv_head=2, max_seq_len=seq_len
+            dim=dim, num_heads=8, num_kv_heads=2, max_seq_len=seq_len
         )
         gqa_8_groups = GroupedQueryAttention(  # Multi-Query Attention
-            d_model=d_model, n_head=8, n_kv_head=1, max_seq_len=seq_len
+            dim=dim, num_heads=8, num_kv_heads=1, max_seq_len=seq_len
         )
 
-        inputs = keras.random.normal([4, seq_len, d_model])
+        inputs = keras.random.normal([4, seq_len, dim])
 
         # Build all layers
         full_mha(inputs)
@@ -710,7 +713,7 @@ class TestGroupedQueryAttention:
         """Test that layer behavior is consistent and deterministic."""
         # Create layer with dropout_rate=0 to ensure deterministic behavior
         layer = GroupedQueryAttention(
-            d_model=256, n_head=4, n_kv_head=2, max_seq_len=64, dropout_rate=0.0
+            dim=256, num_heads=4, num_kv_heads=2, max_seq_len=64, dropout_rate=0.0
         )
 
         # Use fixed inputs

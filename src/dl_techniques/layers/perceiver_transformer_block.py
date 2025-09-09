@@ -8,7 +8,7 @@ from typing import Optional, Any, Dict, Tuple, Union, List
 # local imports
 # ---------------------------------------------------------------------
 
-from .attention.cross_attention_perceiver_attention import PerceiverAttention
+from .attention.perceiver_attention import PerceiverAttention
 
 # ---------------------------------------------------------------------
 

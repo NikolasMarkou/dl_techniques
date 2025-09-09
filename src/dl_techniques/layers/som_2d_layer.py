@@ -1,5 +1,5 @@
 """
-Self-Organizing Map (SOM) layer implementation for Keras.
+Self-Organizing Map (SOM) 2D layer implementation for Keras.
 
 This file should be saved as: dl_techniques/layers/som_2d_layer.py
 
@@ -126,431 +126,297 @@ References
 """
 
 import keras
-from keras import ops
 from typing import Tuple, Optional, Union, Dict, Any, Callable
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
+from .som_nd_layer import SOMLayer
 
 # ---------------------------------------------------------------------
 
+
 @keras.saving.register_keras_serializable()
-class SOM2dLayer(keras.layers.Layer):
+class SOM2dLayer(SOMLayer):
     """
-    Self-Organizing Map layer implementation for Keras.
+    2D Self-Organizing Map (SOM) layer for competitive learning and topological data organization.
 
-    This layer implements a Self-Organizing Map (SOM) which can be used
-    as a memory structure to map high-dimensional input data onto
-    a lower-dimensional grid. The SOM preserves the topological properties
-    of the input space.
+    This layer is a specialized version of the general N-Dimensional SOMLayer,
+    specifically optimized for creating 2D memory grids. It maps high-dimensional
+    input data onto a 2D discretized grid, preserving topological properties of
+    the input space through competitive learning and neighborhood-based weight updates.
 
-    Parameters
-    ----------
-    map_size : Tuple[int, int]
-        Size of the SOM grid (height, width).
-    input_dim : int
-        Dimensionality of the input data.
-    initial_learning_rate : float, optional
-        Initial learning rate for weight updates. Defaults to 0.1.
-    decay_function : Callable, optional
-        Learning rate decay function. Defaults to None.
-    sigma : float, optional
-        Initial neighborhood radius. Defaults to 1.0.
-    neighborhood_function : str, optional
-        Type of neighborhood function to use ('gaussian' or 'bubble').
-        Defaults to 'gaussian'.
-    weights_initializer : str or keras.initializers.Initializer, optional
-        Initialization method for weights. Defaults to 'random_uniform'.
-    regularizer : keras.regularizers.Regularizer, optional
-        Regularizer function applied to the weights. Defaults to None.
-    name : str, optional
-        Name of the layer. Defaults to None.
-    **kwargs : Any
-        Additional keyword arguments for the base layer.
+    **Intent**: Provide a convenient 2D interface for self-organizing maps while
+    leveraging all the robust functionality of the general SOMLayer base class,
+    including vectorized operations, multiple neighborhood functions, and proper
+    Keras 3 serialization support.
+
+    **Architecture**:
+    ```
+    Input(shape=[batch, input_dim])
+             ↓
+    Find BMU: argmin_ij ||x - w_ij||²
+             ↓
+    Compute: h_ij = neighborhood_function(d_ij, σ)
+             ↓
+    Update: w_ij ← w_ij + α·h_ij·(x - w_ij)
+             ↓
+    Output: BMU_indices(shape=[batch, 2]), quantization_errors(shape=[batch,])
+    ```
+
+    **Mathematical Operations**:
+    1. **Distance Computation**: d²_ij = ||x - w_ij||²
+    2. **BMU Selection**: BMU = argmin_ij d²_ij
+    3. **Neighborhood**: h_ij = exp(-d²_grid/(2σ²)) for Gaussian
+    4. **Weight Update**: Δw_ij = α·h_ij·(x - w_ij)
+
+    The 2D grid enables intuitive visualization and interpretation of the learned
+    topological organization, making it ideal for data exploration and clustering tasks.
+
+    Args:
+        map_size: Tuple[int, int], the shape of the 2D SOM grid (height, width).
+            Must contain exactly 2 positive integers. Controls memory capacity
+            and topological resolution. Larger grids provide finer organization
+            but require more computation and memory.
+        input_dim: int, dimensionality of the input data. Must be positive.
+            Each neuron will have a weight vector of this dimensionality.
+        initial_learning_rate: float, optional, initial learning rate for weight
+            updates. Controls adaptation speed during early training. Should be
+            in range (0, 1]. Defaults to 0.1.
+        decay_function: Callable, optional, learning rate decay function that takes
+            current iteration and returns decay multiplier. If None, uses constant
+            learning rate. Defaults to None.
+        sigma: float, optional, initial neighborhood radius in grid coordinates.
+            Controls the size of the influence region around the BMU. Should be
+            positive, typically 1-5 for small grids. Defaults to 1.0.
+        neighborhood_function: str, optional, type of neighborhood function to use.
+            Either 'gaussian' for smooth decay or 'bubble' for hard cutoff.
+            Defaults to 'gaussian'.
+        weights_initializer: Union[str, keras.initializers.Initializer], optional,
+            initialization method for neuron weights. Can be string name or
+            initializer instance. Defaults to 'random_uniform'.
+        regularizer: keras.regularizers.Regularizer, optional, regularizer function
+            applied to the neuron weights during training. Helps prevent overfitting.
+            Defaults to None.
+        name: str, optional, name of the layer for identification in model summaries
+            and debugging. Defaults to None.
+        **kwargs: Any, additional keyword arguments for the base Layer class.
+
+    Input shape:
+        2D tensor with shape: `(batch_size, input_dim)`.
+        Each sample represents a high-dimensional data point to be mapped.
+
+    Output shape:
+        Tuple of two tensors:
+        - BMU indices: 2D tensor with shape `(batch_size, 2)` containing grid
+          coordinates (row, col) of the best matching unit for each input.
+        - Quantization errors: 1D tensor with shape `(batch_size,)` containing
+          the Euclidean distance between each input and its BMU.
+
+    Attributes:
+        map_size: Tuple[int, int], the 2D grid dimensions (height, width).
+        grid_shape: Tuple[int, int], alias for map_size (inherited from SOMLayer).
+        input_dim: int, dimensionality of input vectors.
+        initial_learning_rate: float, base learning rate for training.
+        decay_function: Callable or None, learning rate decay function.
+        sigma: float, neighborhood radius parameter.
+        neighborhood_function: str, type of neighborhood function ('gaussian'/'bubble').
+        weights: keras.Variable, neuron weight matrix of shape (height*width, input_dim).
+
+    Example:
+        ```python
+        # Create a 10x10 SOM for MNIST digit clustering (784-dimensional)
+        som = SOM2dLayer(
+            map_size=(10, 10),
+            input_dim=784,
+            initial_learning_rate=0.5,
+            sigma=2.0,
+            neighborhood_function='gaussian'
+        )
+
+        # Build model for training
+        inputs = keras.Input(shape=(784,))
+        bmu_indices, quant_errors = som(inputs)
+        model = keras.Model(inputs, [bmu_indices, quant_errors])
+
+        # Training requires custom loop since SOM uses competitive learning
+        for epoch in range(100):
+            for batch in dataset:
+                with tf.GradientTape() as tape:
+                    bmu_coords, errors = model(batch, training=True)
+                    # Custom SOM training logic here
+
+        # Visualize the organized feature map
+        weights_grid = som.get_weights_as_grid()  # Shape: (10, 10, 784)
+
+        # For smaller input dimensions, can visualize weight patterns
+        if input_dim == 2:
+            import matplotlib.pyplot as plt
+            plt.scatter(weights_grid[:,:,0], weights_grid[:,:,1])
+            plt.title("SOM Weight Distribution")
+
+        # Extract BMU positions for clustering analysis
+        bmu_positions, _ = som(test_data)
+        cluster_assignments = bmu_positions[:, 0] * 10 + bmu_positions[:, 1]
+        ```
+
+    Note:
+        This layer inherits all core functionality from SOMLayer including vectorized
+        operations, proper weight management, and Keras serialization support. The
+        2D specialization provides the convenience of `map_size` parameter and
+        `get_weights_as_grid()` method for visualization and backward compatibility.
+
+        Training requires custom loops since SOMs use competitive learning rather
+        than gradient descent. The layer provides the building blocks for SOM
+        training but doesn't implement the training loop itself.
     """
 
     def __init__(
-        self,
-        map_size: Tuple[int, int],
-        input_dim: int,
-        initial_learning_rate: float = 0.1,
-        decay_function: Optional[Callable] = None,
-        sigma: float = 1.0,
-        neighborhood_function: str = 'gaussian',
-        weights_initializer: Union[str, keras.initializers.Initializer] = 'random_uniform',
-        regularizer: Optional[keras.regularizers.Regularizer] = None,
-        name: Optional[str] = None,
-        **kwargs: Any
+            self,
+            map_size: Tuple[int, int],
+            input_dim: int,
+            initial_learning_rate: float = 0.1,
+            decay_function: Optional[Callable] = None,
+            sigma: float = 1.0,
+            neighborhood_function: str = 'gaussian',
+            weights_initializer: Union[str, keras.initializers.Initializer] = 'random_uniform',
+            regularizer: Optional[keras.regularizers.Regularizer] = None,
+            name: Optional[str] = None,
+            **kwargs: Any
     ) -> None:
-        """Initialize the SOM layer."""
-        super().__init__(name=name, **kwargs)
+        """Initialize the 2D SOM layer with validation and configuration setup."""
+        # Validate the 2D-specific input
+        if not (isinstance(map_size, (tuple, list)) and len(map_size) == 2):
+            raise ValueError(f"map_size must be a tuple of exactly 2 integers, got {map_size}")
 
-        self.map_size = map_size
-        self.grid_height, self.grid_width = map_size
-        self.input_dim = input_dim
-        self.initial_learning_rate = initial_learning_rate
-        self.sigma = sigma
-        self.neighborhood_function = neighborhood_function
-        self.weights_initializer = keras.initializers.get(weights_initializer)
-        self.regularizer = keras.regularizers.get(regularizer)
+        if not all(isinstance(dim, int) and dim > 0 for dim in map_size):
+            raise ValueError(f"map_size must contain positive integers, got {map_size}")
 
-        # Validate inputs
-        if self.grid_height <= 0 or self.grid_width <= 0:
-            raise ValueError(f"Map size must be positive, got {map_size}")
-        if self.input_dim <= 0:
-            raise ValueError(f"Input dimension must be positive, got {input_dim}")
-        if self.initial_learning_rate <= 0:
-            raise ValueError(f"Learning rate must be positive, got {initial_learning_rate}")
-        if self.sigma <= 0:
-            raise ValueError(f"Sigma must be positive, got {sigma}")
-        if self.neighborhood_function not in ['gaussian', 'bubble']:
-            raise ValueError(f"Neighborhood function must be 'gaussian' or 'bubble', got {neighborhood_function}")
-
-        # Define custom decay function if none provided
-        if decay_function is None:
-            self.decay_function = lambda x, max_iter: self.initial_learning_rate * (1 - x / max_iter)
-        else:
-            self.decay_function = decay_function
-
-        # Initialize weights to None (will be created in build)
-        self.weights_map = None
-        self.iterations = None
-        self.max_iterations = None
-        self.grid_positions = None
-
-        # Store build input shape for serialization
-        self._build_input_shape = None
-
-    def build(self, input_shape: Tuple) -> None:
-        """
-        Build the SOM layer by initializing the weight vectors.
-
-        Parameters
-        ----------
-        input_shape : Tuple
-            Shape of the input tensor.
-        """
-        # Store input shape for serialization
-        self._build_input_shape = input_shape
-
-        # Convert input_shape to list for consistent manipulation
-        input_shape_list = list(input_shape)
-
-        # Verify input shape
-        if input_shape_list[-1] != self.input_dim:
-            raise ValueError(f"Expected input shape with dimension {self.input_dim}, "
-                           f"but got input shape with dimension {input_shape_list[-1]}")
-
-        # Training iterations counter
-        self.iterations = self.add_weight(
-            name="iterations",
-            shape=(),
-            dtype="float32",
-            initializer="zeros",
-            trainable=False
+        # Initialize the parent SOMLayer with grid_shape from map_size
+        super().__init__(
+            grid_shape=map_size,
+            input_dim=input_dim,
+            initial_learning_rate=initial_learning_rate,
+            decay_function=decay_function,
+            sigma=sigma,
+            neighborhood_function=neighborhood_function,
+            weights_initializer=weights_initializer,
+            regularizer=regularizer,
+            name=name,
+            **kwargs
         )
 
-        self.max_iterations = self.add_weight(
-            name="max_iterations",
-            shape=(),
-            dtype="float32",
-            initializer=keras.initializers.Constant(1000.0),
-            trainable=False
-        )
-
-        # Initialize SOM weights
-        self.weights_map = self.add_weight(
-            name="som_weights",
-            shape=(self.grid_height, self.grid_width, self.input_dim),
-            initializer=self.weights_initializer,
-            regularizer=self.regularizer,
-            trainable=False  # SOM weights are updated manually, not through backprop
-        )
-
-        # Initialize grid positions
-        self.grid_positions = self._initialize_grid_positions()
-
-        super().build(input_shape)
-
-        logger.info(f"Built SOM2dLayer with map_size={self.map_size}, input_dim={self.input_dim}")
-
-    def _initialize_grid_positions(self) -> keras.KerasTensor:
-        """
-        Initialize the 2D grid positions for the SOM.
-
-        Returns
-        -------
-        keras.KerasTensor
-            A tensor of shape (grid_height, grid_width, 2) containing
-            the (y, x) coordinates of each neuron in the grid.
-        """
-        # Create coordinate ranges
-        x_coords = ops.cast(ops.arange(self.grid_width), "float32")
-        y_coords = ops.cast(ops.arange(self.grid_height), "float32")
-
-        # Create meshgrid using numpy-style operations
-        x_grid = ops.broadcast_to(
-            ops.reshape(x_coords, (1, self.grid_width)),
-            (self.grid_height, self.grid_width)
-        )
-        y_grid = ops.broadcast_to(
-            ops.reshape(y_coords, (self.grid_height, 1)),
-            (self.grid_height, self.grid_width)
-        )
-
-        # Stack to get (y, x) coordinates for each position
-        position_grid = ops.stack([y_grid, x_grid], axis=-1)
-
-        return position_grid
-
-    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """
-        Forward pass for the SOM layer.
-
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch_size, input_dim).
-        training : bool, optional
-            Boolean indicating whether the layer should behave in
-            training mode or inference mode.
-
-        Returns
-        -------
-        Tuple[keras.KerasTensor, keras.KerasTensor]
-            A tuple containing:
-            - BMU coordinates of shape (batch_size, 2)
-            - Quantization error of shape (batch_size,)
-        """
-        # Find the Best Matching Units (BMUs) for each input
-        bmu_indices, quantization_errors = self._find_bmu(inputs)
-
-        # If in training mode, update the weights
-        if training:
-            self._update_weights(inputs, bmu_indices)
-            # Update iterations counter
-            self.iterations.assign_add(1.0)
-
-        # Apply regularization if specified
-        if self.regularizer is not None:
-            self.add_loss(self.regularizer(self.weights_map))
-
-        return bmu_indices, quantization_errors
-
-    def _find_bmu(self, inputs: keras.KerasTensor) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """
-        Find the Best Matching Unit (BMU) for each input.
-
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch_size, input_dim).
-
-        Returns
-        -------
-        Tuple[keras.KerasTensor, keras.KerasTensor]
-            A tuple containing:
-            - BMU coordinates of shape (batch_size, 2)
-            - Quantization error of shape (batch_size,)
-        """
-        # Reshape weights to [grid_height * grid_width, input_dim]
-        flat_weights = ops.reshape(self.weights_map, (-1, self.input_dim))
-
-        # Compute distances between inputs and all neurons
-        # We use squared Euclidean distance for efficiency
-        expanded_inputs = ops.expand_dims(inputs, 1)  # [batch_size, 1, input_dim]
-        expanded_weights = ops.expand_dims(flat_weights, 0)  # [1, grid_height * grid_width, input_dim]
-
-        # Compute squared distances
-        squared_diff = ops.square(expanded_inputs - expanded_weights)
-        squared_distances = ops.sum(squared_diff, axis=2)
-
-        # Find the index of the minimum distance (BMU)
-        bmu_flat_indices = ops.argmin(squared_distances, axis=1)
-
-        # Convert flat indices to 2D grid coordinates
-        bmu_y = ops.cast(bmu_flat_indices // self.grid_width, "int32")
-        bmu_x = ops.cast(bmu_flat_indices % self.grid_width, "int32")
-        bmu_indices = ops.stack([bmu_y, bmu_x], axis=1)
-
-        # Compute the quantization error (minimum distance)
-        batch_size = ops.shape(inputs)[0]
-        quantization_errors = ops.sqrt(
-            ops.take_along_axis(
-                squared_distances,
-                ops.expand_dims(bmu_flat_indices, axis=1),
-                axis=1
-            )
-        )
-        quantization_errors = ops.squeeze(quantization_errors, axis=1)
-
-        return bmu_indices, quantization_errors
-
-    def _update_weights(self, inputs: keras.KerasTensor, bmu_indices: keras.KerasTensor) -> None:
-        """
-        Update the weights of the SOM using the Kohonen learning rule.
-
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch_size, input_dim).
-        bmu_indices : keras.KerasTensor
-            BMU coordinates of shape (batch_size, 2).
-        """
-        # Update learning rate based on iteration
-        current_learning_rate = self.decay_function(
-            self.iterations, self.max_iterations
-        )
-
-        # Sigma also decreases with iterations
-        current_sigma = self.sigma * (1.0 - self.iterations / self.max_iterations)
-        current_sigma = ops.maximum(current_sigma, 0.01)  # Don't let it go to zero
-
-        # For SOM, we typically process one sample at a time to maintain proper learning
-        # In batch processing, we'll use the first sample in the batch for weight updates
-        # This is a common approach in SOM implementations
-
-        current_input = inputs[0]  # Use first sample in batch
-        bmu_coord = ops.cast(bmu_indices[0], "float32")  # Use corresponding BMU
-
-        # Compute neighborhood values for all neurons
-        if self.neighborhood_function == 'gaussian':
-            # Calculate squared distances from all neurons to BMU
-            bmu_expanded = ops.reshape(bmu_coord, (1, 1, 2))
-            squared_dist = ops.sum(
-                ops.square(self.grid_positions - bmu_expanded),
-                axis=2
-            )
-
-            # Compute Gaussian neighborhood
-            neighborhood = ops.exp(-squared_dist / (2 * ops.square(current_sigma)))
-            neighborhood = ops.expand_dims(neighborhood, axis=-1)
-
-        elif self.neighborhood_function == 'bubble':
-            # Calculate distances from all neurons to BMU
-            bmu_expanded = ops.reshape(bmu_coord, (1, 1, 2))
-            dist = ops.sqrt(ops.sum(
-                ops.square(self.grid_positions - bmu_expanded),
-                axis=2
-            ))
-
-            # Compute bubble neighborhood (1 within radius, 0 outside)
-            neighborhood = ops.cast(dist <= current_sigma, "float32")
-            neighborhood = ops.expand_dims(neighborhood, axis=-1)
-
-        # Compute the weight update
-        weighted_input = ops.reshape(current_input, (1, 1, self.input_dim))
-        weight_update = current_learning_rate * neighborhood * (weighted_input - self.weights_map)
-
-        # Apply the update
-        self.weights_map.assign_add(weight_update)
+        # Store map_size for backward compatibility and clear interface
+        self.map_size = tuple(map_size)  # Ensure it's a tuple
 
     def get_weights_as_grid(self) -> keras.KerasTensor:
         """
-        Get the current weights organized as a grid.
+        Get the current neuron weights organized as a 2D grid for visualization.
+
+        This method provides a convenient way to access the weight matrix in its
+        natural 2D grid organization, making it easy to visualize the learned
+        feature organization and topological structure.
 
         Returns
         -------
         keras.KerasTensor
-            The SOM weights as a grid of shape (grid_height, grid_width, input_dim).
-        """
-        return self.weights_map
+            The SOM weights reshaped as a grid with shape (height, width, input_dim).
+            Each position (i, j) contains the weight vector for neuron at grid
+            coordinate (i, j). This format is ideal for visualization and analysis
+            of the topological organization learned by the SOM.
 
-    def compute_output_shape(self, input_shape: Tuple) -> Tuple[Tuple, Tuple]:
-        """
-        Compute the output shape of the layer.
-
-        Parameters
-        ----------
-        input_shape : Tuple
-            Shape of the input tensor.
-
-        Returns
+        Example
         -------
-        Tuple[Tuple, Tuple]
-            A tuple containing:
-            - BMU coordinates shape: (batch_size, 2)
-            - Quantization error shape: (batch_size,)
+        ```python
+        som = SOM2dLayer(map_size=(8, 8), input_dim=3)
+        # ... after training ...
+
+        weights_grid = som.get_weights_as_grid()  # Shape: (8, 8, 3)
+
+        # Visualize RGB color organization (for 3D input)
+        import matplotlib.pyplot as plt
+        plt.imshow(weights_grid)  # Shows color organization
+        plt.title("SOM Color Organization")
+
+        # Access specific neuron weights
+        center_neuron_weights = weights_grid[4, 4, :]  # Center of 8x8 grid
+        ```
+
+        Note
+        ----
+        This is an alias for `get_weights_map()` provided for backward compatibility
+        and intuitive naming for 2D SOMs. Both methods return identical results.
         """
-        # Convert to list for consistent manipulation
-        input_shape_list = list(input_shape)
-        batch_size = input_shape_list[0]
-
-        bmu_shape = tuple([batch_size, 2])
-        error_shape = tuple([batch_size])
-
-        return bmu_shape, error_shape
+        return self.get_weights_map()
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Get configuration for the layer.
+        Return layer configuration for serialization and model saving.
+
+        This method ensures proper serialization of the 2D SOM layer by returning
+        all necessary parameters in a format that can be used to reconstruct the
+        layer exactly. It uses `map_size` instead of `grid_shape` for backward
+        compatibility with existing 2D SOM implementations.
 
         Returns
         -------
         Dict[str, Any]
-            Configuration dictionary for the layer.
+            Dictionary containing all layer configuration parameters needed for
+            reconstruction. Includes serialized initializers and regularizers
+            for complete state preservation.
+
+        Note
+        ----
+        The configuration uses `map_size` rather than `grid_shape` to maintain
+        the 2D-specific interface while ensuring compatibility with the base
+        SOMLayer serialization system.
         """
+        # Get the base configuration from parent SOMLayer
         config = super().get_config()
-        config.update({
-            'map_size': self.map_size,
-            'input_dim': self.input_dim,
-            'initial_learning_rate': self.initial_learning_rate,
-            'sigma': self.sigma,
-            'neighborhood_function': self.neighborhood_function,
-            'weights_initializer': keras.initializers.serialize(self.weights_initializer),
-            'regularizer': keras.regularizers.serialize(self.regularizer),
-        })
+
+        # Replace 'grid_shape' with 'map_size' for 2D layer compatibility
+        if 'grid_shape' in config:
+            config['map_size'] = self.map_size
+            del config['grid_shape']
+
+        # Ensure proper serialization of initializer and regularizer
+        # The parent class already handles this robustly, but we maintain
+        # explicit serialization for clarity and debugging
+        if hasattr(self, '_weights_initializer_config'):
+            config['weights_initializer'] = keras.initializers.serialize(
+                keras.initializers.get(self._weights_initializer_config)
+            )
+
+        if hasattr(self, '_regularizer_config') and self._regularizer_config is not None:
+            config['regularizer'] = keras.regularizers.serialize(
+                keras.regularizers.get(self._regularizer_config)
+            )
+
         return config
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """
-        Get build configuration for the layer.
-
-        Returns
-        -------
-        Dict[str, Any]
-            Build configuration dictionary.
-        """
-        return {
-            "input_shape": self._build_input_shape,
-        }
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """
-        Build the layer from a configuration.
-
-        Parameters
-        ----------
-        config : Dict[str, Any]
-            Build configuration dictionary.
-        """
-        if config.get("input_shape") is not None:
-            self.build(config["input_shape"])
-
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "SOM2dLayer":
+    def from_config(cls, config: Dict[str, Any]) -> 'SOM2dLayer':
         """
-        Create a layer from its configuration.
+        Create layer instance from configuration dictionary.
 
-        Parameters
-        ----------
-        config : Dict[str, Any]
-            Configuration dictionary.
+        This class method enables proper deserialization of saved 2D SOM layers,
+        handling the conversion between serialized configurations and layer parameters.
 
-        Returns
-        -------
-        SOM2dLayer
-            A new SOM2dLayer instance.
+        Args:
+            config: Dictionary containing layer configuration parameters.
+
+        Returns:
+            SOM2dLayer instance reconstructed from the configuration.
         """
-        # Deserialize complex objects
+        # Handle initializer deserialization
         if 'weights_initializer' in config:
             config['weights_initializer'] = keras.initializers.deserialize(
                 config['weights_initializer']
             )
-        if 'regularizer' in config:
+
+        # Handle regularizer deserialization
+        if 'regularizer' in config and config['regularizer'] is not None:
             config['regularizer'] = keras.regularizers.deserialize(
                 config['regularizer']
             )

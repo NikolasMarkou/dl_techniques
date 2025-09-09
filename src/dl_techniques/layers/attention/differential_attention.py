@@ -95,9 +95,9 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
             Must be positive and should divide dim evenly.
         head_dim: Integer, dimension of each attention head. Must be positive.
             Typically computed as dim // num_heads.
-        dropout: Float, output dropout rate applied after projection.
+        dropout_rate: Float, output dropout rate applied after projection.
             Must be between 0 and 1. Defaults to 0.0.
-        attention_dropout: Float, dropout rate applied to attention weights in
+        attention_dropout_rate: Float, dropout rate applied to attention weights in
             both MHA layers. Must be between 0 and 1. Defaults to 0.0.
         lambda_init: Float, initial value for the λ parameter controlling the
             balance between attention mechanisms. Should be between 0 and 1.
@@ -134,8 +134,8 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
             dim=768,
             num_heads=12,
             head_dim=64,
-            dropout=0.1,
-            attention_dropout=0.05,
+            dropout_rate=0.1,
+            attention_dropout_rate=0.05,
             lambda_init=0.7,
             kernel_regularizer=keras.regularizers.L2(1e-4)
         )
@@ -175,8 +175,8 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         dim: int,
         num_heads: int,
         head_dim: int,
-        dropout: float = 0.0,
-        attention_dropout: float = 0.0,
+        dropout_rate: float = 0.0,
+        attention_dropout_rate: float = 0.0,
         lambda_init: float = 0.8,
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
@@ -195,10 +195,10 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
             raise ValueError(f"num_heads must be positive, got {num_heads}")
         if head_dim <= 0:
             raise ValueError(f"head_dim must be positive, got {head_dim}")
-        if not (0.0 <= dropout <= 1.0):
-            raise ValueError(f"dropout must be between 0 and 1, got {dropout}")
-        if not (0.0 <= attention_dropout <= 1.0):
-            raise ValueError(f"attention_dropout must be between 0 and 1, got {attention_dropout}")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(f"dropout must be between 0 and 1, got {dropout_rate}")
+        if not (0.0 <= attention_dropout_rate <= 1.0):
+            raise ValueError(f"attention_dropout_rate must be between 0 and 1, got {attention_dropout_rate}")
         if not (0.0 <= lambda_init <= 1.0):
             raise ValueError(f"lambda_init must be between 0 and 1, got {lambda_init}")
 
@@ -206,8 +206,8 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = head_dim
-        self.dropout_rate = dropout
-        self.attention_dropout_rate = attention_dropout
+        self.dropout_rate = dropout_rate
+        self.attention_dropout_rate = attention_dropout_rate
         self.lambda_init = lambda_init
 
         # Store serialized initializers and regularizers
@@ -343,7 +343,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
     def call(
         self,
         inputs: keras.KerasTensor,
-        mask: Optional[keras.KerasTensor] = None,
+        attention_mask: Optional[keras.KerasTensor] = None,
         layer_idx: int = 0,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
@@ -356,7 +356,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
 
         Args:
             inputs: Input tensor of shape (batch_size, sequence_length, dim).
-            mask: Optional attention mask tensor. Can be 2D, 3D, or 4D tensor
+            attention_mask: Optional attention mask tensor. Can be 2D, 3D, or 4D tensor
                 for different masking strategies.
             layer_idx: Integer, index of the layer in the network stack (0-based).
                 Used for layer-dependent lambda computation. Defaults to 0.
@@ -372,7 +372,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
             query=inputs,
             value=inputs,
             key=inputs,
-            attention_mask=mask,
+            attention_mask=attention_mask,
             training=training,
             return_attention_scores=False
         )
@@ -381,7 +381,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
             query=inputs,
             value=inputs,
             key=inputs,
-            attention_mask=mask,
+            attention_mask=attention_mask,
             training=training,
             return_attention_scores=False
         )
@@ -427,8 +427,8 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
             'dim': self.dim,
             'num_heads': self.num_heads,
             'head_dim': self.head_dim,
-            'dropout': self.dropout_rate,
-            'attention_dropout': self.attention_dropout_rate,
+            'dropout_rate': self.dropout_rate,
+            'attention_dropout_rate': self.attention_dropout_rate,
             'lambda_init': self.lambda_init,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),

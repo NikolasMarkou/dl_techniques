@@ -391,7 +391,7 @@ class FlashGroupedQueryAttention(layers.Layer):
             return self.w_o(out)
         else:
             # Fall back to standard implementation
-            return super().call(x, training=training, mask=mask)
+            return super().call(x, training=training, attention_mask=mask)
 ```
 
 **FlashAttention Details:**
@@ -478,27 +478,28 @@ Large models require careful memory management.
 def create_memory_efficient_model(config):
     # Enable gradient checkpointing
     keras.mixed_precision.set_global_policy('mixed_bfloat16')
-    
+
     class MemoryEfficientTransformerBlock(TransformerBlock):
         def call(self, x, training=None, mask=None):
             if training and config.gradient_checkpointing:
                 # Recompute activations during backward pass
                 return self._checkpointed_call(x, mask)
             else:
-                return super().call(x, training=training, mask=mask)
-        
+                return super().call(x, training=training, attention_mask=mask)
+
         @tf.recompute_grad  # TensorFlow-specific, adapt for other backends
         def _checkpointed_call(self, x, mask):
-            return super().call(x, training=True, mask=mask)
-    
+            return super().call(x, training=True, attention_mask=mask)
+
     # Use memory-efficient blocks
     model = NumericallyStableTransformer(config)
     model.blocks = [
-        MemoryEfficientTransformerBlock(config, i) 
+        MemoryEfficientTransformerBlock(config, i)
         for i in range(config.n_layer)
     ]
-    
+
     return model
+
 
 # Optimizer configuration for memory efficiency
 def create_optimizer(config):
@@ -509,7 +510,7 @@ def create_optimizer(config):
         warmup_target=config.learning_rate,
         warmup_steps=config.warmup_steps
     )
-    
+
     # AdamW with proper weight decay
     optimizer = keras.optimizers.AdamW(
         learning_rate=lr_schedule,
@@ -519,7 +520,7 @@ def create_optimizer(config):
         epsilon=1e-8,
         clipnorm=1.0  # Global gradient clipping
     )
-    
+
     return optimizer
 ```
 

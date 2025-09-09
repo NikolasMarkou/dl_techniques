@@ -1,3 +1,11 @@
+"""
+Refined test suite for CapsuleRoutingSelfAttention layer implementation.
+
+This test suite is specifically designed to validate the new CapsuleRoutingSelfAttention
+implementation with proper error message matching, comprehensive routing algorithm testing,
+and robust serialization validation.
+"""
+
 import pytest
 import numpy as np
 import keras
@@ -11,11 +19,11 @@ from dl_techniques.layers.attention.capsule_routing_attention import CapsuleRout
 
 
 class TestCapsuleRoutingSelfAttention:
-    """Test suite for CapsuleRoutingSelfAttention layer implementation."""
+    """Comprehensive test suite for CapsuleRoutingSelfAttention layer implementation."""
 
     @pytest.fixture
     def input_tensor(self):
-        """Create a test input tensor."""
+        """Create a test input tensor with proper shape for attention."""
         # Shape: (batch_size, seq_len, embed_dim)
         return keras.random.normal([4, 16, 128])  # 4 batches, 16 tokens, 128 dims
 
@@ -32,7 +40,7 @@ class TestCapsuleRoutingSelfAttention:
         assert layer.num_heads == 8
         assert layer.key_dim == 64
         assert layer.value_dim is None
-        assert layer.dropout == 0.0
+        assert layer.dropout_rate == 0.0
         assert layer.use_bias is True
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
         assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
@@ -52,7 +60,7 @@ class TestCapsuleRoutingSelfAttention:
             num_heads=12,
             key_dim=32,
             value_dim=48,
-            dropout=0.1,
+            dropout_rate=0.1,
             use_bias=False,
             kernel_initializer="he_normal",
             bias_initializer="ones",
@@ -69,7 +77,7 @@ class TestCapsuleRoutingSelfAttention:
         assert layer.num_heads == 12
         assert layer.key_dim == 32
         assert layer.value_dim == 48
-        assert layer.dropout == 0.1
+        assert layer.dropout_rate == 0.1
         assert layer.use_bias is False
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
         assert isinstance(layer.bias_initializer, keras.initializers.Ones)
@@ -82,51 +90,51 @@ class TestCapsuleRoutingSelfAttention:
         assert layer.epsilon == 1e-6
 
     def test_invalid_parameters(self):
-        """Test that invalid parameters raise appropriate errors."""
+        """Test that invalid parameters raise appropriate errors with exact message matching."""
         # Test negative or zero num_heads
-        with pytest.raises(ValueError, match="num_heads must be positive"):
+        with pytest.raises(ValueError, match=r"num_heads must be positive, got -8"):
             CapsuleRoutingSelfAttention(num_heads=-8)
 
-        with pytest.raises(ValueError, match="num_heads must be positive"):
+        with pytest.raises(ValueError, match=r"num_heads must be positive, got 0"):
             CapsuleRoutingSelfAttention(num_heads=0)
 
         # Test negative or zero key_dim
-        with pytest.raises(ValueError, match="key_dim must be positive"):
+        with pytest.raises(ValueError, match=r"key_dim must be positive, got -16"):
             CapsuleRoutingSelfAttention(num_heads=8, key_dim=-16)
 
-        with pytest.raises(ValueError, match="key_dim must be positive"):
+        with pytest.raises(ValueError, match=r"key_dim must be positive, got 0"):
             CapsuleRoutingSelfAttention(num_heads=8, key_dim=0)
 
         # Test negative or zero value_dim
-        with pytest.raises(ValueError, match="value_dim must be positive"):
+        with pytest.raises(ValueError, match=r"value_dim must be positive, got -32"):
             CapsuleRoutingSelfAttention(num_heads=8, key_dim=16, value_dim=-32)
 
-        with pytest.raises(ValueError, match="value_dim must be positive"):
+        with pytest.raises(ValueError, match=r"value_dim must be positive, got 0"):
             CapsuleRoutingSelfAttention(num_heads=8, key_dim=16, value_dim=0)
 
-        # Test invalid dropout rates
-        with pytest.raises(ValueError, match="dropout must be between 0 and 1"):
-            CapsuleRoutingSelfAttention(num_heads=8, dropout=-0.1)
+        # Test invalid dropout rates (matching exact error message pattern)
+        with pytest.raises(ValueError, match=r"dropout_rate must be between 0 and 1, got -0\.1"):
+            CapsuleRoutingSelfAttention(num_heads=8, dropout_rate=-0.1)
 
-        with pytest.raises(ValueError, match="dropout must be between 0 and 1"):
-            CapsuleRoutingSelfAttention(num_heads=8, dropout=1.1)
+        with pytest.raises(ValueError, match=r"dropout_rate must be between 0 and 1, got 1\.1"):
+            CapsuleRoutingSelfAttention(num_heads=8, dropout_rate=1.1)
 
         # Test negative or zero routing_iterations
-        with pytest.raises(ValueError, match="routing_iterations must be positive"):
+        with pytest.raises(ValueError, match=r"routing_iterations must be positive, got -3"):
             CapsuleRoutingSelfAttention(num_heads=8, routing_iterations=-3)
 
-        with pytest.raises(ValueError, match="routing_iterations must be positive"):
+        with pytest.raises(ValueError, match=r"routing_iterations must be positive, got 0"):
             CapsuleRoutingSelfAttention(num_heads=8, routing_iterations=0)
 
         # Test negative or zero epsilon
-        with pytest.raises(ValueError, match="epsilon must be positive"):
+        with pytest.raises(ValueError, match=r"epsilon must be positive, got -1e-08"):
             CapsuleRoutingSelfAttention(num_heads=8, epsilon=-1e-8)
 
-        with pytest.raises(ValueError, match="epsilon must be positive"):
+        with pytest.raises(ValueError, match=r"epsilon must be positive, got 0"):
             CapsuleRoutingSelfAttention(num_heads=8, epsilon=0)
 
     def test_build_process(self, input_tensor, layer_instance):
-        """Test that the layer builds properly."""
+        """Test that the layer builds properly with all sub-components."""
         # Trigger build through forward pass
         output = layer_instance(input_tensor)
 
@@ -139,7 +147,7 @@ class TestCapsuleRoutingSelfAttention:
         assert hasattr(layer_instance, "output_dense")
         assert hasattr(layer_instance, "dropout_layer")
 
-        # Check embedding dimension was set
+        # Check embedding dimension was set correctly
         assert layer_instance.embed_dim == input_tensor.shape[-1]
         assert layer_instance.actual_key_dim == layer_instance.key_dim
         assert layer_instance.actual_value_dim == layer_instance.key_dim  # defaults to key_dim
@@ -160,25 +168,31 @@ class TestCapsuleRoutingSelfAttention:
         input_tensor = keras.random.normal([2, 16, 127])
         layer = CapsuleRoutingSelfAttention(num_heads=8)
 
-        with pytest.raises(ValueError, match="embed_dim .* must be divisible by num_heads"):
+        # Match exact error message pattern from implementation
+        with pytest.raises(ValueError, match=r"embed_dim \(127\) must be divisible by num_heads \(8\)"):
             layer(input_tensor)
 
+    def test_build_with_invalid_input_dimensions(self):
+        """Test build fails with invalid input shapes."""
+        layer = CapsuleRoutingSelfAttention(num_heads=8, key_dim=16)
+
+        # Test non-3D input
+        with pytest.raises(ValueError, match=r"Expected 3D input, got shape"):
+            layer.build((None, 128))  # 2D shape
+
+        # Test 4D input
+        with pytest.raises(ValueError, match=r"Expected 3D input, got shape"):
+            layer.build((None, 16, 16, 128))  # 4D shape
+
     def test_output_shapes(self, input_tensor):
-        """Test that output shapes are computed correctly."""
+        """Test that output shapes are computed correctly for various configurations."""
         configs_to_test = [
             {"num_heads": 4, "key_dim": 32},
             {"num_heads": 8, "key_dim": 16, "value_dim": 24},
-            # Corrected this config: 128 is not divisible by 12. Use 16 instead.
-            {"num_heads": 16, "key_dim": 8, "value_dim": 8},
+            {"num_heads": 16, "key_dim": 8, "value_dim": 8},  # Fixed divisibility issue
         ]
 
         for config in configs_to_test:
-            # Use a custom input tensor if embed_dim doesn't match fixture
-            current_embed_dim = input_tensor.shape[-1]
-            if current_embed_dim % config["num_heads"] != 0:
-                # This case is avoided by correcting the config above but is good practice
-                continue
-
             layer = CapsuleRoutingSelfAttention(**config)
             output = layer(input_tensor)
 
@@ -189,13 +203,13 @@ class TestCapsuleRoutingSelfAttention:
             computed_shape = layer.compute_output_shape(input_tensor.shape)
             assert computed_shape == input_tensor.shape
 
-    def test_forward_pass(self, input_tensor, layer_instance):
-        """Test that forward pass produces expected values."""
+    def test_forward_pass_comprehensive(self, input_tensor, layer_instance):
+        """Comprehensive test of forward pass functionality."""
         output = layer_instance(input_tensor)
 
         # Basic sanity checks
-        assert not np.any(np.isnan(output.numpy()))
-        assert not np.any(np.isinf(output.numpy()))
+        assert not np.any(np.isnan(ops.convert_to_numpy(output)))
+        assert not np.any(np.isinf(ops.convert_to_numpy(output)))
 
         # Check output shape
         assert output.shape == input_tensor.shape
@@ -208,59 +222,93 @@ class TestCapsuleRoutingSelfAttention:
         output_training = layer_instance(input_tensor, training=True)
         assert output_training.shape == input_tensor.shape
 
-    def test_different_routing_configurations(self):
-        """Test layer with different routing configurations."""
+        # Test deterministic behavior in inference mode
+        output_inference_2 = layer_instance(input_tensor, training=False)
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(output_inference),
+            ops.convert_to_numpy(output_inference_2),
+            rtol=1e-6, atol=1e-6,
+            err_msg="Inference should be deterministic"
+        )
+
+    def test_routing_configurations(self):
+        """Test layer with different routing configurations systematically."""
         configurations = [
+            # Test individual routing mechanisms
             {"num_heads": 8, "use_vertical_routing": True, "use_horizontal_routing": False},
             {"num_heads": 8, "use_vertical_routing": False, "use_horizontal_routing": True},
             {"num_heads": 8, "use_vertical_routing": False, "use_horizontal_routing": False},
+
+            # Test positional routing variations
             {"num_heads": 8, "use_positional_routing": False},
+            {"num_heads": 8, "use_positional_routing": True},
+
+            # Test routing iterations
             {"num_heads": 8, "routing_iterations": 1},
             {"num_heads": 8, "routing_iterations": 10},
+
+            # Combined configurations
+            {
+                "num_heads": 6,
+                "use_vertical_routing": True,
+                "use_horizontal_routing": True,
+                "use_positional_routing": True,
+                "routing_iterations": 5
+            },
         ]
 
         for config in configurations:
             layer = CapsuleRoutingSelfAttention(**config)
 
             # Create test input
-            test_input = keras.random.normal([2, 16, 128])
+            test_input = keras.random.normal([2, 16, 120])  # 120 is divisible by 6
 
             # Test forward pass
             output = layer(test_input)
 
             # Check output is valid
-            assert not np.any(np.isnan(output.numpy()))
+            assert not np.any(np.isnan(ops.convert_to_numpy(output)))
             assert output.shape == test_input.shape
 
-    def test_attention_mask_support(self, layer_instance):
-        """Test attention mask functionality."""
+    def test_attention_mask_comprehensive(self, layer_instance):
+        """Comprehensive test of attention mask functionality."""
         batch_size, seq_len, embed_dim = 2, 16, 128
         input_tensor = keras.random.normal([batch_size, seq_len, embed_dim])
 
         # Test with 2D mask (padding mask)
-        mask_2d = keras.ops.ones((batch_size, seq_len))
+        mask_2d = keras.ops.ones((batch_size, seq_len), dtype='bool')
         # Mask out last 4 positions
         mask_2d = keras.ops.concatenate([
             mask_2d[:, :-4],
-            keras.ops.zeros((batch_size, 4))
+            keras.ops.zeros((batch_size, 4), dtype='bool')
         ], axis=1)
 
         output_with_mask = layer_instance(input_tensor, attention_mask=mask_2d)
         assert output_with_mask.shape == input_tensor.shape
-        assert not np.any(np.isnan(output_with_mask.numpy()))
+        assert not np.any(np.isnan(ops.convert_to_numpy(output_with_mask)))
 
-        # Test with 3D mask (attention mask)
-        mask_3d = keras.ops.ones((batch_size, seq_len, seq_len))
+        # Test with 3D mask (causal mask)
+        mask_3d = keras.ops.ones((batch_size, seq_len, seq_len), dtype='bool')
         # Create causal mask
         mask_3d = keras.ops.tril(mask_3d)
 
         output_with_3d_mask = layer_instance(input_tensor, attention_mask=mask_3d)
         assert output_with_3d_mask.shape == input_tensor.shape
-        assert not np.any(np.isnan(output_with_3d_mask.numpy()))
+        assert not np.any(np.isnan(ops.convert_to_numpy(output_with_3d_mask)))
+
+        # Test that masking actually affects output
+        output_without_mask = layer_instance(input_tensor)
+
+        # Outputs should be different when mask is applied
+        assert not np.allclose(
+            ops.convert_to_numpy(output_without_mask),
+            ops.convert_to_numpy(output_with_mask),
+            rtol=1e-5, atol=1e-5
+        )
 
     def test_different_sequence_lengths(self):
         """Test layer with different sequence lengths."""
-        seq_lengths = [4, 8, 16, 32, 64]
+        seq_lengths = [1, 4, 8, 16, 32, 64]
         layer = CapsuleRoutingSelfAttention(num_heads=8, key_dim=16)
 
         for seq_len in seq_lengths:
@@ -269,17 +317,20 @@ class TestCapsuleRoutingSelfAttention:
             output = layer(test_input)
 
             assert output.shape == test_input.shape
-            assert not np.any(np.isnan(output.numpy()))
+            assert not np.any(np.isnan(ops.convert_to_numpy(output)))
 
-    def test_serialization_cycle(self):
-        """Test complete serialization cycle."""
+    def test_serialization_cycle_comprehensive(self):
+        """Comprehensive test of serialization cycle with all parameters."""
         original_layer = CapsuleRoutingSelfAttention(
             num_heads=12,
             key_dim=32,
             value_dim=48,
-            dropout=0.1,
+            dropout_rate=0.1,
             use_bias=True,
             kernel_initializer="he_normal",
+            bias_initializer="ones",
+            kernel_regularizer=keras.regularizers.L2(1e-4),
+            bias_regularizer=keras.regularizers.L1(1e-5),
             routing_iterations=5,
             use_vertical_routing=True,
             use_horizontal_routing=False,
@@ -290,6 +341,17 @@ class TestCapsuleRoutingSelfAttention:
         # Get config
         config = original_layer.get_config()
 
+        # Check that all parameters are included in config
+        expected_keys = {
+            'num_heads', 'key_dim', 'value_dim', 'dropout_rate', 'use_bias',
+            'kernel_initializer', 'bias_initializer', 'kernel_regularizer',
+            'bias_regularizer', 'routing_iterations', 'use_vertical_routing',
+            'use_horizontal_routing', 'use_positional_routing', 'epsilon'
+        }
+
+        assert expected_keys.issubset(
+            set(config.keys())), f"Missing keys in config: {expected_keys - set(config.keys())}"
+
         # Recreate the layer
         recreated_layer = CapsuleRoutingSelfAttention.from_config(config)
 
@@ -297,7 +359,7 @@ class TestCapsuleRoutingSelfAttention:
         assert recreated_layer.num_heads == original_layer.num_heads
         assert recreated_layer.key_dim == original_layer.key_dim
         assert recreated_layer.value_dim == original_layer.value_dim
-        assert recreated_layer.dropout_rate == original_layer.dropout
+        assert recreated_layer.dropout_rate == original_layer.dropout_rate
         assert recreated_layer.use_bias == original_layer.use_bias
         assert recreated_layer.routing_iterations == original_layer.routing_iterations
         assert recreated_layer.use_vertical_routing == original_layer.use_vertical_routing
@@ -305,14 +367,15 @@ class TestCapsuleRoutingSelfAttention:
         assert recreated_layer.use_positional_routing == original_layer.use_positional_routing
         assert recreated_layer.epsilon == original_layer.epsilon
 
-    def test_model_integration(self, input_tensor):
-        """Test the layer in a model context."""
-        # Create a simple model with the capsule attention layer
+    def test_model_integration_complete(self, input_tensor):
+        """Complete test of the layer in a model context with compilation and training."""
+        # Create a model with the capsule attention layer
         inputs = keras.Input(shape=input_tensor.shape[1:])
         x = CapsuleRoutingSelfAttention(
             num_heads=8,
             key_dim=16,
-            routing_iterations=3
+            routing_iterations=3,
+            name="capsule_attention"
         )(inputs)
         x = keras.layers.LayerNormalization()(x)
         x = keras.layers.Dense(64, activation='relu')(x)
@@ -333,13 +396,15 @@ class TestCapsuleRoutingSelfAttention:
         assert y_pred.shape == (input_tensor.shape[0], 10)
 
         # Test with dummy labels for training
-        # FIX: Use numpy to generate random integers, which is more stable in tests.
         labels = np.random.randint(0, 10, size=(input_tensor.shape[0],))
         loss = model.test_on_batch(input_tensor, labels)
         assert not np.isnan(loss[0])  # loss should be finite
 
-    def test_model_save_load_cycle(self, input_tensor):
-        """CRITICAL TEST: Full model save/load serialization cycle."""
+        # Test model summary doesn't crash
+        model.summary()
+
+    def test_model_save_load_cycle_comprehensive(self, input_tensor):
+        """CRITICAL TEST: Complete model save/load serialization cycle with predictions."""
         # Create a model with the capsule attention layer
         inputs = keras.Input(shape=input_tensor.shape[1:])
         x = CapsuleRoutingSelfAttention(
@@ -348,6 +413,7 @@ class TestCapsuleRoutingSelfAttention:
             routing_iterations=3,
             use_vertical_routing=True,
             use_horizontal_routing=True,
+            dropout_rate=0.1,
             name="capsule_attention"
         )(inputs)
         x = keras.layers.LayerNormalization()(x)
@@ -389,10 +455,12 @@ class TestCapsuleRoutingSelfAttention:
             assert capsule_layer.num_heads == 8
             assert capsule_layer.key_dim == 16
             assert capsule_layer.routing_iterations == 3
+            assert capsule_layer.use_vertical_routing is True
+            assert capsule_layer.use_horizontal_routing is True
 
-    def test_numerical_stability(self):
-        """Test layer stability with extreme input values."""
-        layer = CapsuleRoutingSelfAttention(num_heads=4, key_dim=16)
+    def test_numerical_stability_extreme_cases(self):
+        """Test layer stability with extreme input values and configurations."""
+        layer = CapsuleRoutingSelfAttention(num_heads=4, key_dim=16, epsilon=1e-8)
 
         # Create inputs with different magnitudes
         batch_size = 2
@@ -400,21 +468,26 @@ class TestCapsuleRoutingSelfAttention:
         embed_dim = 64
 
         test_cases = [
-            keras.ops.zeros((batch_size, seq_len, embed_dim)),  # Zeros
-            keras.ops.ones((batch_size, seq_len, embed_dim)) * 1e-10,  # Very small values
-            keras.ops.ones((batch_size, seq_len, embed_dim)) * 1e3,  # Large values
-            keras.random.normal((batch_size, seq_len, embed_dim)) * 100  # Large random values
+            ("zeros", keras.ops.zeros((batch_size, seq_len, embed_dim))),
+            ("tiny_values", keras.ops.ones((batch_size, seq_len, embed_dim)) * 1e-10),
+            ("large_values", keras.ops.ones((batch_size, seq_len, embed_dim)) * 1e3),
+            ("large_random", keras.random.normal((batch_size, seq_len, embed_dim)) * 100),
+            ("mixed_scale", keras.ops.concatenate([
+                keras.ops.ones((batch_size, seq_len // 2, embed_dim)) * 1e-6,
+                keras.ops.ones((batch_size, seq_len // 2, embed_dim)) * 1e6
+            ], axis=1))
         ]
 
-        for test_input in test_cases:
+        for case_name, test_input in test_cases:
             output = layer(test_input)
 
             # Check for NaN/Inf values
-            assert not np.any(np.isnan(output.numpy())), "NaN values detected in output"
-            assert not np.any(np.isinf(output.numpy())), "Inf values detected in output"
+            output_numpy = ops.convert_to_numpy(output)
+            assert not np.any(np.isnan(output_numpy)), f"NaN values detected in output for {case_name}"
+            assert not np.any(np.isinf(output_numpy)), f"Inf values detected in output for {case_name}"
 
-    def test_regularization_losses(self, input_tensor):
-        """Test that regularization losses are properly applied."""
+    def test_regularization_losses_comprehensive(self, input_tensor):
+        """Test that regularization losses are properly applied and accessible."""
         # Create layer with regularization
         layer = CapsuleRoutingSelfAttention(
             num_heads=8,
@@ -426,54 +499,64 @@ class TestCapsuleRoutingSelfAttention:
         # Build layer and call it
         _ = layer(input_tensor)
 
-        # Check that regularization losses have been added.
-        # In Keras 3, losses are typically added during build.
+        # Check that regularization losses have been added
         assert len(layer.losses) > 0
 
-    def test_squash_function_properties(self):
-        """Test properties of the squashing function."""
+        # Test that losses are finite
+        total_loss = sum(layer.losses)
+        assert not np.isnan(ops.convert_to_numpy(total_loss))
+        assert not np.isinf(ops.convert_to_numpy(total_loss))
+
+    def test_squash_function_properties_detailed(self):
+        """Detailed test of the squashing function properties."""
         layer = CapsuleRoutingSelfAttention(num_heads=4, key_dim=16)
 
-        # Test squash function directly
-        # Create test vectors
-        test_vectors = keras.random.normal([2, 3, 4])  # arbitrary shape
-        squashed = layer._squash(test_vectors)
+        # Test squash function with various input scales
+        test_cases = [
+            keras.random.normal([2, 3, 4]),  # Standard normal
+            keras.ops.ones([2, 3, 4]) * 0.1,  # Small vectors
+            keras.ops.ones([2, 3, 4]) * 10.0,  # Large vectors
+            keras.ops.zeros([2, 3, 4]),  # Zero vectors
+        ]
 
-        # Check output shape is preserved
-        assert squashed.shape == test_vectors.shape
+        for test_vectors in test_cases:
+            squashed = layer._squash(test_vectors)
 
-        # Check no NaN/Inf values
-        assert not np.any(np.isnan(squashed.numpy()))
-        assert not np.any(np.isinf(squashed.numpy()))
+            # Check output shape is preserved
+            assert squashed.shape == test_vectors.shape
 
-        # Check squashing properties: ||squashed|| should be less than ||original|| for large vectors
-        original_norms = keras.ops.sqrt(keras.ops.sum(keras.ops.square(test_vectors), axis=-1))
-        squashed_norms = keras.ops.sqrt(keras.ops.sum(keras.ops.square(squashed), axis=-1))
+            # Check no NaN/Inf values
+            squashed_numpy = ops.convert_to_numpy(squashed)
+            assert not np.any(np.isnan(squashed_numpy))
+            assert not np.any(np.isinf(squashed_numpy))
 
-        # For vectors with norm > 1, squashed norm should be smaller
-        large_norm_mask = original_norms > 1.0
-        if keras.ops.any(large_norm_mask):
-            are_squashed_norms_smaller = squashed_norms < original_norms
-            final_check = ops.logical_or(ops.logical_not(large_norm_mask), are_squashed_norms_smaller)
-            assert ops.all(final_check)
+            # Check squashing properties
+            original_norms = ops.sqrt(ops.sum(ops.square(test_vectors), axis=-1))
+            squashed_norms = ops.sqrt(ops.sum(ops.square(squashed), axis=-1))
 
-    def test_dynamic_routing_convergence(self):
-        """Test that dynamic routing produces consistent results."""
+            # For non-zero vectors, squashed norm should be <= 1
+            non_zero_mask = original_norms > 1e-6
+            if ops.any(non_zero_mask):
+                masked_squashed_norms = ops.where(non_zero_mask, squashed_norms, 0.0)
+                assert ops.all(masked_squashed_norms <= 1.0 + 1e-6)  # Allow small numerical error
+
+    def test_dynamic_routing_algorithm_properties(self):
+        """Test properties of the dynamic routing algorithm."""
         layer = CapsuleRoutingSelfAttention(
             num_heads=4,
             key_dim=16,
-            routing_iterations=10  # More iterations for stability
+            routing_iterations=5
         )
 
         test_input = keras.random.normal([2, 8, 64])
 
-        # Run multiple times and check consistency
+        # Test consistency across multiple calls (with dropout disabled)
         outputs = []
         for _ in range(3):
-            output = layer(test_input, training=False)  # Disable dropout for consistency
-            outputs.append(output.numpy())
+            output = layer(test_input, training=False)
+            outputs.append(ops.convert_to_numpy(output))
 
-        # Check that outputs are very similar (deterministic routing)
+        # Check that outputs are consistent (deterministic routing)
         for i in range(1, len(outputs)):
             np.testing.assert_allclose(
                 outputs[0],
@@ -482,48 +565,82 @@ class TestCapsuleRoutingSelfAttention:
                 err_msg="Dynamic routing should be deterministic in inference mode"
             )
 
-    def test_routing_disabled_fallback(self):
-        """Test that layer works when both routing methods are disabled."""
+    def test_routing_iterations_effect(self):
+        """Test that different routing iterations produce different results."""
+        test_input = keras.random.normal([2, 8, 64])
+
+        # Create layers with different routing iterations
+        layer_1_iter = CapsuleRoutingSelfAttention(
+            num_heads=4, key_dim=16, routing_iterations=1
+        )
+        layer_5_iter = CapsuleRoutingSelfAttention(
+            num_heads=4, key_dim=16, routing_iterations=5
+        )
+
+        output_1 = layer_1_iter(test_input, training=False)
+        output_5 = layer_5_iter(test_input, training=False)
+
+        # Outputs should be different (routing should converge differently)
+        assert not np.allclose(
+            ops.convert_to_numpy(output_1),
+            ops.convert_to_numpy(output_5),
+            rtol=1e-3, atol=1e-3
+        )
+
+    def test_routing_disabled_fallback_comprehensive(self):
+        """Test that layer works correctly when routing methods are disabled."""
+        configurations = [
+            # No routing at all
+            {"use_vertical_routing": False, "use_horizontal_routing": False},
+            # Only vertical routing
+            {"use_vertical_routing": True, "use_horizontal_routing": False},
+            # Only horizontal routing
+            {"use_vertical_routing": False, "use_horizontal_routing": True},
+        ]
+
+        test_input = keras.random.normal([2, 16, 128])
+
+        for config in configurations:
+            layer = CapsuleRoutingSelfAttention(num_heads=8, key_dim=16, **config)
+            output = layer(test_input)
+
+            # Should still work and produce valid output
+            assert output.shape == test_input.shape
+            output_numpy = ops.convert_to_numpy(output)
+            assert not np.any(np.isnan(output_numpy))
+            assert not np.any(np.isinf(output_numpy))
+
+    def test_different_key_value_dims_comprehensive(self):
+        """Test layer with different key and value dimensions extensively."""
+        test_configs = [
+            {"key_dim": 32, "value_dim": 16},
+            {"key_dim": 16, "value_dim": 32},
+            {"key_dim": 64, "value_dim": 8},
+        ]
+
+        for config in test_configs:
+            layer = CapsuleRoutingSelfAttention(num_heads=8, **config)
+            test_input = keras.random.normal([2, 16, 128])
+            output = layer(test_input)
+
+            # Output should still match input shape
+            assert output.shape == test_input.shape
+            assert not np.any(np.isnan(ops.convert_to_numpy(output)))
+
+            # Check internal dimensions are set correctly
+            assert layer.actual_key_dim == config["key_dim"]
+            assert layer.actual_value_dim == config["value_dim"]
+
+    def test_gradients_flow_comprehensive(self, input_tensor):
+        """Comprehensive test that gradients flow properly through all components."""
         layer = CapsuleRoutingSelfAttention(
             num_heads=8,
             key_dim=16,
-            use_vertical_routing=False,
-            use_horizontal_routing=False
+            use_vertical_routing=True,
+            use_horizontal_routing=True
         )
-
-        test_input = keras.random.normal([2, 16, 128])
-        output = layer(test_input)
-
-        # Should still work and produce valid output
-        assert output.shape == test_input.shape
-        assert not np.any(np.isnan(output.numpy()))
-        assert not np.any(np.isinf(output.numpy()))
-
-    def test_different_key_value_dims(self):
-        """Test layer with different key and value dimensions."""
-        layer = CapsuleRoutingSelfAttention(
-            num_heads=8,
-            key_dim=32,
-            value_dim=16  # Different from key_dim
-        )
-
-        test_input = keras.random.normal([2, 16, 128])
-        output = layer(test_input)
-
-        # Output should still match input shape
-        assert output.shape == test_input.shape
-        assert not np.any(np.isnan(output.numpy()))
-
-        # Check internal dimensions are set correctly
-        assert layer.actual_key_dim == 32
-        assert layer.actual_value_dim == 16
-
-    def test_gradients_flow(self, input_tensor):
-        """Test that gradients flow properly through the layer."""
-        layer = CapsuleRoutingSelfAttention(num_heads=8, key_dim=16)
 
         with tf.GradientTape() as tape:
-            # KerasTensors need to be converted to TF tensors for gradient tape
             input_tensor_tf = tf.convert_to_tensor(input_tensor)
             tape.watch(input_tensor_tf)
             output = layer(input_tensor_tf)
@@ -532,18 +649,23 @@ class TestCapsuleRoutingSelfAttention:
         gradients = tape.gradient(loss, layer.trainable_variables)
 
         # Check that gradients exist and are finite
-        assert all(g is not None for g in gradients)
-        assert len(gradients) > 0
+        assert all(g is not None for g in gradients), "Some gradients are None"
+        assert len(gradients) > 0, "No trainable variables found"
 
-        for grad in gradients:
-            assert not np.any(np.isnan(grad.numpy())), "NaN gradients detected"
-            assert not np.any(np.isinf(grad.numpy())), "Infinite gradients detected"
+        for i, grad in enumerate(gradients):
+            grad_numpy = grad.numpy()
+            assert not np.any(np.isnan(grad_numpy)), f"NaN gradients detected in variable {i}"
+            assert not np.any(np.isinf(grad_numpy)), f"Infinite gradients detected in variable {i}"
 
-    def test_different_batch_sizes(self):
-        """Test layer with different batch sizes."""
+            # Check that gradients have reasonable magnitude
+            grad_norm = np.linalg.norm(grad_numpy)
+            assert grad_norm < 1e6, f"Gradient norm too large: {grad_norm}"
+
+    def test_different_batch_sizes_comprehensive(self):
+        """Test layer with comprehensive range of batch sizes."""
         layer = CapsuleRoutingSelfAttention(num_heads=8, key_dim=16)
 
-        batch_sizes = [1, 4, 8, 16]
+        batch_sizes = [1, 2, 4, 8, 16, 32]
         seq_len, embed_dim = 16, 128
 
         for batch_size in batch_sizes:
@@ -551,45 +673,98 @@ class TestCapsuleRoutingSelfAttention:
             output = layer(test_input)
 
             assert output.shape == test_input.shape
-            assert not np.any(np.isnan(output.numpy()))
+            output_numpy = ops.convert_to_numpy(output)
+            assert not np.any(np.isnan(output_numpy))
+
+            # Test that output has reasonable scale
+            output_std = np.std(output_numpy)
+            assert 0.001 < output_std < 100, f"Output std {output_std} seems unreasonable"
 
     @pytest.mark.parametrize("training", [True, False, None])
-    def test_training_modes(self, input_tensor, layer_instance, training):
-        """Test behavior in different training modes."""
+    def test_training_modes_comprehensive(self, input_tensor, layer_instance, training):
+        """Comprehensive test of behavior in different training modes."""
         output = layer_instance(input_tensor, training=training)
 
         # Should always produce valid output
         assert output.shape == input_tensor.shape
-        assert not np.any(np.isnan(output.numpy()))
-        assert not np.any(np.isinf(output.numpy()))
+        output_numpy = ops.convert_to_numpy(output)
+        assert not np.any(np.isnan(output_numpy))
+        assert not np.any(np.isinf(output_numpy))
 
-    def test_invalid_input_shapes(self):
-        """Test that invalid input shapes raise appropriate errors."""
-        layer = CapsuleRoutingSelfAttention(num_heads=8, key_dim=16)
+        # Test that training mode affects dropout behavior
+        if hasattr(layer_instance, 'dropout_rate') and layer_instance.dropout_rate > 0:
+            if training is True:
+                # In training mode with dropout, outputs should vary slightly
+                output2 = layer_instance(input_tensor, training=True)
+                # Note: Due to routing determinism, difference might be small
+                # We just check that it doesn't crash
+                assert output2.shape == input_tensor.shape
+            elif training is False:
+                # In inference mode, outputs should be deterministic
+                output2 = layer_instance(input_tensor, training=False)
+                np.testing.assert_allclose(
+                    output_numpy,
+                    ops.convert_to_numpy(output2),
+                    rtol=1e-6, atol=1e-6,
+                    err_msg="Inference mode should be deterministic"
+                )
 
-        # Test 2D input (missing sequence dimension)
-        with pytest.raises(ValueError, match="Expected 3D input"):
-            layer.build((None, 128))  # Should be (None, seq_len, embed_dim)
+    def test_capsule_routing_weight_initialization(self):
+        """Test that capsule routing weights are properly initialized."""
+        layer = CapsuleRoutingSelfAttention(
+            num_heads=8,
+            key_dim=16,
+            use_vertical_routing=True
+        )
 
-        # Test 4D input (too many dimensions)
-        with pytest.raises(ValueError, match="Expected 3D input"):
-            layer.build((None, 16, 16, 128))  # Should be 3D
+        # Build the layer
+        test_input = keras.random.normal([2, 16, 128])
+        _ = layer(test_input)
 
-    def test_very_small_sequence_length(self):
-        """Test layer with very small sequence lengths."""
-        layer = CapsuleRoutingSelfAttention(num_heads=4, key_dim=16)
+        # Check vertical routing weights exist when enabled
+        assert hasattr(layer, 'vertical_aggregation_weights')
+        assert layer.vertical_aggregation_weights is not None
 
-        # Test with sequence length of 1
-        test_input = keras.random.normal([2, 1, 64])
-        output = layer(test_input)
+        # Check weight shapes
+        assert layer.vertical_aggregation_weights.shape == (8, 8)  # (num_heads, num_heads)
 
-        assert output.shape == test_input.shape
-        assert not np.any(np.isnan(output.numpy()))
+    def test_positional_routing_behavior(self):
+        """Test that positional routing behaves differently from non-positional."""
+        test_input = keras.random.normal([2, 8, 64])
 
-    def test_epsilon_parameter_effect(self):
-        """Test that epsilon parameter affects numerical stability."""
+        layer_with_pos = CapsuleRoutingSelfAttention(
+            num_heads=4,
+            key_dim=16,
+            use_vertical_routing=False,  # Focus on horizontal routing
+            use_horizontal_routing=True,
+            use_positional_routing=True
+        )
+
+        layer_without_pos = CapsuleRoutingSelfAttention(
+            num_heads=4,
+            key_dim=16,
+            use_vertical_routing=False,  # Focus on horizontal routing
+            use_horizontal_routing=True,
+            use_positional_routing=False
+        )
+
+        output_with_pos = layer_with_pos(test_input, training=False)
+        output_without_pos = layer_without_pos(test_input, training=False)
+
+        # Outputs should be different due to different routing constraints
+        assert not np.allclose(
+            ops.convert_to_numpy(output_with_pos),
+            ops.convert_to_numpy(output_without_pos),
+            rtol=1e-3, atol=1e-3
+        )
+
+    def test_epsilon_parameter_numerical_effect(self):
+        """Test that epsilon parameter affects numerical stability appropriately."""
         # Test with different epsilon values
         epsilons = [1e-12, 1e-8, 1e-4]
+
+        # Create input that might cause numerical issues (very small values)
+        test_input = keras.ops.ones([2, 8, 64]) * 1e-10
 
         for eps in epsilons:
             layer = CapsuleRoutingSelfAttention(
@@ -598,10 +773,9 @@ class TestCapsuleRoutingSelfAttention:
                 epsilon=eps
             )
 
-            # Create input that might cause numerical issues
-            test_input = keras.ops.ones([2, 8, 64]) * 1e-10
             output = layer(test_input)
 
             # Should handle small values gracefully
-            assert not np.any(np.isnan(output.numpy()))
-            assert not np.any(np.isinf(output.numpy()))
+            output_numpy = ops.convert_to_numpy(output)
+            assert not np.any(np.isnan(output_numpy)), f"NaN values with epsilon={eps}"
+            assert not np.any(np.isinf(output_numpy)), f"Inf values with epsilon={eps}"
