@@ -60,16 +60,15 @@ model = create_vae(input_shape=(64, 64, 3), latent_dim=128, kl_loss_weight=0.01)
 
 import keras
 import tensorflow as tf
-from keras import ops, layers
-from typing import Optional, Tuple, Union, Dict, Any, List
+from keras import layers, ops
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 from dl_techniques.layers.sampling import Sampling
-
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
@@ -120,36 +119,36 @@ class VAE(keras.Model):
             "steps_per_depth": 1,
             "filters": [16, 32],
             "default_latent_dim": 32,
-            "kl_loss_weight": 0.01
+            "kl_loss_weight": 0.01,
         },
         "small": {
             "depths": 2,
             "steps_per_depth": 1,
             "filters": [32, 64],
             "default_latent_dim": 64,
-            "kl_loss_weight": 0.01
+            "kl_loss_weight": 0.01,
         },
         "medium": {
             "depths": 3,
             "steps_per_depth": 1,
             "filters": [32, 64, 128],
             "default_latent_dim": 128,
-            "kl_loss_weight": 0.005
+            "kl_loss_weight": 0.005,
         },
         "large": {
             "depths": 3,
             "steps_per_depth": 2,
             "filters": [64, 128, 256],
             "default_latent_dim": 256,
-            "kl_loss_weight": 0.005
+            "kl_loss_weight": 0.005,
         },
         "xlarge": {
             "depths": 4,
             "steps_per_depth": 2,
             "filters": [64, 128, 256, 512],
             "default_latent_dim": 512,
-            "kl_loss_weight": 0.001
-        }
+            "kl_loss_weight": 0.001,
+        },
     }
 
     # Architecture constants
@@ -158,22 +157,24 @@ class VAE(keras.Model):
     DEFAULT_INITIALIZER = "he_normal"
 
     def __init__(
-            self,
-            latent_dim: int,
-            input_shape: Tuple[int, int, int],
-            depths: int = 2,
-            steps_per_depth: int = 1,
-            filters: Optional[List[int]] = None,
-            kl_loss_weight: float = 0.01,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
-            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            use_batch_norm: bool = True,
-            use_bias: bool = True,
-            dropout_rate: float = 0.0,
-            activation: str = "leaky_relu",
-            final_activation: str = "sigmoid",
-            name: Optional[str] = None,
-            **kwargs: Any
+        self,
+        latent_dim: int,
+        input_shape: Tuple[int, int, int],
+        depths: int = 2,
+        steps_per_depth: int = 1,
+        filters: Optional[List[int]] = None,
+        kl_loss_weight: float = 0.01,
+        kernel_initializer: Union[
+            str, keras.initializers.Initializer
+        ] = "he_normal",
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        use_batch_norm: bool = True,
+        use_bias: bool = True,
+        dropout_rate: float = 0.0,
+        activation: str = "leaky_relu",
+        final_activation: str = "sigmoid",
+        name: Optional[str] = None,
+        **kwargs: Any,
     ):
         # Validate inputs
         if latent_dim <= 0:
@@ -181,18 +182,24 @@ class VAE(keras.Model):
         if depths <= 0:
             raise ValueError(f"depths must be positive, got {depths}")
         if steps_per_depth <= 0:
-            raise ValueError(f"steps_per_depth must be positive, got {steps_per_depth}")
+            raise ValueError(
+                f"steps_per_depth must be positive, got {steps_per_depth}"
+            )
         if not (0.0 <= dropout_rate < 1.0):
-            raise ValueError(f"dropout_rate must be in [0, 1), got {dropout_rate}")
+            raise ValueError(
+                f"dropout_rate must be in [0, 1), got {dropout_rate}"
+            )
         if len(input_shape) != 3:
             raise ValueError(f"input_shape must be 3D, got {input_shape}")
 
         # Set default filters if not provided
         if filters is None:
-            filters = [32 * (2 ** i) for i in range(depths)]
+            filters = [32 * (2**i) for i in range(depths)]
 
         if len(filters) != depths:
-            raise ValueError(f"Filters array length {len(filters)} must equal depths {depths}")
+            raise ValueError(
+                f"Filters array length {len(filters)} must equal depths {depths}"
+            )
 
         # Store configuration
         self.latent_dim = latent_dim
@@ -212,12 +219,16 @@ class VAE(keras.Model):
         # Validate input dimensions
         height, width, channels = input_shape
         if height < 8 or width < 8:
-            raise ValueError(f"Input dimensions must be at least 8x8, got {height}x{width}")
+            raise ValueError(
+                f"Input dimensions must be at least 8x8, got {height}x{width}"
+            )
 
         # Initialize metrics
         self.total_loss_tracker = keras.metrics.Mean(name="total_loss")
         self.kl_loss_tracker = keras.metrics.Mean(name="kl_loss")
-        self.reconstruction_loss_tracker = keras.metrics.Mean(name="reconstruction_loss")
+        self.reconstruction_loss_tracker = keras.metrics.Mean(
+            name="reconstruction_loss"
+        )
 
         # Build the model using functional API
         inputs = keras.Input(shape=input_shape, name="input")
@@ -225,6 +236,12 @@ class VAE(keras.Model):
 
         # Initialize the Model
         super().__init__(inputs=inputs, outputs=outputs, name=name or "vae", **kwargs)
+
+        # Create a reusable decoder model from the main graph. This allows
+        # self.decode() to reuse the trained decoder weights.
+        decoder_input = self.get_layer("vae_sampling").output
+        decoder_output = self.output["reconstruction"]
+        self.decoder = keras.Model(decoder_input, decoder_output, name="decoder")
 
         logger.info(
             f"Created VAE model for input {input_shape} with latent_dim={latent_dim}, "
@@ -254,10 +271,12 @@ class VAE(keras.Model):
             "z": z,
             "z_mean": z_mean,
             "z_log_var": z_log_var,
-            "reconstruction": reconstruction
+            "reconstruction": reconstruction,
         }
 
-    def _build_encoder(self, inputs: keras.KerasTensor) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
+    def _build_encoder(
+        self, inputs: keras.KerasTensor
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Build the encoder network with ResNet blocks.
 
         Args:
@@ -277,11 +296,13 @@ class VAE(keras.Model):
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            name="encoder_stem_conv"
+            name="encoder_stem_conv",
         )(x)
 
         if self.use_batch_norm:
-            x = layers.BatchNormalization(center=self.use_bias, name="encoder_stem_bn")(x)
+            x = layers.BatchNormalization(center=self.use_bias, name="encoder_stem_bn")(
+                x
+            )
         x = layers.Activation(self.activation, name="encoder_stem_activation")(x)
 
         # Encoder blocks with downsampling
@@ -296,23 +317,27 @@ class VAE(keras.Model):
             units=self.latent_dim,
             use_bias=self.use_bias,
             kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.01),
-            bias_initializer='zeros',
+            bias_initializer="zeros",
             kernel_regularizer=self.kernel_regularizer,
-            name="encoder_z_mean"
+            name="encoder_z_mean",
         )(x)
 
         z_log_var = layers.Dense(
             units=self.latent_dim,
             use_bias=self.use_bias,
             kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.01),
-            bias_initializer=keras.initializers.Constant(-2.0),  # Initialize to small variance
+            bias_initializer=keras.initializers.Constant(
+                -2.0
+            ),  # Initialize to small variance
             kernel_regularizer=self.kernel_regularizer,
-            name="encoder_z_log_var"
+            name="encoder_z_log_var",
         )(x)
 
         return z_mean, z_log_var
 
-    def _build_encoder_stage(self, x: keras.KerasTensor, stage_idx: int) -> keras.KerasTensor:
+    def _build_encoder_stage(
+        self, x: keras.KerasTensor, stage_idx: int
+    ) -> keras.KerasTensor:
         """Build a single encoder stage with downsampling and residual blocks.
 
         Args:
@@ -333,20 +358,28 @@ class VAE(keras.Model):
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            name=f"encoder_downsample_{stage_idx}"
+            name=f"encoder_downsample_{stage_idx}",
         )(x)
 
         if self.use_batch_norm:
-            x = layers.BatchNormalization(center=self.use_bias, name=f"encoder_downsample_bn_{stage_idx}")(x)
-        x = layers.Activation(self.activation, name=f"encoder_downsample_activation_{stage_idx}")(x)
+            x = layers.BatchNormalization(
+                center=self.use_bias, name=f"encoder_downsample_bn_{stage_idx}"
+            )(x)
+        x = layers.Activation(
+            self.activation, name=f"encoder_downsample_activation_{stage_idx}"
+        )(x)
 
         # Residual blocks
         for step in range(self.steps_per_depth):
-            x = self._build_residual_block(x, num_filters, f"encoder_{stage_idx}_{step}")
+            x = self._build_residual_block(
+                x, num_filters, f"encoder_{stage_idx}_{step}"
+            )
 
         return x
 
-    def _build_residual_block(self, x: keras.KerasTensor, filters: int, prefix: str) -> keras.KerasTensor:
+    def _build_residual_block(
+        self, x: keras.KerasTensor, filters: int, prefix: str
+    ) -> keras.KerasTensor:
         """Build a residual block.
 
         Args:
@@ -368,11 +401,13 @@ class VAE(keras.Model):
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            name=f"{prefix}_conv_1"
+            name=f"{prefix}_conv_1",
         )(x)
 
         if self.use_batch_norm:
-            x = layers.BatchNormalization(center=self.use_bias, name=f"{prefix}_bn_1")(x)
+            x = layers.BatchNormalization(center=self.use_bias, name=f"{prefix}_bn_1")(
+                x
+            )
         x = layers.Activation(self.activation, name=f"{prefix}_activation_1")(x)
 
         if self.dropout_rate > 0:
@@ -387,11 +422,13 @@ class VAE(keras.Model):
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            name=f"{prefix}_conv_2"
+            name=f"{prefix}_conv_2",
         )(x)
 
         if self.use_batch_norm:
-            x = layers.BatchNormalization(center=self.use_bias, name=f"{prefix}_bn_2")(x)
+            x = layers.BatchNormalization(center=self.use_bias, name=f"{prefix}_bn_2")(
+                x
+            )
 
         # Residual connection
         x = layers.Add(name=f"{prefix}_add")([x, residual])
@@ -410,8 +447,8 @@ class VAE(keras.Model):
         """
         # Calculate feature map size after all downsampling
         height, width, channels = self._input_shape
-        feature_height = height // (2 ** self.depths)
-        feature_width = width // (2 ** self.depths)
+        feature_height = height // (2**self.depths)
+        feature_width = width // (2**self.depths)
 
         # Ensure minimum size
         feature_height = max(feature_height, 1)
@@ -423,10 +460,12 @@ class VAE(keras.Model):
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            name="decoder_projection"
+            name="decoder_projection",
         )(z)
 
-        x = layers.Reshape((feature_height, feature_width, self.filters[-1]), name="decoder_reshape")(x)
+        x = layers.Reshape(
+            (feature_height, feature_width, self.filters[-1]), name="decoder_reshape"
+        )(x)
 
         # Decoder stages with upsampling
         for depth in range(self.depths - 1, -1, -1):
@@ -442,8 +481,8 @@ class VAE(keras.Model):
             use_bias=self.use_bias,
             kernel_regularizer=keras.regularizers.L1(1e-6),
             kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.01),
-            bias_initializer='zeros',
-            name="decoder_output"
+            bias_initializer="zeros",
+            name="decoder_output",
         )(x)
 
         # Ensure exact shape matching
@@ -454,12 +493,14 @@ class VAE(keras.Model):
                 height=target_height,
                 width=target_width,
                 interpolation="bilinear",
-                name="decoder_resize"
+                name="decoder_resize",
             )(x)
 
         return x
 
-    def _build_decoder_stage(self, x: keras.KerasTensor, stage_idx: int) -> keras.KerasTensor:
+    def _build_decoder_stage(
+        self, x: keras.KerasTensor, stage_idx: int
+    ) -> keras.KerasTensor:
         """Build a single decoder stage with upsampling and residual blocks.
 
         Args:
@@ -472,7 +513,9 @@ class VAE(keras.Model):
         num_filters = self.filters[stage_idx]
 
         # Upsampling layer
-        x = layers.UpSampling2D(size=(2, 2), interpolation="nearest", name=f"decoder_upsample_{stage_idx}")(x)
+        x = layers.UpSampling2D(
+            size=(2, 2), interpolation="nearest", name=f"decoder_upsample_{stage_idx}"
+        )(x)
 
         # Convolution after upsampling
         x = layers.Conv2D(
@@ -483,26 +526,32 @@ class VAE(keras.Model):
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            name=f"decoder_conv_{stage_idx}"
+            name=f"decoder_conv_{stage_idx}",
         )(x)
 
         if self.use_batch_norm:
-            x = layers.BatchNormalization(center=self.use_bias, name=f"decoder_bn_{stage_idx}")(x)
-        x = layers.Activation(self.activation, name=f"decoder_activation_{stage_idx}")(x)
+            x = layers.BatchNormalization(
+                center=self.use_bias, name=f"decoder_bn_{stage_idx}"
+            )(x)
+        x = layers.Activation(self.activation, name=f"decoder_activation_{stage_idx}")(
+            x
+        )
 
         # Residual blocks
         for step in range(self.steps_per_depth):
-            x = self._build_residual_block(x, num_filters, f"decoder_{stage_idx}_{step}")
+            x = self._build_residual_block(
+                x, num_filters, f"decoder_{stage_idx}_{step}"
+            )
 
         return x
 
     @classmethod
     def from_variant(
-            cls,
-            variant: str,
-            input_shape: Tuple[int, int, int],
-            latent_dim: Optional[int] = None,
-            **kwargs
+        cls,
+        variant: str,
+        input_shape: Tuple[int, int, int],
+        latent_dim: Optional[int] = None,
+        **kwargs,
     ) -> "VAE":
         """Create a VAE model from a predefined variant.
 
@@ -548,7 +597,7 @@ class VAE(keras.Model):
             steps_per_depth=config["steps_per_depth"],
             filters=config["filters"],
             kl_loss_weight=config["kl_loss_weight"],
-            **kwargs
+            **kwargs,
         )
 
     @property
@@ -557,10 +606,12 @@ class VAE(keras.Model):
         return [
             self.total_loss_tracker,
             self.reconstruction_loss_tracker,
-            self.kl_loss_tracker
+            self.kl_loss_tracker,
         ]
 
-    def encode(self, inputs: keras.KerasTensor) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
+    def encode(
+        self, inputs: keras.KerasTensor
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Encode inputs to latent parameters.
 
         Args:
@@ -581,12 +632,7 @@ class VAE(keras.Model):
         Returns:
             Reconstructed tensor
         """
-        # Create a temporary model for decoding
-        z_input = keras.Input(shape=(self.latent_dim,))
-        reconstruction = self._build_decoder(z_input)
-        decoder_model = keras.Model(z_input, reconstruction)
-
-        return decoder_model(z)
+        return self.decoder(z)
 
     def sample(self, num_samples: int) -> keras.KerasTensor:
         """Generate samples from the latent space.
@@ -617,7 +663,9 @@ class VAE(keras.Model):
 
         # Validate input shape
         if x.shape[1:] != self._input_shape:
-            logger.warning(f"Input shape {x.shape} doesn't match expected {self._input_shape}")
+            logger.warning(
+                f"Input shape {x.shape} doesn't match expected {self._input_shape}"
+            )
 
         with tf.GradientTape() as tape:
             # Forward pass
@@ -626,7 +674,10 @@ class VAE(keras.Model):
 
             # Validate reconstruction shape
             if reconstruction.shape != x.shape:
-                raise ValueError(f"Reconstruction shape {reconstruction.shape} doesn't match input {x.shape}")
+                raise ValueError(
+                    f"Reconstruction shape {reconstruction.shape} "
+                    f"doesn't match input {x.shape}"
+                )
 
             # Compute losses
             reconstruction_loss = self._compute_reconstruction_loss(x, reconstruction)
@@ -640,11 +691,15 @@ class VAE(keras.Model):
                 total_loss += ops.sum(self.losses)
 
         # Compute and clip gradients
-        gradients = tape.gradient(total_loss, self.trainable_weights)
-        gradients = [ops.clip(grad, -1.0, 1.0) if grad is not None else None for grad in gradients]
+        trainable_weights = self.trainable_weights
+        gradients = tape.gradient(total_loss, trainable_weights)
+        gradients = [
+            ops.clip(grad, -1.0, 1.0) if grad is not None else None
+            for grad in gradients
+        ]
 
         # Apply gradients
-        self.optimizer.apply_gradients(zip(gradients, self.trainable_weights))
+        self.optimizer.apply_gradients(zip(gradients, trainable_weights))
 
         # Update metrics
         self.total_loss_tracker.update_state(total_loss)
@@ -654,7 +709,7 @@ class VAE(keras.Model):
         return {
             "total_loss": self.total_loss_tracker.result(),
             "reconstruction_loss": self.reconstruction_loss_tracker.result(),
-            "kl_loss": self.kl_loss_tracker.result()
+            "kl_loss": self.kl_loss_tracker.result(),
         }
 
     def test_step(self, data) -> Dict[str, keras.KerasTensor]:
@@ -693,13 +748,11 @@ class VAE(keras.Model):
         return {
             "total_loss": self.total_loss_tracker.result(),
             "reconstruction_loss": self.reconstruction_loss_tracker.result(),
-            "kl_loss": self.kl_loss_tracker.result()
+            "kl_loss": self.kl_loss_tracker.result(),
         }
 
     def _compute_reconstruction_loss(
-            self,
-            y_true: keras.KerasTensor,
-            y_pred: keras.KerasTensor
+        self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Compute reconstruction loss with numerical stability.
 
@@ -712,7 +765,9 @@ class VAE(keras.Model):
         """
         # Ensure shapes match
         if y_true.shape != y_pred.shape:
-            raise ValueError(f"Shape mismatch: y_true {y_true.shape}, y_pred {y_pred.shape}")
+            raise ValueError(
+                f"Shape mismatch: y_true {y_true.shape}, y_pred {y_pred.shape}"
+            )
 
         # Flatten for loss computation
         y_true_flat = ops.reshape(y_true, (ops.shape(y_true)[0], -1))
@@ -729,9 +784,7 @@ class VAE(keras.Model):
         return reconstruction_loss
 
     def _compute_kl_loss(
-            self,
-            z_mean: keras.KerasTensor,
-            z_log_var: keras.KerasTensor
+        self, z_mean: keras.KerasTensor, z_log_var: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Compute KL divergence loss with numerical stability.
 
@@ -748,7 +801,7 @@ class VAE(keras.Model):
         # Compute KL divergence: KL(q||p) = -0.5 * sum(1 + log_var - mean^2 - exp(log_var))
         kl_loss = -0.5 * ops.sum(
             1.0 + z_log_var_clipped - ops.square(z_mean) - ops.exp(z_log_var_clipped),
-            axis=1
+            axis=1,
         )
 
         # Take mean across batch
@@ -812,7 +865,7 @@ class VAE(keras.Model):
         super().summary(**kwargs)
 
         # Print additional model information
-        logger.info(f"VAE configuration:")
+        logger.info("VAE configuration:")
         logger.info(f"  - Input shape: {self._input_shape}")
         logger.info(f"  - Latent dimension: {self.latent_dim}")
         logger.info(f"  - Depths: {self.depths}")
@@ -824,13 +877,14 @@ class VAE(keras.Model):
 
 # ---------------------------------------------------------------------
 
+
 def create_vae(
-        input_shape: Tuple[int, int, int],
-        latent_dim: int,
-        variant: str = "small",
-        optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
-        learning_rate: float = 0.001,
-        **kwargs
+    input_shape: Tuple[int, int, int],
+    latent_dim: int,
+    variant: str = "small",
+    optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
+    learning_rate: float = 0.001,
+    **kwargs,
 ) -> VAE:
     """Convenience function to create and compile VAE models.
 
@@ -862,16 +916,13 @@ def create_vae(
     """
     # Create the model
     model = VAE.from_variant(
-        variant=variant,
-        input_shape=input_shape,
-        latent_dim=latent_dim,
-        **kwargs
+        variant=variant, input_shape=input_shape, latent_dim=latent_dim, **kwargs
     )
 
     # Set up optimizer
     if isinstance(optimizer, str):
         optimizer_instance = keras.optimizers.get(optimizer)
-        if hasattr(optimizer_instance, 'learning_rate'):
+        if hasattr(optimizer_instance, "learning_rate"):
             optimizer_instance.learning_rate = learning_rate
     else:
         optimizer_instance = optimizer
@@ -884,9 +935,17 @@ def create_vae(
     test_output = model(test_input, training=False)
 
     # Validate outputs
-    assert test_output['reconstruction'].shape == test_input.shape, "Reconstruction shape mismatch"
-    assert test_output['z_mean'].shape == (2, latent_dim), "z_mean shape mismatch"
-    assert test_output['z_log_var'].shape == (2, latent_dim), "z_log_var shape mismatch"
+    assert (
+        test_output["reconstruction"].shape == test_input.shape
+    ), "Reconstruction shape mismatch"
+    assert test_output["z_mean"].shape == (
+        2,
+        latent_dim,
+    ), "z_mean shape mismatch"
+    assert test_output["z_log_var"].shape == (
+        2,
+        latent_dim,
+    ), "z_log_var shape mismatch"
 
     logger.info(f"Created VAE-{variant.upper()} for input shape {input_shape}")
     logger.info(f"Latent dim: {latent_dim}, Parameters: {model.count_params():,}")
@@ -895,9 +954,9 @@ def create_vae(
 
 
 def create_vae_from_config(
-        config: Dict[str, Any],
-        optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
-        learning_rate: float = 0.001
+    config: Dict[str, Any],
+    optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
+    learning_rate: float = 0.001,
 ) -> VAE:
     """Create VAE from configuration dictionary.
 
@@ -925,7 +984,7 @@ def create_vae_from_config(
     # Set up optimizer
     if isinstance(optimizer, str):
         optimizer_instance = keras.optimizers.get(optimizer)
-        if hasattr(optimizer_instance, 'learning_rate'):
+        if hasattr(optimizer_instance, "learning_rate"):
             optimizer_instance.learning_rate = learning_rate
     else:
         optimizer_instance = optimizer
@@ -936,5 +995,3 @@ def create_vae_from_config(
     logger.info(f"Created VAE from config with latent_dim={config['latent_dim']}")
 
     return model
-
-# ---------------------------------------------------------------------
