@@ -709,3 +709,313 @@ class ComplexReLU(keras.layers.Layer):
         return super().get_config()
 
 # ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable()
+class ComplexAveragePooling2D(keras.layers.Layer):
+    """
+    Complex-valued 2D average pooling layer.
+
+    Performs average pooling on complex-valued inputs by applying standard
+    average pooling independently to the real and imaginary components.
+    This downsamples the feature maps while preserving the complex structure.
+
+    **Intent**: To provide a downsampling mechanism for complex-valued
+    convolutional neural networks, analogous to standard AveragePooling2D in
+    real-valued networks. It reduces spatial dimensions, helping to control
+    model complexity and increase receptive field size.
+
+    **Mathematical Operation**:
+    For a complex input tensor z = x + iy, where x and y are the real and
+    imaginary parts:
+    output = AvgPool(x) + i·AvgPool(y)
+
+    **Architecture**:
+    ```
+    Input(shape=[batch, height, width, channels_complex])
+           ↓
+    Split: real_part = Re(z), imag_part = Im(z)
+           ↓
+    Apply Average Pooling:
+      pooled_real = AvgPool(real_part, pool_size, strides, padding)
+      pooled_imag = AvgPool(imag_part, pool_size, strides, padding)
+           ↓
+    Combine: output = complex(pooled_real, pooled_imag)
+           ↓
+    Output(shape=[batch, new_height, new_width, channels_complex])
+    ```
+
+    Args:
+        pool_size: Integer or tuple of 2 integers, specifying the dimensions
+            of the pooling window. If an integer, the same value is used for
+            both height and width. Defaults to (2, 2).
+        strides: Integer or tuple of 2 integers, specifying the stride of the
+            pooling operation. If None, it defaults to `pool_size`. Defaults to None.
+        padding: String, either 'SAME' or 'VALID' (case-insensitive).
+            'SAME' pads the input to preserve spatial dimensions as much as
+            possible. 'VALID' performs pooling without padding. Defaults to 'VALID'.
+        **kwargs: Additional keyword arguments for Layer base class.
+
+    Input shape:
+        4D tensor with shape: `(batch_size, height, width, channels)`.
+        Input should be complex-valued (tf.complex64 or tf.complex128).
+
+    Output shape:
+        4D tensor with shape: `(batch_size, new_height, new_width, channels)`.
+        Output dimensions depend on `pool_size`, `strides`, and `padding`.
+
+    Example:
+        ```python
+        # Downsample complex feature maps
+        pool = ComplexAveragePooling2D(pool_size=(2, 2), strides=(2, 2))
+        inputs = keras.random.uniform((32, 28, 28, 64), dtype=tf.complex64)
+        outputs = pool(inputs) # Shape: (32, 14, 14, 64)
+
+        # As part of a complex CNN
+        inputs = keras.Input(shape=(128, 128, 3), dtype=tf.complex64)
+        x = ComplexConv2D(32, 3)(inputs)
+        x = ComplexReLU()(x)
+        x = ComplexAveragePooling2D()(x) # Downsample
+        x = ComplexConv2D(64, 3)(x)
+        x = ComplexReLU()(x)
+        x = ComplexAveragePooling2D()(x) # Downsample again
+        # ... rest of the model
+        model = keras.Model(inputs, x)
+        ```
+
+    Note:
+        This layer has no trainable weights. It performs a fixed downsampling
+        operation on the real and imaginary parts of the input.
+    """
+
+    def __init__(
+            self,
+            pool_size: Union[int, Tuple[int, int]] = (2, 2),
+            strides: Optional[Union[int, Tuple[int, int]]] = None,
+            padding: str = 'VALID',
+            **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+
+        # Store and validate configuration
+        self.pool_size = pool_size if isinstance(pool_size, tuple) else (pool_size, pool_size)
+        self.strides = strides if strides is not None else self.pool_size
+        self.strides = self.strides if isinstance(self.strides, tuple) else (self.strides, self.strides)
+        self.padding = padding.upper()
+
+        if self.padding not in ['SAME', 'VALID']:
+            raise ValueError(f"padding must be 'SAME' or 'VALID', got {padding}")
+
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Apply complex average pooling.
+
+        Args:
+            inputs: Complex-valued input tensor.
+            training: Boolean indicating whether in training mode (unused).
+
+        Returns:
+            Complex-valued output tensor after pooling.
+        """
+        # Split into real and imaginary components
+        inputs_real = tf.math.real(inputs)
+        inputs_imag = tf.math.imag(inputs)
+
+        # Apply average pooling to each component
+        # Note: keras.ops.average_pool expects lowercase padding
+        padding_lower = self.padding.lower()
+
+        pooled_real = keras.ops.average_pool(
+            inputs_real,
+            pool_size=self.pool_size,
+            strides=self.strides,
+            padding=padding_lower
+        )
+
+        pooled_imag = keras.ops.average_pool(
+            inputs_imag,
+            pool_size=self.pool_size,
+            strides=self.strides,
+            padding=padding_lower
+        )
+
+        # Recombine into a complex tensor
+        return tf.complex(pooled_real, pooled_imag)
+
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape of the pooling layer.
+
+        Args:
+            input_shape: Input tensor shape.
+
+        Returns:
+            Output tensor shape.
+        """
+        if len(input_shape) != 4:
+            raise ValueError(f"ComplexAveragePooling2D requires 4D input, got {len(input_shape)}D")
+
+        batch_size, height, width, channels = input_shape
+
+        def _compute_dim(dim, pool, stride, padding):
+            if dim is None:
+                return None
+            if padding == 'VALID':
+                return (dim - pool + stride) // stride
+            else:  # SAME
+                return (dim + stride - 1) // stride
+
+        output_height = _compute_dim(height, self.pool_size[0], self.strides[0], self.padding)
+        output_width = _compute_dim(width, self.pool_size[1], self.strides[1], self.padding)
+
+        return (batch_size, output_height, output_width, channels)
+
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Get layer configuration for serialization.
+
+        Returns:
+            Configuration dictionary containing all constructor parameters.
+        """
+        config = super().get_config()
+        config.update({
+            'pool_size': self.pool_size,
+            'strides': self.strides,
+            'padding': self.padding
+        })
+        return config
+
+# ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable()
+class ComplexDropout(keras.layers.Layer):
+    """
+    Complex-valued dropout layer for regularization.
+
+    Applies dropout to complex-valued inputs by generating a single dropout
+    mask and applying it to both the real and imaginary parts. This ensures
+    that entire complex units are dropped out together, preserving the
+    relationship between real and imaginary components.
+
+    **Intent**: Provide regularization for complex-valued neural networks to
+    prevent overfitting, analogous to the standard dropout layer in
+    real-valued networks.
+
+    **Mathematical Operation**:
+    1. A binary mask `m` is generated, where each element is 0 with probability `rate`.
+    2. During training, the output is `(x + iy) * m / (1 - rate)`.
+    3. During inference, the output is unchanged: `x + iy`.
+
+    **Architecture**:
+    ```
+    Input(shape=[..., complex_features])
+           ↓
+    (During Training Only)
+           ↓
+    Generate Real-Valued Mask `m` using a standard Dropout layer on a tensor of ones.
+           ↓
+    Apply Mask: output = input * m
+           ↓
+    Output(shape=[..., complex_features])
+    ```
+
+    Args:
+        rate: Float between 0 and 1. Fraction of the input units to drop.
+        **kwargs: Additional keyword arguments for Layer base class.
+
+    Input shape:
+        Arbitrary. Complex-valued tensor of any shape.
+
+    Output shape:
+        Same as input shape.
+
+    Example:
+        ```python
+        # Apply dropout to complex activations
+        dropout = ComplexDropout(rate=0.5)
+        inputs = keras.random.uniform((32, 128), dtype=tf.complex64)
+        outputs = dropout(inputs, training=True) # `training` flag is crucial
+
+        # In a complex model
+        inputs = keras.Input(shape=(256,), dtype=tf.complex64)
+        x = ComplexDense(128)(inputs)
+        x = ComplexReLU()(x)
+        x = ComplexDropout(0.3)(x) # Regularize after activation
+        outputs = ComplexDense(64)(x)
+        model = keras.Model(inputs, outputs)
+        ```
+
+    Note:
+        This layer is only active during training (`training=True`). During
+        inference, it returns the input tensor unmodified. The multiplication
+        of a complex tensor by the real-valued mask correctly scales both
+        the real and imaginary parts.
+    """
+
+    def __init__(self, rate: float, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+
+        # Validate inputs
+        if not 0 <= rate < 1:
+            raise ValueError(f"rate must be in the interval [0, 1), got {rate}")
+
+        self.rate = rate
+        # Use a standard Dropout layer internally. This is the correct,
+        # backend-agnostic way to handle dropout logic.
+        self.dropout_layer = keras.layers.Dropout(self.rate)
+
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Apply complex dropout.
+
+        Args:
+            inputs: Complex-valued input tensor.
+            training: Boolean indicating whether in training mode.
+
+        Returns:
+            Complex-valued output tensor after dropout.
+        """
+        # Generate a real-valued mask by applying dropout to a tensor of ones.
+        # The internal Dropout layer handles the `training` flag and scaling.
+        mask = self.dropout_layer(
+            tf.ones_like(tf.math.real(inputs)),
+            training=training
+        )
+
+        # The mask is real-valued. Multiplying it with the complex input
+        # correctly scales both the real and imaginary parts simultaneously.
+        return inputs * tf.cast(mask, dtype=inputs.dtype)
+
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape (same as input for dropout).
+
+        Args:
+            input_shape: Input tensor shape.
+
+        Returns:
+            Output tensor shape (identical to input).
+        """
+        return input_shape
+
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Get layer configuration for serialization.
+
+        Returns:
+            Configuration dictionary.
+        """
+        config = super().get_config()
+        config.update({
+            'rate': self.rate,
+        })
+        return config
+
+# ---------------------------------------------------------------------

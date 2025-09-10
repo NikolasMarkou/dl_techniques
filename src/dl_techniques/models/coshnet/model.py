@@ -72,7 +72,13 @@ from typing import Optional, Tuple, List, Dict, Any, Sequence, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.shearlet_transform import ShearletTransform
-from dl_techniques.layers.complex_layers import ComplexDense, ComplexConv2D, ComplexReLU
+from dl_techniques.layers.complex_layers import (
+    ComplexDense,
+    ComplexConv2D,
+    ComplexReLU,
+    ComplexAveragePooling2D,
+    ComplexDropout
+)
 
 
 # ---------------------------------------------------------------------
@@ -238,7 +244,7 @@ class CoShNet(keras.Model):
 
         # Create complex convolutional layers
         self.conv_layers: List[ComplexConv2D] = []
-        self.pool_layers: List[layers.AveragePooling2D] = []
+        self.pool_layers: List[ComplexAveragePooling2D] = []
 
         for i, filters in enumerate(self.conv_filters):
             conv_layer = ComplexConv2D(
@@ -253,7 +259,7 @@ class CoShNet(keras.Model):
             )
             self.conv_layers.append(conv_layer)
 
-            pool_layer = layers.AveragePooling2D(
+            pool_layer = ComplexAveragePooling2D(
                 pool_size=self.pool_size,
                 name=f'avg_pool_{i}'
             )
@@ -267,7 +273,7 @@ class CoShNet(keras.Model):
 
         # Create complex dense layers with dropout
         self.dense_layers: List[ComplexDense] = []
-        self.dropout_layers: List[layers.Dropout] = []
+        self.dropout_layers: List[ComplexDropout] = []
 
         for i, units in enumerate(self.dense_units):
             dense_layer = ComplexDense(
@@ -279,7 +285,7 @@ class CoShNet(keras.Model):
             )
             self.dense_layers.append(dense_layer)
 
-            dropout_layer = layers.Dropout(
+            dropout_layer = ComplexDropout(
                 rate=self.dropout_rate,
                 name=f'dropout_{i}'
             )
@@ -418,7 +424,6 @@ class CoShNet(keras.Model):
             x = self.activation(x, training=training)
             if training:
                 x = dropout_layer(x, training=training)
-
         # Final classification (convert to real by taking magnitude)
         x = ops.abs(x)
         x = self.classifier(x, training=training)
