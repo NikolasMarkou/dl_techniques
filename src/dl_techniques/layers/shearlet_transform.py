@@ -265,7 +265,7 @@ class ShearletTransform(keras.layers.Layer):
         width: Integer, width of input images (set during build).
         freq_x: Tensor, x-coordinates of frequency grid (set during build).
         freq_y: Tensor, y-coordinates of frequency grid (set during build).
-        filters: List of complex-valued shearlet filters in frequency domain (set during build).
+        filter_bank: Tensor of complex-valued shearlet filters in frequency domain (set during build).
 
     Example:
         ```python
@@ -331,7 +331,7 @@ class ShearletTransform(keras.layers.Layer):
         self.width: Optional[int] = None
         self.freq_x: Optional[tf.Tensor] = None
         self.freq_y: Optional[tf.Tensor] = None
-        self.filters: Optional[List[tf.Tensor]] = None
+        self.filter_bank: Optional[tf.Tensor] = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
@@ -356,7 +356,10 @@ class ShearletTransform(keras.layers.Layer):
         self.freq_x, self.freq_y = self._create_freq_grid()
 
         # Generate shearlet filters with improved frame properties
-        self.filters = self._create_shearlet_filters()
+        filters_list = self._create_shearlet_filters()
+        
+        # Stack filters into a single tensor for efficient vectorized computation
+        self.filter_bank = tf.stack(filters_list, axis=0)  # Shape: (num_filters, H, W)
 
         super().build(input_shape)
 
@@ -578,62 +581,68 @@ class ShearletTransform(keras.layers.Layer):
             training: Boolean indicating training mode (unused but kept for API consistency)
 
         Returns:
-            Tensor of shearlet coefficients with shape [batch_size, height, width, num_filters]
+            Tensor of shearlet coefficients with shape [batch_size, height, width, num_filters * channels]
         """
         # Ensure float32 input for numerical stability
         inputs = tf.cast(inputs, tf.float32)
 
-        # Handle single channel vs multi-channel inputs
-        input_shape = tf.shape(inputs)
+        # Handle inputs that might not have a channel dimension
         if len(inputs.shape) == 3:
             inputs = tf.expand_dims(inputs, axis=-1)
 
-        # Process each channel independently
-        batch_size = input_shape[0]
-        channels = input_shape[-1] if len(inputs.shape) == 4 else 1
+        # Cast to complex for FFT operations
+        inputs_complex = tf.cast(inputs, tf.complex64)
 
-        all_coefficients = []
+        # Permute from (B, H, W, C) to (B, C, H, W) so fft2d works on H, W
+        inputs_permuted = tf.transpose(inputs_complex, perm=[0, 3, 1, 2])
 
-        for c in range(channels):
-            # Extract single channel
-            if channels == 1:
-                channel_input = inputs[..., 0:1]
-            else:
-                channel_input = inputs[..., c:c + 1]
+        # Compute 2D FFT and shift the zero-frequency component to the center
+        fft = tf.signal.fftshift(tf.signal.fft2d(inputs_permuted), axes=[-2, -1])
 
-            # Remove channel dimension for FFT
-            channel_input = tf.squeeze(channel_input, axis=-1)
+        # Prepare tensors for broadcasting:
+        # fft shape:           (B, C, H, W)
+        # self.filter_bank:    (num_filters, H, W)
+        # Reshape fft ->       (B, C, 1, H, W)
+        # Reshape filter_bank ->(1, 1, num_filters, H, W)
+        fft_expanded = tf.expand_dims(fft, axis=2)
+        filters_expanded = tf.reshape(self.filter_bank, (1, 1, -1, self.height, self.width))
 
-            # Compute 2D FFT
-            fft = tf.signal.fftshift(
-                tf.signal.fft2d(tf.cast(channel_input, tf.complex64))
-            )
+        # Apply filters via element-wise multiplication in the frequency domain.
+        # Broadcasting results in shape: (B, C, num_filters, H, W)
+        filtered_fft = fft_expanded * filters_expanded
 
-            # Apply each filter and compute inverse FFT
-            channel_coefficients = []
-            for filter_kernel in self.filters:
-                filtered = fft * filter_kernel
-                coeff = tf.cast(
-                    tf.math.real(
-                        tf.signal.ifft2d(
-                            tf.signal.ifftshift(filtered)
-                        )
-                    ),
-                    tf.float32
-                )
-                channel_coefficients.append(coeff)
+        # Shift back and compute inverse FFT on the H, W dimensions
+        coeffs_complex = tf.signal.ifft2d(tf.signal.ifftshift(filtered_fft, axes=[-2, -1]))
 
-            # Stack coefficients for this channel
-            channel_stack = tf.stack(channel_coefficients, axis=-1)
-            all_coefficients.append(channel_stack)
+        # Take the real part of the coefficients
+        # Shape remains (B, C, num_filters, H, W)
+        coeffs_real = tf.math.real(coeffs_complex)
 
-        # Combine all channels
-        if len(all_coefficients) == 1:
-            result = all_coefficients[0]
+        # Transpose back to the standard Keras layout (B, H, W, Channels)
+        # From (B, C, num_filters, H, W) to (B, H, W, C, num_filters)
+        coeffs_permuted = tf.transpose(coeffs_real, perm=[0, 3, 4, 1, 2])
+
+        # Get shape information for the final reshape.
+        # Using static shape info if available is better for Keras shape inference.
+        input_shape_static = inputs.shape
+        input_shape_dynamic = tf.shape(inputs)
+        batch_size = input_shape_dynamic[0]
+        num_channels = input_shape_static[-1]
+        num_base_filters = self.filter_bank.shape[0]
+
+        # Reshape to combine the input channels and filter channels into one dimension
+        # Target shape: (B, H, W, C * num_base_filters)
+        if num_channels is None:
+            # Fallback to dynamic shape if channel count is not known at graph build time
+            num_channels_dyn = input_shape_dynamic[3]
+            output_channels = num_channels_dyn * num_base_filters
+            result = tf.reshape(coeffs_permuted, [batch_size, self.height, self.width, output_channels])
         else:
-            result = tf.concat(all_coefficients, axis=-1)
+            # Use static shape info for better graph optimization and shape inference
+            output_channels = num_channels * num_base_filters
+            result = tf.reshape(coeffs_permuted, [-1, self.height, self.width, output_channels])
 
-        return result
+        return tf.cast(result, tf.float32)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """
@@ -697,4 +706,3 @@ class ShearletTransform(keras.layers.Layer):
         return cls(**config)
 
 # ---------------------------------------------------------------------
-

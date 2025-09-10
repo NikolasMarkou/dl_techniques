@@ -104,9 +104,27 @@ def built_transform(transform: ShearletTransform) -> ShearletTransform:
     return transform
 
 
+def _create_synthetic_batch(shape: Tuple[int, ...]) -> tf.Tensor:
+    """Helper function to create a synthetic batch of images."""
+    b, h, w, c = shape
+    batch = np.zeros(shape, dtype=np.float32)
+
+    x, y = np.meshgrid(np.linspace(-2, 2, w), np.linspace(-2, 2, h))
+    gaussian = np.exp(-(x ** 2 + y ** 2) / 0.8)
+    pattern = gaussian + 0.3 * np.sin(2 * np.pi * (x + y)) * gaussian
+
+    for i in range(b):
+        for j in range(c):
+            # Create slightly different patterns for each batch item and channel
+            current_pattern = (pattern + i * 0.1) * (1 - j * 0.2)
+            batch[i, :, :, j] = current_pattern
+
+    return tf.convert_to_tensor(batch, dtype=tf.float32)
+
+
 @pytest.fixture
 def sample_input(input_shape: Tuple[int, int]) -> Tuple[tf.Tensor, Tuple[int, ...]]:
-    """Generate sample input tensors with realistic patterns.
+    """Generate sample single-channel input tensors with realistic patterns.
 
     Args:
         input_shape: Tuple of (height, width)
@@ -116,25 +134,22 @@ def sample_input(input_shape: Tuple[int, int]) -> Tuple[tf.Tensor, Tuple[int, ..
     """
     h, w = input_shape
     shape = (2, h, w, 1)
+    return _create_synthetic_batch(shape), shape
 
-    # Create synthetic patterns with better numerical properties
-    x, y = np.meshgrid(
-        np.linspace(-2, 2, w),
-        np.linspace(-2, 2, h)
-    )
 
-    # Gaussian blob with good dynamic range
-    gaussian = np.exp(-(x ** 2 + y ** 2) / 0.8)
+@pytest.fixture
+def multi_channel_sample_input(input_shape: Tuple[int, int]) -> Tuple[tf.Tensor, Tuple[int, ...]]:
+    """Generate sample multi-channel input tensors with realistic patterns.
 
-    # Add directional pattern with windowing
-    pattern = gaussian + 0.3 * np.sin(2 * np.pi * (x + y)) * gaussian
+    Args:
+        input_shape: Tuple of (height, width)
 
-    # Create batch with different patterns
-    batch = np.zeros(shape, dtype=np.float32)
-    batch[0, :, :, 0] = pattern
-    batch[1, :, :, 0] = gaussian
-
-    return tf.convert_to_tensor(batch, dtype=tf.float32), shape
+    Returns:
+        Tuple[tf.Tensor, Tuple]: Sample input tensor and shape
+    """
+    h, w = input_shape
+    shape = (2, h, w, 3)
+    return _create_synthetic_batch(shape), shape
 
 
 @pytest.fixture
@@ -296,11 +311,11 @@ class TestLayerBehavior:
         # Verify all internal attributes are created
         assert default_transform.height is not None
         assert default_transform.width is not None
-        assert default_transform.filters is not None
+        assert default_transform.filter_bank is not None
 
     def test_output_shape_computation(self, default_transform: ShearletTransform,
                                     sample_input: Tuple[tf.Tensor, Tuple]) -> None:
-        """Test output shape computation and consistency.
+        """Test output shape computation and consistency for single-channel input.
 
         Args:
             default_transform: ShearletTransform instance
@@ -325,6 +340,57 @@ class TestLayerBehavior:
         # Verify expected number of output channels
         expected_channels = 1 + default_transform.scales * (default_transform.directions + 1)
         assert computed_shape[-1] == expected_channels
+
+    def test_multi_channel_output_shape(self, default_transform: ShearletTransform,
+                                        multi_channel_sample_input: Tuple[tf.Tensor, Tuple]) -> None:
+        """Test output shape computation for multi-channel input.
+
+        Args:
+            default_transform: ShearletTransform instance
+            multi_channel_sample_input: Multi-channel input tensor
+        """
+        input_tensor, _ = multi_channel_sample_input
+        num_input_channels = input_tensor.shape[-1]
+
+        output = default_transform(input_tensor)
+
+        num_base_filters = 1 + default_transform.scales * (default_transform.directions + 1)
+        expected_channels = num_input_channels * num_base_filters
+
+        assert output.shape[-1] == expected_channels, \
+            f"Expected {expected_channels} output channels for {num_input_channels} input channels, got {output.shape[-1]}"
+
+    def test_multi_channel_processing_consistency(self, default_transform: ShearletTransform,
+                                                  multi_channel_sample_input: Tuple[tf.Tensor, Tuple]) -> None:
+        """Verify that channels are processed independently and correctly.
+
+        This test processes a 3-channel input, then processes each channel individually,
+        and verifies that the corresponding output slices match.
+        """
+        input_tensor, _ = multi_channel_sample_input
+
+        # Process all channels at once
+        batch_output = default_transform(input_tensor)
+
+        num_base_filters = default_transform.filter_bank.shape[0]
+
+        # Process each channel individually and compare
+        for i in range(input_tensor.shape[-1]):
+            # Process single channel
+            single_channel_input = input_tensor[..., i:i+1]
+            single_channel_output = default_transform(single_channel_input)
+
+            # Extract the corresponding slice from the batch output
+            start_idx = i * num_base_filters
+            end_idx = (i + 1) * num_base_filters
+            batch_slice = batch_output[..., start_idx:end_idx]
+
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(single_channel_output),
+                keras.ops.convert_to_numpy(batch_slice),
+                rtol=1e-6, atol=1e-6,
+                err_msg=f"Processing for channel {i} is inconsistent between batch and single modes"
+            )
 
     def test_gradients_flow(self, default_transform: ShearletTransform,
                            sample_input: Tuple[tf.Tensor, Tuple]) -> None:
@@ -427,7 +493,8 @@ class TestParameterValidation:
 
     def test_invalid_input_shape(self, default_transform: ShearletTransform) -> None:
         """Test error handling for invalid input shapes."""
-        # 3D input should fail
+        # 3D input should fail build, but call will handle it by expanding dims.
+        # So we test the build method directly.
         with pytest.raises(ValueError, match="Expected 4D input shape"):
             default_transform.build((32, 32, 1))
 
@@ -451,19 +518,18 @@ class TestFilterProperties:
             transform: Transform instance
         """
         transform.build((1, 64, 64, 1))
-        filters = transform.filters
+        filter_bank = transform.filter_bank
 
         # Check number of filters
         expected_filters = 1 + transform_config['scales'] * (transform_config['directions'] + 1)
-        assert len(filters) == expected_filters, \
-            f"Expected {expected_filters} filters, got {len(filters)}"
+        assert filter_bank.shape[0] == expected_filters, \
+            f"Expected {expected_filters} filters, got {filter_bank.shape[0]}"
 
         # Check filter shapes and types
-        for i, filter_kernel in enumerate(filters):
-            assert filter_kernel.shape == (64, 64), \
-                f"Filter {i} has wrong shape: {filter_kernel.shape}"
-            assert filter_kernel.dtype == tf.complex64, \
-                f"Filter {i} has wrong dtype: {filter_kernel.dtype}"
+        assert filter_bank.shape[1:] == (64, 64), \
+            f"Filters have wrong shape: {filter_bank.shape[1:]}"
+        assert filter_bank.dtype == tf.complex64, \
+            f"Filters have wrong dtype: {filter_bank.dtype}"
 
     def test_filter_size_adaptation(self, transform: ShearletTransform, input_shape: Tuple[int, int]) -> None:
         """Test if filters adapt to different input sizes.
@@ -473,10 +539,9 @@ class TestFilterProperties:
             input_shape: Input dimensions
         """
         transform.build((1, *input_shape, 1))
-
-        for filter_kernel in transform.filters:
-            assert filter_kernel.shape == input_shape, \
-                f"Filter shape {filter_kernel.shape} doesn't match input {input_shape}"
+        filter_bank = transform.filter_bank
+        assert filter_bank.shape[1:] == input_shape, \
+            f"Filter bank shape {filter_bank.shape[1:]} doesn't match input {input_shape}"
 
     def test_frequency_coverage(self, built_transform: ShearletTransform) -> None:
         """Test if filters provide adequate frequency coverage.
@@ -484,8 +549,8 @@ class TestFilterProperties:
         Args:
             built_transform: Built transform instance
         """
-        # Stack magnitude responses and normalize
-        responses = tf.stack([tf.abs(f) for f in built_transform.filters])
+        # Get magnitude responses and normalize
+        responses = tf.abs(built_transform.filter_bank)
         responses = responses / (tf.reduce_max(responses) + 1e-10)
         total_response = tf.reduce_sum(responses, axis=0)
 
@@ -508,7 +573,7 @@ class TestFilterProperties:
         Args:
             built_transform: Built transform instance
         """
-        low_pass = built_transform.filters[0]
+        low_pass = built_transform.filter_bank[0]
         response = tf.abs(low_pass)
 
         # Normalize the response
@@ -680,9 +745,9 @@ class TestFrameProperties:
         Args:
             built_transform: Built transform instance
         """
-        # Stack squared magnitude responses
-        responses = tf.stack([tf.abs(f) ** 2 for f in built_transform.filters])
-        total_energy = tf.reduce_sum(responses, axis=0)
+        # Get squared magnitude responses
+        responses_squared = tf.abs(built_transform.filter_bank) ** 2
+        total_energy = tf.reduce_sum(responses_squared, axis=0)
 
         # Get frame bounds
         min_energy = tf.reduce_min(total_energy)
@@ -708,14 +773,13 @@ class TestFrameProperties:
         transform.build((1, 64, 64, 1))
 
         # Test frequency coverage
-        responses = tf.stack([tf.abs(f) for f in transform.filters])
+        responses = tf.abs(transform.filter_bank)
         total_response = tf.reduce_sum(responses, axis=0)
-
         min_response = tf.reduce_min(total_response)
         assert min_response > 1e-3, "Coverage gap detected"
 
         # Test frame bounds
-        responses_squared = tf.stack([tf.abs(f) ** 2 for f in transform.filters])
+        responses_squared = tf.abs(transform.filter_bank) ** 2
         total_energy = tf.reduce_sum(responses_squared, axis=0)
 
         min_energy = tf.reduce_min(total_energy)
