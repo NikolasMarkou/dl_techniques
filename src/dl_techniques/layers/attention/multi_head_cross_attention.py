@@ -362,7 +362,7 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             k, v = kv[0], kv[1]
 
         # Scaled dot-product attention
-        scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2))) * self.scale
+        scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2))) * ops.cast(self.scale, q.dtype)
 
         # Apply attention mask if provided
         if attention_mask is not None:
