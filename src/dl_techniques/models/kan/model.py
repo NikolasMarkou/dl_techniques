@@ -1,6 +1,6 @@
 """
-Kolmogorov-Arnold Network (KAN) Model Implementation
-===========================================================
+Kolmogorov-Arnold Network (KAN) Model Implementation - Modern Keras 3
+====================================================================
 
 A complete implementation of the KAN architecture using modern Keras 3 patterns.
 KAN uses learnable activation functions on edges rather than nodes, providing
@@ -11,12 +11,13 @@ https://arxiv.org/abs/2404.19756
 
 Key Features:
 ------------
+- Modern Keras 3 functional API patterns for robust serialization
 - Modular design using KANLinear layers as building blocks
 - Learnable spline-based activation functions on edges
 - Support for multiple KAN variants for different tasks
-- Comprehensive debugging and monitoring capabilities
-- Complete serialization support with modern Keras 3 patterns
-- Production-ready implementation with robust error handling
+- Complete serialization support with proper layer building
+- Production-ready implementation with comprehensive error handling
+- Full type safety with modern type hints
 
 Architecture Concept:
 -------------------
@@ -42,576 +43,644 @@ model = KAN.from_variant("small", input_features=784, num_classes=10)
 model = KAN.from_variant("medium", input_features=100, num_classes=1)
 
 # Custom configuration
-config = [
-    {"in_features": 784, "out_features": 128, "grid_size": 8},
-    {"in_features": 128, "out_features": 64, "grid_size": 6},
-    {"in_features": 64, "out_features": 10, "grid_size": 5}
+layer_configs = [
+    {"features": 128, "grid_size": 8, "activation": "gelu"},
+    {"features": 64, "grid_size": 6, "activation": "gelu"},
+    {"features": 10, "grid_size": 5, "activation": "softmax"}
 ]
-model = KAN(layers_configurations=config)
+model = KAN(
+    layer_configs=layer_configs,
+    input_features=784,
+    name="custom_kan"
+)
 ```
 """
 
 import keras
-from typing import Optional, Dict, Any, List, Union
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
+from keras import backend
+from typing import Optional, Dict, Any, List, Union, Tuple
+import numpy as np
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.kan_linear import KANLinear
 
 
-# ---------------------------------------------------------------------
-
-
 @keras.saving.register_keras_serializable()
 class KAN(keras.Model):
-    """Kolmogorov-Arnold Network model using modern Keras 3 patterns.
+    """Modern Kolmogorov-Arnold Network model using Keras 3 functional API patterns.
 
     KAN stacks multiple KANLinear layers to create a deep network that can
     approximate complex multivariate functions using learnable spline-based
     activation functions on edges rather than nodes.
 
+    **Intent**: Provide a clean, serializable KAN implementation that leverages
+    the modern Keras 3 patterns for robust model creation, training, and deployment.
+    The model uses the functional API internally for proper layer building and
+    weight management.
+
+    **Architecture**:
+    ```
+    Input(shape=[input_features])
+           ↓
+    KANLinear(layer_configs[0])
+           ↓
+    KANLinear(layer_configs[1])
+           ↓
+         ...
+           ↓
+    KANLinear(layer_configs[-1])
+           ↓
+    Output(shape=[final_features])
+    ```
+
+    **Configuration Pattern**:
+    Each layer_config dict supports all KANLinear parameters:
+    - features (required): output features
+    - grid_size: B-spline grid size
+    - spline_order: B-spline order
+    - activation: activation function
+    - regularization_factor: L2 regularization
+    - grid_range: spline grid range
+    - use_residual: residual connections
+    - kernel_initializer/spline_initializer: weight initializers
+    - kernel_regularizer/spline_regularizer: weight regularizers
+
     Args:
-        layers_configurations: List of dictionaries, each containing configuration
-            for a KANLinear layer. Each dict should have 'in_features' and 'out_features'
-            keys, and optionally other KANLinear parameters.
-        enable_debugging: Boolean, whether to enable extra validation during forward pass.
-            When True, logs layer outputs and checks for numerical issues.
-        input_features: Optional integer, input feature dimension. If provided and
-            layers_configurations is None, will be used with num_classes to create default config.
-        num_classes: Optional integer, output dimension. Only used with input_features
-            when layers_configurations is None.
-        include_top: Boolean, whether to include the final output layer.
+        layer_configs: List of dictionaries, each containing KANLinear configuration.
+            Each dict must have 'features' key and optionally other KANLinear parameters.
+        input_features: Integer, number of input features. Must be positive.
+        enable_debugging: Boolean, whether to enable debug logging during training.
         name: Optional string name for the model.
         **kwargs: Additional arguments passed to the Model base class.
 
-    Raises:
-        ValueError: If layer configurations are invalid or incompatible.
+    Input shape:
+        Tensor with shape `(batch_size, input_features)`.
+
+    Output shape:
+        Tensor with shape `(batch_size, layer_configs[-1]['features'])`.
 
     Example:
-        >>> # Custom configuration
-        >>> config = [
-        ...     {"in_features": 784, "out_features": 128, "grid_size": 8},
-        ...     {"in_features": 128, "out_features": 64, "grid_size": 6},
-        ...     {"in_features": 64, "out_features": 10, "grid_size": 5}
-        ... ]
-        >>> model = KAN(layers_configurations=config)
-        >>>
-        >>> # Simple configuration
-        >>> model = KAN(input_features=784, num_classes=10)
-        >>>
-        >>> # From variant
-        >>> model = KAN.from_variant("small", input_features=784, num_classes=10)
+        ```python
+        # Simple 3-layer KAN
+        layer_configs = [
+            {"features": 128, "grid_size": 8, "activation": "gelu"},
+            {"features": 64, "grid_size": 6, "activation": "gelu"},
+            {"features": 10, "grid_size": 5, "activation": "softmax"}
+        ]
+        model = KAN(
+            layer_configs=layer_configs,
+            input_features=784,
+            enable_debugging=True
+        )
+
+        # Compile and use
+        model.compile(
+            optimizer="adam",
+            loss="sparse_categorical_crossentropy",
+            metrics=["accuracy"]
+        )
+        ```
+
+    Raises:
+        ValueError: If layer_configs is empty or contains invalid configurations.
+        ValueError: If input_features is not positive.
     """
 
-    # Model variant configurations
-    MODEL_VARIANTS = {
+    # Model variant configurations for easy setup
+    VARIANT_CONFIGS = {
         "micro": {
-            "hidden_sizes": [16, 8],
+            "hidden_features": [16, 8],
             "grid_size": 3,
             "spline_order": 3,
-            "activation": "swish"
+            "activation": "swish",
+            "regularization_factor": 0.01
         },
         "small": {
-            "hidden_sizes": [64, 32, 16],
+            "hidden_features": [64, 32, 16],
             "grid_size": 5,
             "spline_order": 3,
-            "activation": "swish"
+            "activation": "swish",
+            "regularization_factor": 0.01
         },
         "medium": {
-            "hidden_sizes": [128, 64, 32],
+            "hidden_features": [128, 64, 32],
             "grid_size": 7,
             "spline_order": 3,
-            "activation": "gelu"
+            "activation": "gelu",
+            "regularization_factor": 0.005
         },
         "large": {
-            "hidden_sizes": [256, 128, 64, 32],
+            "hidden_features": [256, 128, 64, 32],
             "grid_size": 10,
             "spline_order": 3,
-            "activation": "gelu"
+            "activation": "gelu",
+            "regularization_factor": 0.001
         },
         "xlarge": {
-            "hidden_sizes": [512, 256, 128, 64],
+            "hidden_features": [512, 256, 128, 64],
             "grid_size": 12,
             "spline_order": 3,
-            "activation": "gelu"
+            "activation": "gelu",
+            "regularization_factor": 0.0005
         }
     }
 
-    # Architecture constants
-    DEFAULT_GRID_SIZE = 5
-    DEFAULT_SPLINE_ORDER = 3
-    DEFAULT_ACTIVATION = "swish"
-
     def __init__(
-            self,
-            layers_configurations: Optional[List[Dict[str, Any]]] = None,
-            enable_debugging: bool = False,
-            input_features: Optional[int] = None,
-            num_classes: Optional[int] = None,
-            include_top: bool = True,
-            name: Optional[str] = None,
-            **kwargs: Any
-    ):
-        # Handle configuration creation
-        if layers_configurations is None:
-            if input_features is None or num_classes is None:
-                raise ValueError(
-                    "Either layers_configurations must be provided, or both "
-                    "input_features and num_classes must be specified"
-                )
-            layers_configurations = [
-                {
-                    "in_features": input_features,
-                    "out_features": num_classes,
-                    "grid_size": self.DEFAULT_GRID_SIZE,
-                    "spline_order": self.DEFAULT_SPLINE_ORDER,
-                    "activation": self.DEFAULT_ACTIVATION
-                }
-            ]
+        self,
+        layer_configs: List[Dict[str, Any]],
+        input_features: int,
+        enable_debugging: bool = False,
+        name: Optional[str] = None,
+        **kwargs: Any
+    ) -> None:
+        """Initialize KAN model using modern Keras 3 functional API patterns.
 
-        # Validate and store configuration
-        self.layers_configurations = self._deep_copy_configurations(layers_configurations)
+        Args:
+            layer_configs: List of KANLinear configuration dictionaries.
+            input_features: Number of input features.
+            enable_debugging: Whether to enable debug logging.
+            name: Optional model name.
+            **kwargs: Additional Model arguments.
+
+        Raises:
+            ValueError: If configurations are invalid.
+        """
+        # Validate inputs first
+        if not isinstance(layer_configs, list) or not layer_configs:
+            raise ValueError("layer_configs must be a non-empty list")
+
+        if not isinstance(input_features, int) or input_features <= 0:
+            raise ValueError(f"input_features must be positive integer, got {input_features}")
+
+        # Store configuration for serialization
+        self.layer_configs = self._validate_and_copy_configs(layer_configs)
+        self.input_features = input_features
         self.enable_debugging = enable_debugging
-        self.include_top = include_top
-        self._validate_configurations(self.layers_configurations)
+        self.num_layers = len(self.layer_configs)
 
-        # Store computed properties
-        self.input_features = self.layers_configurations[0]["in_features"]
-        self.output_features = self.layers_configurations[-1]["out_features"] if include_top else None
+        # Build model using functional API pattern
+        inputs, outputs = self._build_functional_model()
 
-        # Track model statistics for debugging
-        self._layer_stats = {}
-
-        # Build the model using functional API
-        inputs = keras.Input(shape=(self.input_features,), name="input")
-        outputs = self._build_model(inputs)
-
-        # Initialize the Model
-        super().__init__(inputs=inputs, outputs=outputs, name=name or "kan_model", **kwargs)
-
-        logger.info(
-            f"Created KAN model with {len(self.layers_configurations)} layers: "
-            f"{self.input_features} -> {self.output_features if include_top else 'features'}"
+        # Initialize parent Model class
+        super().__init__(
+            inputs=inputs,
+            outputs=outputs,
+            name=name or "kan_model",
+            **kwargs
         )
 
-    def _deep_copy_configurations(self, configs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Create a deep copy of configurations to avoid mutations.
+        logger.info(
+            f"Created KAN model: {input_features} -> "
+            f"{' -> '.join([str(cfg['features']) for cfg in self.layer_configs])} "
+            f"({self.num_layers} layers)"
+        )
+
+    def _validate_and_copy_configs(
+        self,
+        configs: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Validate and create deep copy of layer configurations.
 
         Args:
             configs: Original configuration list.
 
         Returns:
-            Deep copy of the configuration list.
+            Validated and copied configuration list.
 
         Raises:
-            ValueError: If configs is not a list.
+            ValueError: If any configuration is invalid.
         """
-        if not isinstance(configs, list):
-            raise ValueError("Layer configurations must be a list")
-        return [dict(config) for config in configs]
+        validated_configs = []
 
-    def _validate_configurations(self, configs: List[Dict[str, Any]]) -> None:
-        """Validate layer configurations for compatibility.
-
-        Args:
-            configs: List of layer configuration dictionaries.
-
-        Raises:
-            ValueError: If configurations are invalid or incompatible.
-        """
-        if not configs:
-            raise ValueError("Layer configurations cannot be empty")
-
-        if not isinstance(configs, list):
-            raise ValueError("Layer configurations must be a list")
-
-        # Check that each config has required keys and valid values
         for i, config in enumerate(configs):
             if not isinstance(config, dict):
-                raise ValueError(f"Layer {i} configuration must be a dictionary")
+                raise ValueError(f"Layer {i} config must be a dictionary, got {type(config)}")
 
-            required_keys = ['in_features', 'out_features']
-            for key in required_keys:
-                if key not in config:
-                    raise ValueError(f"Layer {i} missing required key: '{key}'")
+            # Check required 'features' parameter
+            if 'features' not in config:
+                raise ValueError(f"Layer {i} config missing required 'features' key")
 
-                if not isinstance(config[key], int) or config[key] <= 0:
-                    raise ValueError(f"Layer {i} '{key}' must be a positive integer, got {config[key]}")
-
-            # Validate optional parameters if present
-            if 'grid_size' in config:
-                if not isinstance(config['grid_size'], int) or config['grid_size'] < 3:
-                    raise ValueError(f"Layer {i} 'grid_size' must be an integer >= 3, got {config['grid_size']}")
-
-            if 'spline_order' in config:
-                if not isinstance(config['spline_order'], int) or config['spline_order'] < 1:
-                    raise ValueError(
-                        f"Layer {i} 'spline_order' must be a positive integer, got {config['spline_order']}")
-
-        # Check that consecutive layers are compatible
-        for i in range(len(configs) - 1):
-            current_out = configs[i]['out_features']
-            next_in = configs[i + 1]['in_features']
-
-            if current_out != next_in:
+            features = config['features']
+            if not isinstance(features, int) or features <= 0:
                 raise ValueError(
-                    f"Incompatible layer dimensions: Layer {i} output features ({current_out}) "
-                    f"don't match Layer {i + 1} input features ({next_in})"
+                    f"Layer {i} 'features' must be positive integer, got {features}"
                 )
 
-    def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the complete KAN model architecture.
+            # Validate optional parameters
+            if 'grid_size' in config:
+                grid_size = config['grid_size']
+                if not isinstance(grid_size, int) or grid_size < 3:
+                    raise ValueError(
+                        f"Layer {i} 'grid_size' must be integer >= 3, got {grid_size}"
+                    )
 
-        Args:
-            inputs: Input tensor
+            if 'spline_order' in config:
+                spline_order = config['spline_order']
+                if not isinstance(spline_order, int) or spline_order < 1:
+                    raise ValueError(
+                        f"Layer {i} 'spline_order' must be positive integer, got {spline_order}"
+                    )
+
+            # Create deep copy to avoid mutations
+            validated_configs.append(dict(config))
+
+        return validated_configs
+
+    def _build_functional_model(self) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
+        """Build the model using Keras functional API for proper serialization.
+
+        This method follows the modern Keras 3 pattern of using functional API
+        in __init__ to ensure proper layer creation and building.
 
         Returns:
-            Output tensor
+            Tuple of (inputs, outputs) tensors for Model initialization.
         """
+        # Create input layer
+        inputs = keras.Input(shape=(self.input_features,), name="kan_input")
+
+        # Build sequential KAN layers
         x = inputs
+        for i, config in enumerate(self.layer_configs):
+            layer_name = f"kan_layer_{i}"
 
-        # Apply KAN layers sequentially
-        for i, layer_config in enumerate(self.layers_configurations):
-            x = self._build_kan_layer(x, i, layer_config)
+            # Add debugging wrapper if enabled
+            if self.enable_debugging:
+                x = self._add_debug_layer(x, i)
 
-        return x
+            # Create and apply KANLinear layer
+            kan_layer = KANLinear(name=layer_name, **config)
+            x = kan_layer(x)
 
-    def _build_kan_layer(
-            self,
-            x: keras.KerasTensor,
-            layer_idx: int,
-            config: Dict[str, Any]
+            logger.info(f"Added {layer_name}: features={config['features']}")
+
+        # Final debug layer if enabled
+        if self.enable_debugging:
+            x = self._add_debug_layer(x, self.num_layers, is_final=True)
+
+        return inputs, x
+
+    def _add_debug_layer(
+        self,
+        x: keras.KerasTensor,
+        layer_idx: int,
+        is_final: bool = False
     ) -> keras.KerasTensor:
-        """Build a single KAN layer.
+        """Add debugging monitoring layer.
 
         Args:
-            x: Input tensor
-            layer_idx: Index of the layer
-            config: Configuration dictionary for the layer
+            x: Input tensor to monitor.
+            layer_idx: Index of the layer for naming.
+            is_final: Whether this is the final output monitoring.
 
         Returns:
-            Output tensor from the KAN layer
+            Monitored tensor (unchanged data, just adds monitoring).
         """
-        # Create KAN layer with debugging wrapper if needed
-        kan_layer = KANLinear(name=f"kan_layer_{layer_idx}", **config)
+        def debug_monitor(tensor: keras.KerasTensor) -> keras.KerasTensor:
+            """Monitor tensor for debugging information using XLA-compatible ops."""
+            # The original implementation with Python `if` and `logger` is not
+            # compatible with graph compilation (e.g., tf.function) or XLA.
+            # We use tf.debugging.check_numerics, which is the robust and
+            # XLA-compatible way to check for NaN and Inf values.
+            if backend.backend() != "tensorflow":
+                return tensor  # No-op for other backends
 
-        x = kan_layer(x)
+            import tensorflow as tf
 
-        # Add debugging monitoring if enabled
-        if self.enable_debugging:
-            # This will be executed during the forward pass
-            def debug_monitor(tensor):
-                # Log layer information
-                logger.info(f"KAN Layer {layer_idx}: shape={keras.ops.shape(tensor)}")
+            # This op will raise an InvalidArgumentError if the tensor contains
+            # NaN or Inf values, halting execution. This is a more effective
+            # debugging strategy than logging warnings, as it prevents bad
+            # values from propagating through the network.
+            return tf.debugging.check_numerics(
+                tensor,
+                message=f"Numerical issue (NaN/Inf) detected in tensor before layer {layer_idx}"
+            )
 
-                # Check for numerical issues
-                if keras.ops.any(keras.ops.isnan(tensor)):
-                    logger.warning(f"NaN detected in KAN layer {layer_idx} output")
-                if keras.ops.any(keras.ops.isinf(tensor)):
-                    logger.warning(f"Infinite values detected in KAN layer {layer_idx} output")
+        suffix = "_final" if is_final else ""
+        debug_layer = keras.layers.Lambda(
+            debug_monitor,
+            output_shape=lambda shape: shape,
+            name=f"debug_monitor_{layer_idx}{suffix}"
+        )
 
-                return tensor
-
-            # Add output_shape to help Keras with shape inference
-            x = keras.layers.Lambda(
-                debug_monitor,
-                output_shape=lambda s: s,
-                name=f"debug_monitor_{layer_idx}"
-            )(x)
-
-        logger.info(f"Built KAN layer {layer_idx}: {config['in_features']} -> {config['out_features']}")
-
-        return x
+        return debug_layer(x)
 
     @classmethod
     def from_variant(
-            cls,
-            variant: str,
-            input_features: int,
-            num_classes: int,
-            enable_debugging: bool = False,
-            **kwargs
+        cls,
+        variant: str,
+        input_features: int,
+        num_classes: int,
+        enable_debugging: bool = False,
+        override_config: Optional[Dict[str, Any]] = None,
+        **kwargs: Any
     ) -> "KAN":
-        """Create a KAN model from a predefined variant.
+        """Create KAN model from predefined variant configuration.
 
         Args:
-            variant: String, one of "micro", "small", "medium", "large", "xlarge"
-            input_features: Integer, number of input features
-            num_classes: Integer, number of output classes
-            enable_debugging: Boolean, whether to enable debugging
-            **kwargs: Additional arguments passed to the constructor
+            variant: String, one of "micro", "small", "medium", "large", "xlarge".
+            input_features: Integer, number of input features.
+            num_classes: Integer, number of output classes/features.
+            enable_debugging: Boolean, whether to enable debugging.
+            override_config: Optional dict to override variant defaults.
+            **kwargs: Additional arguments passed to the constructor.
 
         Returns:
-            KAN model instance
+            Configured KAN model instance.
 
         Raises:
-            ValueError: If variant is not recognized
+            ValueError: If variant is not recognized.
 
         Example:
-            >>> # MNIST classification
-            >>> model = KAN.from_variant("small", input_features=784, num_classes=10)
-            >>> # Binary classification
-            >>> model = KAN.from_variant("medium", input_features=100, num_classes=1)
-            >>> # Multi-class problem
-            >>> model = KAN.from_variant("large", input_features=256, num_classes=50)
-        """
-        if variant not in cls.MODEL_VARIANTS:
-            raise ValueError(
-                f"Unknown variant '{variant}'. Available variants: "
-                f"{list(cls.MODEL_VARIANTS.keys())}"
+            ```python
+            # Standard MNIST classification
+            model = KAN.from_variant("small", input_features=784, num_classes=10)
+
+            # Custom activation for all layers
+            model = KAN.from_variant(
+                "medium",
+                input_features=256,
+                num_classes=50,
+                override_config={"activation": "gelu"}
             )
+            ```
+        """
+        if variant not in cls.VARIANT_CONFIGS:
+            available = list(cls.VARIANT_CONFIGS.keys())
+            raise ValueError(f"Unknown variant '{variant}'. Available: {available}")
 
-        config = cls.MODEL_VARIANTS[variant]
-        hidden_sizes = config["hidden_sizes"]
+        variant_config = cls.VARIANT_CONFIGS[variant].copy()
 
-        # Create layer sizes by combining input, hidden, and output
-        layer_sizes = [input_features] + hidden_sizes + [num_classes]
+        # Apply overrides if provided
+        if override_config:
+            variant_config.update(override_config)
+
+        # Extract hidden features and build layer configs
+        hidden_features = variant_config.pop("hidden_features")
+        all_features = hidden_features + [num_classes]
 
         # Create layer configurations
-        layers_configurations = []
-        for i in range(len(layer_sizes) - 1):
-            layer_config = {
-                "in_features": layer_sizes[i],
-                "out_features": layer_sizes[i + 1],
-                "grid_size": config["grid_size"],
-                "spline_order": config["spline_order"],
-                "activation": config["activation"]
-            }
-            layers_configurations.append(layer_config)
+        layer_configs = []
+        for features in all_features:
+            config = variant_config.copy()
+            config["features"] = features
+            layer_configs.append(config)
 
         logger.info(f"Creating KAN-{variant.upper()} model")
-        logger.info(f"Architecture: {' -> '.join(map(str, layer_sizes))}")
+        logger.info(f"Architecture: {input_features} -> {' -> '.join(map(str, all_features))}")
 
         return cls(
-            layers_configurations=layers_configurations,
+            layer_configs=layer_configs,
+            input_features=input_features,
             enable_debugging=enable_debugging,
             **kwargs
         )
 
-    def get_architecture_summary(self) -> str:
-        """Get a human-readable summary of the model architecture.
+    @classmethod
+    def from_layer_sizes(
+        cls,
+        layer_sizes: List[int],
+        grid_size: int = 5,
+        spline_order: int = 3,
+        activation: str = "swish",
+        regularization_factor: float = 0.01,
+        enable_debugging: bool = False,
+        **kan_layer_kwargs: Any
+    ) -> "KAN":
+        """Create KAN model from layer sizes with uniform configuration.
+
+        This is a convenience method for creating KAN models where all layers
+        share the same hyperparameters except for the number of features.
+
+        Args:
+            layer_sizes: List of layer sizes including input and output.
+                E.g., [784, 128, 64, 10] creates input->128->64->10 architecture.
+            grid_size: Grid size for all KANLinear layers.
+            spline_order: Spline order for all layers.
+            activation: Activation function for all layers.
+            regularization_factor: L2 regularization factor.
+            enable_debugging: Whether to enable debugging.
+            **kan_layer_kwargs: Additional KANLinear parameters.
 
         Returns:
-            String description of the model architecture.
+            Configured KAN model.
+
+        Raises:
+            ValueError: If layer_sizes has fewer than 2 elements.
+
+        Example:
+            ```python
+            # Simple 3-layer network: 784->128->64->10
+            model = KAN.from_layer_sizes(
+                [784, 128, 64, 10],
+                grid_size=8,
+                activation="gelu"
+            )
+            ```
         """
-        if not self.layers_configurations:
-            return "Empty KAN model"
+        if len(layer_sizes) < 2:
+            raise ValueError("layer_sizes must have at least 2 elements")
 
-        summary_lines = ["KAN Model Architecture:"]
-        summary_lines.append("=" * 50)
+        input_features = layer_sizes[0]
+        output_features = layer_sizes[1:]
 
+        # Create uniform layer configurations
+        layer_configs = []
+        for features in output_features:
+            config = {
+                "features": features,
+                "grid_size": grid_size,
+                "spline_order": spline_order,
+                "activation": activation,
+                "regularization_factor": regularization_factor,
+                **kan_layer_kwargs
+            }
+            layer_configs.append(config)
+
+        return cls(
+            layer_configs=layer_configs,
+            input_features=input_features,
+            enable_debugging=enable_debugging
+        )
+
+    def get_architecture_summary(self) -> str:
+        """Get human-readable summary of model architecture.
+
+        Returns:
+            Multi-line string describing the model architecture.
+        """
+        lines = ["KAN Model Architecture Summary"]
+        lines.append("=" * 50)
+
+        # Model overview
+        total_features = [self.input_features] + [cfg["features"] for cfg in self.layer_configs]
+        architecture_str = " -> ".join(map(str, total_features))
+        lines.append(f"Architecture: {architecture_str}")
+        lines.append(f"Total layers: {self.num_layers}")
+        lines.append(f"Debugging enabled: {self.enable_debugging}")
+        lines.append("")
+
+        # Layer details
+        for i, config in enumerate(self.layer_configs):
+            features = config["features"]
+            grid_size = config.get("grid_size", "default")
+            activation = config.get("activation", "default")
+            spline_order = config.get("spline_order", "default")
+
+            lines.append(
+                f"Layer {i:2d}: features={features:4d}, grid_size={grid_size}, "
+                f"activation={activation}, spline_order={spline_order}"
+            )
+
+        # Parameter estimation
+        total_params = self._estimate_parameters()
+        lines.append("")
+        lines.append(f"Estimated parameters: ~{total_params:,}")
+
+        return "\n".join(lines)
+
+    def _estimate_parameters(self) -> int:
+        """Estimate total number of parameters in the model.
+
+        Returns:
+            Approximate parameter count.
+        """
         total_params = 0
-        for i, config in enumerate(self.layers_configurations):
-            in_feat = config['in_features']
-            out_feat = config['out_features']
-            grid_size = config.get('grid_size', 5)
-            activation = config.get('activation', 'swish')
+        current_features = self.input_features
 
-            # Estimate parameters (base + spline weights + scaler)
-            base_params = in_feat * out_feat
-            spline_params = in_feat * out_feat * (grid_size + 2)  # Approximate
-            scaler_params = in_feat * out_feat
+        for config in self.layer_configs:
+            out_features = config["features"]
+            grid_size = config.get("grid_size", 5)
+            spline_order = config.get("spline_order", 3)
+
+            # KANLinear parameter estimation
+            # base_weight: in_features * out_features
+            # spline_weight: in_features * out_features * (grid_size + spline_order - 1)
+            # spline_scaler: in_features * out_features
+
+            base_params = current_features * out_features
+            spline_params = current_features * out_features * (grid_size + spline_order - 1)
+            scaler_params = current_features * out_features
+
             layer_params = base_params + spline_params + scaler_params
             total_params += layer_params
 
-            summary_lines.append(
-                f"Layer {i:2d}: {in_feat:4d} -> {out_feat:4d} "
-                f"(grid={grid_size}, act={activation}, params≈{layer_params:,})"
-            )
+            current_features = out_features
 
-        summary_lines.append("=" * 50)
-        summary_lines.append(f"Total parameters (approx): {total_params:,}")
-        summary_lines.append(f"Number of layers: {len(self.layers_configurations)}")
-        summary_lines.append(f"Debugging enabled: {self.enable_debugging}")
+        return total_params
 
-        return "\n".join(summary_lines)
+    def summary(self, **kwargs: Any) -> None:
+        """Print model summary with additional KAN-specific information.
 
-    def get_layer_statistics(self) -> Dict[str, Dict[str, float]]:
-        """Get statistics from the last forward pass (debug mode only).
-
-        Returns:
-            Dictionary containing layer-wise statistics.
+        Args:
+            **kwargs: Arguments passed to parent summary method.
         """
-        return dict(self._layer_stats) if self.enable_debugging else {}
+        # Print standard Keras summary
+        super().summary(**kwargs)
+
+        # Print KAN-specific architecture summary
+        print("\n" + self.get_architecture_summary())
 
     def get_config(self) -> Dict[str, Any]:
-        """Get model configuration for serialization.
+        """Get complete model configuration for serialization.
 
         Returns:
-            Configuration dictionary
+            Dictionary containing all configuration needed to reconstruct model.
         """
-        config = {
-            "layers_configurations": self.layers_configurations,
+        config = super().get_config()
+        config.update({
+            "layer_configs": self.layer_configs,
+            "input_features": self.input_features,
             "enable_debugging": self.enable_debugging,
-            "include_top": self.include_top,
-        }
+        })
         return config
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "KAN":
-        """Create model from configuration.
+        """Reconstruct model from configuration.
 
         Args:
-            config: Configuration dictionary
+            config: Configuration dictionary from get_config().
 
         Returns:
-            KAN model instance
+            Reconstructed KAN model instance.
         """
         return cls(**config)
 
-    def summary(self, **kwargs):
-        """Print model summary with additional information."""
-        super().summary(**kwargs)
 
-        # Print additional model information
-        total_layers = len(self.layers_configurations)
-        logger.info(f"KAN configuration:")
-        logger.info(f"  - Input features: {self.input_features}")
-        logger.info(f"  - Output features: {self.output_features}")
-        logger.info(f"  - Total KAN layers: {total_layers}")
-        logger.info(f"  - Include top: {self.include_top}")
-        logger.info(f"  - Debugging enabled: {self.enable_debugging}")
-
-        # Print architecture summary
-        print("\n" + self.get_architecture_summary())
-
-
-# ---------------------------------------------------------------------
-
-def create_kan_model(
-        variant: str = "small",
-        input_features: int = 784,
-        num_classes: int = 10,
-        optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
-        learning_rate: float = 0.001,
-        loss: Union[str, keras.losses.Loss] = "sparse_categorical_crossentropy",
-        metrics: List[Union[str, keras.metrics.Metric]] = None,
-        **kwargs
+def create_compiled_kan(
+    variant: str = "small",
+    input_features: int = 784,
+    num_classes: int = 10,
+    optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
+    learning_rate: float = 0.001,
+    loss: Union[str, keras.losses.Loss] = "sparse_categorical_crossentropy",
+    metrics: Optional[List[Union[str, keras.metrics.Metric]]] = None,
+    **model_kwargs: Any
 ) -> KAN:
-    """Convenience function to create and compile KAN models.
+    """Create and compile KAN model ready for training.
 
     Args:
-        variant: String, model variant ("micro", "small", "medium", "large", "xlarge")
-        input_features: Integer, number of input features
-        num_classes: Integer, number of output classes
-        optimizer: String name or optimizer instance. Default is "adam"
-        learning_rate: Float, learning rate for optimizer. Default is 0.001
-        loss: String name or loss function. Default is "sparse_categorical_crossentropy"
-        metrics: List of metrics to track. Default is ["accuracy"]
-        **kwargs: Additional arguments passed to the model constructor
+        variant: Model variant ("micro", "small", "medium", "large", "xlarge").
+        input_features: Number of input features.
+        num_classes: Number of output classes.
+        optimizer: Optimizer name or instance.
+        learning_rate: Learning rate for optimizer.
+        loss: Loss function name or instance.
+        metrics: List of metrics to track.
+        **model_kwargs: Additional arguments for model creation.
 
     Returns:
-        Compiled KAN model ready for training
+        Compiled KAN model ready for training.
 
     Example:
-        >>> # MNIST classification
-        >>> model = create_kan_model("small", input_features=784, num_classes=10)
-        >>>
-        >>> # Binary classification with custom settings
-        >>> model = create_kan_model(
-        ...     "medium",
-        ...     input_features=100,
-        ...     num_classes=1,
-        ...     loss="binary_crossentropy",
-        ...     metrics=["binary_accuracy"]
-        ... )
-        >>>
-        >>> # Regression task
-        >>> model = create_kan_model(
-        ...     "large",
-        ...     input_features=50,
-        ...     num_classes=1,
-        ...     loss="mse",
-        ...     metrics=["mae"]
-        ... )
+        ```python
+        # MNIST classification
+        model = create_compiled_kan(
+            variant="small",
+            input_features=784,
+            num_classes=10,
+            learning_rate=0.001
+        )
+
+        # Binary classification
+        model = create_compiled_kan(
+            variant="medium",
+            input_features=100,
+            num_classes=1,
+            loss="binary_crossentropy",
+            metrics=["binary_accuracy"]
+        )
+        ```
     """
     if metrics is None:
         metrics = ["accuracy"]
 
-    # Create the model
+    # Create model
     model = KAN.from_variant(
         variant=variant,
         input_features=input_features,
         num_classes=num_classes,
-        **kwargs
+        **model_kwargs
     )
 
-    # Set up optimizer
+    # Configure optimizer with learning rate
     if isinstance(optimizer, str):
         optimizer_instance = keras.optimizers.get(optimizer)
-        if hasattr(optimizer_instance, 'learning_rate'):
+        if hasattr(optimizer_instance, "learning_rate"):
             optimizer_instance.learning_rate = learning_rate
     else:
         optimizer_instance = optimizer
 
-    # Compile the model
+    # Compile model
     model.compile(
         optimizer=optimizer_instance,
         loss=loss,
         metrics=metrics
     )
 
-    logger.info(f"Created and compiled KAN-{variant.upper()} with input_features={input_features}, "
-                f"num_classes={num_classes}")
+    logger.info(
+        f"Created and compiled KAN-{variant.upper()}: "
+        f"{input_features}->{num_classes}, lr={learning_rate}"
+    )
 
     return model
-
-
-def create_kan_from_sizes(
-        layer_sizes: List[int],
-        grid_size: int = 5,
-        spline_order: int = 3,
-        activation: str = 'swish',
-        enable_debugging: bool = False,
-        **kan_layer_kwargs: Any
-) -> KAN:
-    """Create a KAN model with uniform configuration across layers.
-
-    This is a convenience function for creating KAN models where all layers
-    share the same hyperparameters except for input/output dimensions.
-
-    Args:
-        layer_sizes: List of layer sizes including input and output dimensions.
-            E.g., [784, 128, 64, 10] creates a 3-layer network.
-        grid_size: Grid size for all KANLinear layers.
-        spline_order: Spline order for all KANLinear layers.
-        activation: Activation function for all layers.
-        enable_debugging: Whether to enable debugging in the model.
-        **kan_layer_kwargs: Additional arguments passed to all KANLinear layers.
-
-    Returns:
-        Configured KAN model.
-
-    Raises:
-        ValueError: If layer_sizes has fewer than 2 elements.
-
-    Example:
-        >>> # 3-layer KAN: 784->128->64->10
-        >>> model = create_kan_from_sizes([784, 128, 64, 10], grid_size=8, activation='gelu')
-        >>>
-        >>> # Simple 1-layer network for binary classification
-        >>> model = create_kan_from_sizes([100, 1], grid_size=5, activation='swish')
-    """
-    if len(layer_sizes) < 2:
-        raise ValueError("layer_sizes must have at least 2 elements (input and output)")
-
-    # Create layer configurations
-    layer_configs = []
-    for i in range(len(layer_sizes) - 1):
-        config = {
-            'in_features': layer_sizes[i],
-            'out_features': layer_sizes[i + 1],
-            'grid_size': grid_size,
-            'spline_order': spline_order,
-            'activation': activation,
-            **kan_layer_kwargs
-        }
-        layer_configs.append(config)
-
-    return KAN(
-        layers_configurations=layer_configs,
-        enable_debugging=enable_debugging
-    )
