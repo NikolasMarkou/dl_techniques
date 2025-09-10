@@ -1019,3 +1019,132 @@ class ComplexDropout(keras.layers.Layer):
         return config
 
 # ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable()
+class ComplexGlobalAveragePooling2D(keras.layers.Layer):
+    """
+    Complex-valued global 2D average pooling layer.
+
+    Performs global average pooling on complex-valued inputs by applying the
+    operation independently to the real and imaginary components. This reduces
+    each feature map to a single complex number.
+
+    **Intent**: To completely downsample the spatial dimensions of complex
+    feature maps, typically used as a transition from convolutional blocks to
+    fully connected (Dense) layers in a classifier.
+
+    **Mathematical Operation**:
+    For a complex input tensor z = x + iy:
+    output = GlobalAvgPool(x) + i·GlobalAvgPool(y)
+    where GlobalAvgPool computes the mean over the spatial (height, width) axes.
+
+    **Architecture**:
+    ```
+    Input(shape=[batch, height, width, channels_complex])
+           ↓
+    Split: real_part = Re(z), imag_part = Im(z)
+           ↓
+    Apply Global Average Pooling:
+      pooled_real = mean(real_part, axis=[1, 2])
+      pooled_imag = mean(imag_part, axis=[1, 2])
+           ↓
+    Combine: output = complex(pooled_real, pooled_imag)
+           ↓
+    Output(shape=[batch, channels_complex]) or (if keepdims=True)
+    Output(shape=[batch, 1, 1, channels_complex])
+    ```
+
+    Args:
+        keepdims: Boolean, whether to keep the spatial dimensions or not.
+            If `False` (default), the output has shape `(batch, channels)`.
+            If `True`, the output has shape `(batch, 1, 1, channels)`.
+        **kwargs: Additional keyword arguments for Layer base class.
+
+    Input shape:
+        4D tensor with shape: `(batch_size, height, width, channels)`.
+        Input should be complex-valued (tf.complex64 or tf.complex128).
+
+    Output shape:
+        - If `keepdims=False`: 2D tensor with shape `(batch_size, channels)`.
+        - If `keepdims=True`: 4D tensor with shape `(batch_size, 1, 1, channels)`.
+
+    Example:
+        ```python
+        # Transition from conv to dense in a complex CNN
+        inputs = keras.Input(shape=(32, 32, 3), dtype=tf.complex64)
+        x = ComplexConv2D(64, 3)(inputs)
+        x = ComplexReLU()(x)
+        x = ComplexAveragePooling2D()(x)
+        # Flatten spatial dimensions to a vector of complex features
+        x = ComplexGlobalAveragePooling2D()(x) # Shape: (batch, 64)
+        outputs = ComplexDense(10)(x) # Classifier head
+        model = keras.Model(inputs, outputs)
+        ```
+
+    Note:
+        This layer has no trainable weights and is a fundamental building block
+        for complex-valued classification models.
+    """
+    def __init__(self, keepdims: bool = False, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.keepdims = keepdims
+
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Apply complex global average pooling.
+
+        Args:
+            inputs: Complex-valued input tensor.
+            training: Boolean indicating whether in training mode (unused).
+
+        Returns:
+            Complex-valued output tensor after pooling.
+        """
+        # Split into real and imaginary components
+        inputs_real = tf.math.real(inputs)
+        inputs_imag = tf.math.imag(inputs)
+
+        # Apply global average pooling to each component
+        # The spatial axes for a 4D tensor are 1 and 2.
+        pooled_real = keras.ops.mean(inputs_real, axis=[1, 2], keepdims=self.keepdims)
+        pooled_imag = keras.ops.mean(inputs_imag, axis=[1, 2], keepdims=self.keepdims)
+
+        # Recombine into a complex tensor
+        return tf.complex(pooled_real, pooled_imag)
+
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape of the global pooling layer.
+
+        Args:
+            input_shape: Input tensor shape.
+
+        Returns:
+            Output tensor shape.
+        """
+        if len(input_shape) != 4:
+            raise ValueError(f"ComplexGlobalAveragePooling2D requires 4D input, got {len(input_shape)}D")
+
+        if self.keepdims:
+            return (input_shape[0], 1, 1, input_shape[3])
+        else:
+            return (input_shape[0], input_shape[3])
+
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Get layer configuration for serialization.
+
+        Returns:
+            Configuration dictionary containing all constructor parameters.
+        """
+        config = super().get_config()
+        config.update({
+            'keepdims': self.keepdims,
+        })
+        return config
+
+# ---------------------------------------------------------------------
