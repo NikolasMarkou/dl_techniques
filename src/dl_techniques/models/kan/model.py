@@ -315,7 +315,12 @@ class KAN(keras.Model):
 
                 return tensor
 
-            x = keras.layers.Lambda(debug_monitor, name=f"debug_monitor_{layer_idx}")(x)
+            # Add output_shape to help Keras with shape inference
+            x = keras.layers.Lambda(
+                debug_monitor,
+                output_shape=lambda s: s,
+                name=f"debug_monitor_{layer_idx}"
+            )(x)
 
         logger.info(f"Built KAN layer {layer_idx}: {config['in_features']} -> {config['out_features']}")
 
@@ -610,5 +615,3 @@ def create_kan_from_sizes(
         layers_configurations=layer_configs,
         enable_debugging=enable_debugging
     )
-
-# ---------------------------------------------------------------------

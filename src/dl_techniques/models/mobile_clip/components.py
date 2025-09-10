@@ -465,7 +465,9 @@ class MobileClipTextEncoder(keras.layers.Layer):
         causal_mask = None
         if self.use_causal_mask:
             seq_len = ops.shape(x)[1]
-            causal_mask = ops.triu(ops.ones((seq_len, seq_len)), k=1)
+            # Create a lower-triangular mask to prevent attending to future tokens.
+            # The mask should be 3D to be broadcastable across the batch and head dimensions.
+            causal_mask = ops.tril(ops.ones((1, seq_len, seq_len)))
 
         for transformer_layer in self.transformer_layers:
             x = transformer_layer(x, attention_mask=causal_mask, training=training)

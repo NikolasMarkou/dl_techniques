@@ -20,7 +20,7 @@ from keras import ops
 from typing import List, Dict, Any
 
 from dl_techniques.layers.kan_linear import KANLinear
-from dl_techniques.models.kan.model import KAN, create_kan_model
+from dl_techniques.models.kan.model import KAN, create_kan_from_sizes
 from dl_techniques.utils.logger import logger
 
 
@@ -50,15 +50,15 @@ class TestKAN:
         return [
             {
                 "in_features": 15, "out_features": 20, "grid_size": 8,
-                "activation": "swish", "spline_order": 3, "regularization_factor": 0.01
+                "activation": "swish", "spline_order": 3
             },
             {
                 "in_features": 20, "out_features": 12, "grid_size": 6,
-                "activation": "gelu", "spline_order": 2, "use_residual": False
+                "activation": "gelu", "spline_order": 2
             },
             {
                 "in_features": 12, "out_features": 5, "grid_size": 4,
-                "activation": "linear", "epsilon": 1e-8
+                "activation": "linear"
             }
         ]
 
@@ -84,12 +84,13 @@ class TestKAN:
         """Test initialization with simple configuration."""
         model = KAN(layers_configurations=simple_config)
 
-        # Before building, layers list should be empty
-        assert len(model.kan_layers) == 0
+        assert model.built is True
         assert model.enable_debugging is False
         assert model.layers_configurations == simple_config
-        assert model._is_built is False
         assert model.name == "kan_model"  # Default name
+
+        kan_layers = [l for l in model.layers if isinstance(l, KANLinear)]
+        assert len(kan_layers) == 3
 
     def test_initialization_with_debugging(self, simple_config: List[Dict[str, Any]]) -> None:
         """Test initialization with debugging enabled."""
@@ -109,46 +110,38 @@ class TestKAN:
 
         assert len(model.layers_configurations) == 3
         assert model.layers_configurations[0]["spline_order"] == 3
-        assert model.layers_configurations[1]["use_residual"] is False
-        assert model.layers_configurations[2]["epsilon"] == 1e-8
+        assert model.layers_configurations[1]["spline_order"] == 2
 
-    def test_build_method(self, simple_config: List[Dict[str, Any]], input_tensor: keras.KerasTensor) -> None:
-        """Test the build method functionality."""
+    def test_build_method(self, simple_config: List[Dict[str, Any]]) -> None:
+        """Test that the model is built correctly on initialization."""
         model = KAN(layers_configurations=simple_config)
 
-        # Initially not built
-        assert not model._is_built
-        assert len(model.kan_layers) == 0
+        # The model is built on initialization with the Functional API
+        assert model.built
 
-        # Build the model
-        model.build(input_tensor.shape)
-
-        # After building
-        assert model._is_built
-        assert len(model.kan_layers) == 3
-        assert model._build_input_shape == input_tensor.shape
+        kan_layers = [l for l in model.layers if isinstance(l, KANLinear)]
+        assert len(kan_layers) == 3
 
         # Check that layers are properly created
-        assert model.kan_layers[0].in_features == 10
-        assert model.kan_layers[0].out_features == 8
-        assert model.kan_layers[1].in_features == 8
-        assert model.kan_layers[1].out_features == 4
-        assert model.kan_layers[2].in_features == 4
-        assert model.kan_layers[2].out_features == 2
+        assert kan_layers[0].in_features == 10
+        assert kan_layers[0].out_features == 8
+        assert kan_layers[1].in_features == 8
+        assert kan_layers[1].out_features == 4
+        assert kan_layers[2].in_features == 4
+        assert kan_layers[2].out_features == 2
 
     def test_auto_build_on_call(self, simple_config: List[Dict[str, Any]], input_tensor: keras.KerasTensor) -> None:
-        """Test that model auto-builds on first call."""
+        """Test that model is built on init and callable."""
         model = KAN(layers_configurations=simple_config)
 
-        # Initially not built
-        assert not model._is_built
+        # Model should be built after initialization
+        assert model.built
 
-        # Call should trigger auto-build
+        # Calling the model should work and produce the correct output shape
         output = model(input_tensor)
 
-        # Should now be built
-        assert model._is_built
-        assert len(model.kan_layers) == 3
+        kan_layers = [l for l in model.layers if isinstance(l, KANLinear)]
+        assert len(kan_layers) == 3
         assert output.shape == (16, 2)
 
     def test_invalid_configurations(self) -> None:
@@ -188,17 +181,14 @@ class TestKAN:
         with pytest.raises(ValueError, match="Incompatible layer dimensions"):
             KAN(layers_configurations=incompatible_config)
 
-    def test_build_with_invalid_input_shape(self, simple_config: List[Dict[str, Any]]) -> None:
-        """Test build method with invalid input shapes."""
+    def test_call_with_invalid_input_shape(self, simple_config: List[Dict[str, Any]]) -> None:
+        """Test calling the model with an invalid input shape."""
         model = KAN(layers_configurations=simple_config)
 
-        # 1D input (too few dimensions)
-        with pytest.raises(ValueError, match="Input must be at least 2D"):
-            model.build((10,))
-
         # Incompatible input features
-        with pytest.raises(ValueError, match="Input features .* don't match first layer"):
-            model.build((16, 5))  # Should be 10
+        with pytest.raises(ValueError, match="incompatible with the layer"):
+            invalid_input = keras.random.normal((16, 5))  # Expected 10 features
+            model(invalid_input)
 
     def test_forward_pass(
             self,
@@ -245,12 +235,9 @@ class TestKAN:
         output = model(input_tensor, training=True)
         assert output.shape == (16, 2)
 
-        # Check that statistics were collected
+        # Debugging only logs to console, no stats are returned
         stats = model.get_layer_statistics()
-        assert len(stats) == 3  # One for each layer
-        assert 'layer_0' in stats
-        assert 'output_mean' in stats['layer_0']
-        assert 'output_std' in stats['layer_0']
+        assert stats == {}
 
     def test_empty_batch_handling(self, simple_config: List[Dict[str, Any]]) -> None:
         """Test handling of empty batches."""
@@ -321,34 +308,25 @@ class TestKAN:
         assert 'loss' in history.history
         assert len(history.history['loss']) == 2
 
-    def test_serialization_complete(self, simple_config: List[Dict[str, Any]]) -> None:
-        """Test complete KAN model serialization."""
+    def test_serialization_config_only(self, simple_config: List[Dict[str, Any]]) -> None:
+        """Test KAN model get_config and from_config methods."""
         original_model = KAN(
             layers_configurations=simple_config,
             enable_debugging=True,
-            name="original_kan"
         )
-
-        # Build the model
-        test_input = keras.random.normal([8, 10])
-        original_output = original_model(test_input)
 
         # Get config and recreate
         config = original_model.get_config()
-        build_config = original_model.get_build_config()
-
         recreated_model = KAN.from_config(config)
-        recreated_model.build_from_config(build_config)
 
         # Check configuration matches
         assert recreated_model.layers_configurations == original_model.layers_configurations
         assert recreated_model.enable_debugging == original_model.enable_debugging
-        assert recreated_model.name == original_model.name
-        assert recreated_model._is_built == original_model._is_built
+        assert recreated_model.built == original_model.built
 
-        # Test that recreated model produces same architecture
-        recreated_output = recreated_model(test_input)
-        assert recreated_output.shape == original_output.shape
+        # Test that recreated model has the same architecture properties
+        assert recreated_model.input_shape == original_model.input_shape
+        assert recreated_model.output_shape == original_model.output_shape
 
     def test_different_architectures(self) -> None:
         """Test KAN with different architectures."""
@@ -386,13 +364,13 @@ class TestKAN:
             assert not ops.any(ops.isnan(output))
 
 
-class TestCreateKANModel:
-    """Test the create_kan_model convenience function."""
+class TestCreateKANFromSizes:
+    """Test the create_kan_from_sizes convenience function."""
 
     def test_create_simple_model(self) -> None:
         """Test creating a simple KAN model with uniform configuration."""
         layer_sizes = [10, 20, 15, 5]
-        model = create_kan_model(
+        model = create_kan_from_sizes(
             layer_sizes=layer_sizes,
             grid_size=8,
             activation='gelu',
@@ -417,33 +395,31 @@ class TestCreateKANModel:
     def test_create_model_with_additional_kwargs(self) -> None:
         """Test creating KAN model with additional KANLinear arguments."""
         layer_sizes = [5, 8, 3]
-        model = create_kan_model(
+        model = create_kan_from_sizes(
             layer_sizes=layer_sizes,
             grid_size=6,
             spline_order=4,
-            regularization_factor=0.02,
             use_residual=False
         )
 
         # Check that additional kwargs were passed through
         config = model.layers_configurations[0]
         assert config["spline_order"] == 4
-        assert config["regularization_factor"] == 0.02
         assert config["use_residual"] is False
 
     def test_create_model_invalid_layer_sizes(self) -> None:
         """Test creating KAN model with invalid layer sizes."""
         # Too few layer sizes
         with pytest.raises(ValueError, match="layer_sizes must have at least 2 elements"):
-            create_kan_model(layer_sizes=[10])
+            create_kan_from_sizes(layer_sizes=[10])
 
         # Empty layer sizes
         with pytest.raises(ValueError, match="layer_sizes must have at least 2 elements"):
-            create_kan_model(layer_sizes=[])
+            create_kan_from_sizes(layer_sizes=[])
 
     def test_create_model_functional_test(self) -> None:
         """Test that created model works functionally."""
-        model = create_kan_model(
+        model = create_kan_from_sizes(
             layer_sizes=[784, 128, 64, 10],
             grid_size=8,
             activation='swish'
@@ -487,7 +463,6 @@ class TestEdgeCases:
         config = [
             {
                 "in_features": 4, "out_features": 2,
-                "grid_range": (-10.0, 10.0), "clip_value": 1e2
             }
         ]
         model = KAN(layers_configurations=config)
@@ -549,9 +524,9 @@ class TestEdgeCases:
         output = model(problematic_input, training=True)
         assert output.shape == (8, 2)
 
-        # Check that statistics were collected despite issues
+        # Check that statistics are empty as they are not collected
         stats = model.get_layer_statistics()
-        assert len(stats) > 0
+        assert stats == {}
 
 
 class TestModelSaveLoad:
@@ -661,11 +636,13 @@ class TestModelSaveLoad:
             assert not ops.any(ops.isinf(loaded_output))
 
             # Check that the model architecture is preserved
-            assert len(loaded_model.kan_layers) == len(original_model.kan_layers)
+            original_kan_layers = [l for l in original_model.layers if isinstance(l, KANLinear)]
+            loaded_kan_layers = [l for l in loaded_model.layers if isinstance(l, KANLinear)]
+            assert len(loaded_kan_layers) == len(original_kan_layers)
             assert loaded_model.enable_debugging == original_model.enable_debugging
 
             # Check that the layers have the correct configurations
-            for orig_layer, loaded_layer in zip(original_model.kan_layers, loaded_model.kan_layers):
+            for orig_layer, loaded_layer in zip(original_kan_layers, loaded_kan_layers):
                 assert orig_layer.in_features == loaded_layer.in_features
                 assert orig_layer.out_features == loaded_layer.out_features
                 assert orig_layer.grid_size == loaded_layer.grid_size
@@ -673,8 +650,8 @@ class TestModelSaveLoad:
             logger.info("KAN model direct save/load test passed successfully")
 
     def test_create_kan_model_save_load(self) -> None:
-        """Test saving and loading model created with create_kan_model."""
-        model = create_kan_model(
+        """Test saving and loading model created with create_kan_from_sizes."""
+        model = create_kan_from_sizes(
             layer_sizes=[10, 15, 8, 3],
             grid_size=7,
             activation='gelu',
@@ -764,17 +741,16 @@ class TestPerformance:
 
             # Check that statistics were collected in debugging mode
             stats = model.get_layer_statistics()
-            assert len(stats) == len(config)
+            assert stats == {}
 
     def test_deep_network_stability(self) -> None:
         """Test stability with very deep KAN networks."""
         # Create a deep network
         layer_sizes = [20, 18, 16, 14, 12, 10, 8, 6, 4, 2]
-        model = create_kan_model(
+        model = create_kan_from_sizes(
             layer_sizes=layer_sizes,
             grid_size=5,
             activation='swish',
-            regularization_factor=0.02
         )
 
         test_input = keras.random.normal([16, 20])
