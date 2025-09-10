@@ -571,7 +571,7 @@ def main() -> None:
                         help='CoShNet model variant')
 
     # Training arguments - optimized for CoShNet's fast convergence
-    parser.add_argument('--epochs', type=int, default=50,
+    parser.add_argument('--epochs', type=int, default=100,
                         help='Number of training epochs (CoShNet converges faster)')
     parser.add_argument('--batch-size', type=int, default=64,
                         help='Training batch size')

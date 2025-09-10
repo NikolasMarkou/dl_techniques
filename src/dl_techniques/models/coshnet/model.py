@@ -1,6 +1,6 @@
 """
 CoShNet (Complex Shearlet Network) Implementation
-===============================================
+================================================================
 
 This module implements the CoShNet architecture, a hybrid complex-valued neural network
 that combines fixed shearlet transforms with learnable complex-valued layers for
@@ -11,12 +11,13 @@ Key Features:
 1. Hybrid Architecture:
    - Fixed shearlet transform frontend for multi-scale feature extraction
    - Learnable complex-valued convolutional and dense layers
+   - Global Average Pooling for spatial dimension reduction
    - Efficient parameter usage through fixed transform
    - Built-in multi-scale and directional sensitivity
 
 2. Technical Advantages:
-   - Fewer parameters than traditional CNNs (49.9k vs 11.18M for ResNet-18)
-   - Faster training convergence (20 epochs vs 200 for standard CNNs)
+   - Fewer parameters than traditional CNNs
+   - Faster training convergence
    - Better gradient flow through complex-valued operations
    - Natural handling of phase information
    - Self-regularizing behavior
@@ -25,7 +26,7 @@ Key Features:
    - Complex-valued operations with split real/imaginary implementation
    - Numerically stable complex arithmetic
    - Proper complex weight initialization
-   - Efficient memory usage through in-place operations
+   - Efficient memory usage through global pooling
    - Modern Keras 3 patterns for serialization and configuration
 
 Network Architecture:
@@ -39,19 +40,19 @@ Network Architecture:
    - Complex Convolution: 2 layers (32 and 64 filters)
    - Complex Dense: 2 layers (1250 and 500 units)
    - Average Pooling: After each convolution
+   - Global Average Pooling: Before dense layers
    - Complex ReLU: Non-linear activation
    - Final Real Classification Layer
 
 Performance Characteristics:
 -------------------------
 1. Model Size:
-   - Base Model: 1.3M parameters
-   - Tiny Model: 49.9k parameters
-   - Memory Efficient: No batch norm, minimal activation storage
+   - Base Model: ~1.3M parameters (reduced with global pooling)
+   - Tiny Model: ~49.9k parameters
+   - Memory Efficient: Global pooling reduces spatial dimensions
 
 2. Computational Efficiency:
-   - 52× fewer FLOPs than ResNet-18
-   - 93.06 MFLOPs vs 4.77 GFLOPs
+   - Reduced FLOPs compared to traditional CNNs
    - Fast convergence in 20 epochs
    - Efficient forward pass through fixed transform
 
@@ -76,33 +77,29 @@ from dl_techniques.layers.complex_layers import (
     ComplexDense,
     ComplexConv2D,
     ComplexReLU,
+    ComplexDropout,
     ComplexAveragePooling2D,
-    ComplexDropout
+    ComplexGlobalAveragePooling2D
 )
 
-
 # ---------------------------------------------------------------------
-
 
 @keras.saving.register_keras_serializable()
 class CoShNet(keras.Model):
     """
-    Complex Shearlet Network (CoShNet) implementation.
+    Refined Complex Shearlet Network (CoShNet) implementation.
 
     CoShNet combines fixed ShearletTransform with complex-valued layers for efficient
     image classification with built-in multi-scale and directional sensitivity.
-
-    The architecture uses fewer parameters than traditional CNNs while maintaining
-    competitive performance through its hybrid design of fixed transforms and
-    learnable complex-valued neural network layers.
+    This refined version uses global average pooling for better parameter efficiency.
 
     **Architecture**:
     ```
-    Input → ShearletTransform → Complex Conv Layers → Complex Dense Layers → Classification
+    Input → ShearletTransform → Complex Conv Layers → Global Avg Pool → Complex Dense Layers → Classification
 
     Detailed Flow:
     Image → Shearlet(scales, directions) → ComplexConv2D + Pool → ComplexConv2D + Pool
-          → Flatten → ComplexDense + Dropout → ComplexDense + Dropout → Dense(softmax)
+          → GlobalAvgPool → ComplexDense + Dropout → ComplexDense + Dropout → Dense(softmax)
     ```
 
     Args:
@@ -161,15 +158,6 @@ class CoShNet(keras.Model):
         # Build model
         model.build((None, 32, 32, 3))
         print(f"Total parameters: {model.count_params():,}")
-
-        # Create tiny variant
-        tiny_model = CoShNet(
-            input_shape=(32, 32, 3),
-            num_classes=10,
-            conv_filters=[16, 32],
-            dense_units=[256, 128],
-            dropout_rate=0.2
-        )
         ```
     """
 
@@ -187,7 +175,7 @@ class CoShNet(keras.Model):
             # Layer configuration
             conv_kernel_size: int = 5,
             conv_strides: int = 2,
-            pool_size: int = 2,
+            pool_size: int = 1,
             # Regularization
             dropout_rate: float = 0.1,
             kernel_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
@@ -261,6 +249,7 @@ class CoShNet(keras.Model):
 
             pool_layer = ComplexAveragePooling2D(
                 pool_size=self.pool_size,
+                strides=self.pool_size,
                 name=f'avg_pool_{i}'
             )
             self.pool_layers.append(pool_layer)
@@ -268,8 +257,11 @@ class CoShNet(keras.Model):
         # Complex ReLU activation
         self.activation = ComplexReLU(name='complex_relu')
 
-        # Flatten layer
-        self.flatten = layers.Flatten(name='flatten')
+        # Global Average Pooling layer (replaces flatten)
+        self.global_avg_pool = ComplexGlobalAveragePooling2D(
+            keepdims=False,
+            name='global_avg_pool'
+        )
 
         # Create complex dense layers with dropout
         self.dense_layers: List[ComplexDense] = []
@@ -300,11 +292,9 @@ class CoShNet(keras.Model):
             name='classifier'
         )
 
-        # Store build input shape for serialization
-        self._build_input_shape = None
-
-        logger.info(f"CoShNet initialized with {sum(self.conv_filters)} conv filters, "
+        logger.info(f"Refined CoShNet initialized with {sum(self.conv_filters)} conv filters, "
                     f"{sum(self.dense_units)} dense units, {self.num_classes} classes")
+        logger.info("Using global average pooling for spatial dimension reduction")
 
     def _validate_config(self) -> None:
         """Validate configuration parameters."""
@@ -349,11 +339,9 @@ class CoShNet(keras.Model):
             raise ValueError(f"epsilon must be positive, got {self.epsilon}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the CoShNet model components."""
+        """Build the refined CoShNet model components."""
         if self.built:
             return
-
-        self._build_input_shape = input_shape
 
         # Build shearlet transform
         self.shearlet.build(input_shape)
@@ -370,12 +358,12 @@ class CoShNet(keras.Model):
             pool_layer.build(conv_output_shape)
             current_shape = pool_layer.compute_output_shape(conv_output_shape)
 
-        # Build flatten
-        self.flatten.build(current_shape)
-        flatten_output_shape = self.flatten.compute_output_shape(current_shape)
+        # Build global average pooling
+        self.global_avg_pool.build(current_shape)
+        global_pool_output_shape = self.global_avg_pool.compute_output_shape(current_shape)
 
         # Build dense and dropout layers
-        current_shape = flatten_output_shape
+        current_shape = global_pool_output_shape
         for dense_layer, dropout_layer in zip(self.dense_layers, self.dropout_layers):
             dense_layer.build(current_shape)
             dense_output_shape = dense_layer.compute_output_shape(current_shape)
@@ -394,7 +382,7 @@ class CoShNet(keras.Model):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through the network.
+        """Forward pass through the refined network.
 
         Args:
             inputs: Input tensor of shape [batch_size, height, width, channels]
@@ -415,15 +403,15 @@ class CoShNet(keras.Model):
             x = self.activation(x, training=training)
             x = pool_layer(x, training=training)
 
-        # Flatten
-        x = self.flatten(x)
+        # Global average pooling (replaces flatten)
+        x = self.global_avg_pool(x)
 
         # Dense layers with dropout
         for dense_layer, dropout_layer in zip(self.dense_layers, self.dropout_layers):
             x = dense_layer(x, training=training)
             x = self.activation(x, training=training)
-            if training:
-                x = dropout_layer(x, training=training)
+            x = dropout_layer(x, training=training)
+
         # Final classification (convert to real by taking magnitude)
         x = ops.abs(x)
         x = self.classifier(x, training=training)
@@ -459,6 +447,8 @@ class CoShNet(keras.Model):
 
 
 # ---------------------------------------------------------------------
+# Factory Functions
+# ---------------------------------------------------------------------
 
 def create_coshnet(
         input_shape: Tuple[int, int, int] = (32, 32, 3),
@@ -469,7 +459,7 @@ def create_coshnet(
         **kwargs: Any
 ) -> CoShNet:
     """
-    Create a CoShNet model with specified configuration.
+    Create a refined CoShNet model with global average pooling.
 
     Args:
         input_shape: Shape of input images (height, width, channels). Default (32, 32, 3).
@@ -480,11 +470,11 @@ def create_coshnet(
         **kwargs: Additional configuration parameters.
 
     Returns:
-        Configured CoShNet model
+        Configured refined CoShNet model
 
     Example:
         ```python
-        # Create standard CoShNet for CIFAR-10
+        # Create standard refined CoShNet for CIFAR-10
         model = create_coshnet(
             input_shape=(32, 32, 3),
             num_classes=10,
@@ -501,7 +491,7 @@ def create_coshnet(
         )
         ```
     """
-    logger.info("Creating CoShNet model with modern architecture")
+    logger.info("Creating refined CoShNet model with global average pooling")
     return CoShNet(
         input_shape=input_shape,
         num_classes=num_classes,
@@ -512,16 +502,14 @@ def create_coshnet(
     )
 
 
-# ---------------------------------------------------------------------
-
 def create_coshnet_variant(variant: str = "base") -> CoShNet:
     """
-    Create predefined CoShNet model variants for different use cases.
+    Create predefined refined CoShNet model variants for different use cases.
 
     Args:
         variant: Model variant string. Options:
-            - "tiny": Minimal model (49.9k parameters)
-            - "base": Standard model (1.3M parameters)
+            - "tiny": Minimal model (~20k parameters)
+            - "base": Standard model (~800k parameters)
             - "large": Larger model for complex datasets
             - "cifar10": Optimized for CIFAR-10
             - "imagenet": Scaled for ImageNet-style inputs
@@ -579,7 +567,7 @@ def create_coshnet_variant(variant: str = "base") -> CoShNet:
             "input_shape": (32, 32, 3),
             "num_classes": 10,
             "conv_filters": (32, 64),
-            "dense_units": (1250, 500),
+            "dense_units": (800, 400),  # Reduced due to global pooling
             "shearlet_scales": 4,
             "shearlet_directions": 8,
             "dropout_rate": 0.1,
@@ -590,7 +578,7 @@ def create_coshnet_variant(variant: str = "base") -> CoShNet:
             "input_shape": (224, 224, 3),
             "num_classes": 1000,
             "conv_filters": (64, 128, 256),
-            "dense_units": (4096, 2048, 1024),
+            "dense_units": (2048, 1024),  # Reduced due to global pooling
             "shearlet_scales": 5,
             "shearlet_directions": 16,
             "dropout_rate": 0.2,
@@ -606,8 +594,6 @@ def create_coshnet_variant(variant: str = "base") -> CoShNet:
         )
 
     config_dict = variant_configs[variant]
-    logger.info(f"Creating CoShNet {variant} variant")
+    logger.info(f"Creating refined CoShNet {variant} variant with global pooling")
 
     return create_coshnet(**config_dict)
-
-# ---------------------------------------------------------------------
