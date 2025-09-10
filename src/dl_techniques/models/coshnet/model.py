@@ -66,7 +66,10 @@ import keras
 from keras import layers, ops, initializers, regularizers
 from typing import Optional, Tuple, List, Dict, Any, Sequence, Union
 
-# dl-techniques imports
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.shearlet_transform import ShearletTransform
 from dl_techniques.layers.complex_layers import ComplexDense, ComplexConv2D, ComplexReLU
