@@ -181,7 +181,7 @@ from typing import Optional, Union, Any, Dict, Tuple, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.transformer import TransformerLayer
-from .components import Embeddings
+from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 
 # ---------------------------------------------------------------------
 
@@ -404,7 +404,7 @@ class BERT(keras.Model):
 
         # Initialize layer containers
         self.encoder_layers: List[TransformerLayer] = []
-        self.embeddings: Optional[Embeddings] = None
+        self.embeddings: Optional[BertEmbeddings] = None
         self.pooler: Optional[keras.layers.Dense] = None
 
         # Build the model architecture
@@ -468,7 +468,7 @@ class BERT(keras.Model):
         """Build all model components following modern Keras 3 patterns."""
 
         # Create embeddings layer
-        self.embeddings = Embeddings(
+        self.embeddings = BertEmbeddings(
             vocab_size=self.vocab_size,
             hidden_size=self.hidden_size,
             max_position_embeddings=self.max_position_embeddings,
