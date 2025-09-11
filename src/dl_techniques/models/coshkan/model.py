@@ -52,10 +52,9 @@ from typing import Optional, Tuple, List, Dict, Any, Sequence, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.kan_linear import KANLinear
 from dl_techniques.layers.shearlet_transform import ShearletTransform
 from dl_techniques.layers.complex_layers import ComplexDense, ComplexConv2D, ComplexReLU
-from dl_techniques.layers.kan_linear import KANLinear
-
 
 # ---------------------------------------------------------------------
 
@@ -231,7 +230,6 @@ class CoshKan(keras.Model):
         self.shearlet = ShearletTransform(
             scales=self.shearlet_scales,
             directions=self.shearlet_directions,
-            kernel_regularizer=self.kernel_regularizer,
             name='shearlet_transform'
         )
 
