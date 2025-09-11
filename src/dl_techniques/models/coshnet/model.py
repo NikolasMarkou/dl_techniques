@@ -175,7 +175,6 @@ class CoShNet(keras.Model):
             # Layer configuration
             conv_kernel_size: int = 5,
             conv_strides: int = 2,
-            pool_size: int = 1,
             # Regularization
             dropout_rate: float = 0.1,
             kernel_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
@@ -196,7 +195,6 @@ class CoShNet(keras.Model):
         self.shearlet_directions = shearlet_directions
         self.conv_kernel_size = conv_kernel_size
         self.conv_strides = conv_strides
-        self.pool_size = pool_size
         self.dropout_rate = dropout_rate
         self.epsilon = epsilon
 
@@ -226,13 +224,11 @@ class CoShNet(keras.Model):
         self.shearlet = ShearletTransform(
             scales=self.shearlet_scales,
             directions=self.shearlet_directions,
-            kernel_regularizer=self.kernel_regularizer,
             name='shearlet_transform'
         )
 
         # Create complex convolutional layers
         self.conv_layers: List[ComplexConv2D] = []
-        self.pool_layers: List[ComplexAveragePooling2D] = []
 
         for i, filters in enumerate(self.conv_filters):
             conv_layer = ComplexConv2D(
@@ -246,13 +242,6 @@ class CoShNet(keras.Model):
                 name=f'complex_conv_{i}'
             )
             self.conv_layers.append(conv_layer)
-
-            pool_layer = ComplexAveragePooling2D(
-                pool_size=self.pool_size,
-                strides=self.pool_size,
-                name=f'avg_pool_{i}'
-            )
-            self.pool_layers.append(pool_layer)
 
         # Complex ReLU activation
         self.activation = ComplexReLU(name='complex_relu')
@@ -327,8 +316,6 @@ class CoShNet(keras.Model):
             raise ValueError(f"conv_kernel_size must be positive, got {self.conv_kernel_size}")
         if self.conv_strides <= 0:
             raise ValueError(f"conv_strides must be positive, got {self.conv_strides}")
-        if self.pool_size <= 0:
-            raise ValueError(f"pool_size must be positive, got {self.pool_size}")
 
         # Regularization validation
         if not 0.0 <= self.dropout_rate <= 1.0:
@@ -350,13 +337,10 @@ class CoShNet(keras.Model):
         shearlet_output_shape = self.shearlet.compute_output_shape(input_shape)
         current_shape = shearlet_output_shape
 
-        # Build conv and pool layers
-        for conv_layer, pool_layer in zip(self.conv_layers, self.pool_layers):
+        # Build conv a layers
+        for conv_layer in self.conv_layers:
             conv_layer.build(current_shape)
-            conv_output_shape = conv_layer.compute_output_shape(current_shape)
-
-            pool_layer.build(conv_output_shape)
-            current_shape = pool_layer.compute_output_shape(conv_output_shape)
+            current_shape = conv_layer.compute_output_shape(current_shape)
 
         # Build global average pooling
         self.global_avg_pool.build(current_shape)
@@ -397,11 +381,10 @@ class CoShNet(keras.Model):
         # Convert to complex (real shearlet output → complex)
         x = ops.cast(x, 'complex64')
 
-        # Convolutional layers with pooling
-        for conv_layer, pool_layer in zip(self.conv_layers, self.pool_layers):
+        # Convolutional layers
+        for conv_layer in self.conv_layers:
             x = conv_layer(x, training=training)
             x = self.activation(x, training=training)
-            x = pool_layer(x, training=training)
 
         # Global average pooling (replaces flatten)
         x = self.global_avg_pool(x)
@@ -434,7 +417,6 @@ class CoShNet(keras.Model):
             # Layer configuration
             'conv_kernel_size': self.conv_kernel_size,
             'conv_strides': self.conv_strides,
-            'pool_size': self.pool_size,
             # Regularization
             'dropout_rate': self.dropout_rate,
             'kernel_regularizer': self._kernel_regularizer_config,
@@ -539,7 +521,6 @@ def create_coshnet_variant(variant: str = "base") -> CoShNet:
             "shearlet_directions": 6,
             "dropout_rate": 0.2,
             "conv_kernel_size": 3,
-            "pool_size": 2,
         },
         "base": {
             "input_shape": (32, 32, 3),
@@ -550,7 +531,6 @@ def create_coshnet_variant(variant: str = "base") -> CoShNet:
             "shearlet_directions": 8,
             "dropout_rate": 0.1,
             "conv_kernel_size": 5,
-            "pool_size": 2,
         },
         "large": {
             "input_shape": (32, 32, 3),
@@ -561,7 +541,6 @@ def create_coshnet_variant(variant: str = "base") -> CoShNet:
             "shearlet_directions": 12,
             "dropout_rate": 0.15,
             "conv_kernel_size": 5,
-            "pool_size": 2,
         },
         "cifar10": {
             "input_shape": (32, 32, 3),
@@ -572,7 +551,6 @@ def create_coshnet_variant(variant: str = "base") -> CoShNet:
             "shearlet_directions": 8,
             "dropout_rate": 0.1,
             "conv_kernel_size": 5,
-            "pool_size": 2,
         },
         "imagenet": {
             "input_shape": (224, 224, 3),
@@ -584,7 +562,6 @@ def create_coshnet_variant(variant: str = "base") -> CoShNet:
             "dropout_rate": 0.2,
             "conv_kernel_size": 7,
             "conv_strides": 2,
-            "pool_size": 3,
         },
     }
 
