@@ -258,7 +258,7 @@ class TestHopfieldAttentionForwardPass:
             keras.ops.zeros((2, 16, 8))
         ], axis=-1)
 
-        output = layer(inputs, mask=mask)
+        output = layer(inputs, attention_mask=mask)
 
         assert output.shape == inputs.shape
 

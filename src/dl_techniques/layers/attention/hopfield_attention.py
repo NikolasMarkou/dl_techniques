@@ -368,7 +368,7 @@ class HopfieldAttention(keras.layers.Layer):
         query: keras.KerasTensor,
         key: keras.KerasTensor,
         value: keras.KerasTensor,
-        mask: Optional[keras.KerasTensor] = None,
+        attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
@@ -378,7 +378,7 @@ class HopfieldAttention(keras.layers.Layer):
             query: Query tensor of shape (batch, num_heads, seq_len_q, head_dim).
             key: Key tensor of shape (batch, num_heads, seq_len_k, head_dim).
             value: Value tensor of shape (batch, num_heads, seq_len_v, value_dim).
-            mask: Optional attention mask.
+            attention_mask: Optional attention mask.
             training: Whether in training mode.
 
         Returns:
@@ -390,14 +390,14 @@ class HopfieldAttention(keras.layers.Layer):
 
         # Handle mask processing
         actual_mask = None
-        if isinstance(mask, (list, tuple)):
+        if isinstance(attention_mask, (list, tuple)):
             # If Keras passes a list, find the first non-None mask.
-            for m in mask:
+            for m in attention_mask:
                 if m is not None:
                     actual_mask = m
                     break
         else:
-            actual_mask = mask
+            actual_mask = attention_mask
 
         if actual_mask is not None:
             mask_tensor = ops.cast(actual_mask, attention_scores.dtype)
@@ -422,7 +422,7 @@ class HopfieldAttention(keras.layers.Layer):
     def call(
         self,
         inputs: Union[keras.KerasTensor, List[keras.KerasTensor]],
-        mask: Optional[keras.KerasTensor] = None,
+        attention_mask: Optional[keras.KerasTensor] = None,
         return_attention_scores: bool = False,
         training: Optional[bool] = None
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
@@ -433,7 +433,7 @@ class HopfieldAttention(keras.layers.Layer):
             inputs: Input tensor or list of tensors [query, key, value].
                 For self-attention, pass a single tensor.
                 For cross-attention, pass [query, key, value] or [query, key_value].
-            mask: Optional attention mask tensor.
+            attention_mask: Optional attention mask tensor.
             return_attention_scores: Boolean, whether to return attention scores along with output.
             training: Optional boolean indicating training mode.
 
@@ -497,7 +497,7 @@ class HopfieldAttention(keras.layers.Layer):
         while True:
             # Perform one Hopfield update step
             output, attention_weights = self._hopfield_update_step(
-                current_query, key_proj, value_proj, mask, training
+                current_query, key_proj, value_proj, attention_mask, training
             )
 
             # If update_steps_max is 0, only do one step (standard attention)
