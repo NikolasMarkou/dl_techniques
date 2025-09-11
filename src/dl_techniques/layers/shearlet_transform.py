@@ -111,7 +111,6 @@ The implementation creates a tight frame of shearlet filters with the following 
 - **Feature Extraction**: First layer for geometry-aware feature learning
 - **Attention Mechanisms**: Multi-scale directional attention weights
 - **Loss Functions**: Perceptual losses based on shearlet domain differences
-- **Regularization**: Sparsity-inducing regularizers in shearlet domain
 
 **Training Considerations**:
 - **Differentiability**: Fully differentiable through FFT operations
@@ -247,8 +246,6 @@ class ShearletTransform(keras.layers.Layer):
         high_freq: Boolean, whether to include high frequency components in the transform.
             When True, captures fine details and noise. When False, focuses on low-mid
             frequencies. Defaults to True.
-        kernel_regularizer: Optional regularizer for internal filter parameters.
-            Can be used to constrain filter responses during training. Defaults to None.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
@@ -285,8 +282,7 @@ class ShearletTransform(keras.layers.Layer):
         # With regularization for training stability
         shearlet = ShearletTransform(
             scales=4,
-            directions=8,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
+            directions=8
         )
         ```
 
@@ -306,7 +302,6 @@ class ShearletTransform(keras.layers.Layer):
             directions: int = 8,
             alpha: float = 0.5,
             high_freq: bool = True,
-            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -324,7 +319,6 @@ class ShearletTransform(keras.layers.Layer):
         self.directions = directions
         self.alpha = alpha
         self.high_freq = high_freq
-        self.kernel_regularizer = kernel_regularizer
 
         # Initialize attributes (created in build)
         self.height: Optional[int] = None
@@ -414,10 +408,10 @@ class ShearletTransform(keras.layers.Layer):
 
         # Compute window value with broader support
         value = tf.where(
-            x < 1 / 3,
+            x < (1.0 / 3.0),
             tf.ones_like(x),
             tf.where(
-                x < 2 / 3,
+                x < (2.0 / 3.0),
                 smooth_transition(2.0 - 3.0 * x),
                 tf.zeros_like(x)
             )
@@ -681,9 +675,6 @@ class ShearletTransform(keras.layers.Layer):
             'directions': self.directions,
             'alpha': self.alpha,
             'high_freq': self.high_freq,
-            'kernel_regularizer': keras.regularizers.serialize(
-                self.kernel_regularizer
-            )
         })
         return config
 
@@ -698,11 +689,7 @@ class ShearletTransform(keras.layers.Layer):
         Returns:
             New ShearletTransform layer instance
         """
-        regularizer_config = config.pop('kernel_regularizer', None)
-        if regularizer_config:
-            config['kernel_regularizer'] = keras.regularizers.deserialize(
-                regularizer_config
-            )
+
         return cls(**config)
 
 # ---------------------------------------------------------------------
