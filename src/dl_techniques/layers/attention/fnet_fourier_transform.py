@@ -195,7 +195,7 @@ class FNetFourierTransform(keras.layers.Layer):
     def call(
             self,
             inputs: keras.KerasTensor,
-            mask: Optional[keras.KerasTensor] = None,
+            attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
@@ -219,9 +219,9 @@ class FNetFourierTransform(keras.layers.Layer):
         output = after_hidden_dft[..., 0]
 
         # Apply mask to zero out padded tokens after mixing
-        if mask is not None:
+        if attention_mask is not None:
             # Expand mask from [batch, seq_len] to [batch, seq_len, 1]
-            mask_expanded = ops.expand_dims(mask, axis=-1)
+            mask_expanded = ops.expand_dims(attention_mask, axis=-1)
             # Ensure mask is same dtype and multiply
             output *= ops.cast(mask_expanded, output.dtype)
 
