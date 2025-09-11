@@ -1,10 +1,11 @@
 """
-CoShNet (Complex Shearlet Network) Implementation
+CoShNet (Complex Shearlet Network) Implementation - Refined Version
 ================================================================
 
-This module implements the CoShNet architecture, a hybrid complex-valued neural network
-that combines fixed shearlet transforms with learnable complex-valued layers for
-efficient image classification.
+This module implements a refined CoShNet architecture, following modern Keras 3 patterns
+and best practices. CoShNet is a hybrid complex-valued neural network that combines
+fixed shearlet transforms with learnable complex-valued layers for efficient image
+classification.
 
 Key Features:
 ------------
@@ -22,39 +23,34 @@ Key Features:
    - Natural handling of phase information
    - Self-regularizing behavior
 
-3. Implementation Details:
-   - Complex-valued operations with split real/imaginary implementation
-   - Numerically stable complex arithmetic
-   - Proper complex weight initialization
-   - Efficient memory usage through global pooling
-   - Modern Keras 3 patterns for serialization and configuration
+3. Implementation Improvements:
+   - Robust input shape handling and validation
+   - Modern Keras 3 serialization patterns
+   - Better error handling and configuration management
+   - Comprehensive model variants system
+   - Production-ready implementation
 
-Network Architecture:
--------------------
-1. Input Layer:
-   - ShearletTransform: Fixed transform for multi-scale decomposition
-   - Scales: 4 (default)
-   - Directions: 8 per scale (default)
-
-2. Learnable Layers:
-   - Complex Convolution: 2 layers (32 and 64 filters)
-   - Complex Dense: 2 layers (1250 and 500 units)
-   - Average Pooling: After each convolution
-   - Global Average Pooling: Before dense layers
-   - Complex ReLU: Non-linear activation
-   - Final Real Classification Layer
+Architecture Variants:
+---------------------
+- CoShNet-Nano: Minimal model for resource-constrained environments
+- CoShNet-Tiny: Small model (~50k parameters)
+- CoShNet-Base: Standard model (~800k parameters)
+- CoShNet-Large: Larger model for complex datasets
+- CoShNet-CIFAR10: Optimized for CIFAR-10 classification
+- CoShNet-ImageNet: Scaled for ImageNet-style inputs
 
 Performance Characteristics:
 -------------------------
-1. Model Size:
-   - Base Model: ~1.3M parameters (reduced with global pooling)
-   - Tiny Model: ~49.9k parameters
-   - Memory Efficient: Global pooling reduces spatial dimensions
+1. Model Efficiency:
+   - Reduced parameters compared to traditional CNNs
+   - Fast convergence in 20-50 epochs
+   - Memory efficient through global pooling
+   - Optimal for small to medium-sized datasets
 
-2. Computational Efficiency:
-   - Reduced FLOPs compared to traditional CNNs
-   - Fast convergence in 20 epochs
-   - Efficient forward pass through fixed transform
+2. Computational Benefits:
+   - Reduced FLOPs through fixed shearlet transform
+   - Efficient forward pass
+   - Lower memory footprint
 
 References:
 ----------
@@ -68,7 +64,7 @@ from keras import layers, ops, initializers, regularizers
 from typing import Optional, Tuple, List, Dict, Any, Sequence, Union
 
 # ---------------------------------------------------------------------
-# local imports
+# Local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
@@ -84,6 +80,7 @@ from dl_techniques.layers.complex_layers import (
 
 # ---------------------------------------------------------------------
 
+
 @keras.saving.register_keras_serializable()
 class CoShNet(keras.Model):
     """
@@ -91,21 +88,24 @@ class CoShNet(keras.Model):
 
     CoShNet combines fixed ShearletTransform with complex-valued layers for efficient
     image classification with built-in multi-scale and directional sensitivity.
-    This refined version uses global average pooling for better parameter efficiency.
+    This refined version follows modern Keras 3 patterns and provides robust
+    input shape handling.
 
     **Architecture**:
     ```
     Input → ShearletTransform → Complex Conv Layers → Global Avg Pool → Complex Dense Layers → Classification
 
     Detailed Flow:
-    Image → Shearlet(scales, directions) → ComplexConv2D + Pool → ComplexConv2D + Pool
-          → GlobalAvgPool → ComplexDense + Dropout → ComplexDense + Dropout → Dense(softmax)
+    Image → Shearlet(scales, directions) → ComplexConv2D + Activation
+          → ComplexConv2D + Activation → GlobalAvgPool → ComplexDense + Dropout
+          → ComplexDense + Dropout → Dense(softmax)
     ```
 
     Args:
-        # Input configuration
-        input_shape: Shape of input images (height, width, channels). Default (32, 32, 3).
+        # Core configuration
         num_classes: Number of output classes for classification. Default 10.
+        input_shape: Shape of input images (height, width, channels). If None,
+            uses (32, 32, 3) for CIFAR-10 compatibility. Must be 3D tuple.
 
         # Architecture configuration
         conv_filters: List of filter counts for convolutional layers. Default [32, 64].
@@ -113,21 +113,22 @@ class CoShNet(keras.Model):
 
         # Shearlet transform configuration
         shearlet_scales: Number of scales in shearlet transform. Default 4.
-        shearlet_directions: Number of directions per scale in shearlet transform. Default 8.
+        shearlet_directions: Number of directions per scale. Default 8.
 
         # Layer configuration
         conv_kernel_size: Kernel size for convolutional layers. Default 5.
         conv_strides: Stride size for convolutional layers. Default 2.
-        pool_size: Pooling size for average pooling layers. Default 2.
+        conv_padding: Padding type for convolutions. Default "same".
 
-        # Regularization
+        # Regularization and training
         dropout_rate: Dropout rate for regularization. Default 0.1.
         kernel_regularizer: Regularization to apply to kernel weights. Default None.
 
         # Initialization
         kernel_initializer: Initialization method for kernel weights. Default 'glorot_uniform'.
 
-        # Numerical stability
+        # Advanced options
+        include_top: Whether to include the classification head. Default True.
         epsilon: Small value for numerical stability in complex operations. Default 1e-7.
 
         **kwargs: Additional arguments for Model base class.
@@ -136,66 +137,136 @@ class CoShNet(keras.Model):
         4D tensor with shape: `(batch_size, height, width, channels)`
 
     Output shape:
-        2D tensor with shape: `(batch_size, num_classes)` with softmax probabilities
+        - If include_top=True: 2D tensor `(batch_size, num_classes)` with softmax probabilities
+        - If include_top=False: 4D tensor with extracted features
 
     Example:
         ```python
         # Create model for CIFAR-10
+        model = CoShNet.from_variant("base", num_classes=10, input_shape=(32, 32, 3))
+
+        # Create custom model
         model = CoShNet(
-            input_shape=(32, 32, 3),
-            num_classes=10,
-            conv_filters=[32, 64],
-            dense_units=[1250, 500]
+            num_classes=100,
+            input_shape=(64, 64, 3),
+            conv_filters=[64, 128],
+            dense_units=[800, 400]
         )
 
-        # Compile and train
+        # Compile and build
         model.compile(
             optimizer='adam',
             loss='categorical_crossentropy',
             metrics=['accuracy']
         )
-
-        # Build model
-        model.build((None, 32, 32, 3))
-        print(f"Total parameters: {model.count_params():,}")
         ```
+
+    Raises:
+        ValueError: If input_shape is not 3D or contains invalid dimensions.
+        ValueError: If architecture parameters are invalid.
+        ValueError: If regularization parameters are out of valid ranges.
     """
 
-    def __init__(
-            self,
-            # Input configuration
-            input_shape: Tuple[int, int, int] = (32, 32, 3),
-            num_classes: int = 10,
-            # Architecture configuration
-            conv_filters: Sequence[int] = (32, 64),
-            dense_units: Sequence[int] = (1250, 500),
-            # Shearlet transform configuration
-            shearlet_scales: int = 4,
-            shearlet_directions: int = 8,
-            # Layer configuration
-            conv_kernel_size: int = 5,
-            conv_strides: int = 2,
-            # Regularization
-            dropout_rate: float = 0.1,
-            kernel_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
-            # Initialization
-            kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-            # Numerical stability
-            epsilon: float = 1e-7,
-            **kwargs: Any
-    ) -> None:
-        super().__init__(name="coshnet", **kwargs)
+    # Model variant configurations
+    MODEL_VARIANTS = {
+        "nano": {
+            "conv_filters": [16, 24],
+            "dense_units": [128, 64],
+            "shearlet_scales": 3,
+            "shearlet_directions": 4,
+            "dropout_rate": 0.15,
+            "conv_kernel_size": 3,
+        },
+        "tiny": {
+            "conv_filters": [16, 32],
+            "dense_units": [256, 128],
+            "shearlet_scales": 3,
+            "shearlet_directions": 6,
+            "dropout_rate": 0.2,
+            "conv_kernel_size": 3,
+        },
+        "base": {
+            "conv_filters": [32, 64],
+            "dense_units": [1250, 500],
+            "shearlet_scales": 4,
+            "shearlet_directions": 8,
+            "dropout_rate": 0.1,
+            "conv_kernel_size": 5,
+        },
+        "large": {
+            "conv_filters": [64, 128, 256],
+            "dense_units": [2048, 1024, 512],
+            "shearlet_scales": 5,
+            "shearlet_directions": 12,
+            "dropout_rate": 0.15,
+            "conv_kernel_size": 5,
+        },
+        "cifar10": {
+            "conv_filters": [32, 64],
+            "dense_units": [800, 400],
+            "shearlet_scales": 4,
+            "shearlet_directions": 8,
+            "dropout_rate": 0.1,
+            "conv_kernel_size": 5,
+        },
+        "imagenet": {
+            "conv_filters": [64, 128, 256],
+            "dense_units": [2048, 1024],
+            "shearlet_scales": 5,
+            "shearlet_directions": 16,
+            "dropout_rate": 0.2,
+            "conv_kernel_size": 7,
+            "conv_strides": 2,
+        },
+    }
 
-        # Store all configuration parameters
-        self.input_shape_config = input_shape
+    # Architecture constants
+    EPSILON_DEFAULT = 1e-7
+    KERNEL_INITIALIZER_DEFAULT = "glorot_uniform"
+
+    def __init__(
+        self,
+        # Core configuration
+        num_classes: int = 10,
+        input_shape: Optional[Tuple[int, int, int]] = None,
+        # Architecture configuration
+        conv_filters: Sequence[int] = (32, 64),
+        dense_units: Sequence[int] = (1250, 500),
+        # Shearlet transform configuration
+        shearlet_scales: int = 4,
+        shearlet_directions: int = 8,
+        # Layer configuration
+        conv_kernel_size: int = 5,
+        conv_strides: int = 2,
+        conv_padding: str = "same",
+        # Regularization and training
+        dropout_rate: float = 0.1,
+        kernel_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
+        # Initialization
+        kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
+        # Advanced options
+        include_top: bool = True,
+        epsilon: float = 1e-7,
+        **kwargs: Any
+    ) -> None:
+
+        # Set default input shape if not provided
+        if input_shape is None:
+            input_shape = (32, 32, 3)
+            logger.info("Using default input_shape (32, 32, 3) for CIFAR-10 compatibility")
+
+        # Store configuration before validation
         self.num_classes = num_classes
+        self._input_shape = input_shape
         self.conv_filters = list(conv_filters)
         self.dense_units = list(dense_units)
         self.shearlet_scales = shearlet_scales
         self.shearlet_directions = shearlet_directions
         self.conv_kernel_size = conv_kernel_size
         self.conv_strides = conv_strides
+        self.conv_padding = conv_padding
         self.dropout_rate = dropout_rate
+        self.include_top = include_top
         self.epsilon = epsilon
 
         # Handle regularizer serialization
@@ -220,90 +291,59 @@ class CoShNet(keras.Model):
         # Validate configuration
         self._validate_config()
 
-        # Create fixed shearlet transform layer
-        self.shearlet = ShearletTransform(
-            scales=self.shearlet_scales,
-            directions=self.shearlet_directions,
-            name='shearlet_transform'
+        # Store input shape properties
+        self.input_height = input_shape[0]
+        self.input_width = input_shape[1]
+        self.input_channels = input_shape[2]
+
+        # Create input layer
+        inputs = keras.Input(shape=input_shape, name="input")
+
+        # Build the complete model
+        outputs = self._build_model(inputs)
+
+        # Initialize the Model
+        super().__init__(inputs=inputs, outputs=outputs, name="coshnet", **kwargs)
+
+        logger.info(
+            f"Created CoShNet model for input {input_shape} "
+            f"with {sum(self.conv_filters)} conv filters, "
+            f"{sum(self.dense_units) if self.include_top else 0} dense units"
         )
-
-        # Create complex convolutional layers
-        self.conv_layers: List[ComplexConv2D] = []
-
-        for i, filters in enumerate(self.conv_filters):
-            conv_layer = ComplexConv2D(
-                filters=filters,
-                kernel_size=self.conv_kernel_size,
-                strides=self.conv_strides,
-                padding="same",
-                kernel_regularizer=self.kernel_regularizer,
-                kernel_initializer=self.kernel_initializer,
-                epsilon=self.epsilon,
-                name=f'complex_conv_{i}'
-            )
-            self.conv_layers.append(conv_layer)
-
-        # Complex ReLU activation
-        self.activation = ComplexReLU(name='complex_relu')
-
-        # Global Average Pooling layer (replaces flatten)
-        self.global_avg_pool = ComplexGlobalAveragePooling2D(
-            keepdims=False,
-            name='global_avg_pool'
-        )
-
-        # Create complex dense layers with dropout
-        self.dense_layers: List[ComplexDense] = []
-        self.dropout_layers: List[ComplexDropout] = []
-
-        for i, units in enumerate(self.dense_units):
-            dense_layer = ComplexDense(
-                units=units,
-                kernel_regularizer=self.kernel_regularizer,
-                kernel_initializer=self.kernel_initializer,
-                epsilon=self.epsilon,
-                name=f'complex_dense_{i}'
-            )
-            self.dense_layers.append(dense_layer)
-
-            dropout_layer = ComplexDropout(
-                rate=self.dropout_rate,
-                name=f'dropout_{i}'
-            )
-            self.dropout_layers.append(dropout_layer)
-
-        # Final classification layer
-        self.classifier = layers.Dense(
-            units=self.num_classes,
-            activation="softmax",
-            kernel_regularizer=self.kernel_regularizer,
-            kernel_initializer=self.kernel_initializer,
-            name='classifier'
-        )
-
-        logger.info(f"Refined CoShNet initialized with {sum(self.conv_filters)} conv filters, "
-                    f"{sum(self.dense_units)} dense units, {self.num_classes} classes")
-        logger.info("Using global average pooling for spatial dimension reduction")
 
     def _validate_config(self) -> None:
-        """Validate configuration parameters."""
+        """Validate all configuration parameters with detailed error messages."""
         # Input shape validation
-        if len(self.input_shape_config) != 3:
-            raise ValueError(f"input_shape must be 3D (height, width, channels), got {self.input_shape_config}")
-        if any(dim <= 0 for dim in self.input_shape_config):
-            raise ValueError(f"All dimensions in input_shape must be positive, got {self.input_shape_config}")
+        if len(self._input_shape) != 3:
+            raise ValueError(
+                f"input_shape must be 3D (height, width, channels), got {self._input_shape}"
+            )
+
+        height, width, channels = self._input_shape
+        if any(dim <= 0 for dim in self._input_shape):
+            raise ValueError(
+                f"All dimensions in input_shape must be positive, got {self._input_shape}"
+            )
+
+        if channels not in [1, 3]:
+            logger.warning(
+                f"Unusual number of channels: {channels}. CoShNet typically uses 1 or 3 channels"
+            )
 
         # Architecture validation
         if self.num_classes <= 0:
             raise ValueError(f"num_classes must be positive, got {self.num_classes}")
+
         if not self.conv_filters:
             raise ValueError("conv_filters cannot be empty")
         if any(f <= 0 for f in self.conv_filters):
             raise ValueError(f"All values in conv_filters must be positive, got {self.conv_filters}")
-        if not self.dense_units:
-            raise ValueError("dense_units cannot be empty")
-        if any(u <= 0 for u in self.dense_units):
-            raise ValueError(f"All values in dense_units must be positive, got {self.dense_units}")
+
+        if self.include_top:
+            if not self.dense_units:
+                raise ValueError("dense_units cannot be empty when include_top=True")
+            if any(u <= 0 for u in self.dense_units):
+                raise ValueError(f"All values in dense_units must be positive, got {self.dense_units}")
 
         # Shearlet validation
         if self.shearlet_scales <= 0:
@@ -316,6 +356,8 @@ class CoShNet(keras.Model):
             raise ValueError(f"conv_kernel_size must be positive, got {self.conv_kernel_size}")
         if self.conv_strides <= 0:
             raise ValueError(f"conv_strides must be positive, got {self.conv_strides}")
+        if self.conv_padding not in ["valid", "same", "causal"]:
+            raise ValueError(f"conv_padding must be 'valid', 'same', or 'causal', got {self.conv_padding}")
 
         # Regularization validation
         if not 0.0 <= self.dropout_rate <= 1.0:
@@ -325,107 +367,279 @@ class CoShNet(keras.Model):
         if self.epsilon <= 0.0:
             raise ValueError(f"epsilon must be positive, got {self.epsilon}")
 
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the refined CoShNet model components."""
-        if self.built:
-            return
-
-        # Build shearlet transform
-        self.shearlet.build(input_shape)
-
-        # Compute shearlet output shape
-        shearlet_output_shape = self.shearlet.compute_output_shape(input_shape)
-        current_shape = shearlet_output_shape
-
-        # Build conv a layers
-        for conv_layer in self.conv_layers:
-            conv_layer.build(current_shape)
-            current_shape = conv_layer.compute_output_shape(current_shape)
-
-        # Build global average pooling
-        self.global_avg_pool.build(current_shape)
-        global_pool_output_shape = self.global_avg_pool.compute_output_shape(current_shape)
-
-        # Build dense and dropout layers
-        current_shape = global_pool_output_shape
-        for dense_layer, dropout_layer in zip(self.dense_layers, self.dropout_layers):
-            dense_layer.build(current_shape)
-            dense_output_shape = dense_layer.compute_output_shape(current_shape)
-
-            dropout_layer.build(dense_output_shape)
-            current_shape = dense_output_shape
-
-        # Build classifier - expects real-valued input (magnitude of complex)
-        classifier_input_shape = (current_shape[0], current_shape[1])
-        self.classifier.build(classifier_input_shape)
-
-        super().build(input_shape)
-
-    def call(
-            self,
-            inputs: keras.KerasTensor,
-            training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """Forward pass through the refined network.
+    def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
+        """Build the complete CoShNet model architecture.
 
         Args:
-            inputs: Input tensor of shape [batch_size, height, width, channels]
-            training: Whether in training mode
+            inputs: Input tensor
 
         Returns:
-            Output tensor of shape [batch_size, num_classes] with softmax probabilities
+            Output tensor
         """
-        # Apply shearlet transform
-        x = self.shearlet(inputs, training=training)
+        x = inputs
 
-        # Convert to complex (real shearlet output → complex)
-        x = ops.cast(x, 'complex64')
+        # Build shearlet transform frontend
+        x = self._build_shearlet_frontend(x)
 
-        # Convolutional layers
-        for conv_layer in self.conv_layers:
-            x = conv_layer(x, training=training)
-            x = self.activation(x, training=training)
+        # Build complex convolutional layers
+        x = self._build_conv_layers(x)
 
-        # Global average pooling (replaces flatten)
-        x = self.global_avg_pool(x)
-
-        # Dense layers with dropout
-        for dense_layer, dropout_layer in zip(self.dense_layers, self.dropout_layers):
-            x = dense_layer(x, training=training)
-            x = self.activation(x, training=training)
-            x = dropout_layer(x, training=training)
-
-        # Final classification (convert to real by taking magnitude)
-        x = ops.abs(x)
-        x = self.classifier(x, training=training)
+        # Build classification head if requested
+        if self.include_top:
+            x = self._build_classification_head(x)
 
         return x
 
+    def _build_shearlet_frontend(self, x: keras.KerasTensor) -> keras.KerasTensor:
+        """Build the fixed shearlet transform frontend.
+
+        Args:
+            x: Input tensor
+
+        Returns:
+            Shearlet-transformed tensor (real-valued)
+        """
+        self.shearlet = ShearletTransform(
+            scales=self.shearlet_scales,
+            directions=self.shearlet_directions,
+            name='shearlet_transform'
+        )
+
+        x = self.shearlet(x)
+
+        logger.debug(f"Shearlet transform output shape: {x.shape}")
+        return x
+
+    def _build_conv_layers(self, x: keras.KerasTensor) -> keras.KerasTensor:
+        """Build complex convolutional layers with activations.
+
+        Args:
+            x: Input tensor (real-valued from shearlet transform)
+
+        Returns:
+            Processed tensor after convolutions
+        """
+        # Convert real shearlet output to complex
+        x = ops.cast(x, 'complex64')
+
+        # Complex ReLU activation (shared across layers)
+        self.activation = ComplexReLU(name='complex_relu')
+
+        # Create and apply complex convolutional layers
+        self.conv_layers: List[ComplexConv2D] = []
+
+        for i, filters in enumerate(self.conv_filters):
+            # Complex convolution
+            conv_layer = ComplexConv2D(
+                filters=filters,
+                kernel_size=self.conv_kernel_size,
+                strides=self.conv_strides,
+                padding=self.conv_padding,
+                kernel_regularizer=self.kernel_regularizer,
+                kernel_initializer=self.kernel_initializer,
+                epsilon=self.epsilon,
+                name=f'complex_conv_{i}'
+            )
+            self.conv_layers.append(conv_layer)
+
+            # Apply convolution and activation
+            x = conv_layer(x)
+            x = self.activation(x)
+
+            logger.debug(f"After conv layer {i}: {x.shape}")
+
+        return x
+
+    def _build_classification_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
+        """Build the classification head with global pooling and dense layers.
+
+        Args:
+            x: Input feature tensor (complex-valued)
+
+        Returns:
+            Classification logits
+        """
+        # Global Average Pooling (replaces flatten for efficiency)
+        self.global_avg_pool = ComplexGlobalAveragePooling2D(
+            keepdims=False,
+            name='global_avg_pool'
+        )
+        x = self.global_avg_pool(x)
+
+        # Complex dense layers with dropout
+        self.dense_layers: List[ComplexDense] = []
+        self.dropout_layers: List[ComplexDropout] = []
+
+        for i, units in enumerate(self.dense_units):
+            # Complex dense layer
+            dense_layer = ComplexDense(
+                units=units,
+                kernel_regularizer=self.kernel_regularizer,
+                kernel_initializer=self.kernel_initializer,
+                epsilon=self.epsilon,
+                name=f'complex_dense_{i}'
+            )
+            self.dense_layers.append(dense_layer)
+
+            # Dropout layer
+            dropout_layer = ComplexDropout(
+                rate=self.dropout_rate,
+                name=f'dropout_{i}'
+            )
+            self.dropout_layers.append(dropout_layer)
+
+            # Apply dense, activation, and dropout
+            x = dense_layer(x)
+            x = self.activation(x)
+            x = dropout_layer(x)
+
+            logger.debug(f"After dense layer {i}: {x.shape}")
+
+        # Final real-valued classification layer
+        self.classifier = layers.Dense(
+            units=self.num_classes,
+            activation="softmax",
+            kernel_regularizer=self.kernel_regularizer,
+            kernel_initializer=self.kernel_initializer,
+            name='classifier'
+        )
+
+        # Convert complex to real by taking magnitude
+        x = ops.abs(x)
+        x = self.classifier(x)
+
+        return x
+
+    @classmethod
+    def from_variant(
+        cls,
+        variant: str,
+        num_classes: int = 10,
+        input_shape: Optional[Tuple[int, int, int]] = None,
+        **kwargs: Any
+    ) -> "CoShNet":
+        """Create a CoShNet model from a predefined variant.
+
+        Args:
+            variant: String, one of "nano", "tiny", "base", "large", "cifar10", "imagenet"
+            num_classes: Integer, number of output classes. Default 10.
+            input_shape: Tuple, input shape. If None, uses appropriate default for variant.
+            **kwargs: Additional arguments passed to the constructor
+
+        Returns:
+            CoShNet model instance configured for the specified variant
+
+        Raises:
+            ValueError: If variant is not recognized
+
+        Example:
+            >>> # CIFAR-10 model
+            >>> model = CoShNet.from_variant("base", num_classes=10, input_shape=(32, 32, 3))
+            >>> # MNIST model
+            >>> model = CoShNet.from_variant("tiny", num_classes=10, input_shape=(28, 28, 3))
+            >>> # ImageNet model
+            >>> model = CoShNet.from_variant("imagenet", num_classes=1000, input_shape=(224, 224, 3))
+        """
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available variants: "
+                f"{list(cls.MODEL_VARIANTS.keys())}"
+            )
+
+        config = cls.MODEL_VARIANTS[variant].copy()
+
+        # Set default input shape based on variant if not provided
+        if input_shape is None:
+            if variant == "imagenet":
+                input_shape = (224, 224, 3)
+            else:
+                input_shape = (32, 32, 3)  # Default for CIFAR-10
+
+        logger.info(f"Creating CoShNet-{variant.upper()} model")
+        logger.info(f"Input shape: {input_shape}, Classes: {num_classes}")
+
+        return cls(
+            num_classes=num_classes,
+            input_shape=input_shape,
+            **config,
+            **kwargs
+        )
+
     def get_config(self) -> Dict[str, Any]:
-        """Get model configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            # Input configuration
-            'input_shape': self.input_shape_config,
-            'num_classes': self.num_classes,
+        """Get model configuration for serialization.
+
+        Returns:
+            Configuration dictionary containing all model parameters
+        """
+        config = {
+            # Core configuration
+            "num_classes": self.num_classes,
+            "input_shape": self._input_shape,
             # Architecture configuration
-            'conv_filters': self.conv_filters,
-            'dense_units': self.dense_units,
+            "conv_filters": self.conv_filters,
+            "dense_units": self.dense_units,
             # Shearlet transform configuration
-            'shearlet_scales': self.shearlet_scales,
-            'shearlet_directions': self.shearlet_directions,
+            "shearlet_scales": self.shearlet_scales,
+            "shearlet_directions": self.shearlet_directions,
             # Layer configuration
-            'conv_kernel_size': self.conv_kernel_size,
-            'conv_strides': self.conv_strides,
-            # Regularization
-            'dropout_rate': self.dropout_rate,
-            'kernel_regularizer': self._kernel_regularizer_config,
+            "conv_kernel_size": self.conv_kernel_size,
+            "conv_strides": self.conv_strides,
+            "conv_padding": self.conv_padding,
+            # Regularization and training
+            "dropout_rate": self.dropout_rate,
+            "kernel_regularizer": self._kernel_regularizer_config,
             # Initialization
-            'kernel_initializer': self._kernel_initializer_config,
-            # Numerical stability
-            'epsilon': self.epsilon,
-        })
+            "kernel_initializer": self._kernel_initializer_config,
+            # Advanced options
+            "include_top": self.include_top,
+            "epsilon": self.epsilon,
+        }
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "CoShNet":
+        """Create model from configuration dictionary.
+
+        Args:
+            config: Configuration dictionary from get_config()
+
+        Returns:
+            CoShNet model instance
+        """
+        # Handle regularizer deserialization
+        if config.get("kernel_regularizer"):
+            config["kernel_regularizer"] = regularizers.deserialize(
+                config["kernel_regularizer"]
+            )
+
+        # Handle initializer deserialization
+        if config.get("kernel_initializer"):
+            config["kernel_initializer"] = initializers.deserialize(
+                config["kernel_initializer"]
+            )
+
+        return cls(**config)
+
+    def summary(self, **kwargs) -> None:
+        """Print model summary with additional CoShNet-specific information."""
+        super().summary(**kwargs)
+
+        # Print additional model information
+        total_conv_filters = sum(self.conv_filters)
+        total_dense_units = sum(self.dense_units) if self.include_top else 0
+
+        logger.info("CoShNet Configuration:")
+        logger.info(f"  - Input shape: {self._input_shape}")
+        logger.info(f"  - Shearlet scales: {self.shearlet_scales}")
+        logger.info(f"  - Shearlet directions: {self.shearlet_directions}")
+        logger.info(f"  - Conv layers: {len(self.conv_filters)}")
+        logger.info(f"  - Total conv filters: {total_conv_filters}")
+        if self.include_top:
+            logger.info(f"  - Dense layers: {len(self.dense_units)}")
+            logger.info(f"  - Total dense units: {total_dense_units}")
+            logger.info(f"  - Number of classes: {self.num_classes}")
+        logger.info(f"  - Dropout rate: {self.dropout_rate}")
+        logger.info(f"  - Include top: {self.include_top}")
 
 
 # ---------------------------------------------------------------------
@@ -433,144 +647,48 @@ class CoShNet(keras.Model):
 # ---------------------------------------------------------------------
 
 def create_coshnet(
-        input_shape: Tuple[int, int, int] = (32, 32, 3),
-        num_classes: int = 10,
-        conv_filters: Sequence[int] = (32, 64),
-        dense_units: Sequence[int] = (1250, 500),
-        dropout_rate: float = 0.1,
-        **kwargs: Any
+    variant: str = "base",
+    num_classes: int = 10,
+    input_shape: Optional[Tuple[int, int, int]] = None,
+    **kwargs: Any
 ) -> CoShNet:
     """
-    Create a refined CoShNet model with global average pooling.
+    Convenience function to create CoShNet models with predefined configurations.
 
     Args:
-        input_shape: Shape of input images (height, width, channels). Default (32, 32, 3).
-        num_classes: Number of output classes. Default 10.
-        conv_filters: Filter counts for convolutional layers. Default (32, 64).
-        dense_units: Unit counts for dense layers. Default (1250, 500).
-        dropout_rate: Dropout rate for regularization. Default 0.1.
-        **kwargs: Additional configuration parameters.
+        variant: String, model variant. Options:
+            - "nano": Minimal model for resource-constrained environments
+            - "tiny": Small model (~50k parameters)
+            - "base": Standard model (~800k parameters)
+            - "large": Larger model for complex datasets
+            - "cifar10": Optimized for CIFAR-10 classification
+            - "imagenet": Scaled for ImageNet-style inputs
+        num_classes: Integer, number of output classes. Default 10.
+        input_shape: Tuple, input shape. If None, uses variant-appropriate default.
+        **kwargs: Additional arguments passed to the model constructor
 
     Returns:
-        Configured refined CoShNet model
+        Configured CoShNet model
 
     Example:
         ```python
-        # Create standard refined CoShNet for CIFAR-10
-        model = create_coshnet(
-            input_shape=(32, 32, 3),
-            num_classes=10,
-            conv_filters=(32, 64),
-            dense_units=(1250, 500)
-        )
+        # Create base CoShNet for CIFAR-10
+        model = create_coshnet("base", num_classes=10, input_shape=(32, 32, 3))
 
-        # Build and compile
-        model.build((None, 32, 32, 3))
-        model.compile(
-            optimizer='adam',
-            loss='categorical_crossentropy',
-            metrics=['accuracy']
-        )
+        # Create tiny CoShNet for MNIST
+        model = create_coshnet("tiny", num_classes=10, input_shape=(28, 28, 3))
+
+        # Create ImageNet CoShNet
+        model = create_coshnet("imagenet", num_classes=1000)
         ```
     """
-    logger.info("Creating refined CoShNet model with global average pooling")
-    return CoShNet(
-        input_shape=input_shape,
+    logger.info(f"Creating CoShNet-{variant.upper()} model")
+
+    return CoShNet.from_variant(
+        variant=variant,
         num_classes=num_classes,
-        conv_filters=conv_filters,
-        dense_units=dense_units,
-        dropout_rate=dropout_rate,
+        input_shape=input_shape,
         **kwargs
     )
 
-
-def create_coshnet_variant(variant: str = "base") -> CoShNet:
-    """
-    Create predefined refined CoShNet model variants for different use cases.
-
-    Args:
-        variant: Model variant string. Options:
-            - "tiny": Minimal model (~20k parameters)
-            - "base": Standard model (~800k parameters)
-            - "large": Larger model for complex datasets
-            - "cifar10": Optimized for CIFAR-10
-            - "imagenet": Scaled for ImageNet-style inputs
-
-    Returns:
-        Configured CoShNet model optimized for the specified use case
-
-    Example:
-        ```python
-        # Create tiny variant for resource-constrained environments
-        tiny_model = create_coshnet_variant("tiny")
-
-        # Create base variant for general use
-        base_model = create_coshnet_variant("base")
-
-        # Create ImageNet variant
-        imagenet_model = create_coshnet_variant("imagenet")
-        ```
-    """
-    variant_configs = {
-        "tiny": {
-            "input_shape": (32, 32, 3),
-            "num_classes": 10,
-            "conv_filters": (16, 32),
-            "dense_units": (256, 128),
-            "shearlet_scales": 3,
-            "shearlet_directions": 6,
-            "dropout_rate": 0.2,
-            "conv_kernel_size": 3,
-        },
-        "base": {
-            "input_shape": (32, 32, 3),
-            "num_classes": 10,
-            "conv_filters": (32, 64),
-            "dense_units": (1250, 500),
-            "shearlet_scales": 4,
-            "shearlet_directions": 8,
-            "dropout_rate": 0.1,
-            "conv_kernel_size": 5,
-        },
-        "large": {
-            "input_shape": (32, 32, 3),
-            "num_classes": 10,
-            "conv_filters": (64, 128, 256),
-            "dense_units": (2048, 1024, 512),
-            "shearlet_scales": 5,
-            "shearlet_directions": 12,
-            "dropout_rate": 0.15,
-            "conv_kernel_size": 5,
-        },
-        "cifar10": {
-            "input_shape": (32, 32, 3),
-            "num_classes": 10,
-            "conv_filters": (32, 64),
-            "dense_units": (800, 400),  # Reduced due to global pooling
-            "shearlet_scales": 4,
-            "shearlet_directions": 8,
-            "dropout_rate": 0.1,
-            "conv_kernel_size": 5,
-        },
-        "imagenet": {
-            "input_shape": (224, 224, 3),
-            "num_classes": 1000,
-            "conv_filters": (64, 128, 256),
-            "dense_units": (2048, 1024),  # Reduced due to global pooling
-            "shearlet_scales": 5,
-            "shearlet_directions": 16,
-            "dropout_rate": 0.2,
-            "conv_kernel_size": 7,
-            "conv_strides": 2,
-        },
-    }
-
-    if variant not in variant_configs:
-        raise ValueError(
-            f"Unknown variant '{variant}'. Available variants: {list(variant_configs.keys())}"
-        )
-
-    config_dict = variant_configs[variant]
-    logger.info(f"Creating refined CoShNet {variant} variant with global pooling")
-
-    return create_coshnet(**config_dict)
+# ---------------------------------------------------------------------

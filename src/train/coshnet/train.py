@@ -13,7 +13,7 @@ from typing import Tuple, Dict, Any, List
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.shearlet_transform import ShearletTransform
 from dl_techniques.layers.complex_layers import ComplexDense, ComplexConv2D, ComplexReLU
-from dl_techniques.models.coshnet.model import CoShNet, create_coshnet, create_coshnet_variant
+from dl_techniques.models.coshnet.model import CoShNet, create_coshnet
 
 
 # ---------------------------------------------------------------------
@@ -308,46 +308,11 @@ def train_model(args: argparse.Namespace) -> None:
     # Create model
     logger.info(f"Creating CoShNet model (variant: {args.variant})...")
 
-    if args.variant in ['tiny', 'base', 'large', 'cifar10', 'imagenet']:
-        # Use predefined variant
-        logger.info(f"Using predefined variant: {args.variant}")
-        model = create_coshnet_variant(variant=args.variant)
-
-        # Adjust for dataset if necessary
-        if model.num_classes != num_classes or model.input_shape_config != input_shape:
-            logger.info(f"Adapting variant for dataset: {args.dataset}")
-            # Create custom model with variant config but dataset-specific settings
-            if args.variant == 'tiny':
-                model = create_coshnet(
-                    input_shape=input_shape,
-                    num_classes=num_classes,
-                    conv_filters=(16, 32),
-                    dense_units=(256, 128),
-                    **{k: v for k, v in model_config.items() if
-                       k not in ['input_shape', 'num_classes', 'conv_filters', 'dense_units']}
-                )
-            elif args.variant == 'large':
-                model = create_coshnet(
-                    input_shape=input_shape,
-                    num_classes=num_classes,
-                    conv_filters=(64, 128, 256),
-                    dense_units=(2048, 1024, 512),
-                    **{k: v for k, v in model_config.items() if
-                       k not in ['input_shape', 'num_classes', 'conv_filters', 'dense_units']}
-                )
-            else:  # base, cifar10
-                model = create_coshnet(
-                    input_shape=input_shape,
-                    num_classes=num_classes,
-                    conv_filters=(32, 64),
-                    dense_units=(1250, 500),
-                    **{k: v for k, v in model_config.items() if
-                       k not in ['input_shape', 'num_classes', 'conv_filters', 'dense_units']}
-                )
-    else:
-        # Create custom model
-        logger.info("Creating custom CoShNet model")
-        model = create_coshnet(**model_config)
+    model = create_coshnet(
+        variant=args.variant,
+        num_classes=num_classes,
+        input_shape=input_shape
+    )
 
     # Create optimizer optimized for complex-valued networks
     if use_lr_schedule:
