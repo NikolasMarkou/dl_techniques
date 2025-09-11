@@ -218,25 +218,28 @@ class MobileMQA(keras.layers.Layer):
         super().build(input_shape)
 
     def call(
-        self, x: keras.KerasTensor, training: Optional[bool] = None
+        self,
+        inputs: keras.KerasTensor,
+        attention_mask: Optional[keras.KerasTensor] = None,
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
         Forward pass of the MobileMQA block.
 
         Args:
-            x: Input tensor of shape (batch_size, height, width, channels).
+            inputs: Input tensor of shape (batch_size, height, width, channels).
+            attention_mask: Optional attention mask tensor.
             training: Boolean indicating training mode.
 
         Returns:
             Output tensor of shape (batch_size, height, width, dim).
         """
-        batch_size = ops.shape(x)[0]
-        height = ops.shape(x)[1]
-        width = ops.shape(x)[2]
+        height = ops.shape(inputs)[1]
+        width = ops.shape(inputs)[2]
 
         # Project to queries and key-values
-        q = self.q_proj(x, training=training)
-        kv = self.kv_proj(x, training=training)
+        q = self.q_proj(inputs, training=training)
+        kv = self.kv_proj(inputs, training=training)
 
         # Apply optional downsampling to key-values
         if self.downsample is not None:
@@ -251,12 +254,12 @@ class MobileMQA(keras.layers.Layer):
 
         # Reshape for attention computation
         # q: (batch_size, num_heads, height * width, head_dim)
-        q = ops.reshape(q, (batch_size, height * width, self.num_heads, self.head_dim))
+        q = ops.reshape(q, (-1, height * width, self.num_heads, self.head_dim))
         q = ops.transpose(q, (0, 2, 1, 3))
 
         # k, v: (batch_size, 1, kv_height * kv_width, head_dim) - shared across heads
-        k = ops.reshape(k, (batch_size, kv_height * kv_width, self.head_dim))
-        v = ops.reshape(v, (batch_size, kv_height * kv_width, self.head_dim))
+        k = ops.reshape(k, (-1, kv_height * kv_width, self.head_dim))
+        v = ops.reshape(v, (-1, kv_height * kv_width, self.head_dim))
         k = ops.expand_dims(k, axis=1)
         v = ops.expand_dims(v, axis=1)
 
@@ -270,13 +273,13 @@ class MobileMQA(keras.layers.Layer):
 
         # Reshape back to spatial format
         out = ops.transpose(out, (0, 2, 1, 3))
-        out = ops.reshape(out, (batch_size, height, width, self.dim))
+        out = ops.reshape(out, (-1, height, width, self.dim))
 
         # Final output projection
         attention_output = self.o_proj(out, training=training)
 
         # FIX: Add a scaled residual connection to use lambda_param and ensure gradients.
-        return x + self.lambda_param * attention_output
+        return inputs + self.lambda_param * attention_output
 
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]

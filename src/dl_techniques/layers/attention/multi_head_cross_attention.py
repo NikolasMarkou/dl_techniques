@@ -297,14 +297,14 @@ class MultiHeadCrossAttention(keras.layers.Layer):
     def _apply_attention_mask(
             self,
             scores: keras.KerasTensor,
-            mask: keras.KerasTensor
+            attention_mask: keras.KerasTensor
     ) -> keras.KerasTensor:
         """
         Apply attention mask to scores tensor.
 
         Args:
             scores: Attention scores of shape (batch, num_heads, query_seq, kv_seq)
-            mask: Attention mask with supported shapes:
+            attention_mask: Attention mask with supported shapes:
                 - (batch, kv_seq): Padding mask
                 - (batch, query_seq, kv_seq): Full attention mask
                 - Other broadcastable shapes
@@ -312,17 +312,17 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         Returns:
             Masked scores tensor with same shape as input scores.
         """
-        mask = ops.cast(mask, scores.dtype)
+        attention_mask = ops.cast(attention_mask, scores.dtype)
 
         # Expand mask dimensions to match scores shape (batch, num_heads, query_seq, kv_seq)
-        if len(mask.shape) == 2:  # Padding mask (batch, kv_seq)
-            mask = ops.expand_dims(ops.expand_dims(mask, 1), 1)  # (batch, 1, 1, kv_seq)
-        elif len(mask.shape) == 3:  # Full mask (batch, query_seq, kv_seq)
-            mask = ops.expand_dims(mask, 1)  # (batch, 1, query_seq, kv_seq)
+        if len(attention_mask.shape) == 2:  # Padding mask (batch, kv_seq)
+            attention_mask = ops.expand_dims(ops.expand_dims(attention_mask, 1), 1)  # (batch, 1, 1, kv_seq)
+        elif len(attention_mask.shape) == 3:  # Full mask (batch, query_seq, kv_seq)
+            attention_mask = ops.expand_dims(attention_mask, 1)  # (batch, 1, query_seq, kv_seq)
 
         # Apply mask: set masked positions to large negative value
         mask_value = -1e9
-        return scores + (1.0 - mask) * mask_value
+        return scores + (1.0 - attention_mask) * mask_value
 
     def call(
             self,
@@ -415,3 +415,5 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             "polynomial_coeffs": self.polynomial_coeffs,
         })
         return config
+
+# ---------------------------------------------------------------------

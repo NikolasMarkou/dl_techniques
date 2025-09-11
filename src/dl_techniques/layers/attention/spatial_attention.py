@@ -133,6 +133,7 @@ class SpatialAttention(keras.layers.Layer):
     def call(
             self,
             inputs: keras.KerasTensor,
+            attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
@@ -145,6 +146,7 @@ class SpatialAttention(keras.layers.Layer):
 
         Args:
             inputs: Input tensor of shape (batch_size, height, width, channels).
+            attention_mask: Optional attention mask tensor.
             training: Boolean indicating whether the layer should behave in
                 training mode or inference mode. Passed to the convolution layer.
 
@@ -199,3 +201,5 @@ class SpatialAttention(keras.layers.Layer):
             "use_bias": self.use_bias,
         })
         return config
+
+# ---------------------------------------------------------------------

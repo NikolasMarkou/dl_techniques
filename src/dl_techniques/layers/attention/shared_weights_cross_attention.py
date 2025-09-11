@@ -182,15 +182,17 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
 
     def call(
         self,
-        x: keras.KerasTensor,
+        inputs: keras.KerasTensor,
         split_sizes: Union[List[int], Tuple[int, ...]],
+        attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Apply shared weights cross-attention.
 
         Args:
-            x: Input tensor of shape (batch_size, total_seq_len, dim).
+            inputs: Input tensor of shape (batch_size, total_seq_len, dim).
             split_sizes: List specifying how to split input into modalities.
+            attention_mask: Optional attention mask tensor.
             training: Boolean indicating training mode.
 
         Returns:
@@ -202,7 +204,7 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         if len(split_sizes) not in [2, 4]:
             raise ValueError("split_sizes must have length 2 or 4")
 
-        _, total_seq_len, _ = x.shape
+        _, total_seq_len, _ = inputs.shape
 
         # Verify split sizes sum to total sequence length
         if sum(split_sizes) != total_seq_len:
@@ -210,7 +212,7 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
                              f"must equal total sequence length ({total_seq_len})")
 
         # Compute Q, K, V for all tokens
-        qkv = self.qkv_dense(x)  # (batch_size, total_seq_len, dim * 3)
+        qkv = self.qkv_dense(inputs)  # (batch_size, total_seq_len, dim * 3)
         # Use -1 for the batch dimension to be compatible with symbolic Keras tensors
         qkv = ops.reshape(qkv, (-1, total_seq_len, 3, self.num_heads, self.head_dim))
         qkv = ops.transpose(qkv, (2, 0, 3, 1, 4))  # (3, batch_size, num_heads, total_seq_len, head_dim)

@@ -222,7 +222,7 @@ class MultiHeadAttention(keras.layers.Layer):
 
     def call(
         self,
-        x: keras.KerasTensor,
+        inputs: keras.KerasTensor,
         attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
@@ -233,7 +233,7 @@ class MultiHeadAttention(keras.layers.Layer):
         in self-attention mode (kv_input=None).
         """
         return self.cross_attention(
-            query_input=x,
+            query_input=inputs,
             kv_input=None,  # Self-attention: kv_input=None
             attention_mask=attention_mask,
             training=training

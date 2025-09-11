@@ -423,6 +423,7 @@ class NonLocalAttention(keras.layers.Layer):
     def call(
         self,
         inputs: keras.KerasTensor,
+        attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None,
         **kwargs: Any
     ) -> keras.KerasTensor:
@@ -431,6 +432,7 @@ class NonLocalAttention(keras.layers.Layer):
 
         Args:
             inputs: Input tensor of shape (batch_size, height, width, channels).
+            attention_mask: Optional attention mask tensor.
             training: Boolean, whether in training mode. Affects dropout and
                 normalization behavior.
             **kwargs: Additional arguments (unused but kept for compatibility).
@@ -462,6 +464,7 @@ class NonLocalAttention(keras.layers.Layer):
         # Apply attention mechanism: [query, value, key] format for keras.layers.Attention
         attention_output = self.attention(
             [query_reshaped, value_reshaped, key_reshaped],
+            mask=attention_mask,
             training=training
         )
 
