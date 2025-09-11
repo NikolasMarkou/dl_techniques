@@ -20,7 +20,7 @@ import tempfile
 import os
 from typing import Dict, Any
 
-from dl_techniques.models.bert.components import Embeddings
+from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 
 
 class TestEmbeddingsLayer:
@@ -55,7 +55,7 @@ class TestEmbeddingsLayer:
 
     def test_initialization(self, basic_params):
         """Test that the layer initializes correctly and creates sub-layers."""
-        layer = Embeddings(**basic_params)
+        layer = BertEmbeddings(**basic_params)
 
         # Verify all parameters are stored correctly
         for key, value in basic_params.items():
@@ -76,25 +76,25 @@ class TestEmbeddingsLayer:
         """Test that invalid __init__ parameters raise ValueErrors."""
         # Test invalid numerical parameters
         with pytest.raises(ValueError, match="vocab_size must be positive"):
-            Embeddings(**{**basic_params, 'vocab_size': 0})
+            BertEmbeddings(**{**basic_params, 'vocab_size': 0})
         with pytest.raises(ValueError, match="hidden_size must be positive"):
-            Embeddings(**{**basic_params, 'hidden_size': -1})
+            BertEmbeddings(**{**basic_params, 'hidden_size': -1})
         with pytest.raises(ValueError, match="initializer_range must be positive"):
-            Embeddings(**{**basic_params, 'initializer_range': 0})
+            BertEmbeddings(**{**basic_params, 'initializer_range': 0})
 
         # Test invalid dropout probability
         with pytest.raises(ValueError, match="hidden_dropout_prob must be between 0 and 1"):
-            Embeddings(**{**basic_params, 'hidden_dropout_prob': 1.1})
+            BertEmbeddings(**{**basic_params, 'hidden_dropout_prob': 1.1})
         with pytest.raises(ValueError, match="hidden_dropout_prob must be between 0 and 1"):
-            Embeddings(**{**basic_params, 'hidden_dropout_prob': -0.1})
+            BertEmbeddings(**{**basic_params, 'hidden_dropout_prob': -0.1})
 
         # Test invalid normalization type
         with pytest.raises(ValueError, match="normalization_type must be one of"):
-            Embeddings(**{**basic_params, 'normalization_type': 'invalid_norm'})
+            BertEmbeddings(**{**basic_params, 'normalization_type': 'invalid_norm'})
 
     def test_build_process(self, basic_params, sample_input):
         """Verify the explicit build method correctly builds all sub-layers."""
-        layer = Embeddings(**basic_params)
+        layer = BertEmbeddings(**basic_params)
         input_shape = ops.shape(sample_input)
 
         # Manually build the layer
@@ -110,13 +110,13 @@ class TestEmbeddingsLayer:
 
     def test_build_invalid_shape(self, basic_params):
         """Test that building with an invalid input shape raises an error."""
-        layer = Embeddings(**basic_params)
+        layer = BertEmbeddings(**basic_params)
         with pytest.raises(ValueError, match="Expected 2D input shape"):
             layer.build((None, 32, 128))  # Invalid 3D shape
 
     def test_forward_pass_input_ids_only(self, basic_params, sample_input):
         """Test forward pass with only input_ids, relying on default creation."""
-        layer = Embeddings(**basic_params)
+        layer = BertEmbeddings(**basic_params)
         output = layer(sample_input, training=False)
 
         expected_shape = (*ops.shape(sample_input), basic_params['hidden_size'])
@@ -124,7 +124,7 @@ class TestEmbeddingsLayer:
 
     def test_forward_pass_with_token_type_ids(self, basic_params, sample_input):
         """Test forward pass with provided token_type_ids."""
-        layer = Embeddings(**basic_params)
+        layer = BertEmbeddings(**basic_params)
         token_type_ids = ops.zeros_like(sample_input, dtype='int32')
         output = layer(sample_input, token_type_ids=token_type_ids, training=False)
 
@@ -133,7 +133,7 @@ class TestEmbeddingsLayer:
 
     def test_forward_pass_with_position_ids(self, basic_params, sample_input):
         """Test forward pass with provided position_ids."""
-        layer = Embeddings(**basic_params)
+        layer = BertEmbeddings(**basic_params)
         position_ids = ops.arange(ops.shape(sample_input)[1], dtype='int32')
         position_ids = ops.broadcast_to(ops.expand_dims(position_ids, 0), ops.shape(sample_input))
         output = layer(sample_input, position_ids=position_ids, training=False)
@@ -144,7 +144,7 @@ class TestEmbeddingsLayer:
     def test_training_mode(self, basic_params, sample_input):
         """Test that dropout is applied in training mode but not evaluation."""
         # With dropout enabled
-        layer_with_dropout = Embeddings(**basic_params)
+        layer_with_dropout = BertEmbeddings(**basic_params)
         output_train = layer_with_dropout(sample_input, training=True)
         output_eval = layer_with_dropout(sample_input, training=False)
         # Outputs should differ due to dropout
@@ -155,7 +155,7 @@ class TestEmbeddingsLayer:
 
         # With dropout disabled
         params_no_dropout = {**basic_params, 'hidden_dropout_prob': 0.0}
-        layer_no_dropout = Embeddings(**params_no_dropout)
+        layer_no_dropout = BertEmbeddings(**params_no_dropout)
         output_train_no_dropout = layer_no_dropout(sample_input, training=True)
         output_eval_no_dropout = layer_no_dropout(sample_input, training=False)
         # Outputs should be identical
@@ -168,7 +168,7 @@ class TestEmbeddingsLayer:
     def test_normalization_types(self, basic_params, sample_input, norm_type):
         """Test that all supported normalization types are functional."""
         params = {**basic_params, 'normalization_type': norm_type}
-        layer = Embeddings(**params)
+        layer = BertEmbeddings(**params)
         output = layer(sample_input, training=False)
 
         expected_shape = (*ops.shape(sample_input), basic_params['hidden_size'])
@@ -177,7 +177,7 @@ class TestEmbeddingsLayer:
 
     def test_compute_output_shape(self, basic_params, sample_input):
         """Verify the compute_output_shape method."""
-        layer = Embeddings(**basic_params)
+        layer = BertEmbeddings(**basic_params)
         input_shape = ops.shape(sample_input)
         output_shape = layer.compute_output_shape(input_shape)
 
@@ -186,7 +186,7 @@ class TestEmbeddingsLayer:
 
     def test_get_config_completeness(self, basic_params):
         """Verify that get_config includes all __init__ parameters."""
-        layer = Embeddings(**basic_params)
+        layer = BertEmbeddings(**basic_params)
         config = layer.get_config()
 
         for key in basic_params:
@@ -197,7 +197,7 @@ class TestEmbeddingsLayer:
         """CRITICAL TEST: Ensure a full save and load cycle works perfectly."""
         # 1. Create original layer in a model
         inputs = keras.Input(shape=sample_input.shape[1:], dtype='int32')
-        layer_output = Embeddings(**basic_params)(inputs)
+        layer_output = BertEmbeddings(**basic_params)(inputs)
         model = keras.Model(inputs, layer_output)
 
         # 2. Get prediction from original model
