@@ -85,13 +85,13 @@ from typing import List, Union, Optional, Dict, Any, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
 from dl_techniques.layers.statistics.mdn_layer import (
     MDNLayer,
     get_uncertainty,
     get_point_estimate,
     get_prediction_intervals
 )
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

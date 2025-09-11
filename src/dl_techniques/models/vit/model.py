@@ -1,10 +1,6 @@
 """
 Vision Transformer (ViT) Model Implementation
 
-This module provides a complete Vision Transformer model implementation following
-modern Keras 3 best practices. The model leverages the dl_techniques framework's
-factory system for consistent component creation and configuration management.
-
 The implementation supports different scales and configurations similar to the original
 "An Image is Worth 16x16 Words" paper and its variants, with enhanced flexibility
 through factory-based component creation.
@@ -20,7 +16,6 @@ from typing import Optional, Tuple, Dict, Any, Union, Literal
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.transformer import TransformerLayer
-
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 
@@ -28,11 +23,10 @@ from dl_techniques.layers.embedding import create_embedding_layer
 # Type definitions for enhanced type safety
 # ---------------------------------------------------------------------
 
-VitScale = Literal['tiny', 'small', 'base', 'large', 'huge']
 PoolingMode = Literal['cls', 'mean', 'max']
-NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'adaptive_band_rms', 'dynamic_tanh']
+VitScale = Literal['tiny', 'small', 'base', 'large', 'huge']
 FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp']
-
+NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'adaptive_band_rms', 'dynamic_tanh']
 
 # ---------------------------------------------------------------------
 

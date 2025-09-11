@@ -41,11 +41,15 @@ import keras
 from keras import ops, layers, initializers
 from typing import Optional, Union, Tuple, List, Dict, Any, Literal
 
-# Framework imports
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.attention import create_attention_layer
-from dl_techniques.layers.ffn import create_ffn_layer
+
 
 # ---------------------------------------------------------------------
 

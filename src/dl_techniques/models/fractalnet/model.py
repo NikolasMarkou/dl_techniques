@@ -56,9 +56,9 @@ from typing import List, Optional, Union, Tuple, Dict, Any, Callable
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
-from ..layers.convblock import ConvBlock
-from ..layers.fractal_block import FractalBlock
+from dl_techniques.utils.logger import logger
+from dl_techniques.layers.convblock import ConvBlock
+from dl_techniques.layers.fractal_block import FractalBlock
 
 # ---------------------------------------------------------------------
 

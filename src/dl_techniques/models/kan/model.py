@@ -59,11 +59,15 @@ model = KAN(
 import keras
 from keras import backend
 from typing import Optional, Dict, Any, List, Union, Tuple
-import numpy as np
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.kan_linear import KANLinear
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class KAN(keras.Model):
