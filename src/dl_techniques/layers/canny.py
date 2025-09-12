@@ -1,5 +1,5 @@
 import keras
-import tensorflow as tf  # For backend-specific ops not in keras.ops
+import tensorflow as tf
 import numpy as np
 from typing import Optional, Tuple, Dict, Any
 

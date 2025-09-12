@@ -18,7 +18,7 @@ import pytest
 import numpy as np
 import tempfile
 import os
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 import keras
 
