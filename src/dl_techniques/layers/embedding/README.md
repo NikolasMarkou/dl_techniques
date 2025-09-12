@@ -4,7 +4,7 @@ The `dl_techniques.layers.embedding` module provides a comprehensive collection 
 
 ## Overview
 
-This module includes seven distinct embedding layer types, covering patch tokenization, learned absolute positional encodings, and various forms of Rotary Position Embeddings (RoPE). All layers are designed for modern Keras 3.x compatibility with full serialization support and are accessible through a centralized factory system.
+This module includes eight distinct embedding layer types, covering patch tokenization, learned absolute positional encodings, various forms of Rotary Position Embeddings (RoPE), and BERT-style embeddings. All layers are designed for modern Keras 3.x compatibility with full serialization support and are accessible through a centralized factory system.
 
 ## Available Embedding Types
 
@@ -19,6 +19,7 @@ All layers in this module are supported by the factory system, which provides au
 | `dual_rope` | `DualRotaryPositionEmbedding` | Dual RoPE with separate global/local configurations. | Gemma3-style models using both global and local attention patterns. |
 | `continuous_rope`| `ContinuousRoPE` | RoPE extended for continuous multi-dimensional coordinates. | Positional encoding for data with spatial coordinates (e.g., 3D point clouds). |
 | `continuous_sincos`| `ContinuousSinCosEmbed`| Embeds continuous coordinates using sine/cosine functions. | Creating fixed, smooth positional representations for continuous data. |
+| `bert_embeddings` | `BertEmbeddings` | BERT embeddings combining word, position, and token type embeddings. | BERT-style language models with configurable normalization. |
 
 ## Factory Interface
 
@@ -42,6 +43,16 @@ rope = create_embedding_layer(
     max_seq_len=4096,
     rope_percentage=0.5
 )
+
+# Create BERT embeddings for language modeling
+bert_embed = create_embedding_layer(
+    'bert_embeddings',
+    vocab_size=30522,
+    hidden_size=768,
+    max_position_embeddings=512,
+    type_vocab_size=2,
+    normalization_type='rms_norm'
+)
 ```
 
 ### Configuration-Based Creation
@@ -50,14 +61,17 @@ rope = create_embedding_layer(
 from dl_techniques.layers.embedding import create_embedding_from_config
 
 config = {
-    'type': 'positional_learned',
-    'max_seq_len': 1024,
-    'dim': 512,
-    'dropout': 0.1,
-    'name': 'learned_pos_embed'
+    'type': 'bert_embeddings',
+    'vocab_size': 30522,
+    'hidden_size': 768,
+    'max_position_embeddings': 512,
+    'type_vocab_size': 2,
+    'hidden_dropout_prob': 0.1,
+    'normalization_type': 'layer_norm',
+    'name': 'bert_embeddings'
 }
 
-pos_embed = create_embedding_from_config(config)
+bert_embed = create_embedding_from_config(config)
 ```
 
 ### Parameter Discovery
@@ -69,11 +83,11 @@ from dl_techniques.layers.embedding import get_embedding_info
 info = get_embedding_info()
 
 # Print requirements for a specific type
-rope_info = info['rope']
-print(f"Required: {rope_info['required_params']}")
-print(f"Optional: {list(rope_info['optional_params'].keys())}")
-# Required: ['head_dim', 'max_seq_len']
-# Optional: ['rope_theta', 'rope_percentage']
+bert_info = info['bert_embeddings']
+print(f"Required: {bert_info['required_params']}")
+print(f"Optional: {list(bert_info['optional_params'].keys())}")
+# Required: ['vocab_size', 'hidden_size', 'max_position_embeddings', 'type_vocab_size']
+# Optional: ['initializer_range', 'layer_norm_eps', 'hidden_dropout_prob', 'normalization_type']
 ```
 
 ### Validation
@@ -83,7 +97,13 @@ from dl_techniques.layers.embedding import validate_embedding_config
 
 # Validate configuration before creation
 try:
-    validate_embedding_config('dual_rope', head_dim=256, max_seq_len=4096)
+    validate_embedding_config(
+        'bert_embeddings', 
+        vocab_size=30522, 
+        hidden_size=768,
+        max_position_embeddings=512,
+        type_vocab_size=2
+    )
     print("Configuration is valid")
 except ValueError as e:
     print(f"Validation error: {e}")
@@ -181,18 +201,90 @@ sincos_embed_2d = create_embedding_layer(
 )
 ```
 
+### BertEmbeddings (`bert_embeddings`)
+- **Required**: `vocab_size`, `hidden_size`, `max_position_embeddings`, `type_vocab_size`
+- **Optional**: `initializer_range` (default: `0.02`), `layer_norm_eps` (default: `1e-8`), `hidden_dropout_prob` (default: `0.0`), `normalization_type` (default: `'layer_norm'`)
+
+```python
+# Standard BERT embeddings
+bert_embed = create_embedding_layer(
+    'bert_embeddings',
+    vocab_size=30522,
+    hidden_size=768,
+    max_position_embeddings=512,
+    type_vocab_size=2
+)
+
+# BERT embeddings with RMS normalization for efficiency
+bert_rms_embed = create_embedding_layer(
+    'bert_embeddings',
+    vocab_size=50257,  # GPT-2 vocab size
+    hidden_size=1024,
+    max_position_embeddings=1024,
+    type_vocab_size=1,  # Only one segment type
+    normalization_type='rms_norm',
+    hidden_dropout_prob=0.1
+)
+
+# BERT embeddings with Band RMS for improved stability
+bert_band_embed = create_embedding_layer(
+    'bert_embeddings',
+    vocab_size=30522,
+    hidden_size=768,
+    max_position_embeddings=512,
+    type_vocab_size=2,
+    normalization_type='band_rms',
+    layer_norm_eps=1e-12
+)
+```
+
 ## Direct Layer Instantiation
 While the factory is recommended for consistency and validation, direct instantiation is always available.
 
 ```python
-from dl_techniques.layers.embedding import PatchEmbedding2D, RotaryPositionEmbedding
+from dl_techniques.layers.embedding import PatchEmbedding2D, RotaryPositionEmbedding, BertEmbeddings
 
 # Direct instantiation (bypasses factory validation and defaults)
 patch_embed = PatchEmbedding2D(patch_size=16, embed_dim=768)
 rope_embed = RotaryPositionEmbedding(head_dim=64, max_seq_len=1024)
+bert_embed = BertEmbeddings(
+    vocab_size=30522,
+    hidden_size=768,
+    max_position_embeddings=512,
+    type_vocab_size=2
+)
 ```
 
 ## Integration Patterns
+
+### In a BERT-Style Language Model
+
+```python
+@keras.saving.register_keras_serializable()
+class BertInputLayer(keras.layers.Layer):
+    def __init__(self, vocab_size, hidden_size, max_position_embeddings, 
+                 type_vocab_size, normalization_type='layer_norm', **kwargs):
+        super().__init__(**kwargs)
+        
+        # Create BERT embeddings using the factory
+        self.embeddings = create_embedding_layer(
+            'bert_embeddings',
+            vocab_size=vocab_size,
+            hidden_size=hidden_size,
+            max_position_embeddings=max_position_embeddings,
+            type_vocab_size=type_vocab_size,
+            normalization_type=normalization_type,
+            name='bert_embeddings'
+        )
+
+    def call(self, input_ids, token_type_ids=None, position_ids=None, training=None):
+        return self.embeddings(
+            input_ids=input_ids,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            training=training
+        )
+```
 
 ### In a Vision Transformer (ViT)
 
@@ -247,6 +339,9 @@ The factory performs comprehensive validation, catching common errors before lay
 ```python
 # Raises ValueError: "Required parameters missing for patch_2d: ['embed_dim']"
 create_embedding_layer('patch_2d', patch_size=16)
+
+# Raises ValueError: "Required parameters missing for bert_embeddings: ['type_vocab_size']"
+create_embedding_layer('bert_embeddings', vocab_size=30522, hidden_size=768, max_position_embeddings=512)
 ```
 
 #### Value Range Validation
@@ -254,14 +349,23 @@ create_embedding_layer('patch_2d', patch_size=16)
 # Raises ValueError: "rope_percentage must be in (0, 1], got 1.5"
 create_embedding_layer('rope', head_dim=64, max_seq_len=512, rope_percentage=1.5)
 
-# Raises ValueError: "head_dim must be positive, got -64"
-create_embedding_layer('rope', head_dim=-64, max_seq_len=512)
+# Raises ValueError: "vocab_size must be positive, got -30522"
+create_embedding_layer('bert_embeddings', vocab_size=-30522, hidden_size=768, 
+                      max_position_embeddings=512, type_vocab_size=2)
+
+# Raises ValueError: "hidden_dropout_prob must be in [0, 1], got 1.5"
+create_embedding_layer('bert_embeddings', vocab_size=30522, hidden_size=768,
+                      max_position_embeddings=512, type_vocab_size=2, hidden_dropout_prob=1.5)
 ```
 
 #### Invalid String Value Validation
 ```python
 # Raises ValueError: "padding must be 'same', 'valid', or 'causal', got 'invalid_padding'"
 create_embedding_layer('patch_1d', patch_size=16, embed_dim=128, padding='invalid_padding')
+
+# Raises ValueError: "normalization_type must be one of ['layer_norm', 'rms_norm', 'band_rms', 'batch_norm'], got 'invalid_norm'"
+create_embedding_layer('bert_embeddings', vocab_size=30522, hidden_size=768,
+                      max_position_embeddings=512, type_vocab_size=2, normalization_type='invalid_norm')
 ```
 
 ## Logging and Debugging
@@ -270,28 +374,105 @@ The factory provides detailed logging to aid in debugging model configurations.
 #### Info Level Logging
 Shows all parameters passed to each layer, including resolved defaults.
 ```
-INFO Creating 'rope' embedding layer with parameters:
-INFO   'head_dim': 64
-INFO   'max_seq_len': 4096
-INFO   'name': None
-INFO   'rope_percentage': 0.5
-INFO   'rope_theta': 10000.0
+INFO Creating 'bert_embeddings' embedding layer with parameters:
+INFO   'hidden_dropout_prob': 0.1
+INFO   'hidden_size': 768
+INFO   'initializer_range': 0.02
+INFO   'layer_norm_eps': 1e-08
+INFO   'max_position_embeddings': 512
+INFO   'name': 'bert_embeddings'
+INFO   'normalization_type': 'rms_norm'
+INFO   'type_vocab_size': 2
+INFO   'vocab_size': 30522
 ```
 
 #### Debug Level Logging
 Confirms successful layer creation.
 ```
-DEBUG Successfully created 'rope' layer: rotary_position_embedding
+DEBUG Successfully created 'bert_embeddings' layer: bert_embeddings
 ```
 
 #### Error Logging
 Provides detailed context when layer creation fails.
 ```
-ERROR Failed to create 'patch_1d' embedding layer (PatchEmbedding1D).
-  Required params: ['patch_size', 'embed_dim']
-  Provided params: ['patch_size']
+ERROR Failed to create 'bert_embeddings' embedding layer (BertEmbeddings).
+  Required params: ['vocab_size', 'hidden_size', 'max_position_embeddings', 'type_vocab_size']
+  Provided params: ['vocab_size', 'hidden_size', 'max_position_embeddings']
   Check parameter compatibility and types. Use get_embedding_info() for details.
-  Original error: Required parameters missing for patch_1d: ['embed_dim']. Required: ['patch_size', 'embed_dim']
+  Original error: Required parameters missing for bert_embeddings: ['type_vocab_size']. Required: ['vocab_size', 'hidden_size', 'max_position_embeddings', 'type_vocab_size']
+```
+
+## BERT Embeddings Advanced Usage
+
+### Custom Normalization Configuration
+
+```python
+# Using different normalization types for different use cases
+configs = {
+    'standard_bert': {
+        'type': 'bert_embeddings',
+        'vocab_size': 30522,
+        'hidden_size': 768,
+        'max_position_embeddings': 512,
+        'type_vocab_size': 2,
+        'normalization_type': 'layer_norm',  # Standard BERT
+        'layer_norm_eps': 1e-12
+    },
+    'efficient_bert': {
+        'type': 'bert_embeddings',
+        'vocab_size': 30522,
+        'hidden_size': 768,
+        'max_position_embeddings': 512,
+        'type_vocab_size': 2,
+        'normalization_type': 'rms_norm',  # Faster training
+        'hidden_dropout_prob': 0.1
+    },
+    'stable_bert': {
+        'type': 'bert_embeddings',
+        'vocab_size': 30522,
+        'hidden_size': 768,
+        'max_position_embeddings': 512,
+        'type_vocab_size': 2,
+        'normalization_type': 'band_rms',  # Better stability
+        'layer_norm_eps': 1e-8
+    }
+}
+
+# Create different variants
+embeddings = {name: create_embedding_from_config(config) 
+              for name, config in configs.items()}
+```
+
+### Single Segment Models
+
+```python
+# For models that don't use segment embeddings (like GPT-style)
+gpt_embed = create_embedding_layer(
+    'bert_embeddings',
+    vocab_size=50257,  # GPT-2 vocab
+    hidden_size=1024,
+    max_position_embeddings=1024,
+    type_vocab_size=1,  # Only one segment type
+    normalization_type='layer_norm',
+    hidden_dropout_prob=0.1
+)
+```
+
+### Large Model Configuration
+
+```python
+# For large language models with extended context
+large_bert_embed = create_embedding_layer(
+    'bert_embeddings',
+    vocab_size=100000,  # Large vocabulary
+    hidden_size=1536,   # Large hidden size
+    max_position_embeddings=4096,  # Long sequences
+    type_vocab_size=8,  # Multiple segment types
+    normalization_type='rms_norm',  # Efficient normalization
+    initializer_range=0.01,  # Smaller init for stability
+    layer_norm_eps=1e-6,
+    hidden_dropout_prob=0.05  # Lower dropout for large models
+)
 ```
 
 ## API Reference
@@ -304,3 +485,16 @@ ERROR Failed to create 'patch_1d' embedding layer (PatchEmbedding1D).
 
 #### Types
 - `EmbeddingType`: A `Literal` type defining valid embedding type strings.
+
+#### BERT Embeddings Input/Output
+- **Input shapes**:
+  - `input_ids`: `(batch_size, sequence_length)` - Token IDs
+  - `token_type_ids`: `(batch_size, sequence_length)` - Optional segment IDs
+  - `position_ids`: `(batch_size, sequence_length)` - Optional position IDs
+- **Output shape**: `(batch_size, sequence_length, hidden_size)` - Combined embeddings
+
+#### Available Normalization Types for BERT Embeddings
+- `'layer_norm'`: Standard LayerNormalization (BERT default)
+- `'rms_norm'`: RMSNorm for efficiency
+- `'band_rms'`: Band-constrained RMS for stability
+- `'batch_norm'`: BatchNormalization (less common for transformers)

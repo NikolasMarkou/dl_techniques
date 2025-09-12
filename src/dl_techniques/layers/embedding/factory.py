@@ -3,8 +3,8 @@ Embedding Layer Factory for dl_techniques Framework
 
 Provides a centralized factory function for creating various embedding layers
 with a unified interface, type safety, and comprehensive parameter validation.
-This factory supports patch embeddings, learned positional embeddings, and various
-forms of rotary position embeddings (RoPE).
+This factory supports patch embeddings, learned positional embeddings, various
+forms of rotary position embeddings (RoPE), and BERT-style embeddings.
 """
 
 import keras
@@ -16,6 +16,7 @@ from typing import Dict, Any, Literal, Optional
 
 from dl_techniques.utils.logger import logger
 
+from .bert_embeddings import BertEmbeddings
 from .continuous_rope_embedding import ContinuousRoPE
 from .dual_rotary_position_embedding import DualRotaryPositionEmbedding
 from .continuous_sin_cos_embedding import ContinuousSinCosEmbed
@@ -34,7 +35,8 @@ EmbeddingType = Literal[
     'rope',
     'dual_rope',
     'continuous_rope',
-    'continuous_sincos'
+    'continuous_sincos',
+    'bert_embeddings'
 ]
 
 # ---------------------------------------------------------------------
@@ -119,6 +121,18 @@ EMBEDDING_REGISTRY: Dict[str, Dict[str, Any]] = {
             'assert_positive': True
         },
         'use_case': 'Creating fixed, smooth positional representations for continuous coordinate data.'
+    },
+    'bert_embeddings': {
+        'class': BertEmbeddings,
+        'description': 'BERT embeddings combining word, position, and token type embeddings with configurable normalization.',
+        'required_params': ['vocab_size', 'hidden_size', 'max_position_embeddings', 'type_vocab_size'],
+        'optional_params': {
+            'initializer_range': 0.02,
+            'layer_norm_eps': 1e-8,
+            'hidden_dropout_prob': 0.0,
+            'normalization_type': 'layer_norm'
+        },
+        'use_case': 'BERT-style language models combining word, positional, and segment embeddings with sum aggregation and normalization.'
     }
 }
 
@@ -190,7 +204,8 @@ def validate_embedding_config(embedding_type: str, **kwargs: Any) -> None:
     # --- Parameter Value Validations ---
 
     # Common positive integer checks
-    positive_params = ['dim', 'embed_dim', 'head_dim', 'max_seq_len', 'patch_size', 'ndim']
+    positive_params = ['dim', 'embed_dim', 'head_dim', 'max_seq_len', 'patch_size', 'ndim',
+                      'vocab_size', 'hidden_size', 'max_position_embeddings', 'type_vocab_size']
     for param in positive_params:
         if param in kwargs and kwargs[param] is not None:
             value = kwargs[param]
@@ -207,6 +222,17 @@ def validate_embedding_config(embedding_type: str, **kwargs: Any) -> None:
             elif isinstance(value, int) and value <= 0:
                 raise ValueError(f"{param} must be positive, got {value}")
 
+    # Common positive float checks
+    positive_float_params = ['initializer_range', 'layer_norm_eps', 'scale']
+    for param in positive_float_params:
+        if param in kwargs and kwargs[param] is not None and kwargs[param] <= 0:
+            raise ValueError(f"{param} must be positive, got {kwargs[param]}")
+
+    # Common dropout rate checks
+    dropout_params = ['dropout', 'hidden_dropout_prob']
+    for param in dropout_params:
+        if param in kwargs and not (0.0 <= kwargs[param] <= 1.0):
+            raise ValueError(f"{param} must be in [0, 1], got {kwargs[param]}")
 
     # Type-specific validations
     if embedding_type == 'patch_1d':
@@ -214,12 +240,6 @@ def validate_embedding_config(embedding_type: str, **kwargs: Any) -> None:
             raise ValueError(f"stride must be positive, got {kwargs['stride']}")
         if 'padding' in kwargs and kwargs['padding'] not in ['same', 'valid', 'causal']:
             raise ValueError(f"padding must be 'same', 'valid', or 'causal', got {kwargs['padding']}")
-
-    if embedding_type == 'positional_learned':
-        if 'dropout' in kwargs and not (0.0 <= kwargs['dropout'] <= 1.0):
-            raise ValueError(f"dropout must be in [0, 1], got {kwargs['dropout']}")
-        if 'scale' in kwargs and kwargs['scale'] <= 0:
-            raise ValueError(f"scale must be positive, got {kwargs['scale']}")
 
     if embedding_type == 'rope':
         if 'rope_theta' in kwargs and kwargs['rope_theta'] <= 0:
@@ -238,6 +258,12 @@ def validate_embedding_config(embedding_type: str, **kwargs: Any) -> None:
     if embedding_type in ['continuous_rope', 'continuous_sincos']:
         if 'max_wavelength' in kwargs and kwargs['max_wavelength'] <= 0:
             raise ValueError(f"max_wavelength must be positive, got {kwargs['max_wavelength']}")
+
+    if embedding_type == 'bert_embeddings':
+        if 'normalization_type' in kwargs:
+            valid_norm_types = ['layer_norm', 'rms_norm', 'band_rms', 'batch_norm']
+            if kwargs['normalization_type'] not in valid_norm_types:
+                raise ValueError(f"normalization_type must be one of {valid_norm_types}, got {kwargs['normalization_type']}")
 
 
 def create_embedding_layer(
@@ -274,12 +300,14 @@ def create_embedding_layer(
             name='vit_patch_embed'
         )
 
-        # Create a standard Rotary Position Embedding layer
-        rope_embed = create_embedding_layer(
-            'rope',
-            head_dim=64,
-            max_seq_len=2048,
-            rope_percentage=0.25
+        # Create a BERT embeddings layer
+        bert_embed = create_embedding_layer(
+            'bert_embeddings',
+            vocab_size=30522,
+            hidden_size=768,
+            max_position_embeddings=512,
+            type_vocab_size=2,
+            name='bert_embeddings'
         )
         ```
     """
@@ -311,7 +339,6 @@ def create_embedding_layer(
             log_params['name'] = name
         for param_name, param_value in sorted(log_params.items()):
             logger.info(f"  {param_name}: {param_value!r}")
-
 
         # Create the layer instance
         embedding_layer = embed_class(**final_params)
@@ -358,13 +385,15 @@ def create_embedding_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     Example:
         ```python
         config = {
-            'type': 'positional_learned',
-            'max_seq_len': 1024,
-            'dim': 512,
-            'dropout': 0.1,
-            'name': 'learned_pos_embed'
+            'type': 'bert_embeddings',
+            'vocab_size': 30522,
+            'hidden_size': 768,
+            'max_position_embeddings': 512,
+            'type_vocab_size': 2,
+            'normalization_type': 'rms_norm',
+            'name': 'bert_embeddings'
         }
-        pos_embed = create_embedding_from_config(config)
+        bert_embed = create_embedding_from_config(config)
         ```
     """
     if not isinstance(config, dict):
