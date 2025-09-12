@@ -228,6 +228,7 @@ from .embedding.positional_embedding import PositionalEmbedding
 
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class ByteTokenizer(keras.layers.Layer):
     """
     Converts text to byte tokens for BLT processing.
@@ -235,6 +236,16 @@ class ByteTokenizer(keras.layers.Layer):
     This layer handles the conversion of text strings to byte sequences,
     with proper handling of special tokens and padding. It operates at the
     byte level to achieve true language-agnostic processing.
+
+    **Intent**: Provide byte-level tokenization that maintains full character
+    information without vocabulary limitations, enabling robust processing of
+    any UTF-8 text input.
+
+    **Architecture**:
+    ```
+    Text String → UTF-8 Encoding → Byte Values + Offset → Special Tokens
+    "Hello" → [72, 101, 108, 108, 111] → [76, 105, 112, 112, 115] → [1, 76, ..., 2]
+    ```
 
     Args:
         vocab_size: Size of the vocabulary including special tokens.
@@ -332,6 +343,7 @@ class ByteTokenizer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class EntropyModel(keras.layers.Layer):
     """
     Small causal transformer for computing next-byte entropy.
@@ -339,6 +351,22 @@ class EntropyModel(keras.layers.Layer):
     This model predicts the probability distribution of the next byte
     at each position, which is used for dynamic patching. The entropy
     computed from these distributions indicates information density.
+
+    **Intent**: Provide lightweight entropy computation for dynamic patch
+    boundary detection, enabling adaptive compute allocation based on
+    information content.
+
+    **Architecture**:
+    ```
+    Byte Tokens → Embedding → Positional → Transformer Layers → LayerNorm → Dense → Logits
+    [B,S] → [B,S,H] → [B,S,H] → [B,S,H] → [B,S,H] → [B,S,V] → Shannon Entropy
+    ```
+
+    **Mathematical Operations**:
+    1. **Token Embedding**: E(x) ∈ ℝ^(V×H)
+    2. **Position Encoding**: PE(pos, 2i) = sin(pos/10000^(2i/H))
+    3. **Causal Self-Attention**: Att(Q,K,V) with lower triangular mask
+    4. **Entropy Calculation**: H(x) = -Σ p(x) log p(x)
 
     Args:
         vocab_size: Size of byte vocabulary.
@@ -381,25 +409,13 @@ class EntropyModel(keras.layers.Layer):
         self.max_seq_len = max_seq_len
         self.dropout_rate = dropout_rate
 
-        # Sublayers initialized in build()
-        self.embedding = None
-        self.positional_embedding = None
-        self.transformer_layers = []
-        self.layer_norm = None
-        self.output_projection = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the entropy model layers."""
-        super().build(input_shape)
-
-        # Token embedding
+        # Create all sub-layers in __init__
         self.embedding = keras.layers.Embedding(
             input_dim=self.vocab_size,
             output_dim=self.hidden_dim,
             name='token_embedding'
         )
 
-        # Positional embedding
         self.positional_embedding = PositionalEmbedding(
             max_seq_len=self.max_seq_len,
             dim=self.hidden_dim,
@@ -407,7 +423,7 @@ class EntropyModel(keras.layers.Layer):
             name='positional_embedding'
         )
 
-        # Transformer layers
+        self.transformer_layers = []
         for i in range(self.num_layers):
             layer = TransformerLayer(
                 hidden_size=self.hidden_dim,
@@ -418,17 +434,35 @@ class EntropyModel(keras.layers.Layer):
             )
             self.transformer_layers.append(layer)
 
-        # Final layer norm and projection
         self.layer_norm = keras.layers.LayerNormalization(name='final_layer_norm')
         self.output_projection = keras.layers.Dense(
             self.vocab_size,
             name='output_projection'
         )
 
-        # Build sublayers with proper input shape
-        sample_input = (input_shape[0], input_shape[1], self.hidden_dim)
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the entropy model layers."""
+        super().build(input_shape)
+
+        # Explicitly build sub-layers for serialization
+        self.embedding.build(input_shape)
+
+        # Compute shapes for building transformer layers
+        embedded_shape = self.embedding.compute_output_shape(input_shape)
+        pos_embedded_shape = self.positional_embedding.compute_output_shape(embedded_shape)
+
+        self.positional_embedding.build(embedded_shape)
+
+        # Build transformer layers
+        current_shape = pos_embedded_shape
         for layer in self.transformer_layers:
-            layer.build(sample_input)
+            layer.build(current_shape)
+            current_shape = layer.compute_output_shape(current_shape)
+
+        # Build final layers
+        self.layer_norm.build(current_shape)
+        norm_shape = current_shape
+        self.output_projection.build(norm_shape)
 
     def call(
             self,
@@ -501,6 +535,7 @@ class EntropyModel(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class DynamicPatcher(keras.layers.Layer):
     """
     Creates dynamic patches based on entropy thresholding.
@@ -509,6 +544,22 @@ class DynamicPatcher(keras.layers.Layer):
     byte sequences based on information density measured by entropy. When
     entropy exceeds a threshold, it indicates an unpredictable transition
     where a new patch boundary should be created.
+
+    **Intent**: Enable adaptive sequence segmentation based on information
+    content, allowing more compute for complex regions while grouping
+    predictable content efficiently.
+
+    **Architecture**:
+    ```
+    Entropy Values → Threshold Detection → Boundary Creation → Patch Lengths
+    [B,S] → Compare > θ → Boundary Mask → [B,max_patches]
+    ```
+
+    **Patching Algorithm**:
+    1. **Global Threshold**: H(x_t) > θ_g creates patch boundary
+    2. **Monotonic Check**: H(x_t) - H(x_{t-1}) > θ_r for trend detection
+    3. **Length Constraints**: Min/max patch sizes for stability
+    4. **Dynamic Allocation**: Variable patches per sequence
 
     Args:
         entropy_threshold: Threshold for creating patch boundaries.
@@ -656,6 +707,7 @@ class DynamicPatcher(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class PatchPooling(keras.layers.Layer):
     """
     Pools byte representations within patches to create patch representations.
@@ -663,6 +715,21 @@ class PatchPooling(keras.layers.Layer):
     This layer reduces the sequence of byte hidden states to patch hidden states
     using various pooling strategies. The attention-based pooling method uses
     learnable query vectors to extract the most relevant information from each patch.
+
+    **Intent**: Aggregate byte-level information within patches into compact
+    representations while preserving the most important features for global
+    processing.
+
+    **Architecture** (Attention Pooling):
+    ```
+    Byte Hidden States + Patch IDs → Patch Grouping → Query Attention → Patch Representations
+    [B,S,H] + [B,S] → {Patch_i} → Q @ {K,V}_i → [B,P,D]
+    ```
+
+    **Pooling Methods**:
+    1. **Max Pooling**: max(h_bytes) per patch
+    2. **Mean Pooling**: mean(h_bytes) per patch
+    3. **Attention Pooling**: Learnable queries attend to patch bytes
 
     Args:
         pooling_method: Method for pooling ('max', 'mean', 'attention').
@@ -700,9 +767,15 @@ class PatchPooling(keras.layers.Layer):
         self.output_dim = output_dim
         self.num_queries = num_queries
 
-        # Sublayers initialized in build()
-        self.query_embeddings = None
-        self.attention_layer = None
+        # Create sub-layers in __init__
+        if self.pooling_method == 'attention':
+            self.attention_layer = MultiHeadAttention(
+                embed_dim=self.output_dim,  # Will be adjusted in build if needed
+                num_heads=8,
+                name='patch_attention'
+            )
+
+        # Output projection layer (will be created in build if needed)
         self.output_projection = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -713,7 +786,7 @@ class PatchPooling(keras.layers.Layer):
         input_dim = input_shape[-1]
 
         if self.pooling_method == 'attention':
-            # Learnable query embeddings for cross-attention
+            # Create learnable query embeddings
             self.query_embeddings = self.add_weight(
                 shape=(self.num_queries, input_dim),
                 initializer='glorot_uniform',
@@ -721,19 +794,19 @@ class PatchPooling(keras.layers.Layer):
                 name='query_embeddings'
             )
 
-            # Cross-attention layer
-            self.attention_layer = MultiHeadAttention(
-                embed_dim=input_dim,
-                num_heads=8,
-                name='patch_attention'
-            )
+            # Build attention layer with correct dimensions
+            query_shape = (input_shape[0], self.num_queries, input_dim)
+            self.attention_layer.build([query_shape, input_shape, input_shape])
 
-        # Output projection to desired dimension
+        # Create output projection if dimensions don't match
         if input_dim != self.output_dim:
             self.output_projection = keras.layers.Dense(
                 self.output_dim,
                 name='output_projection'
             )
+            # Build projection layer
+            projection_input_shape = (input_shape[0], None, input_dim)
+            self.output_projection.build(projection_input_shape)
 
     def call(
             self,
@@ -901,6 +974,7 @@ class PatchPooling(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class LocalEncoder(keras.layers.Layer):
     """
     Local Encoder for BLT that processes bytes within their patches.
@@ -908,6 +982,22 @@ class LocalEncoder(keras.layers.Layer):
     This encoder applies causal self-attention to bytes within patches,
     learning local patterns and dependencies. It then pools the byte
     representations to create a single representation for each patch.
+
+    **Intent**: Process byte sequences with local causal attention to capture
+    short-range dependencies, then aggregate into patch representations for
+    hierarchical global processing.
+
+    **Architecture**:
+    ```
+    Byte Tokens → Embedding → Positional → Local Transformers → Patch Pooling
+    [B,S] → [B,S,D_l] → [B,S,D_l] → [B,S,D_l] → [B,P,D_g]
+    ```
+
+    **Processing Flow**:
+    1. **Byte Embedding**: Map tokens to dense vectors
+    2. **Position Encoding**: Add positional information
+    3. **Local Attention**: Causal self-attention within patches
+    4. **Cross-Attention Pooling**: Aggregate bytes to patch representations
 
     Args:
         vocab_size: Size of byte vocabulary (typically 256 + special tokens).
@@ -949,25 +1039,13 @@ class LocalEncoder(keras.layers.Layer):
         self.global_dim = global_dim
         self.cross_attention_queries = cross_attention_queries
 
-        # Sublayers initialized in build()
-        self.byte_embedding = None
-        self.positional_embedding = None
-        self.transformer_layers = []
-        self.patch_pooling = None
-        self.layer_norm = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build local encoder layers."""
-        super().build(input_shape)
-
-        # Byte token embedding
+        # Create all sub-layers in __init__
         self.byte_embedding = keras.layers.Embedding(
             input_dim=self.vocab_size,
             output_dim=self.local_dim,
             name='byte_embedding'
         )
 
-        # Positional embedding for byte positions
         self.positional_embedding = PositionalEmbedding(
             max_seq_len=self.max_sequence_length,
             dim=self.local_dim,
@@ -975,7 +1053,7 @@ class LocalEncoder(keras.layers.Layer):
             name='positional_embedding'
         )
 
-        # Local transformer layers (causal attention)
+        self.transformer_layers = []
         for i in range(self.num_local_layers):
             layer = TransformerLayer(
                 hidden_size=self.local_dim,
@@ -986,7 +1064,6 @@ class LocalEncoder(keras.layers.Layer):
             )
             self.transformer_layers.append(layer)
 
-        # Patch pooling layer
         self.patch_pooling = PatchPooling(
             pooling_method=self.patch_pooling_method,
             output_dim=self.global_dim,
@@ -994,15 +1071,34 @@ class LocalEncoder(keras.layers.Layer):
             name='patch_pooling'
         )
 
-        # Final layer norm
         self.layer_norm = keras.layers.LayerNormalization(name='local_encoder_norm')
 
-        # Build sublayers
-        sample_shape = (input_shape[0], input_shape[1], self.local_dim)
-        for layer in self.transformer_layers:
-            layer.build(sample_shape)
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build local encoder layers."""
+        super().build(input_shape)
 
-        self.patch_pooling.build(sample_shape)
+        # Build embedding layer
+        self.byte_embedding.build(input_shape)
+
+        # Compute shape after embedding
+        embedded_shape = self.byte_embedding.compute_output_shape(input_shape)
+
+        # Build positional embedding
+        self.positional_embedding.build(embedded_shape)
+        pos_embedded_shape = self.positional_embedding.compute_output_shape(embedded_shape)
+
+        # Build transformer layers
+        current_shape = pos_embedded_shape
+        for layer in self.transformer_layers:
+            layer.build(current_shape)
+            current_shape = layer.compute_output_shape(current_shape)
+
+        # Build layer norm
+        self.layer_norm.build(current_shape)
+        norm_shape = current_shape
+
+        # Build patch pooling
+        self.patch_pooling.build(norm_shape)
 
     def call(
             self,
@@ -1063,12 +1159,29 @@ class LocalEncoder(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class GlobalTransformer(keras.layers.Layer):
     """
     Global Transformer for BLT that processes patch sequences.
 
     This transformer applies self-attention across patch representations
     to model long-range dependencies in the hierarchical structure.
+
+    **Intent**: Model long-range dependencies between patches using standard
+    causal self-attention, enabling global context understanding while
+    maintaining computational efficiency through reduced sequence length.
+
+    **Architecture**:
+    ```
+    Patch Representations → Positional → Global Transformers → Contextualized Patches
+    [B,P,D_g] → [B,P,D_g] → [B,P,D_g] → [B,P,D_g]
+    ```
+
+    **Global Processing**:
+    1. **Patch Positions**: Add positional encoding to patch sequence
+    2. **Causal Attention**: Standard transformer self-attention across patches
+    3. **Deep Processing**: Multiple layers for complex dependency modeling
+    4. **Context Integration**: Rich patch representations with global awareness
 
     Args:
         global_dim: Hidden dimension for global transformer.
@@ -1095,16 +1208,7 @@ class GlobalTransformer(keras.layers.Layer):
         self.max_patches = max_patches
         self.dropout_rate = dropout_rate
 
-        # Sublayers initialized in build()
-        self.patch_positional_embedding = None
-        self.transformer_layers = []
-        self.layer_norm = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build global transformer layers."""
-        super().build(input_shape)
-
-        # Positional embedding for patch positions
+        # Create sub-layers in __init__
         self.patch_positional_embedding = PositionalEmbedding(
             max_seq_len=self.max_patches,
             dim=self.global_dim,
@@ -1112,7 +1216,7 @@ class GlobalTransformer(keras.layers.Layer):
             name='patch_positional_embedding'
         )
 
-        # Global transformer layers
+        self.transformer_layers = []
         for i in range(self.num_global_layers):
             layer = TransformerLayer(
                 hidden_size=self.global_dim,
@@ -1123,12 +1227,24 @@ class GlobalTransformer(keras.layers.Layer):
             )
             self.transformer_layers.append(layer)
 
-        # Final layer norm
         self.layer_norm = keras.layers.LayerNormalization(name='global_transformer_norm')
 
-        # Build sublayers
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build global transformer layers."""
+        super().build(input_shape)
+
+        # Build positional embedding
+        self.patch_positional_embedding.build(input_shape)
+        pos_embedded_shape = self.patch_positional_embedding.compute_output_shape(input_shape)
+
+        # Build transformer layers
+        current_shape = pos_embedded_shape
         for layer in self.transformer_layers:
-            layer.build(input_shape)
+            layer.build(current_shape)
+            current_shape = layer.compute_output_shape(current_shape)
+
+        # Build final layer norm
+        self.layer_norm.build(current_shape)
 
     def call(
             self,
@@ -1175,12 +1291,34 @@ class GlobalTransformer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class LocalDecoder(keras.layers.Layer):
     """
     Local Decoder for BLT that generates next byte predictions.
 
     This decoder processes byte sequences with causal self-attention
     and uses cross-attention to incorporate global patch context.
+
+    **Intent**: Generate next-byte predictions by combining local causal
+    modeling with global patch context, enabling both local coherence
+    and global consistency in generation.
+
+    **Architecture**:
+    ```
+    Byte Tokens + Global Context → Self-Attention → Cross-Attention → Output Logits
+    [B,S] + [B,P,D_g] → [B,S,D_l] → [B,S,D_l] → [B,S,V]
+    ```
+
+    **Decoder Flow**:
+    1. **Byte Embedding**: Map input tokens to local dimension
+    2. **Causal Self-Attention**: Model local byte dependencies
+    3. **Cross-Attention**: Incorporate global patch context
+    4. **Output Projection**: Generate vocabulary logits
+
+    **Cross-Attention Mechanism**:
+    - Bytes query their corresponding patch representations
+    - Masked to ensure bytes only see relevant patch context
+    - Combines local patterns with global understanding
 
     Args:
         vocab_size: Size of byte vocabulary (typically 256 + special tokens).
@@ -1213,28 +1351,13 @@ class LocalDecoder(keras.layers.Layer):
         self.max_sequence_length = max_sequence_length
         self.dropout_rate = dropout_rate
 
-        # Sublayers initialized in build()
-        self.byte_embedding = None
-        self.positional_embedding = None
-        self.decoder_layers = []
-        self.cross_attention_layers = []
-        self.cross_attention_norms = []
-        self.context_projection = None
-        self.layer_norm = None
-        self.output_projection = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build local decoder layers."""
-        super().build(input_shape)
-
-        # Byte token embedding (can be shared with encoder or separate)
+        # Create sub-layers in __init__
         self.byte_embedding = keras.layers.Embedding(
             input_dim=self.vocab_size,
             output_dim=self.local_dim,
             name='decoder_byte_embedding'
         )
 
-        # Positional embedding
         self.positional_embedding = PositionalEmbedding(
             max_seq_len=self.max_sequence_length,
             dim=self.local_dim,
@@ -1242,14 +1365,19 @@ class LocalDecoder(keras.layers.Layer):
             name='decoder_positional_embedding'
         )
 
-        # Project global context to local dimension if needed
+        # Context projection if dimensions don't match
+        self.context_projection = None
         if self.global_dim != self.local_dim:
             self.context_projection = keras.layers.Dense(
                 self.local_dim,
                 name='context_projection'
             )
 
-        # Decoder transformer layers with cross-attention
+        # Decoder layers with cross-attention
+        self.decoder_layers = []
+        self.cross_attention_layers = []
+        self.cross_attention_norms = []
+
         for i in range(self.num_local_layers):
             # Self-attention layer
             decoder_layer = TransformerLayer(
@@ -1274,20 +1402,55 @@ class LocalDecoder(keras.layers.Layer):
             cross_norm = keras.layers.LayerNormalization(name=f'cross_attention_norm_{i}')
             self.cross_attention_norms.append(cross_norm)
 
-        # Final layer norm and output projection
+        # Final layers
         self.layer_norm = keras.layers.LayerNormalization(name='decoder_norm')
         self.output_projection = keras.layers.Dense(
             self.vocab_size,
             name='output_projection'
         )
 
-        # Build sublayers
-        sample_shape = (input_shape[0], input_shape[1], self.local_dim)
-        for layer in self.decoder_layers:
-            layer.build(sample_shape)
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build local decoder layers."""
+        super().build(input_shape)
 
-        for layer in self.cross_attention_layers:
-            layer.build(sample_shape)
+        # Build byte embedding
+        byte_input_shape = input_shape[0] if isinstance(input_shape, list) else input_shape
+        self.byte_embedding.build(byte_input_shape)
+
+        # Compute embedded shape
+        embedded_shape = self.byte_embedding.compute_output_shape(byte_input_shape)
+
+        # Build positional embedding
+        self.positional_embedding.build(embedded_shape)
+        pos_embedded_shape = self.positional_embedding.compute_output_shape(embedded_shape)
+
+        # Build context projection if needed
+        if self.context_projection is not None:
+            global_context_shape = (embedded_shape[0], None, self.global_dim)
+            self.context_projection.build(global_context_shape)
+
+        # Build decoder layers and cross-attention
+        current_shape = pos_embedded_shape
+        cross_attention_kv_shape = (current_shape[0], current_shape[1], self.local_dim)
+
+        for i, (decoder_layer, cross_attention, cross_norm) in enumerate(
+                zip(self.decoder_layers, self.cross_attention_layers, self.cross_attention_norms)
+        ):
+            # Build self-attention decoder layer
+            decoder_layer.build(current_shape)
+            decoder_output_shape = decoder_layer.compute_output_shape(current_shape)
+
+            # Build cross-attention layer
+            cross_attention.build([decoder_output_shape, cross_attention_kv_shape, cross_attention_kv_shape])
+
+            # Build cross-attention norm
+            cross_norm.build(decoder_output_shape)
+
+            current_shape = decoder_output_shape
+
+        # Build final layers
+        self.layer_norm.build(current_shape)
+        self.output_projection.build(current_shape)
 
     def call(
             self,
@@ -1392,8 +1555,13 @@ class LocalDecoder(keras.layers.Layer):
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape."""
-        batch_size = input_shape[0]
-        seq_len = input_shape[1]
+        if isinstance(input_shape, list):
+            # Multiple inputs - use first for batch and seq dimensions
+            batch_size = input_shape[0][0]
+            seq_len = input_shape[0][1]
+        else:
+            batch_size = input_shape[0]
+            seq_len = input_shape[1]
         return (batch_size, seq_len, self.vocab_size)
 
     def get_config(self) -> Dict[str, Any]:
