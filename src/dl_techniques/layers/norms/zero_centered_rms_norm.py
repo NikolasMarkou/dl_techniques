@@ -40,14 +40,18 @@ References:
     - Builds upon concepts from both LayerNorm and RMSNorm literature
 """
 
-# Core Keras imports - always use full paths
+
 import keras
 from keras import ops, initializers
 from typing import Optional, Union, Tuple, Dict, Any
 
-# DL-Techniques framework imports
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class ZeroCenteredRMSNorm(keras.layers.Layer):
