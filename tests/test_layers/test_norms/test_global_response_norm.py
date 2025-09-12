@@ -471,3 +471,5 @@ def debug_layer_serialization(layer_config: Dict[str, Any], sample_input: keras.
         logger.error(f"❌ Error: {e}")
         raise
 
+if __name__ == "__main__":
+    pytest.main([__file__])

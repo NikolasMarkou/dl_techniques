@@ -25,13 +25,15 @@ from .global_response_norm import GlobalResponseNormalization
 from .logit_norm import LogitNorm
 from .max_logit_norm import MaxLogitNorm, DecoupledMaxLogit, DMLPlus
 from .dynamic_tanh import DynamicTanh
+from .zero_centered_rms_norm import ZeroCenteredRMSNorm
 
 # ---------------------------------------------------------------------
 
 NormalizationType = Literal[
-    'layer_norm', 'batch_norm', 'rms_norm', 'band_rms', 'adaptive_band_rms',
-    'band_logit_norm', 'global_response_norm', 'logit_norm', 'max_logit_norm',
-    'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center', 'dynamic_tanh'
+    'layer_norm', 'batch_norm', 'rms_norm', 'zero_centered_rms_norm', 'band_rms',
+    'adaptive_band_rms', 'band_logit_norm', 'global_response_norm', 'logit_norm',
+    'max_logit_norm', 'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center',
+    'dynamic_tanh'
 ]
 
 # ---------------------------------------------------------------------
@@ -55,6 +57,7 @@ def create_normalization_layer(
             - 'layer_norm': Standard Keras LayerNormalization
             - 'batch_norm': Standard Keras BatchNormalization
             - 'rms_norm': Root Mean Square normalization
+            - 'zero_centered_rms_norm': Zero-centered RMS normalization with mean centering
             - 'band_rms': RMS normalization with bounded constraints
             - 'adaptive_band_rms': Adaptive RMS with log-transformed scaling
             - 'band_logit_norm': Band-constrained logit normalization
@@ -78,9 +81,10 @@ def create_normalization_layer(
                 - center: Whether to add learnable bias
                 - scale: Whether to add learnable scale
 
-            rms_norm:
+            rms_norm/zero_centered_rms_norm:
                 - axis: Normalization axis (int or tuple)
                 - use_scale: Whether to use learnable scale parameter
+                - scale_initializer: Initializer for scale parameter
 
             band_rms/adaptive_band_rms:
                 - max_band_width: Maximum band width constraint
@@ -129,12 +133,21 @@ def create_normalization_layer(
             epsilon=1e-5
         )
 
-        # RMS normalization with custom axis
+        # Standard RMS normalization
         rms_norm = create_normalization_layer(
             'rms_norm',
             name='rms_norm_layer',
             axis=-1,
             use_scale=True
+        )
+
+        # Zero-centered RMS normalization for enhanced stability
+        zero_centered_rms = create_normalization_layer(
+            'zero_centered_rms_norm',
+            name='zero_centered_norm',
+            axis=-1,
+            use_scale=True,
+            epsilon=1e-5
         )
 
         # Band RMS with custom constraints
@@ -167,6 +180,8 @@ def create_normalization_layer(
         - Some normalization types may ignore certain parameters if they're not applicable
         - For specialized normalization layers, refer to their individual documentation
           for detailed parameter descriptions and usage guidelines
+        - Zero-centered RMS normalization is particularly beneficial for large language
+          models and transformer architectures where training stability is crucial
     """
     # Prepare base parameters
     layer_kwargs = kwargs.copy()
@@ -188,6 +203,11 @@ def create_normalization_layer(
         # Root Mean Square normalization
         layer_kwargs.setdefault('epsilon', epsilon)
         return RMSNorm(**layer_kwargs)
+
+    elif normalization_type == 'zero_centered_rms_norm':
+        # Zero-centered RMS normalization with enhanced stability
+        layer_kwargs.setdefault('epsilon', epsilon)
+        return ZeroCenteredRMSNorm(**layer_kwargs)
 
     elif normalization_type == 'band_rms':
         # RMS normalization with bounded constraints
@@ -246,9 +266,10 @@ def create_normalization_layer(
 
     else:
         supported_types = [
-            'layer_norm', 'batch_norm', 'rms_norm', 'band_rms', 'adaptive_band_rms',
-            'band_logit_norm', 'global_response_norm', 'logit_norm', 'max_logit_norm',
-            'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center', 'dynamic_tanh'
+            'layer_norm', 'batch_norm', 'rms_norm', 'zero_centered_rms_norm', 'band_rms',
+            'adaptive_band_rms', 'band_logit_norm', 'global_response_norm', 'logit_norm',
+            'max_logit_norm', 'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center',
+            'dynamic_tanh'
         ]
         raise ValueError(
             f"Unknown normalization type: '{normalization_type}'. "
@@ -270,6 +291,7 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
         ```python
         info = get_normalization_info()
         print(info['rms_norm']['description'])
+        print(info['zero_centered_rms_norm']['use_case'])
         print(info['band_rms']['parameters'])
         ```
     """
@@ -286,8 +308,13 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
         },
         'rms_norm': {
             'description': 'Root Mean Square normalization without centering',
-            'parameters': ['axis', 'epsilon', 'use_scale'],
+            'parameters': ['axis', 'epsilon', 'use_scale', 'scale_initializer'],
             'use_case': 'Transformers, especially for faster training and inference'
+        },
+        'zero_centered_rms_norm': {
+            'description': 'Zero-centered RMS normalization combining RMSNorm efficiency with LayerNorm stability',
+            'parameters': ['axis', 'epsilon', 'use_scale', 'scale_initializer'],
+            'use_case': 'Large language models and transformers requiring enhanced training stability'
         },
         'band_rms': {
             'description': 'RMS normalization with bounded magnitude constraints',
@@ -336,7 +363,7 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
         },
         'dynamic_tanh': {
             'description': 'Dynamic Tanh normalization for normalization-free transformers',
-            'parameters': ['axis', 'alpha_init_value'],
+            'parameters': ['axis', 'alpha_init_value', 'kernel_initializer'],
             'use_case': 'Normalization-free transformer architectures'
         }
     }
@@ -364,6 +391,14 @@ def validate_normalization_config(
         ```python
         # This will pass
         validate_normalization_config('rms_norm', axis=-1, use_scale=True)
+
+        # This will also pass - zero-centered RMS norm
+        validate_normalization_config(
+            'zero_centered_rms_norm',
+            axis=-1,
+            use_scale=True,
+            epsilon=1e-5
+        )
 
         # This will raise ValueError
         validate_normalization_config('dynamic_tanh', epsilon=1e-6)  # DynamicTanh doesn't use epsilon
@@ -404,6 +439,83 @@ def validate_normalization_config(
             if not isinstance(constant, (int, float)):
                 raise ValueError("constant must be a number")
 
+    if normalization_type in ['rms_norm', 'zero_centered_rms_norm']:
+        if 'epsilon' in kwargs:
+            epsilon = kwargs['epsilon']
+            if not isinstance(epsilon, (int, float)) or epsilon <= 0:
+                raise ValueError("epsilon must be a positive number")
+
+    if normalization_type == 'dynamic_tanh':
+        if 'alpha_init_value' in kwargs:
+            alpha_init_value = kwargs['alpha_init_value']
+            if not isinstance(alpha_init_value, (int, float)) or alpha_init_value <= 0:
+                raise ValueError("alpha_init_value must be a positive number")
+
     return True
+
+# ---------------------------------------------------------------------
+
+
+def create_normalization_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
+    """
+    Create a normalization layer from a configuration dictionary.
+
+    This function provides an alternative interface for creating normalization layers
+    when the configuration is stored as a dictionary, commonly used in configuration
+    files or hyperparameter specifications.
+
+    Args:
+        config: Configuration dictionary containing:
+            - 'type': Required. Normalization type (same as normalization_type in create_normalization_layer)
+            - 'name': Optional. Layer name
+            - 'epsilon': Optional. Epsilon for numerical stability (defaults to 1e-6)
+            - Additional parameters specific to the normalization type
+
+    Returns:
+        Configured normalization layer instance.
+
+    Raises:
+        KeyError: If 'type' key is missing from config.
+        ValueError: If normalization type or parameters are invalid.
+
+    Example:
+        ```python
+        # Configuration for zero-centered RMS normalization
+        config = {
+            'type': 'zero_centered_rms_norm',
+            'name': 'llm_norm',
+            'epsilon': 1e-5,
+            'axis': -1,
+            'use_scale': True,
+            'scale_initializer': 'ones'
+        }
+
+        layer = create_normalization_from_config(config)
+
+        # Configuration for band RMS with constraints
+        band_config = {
+            'type': 'band_rms',
+            'name': 'constrained_norm',
+            'max_band_width': 0.1,
+            'epsilon': 1e-6
+        }
+
+        band_layer = create_normalization_from_config(band_config)
+
+        # Configuration from JSON file
+        import json
+        with open('model_config.json', 'r') as f:
+            model_config = json.load(f)
+
+        norm_layer = create_normalization_from_config(model_config['normalization'])
+        ```
+    """
+    if 'type' not in config:
+        raise KeyError("Configuration dictionary must contain 'type' key")
+
+    config_copy = config.copy()
+    normalization_type = config_copy.pop('type')
+
+    return create_normalization_layer(normalization_type, **config_copy)
 
 # ---------------------------------------------------------------------
