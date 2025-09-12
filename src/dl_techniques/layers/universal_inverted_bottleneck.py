@@ -124,6 +124,13 @@ class UIB(keras.layers.Layer):
             "use_bias": False
         }
 
+        depth_conv_config = {
+            "depthwise_initializer": self.kernel_initializer,
+            "depthwise_regularizer": self.kernel_regularizer,
+            "padding": "same",
+            "use_bias": False
+        }
+
         # 2. CREATE all sub-layers in __init__ (they remain unbuilt)
         # Expansion phase
         # Note: The expanded filter count is determined from input_shape in build()
@@ -140,7 +147,7 @@ class UIB(keras.layers.Layer):
             self.dw1 = layers.DepthwiseConv2D(
                 kernel_size=self.kernel_size,
                 strides=self.stride,
-                **conv_config
+                **depth_conv_config
             )
             self.bn_dw1 = layers.BatchNormalization()
         else:
@@ -151,7 +158,7 @@ class UIB(keras.layers.Layer):
             self.dw2 = layers.DepthwiseConv2D(
                 kernel_size=self.kernel_size,
                 strides=1,
-                **conv_config
+                **depth_conv_config
             )
             self.bn_dw2 = layers.BatchNormalization()
         else:

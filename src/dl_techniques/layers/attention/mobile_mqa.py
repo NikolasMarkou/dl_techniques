@@ -209,10 +209,12 @@ class MobileMQA(keras.layers.Layer):
         self.o_proj.build(input_shape)
 
         if self.downsample is not None:
-            # FIX: Handle both list and tuple for input_shape during serialization.
+            # The input shape for the downsample layer is the output shape
+            # of the kv_proj layer.
             kv_shape = list(input_shape)
-            kv_shape[-1] = 2 * self.head_dim
+            kv_shape[-1] = self.kv_proj.units
             self.downsample.build(tuple(kv_shape))
+
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -234,8 +236,9 @@ class MobileMQA(keras.layers.Layer):
         Returns:
             Output tensor of shape (batch_size, height, width, dim).
         """
-        height = ops.shape(inputs)[1]
-        width = ops.shape(inputs)[2]
+        input_shape = ops.shape(inputs)
+        height = input_shape[1]
+        width = input_shape[2]
 
         # Project to queries and key-values
         q = self.q_proj(inputs, training=training)
@@ -244,7 +247,8 @@ class MobileMQA(keras.layers.Layer):
         # Apply optional downsampling to key-values
         if self.downsample is not None:
             kv = self.downsample(kv, training=training)
-            kv_height, kv_width = height // 2, width // 2
+            kv_shape = ops.shape(kv)
+            kv_height, kv_width = kv_shape[1], kv_shape[2]
         else:
             kv_height, kv_width = height, width
 
