@@ -1,161 +1,13 @@
 """
-Qwen3 Next Model Implementation
-===============================
+Qwen3 Next Model Implementation (Corrected)
+============================================
 
-A complete implementation of the Qwen3 Next architecture using Mixture of Experts (MoE).
-This implementation provides a flexible, production-ready Qwen3 Next model with modern
-dl-techniques features optimized for efficiency and scalability.
+A complete implementation of the Qwen3 Next architecture following the correct block structure:
+- Each block contains 3x Gated DeltaNet layers + 1x Gated Attention layer
+- Each layer has its own Zero-Centered RMSNorm and MoE
+- Proper residual connections throughout
 
-Based on: Qwen3 Next architecture with 80B parameters and sparsely activated experts.
-
-Theory and Architecture Overview:
----------------------------------
-
-Qwen3 Next represents a significant advancement in large language models by incorporating
-Mixture of Experts (MoE) architecture to achieve high parameter counts while maintaining
-computational efficiency. Unlike traditional dense models that activate all parameters
-for every input, MoE models selectively activate only a subset of expert networks,
-dramatically reducing inference costs while scaling model capacity.
-
-**Key Innovations:**
-
-1. **Mixture of Experts (MoE) Architecture**: Each transformer layer includes multiple
-   expert networks with a gating mechanism that selects which experts to activate.
-   This enables scaling to 80B+ parameters while keeping compute cost manageable.
-
-2. **Grouped Query Attention (GQA)**: Reduces memory bandwidth and improves efficiency
-   by sharing key-value heads across multiple query heads, maintaining performance
-   while reducing computational overhead.
-
-3. **Sparse Expert Activation**: Only 8 out of 64 experts are activated per token,
-   achieving a 8:1 sparsity ratio that dramatically reduces active parameters during
-   inference while maintaining model expressiveness.
-
-4. **Advanced Positional Encoding**: Uses Rotary Position Embeddings (RoPE) with
-   extended context support through high theta values (1M) for handling long sequences.
-
-**Architecture Components:**
-
-```
-Input Processing:
-    Token IDs (vocab_size=151k)
-           │
-           ▼
-    Token Embeddings + RoPE Position Encoding
-           │
-           ▼
-    Input Projections (dim=2048)
-           │
-           ▼
-Transformer Stack (N layers):
-    Pre-RMSNorm
-           │
-           ▼
-    Grouped Query Attention (16 heads, 4 KV heads)
-           │
-    Add & Residual
-           ▼
-    Pre-RMSNorm
-           │
-           ▼
-    Mixture of Experts Layer:
-        Router (Top-K=8 of 64 experts)
-               │
-        ┌──────┼──────┬──────┬──────┐
-        ▼      ▼      ▼      ▼      ▼
-    Expert₁ Expert₂ ... Expert₈ (SwiGLU)
-        │      │      │      │      │
-        └──────┼──────┴──────┴──────┘
-               ▼
-    Weighted Expert Combination
-           │
-    Add & Residual
-           ▼
-    Layer N Output
-           │
-           ▼
-Output Processing:
-    Final RMSNorm
-           │
-           ▼
-    Linear Projection → Logits (vocab_size=151k)
-```
-
-**Mathematical Foundation:**
-
-Mixture of Experts Gating:
-- Gate scores: G(x) = Softmax(x·W_g)
-- Top-K selection: experts = TopK(G(x), k=8)
-- Expert combination: y = Σᵢ G(x)ᵢ · Expertᵢ(x) for i in TopK
-
-Grouped Query Attention:
-- Queries: Q = XW_Q (shape: [batch, seq, n_heads, head_dim])
-- Keys/Values: K,V = XW_K, XW_V (shape: [batch, seq, n_kv_heads, head_dim])
-- Attention: Attention(Q,K,V) with K,V broadcasted across query groups
-
-Rotary Position Embeddings:
-- θⱼ = rope_theta^(-2j/d) for j ∈ [0, d/2)
-- Rotation matrices applied to Q,K: RoPE(x,pos) = x rotated by pos·θ
-
-**Model Variants:**
-
-- **Qwen3-Next-80B-A3B**: 80B total parameters, ~3B active per token
-- **Qwen3-Next-80B**: Dense variant without MoE
-- **Qwen3-Next-Small**: Lightweight variant for experimentation
-
-**Resource Efficiency:**
-
-The MoE architecture provides significant computational savings:
-- **Storage**: 80B total parameters, only ~10-20B loaded in memory per device
-- **Computation**: ~3B active parameters per forward pass vs 80B dense
-- **Throughput**: ~26x improvement in inference speed vs dense equivalent
-- **Memory**: Linear scaling with active parameters rather than total parameters
-
-**Modern Extensions in this Implementation:**
-
-- Configurable expert topologies and gating strategies
-- Advanced normalization options (RMSNorm, DynamicTanh)
-- Flexible attention mechanisms (standard, window, differential)
-- Production-ready serialization and deployment features
-- Memory-efficient implementation with gradient checkpointing
-- Comprehensive factory functions for common use cases
-
-Training Strategies:
-------------------
-- **Pre-training**: Large-scale autoregressive training with expert load balancing
-- **Expert Specialization**: Routing tokens to specialized expert networks
-- **Load Balancing**: Auxiliary losses to ensure uniform expert utilization
-- **Gradient Scaling**: Proper gradient handling across sparse expert activations
-
-Usage Examples:
---------------
-```python
-# Create Qwen3 Next 80B-A3B model
-model = create_qwen3_next_80b_a3b(max_seq_len=8192)
-
-# Create smaller model for experimentation
-small_model = Qwen3Next.from_variant("small", max_seq_len=2048)
-
-# Advanced configuration with custom experts
-config = create_qwen3_next_with_advanced_features(
-    variant="80b_a3b",
-    num_experts=128,
-    experts_per_token=16,
-    normalization_type="rms_norm"
-)
-model = Qwen3Next(**config)
-
-# Generate text
-input_ids = keras.random.uniform((1, 100), 0, 151936, dtype="int32")
-outputs = model(input_ids)
-logits = outputs  # Shape: (1, 100, 151936)
-
-# For fine-tuning
-inputs = keras.Input(shape=(None,), dtype="int32", name="input_ids")
-outputs = model(inputs)
-custom_head = keras.layers.Dense(num_classes)(outputs)
-fine_tuned_model = keras.Model(inputs, custom_head)
-```
+Based on the architectural diagram showing the precise layer arrangement and connections.
 """
 
 import keras
@@ -166,22 +18,246 @@ from typing import Optional, Union, Any, Dict, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.transformer import TransformerLayer
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.norms import create_normalization_layer
+
+from dl_techniques.layers.gated_delta_net import GatedDeltaNet
+from dl_techniques.layers.attention.gated_attention import GatedAttention
+
 
 # ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
+class Qwen3NextBlock(keras.layers.Layer):
+    """
+    Qwen3 Next transformer block with the correct architecture.
+
+    This block implements the exact pattern shown in the architecture diagram:
+    - 3x Gated DeltaNet layers (each with Zero-Centered RMSNorm + MoE + residual)
+    - 1x Gated Attention layer (with Zero-Centered RMSNorm + MoE + residual)
+
+    **Architecture Pattern (bottom to top)**:
+    ```
+    Input
+      ↓
+    Zero-Centered RMSNorm → Gated DeltaNet → MoE → ⊕ (residual)
+      ↓
+    Zero-Centered RMSNorm → Gated DeltaNet → MoE → ⊕ (residual)
+      ↓
+    Zero-Centered RMSNorm → Gated DeltaNet → MoE → ⊕ (residual)
+      ↓
+    Zero-Centered RMSNorm → Gated Attention → MoE → ⊕ (residual)
+      ↓
+    Output
+    ```
+
+    Args:
+        dim: Integer, model dimension size
+        num_heads: Integer, number of attention heads
+        head_dim: Optional integer, dimension per head
+        moe_config: MoE configuration for expert layers
+        normalization_type: String, type of normalization
+        norm_eps: Float, epsilon for normalization
+        dropout_rate: Float, dropout rate for regularization
+        use_stochastic_depth: Boolean, whether to use stochastic depth
+        stochastic_depth_rate: Float, stochastic depth rate
+        **kwargs: Additional arguments for Layer base class
+    """
+
+    def __init__(
+            self,
+            dim: int,
+            num_heads: int,
+            head_dim: Optional[int] = None,
+            moe_config: Optional[MoEConfig] = None,
+            normalization_type: str = "zero_centered_rms_norm",
+            norm_eps: float = 1e-6,
+            dropout_rate: float = 0.0,
+            use_stochastic_depth: bool = False,
+            stochastic_depth_rate: float = 0.1,
+            **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+
+        # Store configuration
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = head_dim if head_dim is not None else dim // num_heads
+        self.moe_config = moe_config
+        self.normalization_type = normalization_type
+        self.norm_eps = norm_eps
+        self.dropout_rate = dropout_rate
+        self.use_stochastic_depth = use_stochastic_depth
+        self.stochastic_depth_rate = stochastic_depth_rate
+
+        # Create all sub-layers in __init__
+
+        # 3x Gated DeltaNet layers with their normalization and MoE
+        self.delta_norms = []
+        self.delta_layers = []
+        self.delta_moe_layers = []
+
+        for i in range(3):
+            # Pre-layer normalization
+            delta_norm = create_normalization_layer(
+                normalization_type,
+                epsilon=norm_eps,
+                name=f"delta_norm_{i}"
+            )
+            self.delta_norms.append(delta_norm)
+
+            # Gated DeltaNet layer
+            delta_layer = GatedDeltaNet(
+                dim=dim,
+                num_heads=num_heads,
+                head_dim=self.head_dim,
+                dropout_rate=dropout_rate,
+                name=f"gated_delta_net_{i}"
+            )
+            self.delta_layers.append(delta_layer)
+
+            # MoE layer after DeltaNet
+            if moe_config is not None:
+                from dl_techniques.layers.moe import MixtureOfExperts
+                delta_moe = MixtureOfExperts(
+                    moe_config,
+                    name=f"delta_moe_{i}"
+                )
+                self.delta_moe_layers.append(delta_moe)
+            else:
+                self.delta_moe_layers.append(None)
+
+        # 1x Gated Attention layer with its normalization and MoE
+        self.attention_norm = create_normalization_layer(
+            normalization_type,
+            epsilon=norm_eps,
+            name="attention_norm"
+        )
+
+        self.attention_layer = GatedAttention(
+            dim=dim,
+            num_heads=num_heads,
+            head_dim=self.head_dim,
+            dropout_rate=dropout_rate,
+            name="gated_attention"
+        )
+
+        # MoE layer after attention
+        if moe_config is not None:
+            from dl_techniques.layers.moe import MixtureOfExperts
+            self.attention_moe = MixtureOfExperts(
+                moe_config,
+                name="attention_moe"
+            )
+        else:
+            self.attention_moe = None
+
+        # Stochastic depth for regularization
+        if use_stochastic_depth and stochastic_depth_rate > 0.0:
+            from dl_techniques.layers.stochastic_depth import StochasticDepth
+            self.stochastic_depth_layers = []
+            for i in range(4):  # 3 delta + 1 attention
+                stoch_depth = StochasticDepth(
+                    drop_path_rate=stochastic_depth_rate,
+                    name=f"stochastic_depth_{i}"
+                )
+                self.stochastic_depth_layers.append(stoch_depth)
+        else:
+            self.stochastic_depth_layers = []
+
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            attention_mask: Optional[keras.KerasTensor] = None,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Forward pass through the Qwen3Next block.
+
+        Args:
+            inputs: Input tensor of shape (batch_size, seq_len, dim)
+            attention_mask: Optional attention mask
+            training: Training mode flag
+
+        Returns:
+            Output tensor of shape (batch_size, seq_len, dim)
+        """
+        x = inputs
+
+        # Process through 3x Gated DeltaNet layers
+        for i in range(3):
+            # Pre-normalization
+            x_norm = self.delta_norms[i](x, training=training)
+
+            # Gated DeltaNet
+            delta_out = self.delta_layers[i](x_norm, training=training)
+
+            # MoE if configured
+            if self.delta_moe_layers[i] is not None:
+                delta_out = self.delta_moe_layers[i](delta_out, training=training)
+
+            # Apply stochastic depth if configured
+            if (self.stochastic_depth_layers and
+                    i < len(self.stochastic_depth_layers)):
+                delta_out = self.stochastic_depth_layers[i](
+                    delta_out, training=training
+                )
+
+            # Residual connection
+            x = x + delta_out
+
+        # Process through 1x Gated Attention layer
+        # Pre-normalization
+        x_norm = self.attention_norm(x, training=training)
+
+        # Gated Attention
+        attn_out = self.attention_layer(x_norm, mask=attention_mask, training=training)
+
+        # MoE if configured
+        if self.attention_moe is not None:
+            attn_out = self.attention_moe(attn_out, training=training)
+
+        # Apply stochastic depth if configured
+        if (self.stochastic_depth_layers and
+                len(self.stochastic_depth_layers) > 3):
+            attn_out = self.stochastic_depth_layers[3](
+                attn_out, training=training
+            )
+
+        # Residual connection
+        x = x + attn_out
+
+        return x
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return configuration for serialization."""
+        config = super().get_config()
+        config.update({
+            "dim": self.dim,
+            "num_heads": self.num_heads,
+            "head_dim": self.head_dim,
+            "moe_config": self.moe_config.to_dict() if self.moe_config else None,
+            "normalization_type": self.normalization_type,
+            "norm_eps": self.norm_eps,
+            "dropout_rate": self.dropout_rate,
+            "use_stochastic_depth": self.use_stochastic_depth,
+            "stochastic_depth_rate": self.stochastic_depth_rate,
+        })
+        return config
+
+
+@keras.saving.register_keras_serializable()
 class Qwen3Next(keras.Model):
     """
-    Qwen3 Next (Mixture of Experts) model.
+    Qwen3 Next (Mixture of Experts) model with correct architecture.
 
-    A modern, flexible implementation of the Qwen3 Next architecture with support for
-    sparse Mixture of Experts, advanced attention mechanisms, and various optimization
-    features from dl-techniques library.
+    This implementation follows the exact pattern shown in the architecture diagram:
+    - Token embeddings + RoPE position embeddings
+    - N blocks, each containing 3x GatedDeltaNet + 1x GatedAttention
+    - Each layer has its own Zero-Centered RMSNorm and MoE
+    - Final normalization and language modeling head
 
     **Architecture Overview:**
     ```
@@ -191,23 +267,23 @@ class Qwen3Next(keras.Model):
     Token Embeddings (vocab_size=151k, dim=2048)
            │
            ▼
-    RoPE Position Embeddings (theta=1M, long context)
+    RoPE Position Embeddings (theta=1M)
            │
            ▼
-    TransformerLayer₁:
-        Pre-RMSNorm → GQA(16 heads, 4 KV) → Residual
-        Pre-RMSNorm → MoE(64 experts, top-8) → Residual
+    Qwen3NextBlock₁:
+        3x [Zero-Centered RMSNorm → GatedDeltaNet → MoE → Residual]
+        1x [Zero-Centered RMSNorm → GatedAttention → MoE → Residual]
            │
            ▼
           ...
            │
            ▼
-    TransformerLayerₙ:
-        Pre-RMSNorm → GQA → Residual
-        Pre-RMSNorm → MoE → Residual
+    Qwen3NextBlockₙ:
+        3x [Zero-Centered RMSNorm → GatedDeltaNet → MoE → Residual]
+        1x [Zero-Centered RMSNorm → GatedAttention → MoE → Residual]
            │
            ▼
-    Final RMSNorm
+    Final Zero-Centered RMSNorm
            │
            ▼
     Linear Projection → Logits (vocab_size=151k)
@@ -216,56 +292,22 @@ class Qwen3Next(keras.Model):
     Args:
         vocab_size: Integer, size of the vocabulary. Defaults to 151936.
         hidden_size: Integer, dimensionality of encoder layers. Defaults to 2048.
-        num_layers: Integer, number of transformer layers. Defaults to 48.
+        num_layers: Integer, number of transformer blocks. Defaults to 12.
         num_attention_heads: Integer, number of attention heads. Defaults to 16.
         num_key_value_heads: Integer, number of key-value heads for GQA. Defaults to 4.
-        intermediate_size: Integer, intermediate FFN size (ignored with MoE). Defaults to 5632.
         max_position_embeddings: Integer, maximum sequence length. Defaults to 8192.
         rope_theta: Float, RoPE theta parameter. Defaults to 1000000.0.
         num_experts: Integer, total number of experts in MoE layers. Defaults to 64.
         num_experts_per_tok: Integer, number of experts activated per token. Defaults to 8.
-        shared_expert_intermediate_size: Integer, shared expert size. Defaults to 512.
         moe_intermediate_size: Integer, individual expert intermediate size. Defaults to 1408.
         norm_eps: Float, epsilon for normalization layers. Defaults to 1e-6.
-        tie_word_embeddings: Boolean, whether to tie input/output embeddings. Defaults to False.
         dropout_rate: Float, dropout rate for regularization. Defaults to 0.0.
-        attention_dropout_rate: Float, attention-specific dropout rate. Defaults to 0.0.
         initializer_range: Float, standard deviation for weight initialization. Defaults to 0.02.
-        normalization_type: String, type of normalization layer. Defaults to "rms_norm".
-        attention_type: String, type of attention mechanism. Defaults to "group_query_attention".
+        normalization_type: String, type of normalization layer. Defaults to "zero_centered_rms_norm".
         ffn_type: String, type of feed-forward network in experts. Defaults to "swiglu".
         use_stochastic_depth: Boolean, whether to enable stochastic depth. Defaults to False.
         stochastic_depth_rate: Float, drop path rate for stochastic depth. Defaults to 0.1.
         **kwargs: Additional keyword arguments for the `keras.Model` base class.
-
-    Input shape:
-        - Single tensor: `input_ids` with shape `(batch_size, sequence_length)`.
-        - Dictionary: Can contain `input_ids`, `attention_mask`, etc.
-
-    Output shape:
-        - A tensor of shape `(batch_size, sequence_length, vocab_size)` representing logits.
-
-    Attributes:
-        embeddings: The token embedding layer instance.
-        rope_embedding: The rotary position embedding layer.
-        transformer_layers: A list of `TransformerLayer` instances with MoE.
-        final_norm: The final normalization layer.
-        lm_head: The language modeling head for output projection.
-
-    Raises:
-        ValueError: If invalid configuration parameters are provided.
-
-    Example:
-        >>> # Create standard Qwen3 Next 80B model
-        >>> model = Qwen3Next.from_variant("80b_a3b")
-        >>>
-        >>> # Create custom model with advanced features
-        >>> config = create_qwen3_next_with_advanced_features("small", num_experts=16)
-        >>> model = Qwen3Next(**config)
-        >>>
-        >>> # Use the model
-        >>> input_ids = keras.random.uniform((2, 128), 0, 151936, dtype="int32")
-        >>> logits = model(input_ids)
     """
 
     # Model variant configurations following Qwen3 Next specifications
@@ -273,91 +315,73 @@ class Qwen3Next(keras.Model):
         "80b_a3b": {
             "vocab_size": 151936,
             "hidden_size": 2048,
-            "num_layers": 48,
+            "num_layers": 12,  # 12 blocks, each with 3 delta + 1 attn = 48 layers total
             "num_attention_heads": 16,
             "num_key_value_heads": 4,
-            "intermediate_size": 5632,
             "max_position_embeddings": 8192,
             "num_experts": 64,
             "num_experts_per_tok": 8,
             "moe_intermediate_size": 1408,
-            "description": "Qwen3 Next 80B-A3B: 80B total parameters, ~3B active per token"
+            "description": "Qwen3 Next 80B-A3B: 12 blocks × (3 delta + 1 attn) = 48 effective layers"
         },
         "80b": {
             "vocab_size": 151936,
             "hidden_size": 2048,
-            "num_layers": 48,
+            "num_layers": 12,
             "num_attention_heads": 16,
             "num_key_value_heads": 4,
-            "intermediate_size": 5632,
             "max_position_embeddings": 8192,
             "num_experts": 1,  # Dense model
             "num_experts_per_tok": 1,
             "moe_intermediate_size": 5632,
-            "description": "Qwen3 Next 80B Dense: Full dense model without MoE"
+            "description": "Qwen3 Next 80B Dense: 12 blocks without MoE"
         },
         "small": {
             "vocab_size": 151936,
             "hidden_size": 1024,
-            "num_layers": 12,
+            "num_layers": 6,  # 6 blocks
             "num_attention_heads": 16,
             "num_key_value_heads": 4,
-            "intermediate_size": 2816,
             "max_position_embeddings": 2048,
             "num_experts": 8,
             "num_experts_per_tok": 2,
             "moe_intermediate_size": 704,
-            "description": "Qwen3 Next Small: Lightweight variant for experimentation"
+            "description": "Qwen3 Next Small: 6 blocks for experimentation"
         },
         "tiny": {
             "vocab_size": 151936,
             "hidden_size": 512,
-            "num_layers": 6,
+            "num_layers": 3,  # 3 blocks
             "num_attention_heads": 8,
             "num_key_value_heads": 2,
-            "intermediate_size": 1408,
             "max_position_embeddings": 1024,
             "num_experts": 4,
             "num_experts_per_tok": 1,
             "moe_intermediate_size": 352,
-            "description": "Qwen3 Next Tiny: Ultra-lightweight for mobile/edge deployment"
+            "description": "Qwen3 Next Tiny: 3 blocks for mobile/edge deployment"
         },
     }
 
-    # Architecture constants following Qwen3 Next specifications
-    DEFAULT_VOCAB_SIZE = 151936
-    DEFAULT_ROPE_THETA = 1000000.0
-    DEFAULT_NORM_EPSILON = 1e-6
-    DEFAULT_INITIALIZER_RANGE = 0.02
-    DEFAULT_NORMALIZATION_TYPE = "rms_norm"
-    DEFAULT_ATTENTION_TYPE = "group_query_attention"
-    DEFAULT_FFN_TYPE = "swiglu"
-
     def __init__(
-        self,
-        vocab_size: int = 151936,
-        hidden_size: int = 2048,
-        num_layers: int = 48,
-        num_attention_heads: int = 16,
-        num_key_value_heads: int = 4,
-        intermediate_size: int = 5632,
-        max_position_embeddings: int = 8192,
-        rope_theta: float = 1000000.0,
-        num_experts: int = 64,
-        num_experts_per_tok: int = 8,
-        shared_expert_intermediate_size: int = 512,
-        moe_intermediate_size: int = 1408,
-        norm_eps: float = 1e-6,
-        tie_word_embeddings: bool = False,
-        dropout_rate: float = 0.0,
-        attention_dropout_rate: float = 0.0,
-        initializer_range: float = 0.02,
-        normalization_type: str = "rms_norm",
-        attention_type: str = "group_query_attention",
-        ffn_type: str = "swiglu",
-        use_stochastic_depth: bool = False,
-        stochastic_depth_rate: float = 0.1,
-        **kwargs: Any
+            self,
+            vocab_size: int = 151936,
+            hidden_size: int = 2048,
+            num_layers: int = 12,
+            num_attention_heads: int = 16,
+            num_key_value_heads: int = 4,
+            max_position_embeddings: int = 8192,
+            rope_theta: float = 1000000.0,
+            num_experts: int = 64,
+            num_experts_per_tok: int = 8,
+            moe_intermediate_size: int = 1408,
+            norm_eps: float = 1e-6,
+            dropout_rate: float = 0.0,
+            initializer_range: float = 0.02,
+            normalization_type: str = "zero_centered_rms_norm",
+            ffn_type: str = "swiglu",
+            use_stochastic_depth: bool = False,
+            stochastic_depth_rate: float = 0.1,
+            **kwargs: Any
     ) -> None:
 
         # Validate configuration parameters
@@ -372,33 +396,21 @@ class Qwen3Next(keras.Model):
         self.num_layers = num_layers
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads
-        self.intermediate_size = intermediate_size
         self.max_position_embeddings = max_position_embeddings
         self.rope_theta = rope_theta
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok
-        self.shared_expert_intermediate_size = shared_expert_intermediate_size
         self.moe_intermediate_size = moe_intermediate_size
         self.norm_eps = norm_eps
-        self.tie_word_embeddings = tie_word_embeddings
         self.dropout_rate = dropout_rate
-        self.attention_dropout_rate = attention_dropout_rate
         self.initializer_range = initializer_range
         self.normalization_type = normalization_type
-        self.attention_type = attention_type
         self.ffn_type = ffn_type
         self.use_stochastic_depth = use_stochastic_depth
         self.stochastic_depth_rate = stochastic_depth_rate
 
         # Calculate head dimension
         self.head_dim = self.hidden_size // self.num_attention_heads
-
-        # Initialize layer containers
-        self.embeddings: Optional[keras.layers.Embedding] = None
-        self.rope_embedding = None
-        self.transformer_layers: List[TransformerLayer] = []
-        self.final_norm = None
-        self.lm_head: Optional[keras.layers.Dense] = None
 
         # Build the model architecture
         self._build_architecture()
@@ -407,37 +419,26 @@ class Qwen3Next(keras.Model):
         super().__init__(**kwargs)
 
         # Log model creation
-        active_params = (self.num_experts_per_tok / self.num_experts) * 100
+        total_effective_layers = num_layers * 4  # Each block has 3 delta + 1 attn
+        active_params_pct = (self.num_experts_per_tok / self.num_experts) * 100
         logger.info(
-            f"Created Qwen3 Next model: {self.num_layers} layers, "
+            f"Created Qwen3 Next model: {self.num_layers} blocks "
+            f"({total_effective_layers} effective layers), "
             f"hidden_size={self.hidden_size}, experts={self.num_experts}, "
-            f"active={self.num_experts_per_tok} ({active_params:.1f}%)"
+            f"active={self.num_experts_per_tok} ({active_params_pct:.1f}%)"
         )
 
     def _validate_config(
-        self,
-        vocab_size: int,
-        hidden_size: int,
-        num_layers: int,
-        num_attention_heads: int,
-        num_key_value_heads: int,
-        num_experts: int,
-        num_experts_per_tok: int,
+            self,
+            vocab_size: int,
+            hidden_size: int,
+            num_layers: int,
+            num_attention_heads: int,
+            num_key_value_heads: int,
+            num_experts: int,
+            num_experts_per_tok: int,
     ) -> None:
-        """Validate model configuration parameters.
-
-        Args:
-            vocab_size: Vocabulary size to validate
-            hidden_size: Hidden dimension size to validate
-            num_layers: Number of layers to validate
-            num_attention_heads: Number of attention heads to validate
-            num_key_value_heads: Number of key-value heads to validate
-            num_experts: Number of experts to validate
-            num_experts_per_tok: Number of experts per token to validate
-
-        Raises:
-            ValueError: If any configuration parameter is invalid
-        """
+        """Validate model configuration parameters."""
         if vocab_size <= 0:
             raise ValueError(f"vocab_size must be positive, got {vocab_size}")
         if hidden_size <= 0:
@@ -490,10 +491,9 @@ class Qwen3Next(keras.Model):
             name='rope_embedding'
         )
 
-        # Create transformer layers with MoE
-        self.transformer_layers = []
-        for i in range(self.num_layers):
-            # Create MoE configuration
+        # Create MoE configuration
+        moe_config = None
+        if self.num_experts > 1:
             moe_config = MoEConfig(
                 num_experts=self.num_experts,
                 expert_config=ExpertConfig(
@@ -509,30 +509,22 @@ class Qwen3Next(keras.Model):
                 )
             )
 
-            # Create transformer layer with MoE
-            transformer_layer = TransformerLayer(
-                hidden_size=self.hidden_size,
+        # Create Qwen3Next blocks
+        self.blocks = []
+        for i in range(self.num_layers):
+            block = Qwen3NextBlock(
+                dim=self.hidden_size,
                 num_heads=self.num_attention_heads,
-                intermediate_size=self.intermediate_size,  # Ignored due to MoE
-                attention_type=self.attention_type,
-                attention_args={
-                    'n_kv_head': self.num_key_value_heads,
-                },
-                normalization_type=self.normalization_type,
-                normalization_position='pre',
-                attention_norm_args={'epsilon': self.norm_eps},
-                ffn_norm_args={'epsilon': self.norm_eps},
+                head_dim=self.head_dim,
                 moe_config=moe_config,
+                normalization_type=self.normalization_type,
+                norm_eps=self.norm_eps,
                 dropout_rate=self.dropout_rate,
-                attention_dropout_rate=self.attention_dropout_rate,
                 use_stochastic_depth=self.use_stochastic_depth,
                 stochastic_depth_rate=self.stochastic_depth_rate,
-                kernel_initializer=keras.initializers.TruncatedNormal(
-                    stddev=self.initializer_range
-                ),
-                name=f"transformer_layer_{i}"
+                name=f"qwen3_next_block_{i}"
             )
-            self.transformer_layers.append(transformer_layer)
+            self.blocks.append(block)
 
         # Final normalization layer
         self.final_norm = create_normalization_layer(
@@ -551,17 +543,12 @@ class Qwen3Next(keras.Model):
             name='lm_head'
         )
 
-        # Tie embeddings if requested
-        if self.tie_word_embeddings:
-            # Note: This would require custom implementation
-            logger.warning("Weight tying not implemented in this version")
-
     def call(
-        self,
-        inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
-        attention_mask: Optional[keras.KerasTensor] = None,
-        training: Optional[bool] = None,
-        return_dict: bool = False
+            self,
+            inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
+            attention_mask: Optional[keras.KerasTensor] = None,
+            training: Optional[bool] = None,
+            return_dict: bool = False
     ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """
         Forward pass of the Qwen3 Next model.
@@ -576,9 +563,6 @@ class Qwen3Next(keras.Model):
             Model outputs. The format depends on `return_dict`:
             - `return_dict=False`: `logits` tensor of shape (batch, seq_len, vocab_size).
             - `return_dict=True`: Dictionary with keys `logits` and optionally others.
-
-        Raises:
-            ValueError: If inputs are not properly formatted.
         """
         # Parse inputs
         if isinstance(inputs, dict):
@@ -592,9 +576,9 @@ class Qwen3Next(keras.Model):
         # Token embeddings
         hidden_states = self.embeddings(input_ids)
 
-        # Pass through transformer layers
-        for i, transformer_layer in enumerate(self.transformer_layers):
-            hidden_states = transformer_layer(
+        # Pass through all Qwen3Next blocks
+        for block in self.blocks:
+            hidden_states = block(
                 hidden_states,
                 attention_mask=attention_mask,
                 training=training
@@ -614,9 +598,9 @@ class Qwen3Next(keras.Model):
 
     @classmethod
     def from_variant(
-        cls,
-        variant: str,
-        **kwargs: Any
+            cls,
+            variant: str,
+            **kwargs: Any
     ) -> "Qwen3Next":
         """
         Create a Qwen3 Next model from a predefined variant.
@@ -627,16 +611,6 @@ class Qwen3Next(keras.Model):
 
         Returns:
             Qwen3Next model instance
-
-        Raises:
-            ValueError: If variant is not recognized
-
-        Example:
-            >>> # Create Qwen3 Next 80B-A3B model
-            >>> model = Qwen3Next.from_variant("80b_a3b")
-            >>>
-            >>> # Create small model with custom settings
-            >>> model = Qwen3Next.from_variant("small", max_position_embeddings=4096)
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -645,7 +619,7 @@ class Qwen3Next(keras.Model):
             )
 
         config = cls.MODEL_VARIANTS[variant].copy()
-        config.pop("description", None)  # Remove description field
+        config.pop("description", None)
 
         logger.info(f"Creating Qwen3Next-{variant.upper()} model")
         logger.info(f"Configuration: {cls.MODEL_VARIANTS[variant]['description']}")
@@ -661,20 +635,15 @@ class Qwen3Next(keras.Model):
             "num_layers": self.num_layers,
             "num_attention_heads": self.num_attention_heads,
             "num_key_value_heads": self.num_key_value_heads,
-            "intermediate_size": self.intermediate_size,
             "max_position_embeddings": self.max_position_embeddings,
             "rope_theta": self.rope_theta,
             "num_experts": self.num_experts,
             "num_experts_per_tok": self.num_experts_per_tok,
-            "shared_expert_intermediate_size": self.shared_expert_intermediate_size,
             "moe_intermediate_size": self.moe_intermediate_size,
             "norm_eps": self.norm_eps,
-            "tie_word_embeddings": self.tie_word_embeddings,
             "dropout_rate": self.dropout_rate,
-            "attention_dropout_rate": self.attention_dropout_rate,
             "initializer_range": self.initializer_range,
             "normalization_type": self.normalization_type,
-            "attention_type": self.attention_type,
             "ffn_type": self.ffn_type,
             "use_stochastic_depth": self.use_stochastic_depth,
             "stochastic_depth_rate": self.stochastic_depth_rate,
@@ -683,77 +652,56 @@ class Qwen3Next(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "Qwen3Next":
-        """Create model from configuration.
-
-        Args:
-            config: Configuration dictionary
-
-        Returns:
-            Qwen3Next model instance
-        """
+        """Create model from configuration."""
         return cls(**config)
 
     def summary(self, **kwargs) -> None:
         """Print model summary with additional Qwen3 Next-specific information."""
         super().summary(**kwargs)
 
-        # Calculate expert statistics
-        total_experts = self.num_experts * self.num_layers
-        active_experts_per_token = self.num_experts_per_tok * self.num_layers
-        sparsity_ratio = self.num_experts / self.num_experts_per_tok
+        # Calculate statistics
+        total_blocks = self.num_layers
+        total_delta_layers = total_blocks * 3
+        total_attention_layers = total_blocks * 1
+        total_effective_layers = total_delta_layers + total_attention_layers
+        total_experts = self.num_experts * total_effective_layers if self.num_experts > 1 else 0
+        active_experts_per_token = self.num_experts_per_tok * total_effective_layers if self.num_experts > 1 else 0
+        sparsity_ratio = self.num_experts / self.num_experts_per_tok if self.num_experts > 1 else 1
 
         logger.info("Qwen3 Next Model Configuration:")
-        logger.info(f"  - Architecture: {self.num_layers} layers, {self.hidden_size} hidden size")
-        logger.info(f"  - Attention: {self.num_attention_heads} heads, {self.num_key_value_heads} KV heads (GQA)")
+        logger.info(f"  - Architecture: {total_blocks} blocks → {total_effective_layers} effective layers")
+        logger.info(f"    - {total_delta_layers} Gated DeltaNet layers")
+        logger.info(f"    - {total_attention_layers} Gated Attention layers")
+        logger.info(f"  - Hidden size: {self.hidden_size}")
+        logger.info(f"  - Attention heads: {self.num_attention_heads} (KV heads: {self.num_key_value_heads})")
         logger.info(f"  - Vocabulary: {self.vocab_size:,} tokens")
         logger.info(f"  - Max sequence length: {self.max_position_embeddings:,}")
         logger.info(f"  - RoPE theta: {self.rope_theta:,}")
-        logger.info(f"  - MoE Configuration:")
-        logger.info(f"    - Experts per layer: {self.num_experts}")
-        logger.info(f"    - Active per token: {self.num_experts_per_tok}")
-        logger.info(f"    - Sparsity ratio: {sparsity_ratio:.1f}:1")
-        logger.info(f"    - Total experts: {total_experts:,}")
-        logger.info(f"    - Active experts per token: {active_experts_per_token}")
+        if self.num_experts > 1:
+            logger.info(f"  - MoE Configuration:")
+            logger.info(f"    - Experts per layer: {self.num_experts}")
+            logger.info(f"    - Active per token: {self.num_experts_per_tok}")
+            logger.info(f"    - Sparsity ratio: {sparsity_ratio:.1f}:1")
+            logger.info(f"    - Total experts: {total_experts:,}")
+            logger.info(f"    - Active experts per token: {active_experts_per_token}")
         logger.info(f"  - Normalization: {self.normalization_type}")
         logger.info(f"  - Expert FFN: {self.ffn_type}")
         if self.use_stochastic_depth:
             logger.info(f"  - Stochastic depth: {self.stochastic_depth_rate}")
 
+
 # ---------------------------------------------------------------------
-# Factory Functions
+# Factory Functions (Updated)
 # ---------------------------------------------------------------------
 
-
-def create_qwen3_next_generation(
-    config: Dict[str, Any]
-) -> keras.Model:
-    """
-    Create a Qwen3 Next model optimized for text generation.
-
-    This function builds a complete model with proper input handling for
-    autoregressive generation tasks.
-
-    Args:
-        config: Dictionary containing Qwen3 Next model hyperparameters.
-
-    Returns:
-        A `keras.Model` optimized for text generation.
-
-    Example:
-        >>> config = create_qwen3_next_80b_a3b_config()
-        >>> model = create_qwen3_next_generation(config)
-        >>> model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
-    """
+def create_qwen3_next_generation(config: Dict[str, Any]) -> keras.Model:
+    """Create a Qwen3 Next model optimized for text generation."""
     logger.info("Creating Qwen3 Next model for text generation")
 
-    # Create base model
     qwen3_next = Qwen3Next(**config, name="qwen3_next")
-
-    # Define inputs using Keras Functional API
     input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
     attention_mask = keras.Input(shape=(None,), dtype="int32", name="attention_mask")
 
-    # Get model outputs
     logits = qwen3_next(
         inputs={
             "input_ids": input_ids,
@@ -761,59 +709,31 @@ def create_qwen3_next_generation(
         }
     )
 
-    # Create the final model
     model = keras.Model(
         inputs=[input_ids, attention_mask],
         outputs=logits,
         name="qwen3_next_for_generation"
     )
 
-    logger.info(
-        f"Created Qwen3 Next generation model with {model.count_params():,} parameters"
-    )
+    logger.info(f"Created Qwen3 Next generation model with {model.count_params():,} parameters")
     return model
 
-# ---------------------------------------------------------------------
 
 def create_qwen3_next_classification(
-    config: Dict[str, Any],
-    num_labels: int,
-    classifier_dropout: Optional[float] = None
+        config: Dict[str, Any],
+        num_labels: int,
+        classifier_dropout: Optional[float] = None
 ) -> keras.Model:
-    """
-    Create a Qwen3 Next model for sequence classification tasks.
-
-    This function builds a complete model by adding a classification head
-    on top of the sequence representations.
-
-    Args:
-        config: Dictionary containing Qwen3 Next model hyperparameters.
-        num_labels: Integer, the number of classification labels.
-        classifier_dropout: Optional float, dropout rate for the classifier head.
-
-    Returns:
-        A complete `keras.Model` for sequence classification.
-
-    Raises:
-        ValueError: If num_labels is not positive.
-
-    Example:
-        >>> config = create_qwen3_next_small_config()
-        >>> model = create_qwen3_next_classification(config, num_labels=2)
-    """
+    """Create a Qwen3 Next model for sequence classification tasks."""
     if num_labels <= 0:
         raise ValueError(f"num_labels must be positive, got {num_labels}")
 
     logger.info(f"Creating Qwen3 Next classification model with {num_labels} labels")
 
-    # Create base model
     qwen3_next = Qwen3Next(**config, name="qwen3_next")
-
-    # Define inputs
     input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
     attention_mask = keras.Input(shape=(None,), dtype="int32", name="attention_mask")
 
-    # Get sequence representations
     sequence_output = qwen3_next(
         inputs={
             "input_ids": input_ids,
@@ -821,10 +741,8 @@ def create_qwen3_next_classification(
         }
     )
 
-    # Use first token (typically CLS or equivalent) for classification
     pooled_output = sequence_output[:, 0]  # Shape: (batch_size, hidden_size)
 
-    # Apply classifier dropout
     if classifier_dropout is None:
         classifier_dropout = config.get("dropout_rate", 0.1)
 
@@ -834,7 +752,6 @@ def create_qwen3_next_classification(
             name="classifier_dropout"
         )(pooled_output)
 
-    # Final classification layer
     logits = keras.layers.Dense(
         units=num_labels,
         kernel_initializer=keras.initializers.TruncatedNormal(
@@ -843,56 +760,29 @@ def create_qwen3_next_classification(
         name="classifier"
     )(pooled_output)
 
-    # Create the final model
     model = keras.Model(
         inputs=[input_ids, attention_mask],
         outputs=logits,
         name="qwen3_next_for_classification"
     )
 
-    logger.info(
-        f"Created Qwen3 Next classification model with {model.count_params():,} parameters"
-    )
+    logger.info(f"Created Qwen3 Next classification model with {model.count_params():,} parameters")
     return model
 
-# ---------------------------------------------------------------------
 
 def create_qwen3_next(
-    variant: str = "small",
-    task_type: str = "generation",
-    num_labels: Optional[int] = None,
-    **kwargs: Any
+        variant: str = "small",
+        task_type: str = "generation",
+        num_labels: Optional[int] = None,
+        **kwargs: Any
 ) -> keras.Model:
-    """
-    Convenience function to create Qwen3 Next models for common tasks.
-
-    Args:
-        variant: String, model variant ("80b_a3b", "80b", "small", "tiny")
-        task_type: String, type of task ("generation", "classification")
-        num_labels: Optional integer, number of labels for classification tasks
-        **kwargs: Additional arguments passed to the model constructor
-
-    Returns:
-        Qwen3Next model instance configured for the specified task
-
-    Raises:
-        ValueError: If invalid task_type or missing num_labels for classification
-
-    Example:
-        >>> # Create generation model
-        >>> model = create_qwen3_next("small", task_type="generation")
-        >>>
-        >>> # Create classification model
-        >>> model = create_qwen3_next("small", task_type="classification", num_labels=2)
-    """
-    # Get base configuration
+    """Convenience function to create Qwen3 Next models for common tasks."""
     if variant in Qwen3Next.MODEL_VARIANTS:
         config = Qwen3Next.MODEL_VARIANTS[variant].copy()
         config.pop("description", None)
     else:
         raise ValueError(f"Unknown variant: {variant}")
 
-    # Update with any additional kwargs
     config.update(kwargs)
 
     if task_type == "generation":
@@ -903,5 +793,3 @@ def create_qwen3_next(
         return create_qwen3_next_classification(config, num_labels)
     else:
         raise ValueError(f"Unknown task_type: {task_type}")
-
-# ---------------------------------------------------------------------
