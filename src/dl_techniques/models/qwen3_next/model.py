@@ -11,16 +11,17 @@ Based on the architectural diagram showing the precise layer arrangement and con
 """
 
 import keras
-from typing import Optional, Union, Any, Dict, List
+from typing import Optional, Union, Any, Dict
 
 # ---------------------------------------------------------------------
 # Local Imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
+
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 
 from dl_techniques.layers.gated_delta_net import GatedDeltaNet
 from dl_techniques.layers.attention.gated_attention import GatedAttention
@@ -213,21 +214,25 @@ class Qwen3NextBlock(keras.layers.Layer):
         x_norm = self.attention_norm(x, training=training)
 
         # Gated Attention
-        attn_out = self.attention_layer(x_norm, mask=attention_mask, training=training)
+        attention_out = (
+            self.attention_layer(
+                x_norm,
+                attention_mask=attention_mask,
+                training=training))
 
         # MoE if configured
         if self.attention_moe is not None:
-            attn_out = self.attention_moe(attn_out, training=training)
+            attention_out = self.attention_moe(attention_out, training=training)
 
         # Apply stochastic depth if configured
         if (self.stochastic_depth_layers and
                 len(self.stochastic_depth_layers) > 3):
-            attn_out = self.stochastic_depth_layers[3](
-                attn_out, training=training
+            attention_out = self.stochastic_depth_layers[3](
+                attention_out, training=training
             )
 
         # Residual connection
-        x = x + attn_out
+        x = x + attention_out
 
         return x
 

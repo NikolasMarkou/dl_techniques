@@ -364,7 +364,7 @@ class GatedAttention(keras.layers.Layer):
             q: keras.KerasTensor,
             k: keras.KerasTensor,
             v: keras.KerasTensor,
-            mask: Optional[keras.KerasTensor] = None,
+            attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
@@ -374,7 +374,7 @@ class GatedAttention(keras.layers.Layer):
             q: Query tensor of shape [batch, seq_len, num_heads, head_dim]
             k: Key tensor of shape [batch, seq_len, num_heads, head_dim]
             v: Value tensor of shape [batch, seq_len, num_heads, head_dim]
-            mask: Optional attention mask
+            attention_mask: Optional attention mask
             training: Training mode flag
 
         Returns:
@@ -393,8 +393,13 @@ class GatedAttention(keras.layers.Layer):
         scaled_attention_logits = matmul_qk / ops.sqrt(dk)
 
         # Apply mask if provided
-        if mask is not None:
-            scaled_attention_logits += (mask * -1e9)
+        if attention_mask is not None:
+            # The attention mask is of shape (batch, seq_len).
+            # We need to broadcast it to (batch, num_heads, seq_len, seq_len).
+            # Reshape to (batch, 1, 1, seq_len)
+            mask = ops.expand_dims(ops.expand_dims(attention_mask, 1), 1)
+            additive_mask = (1.0 - ops.cast(mask, scaled_attention_logits.dtype)) * -1e9
+            scaled_attention_logits = scaled_attention_logits + additive_mask
 
         # Softmax
         attention_weights = ops.softmax(scaled_attention_logits, axis=-1)
@@ -414,7 +419,7 @@ class GatedAttention(keras.layers.Layer):
     def call(
             self,
             inputs: keras.KerasTensor,
-            mask: Optional[keras.KerasTensor] = None,
+            attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
@@ -422,7 +427,7 @@ class GatedAttention(keras.layers.Layer):
 
         Args:
             inputs: Input tensor of shape (batch_size, seq_len, dim).
-            mask: Optional attention mask.
+            attention_mask: Optional attention mask.
             training: Boolean indicating training or inference mode.
 
         Returns:
@@ -457,12 +462,12 @@ class GatedAttention(keras.layers.Layer):
 
         # Apply scaled dot-product attention
         attention_output = self.scaled_dot_product_attention(
-            q_rope, k_rope, v_reshaped, mask=mask, training=training
+            q_rope, k_rope, v_reshaped, attention_mask=attention_mask, training=training
         )
 
         # Reshape back to [batch, seq, dim]
         attention_output = ops.reshape(
-            attention_output, (batch_size, seq_len, self.dim)
+            attention_output, (batch_size, seq_len, self.attention_dim)
         )
 
         # Output gating

@@ -586,12 +586,13 @@ class GatedDeltaNet(keras.layers.Layer):
         # `tensor.shape[dim]` is a Python int if the shape is known.
         # `ops.shape(tensor)[dim]` is a symbolic Tensor.
         # XLA requires a static integer for the `length` argument of `scan`.
-        seq_len = q.shape[1]
-        if seq_len is None:
-            # Fallback for dynamic sequence lengths (won't be XLA-compatible).
-            seq_len = ops.shape(q)[1]
+        # seq_len = q.shape[1]
+        # if seq_len is None:
+        #     # Fallback for dynamic sequence lengths (won't be XLA-compatible).
+        #     seq_len = ops.shape(q)[1]
 
         batch_size = ops.shape(q)[0]
+        seq_len = q.shape[1]
 
         def step_function(prev_carry, inputs):
             """
