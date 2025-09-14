@@ -46,7 +46,7 @@ class GatedAttention(keras.layers.Layer):
          → K Linear → Zero-Centered RMSNorm → Partial RoPE → Attention
          → V Linear → Zero-Centered RMSNorm ---------------→ ↗
            ↓
-    Attention Output → Linear → Sigmoid → Gate (⊗) → Output
+    Attention Output → (Optional Projection) → Linear → Sigmoid → Gate (⊗) → Output
     ```
 
     **Mathematical Operations**:
@@ -55,7 +55,8 @@ class GatedAttention(keras.layers.Layer):
     3. **Normalization**: Q_norm = RMSNorm(Q), K_norm = RMSNorm(K), V_norm = RMSNorm(V)
     4. **RoPE**: Q_rope = RoPE(Q_norm), K_rope = RoPE(K_norm)
     5. **Attention**: A = Attention(Q_rope, K_rope, V_norm)
-    6. **Gating**: gate = σ(Linear_gate(A)), output = gate ⊗ A
+    6. **Projection**: A' = Linear_proj(A) if attention_dim != dim
+    7. **Gating**: gate = σ(Linear_gate(A')), output = gate ⊗ A'
 
     Args:
         dim: Integer, the model dimension size. Must be positive and divisible by num_heads
@@ -93,6 +94,7 @@ class GatedAttention(keras.layers.Layer):
         q_linear, k_linear, v_linear: Dense layers for Q/K/V projections.
         q_norm, k_norm, v_norm: Zero-Centered RMS normalization layers.
         rope: Rotary Position Embedding layer for positional encoding.
+        output_proj: Optional Dense layer for dimension matching when attention_dim != dim.
         dropout: Dropout layer for attention weight regularization.
         output_gate_linear: Dense layer for computing gating weights.
 
@@ -139,6 +141,8 @@ class GatedAttention(keras.layers.Layer):
         This implementation uses Zero-Centered RMSNorm for improved training stability
         and Partial RoPE for efficient positional encoding. The gating mechanism allows
         the model to selectively control information flow through the attention output.
+        When attention_dim != dim (custom head_dim case), an additional projection layer
+        ensures dimensional compatibility.
     """
 
     def __init__(
@@ -162,7 +166,7 @@ class GatedAttention(keras.layers.Layer):
         self._validate_inputs(dim, num_heads, head_dim, max_seq_len,
                             rope_percentage, dropout_rate)
 
-        # Store ALL configuration parameters
+        # Store ALL configuration parameters for serialization
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = head_dim if head_dim is not None else dim // num_heads
@@ -175,10 +179,12 @@ class GatedAttention(keras.layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
 
-        # Compute total attention dimension
+        # TRICKY POINT: When using custom head_dim, attention_dim may not equal dim
+        # This requires an additional projection layer to match dimensions
         self.attention_dim = self.num_heads * self.head_dim
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
+        # Following the Golden Rule: Create in __init__, Build in build()
 
         # Input linear projection
         self.input_linear = layers.Dense(
@@ -191,7 +197,7 @@ class GatedAttention(keras.layers.Layer):
             name="input_linear"
         )
 
-        # QKV projections
+        # QKV projections - project to attention_dim, not dim
         self.q_linear = layers.Dense(
             self.attention_dim,
             use_bias=self.use_bias,
@@ -241,6 +247,7 @@ class GatedAttention(keras.layers.Layer):
         )
 
         # Rotary Position Embedding (Partial RoPE)
+        # TRICKY POINT: RoPE doesn't have trainable parameters, just precomputed sin/cos
         self.rope = create_embedding_layer(
             'rope',
             head_dim=self.head_dim,
@@ -249,13 +256,28 @@ class GatedAttention(keras.layers.Layer):
             name='rope'
         )
 
-        # Dropout for attention weights
+        # Dropout for attention weights (conditional creation)
         if dropout_rate > 0.0:
             self.dropout = layers.Dropout(dropout_rate, name="attention_dropout")
         else:
             self.dropout = None
 
-        # Output gate
+        # TRICKY POINT: Output projection needed when attention_dim != dim
+        # This happens when using custom head_dim that doesn't divide evenly into dim
+        if self.attention_dim != self.dim:
+            self.output_proj = layers.Dense(
+                self.dim,
+                use_bias=self.use_bias,
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                bias_regularizer=self.bias_regularizer,
+                name="output_proj"
+            )
+        else:
+            self.output_proj = None
+
+        # Output gate - always projects to dim
         self.output_gate_linear = layers.Dense(
             self.dim,
             use_bias=self.use_bias,
@@ -312,7 +334,7 @@ class GatedAttention(keras.layers.Layer):
         """
         Build the layer and all its sub-layers.
 
-        This method explicitly builds each sub-layer for robust serialization
+        CRITICAL: This method explicitly builds each sub-layer for robust serialization
         support, ensuring all weight variables exist before weight restoration.
 
         Args:
@@ -335,7 +357,7 @@ class GatedAttention(keras.layers.Layer):
         linear_output_shape = (batch_size, seq_len, self.dim)
         qkv_shape = (batch_size, seq_len, self.attention_dim)
 
-        # Build QKV projections
+        # Build QKV projections - MUST be built explicitly
         self.q_linear.build(linear_output_shape)
         self.k_linear.build(linear_output_shape)
         self.v_linear.build(linear_output_shape)
@@ -352,6 +374,10 @@ class GatedAttention(keras.layers.Layer):
         # Build dropout if used
         if self.dropout is not None:
             self.dropout.build((batch_size, self.num_heads, seq_len, seq_len))
+
+        # TRICKY POINT: Build output projection only if it exists
+        if self.output_proj is not None:
+            self.output_proj.build((batch_size, seq_len, self.attention_dim))
 
         # Build output gate
         self.output_gate_linear.build((batch_size, seq_len, self.dim))
@@ -374,7 +400,7 @@ class GatedAttention(keras.layers.Layer):
             q: Query tensor of shape [batch, seq_len, num_heads, head_dim]
             k: Key tensor of shape [batch, seq_len, num_heads, head_dim]
             v: Value tensor of shape [batch, seq_len, num_heads, head_dim]
-            attention_mask: Optional attention mask
+            attention_mask: Optional attention mask of shape [batch, seq_len]
             training: Training mode flag
 
         Returns:
@@ -388,23 +414,23 @@ class GatedAttention(keras.layers.Layer):
         # Compute attention scores
         matmul_qk = ops.matmul(q, ops.transpose(k, axes=[0, 1, 3, 2]))
 
-        # Scale by sqrt(head_dim)
+        # Scale by sqrt(head_dim) for numerical stability
         dk = ops.cast(self.head_dim, keras.backend.floatx())
         scaled_attention_logits = matmul_qk / ops.sqrt(dk)
 
-        # Apply mask if provided
+        # TRICKY POINT: Attention mask broadcasting
+        # The mask is [batch, seq_len] but needs to be [batch, num_heads, seq_len, seq_len]
         if attention_mask is not None:
-            # The attention mask is of shape (batch, seq_len).
-            # We need to broadcast it to (batch, num_heads, seq_len, seq_len).
-            # Reshape to (batch, 1, 1, seq_len)
+            # Reshape to (batch, 1, 1, seq_len) for broadcasting
             mask = ops.expand_dims(ops.expand_dims(attention_mask, 1), 1)
+            # Create additive mask (masked positions get -inf)
             additive_mask = (1.0 - ops.cast(mask, scaled_attention_logits.dtype)) * -1e9
             scaled_attention_logits = scaled_attention_logits + additive_mask
 
-        # Softmax
+        # Softmax over the last axis (key dimension)
         attention_weights = ops.softmax(scaled_attention_logits, axis=-1)
 
-        # Apply dropout
+        # Apply dropout during training
         if training and self.dropout is not None:
             attention_weights = self.dropout(attention_weights, training=training)
 
@@ -427,7 +453,7 @@ class GatedAttention(keras.layers.Layer):
 
         Args:
             inputs: Input tensor of shape (batch_size, seq_len, dim).
-            attention_mask: Optional attention mask.
+            attention_mask: Optional attention mask of shape (batch_size, seq_len).
             training: Boolean indicating training or inference mode.
 
         Returns:
@@ -436,11 +462,11 @@ class GatedAttention(keras.layers.Layer):
         # Input linear projection
         x = self.input_linear(inputs, training=training)
 
-        # Get batch and sequence dimensions
+        # Get batch and sequence dimensions dynamically
         batch_size = ops.shape(x)[0]
         seq_len = ops.shape(x)[1]
 
-        # Generate Q, K, V
+        # Generate Q, K, V projections
         q = self.q_linear(x, training=training)  # [batch, seq, attention_dim]
         k = self.k_linear(x, training=training)  # [batch, seq, attention_dim]
         v = self.v_linear(x, training=training)  # [batch, seq, attention_dim]
@@ -456,7 +482,7 @@ class GatedAttention(keras.layers.Layer):
         k_reshaped = ops.reshape(k_norm, (batch_size, seq_len, self.num_heads, self.head_dim))
         v_reshaped = ops.reshape(v_norm, (batch_size, seq_len, self.num_heads, self.head_dim))
 
-        # Apply Partial RoPE to Q and K
+        # Apply Partial RoPE to Q and K (not V)
         q_rope = self.rope(q_reshaped, training=training)
         k_rope = self.rope(k_reshaped, training=training)
 
@@ -465,12 +491,17 @@ class GatedAttention(keras.layers.Layer):
             q_rope, k_rope, v_reshaped, attention_mask=attention_mask, training=training
         )
 
-        # Reshape back to [batch, seq, dim]
+        # Reshape back to [batch, seq, attention_dim]
         attention_output = ops.reshape(
             attention_output, (batch_size, seq_len, self.attention_dim)
         )
 
-        # Output gating
+        # TRICKY POINT: Project to original dim if needed
+        # This is necessary when attention_dim != dim (custom head_dim case)
+        if self.output_proj is not None:
+            attention_output = self.output_proj(attention_output, training=training)
+
+        # Output gating mechanism
         gate = ops.sigmoid(self.output_gate_linear(attention_output, training=training))
         gated_output = gate * attention_output
 
@@ -492,8 +523,9 @@ class GatedAttention(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-        Returns ALL configuration parameters passed to __init__ for proper
-        serialization and deserialization.
+        CRITICAL: Returns ALL configuration parameters passed to __init__ for proper
+        serialization and deserialization. Missing any parameter will cause
+        deserialization to fail.
 
         Returns:
             Dictionary containing the layer configuration with all parameters
@@ -514,5 +546,3 @@ class GatedAttention(keras.layers.Layer):
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------
