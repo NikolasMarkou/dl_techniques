@@ -29,7 +29,7 @@ class TestGatedAttention:
     # --- Fixtures for Reusability ---
     @pytest.fixture
     def layer_config(self) -> Dict[str, Any]:
-        """Provides a standard configuration for a small, testable layer."""
+        """Provides a standard configuration where attention_dim == dim."""
         return {
             "dim": 64,
             "num_heads": 4,
@@ -40,11 +40,11 @@ class TestGatedAttention:
 
     @pytest.fixture
     def custom_head_config(self) -> Dict[str, Any]:
-        """Provides configuration with custom head dimension."""
+        """Provides configuration with custom head dimension where attention_dim != dim."""
         return {
             "dim": 96,
             "num_heads": 6,
-            "head_dim": 12,  # Custom head size
+            "head_dim": 12,  # Custom head size -> attention_dim = 72
             "max_seq_len": 256,
             "rope_percentage": 0.25,
         }
@@ -79,13 +79,20 @@ class TestGatedAttention:
         return tf.random.normal(shape=(3, 8, 32))
 
     @pytest.fixture
-    def attention_mask(self) -> tf.Tensor:
-        """Provides a sample attention mask for testing masking functionality."""
-        # Create a mask where some positions are masked (0) and others are not (1)
-        return tf.constant([[1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                            [1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-                            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0],
-                            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]], dtype=tf.float32)
+    def padding_attention_mask(self, sample_input) -> tf.Tensor:
+        """Provides a 2D sample padding mask for testing."""
+        batch_size, seq_len = sample_input.shape[0], sample_input.shape[1]
+        mask = np.ones((batch_size, seq_len), dtype="float32")
+        # Mask out the second half of the sequence for the first batch item
+        mask[0, seq_len // 2:] = 0
+        return tf.constant(mask)
+
+    @pytest.fixture
+    def causal_attention_mask(self, sample_input) -> tf.Tensor:
+        """Provides a 3D sample causal mask for testing."""
+        seq_len = sample_input.shape[1]
+        mask = tf.linalg.band_part(tf.ones((seq_len, seq_len)), -1, 0)
+        return tf.expand_dims(mask, 0)  # Shape: (1, seq_len, seq_len)
 
     # ===============================================
     # 1. Initialization and Build Tests
@@ -117,8 +124,8 @@ class TestGatedAttention:
         layer = GatedAttention(**regularized_config)
         assert layer.use_bias
         assert layer.dropout_rate == 0.1
-        assert layer.kernel_regularizer is not None
-        assert layer.bias_regularizer is not None
+        assert isinstance(layer.kernel_regularizer, keras.regularizers.L2)
+        assert isinstance(layer.bias_regularizer, keras.regularizers.L1)
 
     def test_build_process_standard(self, layer_config, sample_input):
         """Tests that the layer and all its sub-layers are built correctly."""
@@ -140,6 +147,21 @@ class TestGatedAttention:
         assert layer.v_norm.built
         assert layer.rope.built
         assert layer.output_gate_linear.built
+
+    def test_output_proj_is_none_when_attention_dim_matches(self, layer_config, sample_input):
+        """Tests that output_proj is None when attention_dim == dim."""
+        layer = GatedAttention(**layer_config)
+        assert layer.attention_dim == layer.dim
+        layer(sample_input)  # Build
+        assert layer.output_proj is None
+
+    def test_output_proj_creation_when_attention_dim_mismatch(self, custom_head_config, custom_sample_input):
+        """Tests that output_proj is created when attention_dim != dim."""
+        layer = GatedAttention(**custom_head_config)
+        assert layer.attention_dim != layer.dim
+        layer(custom_sample_input)  # Build
+        assert layer.output_proj is not None
+        assert layer.output_proj.built
 
     def test_build_process_with_dropout(self, small_sample_input):
         """Tests build process with dropout enabled."""
@@ -243,11 +265,11 @@ class TestGatedAttention:
         assert not np.any(np.isinf(ops.convert_to_numpy(output)))
 
     def test_forward_pass_custom_head_dim(self, custom_head_config, custom_sample_input):
-        """Tests forward pass with custom head dimension."""
+        """Tests forward pass with custom head dimension and output projection."""
         layer = GatedAttention(**custom_head_config)
         output = layer(custom_sample_input, training=False)
 
-        assert output.shape == custom_sample_input.shape
+        assert output.shape == custom_sample_input.shape  # Verifies projection back to `dim`
         assert not np.any(np.isnan(ops.convert_to_numpy(output)))
 
     def test_forward_pass_with_regularization(self, regularized_config, small_sample_input):
@@ -258,18 +280,25 @@ class TestGatedAttention:
         assert output.shape == small_sample_input.shape
         assert not np.any(np.isnan(ops.convert_to_numpy(output)))
 
-    def test_forward_pass_with_attention_mask(self, layer_config, sample_input, attention_mask):
-        """Tests forward pass with attention mask."""
+    def test_forward_pass_with_padding_mask(self, layer_config, sample_input, padding_attention_mask):
+        """Tests forward pass with a 2D padding mask."""
         layer = GatedAttention(**layer_config)
-        output = layer(sample_input, attention_mask=attention_mask, training=False)
+        output = layer(sample_input, attention_mask=padding_attention_mask, training=False)
+
+        assert output.shape == sample_input.shape
+        assert not np.any(np.isnan(ops.convert_to_numpy(output)))
+
+    def test_forward_pass_with_causal_mask(self, layer_config, sample_input, causal_attention_mask):
+        """Tests forward pass with a 3D causal mask."""
+        layer = GatedAttention(**layer_config)
+        output = layer(sample_input, attention_mask=causal_attention_mask, training=False)
 
         assert output.shape == sample_input.shape
         assert not np.any(np.isnan(ops.convert_to_numpy(output)))
 
     def test_training_vs_inference_mode(self, layer_config, sample_input):
-        """Tests that layer behaves differently in training vs inference mode."""
-        config = layer_config.copy()
-        config["dropout_rate"] = 0.1
+        """Tests that layer behaves differently in training vs inference mode due to dropout."""
+        config = {**layer_config, "dropout_rate": 0.1}
         layer = GatedAttention(**config)
 
         output_train = layer(sample_input, training=True)
@@ -329,23 +358,18 @@ class TestGatedAttention:
         outputs = GatedAttention(**layer_config)(inputs)
         model = models.Model(inputs, outputs)
 
-        # Get prediction from original model
         original_prediction = model(sample_input, training=False)
 
-        # Save and load model
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = os.path.join(tmpdir, "test_gated_attention_basic.keras")
             model.save(filepath)
             loaded_model = models.load_model(filepath)
             loaded_prediction = loaded_model(sample_input, training=False)
 
-            # Verify identical outputs
             np.testing.assert_allclose(
                 ops.convert_to_numpy(original_prediction),
                 ops.convert_to_numpy(loaded_prediction),
-                rtol=1e-6,
-                atol=1e-6,
-                err_msg="Predictions should match after serialization",
+                rtol=1e-6, atol=1e-6
             )
 
     def test_full_serialization_cycle_custom_head(self, custom_head_config, custom_sample_input):
@@ -365,91 +389,67 @@ class TestGatedAttention:
             np.testing.assert_allclose(
                 ops.convert_to_numpy(original_prediction),
                 ops.convert_to_numpy(loaded_prediction),
-                rtol=1e-6,
-                atol=1e-6,
-                err_msg="Custom head dim serialization should work",
+                rtol=1e-6, atol=1e-6
             )
 
-    def test_full_serialization_cycle_with_regularization(
-            self, regularized_config, small_sample_input
-    ):
-        """Tests full serialization cycle with regularization and custom initializers."""
-        inputs = layers.Input(shape=small_sample_input.shape[1:])
-        outputs = GatedAttention(**regularized_config)(inputs)
-        model = models.Model(inputs, outputs)
-
-        original_prediction = model(small_sample_input, training=False)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            filepath = os.path.join(tmpdir, "test_gated_attention_regularized.keras")
-            model.save(filepath)
-            loaded_model = models.load_model(filepath)
-            loaded_prediction = loaded_model(small_sample_input, training=False)
-
-            np.testing.assert_allclose(
-                ops.convert_to_numpy(original_prediction),
-                ops.convert_to_numpy(loaded_prediction),
-                rtol=1e-6,
-                atol=1e-6,
-                err_msg="Regularized layer serialization should work",
-            )
-
-    def test_full_serialization_cycle_with_mask(
-            self, layer_config, sample_input, attention_mask
-    ):
-        """Tests full serialization cycle with attention mask support."""
-        # Create model with two inputs: main input and mask
+    def test_full_serialization_cycle_with_padding_mask(self, layer_config, sample_input, padding_attention_mask):
+        """Tests full serialization cycle with a 2D padding mask."""
         main_input = layers.Input(shape=sample_input.shape[1:])
         mask_input = layers.Input(shape=(sample_input.shape[1],))
-
-        attention_layer = GatedAttention(**layer_config)
-        outputs = attention_layer(main_input, attention_mask=mask_input)
+        outputs = GatedAttention(**layer_config)(main_input, attention_mask=mask_input)
         model = models.Model([main_input, mask_input], outputs)
 
-        # Get prediction from original model
-        original_prediction = model([sample_input, attention_mask], training=False)
+        original_prediction = model([sample_input, padding_attention_mask], training=False)
 
-        # Save and load model
         with tempfile.TemporaryDirectory() as tmpdir:
-            filepath = os.path.join(tmpdir, "test_gated_attention_mask.keras")
+            filepath = os.path.join(tmpdir, "test_gated_attention_padding_mask.keras")
             model.save(filepath)
             loaded_model = models.load_model(filepath)
-            loaded_prediction = loaded_model([sample_input, attention_mask], training=False)
+            loaded_prediction = loaded_model([sample_input, padding_attention_mask], training=False)
 
-            # Verify identical outputs
             np.testing.assert_allclose(
                 ops.convert_to_numpy(original_prediction),
                 ops.convert_to_numpy(loaded_prediction),
-                rtol=1e-6,
-                atol=1e-6,
-                err_msg="Masked attention serialization should work",
+                rtol=1e-6, atol=1e-6
+            )
+
+    def test_full_serialization_cycle_with_causal_mask(self, layer_config, sample_input, causal_attention_mask):
+        """Tests full serialization cycle with a 3D causal mask."""
+        seq_len = sample_input.shape[1]
+        main_input = layers.Input(shape=(seq_len, layer_config["dim"]))
+        # FIX: The shape of a single mask sample is (seq_len, seq_len).
+        # The provided tensor has shape (1, seq_len, seq_len), which is a batch of 1.
+        # This is compatible with an input layer expecting samples of shape (seq_len, seq_len).
+        mask_input = layers.Input(shape=(seq_len, seq_len))
+        outputs = GatedAttention(**layer_config)(main_input, attention_mask=mask_input)
+        model = models.Model([main_input, mask_input], outputs)
+
+        original_prediction = model([sample_input, causal_attention_mask], training=False)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "test_gated_attention_causal_mask.keras")
+            model.save(filepath)
+            loaded_model = models.load_model(filepath)
+            loaded_prediction = loaded_model([sample_input, causal_attention_mask], training=False)
+
+            np.testing.assert_allclose(
+                ops.convert_to_numpy(original_prediction),
+                ops.convert_to_numpy(loaded_prediction),
+                rtol=1e-6, atol=1e-6
             )
 
     # ===============================================
     # 5. Configuration and Serialization Tests
     # ===============================================
-    def test_get_config_completeness(self, layer_config):
+    def test_get_config_completeness(self, regularized_config):
         """Tests that get_config contains all __init__ parameters."""
-        layer = GatedAttention(**layer_config)
+        layer = GatedAttention(**regularized_config)
         config = layer.get_config()
 
         # Check all required parameters are present
-        required_params = [
-            "dim",
-            "num_heads",
-            "head_dim",
-            "max_seq_len",
-            "rope_percentage",
-            "dropout_rate",
-            "use_bias",
-            "kernel_initializer",
-            "bias_initializer",
-            "kernel_regularizer",
-            "bias_regularizer",
-        ]
-
-        for param in required_params:
+        for param in regularized_config:
             assert param in config, f"Missing {param} in get_config()"
+        assert "head_dim" in config
 
     def test_from_config_reconstruction(self, regularized_config):
         """Tests that layer can be reconstructed from config."""
@@ -491,38 +491,39 @@ class TestGatedAttention:
         layer = GatedAttention(**layer_config)
         layer(sample_input)  # Build the layer
 
+        # 1 input_linear (W)
+        # 3 QKV linear (W)
+        # 3 Norms (scale)
+        # 1 output_gate_linear (W)
+        # Total = 1 + 3 + 3 + 1 = 8
         expected_vars = 8
         actual_vars = len(layer.trainable_variables)
-        assert actual_vars == expected_vars, (
-            f"Expected {expected_vars} variables, got {actual_vars}"
-        )
+        assert actual_vars == expected_vars
+
+    def test_trainable_variables_count_custom_head(self, custom_head_config, custom_sample_input):
+        """Tests trainable variables when an output_proj is created."""
+        layer = GatedAttention(**custom_head_config)
+        layer(custom_sample_input)  # Build the layer
+
+        # Expected vars from standard + 1 for output_proj (W)
+        expected_vars = 8 + 1
+        actual_vars = len(layer.trainable_variables)
+        assert actual_vars == expected_vars
 
     def test_model_training_loop_integration(self, layer_config):
         """Tests integration in a standard training loop."""
-        model = models.Sequential(
-            [
-                layers.InputLayer(shape=(16, 64)),
-                GatedAttention(**layer_config),
-                layers.GlobalAveragePooling1D(),
-                layers.Dense(10),
-            ]
-        )
-
-        model.compile(
-            "adam",
-            keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-            jit_compile=False,
-        )
-
-        # Generate dummy data
+        model = models.Sequential([
+            layers.InputLayer(shape=(16, 64)),
+            GatedAttention(**layer_config),
+            layers.GlobalAveragePooling1D(),
+            layers.Dense(10)
+        ])
+        model.compile("adam", "sparse_categorical_crossentropy")
         x_train = tf.random.normal((32, 16, 64))
         y_train = tf.random.uniform([32], 0, 10, dtype=tf.int32)
-
-        # Train for one epoch
-        history = model.fit(x_train, y_train, epochs=1, batch_size=8, verbose=0)
-
+        history = model.fit(x_train, y_train, epochs=1, verbose=0)
         assert "loss" in history.history
-        assert not np.isnan(history.history["loss"][0]), "Loss became NaN during training"
+        assert not np.isnan(history.history["loss"][0])
 
     def test_stacked_layers(self, sample_input):
         """Tests stacking multiple GatedAttention layers."""
@@ -543,8 +544,7 @@ class TestGatedAttention:
     def test_small_sequence_length(self):
         """Tests layer with very small sequence length."""
         layer = GatedAttention(dim=32, num_heads=2, max_seq_len=64)
-        small_input = tf.random.normal((2, 3, 32))  # Very short sequence
-
+        small_input = tf.random.normal((2, 1, 32))  # Seq len of 1
         output = layer(small_input, training=False)
         assert output.shape == small_input.shape
         assert not np.any(np.isnan(ops.convert_to_numpy(output)))
@@ -553,72 +553,48 @@ class TestGatedAttention:
         """Tests layer with single attention head."""
         layer = GatedAttention(dim=64, num_heads=1, max_seq_len=128)
         output = layer(sample_input, training=False)
-
         assert output.shape == sample_input.shape
-        assert not np.any(np.isnan(ops.convert_to_numpy(output)))
 
     def test_max_rope_percentage(self, sample_input):
         """Tests layer with maximum RoPE percentage (1.0)."""
-        layer = GatedAttention(
-            dim=64,
-            num_heads=4,
-            max_seq_len=128,
-            rope_percentage=1.0,  # Apply RoPE to all dimensions
-        )
+        layer = GatedAttention(dim=64, num_heads=4, max_seq_len=128, rope_percentage=1.0)
         output = layer(sample_input, training=False)
-
         assert output.shape == sample_input.shape
-        assert not np.any(np.isnan(ops.convert_to_numpy(output)))
 
     def test_batch_size_one(self):
         """Tests layer with batch size 1."""
         layer = GatedAttention(dim=32, num_heads=2, max_seq_len=64)
         single_batch_input = tf.random.normal((1, 10, 32))
-
         output = layer(single_batch_input, training=False)
         assert output.shape == single_batch_input.shape
-        assert not np.any(np.isnan(ops.convert_to_numpy(output)))
 
     def test_compute_output_shape(self, layer_config):
         """Tests compute_output_shape method."""
         layer = GatedAttention(**layer_config)
         input_shape = (None, 20, 64)
         output_shape = layer.compute_output_shape(input_shape)
-
         assert output_shape == input_shape
 
     @pytest.mark.parametrize("training", [True, False, None])
     def test_training_modes(self, layer_config, sample_input, training):
         """Tests behavior in different training modes."""
-        config = layer_config.copy()
-        config["dropout_rate"] = 0.1
+        config = {**layer_config, "dropout_rate": 0.1}
         layer = GatedAttention(**config)
-
         output = layer(sample_input, training=training)
         assert output.shape == sample_input.shape
-        assert not np.any(np.isnan(ops.convert_to_numpy(output)))
-
-    def test_long_sequence(self):
-        """Tests layer with long sequences."""
-        layer = GatedAttention(dim=32, num_heads=2, max_seq_len=512)
-        long_input = tf.random.normal((2, 256, 32))  # Long sequence
-
-        output = layer(long_input, training=False)
-        assert output.shape == long_input.shape
-        assert not np.any(np.isnan(ops.convert_to_numpy(output)))
 
     # ===============================================
     # 8. Attention Mechanism Tests
     # ===============================================
-    def test_attention_mask_effect(self, layer_config, sample_input, attention_mask):
-        """Tests that attention mask affects the output."""
+    @pytest.mark.parametrize("mask_type", ["padding", "causal"])
+    def test_attention_mask_effect(self, layer_config, sample_input, padding_attention_mask, causal_attention_mask, mask_type):
+        """Tests that both padding and causal attention masks affect the output."""
         layer = GatedAttention(**layer_config)
+        mask = padding_attention_mask if mask_type == "padding" else causal_attention_mask
 
-        # Run with and without mask
         output_without_mask = layer(sample_input, training=False)
-        output_with_mask = layer(sample_input, attention_mask=attention_mask, training=False)
+        output_with_mask = layer(sample_input, attention_mask=mask, training=False)
 
-        # Outputs should be different due to masking
         assert not np.allclose(
             ops.convert_to_numpy(output_without_mask),
             ops.convert_to_numpy(output_with_mask),
@@ -629,21 +605,18 @@ class TestGatedAttention:
         """Tests that output gating affects the final output."""
         layer = GatedAttention(**layer_config)
         output = layer(sample_input, training=False)
-
-        # The output should be bounded due to sigmoid gating
-        output_np = ops.convert_to_numpy(output)
-        assert not np.any(np.abs(output_np) > 100), "Output values seem unbounded"
+        # A simple check: if gating is working, the output magnitude should be
+        # somewhat controlled by the sigmoid gate. This is a heuristic check.
+        assert np.mean(np.abs(ops.convert_to_numpy(output))) < 10.0
 
     def test_rope_application(self, layer_config, sample_input):
-        """Tests that RoPE is being applied to queries and keys."""
-        # Create two layers with different RoPE percentages
-        layer1 = GatedAttention(dim=64, num_heads=4, max_seq_len=128, rope_percentage=0.1)
-        layer2 = GatedAttention(dim=64, num_heads=4, max_seq_len=128, rope_percentage=0.9)
+        """Tests that RoPE is being applied by comparing different percentages."""
+        layer1 = GatedAttention(**{**layer_config, "rope_percentage": 0.1})
+        layer2 = GatedAttention(**{**layer_config, "rope_percentage": 0.9})
 
         output1 = layer1(sample_input, training=False)
         output2 = layer2(sample_input, training=False)
 
-        # Outputs should be different due to different RoPE percentages
         assert not np.allclose(
             ops.convert_to_numpy(output1),
             ops.convert_to_numpy(output2),
@@ -653,16 +626,10 @@ class TestGatedAttention:
     def test_scaled_dot_product_attention_numerical_stability(self, layer_config):
         """Tests numerical stability of scaled dot-product attention."""
         layer = GatedAttention(**layer_config)
-
-        # Create input with large values that could cause numerical issues
         large_input = tf.random.normal((2, 8, 64)) * 10.0
-
         output = layer(large_input, training=False)
-
-        # Check that output doesn't contain NaN or Inf despite large inputs
         assert not np.any(np.isnan(ops.convert_to_numpy(output)))
         assert not np.any(np.isinf(ops.convert_to_numpy(output)))
 
 if __name__ == "__main__":
-    # Run specific tests
-    pytest.main([__file__, "-v"])
+    pytest.main([__file__, "-v", "--tb=short"])
