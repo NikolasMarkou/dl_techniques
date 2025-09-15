@@ -647,3 +647,5 @@ class DeepKernelPCA(keras.layers.Layer):
             'trainable_kernels': self.trainable_kernels,
         })
         return config
+
+# ---------------------------------------------------------------------

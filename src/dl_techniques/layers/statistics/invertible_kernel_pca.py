@@ -11,6 +11,13 @@ import numpy as np
 from keras import ops, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any, Literal
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class InvertibleKernelPCA(keras.layers.Layer):
@@ -763,3 +770,5 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
             'noise_estimation': self.noise_estimation,
         })
         return config
+
+# ---------------------------------------------------------------------

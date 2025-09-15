@@ -608,3 +608,90 @@ class TestGatedDeltaNet:
         assert not np.any(
             np.abs(output_np) > 100
         ), "Output values seem unbounded"
+
+    # ===============================================
+    # 9. Dynamic Shape Handling Tests (Post-Fix Verification)
+    # ===============================================
+    @pytest.mark.parametrize(
+        "input_shape",
+        [
+            (None, 16, 64),  # Dynamic batch
+            (4, None, 64),  # Dynamic sequence length (the original failure case)
+            (None, None, 64),  # Dynamic batch and sequence
+        ],
+        ids=["dynamic_batch", "dynamic_sequence", "dynamic_batch_and_sequence"],
+    )
+    def test_functional_model_with_dynamic_shapes(self, layer_config, input_shape):
+        """
+        Tests that the layer can be used in a functional model with dynamic
+        input shapes, specifically targeting the ops.scan length=None issue.
+        """
+        # This test directly replicates the failure condition.
+        # The model should build without raising an AttributeError.
+        try:
+            # Input shape for the Input layer is (seq_len, dim)
+            inputs = keras.Input(shape=input_shape[1:])
+            outputs = GatedDeltaNet(**layer_config)(inputs)
+            model = keras.models.Model(inputs, outputs)
+        except Exception as e:
+            pytest.fail(
+                f"Failed to build model with dynamic shape {input_shape}. Error: {e}"
+            )
+
+        # Create a concrete input to test the forward pass
+        concrete_batch_size = 4 if input_shape[0] is None else input_shape[0]
+        concrete_seq_len = 16 if input_shape[1] is None else input_shape[1]
+        concrete_dim = input_shape[2]
+
+        concrete_input = tf.random.normal(
+            shape=(concrete_batch_size, concrete_seq_len, concrete_dim)
+        )
+
+        # The model call should execute without errors.
+        try:
+            prediction = model(concrete_input, training=False)
+        except Exception as e:
+            pytest.fail(
+                f"Model forward pass failed for dynamic shape {input_shape}. Error: {e}"
+            )
+
+        # Verify output shape is correct
+        expected_shape = (concrete_batch_size, concrete_seq_len, concrete_dim)
+        assert prediction.shape == expected_shape, (
+            f"Output shape mismatch for dynamic input. "
+            f"Expected {expected_shape}, got {prediction.shape}"
+        )
+        assert not np.any(np.isnan(ops.convert_to_numpy(prediction)))
+
+    def test_dynamic_sequence_length_in_training_loop(self, layer_config):
+        """
+        Tests that a model with the layer and dynamic sequence length can be compiled
+        and trained for one step, which involves graph tracing.
+        """
+        # Model with dynamic sequence length
+        inputs = keras.Input(shape=(None, 64))
+        outputs = GatedDeltaNet(**layer_config)(inputs)
+        # Add a pooling layer to handle variable length for the final Dense layer
+        pooled = keras.layers.GlobalAveragePooling1D()(outputs)
+        logits = keras.layers.Dense(10)(pooled)
+        model = keras.models.Model(inputs, logits)
+
+        model.compile(
+            optimizer="adam",
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        )
+
+        # Dummy data with a specific sequence length
+        x_train = tf.random.normal((8, 20, 64))
+        y_train = tf.random.uniform([8], 0, 10, dtype=tf.int32)
+
+        # Training for one step should work without errors
+        try:
+            history = model.fit(x_train, y_train, epochs=1, batch_size=4, verbose=0)
+            assert "loss" in history.history
+            assert not np.isnan(history.history["loss"][0])
+        except Exception as e:
+            pytest.fail(f"Training failed with dynamic sequence length model. Error: {e}")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

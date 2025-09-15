@@ -582,17 +582,8 @@ class GatedDeltaNet(keras.layers.Layer):
         Returns:
             Output tensor of shape (batch_size, seq_len, num_heads, head_dim).
         """
-        # Get sequence length from static shape if possible for XLA compatibility.
-        # `tensor.shape[dim]` is a Python int if the shape is known.
-        # `ops.shape(tensor)[dim]` is a symbolic Tensor.
-        # XLA requires a static integer for the `length` argument of `scan`.
-        # seq_len = q.shape[1]
-        # if seq_len is None:
-        #     # Fallback for dynamic sequence lengths (won't be XLA-compatible).
-        #     seq_len = ops.shape(q)[1]
-
         batch_size = ops.shape(q)[0]
-        seq_len = q.shape[1]
+        # The sequence length is now inferred by `ops.scan` from the `xs` inputs.
 
         def step_function(prev_carry, inputs):
             """
@@ -646,9 +637,15 @@ class GatedDeltaNet(keras.layers.Layer):
         # To satisfy TF's scan constraint, the carry must be a tuple containing
         # both the state and a template for the per-step output.
         initial_state = ops.zeros(
-            (batch_size, self.num_heads, self.head_dim, self.head_dim)
+            (batch_size, self.num_heads, self.head_dim, self.head_dim),
+            dtype=q.dtype,
         )
-        initial_output = ops.zeros_like(q[:, 0, :, :])
+        # CRITICAL FIX: Do not use `zeros_like` on a symbolic slice (e.g., q[:,0,:,:]).
+        # This fails during graph construction with dynamic shapes.
+        # Instead, construct the initial tensor with an explicit, known shape.
+        initial_output = ops.zeros(
+            (batch_size, self.num_heads, self.head_dim), dtype=q.dtype
+        )
         initial_carry = (initial_state, initial_output)
 
         # Transpose inputs to (seq_len, batch_size, ...) for scanning.
@@ -660,13 +657,13 @@ class GatedDeltaNet(keras.layers.Layer):
 
         # ops.scan processes the sequence. It returns the final carry and the
         # stack of per-timestep outputs.
-        # Explicitly passing `length` with a static integer value is crucial
-        # for XLA compilation during training.
+        # The `length` argument is omitted to allow `scan` to infer the length
+        # from the input tensors, which is necessary for handling dynamic
+        # sequence lengths in symbolic (functional model) execution.
         _, stacked_outputs_tuple = ops.scan(
             f=step_function,
             init=initial_carry,
             xs=(q_scan, k_scan, v_scan, alpha_scan, beta_scan),
-            length=seq_len,
         )
 
         # The stacked outputs are a tuple (stacked_states, stacked_real_outputs).

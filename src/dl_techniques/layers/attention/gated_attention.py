@@ -400,7 +400,8 @@ class GatedAttention(keras.layers.Layer):
             q: Query tensor of shape [batch, seq_len, num_heads, head_dim]
             k: Key tensor of shape [batch, seq_len, num_heads, head_dim]
             v: Value tensor of shape [batch, seq_len, num_heads, head_dim]
-            attention_mask: Optional attention mask of shape [batch, seq_len]
+            attention_mask: Optional attention mask of shape `[batch, seq_len]`
+                or `[batch, seq_len, seq_len]`.
             training: Training mode flag
 
         Returns:
@@ -418,11 +419,19 @@ class GatedAttention(keras.layers.Layer):
         dk = ops.cast(self.head_dim, keras.backend.floatx())
         scaled_attention_logits = matmul_qk / ops.sqrt(dk)
 
-        # TRICKY POINT: Attention mask broadcasting
-        # The mask is [batch, seq_len] but needs to be [batch, num_heads, seq_len, seq_len]
         if attention_mask is not None:
-            # Reshape to (batch, 1, 1, seq_len) for broadcasting
-            mask = ops.expand_dims(ops.expand_dims(attention_mask, 1), 1)
+            # The mask can be (batch, seq_len) for padding or (batch, seq_len, seq_len) for causal.
+            # We must broadcast it to (batch, num_heads, seq_len, seq_len).
+            mask_ndim = ops.ndim(attention_mask)
+            if mask_ndim == 2:
+                # Padding mask: (batch, seq_len) -> (batch, 1, 1, seq_len)
+                mask = ops.expand_dims(ops.expand_dims(attention_mask, 1), 1)
+            elif mask_ndim == 3:
+                # Causal/Combined mask: (batch, seq_len, seq_len) -> (batch, 1, seq_len, seq_len)
+                mask = ops.expand_dims(attention_mask, 1)
+            else:
+                mask = attention_mask  # Assume it's already broadcastable
+
             # Create additive mask (masked positions get -inf)
             additive_mask = (1.0 - ops.cast(mask, scaled_attention_logits.dtype)) * -1e9
             scaled_attention_logits = scaled_attention_logits + additive_mask
@@ -453,7 +462,8 @@ class GatedAttention(keras.layers.Layer):
 
         Args:
             inputs: Input tensor of shape (batch_size, seq_len, dim).
-            attention_mask: Optional attention mask of shape (batch_size, seq_len).
+            attention_mask: Optional attention mask of shape
+                (batch_size, seq_len) or (batch_size, seq_len, seq_len).
             training: Boolean indicating training or inference mode.
 
         Returns:

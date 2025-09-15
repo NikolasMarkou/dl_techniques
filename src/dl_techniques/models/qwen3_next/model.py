@@ -19,239 +19,12 @@ from typing import Optional, Union, Any, Dict
 
 from dl_techniques.utils.logger import logger
 
-from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 
-from dl_techniques.layers.gated_delta_net import GatedDeltaNet
-from dl_techniques.layers.attention.gated_attention import GatedAttention
-
+from .components import Qwen3NextBlock
 
 # ---------------------------------------------------------------------
-
-
-@keras.saving.register_keras_serializable()
-class Qwen3NextBlock(keras.layers.Layer):
-    """
-    Qwen3 Next transformer block with the correct architecture.
-
-    This block implements the exact pattern shown in the architecture diagram:
-    - 3x Gated DeltaNet layers (each with Zero-Centered RMSNorm + MoE + residual)
-    - 1x Gated Attention layer (with Zero-Centered RMSNorm + MoE + residual)
-
-    **Architecture Pattern (bottom to top)**:
-    ```
-    Input
-      ↓
-    Zero-Centered RMSNorm → Gated DeltaNet → MoE → ⊕ (residual)
-      ↓
-    Zero-Centered RMSNorm → Gated DeltaNet → MoE → ⊕ (residual)
-      ↓
-    Zero-Centered RMSNorm → Gated DeltaNet → MoE → ⊕ (residual)
-      ↓
-    Zero-Centered RMSNorm → Gated Attention → MoE → ⊕ (residual)
-      ↓
-    Output
-    ```
-
-    Args:
-        dim: Integer, model dimension size
-        num_heads: Integer, number of attention heads
-        head_dim: Optional integer, dimension per head
-        moe_config: MoE configuration for expert layers
-        normalization_type: String, type of normalization
-        norm_eps: Float, epsilon for normalization
-        dropout_rate: Float, dropout rate for regularization
-        use_stochastic_depth: Boolean, whether to use stochastic depth
-        stochastic_depth_rate: Float, stochastic depth rate
-        **kwargs: Additional arguments for Layer base class
-    """
-
-    def __init__(
-            self,
-            dim: int,
-            num_heads: int,
-            head_dim: Optional[int] = None,
-            moe_config: Optional[MoEConfig] = None,
-            normalization_type: str = "zero_centered_rms_norm",
-            norm_eps: float = 1e-6,
-            dropout_rate: float = 0.0,
-            use_stochastic_depth: bool = False,
-            stochastic_depth_rate: float = 0.1,
-            **kwargs: Any
-    ) -> None:
-        super().__init__(**kwargs)
-
-        # Store configuration
-        self.dim = dim
-        self.num_heads = num_heads
-        self.head_dim = head_dim if head_dim is not None else dim // num_heads
-        self.moe_config = moe_config
-        self.normalization_type = normalization_type
-        self.norm_eps = norm_eps
-        self.dropout_rate = dropout_rate
-        self.use_stochastic_depth = use_stochastic_depth
-        self.stochastic_depth_rate = stochastic_depth_rate
-
-        # Create all sub-layers in __init__
-
-        # 3x Gated DeltaNet layers with their normalization and MoE
-        self.delta_norms = []
-        self.delta_layers = []
-        self.delta_moe_layers = []
-
-        for i in range(3):
-            # Pre-layer normalization
-            delta_norm = create_normalization_layer(
-                normalization_type,
-                epsilon=norm_eps,
-                name=f"delta_norm_{i}"
-            )
-            self.delta_norms.append(delta_norm)
-
-            # Gated DeltaNet layer
-            delta_layer = GatedDeltaNet(
-                dim=dim,
-                num_heads=num_heads,
-                head_dim=self.head_dim,
-                dropout_rate=dropout_rate,
-                name=f"gated_delta_net_{i}"
-            )
-            self.delta_layers.append(delta_layer)
-
-            # MoE layer after DeltaNet
-            if moe_config is not None:
-                from dl_techniques.layers.moe import MixtureOfExperts
-                delta_moe = MixtureOfExperts(
-                    moe_config,
-                    name=f"delta_moe_{i}"
-                )
-                self.delta_moe_layers.append(delta_moe)
-            else:
-                self.delta_moe_layers.append(None)
-
-        # 1x Gated Attention layer with its normalization and MoE
-        self.attention_norm = create_normalization_layer(
-            normalization_type,
-            epsilon=norm_eps,
-            name="attention_norm"
-        )
-
-        self.attention_layer = GatedAttention(
-            dim=dim,
-            num_heads=num_heads,
-            head_dim=self.head_dim,
-            dropout_rate=dropout_rate,
-            name="gated_attention"
-        )
-
-        # MoE layer after attention
-        if moe_config is not None:
-            from dl_techniques.layers.moe import MixtureOfExperts
-            self.attention_moe = MixtureOfExperts(
-                moe_config,
-                name="attention_moe"
-            )
-        else:
-            self.attention_moe = None
-
-        # Stochastic depth for regularization
-        if use_stochastic_depth and stochastic_depth_rate > 0.0:
-            from dl_techniques.layers.stochastic_depth import StochasticDepth
-            self.stochastic_depth_layers = []
-            for i in range(4):  # 3 delta + 1 attention
-                stoch_depth = StochasticDepth(
-                    drop_path_rate=stochastic_depth_rate,
-                    name=f"stochastic_depth_{i}"
-                )
-                self.stochastic_depth_layers.append(stoch_depth)
-        else:
-            self.stochastic_depth_layers = []
-
-    def call(
-            self,
-            inputs: keras.KerasTensor,
-            attention_mask: Optional[keras.KerasTensor] = None,
-            training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """
-        Forward pass through the Qwen3Next block.
-
-        Args:
-            inputs: Input tensor of shape (batch_size, seq_len, dim)
-            attention_mask: Optional attention mask
-            training: Training mode flag
-
-        Returns:
-            Output tensor of shape (batch_size, seq_len, dim)
-        """
-        x = inputs
-
-        # Process through 3x Gated DeltaNet layers
-        for i in range(3):
-            # Pre-normalization
-            x_norm = self.delta_norms[i](x, training=training)
-
-            # Gated DeltaNet
-            delta_out = self.delta_layers[i](x_norm, training=training)
-
-            # MoE if configured
-            if self.delta_moe_layers[i] is not None:
-                delta_out = self.delta_moe_layers[i](delta_out, training=training)
-
-            # Apply stochastic depth if configured
-            if (self.stochastic_depth_layers and
-                    i < len(self.stochastic_depth_layers)):
-                delta_out = self.stochastic_depth_layers[i](
-                    delta_out, training=training
-                )
-
-            # Residual connection
-            x = x + delta_out
-
-        # Process through 1x Gated Attention layer
-        # Pre-normalization
-        x_norm = self.attention_norm(x, training=training)
-
-        # Gated Attention
-        attention_out = (
-            self.attention_layer(
-                x_norm,
-                attention_mask=attention_mask,
-                training=training))
-
-        # MoE if configured
-        if self.attention_moe is not None:
-            attention_out = self.attention_moe(attention_out, training=training)
-
-        # Apply stochastic depth if configured
-        if (self.stochastic_depth_layers and
-                len(self.stochastic_depth_layers) > 3):
-            attention_out = self.stochastic_depth_layers[3](
-                attention_out, training=training
-            )
-
-        # Residual connection
-        x = x + attention_out
-
-        return x
-
-    def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            "dim": self.dim,
-            "num_heads": self.num_heads,
-            "head_dim": self.head_dim,
-            "moe_config": self.moe_config.to_dict() if self.moe_config else None,
-            "normalization_type": self.normalization_type,
-            "norm_eps": self.norm_eps,
-            "dropout_rate": self.dropout_rate,
-            "use_stochastic_depth": self.use_stochastic_depth,
-            "stochastic_depth_rate": self.stochastic_depth_rate,
-        })
-        return config
-
 
 @keras.saving.register_keras_serializable()
 class Qwen3Next(keras.Model):
@@ -388,6 +161,8 @@ class Qwen3Next(keras.Model):
             stochastic_depth_rate: float = 0.1,
             **kwargs: Any
     ) -> None:
+        # CRITICAL FIX: Call super() FIRST. This is mandatory for Keras models.
+        super().__init__(**kwargs)
 
         # Validate configuration parameters
         self._validate_config(
@@ -420,12 +195,9 @@ class Qwen3Next(keras.Model):
         # Build the model architecture
         self._build_architecture()
 
-        # Initialize the Model base class
-        super().__init__(**kwargs)
-
         # Log model creation
         total_effective_layers = num_layers * 4  # Each block has 3 delta + 1 attn
-        active_params_pct = (self.num_experts_per_tok / self.num_experts) * 100
+        active_params_pct = (self.num_experts_per_tok / self.num_experts) * 100 if self.num_experts > 1 else 100.0
         logger.info(
             f"Created Qwen3 Next model: {self.num_layers} blocks "
             f"({total_effective_layers} effective layers), "
@@ -487,14 +259,8 @@ class Qwen3Next(keras.Model):
             name="token_embedding"
         )
 
-        # RoPE embedding - using the factory from dl_techniques
-        self.rope_embedding = create_embedding_layer(
-            'rope',
-            head_dim=self.head_dim,
-            max_seq_len=self.max_position_embeddings,
-            rope_theta=self.rope_theta,
-            name='rope_embedding'
-        )
+        # CRITICAL FIX: Removed unused `self.rope_embedding`.
+        # RoPE is handled within each `GatedAttention` layer, not at the model level.
 
         # Create MoE configuration
         moe_config = None
@@ -723,6 +489,7 @@ def create_qwen3_next_generation(config: Dict[str, Any]) -> keras.Model:
     logger.info(f"Created Qwen3 Next generation model with {model.count_params():,} parameters")
     return model
 
+# ---------------------------------------------------------------------
 
 def create_qwen3_next_classification(
         config: Dict[str, Any],
@@ -774,6 +541,7 @@ def create_qwen3_next_classification(
     logger.info(f"Created Qwen3 Next classification model with {model.count_params():,} parameters")
     return model
 
+# ---------------------------------------------------------------------
 
 def create_qwen3_next(
         variant: str = "small",
@@ -798,3 +566,5 @@ def create_qwen3_next(
         return create_qwen3_next_classification(config, num_labels)
     else:
         raise ValueError(f"Unknown task_type: {task_type}")
+
+# ---------------------------------------------------------------------
