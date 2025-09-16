@@ -291,6 +291,7 @@ class Qwen3Next(keras.Model):
                 dim=self.hidden_size,
                 num_heads=self.num_attention_heads,
                 head_dim=self.head_dim,
+                max_seq_len=self.max_position_embeddings,
                 moe_config=moe_config,
                 normalization_type=self.normalization_type,
                 norm_eps=self.norm_eps,
@@ -468,18 +469,29 @@ class Qwen3Next(keras.Model):
 # ---------------------------------------------------------------------
 
 def create_qwen3_next_generation(config: Dict[str, Any]) -> keras.Model:
-    """Create a Qwen3 Next model optimized for text generation."""
-    logger.info("Creating Qwen3 Next model for text generation")
+    """
+    Create a Qwen3 Next model optimized for text generation tasks.
 
-    qwen3_next = Qwen3Next(**config, name="qwen3_next")
+    This factory builds a Keras model that takes `input_ids` and an
+    `attention_mask` and returns token logits, suitable for autoregressive
+    text generation.
+
+    Args:
+        config: A dictionary containing the complete configuration for the
+            `Qwen3Next` base model.
+
+    Returns:
+        A compiled Keras `Model` ready for generation tasks.
+    """
+    logger.info("Creating Qwen3 Next model for text generation.")
+    logger.debug(f"Generation model config: {config}")
+
+    qwen3_next_backbone = Qwen3Next(**config, name="qwen3_next_backbone")
     input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
     attention_mask = keras.Input(shape=(None,), dtype="int32", name="attention_mask")
 
-    logits = qwen3_next(
-        inputs={
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-        }
+    logits = qwen3_next_backbone(
+        inputs={"input_ids": input_ids, "attention_mask": attention_mask}
     )
 
     model = keras.Model(
@@ -488,50 +500,86 @@ def create_qwen3_next_generation(config: Dict[str, Any]) -> keras.Model:
         name="qwen3_next_for_generation"
     )
 
-    logger.info(f"Created Qwen3 Next generation model with {model.count_params():,} parameters")
+    param_count = model.count_params()
+    logger.info(
+        f"Created Qwen3 Next generation model with {param_count:,} parameters."
+    )
     return model
 
 # ---------------------------------------------------------------------
 
 def create_qwen3_next_classification(
-        config: Dict[str, Any],
-        num_labels: int,
-        classifier_dropout: Optional[float] = None
+    config: Dict[str, Any],
+    num_labels: int,
+    pooling_strategy: str = "cls",
+    classifier_dropout: Optional[float] = None,
 ) -> keras.Model:
-    """Create a Qwen3 Next model for sequence classification tasks."""
+    """
+    Create a Qwen3 Next model for sequence classification tasks.
+
+    This factory adds a classification head on top of the Qwen3 Next model.
+    It supports different pooling strategies for aggregating sequence
+    information.
+
+    Args:
+        config: A dictionary containing the complete configuration for the
+            `Qwen3Next` base model.
+        num_labels: The number of output labels for the classification task.
+        pooling_strategy: The method to pool the sequence output.
+            - "cls": Use the output of the first token (CLS token).
+            - "mean": Use the mean of all token outputs (respecting attention mask).
+            Defaults to "cls".
+        classifier_dropout: The dropout rate for the classification head. If
+            `None`, it defaults to the `dropout_rate` from the main `config`.
+            Defaults to `None`.
+
+    Returns:
+        A compiled Keras `Model` ready for classification tasks.
+    """
     if num_labels <= 0:
         raise ValueError(f"num_labels must be positive, got {num_labels}")
+    if pooling_strategy not in ["cls", "mean"]:
+        raise ValueError(f"pooling_strategy must be 'cls' or 'mean', got '{pooling_strategy}'")
 
-    logger.info(f"Creating Qwen3 Next classification model with {num_labels} labels")
+    logger.info(f"Creating Qwen3 Next classification model with {num_labels} labels.")
+    logger.info(f"Using pooling strategy: '{pooling_strategy}'")
+    logger.debug(f"Classification model config: {config}")
 
-    qwen3_next = Qwen3Next(**config, name="qwen3_next")
+    qwen3_next_backbone = Qwen3Next(**config, name="qwen3_next_backbone")
     input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
     attention_mask = keras.Input(shape=(None,), dtype="int32", name="attention_mask")
 
-    sequence_output = qwen3_next(
-        inputs={
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-        }
+    sequence_output = qwen3_next_backbone(
+        inputs={"input_ids": input_ids, "attention_mask": attention_mask}
     )
 
-    pooled_output = sequence_output[:, 0]  # Shape: (batch_size, hidden_size)
+    # Apply the selected pooling strategy
+    if pooling_strategy == "cls":
+        pooled_output = sequence_output[:, 0]  # Shape: (batch_size, hidden_size)
+    else:  # "mean" pooling
+        # Mask the padding tokens before averaging
+        mask = keras.ops.expand_dims(keras.ops.cast(attention_mask, sequence_output.dtype), axis=-1)
+        masked_output = sequence_output * mask
+        summed_output = keras.ops.sum(masked_output, axis=1)
+        # Avoid division by zero for empty sequences
+        num_tokens = keras.ops.maximum(
+            keras.ops.sum(keras.ops.cast(attention_mask, 'float32'), axis=1, keepdims=True), 1.0)
+        pooled_output = summed_output / num_tokens
 
-    if classifier_dropout is None:
-        classifier_dropout = config.get("dropout_rate", 0.1)
-
-    if classifier_dropout > 0.0:
+    # Determine classifier dropout
+    dropout_rate = classifier_dropout if classifier_dropout is not None else config.get("dropout_rate", 0.1)
+    if dropout_rate > 0.0:
+        logger.info(f"Applying classifier dropout with rate: {dropout_rate}")
         pooled_output = keras.layers.Dropout(
-            classifier_dropout,
-            name="classifier_dropout"
+            dropout_rate, name="classifier_dropout"
         )(pooled_output)
 
+    # Final classification layer
+    initializer_range = config.get("initializer_range", 0.02)
     logits = keras.layers.Dense(
         units=num_labels,
-        kernel_initializer=keras.initializers.TruncatedNormal(
-            stddev=config.get("initializer_range", 0.02)
-        ),
-        name="classifier"
+        kernel_initializer=keras.initializers.TruncatedNormal(stddev=initializer_range),
+        name="classifier_head",
     )(pooled_output)
 
     model = keras.Model(
@@ -540,33 +588,112 @@ def create_qwen3_next_classification(
         name="qwen3_next_for_classification"
     )
 
-    logger.info(f"Created Qwen3 Next classification model with {model.count_params():,} parameters")
+    param_count = model.count_params()
+    logger.info(
+        f"Created Qwen3 Next classification model with {param_count:,} parameters."
+    )
     return model
 
-# ---------------------------------------------------------------------
 
 def create_qwen3_next(
-        variant: str = "small",
-        task_type: str = "generation",
-        num_labels: Optional[int] = None,
-        **kwargs: Any
+    config_or_variant: Union[str, Dict[str, Any]],
+    task_type: str = "generation",
+    **kwargs: Any,
 ) -> keras.Model:
-    """Convenience function to create Qwen3 Next models for common tasks."""
-    if variant in Qwen3Next.MODEL_VARIANTS:
+    """
+    High-level factory to create Qwen3 Next models for common tasks.
+
+    This function provides a single, convenient entry point for creating
+    different types of Qwen3 Next models. It allows specifying a model by
+    a predefined variant string or a custom configuration dictionary, and
+    supports overriding any parameter via keyword arguments.
+
+    Configuration Precedence:
+    1. Predefined variant defaults.
+    2. Overridden by `config_or_variant` if it's a dictionary.
+    3. Finally, overridden by any explicit `**kwargs`.
+
+    Args:
+        config_or_variant: Either a variant string (e.g., "tiny", "small")
+            or a dictionary with custom model configuration.
+        task_type: The type of model to create. Supported values are:
+            - "generation": For autoregressive language modeling.
+            - "classification": For sequence classification.
+        **kwargs: Additional keyword arguments to override configuration
+            parameters or provide task-specific settings.
+            - For base model: `hidden_size`, `num_layers`, etc.
+            - For classification task: `num_labels`, `pooling_strategy`,
+              `classifier_dropout`.
+
+    Returns:
+        A Keras `Model` configured for the specified task.
+
+    Example:
+        ```python
+        # Create a standard 'tiny' model for generation
+        gen_model = create_qwen3_next("tiny")
+
+        # Create a 'small' model for classification with 5 labels
+        clf_model = create_qwen3_next("small", task_type="classification", num_labels=5)
+
+        # Create a custom 'tiny' model with fewer layers for generation
+        custom_gen = create_qwen3_next("tiny", num_layers=2)
+
+        # Create a custom classification model from a dictionary with mean pooling
+        my_config = {"hidden_size": 128, "num_layers": 2, ...}
+        custom_clf = create_qwen3_next(
+            my_config,
+            task_type="classification",
+            num_labels=10,
+            pooling_strategy="mean"
+        )
+        ```
+    """
+    # 1. Determine base configuration from variant or dict
+    if isinstance(config_or_variant, str):
+        variant = config_or_variant
+        if variant not in Qwen3Next.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available: {list(Qwen3Next.MODEL_VARIANTS.keys())}"
+            )
         config = Qwen3Next.MODEL_VARIANTS[variant].copy()
         config.pop("description", None)
+    elif isinstance(config_or_variant, dict):
+        config = config_or_variant.copy()
     else:
-        raise ValueError(f"Unknown variant: {variant}")
+        raise TypeError(
+            "config_or_variant must be a string (variant name) or a dictionary."
+        )
 
-    config.update(kwargs)
+    # 2. Separate task-specific kwargs from model config kwargs
+    task_kwargs = {}
+    model_kwargs = {}
+    task_specific_keys = ["num_labels", "pooling_strategy", "classifier_dropout"]
 
+    for key, value in kwargs.items():
+        if key in task_specific_keys:
+            task_kwargs[key] = value
+        else:
+            model_kwargs[key] = value
+
+    # 3. Apply overrides to the base model config
+    config.update(model_kwargs)
+
+    # 4. Build the requested model based on task_type
     if task_type == "generation":
+        if "num_labels" in task_kwargs:
+            logger.warning("`num_labels` is ignored for 'generation' task type.")
         return create_qwen3_next_generation(config)
+
     elif task_type == "classification":
+        num_labels = task_kwargs.pop("num_labels", None)
         if num_labels is None:
-            raise ValueError("num_labels must be provided for classification task")
-        return create_qwen3_next_classification(config, num_labels)
+            raise ValueError(
+                "`num_labels` must be provided for the 'classification' task."
+            )
+        return create_qwen3_next_classification(config, num_labels, **task_kwargs)
+
     else:
-        raise ValueError(f"Unknown task_type: {task_type}")
+        raise ValueError(f"Unknown task_type '{task_type}'. Supported: 'generation', 'classification'.")
 
 # ---------------------------------------------------------------------

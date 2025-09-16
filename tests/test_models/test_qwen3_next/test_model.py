@@ -24,8 +24,6 @@ import keras
 from dl_techniques.models.qwen3_next.model import (
     Qwen3Next,
     Qwen3NextBlock,
-    create_qwen3_next_generation,
-    create_qwen3_next_classification,
     create_qwen3_next,
 )
 from dl_techniques.layers.gated_delta_net import GatedDeltaNet
@@ -45,7 +43,6 @@ class TestQwen3NextModelBasic:
             'max_position_embeddings': 512,
             'num_experts': 1,  # No MoE for basic tests
             'num_experts_per_tok': 1,
-            'rope_theta': 10000.0,
             'dropout_rate': 0.1,
         }
 
@@ -62,7 +59,6 @@ class TestQwen3NextModelBasic:
             'num_experts': 4,
             'num_experts_per_tok': 2,
             'moe_intermediate_size': 64,
-            'rope_theta': 10000.0,
             'dropout_rate': 0.0,
         }
 
@@ -88,9 +84,6 @@ class TestQwen3NextModelBasic:
         # Check embedding layer
         assert model.embeddings.input_dim == tiny_config['vocab_size']
         assert model.embeddings.output_dim == tiny_config['hidden_size']
-
-        # Check RoPE embedding
-        assert model.rope_embedding is not None
 
         # Check normalization layer (should be Zero-Centered RMSNorm)
         assert model.final_norm is not None
@@ -305,6 +298,7 @@ class TestQwen3NextModelConfigurations:
                 'num_layers': 2,
                 'num_attention_heads': config['num_attention_heads'],
                 'num_key_value_heads': config['num_key_value_heads'],
+                'max_position_embeddings': 256,
                 'num_experts': 1,  # No MoE for simplicity
                 'num_experts_per_tok': 1,
             }
@@ -330,6 +324,7 @@ class TestQwen3NextModelConfigurations:
             'num_layers': 2,
             'num_attention_heads': 6,
             'num_key_value_heads': 2,
+            'max_position_embeddings': 256,
         }
 
         moe_configs = [
@@ -357,35 +352,6 @@ class TestQwen3NextModelConfigurations:
             assert model.num_experts == moe_config['num_experts']
             assert model.num_experts_per_tok == moe_config['num_experts_per_tok']
 
-    def test_rope_theta_variations(self):
-        """Test different RoPE theta values."""
-        base_config = {
-            'vocab_size': 400,
-            'hidden_size': 64,
-            'num_layers': 2,
-            'num_attention_heads': 4,
-            'num_key_value_heads': 2,
-            'num_experts': 1,
-            'num_experts_per_tok': 1,
-        }
-
-        rope_thetas = [10000.0, 100000.0, 1000000.0]
-
-        for theta in rope_thetas:
-            config = base_config.copy()
-            config['rope_theta'] = theta
-
-            model = Qwen3Next(**config)
-            assert model.rope_theta == theta
-
-            sample_input = keras.ops.convert_to_tensor(
-                np.random.randint(0, 400, size=(1, 32)),
-                dtype='int32'
-            )
-            output = model(sample_input)
-
-            assert output.shape == (1, 32, config['vocab_size'])
-
     def test_stochastic_depth_configuration(self):
         """Test stochastic depth configuration."""
         config = {
@@ -394,6 +360,7 @@ class TestQwen3NextModelConfigurations:
             'num_layers': 3,
             'num_attention_heads': 4,
             'num_key_value_heads': 2,
+            'max_position_embeddings': 256,
             'num_experts': 1,
             'num_experts_per_tok': 1,
             'use_stochastic_depth': True,
@@ -403,7 +370,7 @@ class TestQwen3NextModelConfigurations:
         model = Qwen3Next(**config)
 
         # Check stochastic depth is enabled
-        assert model.use_stochastic_depth == True
+        assert model.use_stochastic_depth is True
         assert model.stochastic_depth_rate == 0.1
 
         # Check blocks have stochastic depth
@@ -434,6 +401,7 @@ class TestQwen3NextModelSerialization:
             'num_layers': 2,
             'num_attention_heads': 4,
             'num_key_value_heads': 2,
+            'max_position_embeddings': 256,
             'num_experts': 4,
             'num_experts_per_tok': 2,
             'moe_intermediate_size': 64,
@@ -448,7 +416,7 @@ class TestQwen3NextModelSerialization:
         # Check all important parameters are present
         expected_keys = {
             'vocab_size', 'hidden_size', 'num_layers', 'num_attention_heads',
-            'num_key_value_heads', 'max_position_embeddings', 'rope_theta',
+            'num_key_value_heads', 'max_position_embeddings',
             'num_experts', 'num_experts_per_tok', 'moe_intermediate_size',
             'norm_eps', 'dropout_rate', 'initializer_range',
             'normalization_type', 'ffn_type', 'use_stochastic_depth',
@@ -542,83 +510,86 @@ class TestQwen3NextModelSerialization:
 class TestQwen3NextModelFactories:
     """Test factory functions and utilities."""
 
-    def test_create_qwen3_next_generation(self):
-        """Test generation model factory."""
-        config = {
-            'vocab_size': 1000,
-            'hidden_size': 128,
-            'num_layers': 2,
-            'num_attention_heads': 8,
-            'num_key_value_heads': 2,
-            'num_experts': 1,
-            'num_experts_per_tok': 1,
-        }
+    def test_main_factory_functionality(self):
+        """Test the main `create_qwen3_next` factory's core functionality."""
+        num_labels = 5
+        vocab_size = 1000
 
-        model = create_qwen3_next_generation(config)
-
-        # Check model structure
-        assert model.name == "qwen3_next_for_generation"
-        assert len(model.inputs) == 2  # input_ids, attention_mask
-        assert len(model.outputs) == 1  # logits
-
-        # Test with sample input
-        input_ids = keras.ops.convert_to_tensor(
-            np.random.randint(0, 1000, size=(2, 32)),
-            dtype='int32'
-        )
-        attention_mask = keras.ops.ones((2, 32), dtype='int32')
-
-        logits = model([input_ids, attention_mask])
-        assert logits.shape == (2, 32, 1000)
-
-    def test_create_qwen3_next_classification(self):
-        """Test classification model factory."""
-        config = {
-            'vocab_size': 800,
-            'hidden_size': 96,
-            'num_layers': 2,
-            'num_attention_heads': 6,
-            'num_key_value_heads': 2,
-            'num_experts': 1,
-            'num_experts_per_tok': 1,
-        }
-
-        num_labels = 3
-        model = create_qwen3_next_classification(config, num_labels)
-
-        # Check model structure
-        assert model.name == "qwen3_next_for_classification"
-        assert len(model.inputs) == 2  # input_ids, attention_mask
-        assert len(model.outputs) == 1  # classification logits
-
-        # Test with sample input
-        input_ids = keras.ops.convert_to_tensor(
-            np.random.randint(0, 800, size=(2, 24)),
-            dtype='int32'
-        )
-        attention_mask = keras.ops.ones((2, 24), dtype='int32')
-
-        class_logits = model([input_ids, attention_mask])
-        assert class_logits.shape == (2, num_labels)
-
-    def test_create_qwen3_next_convenience_function(self):
-        """Test convenience factory function."""
-        # Test generation model
+        # 1. Test generation model from variant
         gen_model = create_qwen3_next("tiny", task_type="generation")
         assert gen_model.name == "qwen3_next_for_generation"
+        assert len(gen_model.inputs) == 2
+        input_ids = keras.ops.convert_to_tensor(np.random.randint(0, 151936, size=(2, 32)), dtype='int32')
+        attention_mask = keras.ops.ones((2, 32), dtype='int32')
+        logits = gen_model([input_ids, attention_mask])
+        assert logits.shape == (2, 32, 151936)
 
-        # Test classification model
-        clf_model = create_qwen3_next("tiny", task_type="classification", num_labels=5)
+        # 2. Test classification model from variant
+        clf_model = create_qwen3_next("tiny", task_type="classification", num_labels=num_labels)
         assert clf_model.name == "qwen3_next_for_classification"
+        assert len(clf_model.inputs) == 2
+        class_logits = clf_model([input_ids, attention_mask])
+        assert class_logits.shape == (2, num_labels)
 
-        # Test with overrides
+        # 3. Test parameter override with kwargs
         custom_model = create_qwen3_next(
             "tiny",
             task_type="generation",
             hidden_size=256,  # Override
-            num_layers=1  # Override
+            num_layers=1,     # Override
+            vocab_size=vocab_size
         )
         assert custom_model.name == "qwen3_next_for_generation"
+        # Access the backbone model to check its config
+        backbone = custom_model.get_layer("qwen3_next_backbone")
+        assert backbone.hidden_size == 256
+        assert backbone.num_layers == 1
+        assert backbone.vocab_size == vocab_size
+
+        # 4. Test creating from a configuration dictionary
+        custom_config = {
+            'vocab_size': vocab_size,
+            'hidden_size': 128,
+            'num_layers': 2,
+            'num_attention_heads': 4,
+            'num_key_value_heads': 2,
+            'max_position_embeddings': 128,
+            'num_experts': 1,
+            'num_experts_per_tok': 1,
+        }
+        dict_model = create_qwen3_next(custom_config, task_type="generation")
+        dict_backbone = dict_model.get_layer("qwen3_next_backbone")
+        assert dict_backbone.hidden_size == 128
+        assert dict_backbone.vocab_size == vocab_size
+
+    def test_classification_factory_advanced_options(self):
+        """Test advanced options of the classification factory."""
+        num_labels = 3
+        input_ids = keras.ops.convert_to_tensor(np.random.randint(0, 151936, size=(2, 24)), dtype='int32')
+        attention_mask = keras.ops.ones((2, 24), dtype='int32')
+
+        # Test "mean" pooling strategy
+        mean_pool_model = create_qwen3_next(
+            "tiny",
+            task_type="classification",
+            num_labels=num_labels,
+            pooling_strategy="mean"
+        )
+        assert mean_pool_model.name == "qwen3_next_for_classification"
+        mean_pool_logits = mean_pool_model([input_ids, attention_mask])
+        assert mean_pool_logits.shape == (2, num_labels)
+
+        # Test custom classifier dropout
+        dropout_model = create_qwen3_next(
+            "tiny",
+            task_type="classification",
+            num_labels=num_labels,
+            classifier_dropout=0.5
+        )
+        # Check that the dropout layer was created with the correct rate
+        classifier_dropout_layer = dropout_model.get_layer("classifier_dropout")
+        assert classifier_dropout_layer is not None
+        assert classifier_dropout_layer.rate == 0.5
 
     def test_model_variant_configurations(self):
         """Test that MODEL_VARIANTS have correct configurations."""
@@ -746,9 +717,9 @@ class TestQwen3NextModelErrorHandling:
             Qwen3Next.from_variant('invalid_variant')
 
     def test_invalid_factory_parameters(self):
-        """Test error handling in factory functions."""
+        """Test error handling in the main factory function."""
         # Missing num_labels for classification
-        with pytest.raises(ValueError, match="num_labels must be provided"):
+        with pytest.raises(ValueError, match="`num_labels` must be provided"):
             create_qwen3_next("tiny", task_type="classification")
 
         # Invalid task_type
@@ -757,7 +728,11 @@ class TestQwen3NextModelErrorHandling:
 
         # Invalid num_labels
         with pytest.raises(ValueError, match="num_labels must be positive"):
-            create_qwen3_next_classification({}, num_labels=-1)
+            create_qwen3_next("tiny", task_type="classification", num_labels=-1)
+
+        # Invalid pooling strategy
+        with pytest.raises(ValueError, match="pooling_strategy must be 'cls' or 'mean'"):
+            create_qwen3_next("tiny", task_type="classification", num_labels=3, pooling_strategy="max")
 
 
 class TestQwen3NextModelPerformance:
@@ -771,6 +746,7 @@ class TestQwen3NextModelPerformance:
             'num_layers': 3,  # 3 blocks
             'num_attention_heads': 4,
             'num_key_value_heads': 2,
+            'max_position_embeddings': 256,
             'num_experts': 1,
             'num_experts_per_tok': 1,
         }
@@ -796,6 +772,7 @@ class TestQwen3NextModelPerformance:
             'num_layers': 2,
             'num_attention_heads': 6,
             'num_key_value_heads': 2,
+            'max_position_embeddings': 256,
         }
 
         # Model without MoE
@@ -896,6 +873,7 @@ class TestQwen3NextModelPerformance:
             base_config = {
                 'vocab_size': 500,
                 'num_key_value_heads': 2,
+                'max_position_embeddings': 256,
                 'num_experts': 1,
                 'num_experts_per_tok': 1,
                 **config
@@ -998,7 +976,7 @@ class TestQwen3NextIntegration:
         attention_mask = keras.ops.scatter_update(
             attention_mask,
             [[1, 24], [1, 25], [1, 26], [1, 27], [1, 28], [1, 29], [1, 30], [1, 31]],
-            [0, 0, 0, 0, 0, 0, 0, 0]
+            np.array([0, 0, 0, 0, 0, 0, 0, 0], dtype=np.int32)
         )
 
         # Forward pass with mask

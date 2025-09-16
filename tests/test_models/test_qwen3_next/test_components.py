@@ -27,6 +27,7 @@ class TestQwen3NextBlock:
         return {
             "dim": 128,
             "num_heads": 8,
+            "max_seq_len": 512,
             "dropout_rate": 0.0,
         }
 
@@ -37,6 +38,7 @@ class TestQwen3NextBlock:
             "dim": 144,
             "num_heads": 6,
             "head_dim": 32,  # Custom head size
+            "max_seq_len": 256,
             "normalization_type": "rms_norm",
         }
 
@@ -65,6 +67,7 @@ class TestQwen3NextBlock:
         return {
             "dim": 128,
             "num_heads": 8,
+            "max_seq_len": 512,
             "moe_config": moe_config,
             "dropout_rate": 0.1,
         }
@@ -75,6 +78,7 @@ class TestQwen3NextBlock:
         return {
             "dim": 96,
             "num_heads": 6,
+            "max_seq_len": 256,
             "use_stochastic_depth": True,
             "stochastic_depth_rate": 0.2,
             "dropout_rate": 0.0,
@@ -105,6 +109,7 @@ class TestQwen3NextBlock:
             "dim": dim,
             "num_heads": 12,
             "head_dim": 24,
+            "max_seq_len": 1024,
             "moe_config": advanced_moe_config,
             "normalization_type": "zero_centered_rms_norm",
             "norm_eps": 1e-8,
@@ -151,6 +156,7 @@ class TestQwen3NextBlock:
         assert block.dim == 128
         assert block.num_heads == 8
         assert block.head_dim == 16  # 128 // 8
+        assert block.max_seq_len == 512
         assert block.normalization_type == "zero_centered_rms_norm"
         assert block.norm_eps == 1e-6
         assert block.dropout_rate == 0.0
@@ -163,6 +169,7 @@ class TestQwen3NextBlock:
         assert block.dim == 144
         assert block.num_heads == 6
         assert block.head_dim == 32  # Explicitly set
+        assert block.max_seq_len == 256
         assert block.normalization_type == "rms_norm"
 
     def test_initialization_with_moe(self, moe_block_config):
@@ -188,7 +195,7 @@ class TestQwen3NextBlock:
             "gating_config": {"gating_type": "linear", "top_k": 1}
         }
 
-        block = Qwen3NextBlock(dim=128, num_heads=8, moe_config=moe_dict)
+        block = Qwen3NextBlock(dim=128, num_heads=8, max_seq_len=256, moe_config=moe_dict)
         assert block.moe_config is not None
         assert block.moe_config.num_experts == 8
 
@@ -267,6 +274,13 @@ class TestQwen3NextBlock:
 
         with pytest.raises(ValueError, match="head_dim must be positive"):
             Qwen3NextBlock(dim=128, num_heads=8, head_dim=-16)
+
+    def test_parameter_validation_max_seq_len_positive(self):
+        """Tests that max_seq_len must be positive."""
+        with pytest.raises(ValueError, match="max_seq_len must be positive"):
+            Qwen3NextBlock(dim=128, num_heads=8, max_seq_len=0)
+        with pytest.raises(ValueError, match="max_seq_len must be positive"):
+            Qwen3NextBlock(dim=128, num_heads=8, max_seq_len=-512)
 
     def test_parameter_validation_dropout_rate(self):
         """Tests that dropout_rate must be in [0, 1]."""
@@ -376,7 +390,7 @@ class TestQwen3NextBlock:
         """Tests forward pass with different numbers of heads."""
         # Adjust dim to be divisible by num_heads
         dim = num_heads * 16
-        block = Qwen3NextBlock(dim=dim, num_heads=num_heads)
+        block = Qwen3NextBlock(dim=dim, num_heads=num_heads, max_seq_len=256)
 
         # Adjust input to match dim
         adjusted_input = tf.random.normal((sample_input.shape[0], sample_input.shape[1], dim))
@@ -392,6 +406,7 @@ class TestQwen3NextBlock:
         block = Qwen3NextBlock(
             dim=128,
             num_heads=8,
+            max_seq_len=512,
             normalization_type=normalization_type
         )
         output = block(sample_input, training=False)
@@ -510,6 +525,7 @@ class TestQwen3NextBlock:
             "dim",
             "num_heads",
             "head_dim",
+            "max_seq_len",
             "moe_config",
             "normalization_type",
             "norm_eps",
@@ -540,6 +556,7 @@ class TestQwen3NextBlock:
         assert reconstructed_block.dim == original_block.dim
         assert reconstructed_block.num_heads == original_block.num_heads
         assert reconstructed_block.head_dim == original_block.head_dim
+        assert reconstructed_block.max_seq_len == original_block.max_seq_len
         assert reconstructed_block.normalization_type == original_block.normalization_type
         assert reconstructed_block.norm_eps == original_block.norm_eps
         assert reconstructed_block.dropout_rate == original_block.dropout_rate
@@ -571,7 +588,7 @@ class TestQwen3NextBlock:
         assert len(gradients) > 0, "No gradients were computed"
         assert all(g is not None for g in gradients), "Some gradients are None"
         assert all(
-            not np.any(np.isnan(ops.convert_to_numpy(g))) for g in gradients
+            not np.any(np.isnan(ops.convert_to_numpy(g))) for g in gradients if g is not None
         ), "NaN in gradients"
 
     def test_gradient_flow_with_moe(self, moe_block_config, sample_input):
@@ -637,8 +654,8 @@ class TestQwen3NextBlock:
     def test_stacked_blocks(self, sample_input):
         """Tests stacking multiple Qwen3NextBlock layers."""
         inputs = layers.Input(shape=sample_input.shape[1:])
-        x = Qwen3NextBlock(dim=128, num_heads=8)(inputs)
-        x = Qwen3NextBlock(dim=128, num_heads=4)(x)
+        x = Qwen3NextBlock(dim=128, num_heads=8, max_seq_len=512)(inputs)
+        x = Qwen3NextBlock(dim=128, num_heads=4, max_seq_len=512)(x)
         outputs = layers.GlobalAveragePooling1D()(x)
 
         model = models.Model(inputs, outputs)
@@ -718,7 +735,7 @@ class TestQwen3NextBlock:
     def test_moe_vs_no_moe_comparison(self, sample_input):
         """Tests behavioral difference between MoE and non-MoE blocks."""
         # Create basic block without MoE
-        block_no_moe = Qwen3NextBlock(dim=128, num_heads=8)
+        block_no_moe = Qwen3NextBlock(dim=128, num_heads=8, max_seq_len=512)
 
         # Create MoE configuration
         moe_config = MoEConfig(
@@ -730,7 +747,7 @@ class TestQwen3NextBlock:
         )
 
         # Create block with MoE
-        block_with_moe = Qwen3NextBlock(dim=128, num_heads=8, moe_config=moe_config)
+        block_with_moe = Qwen3NextBlock(dim=128, num_heads=8, max_seq_len=512, moe_config=moe_config)
 
         output_no_moe = block_no_moe(sample_input, training=False)
         output_with_moe = block_with_moe(sample_input, training=False)
@@ -795,7 +812,7 @@ class TestQwen3NextBlock:
     # ===============================================
     def test_small_sequence_length(self):
         """Tests block with very small sequence length."""
-        block = Qwen3NextBlock(dim=64, num_heads=4)
+        block = Qwen3NextBlock(dim=64, num_heads=4, max_seq_len=16)
         small_input = tf.random.normal((2, 3, 64))  # Very short sequence
 
         output = block(small_input, training=False)
@@ -804,7 +821,7 @@ class TestQwen3NextBlock:
 
     def test_single_head(self, sample_input):
         """Tests block with single attention head."""
-        block = Qwen3NextBlock(dim=128, num_heads=1)
+        block = Qwen3NextBlock(dim=128, num_heads=1, max_seq_len=512)
         output = block(sample_input, training=False)
 
         assert output.shape == sample_input.shape
@@ -814,7 +831,7 @@ class TestQwen3NextBlock:
         """Tests block with many attention heads."""
         dim = 256
         num_heads = 32  # Many heads
-        block = Qwen3NextBlock(dim=dim, num_heads=num_heads)
+        block = Qwen3NextBlock(dim=dim, num_heads=num_heads, max_seq_len=256)
         large_input = tf.random.normal((2, 16, dim))
 
         output = block(large_input, training=False)
@@ -823,7 +840,7 @@ class TestQwen3NextBlock:
 
     def test_batch_size_one(self):
         """Tests block with batch size 1."""
-        block = Qwen3NextBlock(dim=96, num_heads=6)
+        block = Qwen3NextBlock(dim=96, num_heads=6, max_seq_len=256)
         single_batch_input = tf.random.normal((1, 20, 96))
 
         output = block(single_batch_input, training=False)
@@ -849,7 +866,7 @@ class TestQwen3NextBlock:
 
     def test_very_small_epsilon(self, sample_input):
         """Tests block with very small normalization epsilon."""
-        block = Qwen3NextBlock(dim=128, num_heads=8, norm_eps=1e-12)
+        block = Qwen3NextBlock(dim=128, num_heads=8, max_seq_len=512, norm_eps=1e-12)
         output = block(sample_input, training=False)
 
         assert output.shape == sample_input.shape
@@ -857,7 +874,7 @@ class TestQwen3NextBlock:
 
     def test_high_dropout_rate(self, sample_input):
         """Tests block with high dropout rate."""
-        block = Qwen3NextBlock(dim=128, num_heads=8, dropout_rate=0.9)
+        block = Qwen3NextBlock(dim=128, num_heads=8, max_seq_len=512, dropout_rate=0.9)
 
         # Training mode with high dropout
         output_train = block(sample_input, training=True)

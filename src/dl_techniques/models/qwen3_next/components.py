@@ -74,6 +74,8 @@ class Qwen3NextBlock(keras.layers.Layer):
             should divide evenly into dim for optimal head dimension.
         head_dim: Optional integer, dimension per attention head. If None,
             defaults to dim // num_heads. Must be positive if specified.
+        max_seq_len: Integer, maximum sequence length for RoPE embeddings
+            in the attention layer. Defaults to 4096.
         moe_config: Optional MoEConfig instance for Mixture of Experts layers.
             If provided, each sub-layer will be followed by MoE processing.
             Can also be a dictionary that will be converted to MoEConfig.
@@ -116,6 +118,7 @@ class Qwen3NextBlock(keras.layers.Layer):
         block = Qwen3NextBlock(
             dim=768,
             num_heads=12,
+            max_seq_len=2048,
             dropout_rate=0.1
         )
 
@@ -131,6 +134,7 @@ class Qwen3NextBlock(keras.layers.Layer):
         advanced_block = Qwen3NextBlock(
             dim=1024,
             num_heads=16,
+            max_seq_len=8192,
             moe_config=moe_config,
             use_stochastic_depth=True,
             stochastic_depth_rate=0.1
@@ -154,6 +158,7 @@ class Qwen3NextBlock(keras.layers.Layer):
             dim: int,
             num_heads: int,
             head_dim: Optional[int] = None,
+            max_seq_len: int = 4096,
             moe_config: Optional[Any] = None,  # MoEConfig or dict
             normalization_type: str = "zero_centered_rms_norm",
             norm_eps: float = 1e-6,
@@ -171,6 +176,8 @@ class Qwen3NextBlock(keras.layers.Layer):
             raise ValueError(f"num_heads must be positive, got {num_heads}")
         if head_dim is not None and head_dim <= 0:
             raise ValueError(f"head_dim must be positive, got {head_dim}")
+        if max_seq_len <= 0:
+            raise ValueError(f"max_seq_len must be positive, got {max_seq_len}")
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be in [0, 1], got {dropout_rate}")
         if not (0.0 <= stochastic_depth_rate <= 1.0):
@@ -182,6 +189,7 @@ class Qwen3NextBlock(keras.layers.Layer):
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = head_dim if head_dim is not None else dim // num_heads
+        self.max_seq_len = max_seq_len
         self.normalization_type = normalization_type
         self.norm_eps = norm_eps
         self.dropout_rate = dropout_rate
@@ -243,6 +251,7 @@ class Qwen3NextBlock(keras.layers.Layer):
             dim=self.dim,
             num_heads=self.num_heads,
             head_dim=self.head_dim,
+            max_seq_len=self.max_seq_len,
             dropout_rate=self.dropout_rate,
             name="gated_attention"
         )
@@ -377,6 +386,7 @@ class Qwen3NextBlock(keras.layers.Layer):
             "dim": self.dim,
             "num_heads": self.num_heads,
             "head_dim": self.head_dim,
+            "max_seq_len": self.max_seq_len,
             "moe_config": self.moe_config.to_dict() if self.moe_config else None,
             "normalization_type": self.normalization_type,
             "norm_eps": self.norm_eps,
