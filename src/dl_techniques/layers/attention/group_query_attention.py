@@ -405,9 +405,9 @@ class GroupedQueryAttention(keras.layers.Layer):
         seq_len = ops.shape(inputs)[1]
 
         # Project to Q, K, V with different head counts
-        q = self.w_q(inputs)  # (batch, seq_len, num_heads * head_dim)
-        k = self.w_k(inputs)  # (batch, seq_len, num_kv_heads * head_dim)
-        v = self.w_v(inputs)  # (batch, seq_len, num_kv_heads * head_dim)
+        q = self.w_q(inputs, training=training)  # (batch, seq_len, num_heads * head_dim)
+        k = self.w_k(inputs, training=training)  # (batch, seq_len, num_kv_heads * head_dim)
+        v = self.w_v(inputs, training=training)  # (batch, seq_len, num_kv_heads * head_dim)
 
         # Reshape for multi-head attention
         q = ops.reshape(q, (batch_size, seq_len, self.num_heads, self.head_dim))
@@ -435,20 +435,35 @@ class GroupedQueryAttention(keras.layers.Layer):
 
         # Apply attention mask if provided
         if attention_mask is not None:
-            # Handle different mask shapes
-            if len(ops.shape(attention_mask)) == 3:
-                # (batch, seq_len, seq_len) -> (batch, num_heads, seq_len, seq_len)
-                attention_mask = ops.expand_dims(attention_mask, axis=1)
-                attention_mask = ops.repeat(attention_mask, self.num_heads, axis=1)
-            elif len(ops.shape(attention_mask)) == 4:
-                # Assume (batch, 1, seq_len, seq_len) or (batch, num_heads, seq_len, seq_len)
-                if ops.shape(attention_mask)[1] == 1:
-                    attention_mask = ops.repeat(attention_mask, self.num_heads, axis=1)
+            # The scores tensor has shape (batch, num_heads, query_seq_len, key_seq_len).
+            # The attention_mask must be broadcastable to this shape.
+            mask_shape = ops.shape(attention_mask)
 
-            # Convert mask to additive form: 0 -> -inf, 1 -> 0
-            attention_mask = ops.cast(attention_mask, scores.dtype)
-            attention_mask = (1.0 - attention_mask) * -1e9
-            scores = scores + attention_mask
+            # Prepare the mask for broadcasting by ensuring it is 4D.
+            if len(mask_shape) == 2:
+                # Case 1: Padding mask of shape (batch_size, key_seq_len).
+                # This mask indicates which key tokens to ignore.
+                # Reshape to (batch, 1, 1, key_seq_len) to broadcast across
+                # the heads and query sequence dimensions.
+                attention_mask = ops.reshape(
+                    attention_mask, (mask_shape[0], 1, 1, mask_shape[1])
+                )
+            elif len(mask_shape) == 3:
+                # Case 2: Causal or combined mask of shape (batch, query_seq_len, key_seq_len).
+                # Expand to (batch, 1, q_len, k_len) to broadcast across heads.
+                attention_mask = ops.expand_dims(attention_mask, axis=1)
+
+            # At this point, the mask is 4D. If the head dimension is 1,
+            # we explicitly repeat it to match the number of heads.
+            if len(ops.shape(attention_mask)) == 4 and ops.shape(attention_mask)[1] == 1:
+                attention_mask = ops.repeat(attention_mask, self.num_heads, axis=1)
+
+            # Convert the binary mask (0s and 1s) to an additive mask (-inf and 0s).
+            # A value of `1` in the original mask means "attend," which translates
+            # to `0` in the additive mask. A value of `0` means "mask out,"
+            # which translates to a large negative number.
+            additive_mask = (1.0 - ops.cast(attention_mask, scores.dtype)) * -1e9
+            scores = scores + additive_mask
 
         # Softmax and dropout
         attention_weights = ops.softmax(scores, axis=-1)

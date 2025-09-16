@@ -1,13 +1,11 @@
 """
-Qwen3 Next Model Implementation (Corrected)
+Qwen3 Next Model
 ============================================
 
 A complete implementation of the Qwen3 Next architecture following the correct block structure:
 - Each block contains 3x Gated DeltaNet layers + 1x Gated Attention layer
 - Each layer has its own Zero-Centered RMSNorm and MoE
 - Proper residual connections throughout
-
-Based on the architectural diagram showing the precise layer arrangement and connections.
 """
 
 import keras
@@ -15,7 +13,7 @@ import numpy as np
 from typing import Optional, Union, Any, Dict
 
 # ---------------------------------------------------------------------
-# Local Imports
+# local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
@@ -370,7 +368,7 @@ class Qwen3Next(keras.Model):
         if return_dict:
             return {"logits": logits}
         else:
-            return logits
+            return hidden_states
 
     @classmethod
     def from_variant(
@@ -431,7 +429,7 @@ class Qwen3Next(keras.Model):
         return cls(**config)
 
     def summary(self, **kwargs) -> None:
-        """Print model summary with additional Qwen3 Next-specific information."""
+        """Print model summary with additional Qwen3-specific information."""
         super().summary(**kwargs)
 
         # Calculate statistics
@@ -555,6 +553,7 @@ def create_qwen3_next_classification(
 
     # Apply the selected pooling strategy
     if pooling_strategy == "cls":
+        # Use the first token's representation (CLS token)
         pooled_output = sequence_output[:, 0]  # Shape: (batch_size, hidden_size)
     else:  # "mean" pooling
         # Mask the padding tokens before averaging
@@ -594,6 +593,7 @@ def create_qwen3_next_classification(
     )
     return model
 
+# ---------------------------------------------------------------------
 
 def create_qwen3_next(
     config_or_variant: Union[str, Dict[str, Any]],
