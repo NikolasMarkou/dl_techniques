@@ -3,7 +3,7 @@ Swin Transformer Model Implementation
 ====================================
 
 A complete implementation of the Swin Transformer architecture with hierarchical vision
-transformer using shifted windows. This implementation follows the same patterns as ConvNeXtV2
+transformer using shifted windows. This implementation follows modern Keras 3 patterns
 for consistency and maintainability.
 
 Based on: "Swin Transformer: Hierarchical Vision Transformer using Shifted Windows" (Liu et al., 2021)
@@ -46,283 +46,165 @@ from typing import List, Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.patch_merging import PatchMerging
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.swin_transformer_block import SwinTransformerBlock
 
 # ---------------------------------------------------------------------
 
-
-@keras.saving.register_keras_serializable()
-class PatchMerging(keras.layers.Layer):
-    """
-    Patch merging layer for downsampling between Swin Transformer stages.
-
-    This layer reduces the spatial resolution by a factor of 2 in both height and width
-    while doubling the feature dimension. It implements the standard patch merging
-    operation from the Swin Transformer paper.
-
-    **Mathematical Operation**:
-    - Input: (H, W, C)
-    - Concatenate 2x2 neighborhoods: (H/2, W/2, 4C)
-    - Linear projection: (H/2, W/2, 2C)
-
-    Args:
-        dim: Integer, input dimension (number of channels). Must be positive.
-        use_bias: Boolean, whether to use bias in the linear projection. Defaults to False.
-        kernel_initializer: Initializer for the projection kernel. Defaults to "glorot_uniform".
-        bias_initializer: Initializer for bias if use_bias=True. Defaults to "zeros".
-        kernel_regularizer: Optional regularizer for the projection kernel.
-        bias_regularizer: Optional regularizer for bias if use_bias=True.
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        4D tensor: (batch_size, height, width, dim)
-        height and width should be even for proper merging.
-
-    Output shape:
-        4D tensor: (batch_size, height//2, width//2, dim*2)
-    """
-
-    def __init__(
-            self,
-            dim: int,
-            use_bias: bool = False,
-            kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
-            bias_initializer: Union[str, initializers.Initializer] = "zeros",
-            kernel_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
-            bias_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
-            **kwargs: Any
-    ) -> None:
-        super().__init__(**kwargs)
-
-        if dim <= 0:
-            raise ValueError(f"dim must be positive, got {dim}")
-
-        self.dim = dim
-        self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
-
-        # Layer normalization before merging
-        self.norm = layers.LayerNormalization(
-            epsilon=1e-5,
-            name="norm"
-        )
-
-        # Linear projection to reduce dimension from 4C to 2C
-        self.reduction = layers.Dense(
-            units=2 * dim,
-            use_bias=use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name="reduction"
-        )
-
-    def call(
-            self,
-            inputs: keras.KerasTensor,
-            training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """
-        Forward pass of patch merging.
-
-        Args:
-            inputs: Input tensor of shape (batch_size, height, width, dim).
-            training: Boolean indicating training mode.
-
-        Returns:
-            Output tensor of shape (batch_size, height//2, width//2, dim*2).
-        """
-        B, H, W, C = ops.shape(inputs)[0], ops.shape(inputs)[1], ops.shape(inputs)[2], ops.shape(inputs)[3]
-
-        # Ensure dimensions are even for merging
-        if H % 2 == 1 or W % 2 == 1:
-            # Pad if dimensions are odd
-            pad_h = H % 2
-            pad_w = W % 2
-            inputs = ops.pad(inputs, [[0, 0], [0, pad_h], [0, pad_w], [0, 0]])
-            H, W = H + pad_h, W + pad_w
-
-        # Extract 2x2 patches: (B, H//2, W//2, 4*C)
-        x0 = inputs[:, 0::2, 0::2, :]  # Top-left
-        x1 = inputs[:, 1::2, 0::2, :]  # Bottom-left
-        x2 = inputs[:, 0::2, 1::2, :]  # Top-right
-        x3 = inputs[:, 1::2, 1::2, :]  # Bottom-right
-
-        # Concatenate the 4 patches along channel dimension
-        x = ops.concatenate([x0, x1, x2, x3], axis=-1)
-
-        # Apply layer normalization
-        x = self.norm(x, training=training)
-
-        # Linear projection to reduce from 4C to 2C
-        x = self.reduction(x, training=training)
-
-        return x
-
-    def compute_output_shape(
-            self,
-            input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Optional[int], ...]:
-        """Compute output shape."""
-        batch_size, height, width, channels = input_shape
-        output_height = None if height is None else (height + 1) // 2
-        output_width = None if width is None else (width + 1) // 2
-        output_channels = self.dim * 2
-        return (batch_size, output_height, output_width, output_channels)
-
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
-        config = super().get_config()
-        config.update({
-            "dim": self.dim,
-            "use_bias": self.use_bias,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "bias_initializer": initializers.serialize(self.bias_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
-            "bias_regularizer": regularizers.serialize(self.bias_regularizer),
-        })
-        return config
-
-
 @keras.saving.register_keras_serializable()
 class SwinTransformer(keras.Model):
     """
-    Swin Transformer model for image classification with hierarchical vision transformer architecture.
+    Hierarchical Vision Transformer using shifted windows for efficient image classification.
 
-    This model implements the Swin Transformer using shifted windows multi-head self-attention
-    with linear computational complexity relative to image size. The architecture features
-    hierarchical stages with patch merging for multi-scale feature learning.
+    This model implements the Swin Transformer architecture featuring windowed self-attention
+    with linear computational complexity relative to image size. The hierarchical design
+    with patch merging enables multi-scale feature learning while maintaining global
+    receptive fields through shifted window mechanisms.
 
-    **Intent**: Provide a complete Swin Transformer implementation that efficiently processes
-    images through windowed attention mechanisms while maintaining global receptive fields
-    through shifted window operations and hierarchical design.
+    **Intent**: Provide a production-ready Swin Transformer implementation that efficiently
+    processes images through windowed attention mechanisms, offering better efficiency than
+    standard Vision Transformers while maintaining state-of-the-art performance on image
+    classification and dense prediction tasks.
 
     **Architecture Overview**:
     ```
-    Input Image (H, W, 3)
+    Input Image (H×W×3)
            ↓
-    Patch Embedding (H/4, W/4, embed_dim)
+    Patch Embedding → (H/4×W/4×embed_dim)
            ↓
-    Stage 1: depths[0] × SwinTransformerBlock (window_size=7, shift alternating)
+    Stage 1: depths[0]×SwinBlock (window_size, alternating shifts)
            ↓
-    Patch Merging (H/8, W/8, embed_dim×2)
+    Patch Merging → (H/8×W/8×embed_dim×2)
            ↓
-    Stage 2: depths[1] × SwinTransformerBlock
+    Stage 2: depths[1]×SwinBlock
            ↓
-    Patch Merging (H/16, W/16, embed_dim×4)
+    Patch Merging → (H/16×W/16×embed_dim×4)
            ↓
-    Stage 3: depths[2] × SwinTransformerBlock
+    Stage 3: depths[2]×SwinBlock
            ↓
-    Patch Merging (H/32, W/32, embed_dim×8)
+    Patch Merging → (H/32×W/32×embed_dim×8)
            ↓
-    Stage 4: depths[3] × SwinTransformerBlock
+    Stage 4: depths[3]×SwinBlock
            ↓
-    LayerNorm → GlobalAvgPool → Classifier (if include_top=True)
+    LayerNorm → GlobalAvgPool → Classifier (if include_top)
            ↓
-    Output Logits (num_classes,)
+    Output: (num_classes,) logits or (H/32×W/32×embed_dim×8) features
     ```
 
-    **Key Features**:
-    - Hierarchical feature extraction with 4 stages
-    - Window-based self-attention with O(H×W) complexity
-    - Shifted window mechanism for cross-window connections
-    - Patch merging for multi-scale representation learning
-    - Configurable stochastic depth scheduling
+    **Key Architectural Features**:
+    - **Hierarchical Processing**: 4-stage pyramid with progressively larger features
+    - **Windowed Attention**: O(H×W) complexity through local window attention
+    - **Shifted Windows**: Cross-window connections via cyclical shifting mechanism
+    - **Stochastic Depth**: Linear drop path scheduling for regularization
+    - **Patch Merging**: Efficient downsampling with feature expansion
+
+    **Data Flow**:
+    1. **Patch Embedding**: Converts H×W×3 image to H/4×W/4×embed_dim patches
+    2. **Stage Processing**: Each stage applies multiple Swin blocks with attention
+    3. **Hierarchical Learning**: Patch merging creates multi-scale representations
+    4. **Classification**: Optional global pooling and linear classification head
 
     Args:
-        num_classes: Integer, number of output classes. Must be positive.
-            Only used if include_top=True. Defaults to 1000 for ImageNet.
-        embed_dim: Integer, embedding dimension for patch embedding and first stage.
-            Must be positive. Subsequent stages double this dimension. Defaults to 96.
-        depths: List of integers, number of Swin blocks in each of the 4 stages.
-            Must have exactly 4 elements with positive values. Defaults to [2,2,6,2].
-        num_heads: List of integers, number of attention heads in each stage.
-            Must have exactly 4 elements with positive values. Defaults to [3,6,12,24].
-        window_size: Integer, window size for windowed attention. Must be positive.
-            Typical values are 7 or 8. Defaults to 7.
-        mlp_ratio: Float, ratio of MLP hidden dimension to embedding dimension.
-            Must be positive. Defaults to 4.0.
+        num_classes: Integer, number of output classes for classification.
+            Must be positive. Only used when include_top=True. Defaults to 1000.
+        embed_dim: Integer, base embedding dimension for first stage features.
+            Must be positive. Subsequent stages use 2^i × embed_dim. Defaults to 96.
+        depths: List[int], number of Swin blocks per stage (exactly 4 elements).
+            Each element must be positive. Controls model depth. Defaults to [2,2,6,2].
+        num_heads: List[int], attention heads per stage (exactly 4 elements).
+            Each element must be positive and divide stage dimension. Defaults to [3,6,12,24].
+        window_size: Integer, size of attention windows (typically 7 or 8).
+            Must be positive. Larger windows increase computation. Defaults to 7.
+        mlp_ratio: Float, expansion ratio for MLP layers in each block.
+            Must be positive. Typical values: 4.0. Defaults to 4.0.
         qkv_bias: Boolean, whether to use bias in attention QKV projections.
-            Defaults to True.
+            True generally improves performance. Defaults to True.
         dropout_rate: Float, dropout rate for attention projection and MLP.
-            Must be in [0, 1). Defaults to 0.0.
-        attn_dropout_rate: Float, dropout rate for attention weights.
-            Must be in [0, 1). Defaults to 0.0.
-        drop_path_rate: Float, maximum stochastic depth rate. Rates are linearly
-            scheduled from 0 to this value across all blocks. Must be in [0, 1).
-            Defaults to 0.1.
-        patch_size: Integer, patch size for patch embedding. Must be positive.
-            Determines the initial downsampling factor. Defaults to 4.
-        use_bias: Boolean, whether to use bias in linear layers. Defaults to True.
-        kernel_initializer: String or Initializer, kernel weight initializer.
-            Defaults to "glorot_uniform".
-        bias_initializer: String or Initializer, bias initializer. Defaults to "zeros".
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias terms.
-        include_top: Boolean, whether to include the classification head.
-            Set to False for feature extraction. Defaults to True.
-        input_shape: Tuple, input tensor shape (height, width, channels).
-            If None, defaults to (224, 224, 3) for ImageNet. For other datasets,
-            specify the appropriate shape (e.g., (32, 32, 3) for CIFAR-10).
-        **kwargs: Additional arguments for Model base class.
+            Must be in [0, 1). Applied throughout the model. Defaults to 0.0.
+        attn_dropout_rate: Float, dropout rate specifically for attention weights.
+            Must be in [0, 1). Controls attention sparsity. Defaults to 0.0.
+        drop_path_rate: Float, maximum stochastic depth rate for regularization.
+            Must be in [0, 1). Linearly scheduled across blocks. Defaults to 0.1.
+        patch_size: Integer, patch size for initial patch embedding.
+            Must be positive. Determines initial downsampling. Defaults to 4.
+        use_bias: Boolean, whether to use bias terms in linear layers.
+            False can reduce parameters. Defaults to True.
+        kernel_initializer: String or Initializer, weight initialization strategy.
+            Controls model parameter initialization. Defaults to "glorot_uniform".
+        bias_initializer: String or Initializer, bias initialization strategy.
+            Only used when use_bias=True. Defaults to "zeros".
+        kernel_regularizer: Optional Regularizer, weight regularization.
+            Helps prevent overfitting in large models. Defaults to None.
+        bias_regularizer: Optional Regularizer, bias regularization.
+            Only applied when use_bias=True. Defaults to None.
+        include_top: Boolean, whether to include classification head.
+            Set False for feature extraction models. Defaults to True.
+        input_shape: Optional[Tuple[int, ...]], input tensor shape (H, W, C).
+            If None, defaults to (224, 224, 3). Must be 3D tuple.
+        **kwargs: Additional arguments for Model base class (name, etc.).
 
     Input shape:
-        4D tensor: (batch_size, height, width, channels)
-        Height and width should be divisible by patch_size * 8 for optimal performance.
+        4D tensor: `(batch_size, height, width, channels)`
+        Optimal when height and width are divisible by patch_size × 8.
 
     Output shape:
-        - If include_top=True: (batch_size, num_classes) - classification logits
-        - If include_top=False: (batch_size, H/32, W/32, embed_dim*8) - feature maps
+        - If include_top=True: `(batch_size, num_classes)` - classification logits
+        - If include_top=False: `(batch_size, H/32, W/32, embed_dim×8)` - feature maps
 
     Attributes:
-        patch_embed: Patch embedding layer for tokenizing input images.
-        stages: List of lists containing SwinTransformerBlock layers for each stage.
-        patch_merge_layers: List of PatchMerging layers for downsampling between stages.
-        head_layers: List of layers in the classification head (if include_top=True).
+        patch_embed: Patch embedding layer for image tokenization.
+        patch_embed_norm: Optional normalization after patch embedding.
+        stages: List[List[SwinTransformerBlock]], hierarchical transformer blocks.
+        patch_merge_layers: List[PatchMerging], downsampling between stages.
+        head_layers: List of classification head layers (if include_top=True).
 
     Example:
         ```python
-        # ImageNet model
+        # Standard ImageNet model
         model = SwinTransformer.from_variant("base", num_classes=1000)
 
-        # CIFAR-10 model
-        model = SwinTransformer.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
+        # CIFAR-10 with smaller input
+        model = SwinTransformer.from_variant(
+            "tiny",
+            num_classes=10,
+            input_shape=(32, 32, 3)
+        )
 
-        # Feature extractor
-        model = SwinTransformer.from_variant("small", include_top=False, input_shape=(224, 224, 3))
+        # Feature extraction backbone
+        backbone = SwinTransformer.from_variant(
+            "large",
+            include_top=False,
+            input_shape=(384, 384, 3)
+        )
 
         # Custom configuration
         model = SwinTransformer(
             num_classes=100,
             embed_dim=128,
-            depths=[2, 2, 6, 2],
+            depths=[2, 2, 18, 2],
             num_heads=[4, 8, 16, 32],
             window_size=8,
-            drop_path_rate=0.2,
-            input_shape=(256, 256, 3)
+            drop_path_rate=0.2
         )
         ```
 
     Raises:
         ValueError: If configuration parameters are invalid (negative values,
-            mismatched list lengths, etc.).
+            wrong list lengths, incompatible dimensions).
 
     References:
-        - Swin Transformer: Hierarchical Vision Transformer using Shifted Windows
-          (Liu et al., 2021): https://arxiv.org/abs/2103.14030
+        - "Swin Transformer: Hierarchical Vision Transformer using Shifted Windows"
+          Liu et al., ICCV 2021: https://arxiv.org/abs/2103.14030
         - Official implementation: https://github.com/microsoft/Swin-Transformer
 
     Note:
-        This implementation follows the ConvNeXtV2 model patterns for consistency
-        and integrates with the dl-techniques framework components.
+        This implementation follows modern Keras 3 patterns for robustness and
+        integrates seamlessly with dl-techniques framework components. For optimal
+        performance, ensure input dimensions are multiples of patch_size × 8.
     """
 
-    # Model variant configurations
+    # Model variant configurations (validated presets)
     MODEL_VARIANTS = {
         "tiny": {
             "embed_dim": 96,
@@ -373,8 +255,7 @@ class SwinTransformer(keras.Model):
             input_shape: Optional[Tuple[int, ...]] = None,
             **kwargs: Any
     ) -> None:
-
-        # Comprehensive validation
+        # Comprehensive parameter validation
         if num_classes <= 0:
             raise ValueError(f"num_classes must be positive, got {num_classes}")
         if embed_dim <= 0:
@@ -403,7 +284,6 @@ class SwinTransformer(keras.Model):
         # Set default input shape
         if input_shape is None:
             input_shape = (224, 224, 3)
-
         if len(input_shape) != 3:
             raise ValueError(f"input_shape must be 3D, got {input_shape}")
 
@@ -420,7 +300,7 @@ class SwinTransformer(keras.Model):
                 f"This may cause issues in deeper stages."
             )
 
-        # Store ALL configuration parameters
+        # Store ALL configuration parameters for serialization
         self.num_classes = num_classes
         self.embed_dim = embed_dim
         self.depths = depths
@@ -442,65 +322,57 @@ class SwinTransformer(keras.Model):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
 
-        # Initialize layer lists
+        # Initialize layer collections
         self.stages = []
         self.patch_merge_layers = []
         self.head_layers = []
 
-        # Build the model
+        # CREATE model architecture
         inputs = keras.Input(shape=input_shape, name="input")
-        outputs = self._build_model(inputs)
+        outputs = self._build_architecture(inputs)
 
-        # Initialize the Model
+        # Initialize the Model (Keras handles sub-layer building automatically)
         super().__init__(inputs=inputs, outputs=outputs, **kwargs)
 
         logger.info(
-            f"Created Swin Transformer model: embed_dim={embed_dim}, "
+            f"Created Swin Transformer: embed_dim={embed_dim}, "
             f"depths={depths}, num_heads={num_heads}, "
             f"total_blocks={sum(depths)}, input_shape={input_shape}"
         )
 
-    def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
+    def _build_architecture(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """
-        Build the complete Swin Transformer model architecture.
+        Build the complete Swin Transformer architecture.
 
         Args:
-            inputs: Input tensor.
+            inputs: Input tensor from keras.Input().
 
         Returns:
-            Output tensor.
+            Output tensor (logits or features).
         """
         x = inputs
 
-        # Build patch embedding (stem)
-        x = self._build_patch_embedding(x)
+        # Stage 1: Patch embedding
+        x = self._create_patch_embedding(x)
 
-        # Build hierarchical stages
+        # Stages 2-4: Hierarchical transformer blocks with patch merging
         for stage_idx in range(self.NUM_STAGES):
-            # Add patch merging (except for first stage)
+            # Add patch merging before stages 2-4
             if stage_idx > 0:
-                x = self._build_patch_merging(x, stage_idx)
+                x = self._create_patch_merging(x, stage_idx)
 
-            # Build stage with multiple Swin blocks
-            x = self._build_stage(x, stage_idx)
+            # Add transformer blocks for this stage
+            x = self._create_stage_blocks(x, stage_idx)
 
-        # Build classification head if requested
+        # Optional classification head
         if self.include_top:
-            x = self._build_head(x)
+            x = self._create_classification_head(x)
 
         return x
 
-    def _build_patch_embedding(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Build patch embedding layer to convert image to patches.
-
-        Args:
-            x: Input image tensor.
-
-        Returns:
-            Patch embedded tensor.
-        """
-        # Use the embedding factory to create patch embedding
+    def _create_patch_embedding(self, x: keras.KerasTensor) -> keras.KerasTensor:
+        """Create patch embedding to tokenize input image."""
+        # Use dl-techniques embedding factory
         self.patch_embed = create_embedding_layer(
             embedding_type="patch_2d",
             patch_size=self.patch_size,
@@ -508,7 +380,6 @@ class SwinTransformer(keras.Model):
             use_bias=self.use_bias,
             name="patch_embed"
         )
-
         x = self.patch_embed(x)
 
         # Optional normalization after patch embedding
@@ -523,22 +394,13 @@ class SwinTransformer(keras.Model):
 
         return x
 
-    def _build_patch_merging(
+    def _create_patch_merging(
             self,
             x: keras.KerasTensor,
             stage_idx: int
     ) -> keras.KerasTensor:
-        """
-        Build patch merging layer for downsampling between stages.
-
-        Args:
-            x: Input tensor.
-            stage_idx: Current stage index.
-
-        Returns:
-            Downsampled tensor.
-        """
-        # Calculate input dimension for this stage
+        """Create patch merging layer for downsampling."""
+        # Calculate input dimension for current stage
         input_dim = self.embed_dim * (2 ** (stage_idx - 1))
 
         patch_merge = PatchMerging(
@@ -553,37 +415,25 @@ class SwinTransformer(keras.Model):
 
         x = patch_merge(x)
         self.patch_merge_layers.append(patch_merge)
-
         return x
 
-    def _build_stage(
+    def _create_stage_blocks(
             self,
             x: keras.KerasTensor,
             stage_idx: int
     ) -> keras.KerasTensor:
-        """
-        Build a stage with multiple Swin Transformer blocks.
-
-        Args:
-            x: Input tensor.
-            stage_idx: Stage index (0-3).
-
-        Returns:
-            Processed tensor after the stage.
-        """
+        """Create Swin Transformer blocks for a given stage."""
         stage_blocks = []
         depth = self.depths[stage_idx]
         num_heads = self.num_heads[stage_idx]
-
-        # Calculate dimension for this stage
         stage_dim = self.embed_dim * (2 ** stage_idx)
 
-        # Calculate drop path rates for this stage (linear scheduling)
+        # Calculate drop path rates (linear scheduling)
         total_blocks = sum(self.depths)
         block_start_idx = sum(self.depths[:stage_idx])
 
         for block_idx in range(depth):
-            # Calculate current drop path rate
+            # Calculate drop path rate for this block
             current_block_idx = block_start_idx + block_idx
             if total_blocks > 1:
                 current_drop_path_rate = (
@@ -592,7 +442,7 @@ class SwinTransformer(keras.Model):
             else:
                 current_drop_path_rate = 0.0
 
-            # Alternate between regular and shifted window attention
+            # Alternate between regular and shifted windows
             shift_size = 0 if block_idx % 2 == 0 else self.window_size // 2
 
             # Create Swin Transformer block
@@ -619,20 +469,11 @@ class SwinTransformer(keras.Model):
             stage_blocks.append(block)
 
         self.stages.append(stage_blocks)
-
         return x
 
-    def _build_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Build classification head.
-
-        Args:
-            x: Input feature tensor.
-
-        Returns:
-            Classification logits.
-        """
-        # Layer normalization before global pooling
+    def _create_classification_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
+        """Create classification head with global pooling."""
+        # Layer normalization before pooling
         head_norm = layers.LayerNormalization(
             epsilon=self.LAYERNORM_EPSILON,
             center=self.use_bias,
@@ -657,7 +498,6 @@ class SwinTransformer(keras.Model):
                 name="classifier"
             )
             x = classifier(x)
-
             self.head_layers = [head_norm, gap, classifier]
         else:
             self.head_layers = [head_norm, gap]
@@ -673,40 +513,26 @@ class SwinTransformer(keras.Model):
             **kwargs: Any
     ) -> "SwinTransformer":
         """
-        Create a Swin Transformer model from a predefined variant.
+        Create Swin Transformer from a predefined variant configuration.
 
         Args:
-            variant: String, one of "tiny", "small", "base", "large".
+            variant: String, model variant ("tiny", "small", "base", "large").
             num_classes: Integer, number of output classes.
-            input_shape: Tuple, input shape. If None, uses (224, 224, 3).
-            **kwargs: Additional arguments passed to the constructor.
+            input_shape: Optional tuple, input shape. Defaults to (224, 224, 3).
+            **kwargs: Additional arguments passed to constructor.
 
         Returns:
             SwinTransformer model instance.
 
         Raises:
             ValueError: If variant is not recognized.
-
-        Example:
-            ```python
-            # CIFAR-10 model
-            model = SwinTransformer.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
-
-            # ImageNet model
-            model = SwinTransformer.from_variant("base", num_classes=1000)
-
-            # Feature extraction
-            model = SwinTransformer.from_variant("large", include_top=False)
-            ```
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
-                f"Unknown variant '{variant}'. Available variants: "
-                f"{list(cls.MODEL_VARIANTS.keys())}"
+                f"Unknown variant '{variant}'. Available: {list(cls.MODEL_VARIANTS.keys())}"
             )
 
         config = cls.MODEL_VARIANTS[variant]
-
         logger.info(f"Creating Swin Transformer-{variant.upper()} model")
 
         return cls(
@@ -719,13 +545,9 @@ class SwinTransformer(keras.Model):
         )
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get model configuration for serialization.
-
-        Returns:
-            Configuration dictionary.
-        """
+        """Return configuration for serialization."""
         config = {
+            # ALL __init__ parameters must be included
             "num_classes": self.num_classes,
             "embed_dim": self.embed_dim,
             "depths": self.depths,
@@ -749,15 +571,7 @@ class SwinTransformer(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "SwinTransformer":
-        """
-        Create model from configuration.
-
-        Args:
-            config: Configuration dictionary.
-
-        Returns:
-            SwinTransformer model instance.
-        """
+        """Create model from configuration dictionary."""
         # Deserialize initializers and regularizers
         if config.get("kernel_initializer"):
             config["kernel_initializer"] = initializers.deserialize(
@@ -779,28 +593,31 @@ class SwinTransformer(keras.Model):
         return cls(**config)
 
     def summary(self, **kwargs: Any) -> None:
-        """Print model summary with additional information."""
+        """Print model summary with Swin Transformer specific information."""
         super().summary(**kwargs)
 
-        # Print additional model information
+        # Print additional architectural details
         total_blocks = sum(self.depths)
         total_params = sum(layer.count_params() for layer in self.layers)
 
-        logger.info("Swin Transformer configuration:")
-        logger.info(f"  - Input shape: {self._input_shape}")
-        logger.info(f"  - Patch size: {self.patch_size}")
-        logger.info(f"  - Embedding dimension: {self.embed_dim}")
-        logger.info(f"  - Window size: {self.window_size}")
-        logger.info(f"  - Stages: {self.NUM_STAGES}")
-        logger.info(f"  - Depths: {self.depths}")
-        logger.info(f"  - Num heads: {self.num_heads}")
-        logger.info(f"  - Total blocks: {total_blocks}")
-        logger.info(f"  - MLP ratio: {self.mlp_ratio}")
-        logger.info(f"  - Drop path rate: {self.drop_path_rate}")
-        logger.info(f"  - Include top: {self.include_top}")
+        logger.info("=" * 50)
+        logger.info("SWIN TRANSFORMER CONFIGURATION")
+        logger.info("=" * 50)
+        logger.info(f"Input shape: {self._input_shape}")
+        logger.info(f"Patch size: {self.patch_size}")
+        logger.info(f"Base embedding dimension: {self.embed_dim}")
+        logger.info(f"Window size: {self.window_size}")
+        logger.info(f"Number of stages: {self.NUM_STAGES}")
+        logger.info(f"Depths per stage: {self.depths}")
+        logger.info(f"Heads per stage: {self.num_heads}")
+        logger.info(f"Total transformer blocks: {total_blocks}")
+        logger.info(f"MLP expansion ratio: {self.mlp_ratio}")
+        logger.info(f"Stochastic depth rate: {self.drop_path_rate}")
+        logger.info(f"Include classification head: {self.include_top}")
         if self.include_top:
-            logger.info(f"  - Number of classes: {self.num_classes}")
-        logger.info(f"  - Total parameters: {total_params:,}")
+            logger.info(f"Number of classes: {self.num_classes}")
+        logger.info(f"Total parameters: {total_params:,}")
+        logger.info("=" * 50)
 
 
 # ---------------------------------------------------------------------
@@ -815,40 +632,46 @@ def create_swin_transformer(
         **kwargs: Any
 ) -> SwinTransformer:
     """
-    Convenience function to create Swin Transformer models.
+    Factory function to create Swin Transformer models with validation.
 
     Args:
         variant: String, model variant ("tiny", "small", "base", "large").
         num_classes: Integer, number of output classes.
-        input_shape: Tuple, input shape. If None, uses (224, 224, 3).
-        pretrained: Boolean, whether to load pretrained weights (not implemented).
-        **kwargs: Additional arguments passed to the model constructor.
+        input_shape: Optional tuple, input shape. Defaults to (224, 224, 3).
+        pretrained: Boolean, load pretrained weights (not implemented yet).
+        **kwargs: Additional arguments passed to model constructor.
 
     Returns:
         SwinTransformer model instance.
 
+    Raises:
+        ValueError: If variant is invalid or parameters are incompatible.
+
     Example:
         ```python
-        # Create Swin-Tiny for CIFAR-10
-        model = create_swin_transformer("tiny", num_classes=10, input_shape=(32, 32, 3))
+        # CIFAR-10 model
+        model = create_swin_transformer(
+            "tiny",
+            num_classes=10,
+            input_shape=(32, 32, 3)
+        )
 
-        # Create Swin-Base for ImageNet
-        model = create_swin_transformer("base", num_classes=1000)
-
-        # Create feature extractor
-        model = create_swin_transformer("large", include_top=False)
+        # ImageNet feature extractor
+        backbone = create_swin_transformer(
+            "base",
+            include_top=False,
+            input_shape=(224, 224, 3)
+        )
         ```
     """
     if pretrained:
         logger.warning("Pretrained weights are not yet implemented")
 
-    model = SwinTransformer.from_variant(
+    return SwinTransformer.from_variant(
         variant,
         num_classes=num_classes,
         input_shape=input_shape,
         **kwargs
     )
-
-    return model
 
 # ---------------------------------------------------------------------
