@@ -749,6 +749,8 @@ def create_fnet_for_classification(
     )
     return model
 
+# ---------------------------------------------------------------------
+
 
 def create_fnet_for_sequence_output(
     config: Dict[str, Any],
@@ -808,6 +810,7 @@ def create_fnet_for_sequence_output(
     )
     return model
 
+# ---------------------------------------------------------------------
 
 def create_fnet(
     variant: str = "base",
@@ -858,3 +861,5 @@ def create_fnet(
         return create_fnet_for_sequence_output(config, max_sequence_length)
     else:
         raise ValueError(f"Unknown task_type: {task_type}")
+
+# ---------------------------------------------------------------------
