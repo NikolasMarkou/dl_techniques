@@ -11,6 +11,7 @@ Based on the architectural diagram showing the precise layer arrangement and con
 """
 
 import keras
+import numpy as np
 from typing import Optional, Union, Any, Dict
 
 # ---------------------------------------------------------------------
@@ -74,7 +75,6 @@ class Qwen3Next(keras.Model):
         num_attention_heads: Integer, number of attention heads. Defaults to 16.
         num_key_value_heads: Integer, number of key-value heads for GQA. Defaults to 4.
         max_position_embeddings: Integer, maximum sequence length. Defaults to 8192.
-        rope_theta: Float, RoPE theta parameter. Defaults to 1000000.0.
         num_experts: Integer, total number of experts in MoE layers. Defaults to 64.
         num_experts_per_tok: Integer, number of experts activated per token. Defaults to 8.
         moe_intermediate_size: Integer, individual expert intermediate size. Defaults to 1408.
@@ -148,7 +148,6 @@ class Qwen3Next(keras.Model):
             num_attention_heads: int = 16,
             num_key_value_heads: int = 4,
             max_position_embeddings: int = 8192,
-            rope_theta: float = 1000000.0,
             num_experts: int = 64,
             num_experts_per_tok: int = 8,
             moe_intermediate_size: int = 1408,
@@ -177,7 +176,6 @@ class Qwen3Next(keras.Model):
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads
         self.max_position_embeddings = max_position_embeddings
-        self.rope_theta = rope_theta
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok
         self.moe_intermediate_size = moe_intermediate_size
@@ -280,6 +278,12 @@ class Qwen3Next(keras.Model):
                 )
             )
 
+        # Create a linear schedule for the drop path rate
+        if self.stochastic_depth_rate > 0:
+            dpr = [x for x in np.linspace(0.0, self.stochastic_depth_rate, self.num_layers)]
+        else:
+            dpr = [0.0 for _ in range(self.num_layers)]
+
         # Create Qwen3Next blocks
         self.blocks = []
         for i in range(self.num_layers):
@@ -292,7 +296,7 @@ class Qwen3Next(keras.Model):
                 norm_eps=self.norm_eps,
                 dropout_rate=self.dropout_rate,
                 use_stochastic_depth=self.use_stochastic_depth,
-                stochastic_depth_rate=self.stochastic_depth_rate,
+                stochastic_depth_rate=dpr[i],
                 name=f"qwen3_next_block_{i}"
             )
             self.blocks.append(block)
@@ -407,7 +411,6 @@ class Qwen3Next(keras.Model):
             "num_attention_heads": self.num_attention_heads,
             "num_key_value_heads": self.num_key_value_heads,
             "max_position_embeddings": self.max_position_embeddings,
-            "rope_theta": self.rope_theta,
             "num_experts": self.num_experts,
             "num_experts_per_tok": self.num_experts_per_tok,
             "moe_intermediate_size": self.moe_intermediate_size,
@@ -447,7 +450,6 @@ class Qwen3Next(keras.Model):
         logger.info(f"  - Attention heads: {self.num_attention_heads} (KV heads: {self.num_key_value_heads})")
         logger.info(f"  - Vocabulary: {self.vocab_size:,} tokens")
         logger.info(f"  - Max sequence length: {self.max_position_embeddings:,}")
-        logger.info(f"  - RoPE theta: {self.rope_theta:,}")
         if self.num_experts > 1:
             logger.info(f"  - MoE Configuration:")
             logger.info(f"    - Experts per layer: {self.num_experts}")
@@ -462,7 +464,7 @@ class Qwen3Next(keras.Model):
 
 
 # ---------------------------------------------------------------------
-# Factory Functions (Updated)
+# Factory Functions
 # ---------------------------------------------------------------------
 
 def create_qwen3_next_generation(config: Dict[str, Any]) -> keras.Model:
