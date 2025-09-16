@@ -40,7 +40,7 @@ class TestQwen3NextModelBasic:
             'num_layers': 2,  # 2 blocks = 8 effective layers (6 DeltaNet + 2 Attention)
             'num_attention_heads': 8,
             'num_key_value_heads': 2,
-            'max_position_embeddings': 512,
+            'max_seq_len': 512,
             'num_experts': 1,  # No MoE for basic tests
             'num_experts_per_tok': 1,
             'dropout_rate': 0.1,
@@ -55,7 +55,7 @@ class TestQwen3NextModelBasic:
             'num_layers': 3,  # 3 blocks = 12 effective layers
             'num_attention_heads': 6,
             'num_key_value_heads': 2,
-            'max_position_embeddings': 256,
+            'max_seq_len': 256,
             'num_experts': 4,
             'num_experts_per_tok': 2,
             'moe_intermediate_size': 64,
@@ -298,7 +298,7 @@ class TestQwen3NextModelConfigurations:
                 'num_layers': 2,
                 'num_attention_heads': config['num_attention_heads'],
                 'num_key_value_heads': config['num_key_value_heads'],
-                'max_position_embeddings': 256,
+                'max_seq_len': 256,
                 'num_experts': 1,  # No MoE for simplicity
                 'num_experts_per_tok': 1,
             }
@@ -324,7 +324,7 @@ class TestQwen3NextModelConfigurations:
             'num_layers': 2,
             'num_attention_heads': 6,
             'num_key_value_heads': 2,
-            'max_position_embeddings': 256,
+            'max_seq_len': 256,
         }
 
         moe_configs = [
@@ -360,7 +360,7 @@ class TestQwen3NextModelConfigurations:
             'num_layers': 3,
             'num_attention_heads': 4,
             'num_key_value_heads': 2,
-            'max_position_embeddings': 256,
+            'max_seq_len': 256,
             'num_experts': 1,
             'num_experts_per_tok': 1,
             'use_stochastic_depth': True,
@@ -401,7 +401,7 @@ class TestQwen3NextModelSerialization:
             'num_layers': 2,
             'num_attention_heads': 4,
             'num_key_value_heads': 2,
-            'max_position_embeddings': 256,
+            'max_seq_len': 256,
             'num_experts': 4,
             'num_experts_per_tok': 2,
             'moe_intermediate_size': 64,
@@ -416,7 +416,7 @@ class TestQwen3NextModelSerialization:
         # Check all important parameters are present
         expected_keys = {
             'vocab_size', 'hidden_size', 'num_layers', 'num_attention_heads',
-            'num_key_value_heads', 'max_position_embeddings',
+            'num_key_value_heads', 'max_seq_len',
             'num_experts', 'num_experts_per_tok', 'moe_intermediate_size',
             'norm_eps', 'dropout_rate', 'initializer_range',
             'normalization_type', 'ffn_type', 'use_stochastic_depth',
@@ -553,7 +553,7 @@ class TestQwen3NextModelFactories:
             'num_layers': 2,
             'num_attention_heads': 4,
             'num_key_value_heads': 2,
-            'max_position_embeddings': 128,
+            'max_seq_len': 128,
             'num_experts': 1,
             'num_experts_per_tok': 1,
         }
@@ -746,7 +746,7 @@ class TestQwen3NextModelPerformance:
             'num_layers': 3,  # 3 blocks
             'num_attention_heads': 4,
             'num_key_value_heads': 2,
-            'max_position_embeddings': 256,
+            'max_seq_len': 256,
             'num_experts': 1,
             'num_experts_per_tok': 1,
         }
@@ -772,7 +772,7 @@ class TestQwen3NextModelPerformance:
             'num_layers': 2,
             'num_attention_heads': 6,
             'num_key_value_heads': 2,
-            'max_position_embeddings': 256,
+            'max_seq_len': 256,
         }
 
         # Model without MoE
@@ -842,7 +842,7 @@ class TestQwen3NextModelPerformance:
         sequence_lengths = [16, 32, 64, 128, 256, 512]
 
         for seq_len in sequence_lengths:
-            if seq_len <= model.max_position_embeddings:
+            if seq_len <= model.max_seq_len:
                 inputs = keras.ops.convert_to_tensor(
                     np.random.randint(0, model.vocab_size, size=(2, seq_len)),
                     dtype='int32'
@@ -873,7 +873,7 @@ class TestQwen3NextModelPerformance:
             base_config = {
                 'vocab_size': 500,
                 'num_key_value_heads': 2,
-                'max_position_embeddings': 256,
+                'max_seq_len': 256,
                 'num_experts': 1,
                 'num_experts_per_tok': 1,
                 **config

@@ -74,7 +74,7 @@ class Qwen3Next(keras.Model):
         num_layers: Integer, number of transformer blocks. Defaults to 12.
         num_attention_heads: Integer, number of attention heads. Defaults to 16.
         num_key_value_heads: Integer, number of key-value heads for GQA. Defaults to 4.
-        max_position_embeddings: Integer, maximum sequence length. Defaults to 8192.
+        max_seq_len: Integer, maximum sequence length. Defaults to 8192.
         num_experts: Integer, total number of experts in MoE layers. Defaults to 64.
         num_experts_per_tok: Integer, number of experts activated per token. Defaults to 8.
         moe_intermediate_size: Integer, individual expert intermediate size. Defaults to 1408.
@@ -96,7 +96,7 @@ class Qwen3Next(keras.Model):
             "num_layers": 12,  # 12 blocks, each with 3 delta + 1 attn = 48 layers total
             "num_attention_heads": 16,
             "num_key_value_heads": 4,
-            "max_position_embeddings": 8192,
+            "max_seq_len": 8192,
             "num_experts": 64,
             "num_experts_per_tok": 8,
             "moe_intermediate_size": 1408,
@@ -108,7 +108,7 @@ class Qwen3Next(keras.Model):
             "num_layers": 12,
             "num_attention_heads": 16,
             "num_key_value_heads": 4,
-            "max_position_embeddings": 8192,
+            "max_seq_len": 8192,
             "num_experts": 1,  # Dense model
             "num_experts_per_tok": 1,
             "moe_intermediate_size": 5632,
@@ -120,7 +120,7 @@ class Qwen3Next(keras.Model):
             "num_layers": 6,  # 6 blocks
             "num_attention_heads": 16,
             "num_key_value_heads": 4,
-            "max_position_embeddings": 2048,
+            "max_seq_len": 2048,
             "num_experts": 8,
             "num_experts_per_tok": 2,
             "moe_intermediate_size": 704,
@@ -132,7 +132,7 @@ class Qwen3Next(keras.Model):
             "num_layers": 3,  # 3 blocks
             "num_attention_heads": 8,
             "num_key_value_heads": 2,
-            "max_position_embeddings": 1024,
+            "max_seq_len": 1024,
             "num_experts": 4,
             "num_experts_per_tok": 1,
             "moe_intermediate_size": 352,
@@ -147,7 +147,7 @@ class Qwen3Next(keras.Model):
             num_layers: int = 12,
             num_attention_heads: int = 16,
             num_key_value_heads: int = 4,
-            max_position_embeddings: int = 8192,
+            max_seq_len: int = 8192,
             num_experts: int = 64,
             num_experts_per_tok: int = 8,
             moe_intermediate_size: int = 1408,
@@ -175,7 +175,7 @@ class Qwen3Next(keras.Model):
         self.num_layers = num_layers
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads
-        self.max_position_embeddings = max_position_embeddings
+        self.max_seq_len = max_seq_len
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok
         self.moe_intermediate_size = moe_intermediate_size
@@ -291,7 +291,7 @@ class Qwen3Next(keras.Model):
                 dim=self.hidden_size,
                 num_heads=self.num_attention_heads,
                 head_dim=self.head_dim,
-                max_seq_len=self.max_position_embeddings,
+                max_seq_len=self.max_seq_len,
                 moe_config=moe_config,
                 normalization_type=self.normalization_type,
                 norm_eps=self.norm_eps,
@@ -411,7 +411,7 @@ class Qwen3Next(keras.Model):
             "num_layers": self.num_layers,
             "num_attention_heads": self.num_attention_heads,
             "num_key_value_heads": self.num_key_value_heads,
-            "max_position_embeddings": self.max_position_embeddings,
+            "max_seq_len": self.max_seq_len,
             "num_experts": self.num_experts,
             "num_experts_per_tok": self.num_experts_per_tok,
             "moe_intermediate_size": self.moe_intermediate_size,
@@ -450,7 +450,7 @@ class Qwen3Next(keras.Model):
         logger.info(f"  - Hidden size: {self.hidden_size}")
         logger.info(f"  - Attention heads: {self.num_attention_heads} (KV heads: {self.num_key_value_heads})")
         logger.info(f"  - Vocabulary: {self.vocab_size:,} tokens")
-        logger.info(f"  - Max sequence length: {self.max_position_embeddings:,}")
+        logger.info(f"  - Max sequence length: {self.max_seq_len:,}")
         if self.num_experts > 1:
             logger.info(f"  - MoE Configuration:")
             logger.info(f"    - Experts per layer: {self.num_experts}")

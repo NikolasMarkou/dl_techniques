@@ -16,6 +16,9 @@ from dl_techniques.utils.logger import logger
 class GatedDeltaNet(keras.layers.Layer):
     """
     Gated DeltaNet layer combining delta rule updates with adaptive gating mechanism.
+    This layer is normally input length agnostic,
+    however due to limitations of tensorflow framework
+    we have to define a hard top limit named max_seq_len
 
     This layer implements a sophisticated linear transformer variant that combines:
     - Delta rule mechanism for targeted memory updates
@@ -59,6 +62,8 @@ class GatedDeltaNet(keras.layers.Layer):
             This determines the input/output feature size and state dimension.
         num_heads: Integer, number of attention heads for multi-head processing.
             Must be positive. Each head operates independently on dim//num_heads dimensions.
+        max_seq_len: Integer, the maximum sequence length for the `while_loop`.
+            This sets the `maximum_iterations` to prevent excessively long loops.
         head_dim: Optional integer, dimension per head. If None, defaults to dim // num_heads.
             Allows for custom head dimensionality independent of input dimension.
         conv_kernel_size: Integer, kernel size for short convolution layers.
@@ -85,12 +90,13 @@ class GatedDeltaNet(keras.layers.Layer):
     Example:
         ```python
         # Basic configuration
-        layer = GatedDeltaNet(dim=768, num_heads=12)
+        layer = GatedDeltaNet(dim=768, num_heads=12, max_seq_len=2048)
 
         # Advanced configuration with custom parameters
         layer = GatedDeltaNet(
             dim=768,
             num_heads=12,
+            max_seq_len=4096,
             head_dim=128,
             conv_kernel_size=4,
             dropout_rate=0.1,
@@ -108,6 +114,7 @@ class GatedDeltaNet(keras.layers.Layer):
         self,
         dim: int,
         num_heads: int,
+        max_seq_len: int,
         head_dim: Optional[int] = None,
         conv_kernel_size: int = 4,
         dropout_rate: float = 0.0,
@@ -122,12 +129,13 @@ class GatedDeltaNet(keras.layers.Layer):
 
         # Validate parameters
         self._validate_inputs(
-            dim, num_heads, head_dim, conv_kernel_size, dropout_rate
+            dim, num_heads, head_dim, conv_kernel_size, dropout_rate, max_seq_len
         )
 
         # Store ALL configuration parameters
         self.dim = dim
         self.num_heads = num_heads
+        self.max_seq_len = max_seq_len
         self.head_dim = head_dim if head_dim is not None else dim // num_heads
         self.conv_kernel_size = conv_kernel_size
         self.dropout_rate = dropout_rate
@@ -267,6 +275,7 @@ class GatedDeltaNet(keras.layers.Layer):
         logger.info(
             f"GatedDeltaNet initialized: dim={dim}, "
             f"num_heads={num_heads}, head_dim={self.head_dim}, "
+            f"max_seq_len={self.max_seq_len}, "
             f"qk_dim={self.qk_dim}, v_dim={self.v_dim}"
         )
 
@@ -277,12 +286,15 @@ class GatedDeltaNet(keras.layers.Layer):
         head_dim: Optional[int],
         conv_kernel_size: int,
         dropout_rate: float,
+        max_seq_len: int,
     ) -> None:
         """Validate layer initialization parameters."""
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
+        if max_seq_len <= 0:
+            raise ValueError(f"max_seq_len must be positive, got {max_seq_len}")
         if head_dim is not None and head_dim <= 0:
             raise ValueError(f"head_dim must be positive, got {head_dim}")
         if head_dim is None and dim % num_heads != 0:
@@ -427,9 +439,10 @@ class GatedDeltaNet(keras.layers.Layer):
 
         # Execute the while loop
         _, _, final_outputs_transposed = ops.while_loop(
-            condition,
-            body,
-            (i, initial_state, outputs_transposed),
+            cond=condition,
+            body=body,
+            loop_vars=(i, initial_state, outputs_transposed),
+            maximum_iterations=self.max_seq_len
         )
 
         # Transpose outputs back to (batch_size, seq_len, ...)
@@ -519,6 +532,7 @@ class GatedDeltaNet(keras.layers.Layer):
             {
                 "dim": self.dim,
                 "num_heads": self.num_heads,
+                "max_seq_len": self.max_seq_len,
                 "head_dim": self.head_dim,
                 "conv_kernel_size": self.conv_kernel_size,
                 "dropout_rate": self.dropout_rate,

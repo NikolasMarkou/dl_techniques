@@ -26,6 +26,7 @@ class TestGatedDeltaNet:
         return {
             "dim": 64,
             "num_heads": 4,
+            "max_seq_len": 256,
             "conv_kernel_size": 4,
             "dropout_rate": 0.0,
         }
@@ -36,6 +37,7 @@ class TestGatedDeltaNet:
         return {
             "dim": 72,
             "num_heads": 6,
+            "max_seq_len": 128,
             "head_dim": 16,  # Custom head size
             "conv_kernel_size": 3,
         }
@@ -46,6 +48,7 @@ class TestGatedDeltaNet:
         return {
             "dim": 32,
             "num_heads": 2,
+            "max_seq_len": 64,
             "dropout_rate": 0.1,
             "use_bias": True,
             "kernel_initializer": "he_normal",
@@ -77,6 +80,7 @@ class TestGatedDeltaNet:
         assert not layer.built
         assert layer.dim == 64
         assert layer.num_heads == 4
+        assert layer.max_seq_len == 256
         assert layer.head_dim == 16  # 64 // 4
         assert layer.conv_kernel_size == 4
         assert layer.dropout_rate == 0.0
@@ -89,6 +93,7 @@ class TestGatedDeltaNet:
         layer = GatedDeltaNet(**custom_head_config)
         assert layer.dim == 72
         assert layer.num_heads == 6
+        assert layer.max_seq_len == 128
         assert layer.head_dim == 16  # Explicitly set
         assert layer.qk_dim == 96  # 6 * 16
         assert layer.v_dim == 192  # 6 * 16 * 2
@@ -98,6 +103,7 @@ class TestGatedDeltaNet:
         layer = GatedDeltaNet(**regularized_config)
         assert layer.use_bias
         assert layer.dropout_rate == 0.1
+        assert layer.max_seq_len == 64
         assert layer.kernel_regularizer is not None
         assert layer.bias_regularizer is not None
 
@@ -128,7 +134,7 @@ class TestGatedDeltaNet:
 
     def test_build_process_with_dropout(self, small_sample_input):
         """Tests build process with dropout enabled."""
-        layer = GatedDeltaNet(dim=32, num_heads=2, dropout_rate=0.1)
+        layer = GatedDeltaNet(dim=32, num_heads=2, max_seq_len=64, dropout_rate=0.1)
         layer(small_sample_input)
         assert layer.built
         assert layer.dropout is not None
@@ -136,7 +142,7 @@ class TestGatedDeltaNet:
 
     def test_build_process_without_dropout(self, sample_input):
         """Tests build process with dropout disabled."""
-        layer = GatedDeltaNet(dim=64, num_heads=4, dropout_rate=0.0)
+        layer = GatedDeltaNet(dim=64, num_heads=4, max_seq_len=256, dropout_rate=0.0)
         layer(sample_input)
         assert layer.dropout is None
 
@@ -146,57 +152,65 @@ class TestGatedDeltaNet:
     def test_parameter_validation_dim_positive(self):
         """Tests that dim must be positive."""
         with pytest.raises(ValueError, match="dim must be positive"):
-            GatedDeltaNet(dim=0, num_heads=4)
+            GatedDeltaNet(dim=0, num_heads=4, max_seq_len=256)
 
         with pytest.raises(ValueError, match="dim must be positive"):
-            GatedDeltaNet(dim=-64, num_heads=4)
+            GatedDeltaNet(dim=-64, num_heads=4, max_seq_len=256)
 
     def test_parameter_validation_num_heads_positive(self):
         """Tests that num_heads must be positive."""
         with pytest.raises(ValueError, match="num_heads must be positive"):
-            GatedDeltaNet(dim=64, num_heads=0)
+            GatedDeltaNet(dim=64, num_heads=0, max_seq_len=256)
 
         with pytest.raises(ValueError, match="num_heads must be positive"):
-            GatedDeltaNet(dim=64, num_heads=-4)
+            GatedDeltaNet(dim=64, num_heads=-4, max_seq_len=256)
+
+    def test_parameter_validation_max_seq_len_positive(self):
+        """Tests that max_seq_len must be positive."""
+        with pytest.raises(ValueError, match="max_seq_len must be positive"):
+            GatedDeltaNet(dim=64, num_heads=4, max_seq_len=0)
+
+        with pytest.raises(ValueError, match="max_seq_len must be positive"):
+            GatedDeltaNet(dim=64, num_heads=4, max_seq_len=-256)
 
     def test_parameter_validation_head_dim_positive(self):
         """Tests that head_dim must be positive when specified."""
         with pytest.raises(ValueError, match="head_dim must be positive"):
-            GatedDeltaNet(dim=64, num_heads=4, head_dim=0)
+            GatedDeltaNet(dim=64, num_heads=4, max_seq_len=256, head_dim=0)
 
         with pytest.raises(ValueError, match="head_dim must be positive"):
-            GatedDeltaNet(dim=64, num_heads=4, head_dim=-16)
+            GatedDeltaNet(dim=64, num_heads=4, max_seq_len=256, head_dim=-16)
 
     def test_parameter_validation_divisibility(self):
         """Tests that dim must be divisible by num_heads when head_dim is None."""
         with pytest.raises(
             ValueError, match="dim .* must be divisible by num_heads"
         ):
-            GatedDeltaNet(dim=65, num_heads=4)  # 65 is not divisible by 4
+            GatedDeltaNet(dim=65, num_heads=4, max_seq_len=256)  # 65 is not divisible by 4
 
     def test_parameter_validation_conv_kernel_size(self):
         """Tests that conv_kernel_size must be positive."""
         with pytest.raises(
             ValueError, match="conv_kernel_size must be positive"
         ):
-            GatedDeltaNet(dim=64, num_heads=4, conv_kernel_size=0)
+            GatedDeltaNet(dim=64, num_heads=4, max_seq_len=256, conv_kernel_size=0)
 
         with pytest.raises(
             ValueError, match="conv_kernel_size must be positive"
         ):
-            GatedDeltaNet(dim=64, num_heads=4, conv_kernel_size=-1)
+            GatedDeltaNet(dim=64, num_heads=4, max_seq_len=256, conv_kernel_size=-1)
 
     def test_parameter_validation_dropout_rate(self):
         """Tests that dropout_rate must be in [0, 1]."""
         with pytest.raises(ValueError, match="dropout_rate must be in"):
-            GatedDeltaNet(dim=64, num_heads=4, dropout_rate=-0.1)
+            GatedDeltaNet(dim=64, num_heads=4, max_seq_len=256, dropout_rate=-0.1)
 
         with pytest.raises(ValueError, match="dropout_rate must be in"):
-            GatedDeltaNet(dim=64, num_heads=4, dropout_rate=1.5)
+            GatedDeltaNet(dim=64, num_heads=4, max_seq_len=256, dropout_rate=1.5)
 
     def test_build_validation_input_shape(self):
         """Tests build validation for input shape."""
-        layer = GatedDeltaNet(dim=64, num_heads=4)
+        layer = GatedDeltaNet(dim=64, num_heads=4, max_seq_len=256)
 
         # Test non-3D input
         with pytest.raises(ValueError, match="Expected 3D input shape"):
@@ -280,7 +294,7 @@ class TestGatedDeltaNet:
     ):
         """Tests forward pass with different convolution kernel sizes."""
         layer = GatedDeltaNet(
-            dim=64, num_heads=4, conv_kernel_size=conv_kernel_size
+            dim=64, num_heads=4, max_seq_len=256, conv_kernel_size=conv_kernel_size
         )
         output = layer(sample_input, training=False)
 
@@ -290,7 +304,7 @@ class TestGatedDeltaNet:
     @pytest.mark.parametrize("num_heads", [1, 2, 4, 8])
     def test_different_num_heads(self, num_heads, sample_input):
         """Tests forward pass with different numbers of heads."""
-        layer = GatedDeltaNet(dim=64, num_heads=num_heads)
+        layer = GatedDeltaNet(dim=64, num_heads=num_heads, max_seq_len=256)
         output = layer(sample_input, training=False)
 
         assert output.shape == sample_input.shape
@@ -390,6 +404,7 @@ class TestGatedDeltaNet:
         required_params = [
             "dim",
             "num_heads",
+            "max_seq_len",
             "head_dim",
             "conv_kernel_size",
             "dropout_rate",
@@ -412,6 +427,7 @@ class TestGatedDeltaNet:
         # Check key parameters match
         assert reconstructed_layer.dim == original_layer.dim
         assert reconstructed_layer.num_heads == original_layer.num_heads
+        assert reconstructed_layer.max_seq_len == original_layer.max_seq_len
         assert reconstructed_layer.head_dim == original_layer.head_dim
         assert (
             reconstructed_layer.conv_kernel_size
@@ -494,8 +510,8 @@ class TestGatedDeltaNet:
     def test_stacked_layers(self, sample_input):
         """Tests stacking multiple GatedDeltaNet layers."""
         inputs = layers.Input(shape=sample_input.shape[1:])
-        x = GatedDeltaNet(dim=64, num_heads=4)(inputs)
-        x = GatedDeltaNet(dim=64, num_heads=8)(x)
+        x = GatedDeltaNet(dim=64, num_heads=4, max_seq_len=256)(inputs)
+        x = GatedDeltaNet(dim=64, num_heads=8, max_seq_len=256)(x)
         outputs = layers.GlobalAveragePooling1D()(x)
 
         model = models.Model(inputs, outputs)
@@ -509,7 +525,7 @@ class TestGatedDeltaNet:
     # ===============================================
     def test_small_sequence_length(self):
         """Tests layer with very small sequence length."""
-        layer = GatedDeltaNet(dim=32, num_heads=2, conv_kernel_size=2)
+        layer = GatedDeltaNet(dim=32, num_heads=2, max_seq_len=64, conv_kernel_size=2)
         small_input = tf.random.normal((2, 3, 32))  # Very short sequence
 
         output = layer(small_input, training=False)
@@ -518,7 +534,7 @@ class TestGatedDeltaNet:
 
     def test_single_head(self, sample_input):
         """Tests layer with single attention head."""
-        layer = GatedDeltaNet(dim=64, num_heads=1)
+        layer = GatedDeltaNet(dim=64, num_heads=1, max_seq_len=256)
         output = layer(sample_input, training=False)
 
         assert output.shape == sample_input.shape
@@ -529,6 +545,7 @@ class TestGatedDeltaNet:
         layer = GatedDeltaNet(
             dim=64,
             num_heads=4,
+            max_seq_len=256,
             conv_kernel_size=8,  # Larger than typical
         )
         output = layer(sample_input, training=False)
@@ -538,7 +555,7 @@ class TestGatedDeltaNet:
 
     def test_batch_size_one(self):
         """Tests layer with batch size 1."""
-        layer = GatedDeltaNet(dim=32, num_heads=2)
+        layer = GatedDeltaNet(dim=32, num_heads=2, max_seq_len=64)
         single_batch_input = tf.random.normal((1, 10, 32))
 
         output = layer(single_batch_input, training=False)

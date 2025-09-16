@@ -226,6 +226,7 @@ class Qwen3NextBlock(keras.layers.Layer):
                 num_heads=self.num_heads,
                 head_dim=self.head_dim,
                 dropout_rate=self.dropout_rate,
+                max_seq_len=max_seq_len,
                 name=f"gated_delta_net_{i}"
             )
             self.delta_layers.append(delta_layer)

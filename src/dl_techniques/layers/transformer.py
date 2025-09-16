@@ -25,12 +25,10 @@ from typing import Optional, Union, Any, Dict, Tuple, Literal, Callable
 # local imports
 # ---------------------------------------------------------------------
 
+
 from .stochastic_depth import StochasticDepth
-
-
 from .norms import create_normalization_layer
 from .ffn.factory import create_ffn_from_config
-
 from .attention.window_attention import WindowAttention
 from .attention.multi_head_attention import MultiHeadAttention
 from .attention.group_query_attention import GroupedQueryAttention
@@ -720,3 +718,5 @@ class TransformerLayer(keras.layers.Layer):
             'lambda_init': self.lambda_init,
         })
         return config
+
+# ---------------------------------------------------------------------
