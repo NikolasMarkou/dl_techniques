@@ -1,3 +1,65 @@
+"""Implements a unified multi-head attention with adaptive temperature.
+
+    This layer provides a versatile implementation of multi-head attention that
+    can operate in both self-attention and cross-attention modes. It extends
+    the standard mechanism with an optional adaptive temperature softmax, which
+    dynamically adjusts the sharpness of the attention distribution based on
+    the input, potentially improving model calibration and performance.
+
+    Architecture:
+        The layer's architecture is designed for flexibility. It can function in
+        two primary configurations determined by the inputs:
+
+        1.  **Cross-Attention:** When provided with distinct `query` and `kv_input`
+            tensors, it performs cross-attention. This is an asymmetric setup
+            where a set of query vectors attends to a separate set of key-value
+            pairs. This mode is fundamental to encoder-decoder models and
+            architectures like Perceiver, where a small set of latent queries
+            attends to a large set of input features.
+
+        2.  **Self-Attention:** When only a single input tensor is provided, it
+            performs self-attention. This is a symmetric setup where all
+            tokens in a sequence attend to all other tokens. The layer offers a
+            `shared_qk_projections` option for this mode, which uses a single
+            projection matrix to generate Q, K, and V. This is a parameter-
+            efficient variant suitable for standard transformer blocks.
+
+    Foundational Mathematics:
+        The core of this layer is the scaled dot-product attention mechanism.
+        However, it introduces a key enhancement in the normalization step. While
+        standard attention uses a fixed-temperature softmax, this layer can
+        employ an adaptive temperature `T` that is a function of the input:
+
+            Attention(Q, K, V) = softmax( (Q @ K.T) / (sqrt(d_k) * T) ) @ V
+
+        The adaptive temperature `T` is determined dynamically based on the
+        entropy of the pre-softmax attention scores for each query. The
+        intuition is to adjust the "sharpness" of the attention distribution:
+
+        -   **High Entropy (Uniform Scores):** When a query has similar scores
+            for many keys, the distribution is uncertain. The mechanism assigns a
+            low temperature (`T < 1.0`), which sharpens the softmax output,
+            forcing the model to make a more confident decision.
+        -   **Low Entropy (Peaked Scores):** When a query is already highly
+            confident, with one or a few keys having very high scores, the
+            mechanism assigns a high temperature (`T > 1.0`). This softens the
+            distribution, spreading the probability mass slightly and preventing
+            overconfidence, which can improve model regularization.
+
+        The temperature `T` is calculated by a function `f` that maps the
+        normalized entropy `H` of the attention scores to a value within a
+        predefined range `[min_temp, max_temp]`: `T = f(H)`.
+
+    References:
+        - The scaled dot-product attention mechanism was introduced in:
+          Vaswani, A., et al. (2017). "Attention Is All You Need".
+
+        - The use of temperature to control the sharpness of a softmax is a
+          well-established technique, famously used in knowledge distillation:
+          Hinton, G., Vinyals, O., & Dean, J. (2015). "Distilling the
+          Knowledge in a Neural Network".
+"""
+
 import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple, Union, List
