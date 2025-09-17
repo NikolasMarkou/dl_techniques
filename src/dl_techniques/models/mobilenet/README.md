@@ -13,6 +13,120 @@ The MobileNet family has evolved significantly, with each version introducing ne
 | **MobileNetV3** | Hardware-Aware NAS, Squeeze-and-Excite, Hard-Swish | Utilized Neural Architecture Search (NAS) to find an optimal architecture. Added lightweight attention (Squeeze-and-Excite) and a more efficient non-linearity (hard-swish). |
 | **MobileNetV4** | Universal Inverted Bottleneck (UIB) & Mobile MQA | Introduced a flexible "Universal" block that can represent different block styles (including ConvNeXt-like structures). Added an optional mobile-friendly Multi-Query Attention (MQA) module, creating hybrid vision transformer models. |
 
+## How to Use
+
+This section provides practical examples for creating and customizing the MobileNet models. The convenience functions (`create_mobilenetv1`, `create_mobilenetv2`, etc.) are the recommended way to instantiate models.
+
+### 1. Create a Standard Model for ImageNet
+
+Instantiate a MobileNetV4 model with its default configuration for ImageNet (1000 classes, 224x224 input).
+
+```python
+from mobilenet_v4 import create_mobilenetv4
+
+# Create a MobileNetV4-ConvMedium model for ImageNet classification
+model = create_mobilenetv4(
+    variant="conv_medium",
+    num_classes=1000,
+    input_shape=(224, 224, 3)
+)
+
+model.summary()
+```
+
+### 2. Create a Model for a Custom Dataset (e.g., CIFAR-10)
+
+To adapt the model for a different dataset, simply change the `num_classes` and `input_shape`.
+
+```python
+from mobilenet_v3 import create_mobilenetv3
+
+# Create a MobileNetV3-Small for CIFAR-10 (10 classes, 32x32 input)
+cifar_model = create_mobilenetv3(
+    variant="small",
+    num_classes=10,
+    input_shape=(32, 32, 3)
+)
+
+cifar_model.summary()
+```
+
+### 3. Adjusting Model Size with the Width Multiplier
+
+The `width_multiplier` allows you to scale the number of channels in the model, controlling the trade-off between performance and size. A value `< 1.0` reduces complexity, while a value `> 1.0` increases it.
+
+```python
+from mobilenet_v2 import create_mobilenetv2
+
+# Create a smaller MobileNetV2 with 75% of the default channels
+small_model = create_mobilenetv2(
+    variant="1.0", # Base variant
+    width_multiplier=0.75,
+    num_classes=1000
+)
+
+# Create a larger-than-default MobileNetV2
+# Note: MobileNetV2 also has a "1.4" variant for this purpose
+large_model = create_mobilenetv2(
+    variant="1.0",
+    width_multiplier=1.4,
+    num_classes=1000
+)
+
+print(f"Small model params: {small_model.count_params():,}")
+print(f"Large model params: {large_model.count_params():,}")
+
+```
+
+### 4. Using the Model as a Feature Extractor
+
+For tasks like transfer learning, object detection, or segmentation, you can create the model without the top classification layer.
+
+```python
+from mobilenet_v4 import create_mobilenetv4
+
+# Create a MobileNetV4-Hybrid-Medium base for feature extraction
+feature_extractor = create_mobilenetv4(
+    variant="hybrid_medium",
+    include_top=False, # This is the key argument
+    input_shape=(256, 256, 3)
+)
+
+# The output will be a feature map
+# For example, for a (256, 256, 3) input, the output shape might be (None, 8, 8, 320)
+feature_extractor.summary()
+```
+
+### 5. Compiling and Training a Model
+
+All models are standard `keras.Model` instances and can be compiled and trained using the standard Keras workflow.
+
+```python
+import tensorflow as tf # or import jax, torch
+from mobilenet_v1 import create_mobilenetv1
+
+# 1. Create the model
+model = create_mobilenetv1(
+    variant="0.5",
+    num_classes=10,
+    input_shape=(96, 96, 3)
+)
+
+# 2. Compile the model
+model.compile(
+    optimizer='adam',
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+# 3. Prepare dummy data
+dummy_images = tf.random.normal((16, 96, 96, 3))
+dummy_labels = tf.one_hot(tf.zeros(16, dtype=tf.int32), depth=10)
+
+# 4. Train the model
+model.fit(dummy_images, dummy_labels, epochs=3)
+```
+
 ---
 
 ## MobileNetV1
