@@ -79,9 +79,9 @@ class TestMobileNetV2:
     # Core Tests - Initialization and Building
     # ============================================================================
 
-    def test_width_multiplier_scaling(self):
+    @pytest.mark.parametrize("multiplier", [0.75, 1.4])
+    def test_width_multiplier_scaling(self, multiplier):
         """Test width multiplier correctly scales layer dimensions."""
-        multiplier = 0.75
         model = MobileNetV2(
             width_multiplier=multiplier,
             input_shape=(32, 32, 3)
@@ -96,8 +96,11 @@ class TestMobileNetV2:
         expected_stage2_filters = make_divisible(24 * multiplier)
         assert model.blocks[1].filters == expected_stage2_filters
 
-        # Check last convolution layer
-        expected_last_filters = make_divisible(1280 * multiplier)
+        # Check last convolution layer (special case in MobileNetV2)
+        if multiplier > 1.0:
+            expected_last_filters = make_divisible(1280 * multiplier)
+        else:
+            expected_last_filters = 1280
         assert model.last_conv.filters == expected_last_filters
 
     def test_model_building_on_call(self, default_config, sample_inputs):

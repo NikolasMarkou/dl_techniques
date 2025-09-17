@@ -6,7 +6,7 @@ import keras
 import tensorflow as tf
 from typing import Any, Dict
 
-from dl_techniques.models.mobile_clip.model import MobileClipModel
+from dl_techniques.models.mobile_clip.mobile_clip_v1 import MobileClipModel
 
 class TestMobileClipModel:
     """Comprehensive test suite for the MobileClipModel."""

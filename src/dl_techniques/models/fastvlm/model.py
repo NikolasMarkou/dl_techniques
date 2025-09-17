@@ -15,8 +15,9 @@ from typing import Optional, Union, List, Dict, Any, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from .components import AttentionBlock
 from dl_techniques.layers.repmixer_block import RepMixerBlock, ConvolutionalStem
+
+from .components import AttentionBlock
 
 # ---------------------------------------------------------------------
 
