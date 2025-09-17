@@ -1,10 +1,14 @@
+---
+### `README.md` (Updated)
+---
+
 # Activation Layer Module
 
 The `dl_techniques.layers.activations` module provides a comprehensive collection of standard, custom, and advanced activation functions for deep learning, all accessible through a unified factory interface for consistent layer creation and robust configuration management.
 
 ## Overview
 
-This module includes thirteen distinct activation layer types and a factory system for standardized instantiation and parameter validation. All layers are designed for modern Keras 3.x compatibility and support full serialization, making them suitable for any deep learning pipeline.
+This module includes fifteen distinct activation layer types and a factory system for standardized instantiation and parameter validation. All layers are designed for modern Keras 3.x compatibility and support full serialization, making them suitable for any deep learning pipeline.
 
 ## Available Activation Types
 
@@ -15,6 +19,8 @@ The following layers are supported by the factory system with automated paramete
 | `adaptive_softmax` | `AdaptiveTemperatureSoftmax` | Softmax with dynamic temperature based on input entropy. | Maintaining sharpness in softmax for large output spaces. |
 | `basis_function` | `BasisFunction` | Implements `b(x) = x * sigmoid(x)`, same as SiLU/Swish. | PowerMLP architectures; smooth, self-gated activation. |
 | `gelu` | `GELU` | Gaussian Error Linear Unit. | State-of-the-art activation for Transformer models. |
+| `hard_sigmoid` | `HardSigmoid` | Piecewise linear approximation of the sigmoid function. | Efficient gating in mobile architectures like MobileNetV3. |
+| `hard_swish` | `HardSwish` | Computationally efficient approximation of the Swish/SiLU function. | High-performance activation for mobile-optimized models. |
 | `silu` | `SiLU` | Sigmoid Linear Unit (Swish). | Self-gated activation that often outperforms ReLU. |
 | `xatlu` | `xATLU` | Expanded ArcTan Linear Unit with a trainable `alpha`. | Adaptable arctan-based gating for specialized tasks. |
 | `xgelu` | `xGELU` | Expanded Gaussian Error Linear Unit with a trainable `alpha`. | Extends GELU with a customizable gating range. |
@@ -83,10 +89,11 @@ except ValueError as e:
 ## Layer-Specific Parameters
 
 ### Parameter-Free Activations
-The following activations have no configurable parameters: `basis_function`, `gelu`, `silu`, `elu_plus_one`, `mish`. They can be created simply by name.
+The following activations have no configurable parameters: `basis_function`, `elu_plus_one`, `gelu`, `hard_sigmoid`, `hard_swish`, `mish`, `silu`. They can be created simply by name.
 
 ```python
 mish_layer = create_activation_layer('mish')
+hard_swish_layer = create_activation_layer('hard_swish')
 ```
 
 ### AdaptiveTemperatureSoftmax
@@ -172,7 +179,7 @@ model = keras.Sequential([
     keras.layers.Dense(128, input_shape=(784,)),
     create_activation_layer('mish'),
     keras.layers.Dense(64),
-    create_activation_layer('mish'),
+    create_activation_layer('hard_swish'),
     keras.layers.Dense(10),
     create_activation_layer('adaptive_softmax')
 ])
@@ -287,4 +294,8 @@ Get comprehensive information about all available activation types.
 ### Types
 
 #### `ActivationType`
-A `Literal` type defining all valid activation type strings, such as `'gelu'`, `'mish'`, `'xsilu'`, etc.
+A `Literal` type defining all valid activation type strings, such as `'gelu'`, `'hard_swish'`, `'xsilu'`, etc.
+
+---
+### `factory.py` (Updated)
+---
