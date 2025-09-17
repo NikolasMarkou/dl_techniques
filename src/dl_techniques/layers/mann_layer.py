@@ -138,7 +138,7 @@ class MannLayer(keras.layers.Layer):
       │           │          │ └─────────┘  └───────────┘ └─────┤
       │   ┌───────┴───────┐  └──────────────────────────────────┘
       └─ ─┤ External Memory ◄─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
-          │ (Read/Write)    │            Write/Erase Operations
+          │ (Read/Write)  │            Write/Erase Operations
           └───────────────┘
     ```
 

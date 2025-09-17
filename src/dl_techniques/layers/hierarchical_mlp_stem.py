@@ -1,38 +1,46 @@
-"""
-Hierarchical MLP (hMLP) Stem for Vision Transformers
+"""Implement a hierarchical, non-overlapping convolutional stem for ViTs.
 
-This module implements the hierarchical MLP stem as described in
-"Three things everyone should know about Vision Transformers" by Touvron et al.
+This layer serves as a patch embedding module for Vision Transformers (ViTs),
+converting an input image into a sequence of patch tokens. It replaces the
+standard ViT stem's direct linear projection of flattened patches with a more
+expressive, multi-stage convolutional architecture. The design enhances local
+feature learning within each patch before the tokens are processed by the main
+transformer body.
 
-The paper introduces three key insights about Vision Transformers:
-1. Parallelizing ViT layers can improve efficiency without affecting accuracy
-2. Fine-tuning only attention layers is sufficient for adaptation
-3. Using hierarchical MLP stems improves compatibility with masked self-supervised learning
+Architectural and Mathematical Foundations:
+The stem is constructed dynamically as a series of non-overlapping 2D
+convolutional stages. It begins with a `4x4` convolution with a stride of 4,
+which processes the image into an initial set of `4x4` patch features.
+Subsequently, `2x2` convolutions with a stride of 2 are progressively stacked.
+Each additional stage doubles the effective patch size of the receptive field
+(e.g., `4x4` -> `8x8` -> `16x16`), allowing features to be built
+hierarchically within what will become the final patch token.
 
-HMLP STEM DESIGN:
----------------
-The hMLP stem is a patch pre-processing technique that:
-- Processes each patch independently (no information leakage between patches)
-- Progressively processes patches from 2×2 → 4×4 → 8×8 → 16×16
-- Uses linear projections with normalization and non-linearity at each stage
-- Has minimal computational overhead (<1% increase in FLOPs vs. standard ViT)
+The core mathematical principle is the use of non-overlapping convolutions,
+where `stride = kernel_size`. This ensures that the computation for each
+output patch is exclusively dependent on the pixels within its corresponding
+input region. There is no information leakage across patch boundaries within
+the stem.
 
-KEY ADVANTAGES:
--------------
-1. Compatible with Masked Self-supervised Learning:
-   - Unlike conventional convolutional stems which cause information leakage between patches
-   - Works with BeiT, MAE, and other mask-based approaches
-   - Masking can be applied either before or after the stem with identical results
+This property of **patch independence** is the primary motivation for this
+design over a standard convolutional network stem (like that of a ResNet).
+It makes the stem fully compatible with masked image modeling (MIM)
+pre-training paradigms such as Masked Autoencoders (MAE) and BEiT. In MIM,
+a subset of input patches is masked (e.g., zeroed out). With this stem, a
+masked input patch maps directly to a predictable (e.g., zero) output token
+without affecting the representations of any other visible patches. This clean
+separation is critical for the reconstruction-based self-supervision task.
 
-2. Performance Benefits:
-   - Supervised learning: ~0.3% accuracy improvement over standard ViT
-   - BeiT pre-training: +0.4% accuracy improvement over linear projection
-   - On par with the best convolutional stems for supervised learning
+References:
+    - Liu et al. "h-MLP: Vision MLP with Hierarchical Rearrangement". The
+      hierarchical stem architecture using stacked non-overlapping convolutions
+      is derived from this work.
+      https://arxiv.org/abs/2203.09716
 
-3. Implementation:
-   - Uses convolutions with matching kernel size and stride for efficiency
-   - Each patch is processed independently despite using convolutional layers
-   - Works with both BatchNorm (better performance) and LayerNorm (stable for small batches)
+    - He et al. "Masked Autoencoders Are Scalable Vision Learners" (MAE). This
+      paper exemplifies the masked image modeling paradigm for which the
+      patch-independent property of this stem is essential.
+      https://arxiv.org/abs/2111.06377
 """
 
 import keras

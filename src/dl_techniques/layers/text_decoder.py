@@ -89,10 +89,10 @@ from typing import Optional, Dict, Any, Literal, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from .embedding import create_embedding_layer
-from ..utils.masking import create_causal_mask
-from .norms import create_normalization_layer, NormalizationType
-from .transformer import TransformerLayer, AttentionType, FFNType, NormalizationPosition
+from dl_techniques.layers.embedding import create_embedding_layer
+from dl_techniques.layers.masking import create_mask, MaskConfig, combine_masks
+from dl_techniques.layers.norms import create_normalization_layer, NormalizationType
+from dl_techniques.layers.transformer import TransformerLayer, AttentionType, FFNType, NormalizationPosition
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -414,6 +414,7 @@ class TextDecoder(keras.layers.Layer):
         Args:
             input_ids: Input token IDs of shape (batch_size, seq_len)
             attention_mask: Optional padding mask of shape (batch_size, seq_len)
+                          where 1 indicates valid tokens and 0 indicates padding
             training: Whether layer is in training mode
 
         Returns:
@@ -447,19 +448,33 @@ class TextDecoder(keras.layers.Layer):
         x = self.embed_norm(x)
         x = self.embed_dropout_layer(x, training=training)
 
-        # 4. Create Causal + Padding Mask
-        causal_mask = create_causal_mask(seq_len, dtype=bool)
-        causal_mask = ops.expand_dims(causal_mask, axis=0)  # Add batch dimension
+        # 4. Create Attention Mask using the Masking Factory
+        # Create causal mask
+        causal_mask = create_mask('causal', seq_len=seq_len, dtype='bool')
+        # Add batch dimension and broadcast
+        causal_mask = ops.expand_dims(causal_mask, axis=0)
+        causal_mask = ops.broadcast_to(causal_mask, (batch_size, seq_len, seq_len))
 
         if attention_mask is not None:
-            # Create padding mask (True where padded)
-            padding_mask = ops.equal(attention_mask, 0)
-            padding_mask = ops.expand_dims(padding_mask, axis=1)  # Add seq dimension for broadcasting
-            # Combine causal and padding masks
-            combined_mask = ops.logical_or(padding_mask, causal_mask)
+            # Convert attention_mask from 1/0 format to boolean padding mask
+            # True indicates padding (positions to mask)
+            padding_mask_1d = ops.equal(attention_mask, 0)  # Shape: (batch, seq_len)
+
+            # Create padding attention mask using the factory
+            # The factory expects the padding mask in extra_params
+            padding_config = MaskConfig(
+                mask_type='padding',
+                dtype='bool',
+                extra_params={'padding_mask': padding_mask_1d}
+            )
+            padding_mask_3d = create_mask(config=padding_config)  # Shape: (batch, seq_len, seq_len)
+
+            # Combine causal and padding masks using the factory's combine function
+            # Use 'or' to mask positions that are either future tokens OR padding
+            combined_mask = combine_masks(causal_mask, padding_mask_3d, combination='or')
         else:
             # Use only causal mask
-            combined_mask = ops.broadcast_to(causal_mask, (batch_size, seq_len, seq_len))
+            combined_mask = causal_mask
 
         # 5. Apply Transformer Layers
         for layer in self.decoder_layers:

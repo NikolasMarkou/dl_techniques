@@ -76,8 +76,8 @@ from keras import initializers, layers, ops, regularizers
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from dl_techniques.layers.norms import create_normalization_layer
+from ..utils.logger import logger
+from .norms import create_normalization_layer
 
 # ---------------------------------------------------------------------
 
