@@ -1,10 +1,69 @@
-"""
-Rotary Position Embedding (RoPE) Layer Implementation for Keras 3.x
+"""Applies rotary embeddings to inject relative positional information.
 
-This module implements the Rotary Position Embedding mechanism introduced in the
-RoFormer paper, providing positional information injection through vector rotation
-using trigonometric functions for relative position encoding in transformer models.
-"""
+    This layer implements Rotary Position Embedding (RoPE), a method for
+    encoding the relative positions of tokens in a sequence. Unlike traditional
+    additive positional embeddings, RoPE applies a rotational transformation
+    directly to the query and key vectors within the attention mechanism. This
+    approach has been shown to naturally incorporate relative positional
+    information and improve sequence length extrapolation.
+
+    Architecture:
+        The core architectural insight of RoPE is to avoid altering the content
+        of token embeddings with positional data. Instead, it modifies the
+        attention calculation itself. The feature dimensions of the input query
+        or key vectors are conceptually grouped into pairs. Each pair is treated
+        as a 2D vector (or the real and imaginary components of a complex
+        number) that is then rotated in-place.
+
+        The angle of rotation for each pair is a function of two things: the
+        token's absolute position in the sequence and the feature pair's index.
+        This means that for a given token, different feature pairs are rotated
+        by different angles, creating a rich positional signal.
+
+        To maintain model stability, this rotation is often applied to only a
+        fraction of the feature dimensions (controlled by `rope_percentage`),
+        leaving the remaining dimensions unchanged. For computational efficiency,
+        the sine and cosine values required for these rotations are pre-computed
+        for all positions up to `max_seq_len` and stored in non-trainable
+        lookup tables.
+
+    Foundational Mathematics:
+        The primary objective of RoPE is to ensure that the dot product between a
+        query vector `q` at position `m` and a key vector `k` at position `n`
+        depends only on their relative displacement `m-n`. RoPE achieves this
+        by defining a transformation `f(x, p)` that rotates a vector `x` based
+        on its absolute position `p`.
+
+        The transformation is elegantly defined using complex numbers. For a
+        `d`-dimensional vector, we view it as `d/2` complex numbers. The
+        transformation for a vector `x` at position `m` is equivalent to an
+        element-wise multiplication with a complex exponential:
+
+            f(x, m)_i = x_i * e^(j * m * θ_i)
+
+        The dot product of two transformed vectors `f(q, m)` and `f(k, n)` then
+        satisfies the desired relative property:
+
+            <f(q, m), f(k, n)> = Re( Σ_i (q_i * e^(j*m*θ_i)) * (k_i * e^(-j*n*θ_i)) )
+                              = Re( Σ_i (q_i * k_i*) * e^(j*(m-n)θ_i) )
+
+        This shows the inner product is a function of the original vectors and
+        their relative position `m-n`. The frequencies `θ_i` are fixed and form
+        a geometric progression:
+
+            θ_i = 1 / (rope_theta^(2i / d))
+
+        This provides a multi-scale representation of position, where different
+        frequencies capture positional relationships over different distances.
+        The implementation uses the real-valued equivalent of this complex
+        multiplication, which is a standard 2D rotation matrix applied to each
+        pair of features.
+
+    References:
+        - The original concept was introduced in:
+          Su, J., Lu, Y., Pan, S., Murtadha, A., Wen, B., & Liu, Y. (2021).
+          "RoFormer: Enhanced Transformer with Rotary Position Embedding".
+    """
 
 import keras
 from typing import Optional, Any, Tuple, Dict

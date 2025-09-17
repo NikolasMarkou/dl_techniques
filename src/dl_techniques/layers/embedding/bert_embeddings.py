@@ -1,3 +1,66 @@
+"""Constructs the composite input embeddings for BERT-style models.
+
+    This layer builds the initial vector representation for each token in an
+    input sequence by combining three distinct sources of information. This
+    composite structure is essential for enabling a non-recurrent,
+    attention-based model like BERT to understand the nuances of language,
+    including token identity, sequence order, and sentence relationships.
+
+    Architecture:
+        The architecture is based on the principle that a token's meaning is a
+        function of its identity, its position, and the sentence it belongs to.
+        To capture this, the layer generates three separate embedding vectors
+        which are then summed element-wise:
+
+        1.  **Token Embeddings:** This is the standard word embedding lookup,
+            mapping each token ID from the vocabulary to a high-dimensional
+            vector. It provides the foundational, context-independent meaning
+            of the token.
+
+        2.  **Positional Embeddings:** Since the Transformer architecture is
+            inherently permutation-invariant (it has no built-in sense of
+            sequence order), positional information must be explicitly injected.
+            Unlike the fixed sinusoidal embeddings used in the original
+            Transformer, BERT utilizes *learnable* positional embeddings. A
+            unique vector is learned for each absolute position in the
+            sequence (up to a maximum length), allowing the model to flexibly
+            learn the optimal way to represent token order for its pre-training
+            tasks.
+
+        3.  **Segment (Token Type) Embeddings:** This component is specifically
+            designed to support BERT's pre-training objective of Next Sentence
+            Prediction (NSP). When two sentences (A and B) are concatenated to
+            form a single input sequence, this embedding provides a simple,
+            learnable signal that allows the model to distinguish between tokens
+            belonging to sentence A and those belonging to sentence B.
+
+    Foundational Mathematics:
+        The final embedding for a token at position `i` in the input sequence is
+        the element-wise sum of the three constituent embeddings:
+
+            E_final(token_i) = E_word(token_i) + E_position(i) + E_segment(A or B)
+
+        This summation projects the three distinct information sources into a
+        single, unified vector space. The subsequent Transformer layers are then
+        trained to process these rich, composite representations.
+
+        Following the summation, two final steps are applied:
+        -   **Layer Normalization:** The combined embedding vector is normalized.
+            This stabilizes the learning process by ensuring that the inputs to
+            the first Transformer layer have a consistent distribution, which is
+            crucial for training deep networks.
+        -   **Dropout:** A standard dropout layer is applied for regularization,
+            preventing the model from becoming overly reliant on any single
+            feature in the combined embedding.
+
+    References:
+        - The embedding strategy is a core component of the BERT model,
+          introduced in:
+          Devlin, J., Chang, M. W., Lee, K., & Toutanova, K. (2018). "BERT:
+          Pre-training of Deep Bidirectional Transformers for Language
+          Understanding".
+"""
+
 import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple
@@ -7,8 +70,8 @@ from typing import Optional, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.norms.rms_norm import RMSNorm
-from dl_techniques.layers.norms.band_rms import BandRMS
+from ..norms.rms_norm import RMSNorm
+from ..norms.band_rms import BandRMS
 
 # ---------------------------------------------------------------------
 

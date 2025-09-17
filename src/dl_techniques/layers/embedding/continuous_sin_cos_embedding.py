@@ -1,3 +1,70 @@
+"""Generates continuous, multi-dimensional positional embeddings using sinusoids.
+
+    This layer implements a technique for encoding continuous spatial coordinates
+    (e.g., 2D or 3D points) into a high-dimensional vector space. It serves as
+    a continuous and multi-dimensional generalization of the fixed sinusoidal
+    positional encodings used in the original Transformer architecture, making it
+    suitable for tasks involving geometric data like point clouds, images, or
+    physical simulations.
+
+    Architecture:
+        The core principle is to map each scalar coordinate value into a vector
+        of sine and cosine values at different frequencies. This creates a rich,
+        smooth, and periodic representation that allows a neural network to
+        easily reason about relative positions and distances.
+
+        The architecture partitions the total embedding dimension (`dim`) among
+        the number of input coordinate dimensions (`ndim`). For each coordinate
+        `p_k` (e.g., the x, y, or z value of a point), the layer performs the
+        following steps:
+        1.  It scales the coordinate by a set of fixed, non-learnable
+            frequencies that form a geometric progression.
+        2.  It applies both the `sin` and `cos` functions to these scaled values.
+        3.  The resulting sine and cosine values for all frequencies are
+            concatenated to form an embedding for that single coordinate.
+
+        The final output is the concatenation of the embeddings from all input
+        coordinate dimensions, resulting in a single vector that encodes the
+        full multi-dimensional position.
+
+    Foundational Mathematics:
+        This method is a direct extension of the positional encoding formula
+        from "Attention Is All You Need". For a single continuous coordinate
+        `p`, its embedding `E(p)` is a vector where each pair of elements is
+        defined by:
+
+            E(p)_{2i}   = sin(p * omega_i)
+            E(p)_{2i+1} = cos(p * omega_i)
+
+        The frequencies `omega_i` are fixed and decrease exponentially, forming
+        a geometric progression:
+
+            omega_i = 1 / (max_wavelength^(2i / d'))
+
+        where `d'` is the embedding dimension allocated per coordinate. This
+        formulation has several key properties:
+        -   **Continuity:** The embedding function is smooth, so nearby points in
+            coordinate space are mapped to nearby points in the embedding space.
+        -   **Relative Positioning:** For any displacement `delta`, the embedding
+            `E(p + delta)` can be represented as a linear transformation of
+            `E(p)`, making it easy for models like transformers to learn relative
+            positional relationships.
+        -   **Multi-Frequency Representation:** The use of a spectrum of
+            frequencies, from low (`max_wavelength`) to high, allows the model
+            to capture both coarse, global positional information and
+            fine-grained, local details simultaneously.
+
+    References:
+        - The core technique is inspired by the original Transformer positional
+          encodings:
+          Vaswani, A., et al. (2017). "Attention Is All You Need".
+
+        - This style of continuous coordinate embedding is a key component in
+          Neural Radiance Fields (NeRF) for representing 3D coordinates:
+          Mildenhall, B., et al. (2020). "NeRF: Representing Scenes as Neural
+          Radiance Fields for View Synthesis".
+"""
+
 import keras
 import numpy as np
 from keras import ops
