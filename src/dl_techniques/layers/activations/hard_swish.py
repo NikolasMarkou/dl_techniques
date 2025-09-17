@@ -122,6 +122,7 @@ class HardSwish(keras.layers.Layer):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         # No parameters to store or validate for this simple activation
+        self.activation = keras.layers.ReLU(max_value=6.0)
 
     def call(
             self,
@@ -147,7 +148,7 @@ class HardSwish(keras.layers.Layer):
         """
         # Apply hard-swish: x * hard_sigmoid(x) = x * ReLU6(x + 3) / 6
         # This combines the input with its gating signal
-        hard_sigmoid_part = ops.relu(inputs + 3.0, max_value=6.0) / 6.0
+        hard_sigmoid_part = self.activation(inputs + 3.0) / 6.0
         return inputs * hard_sigmoid_part
 
     def compute_output_shape(

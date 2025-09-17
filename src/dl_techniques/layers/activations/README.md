@@ -1,7 +1,3 @@
----
-### `README.md` (Updated)
----
-
 # Activation Layer Module
 
 The `dl_techniques.layers.activations` module provides a comprehensive collection of standard, custom, and advanced activation functions for deep learning, all accessible through a unified factory interface for consistent layer creation and robust configuration management.

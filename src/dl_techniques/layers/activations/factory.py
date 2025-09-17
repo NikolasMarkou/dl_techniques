@@ -9,10 +9,7 @@ simplifies the instantiation of both standard and custom activation functions.
 import keras
 from typing import Dict, Any, Literal, Optional
 
-# ---------------------------------------------------------------------
 # local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 
 from .adaptive_softmax import AdaptiveTemperatureSoftmax
@@ -27,10 +24,8 @@ from .relu_k import ReLUK
 from .squash import SquashLayer
 from .thresh_max import ThreshMax
 
-# ---------------------------------------------------------------------
-# Type definition for Activation types
-# ---------------------------------------------------------------------
 
+# Type definition for Activation types
 ActivationType = Literal[
     'adaptive_softmax',
     'basis_function',
@@ -44,15 +39,14 @@ ActivationType = Literal[
     'hard_swish',
     'mish',
     'saturated_mish',
+    'relu',
     'relu_k',
     'squash',
     'thresh_max'
 ]
 
-# ---------------------------------------------------------------------
-# Activation layer registry mapping types to classes and parameter info
-# ---------------------------------------------------------------------
 
+# Activation layer registry mapping types to classes and parameter info
 ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
     'adaptive_softmax': {
         'class': AdaptiveTemperatureSoftmax,
@@ -65,7 +59,10 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'eps': 1e-7,
             'polynomial_coeffs': None
         },
-        'use_case': 'Maintains sharpness in softmax for large output spaces, improving retrieval tasks.'
+        'use_case': (
+            'Maintains sharpness in softmax for large output spaces, '
+            'improving retrieval tasks.'
+        )
     },
     'basis_function': {
         'class': BasisFunction,
@@ -97,7 +94,10 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'alpha_regularizer': None,
             'alpha_constraint': None
         },
-        'use_case': 'Expanded activation with an arctan gate; provides adaptable gating for specialized tasks.'
+        'use_case': (
+            'Expanded activation with an arctan gate; provides adaptable '
+            'gating for specialized tasks.'
+        )
     },
     'xgelu': {
         'class': xGELU,
@@ -108,7 +108,10 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'alpha_regularizer': None,
             'alpha_constraint': None
         },
-        'use_case': 'Extends GELU with a trainable parameter to adapt the gating range, enhancing flexibility.'
+        'use_case': (
+            'Extends GELU with a trainable parameter to adapt the gating '
+            'range, enhancing flexibility.'
+        )
     },
     'xsilu': {
         'class': xSiLU,
@@ -147,14 +150,34 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'description': 'A self-regularized, non-monotonic activation: x * tanh(softplus(x)).',
         'required_params': [],
         'optional_params': {},
-        'use_case': 'Smooth activation that can outperform ReLU and Swish in deep vision and NLP models.'
+        'use_case': (
+            'Smooth activation that can outperform ReLU and Swish in deep '
+            'vision and NLP models.'
+        )
     },
     'saturated_mish': {
         'class': SaturatedMish,
         'description': 'Mish variant that smoothly saturates for large positive inputs.',
         'required_params': [],
         'optional_params': {'alpha': 3.0, 'beta': 0.5},
-        'use_case': 'Prevents activation explosion in very deep networks by saturating the Mish function.'
+        'use_case': (
+            'Prevents activation explosion in very deep networks by '
+            'saturating the Mish function.'
+        )
+    },
+    'relu': {
+        'class': keras.layers.ReLU,
+        'description': 'Rectified Linear Unit, the most common activation function.',
+        'required_params': [],
+        'optional_params': {
+            'max_value': None,
+            'negative_slope': 0.0,
+            'threshold': 0.0
+        },
+        'use_case': (
+            'Default activation for hidden layers in many types of neural '
+            'networks due to its simplicity and effectiveness.'
+        )
     },
     'relu_k': {
         'class': ReLUK,
@@ -168,7 +191,10 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'description': 'Squashing non-linearity for Capsule Networks.',
         'required_params': [],
         'optional_params': {'axis': -1, 'epsilon': None},
-        'use_case': 'Core non-linearity for Capsule Networks, normalizing vector outputs to represent probabilities.'
+        'use_case': (
+            'Core non-linearity for Capsule Networks, normalizing vector '
+            'outputs to represent probabilities.'
+        )
     },
     'thresh_max': {
         'class': ThreshMax,
@@ -179,10 +205,8 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
     }
 }
 
-# ---------------------------------------------------------------------
-# Public API functions
-# ---------------------------------------------------------------------
 
+# Public API functions
 def get_activation_info() -> Dict[str, Dict[str, Any]]:
     """
     Get comprehensive information about all available activation layer types.
@@ -202,7 +226,10 @@ def get_activation_info() -> Dict[str, Dict[str, Any]]:
             print(f"  Use case: {details['use_case']}")
         ```
     """
-    return {act_type: info.copy() for act_type, info in ACTIVATION_REGISTRY.items()}
+    return {
+        act_type: info.copy() for act_type, info in ACTIVATION_REGISTRY.items()
+    }
+
 
 def validate_activation_config(activation_type: str, **kwargs: Any) -> None:
     """
@@ -236,27 +263,64 @@ def validate_activation_config(activation_type: str, **kwargs: Any) -> None:
         min_temp = kwargs.get('min_temp', 0.1)
         max_temp = kwargs.get('max_temp', 1.0)
         entropy_threshold = kwargs.get('entropy_threshold', 0.5)
-        if min_temp <= 0.0: raise ValueError(f"min_temp must be positive, got {min_temp}")
-        if max_temp <= 0.0: raise ValueError(f"max_temp must be positive, got {max_temp}")
-        if min_temp > max_temp: raise ValueError(f"min_temp ({min_temp}) must be <= max_temp ({max_temp})")
-        if entropy_threshold < 0.0: raise ValueError(f"entropy_threshold must be non-negative, got {entropy_threshold}")
+        if min_temp <= 0.0:
+            raise ValueError(f"min_temp must be positive, got {min_temp}")
+        if max_temp <= 0.0:
+            raise ValueError(f"max_temp must be positive, got {max_temp}")
+        if min_temp > max_temp:
+            raise ValueError(
+                f"min_temp ({min_temp}) must be <= max_temp ({max_temp})"
+            )
+        if entropy_threshold < 0.0:
+            raise ValueError(
+                f"entropy_threshold must be non-negative, "
+                f"got {entropy_threshold}"
+            )
 
     if activation_type == 'saturated_mish':
         alpha = kwargs.get('alpha', 3.0)
         beta = kwargs.get('beta', 0.5)
-        if alpha <= 0.0: raise ValueError(f"alpha must be positive, got {alpha}")
-        if beta <= 0.0: raise ValueError(f"beta must be positive, got {beta}")
+        if alpha <= 0.0:
+            raise ValueError(f"alpha must be positive, got {alpha}")
+        if beta <= 0.0:
+            raise ValueError(f"beta must be positive, got {beta}")
+
+    if activation_type == 'relu':
+        max_value = kwargs.get('max_value', None)
+        negative_slope = kwargs.get('negative_slope', 0.0)
+        threshold = kwargs.get('threshold', 0.0)
+        if max_value is not None and not isinstance(max_value, (int, float)):
+            raise TypeError(
+                f"max_value must be a number or None, "
+                f"got type {type(max_value).__name__}"
+            )
+        if not isinstance(negative_slope, (int, float)):
+            raise TypeError(
+                f"negative_slope must be a number, "
+                f"got type {type(negative_slope).__name__}"
+            )
+        if not isinstance(threshold, (int, float)):
+            raise TypeError(
+                f"threshold must be a number, "
+                f"got type {type(threshold).__name__}"
+            )
 
     if activation_type == 'relu_k':
         k = kwargs.get('k', 3)
-        if not isinstance(k, int): raise TypeError(f"k must be an integer, got type {type(k).__name__}")
-        if k <= 0: raise ValueError(f"k must be a positive integer, got {k}")
+        if not isinstance(k, int):
+            raise TypeError(
+                f"k must be an integer, got type {type(k).__name__}"
+            )
+        if k <= 0:
+            raise ValueError(f"k must be a positive integer, got {k}")
 
     if activation_type == 'thresh_max':
         slope = kwargs.get('slope', 10.0)
         epsilon = kwargs.get('epsilon', 1e-12)
-        if slope <= 0: raise ValueError(f"slope must be positive, got {slope}")
-        if epsilon <= 0: raise ValueError(f"epsilon must be positive, got {epsilon}")
+        if slope <= 0:
+            raise ValueError(f"slope must be positive, got {slope}")
+        if epsilon <= 0:
+            raise ValueError(f"epsilon must be positive, got {epsilon}")
 
     # Validate initializer/regularizer/constraint strings for expanded activations
     if activation_type in ['xatlu', 'xgelu', 'xsilu']:
@@ -269,10 +333,9 @@ def validate_activation_config(activation_type: str, **kwargs: Any) -> None:
                 try:
                     getter(kwargs[param_name])
                 except (ValueError, KeyError):
-                    raise ValueError(f"Unknown {param_name}: '{kwargs[param_name]}'")
-
-
-# ---------------------------------------------------------------------
+                    raise ValueError(
+                        f"Unknown {param_name}: '{kwargs[param_name]}'"
+                    )
 
 
 def create_activation_layer(
@@ -332,15 +395,22 @@ def create_activation_layer(
         params.update(kwargs)
 
         # Filter out any unknown parameters to avoid constructor errors
-        valid_param_names = set(act_info['required_params']) | set(act_info['optional_params'].keys())
-        final_params = {key: val for key, val in params.items() if key in valid_param_names}
+        valid_param_names = (
+            set(act_info['required_params']) |
+            set(act_info['optional_params'].keys())
+        )
+        final_params = {
+            key: val for key, val in params.items() if key in valid_param_names
+        }
 
         # Add name if provided
         if name is not None:
             final_params['name'] = name
 
         # Log parameters before creating the layer
-        logger.info(f"Creating {activation_type} activation layer with parameters:")
+        logger.info(
+            f"Creating {activation_type} activation layer with parameters:"
+        )
         log_params = {**final_params, 'name': name} if name else final_params
         for param_name, param_value in sorted(log_params.items()):
             logger.info(f"  {param_name}: {repr(param_value)}")
@@ -348,7 +418,10 @@ def create_activation_layer(
         # Create the layer instance
         activation_layer = act_class(**final_params)
 
-        logger.debug(f"Successfully created {activation_type} layer: {activation_layer.name}")
+        logger.debug(
+            f"Successfully created {activation_type} layer: "
+            f"{activation_layer.name}"
+        )
         return activation_layer
 
     except (TypeError, ValueError) as e:
@@ -359,17 +432,19 @@ def create_activation_layer(
             error_msg = (
                 f"Failed to create {activation_type} layer ({class_name}). "
                 f"Provided parameters: {list(kwargs.keys())}. "
-                f"Check parameter compatibility and types. "
-                f"Use get_activation_info() for detailed parameter information. "
+                f"Check parameter compatibility and types. Use "
+                f"get_activation_info() for detailed parameter information. "
                 f"Original error: {e}"
             )
         else:
-            error_msg = f"Failed to create activation layer. Unknown type '{activation_type}'. Original error: {e}"
+            error_msg = (
+                f"Failed to create activation layer. Unknown type "
+                f"'{activation_type}'. Original error: {e}"
+            )
 
         logger.error(error_msg)
         raise ValueError(error_msg) from e
 
-# ---------------------------------------------------------------------
 
 def create_activation_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     """
@@ -403,8 +478,9 @@ def create_activation_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     config_copy = config.copy()
     activation_type = config_copy.pop('type')
 
-    logger.debug(f"Creating activation from config - type: {activation_type}, params: {list(config_copy.keys())}")
+    logger.debug(
+        f"Creating activation from config - type: {activation_type}, "
+        f"params: {list(config_copy.keys())}"
+    )
 
     return create_activation_layer(activation_type, **config_copy)
-
-# ---------------------------------------------------------------------
