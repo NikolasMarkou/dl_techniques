@@ -18,7 +18,8 @@ network designs:
 1.  **Expansion Phase:**
     -   The input feature map, which has a relatively small number of channels, is
         first "expanded" to a much higher-dimensional space using a `1x1 Conv2D`
-        layer. The degree of this expansion is controlled by the `expansion_factor`.
+        layer. The degree of this expansion is controlled by the `expansion_factor`
+        or by specifying the exact `expanded_channels`.
 
 2.  **Processing Phase (Depthwise Convolutions):**
     -   The core processing happens in this high-dimensional space using one or two
@@ -75,6 +76,7 @@ from dl_techniques.layers.activations import create_activation_layer
 
 # ---------------------------------------------------------------------
 
+
 @keras.saving.register_keras_serializable()
 class UniversalInvertedBottleneck(keras.layers.Layer):
     """
@@ -119,7 +121,9 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             Determines the final channel dimension of the block output.
         expansion_factor: Integer, expansion factor for the hidden dimension.
             The intermediate channel count becomes `input_filters * expansion_factor`.
-            Must be positive. Defaults to 4.
+            This is ignored if `expanded_channels` is provided. Defaults to 4.
+        expanded_channels: Optional Integer, the exact number of channels for the
+            expansion layer. If provided, overrides `expansion_factor`. Defaults to None.
         stride: Integer, stride for the first depthwise convolution.
             Used for spatial downsampling. Must be positive. Defaults to 1.
         kernel_size: Integer, kernel size for depthwise convolutions.
@@ -189,39 +193,12 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             use_dw2=False
         )
 
-        # ConvNeXt-style block with GELU activation
-        convnext_block = UniversalInvertedBottleneck(
-            filters=128,
-            expansion_factor=4,
-            kernel_size=7,
-            use_dw1=True,
-            use_dw2=False,
-            activation_type='gelu',
-            normalization_type='layer_norm'
-        )
-
-        # FFN block with custom activation and dropout
-        ffn_block = UniversalInvertedBottleneck(
-            filters=256,
-            expansion_factor=4,
-            use_dw1=False,
-            use_dw2=False,
-            activation_type='silu',
-            dropout_rate=0.1,
-            use_squeeze_excitation=True
-        )
-
-        # Extra Depthwise with advanced configuration
-        extradw_block = UniversalInvertedBottleneck(
-            filters=512,
-            expansion_factor=8,
-            use_dw1=True,
-            use_dw2=True,
-            activation_type='mish',
-            normalization_type='rms_norm',
-            dropout_rate=0.2,
+        # MobileNetV3-style block with exact expanded channels and SE
+        mnv3_block = UniversalInvertedBottleneck(
+            filters=80,
+            expanded_channels=200,  # Explicitly set, overrides expansion_factor
             use_squeeze_excitation=True,
-            se_ratio=0.125
+            se_ratio=0.25
         )
         ```
 
@@ -235,6 +212,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             self,
             filters: int,
             expansion_factor: int = 4,
+            expanded_channels: Optional[int] = None,
             stride: int = 1,
             kernel_size: int = 3,
             use_dw1: bool = True,
@@ -261,22 +239,40 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         # Validate parameters
         if filters <= 0:
             raise ValueError(f"filters must be positive, got {filters}")
-        if expansion_factor <= 0:
-            raise ValueError(f"expansion_factor must be positive, got {expansion_factor}")
+        # --- CHANGE START ---
+        # Added validation for the new expanded_channels parameter.
+        if expansion_factor <= 0 and expanded_channels is None:
+            raise ValueError(
+                "Either expansion_factor must be positive or "
+                "expanded_channels must be provided."
+            )
+        if expanded_channels is not None and expanded_channels <= 0:
+            raise ValueError(
+                f"expanded_channels must be positive, got {expanded_channels}"
+            )
+        # --- CHANGE END ---
         if stride <= 0:
             raise ValueError(f"stride must be positive, got {stride}")
         if kernel_size <= 0:
             raise ValueError(f"kernel_size must be positive, got {kernel_size}")
         if not (0.0 <= dropout_rate <= 1.0):
-            raise ValueError(f"dropout_rate must be between 0.0 and 1.0, got {dropout_rate}")
+            raise ValueError(
+                f"dropout_rate must be between 0.0 and 1.0, got {dropout_rate}"
+            )
         if se_ratio <= 0:
             raise ValueError(f"se_ratio must be positive, got {se_ratio}")
         if padding not in ['same', 'valid', 'causal']:
-            raise ValueError(f"padding must be 'same', 'valid', or 'causal', got {padding}")
+            raise ValueError(
+                f"padding must be 'same', 'valid', or 'causal', got {padding}"
+            )
 
         # Store all configuration parameters
         self.filters = filters
         self.expansion_factor = expansion_factor
+        # --- CHANGE START ---
+        # Storing the new parameter.
+        self.expanded_channels = expanded_channels
+        # --- CHANGE END ---
         self.stride = stride
         self.kernel_size = kernel_size
         self.use_dw1 = use_dw1
@@ -336,7 +332,9 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             self.dw1_activation = self._create_activation_layer('dw1_activation')
 
             if self.dropout_rate > 0:
-                self.dw1_dropout = layers.Dropout(self.dropout_rate, name='dw1_dropout')
+                self.dw1_dropout = layers.Dropout(
+                    self.dropout_rate, name='dw1_dropout'
+                )
             else:
                 self.dw1_dropout = None
         else:
@@ -356,7 +354,9 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             self.dw2_activation = self._create_activation_layer('dw2_activation')
 
             if self.dropout_rate > 0:
-                self.dw2_dropout = layers.Dropout(self.dropout_rate, name='dw2_dropout')
+                self.dw2_dropout = layers.Dropout(
+                    self.dropout_rate, name='dw2_dropout'
+                )
             else:
                 self.dw2_dropout = None
         else:
@@ -367,12 +367,18 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
 
         # Squeeze-and-Excitation block
         if self.use_squeeze_excitation:
-            self.se_squeeze = layers.GlobalAveragePooling2D(keepdims=True, name='se_squeeze')
+            self.se_squeeze = layers.GlobalAveragePooling2D(
+                keepdims=True, name='se_squeeze'
+            )
             # SE layers will be created in build() since they need channel info
             self.se_reduce = None
             self.se_expand = None
-            self.se_activation1 = create_activation_layer(self.se_activation, name='se_activation1')
-            self.se_activation2 = layers.Activation('sigmoid', name='se_activation2')
+            self.se_activation1 = create_activation_layer(
+                self.se_activation, name='se_activation1'
+            )
+            self.se_activation2 = layers.Activation(
+                'sigmoid', name='se_activation2'
+            )
         else:
             self.se_squeeze = None
             self.se_reduce = None
@@ -398,7 +404,9 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
                 **self.activation_args
             )
         except Exception as e:
-            raise ValueError(f"Failed to create activation layer '{self.activation_type}': {e}")
+            raise ValueError(
+                f"Failed to create activation layer '{self.activation_type}': {e}"
+            )
 
     def _create_normalization_layer(self, name: str) -> keras.layers.Layer:
         """Create normalization layer using the factory."""
@@ -409,12 +417,23 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
                 **self.normalization_args
             )
         except Exception as e:
-            raise ValueError(f"Failed to create normalization layer '{self.normalization_type}': {e}")
+            raise ValueError(
+                f"Failed to create normalization layer '{self.normalization_type}': {e}"
+            )
 
     def build(self, input_shape: Tuple[int, ...]) -> None:
         """Build the layer's weights and sub-layers."""
         input_filters = input_shape[-1]
-        expanded_filters = input_filters * self.expansion_factor
+
+        # --- CHANGE START ---
+        # Logic now prioritizes `expanded_channels` if provided, otherwise it
+        # falls back to the original `expansion_factor` calculation. This makes
+        # the change fully backward-compatible.
+        if self.expanded_channels is not None:
+            expanded_filters = self.expanded_channels
+        else:
+            expanded_filters = input_filters * self.expansion_factor
+        # --- CHANGE END ---
 
         # Set the actual number of filters for expansion
         self.expand_conv.filters = expanded_filters
@@ -554,6 +573,10 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         config.update({
             "filters": self.filters,
             "expansion_factor": self.expansion_factor,
+            # --- CHANGE START ---
+            # Added expanded_channels to the config for proper serialization.
+            "expanded_channels": self.expanded_channels,
+            # --- CHANGE END ---
             "stride": self.stride,
             "kernel_size": self.kernel_size,
             "use_dw1": self.use_dw1,
@@ -569,15 +592,15 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             "use_bias": self.use_bias,
             "padding": self.padding,
             "block_type": self.block_type,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "depthwise_initializer": initializers.serialize(self.depthwise_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
-            "depthwise_regularizer": regularizers.serialize(self.depthwise_regularizer),
+            "kernel_initializer":
+                initializers.serialize(self.kernel_initializer),
+            "depthwise_initializer":
+                initializers.serialize(self.depthwise_initializer),
+            "kernel_regularizer":
+                regularizers.serialize(self.kernel_regularizer),
+            "depthwise_regularizer":
+                regularizers.serialize(self.depthwise_regularizer),
         })
         return config
-
-
-# Backward compatibility alias
-UIB = UniversalInvertedBottleneck
 
 # ---------------------------------------------------------------------

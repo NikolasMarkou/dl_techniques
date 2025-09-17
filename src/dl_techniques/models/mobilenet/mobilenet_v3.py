@@ -224,14 +224,12 @@ class MobileNetV3(keras.Model):
             exp_channels = make_divisible(exp_size * self.width_multiplier)
             out_channels = make_divisible(out_size * self.width_multiplier)
 
-            # Calculate expansion factor required by UIB
-            if in_channels == 0:
-                raise ValueError("Input channels cannot be zero.")
-            expansion_factor = exp_channels // in_channels
-
+            # We pass the absolute number of expansion channels to UIB to handle cases
+            # where the expansion is not a clean integer multiple of input channels.
+            # The previous logic using integer division was flawed.
             block = UniversalInvertedBottleneck(
                 filters=out_channels,
-                expansion_factor=expansion_factor,
+                expanded_channels=exp_channels,
                 kernel_size=kernel,
                 stride=stride,
                 use_squeeze_excitation=use_se,
@@ -240,7 +238,7 @@ class MobileNetV3(keras.Model):
                 use_bias=False,
                 use_dw1=True,  # Standard inverted bottleneck structure
                 use_dw2=False,
-                se_ratio=4.0,  # MobileNetV3 uses a fixed SE ratio of 4
+                se_ratio=0.25,  # MobileNetV3 uses a SE reduction of 4 (ratio=1/4)
                 se_activation='relu',  # Activation before expansion in SE
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,

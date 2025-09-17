@@ -234,9 +234,12 @@ class MobileNetV2(keras.Model):
                 block_id += 1
 
         # Final Convolution
-        # FIX: Always scale the last convolution layer's channels. The original
-        # conditional logic was incorrect for multipliers < 1.0.
-        last_channels = self._make_divisible(1280 * self.width_multiplier)
+        # Per the original paper and official implementations, the last convolution
+        # layer's channels are not scaled down for width multipliers <= 1.0.
+        if self.width_multiplier > 1.0:
+            last_channels = self._make_divisible(1280 * self.width_multiplier)
+        else:
+            last_channels = 1280
         self.last_conv = layers.Conv2D(
             last_channels, 1, padding='same', use_bias=False,
             kernel_initializer=self.kernel_initializer,
