@@ -1,9 +1,61 @@
-"""
-RPC-Attention Layer - Robust Principal Components Attention.
+"""Implements a robust attention mechanism via Principal Component Pursuit.
 
-This module implements RPC-Attention which decomposes attention matrices into
-low-rank and sparse components using Principal Component Pursuit, providing
-improved robustness and accuracy, especially under adversarial conditions.
+    This layer enhances the standard scaled dot-product attention by integrating
+    Principal Component Pursuit (PCP), a matrix decomposition technique. The
+    core idea is to make attention more robust to noise, adversarial
+    perturbations, and out-of-distribution data by separating the underlying
+    structure of the attention matrix from sparse, potentially disruptive
+    elements.
+
+    Architecture:
+        The standard attention mechanism computes an attention matrix `A` from
+        queries (Q) and keys (K). RPC-Attention intercepts this matrix `A`
+        before the softmax operation and decomposes it into two distinct
+        components:
+
+        1.  A low-rank matrix `L`: This component captures the principal,
+            globally smooth patterns and correlations within the sequence. It
+            represents the broad, foundational relationships between tokens.
+
+        2.  A sparse matrix `S`: This component captures localized, sharp, or
+            outlier information. It isolates features that are highly specific,
+            potentially representing noise, adversarial attacks, or uniquely
+            important token-to-token interactions that deviate from the global
+            pattern.
+
+        The robust attention matrix is then reconstructed as `A_robust = L + S`
+        before being passed to the final softmax function. This decomposition
+        and reconstruction filters the attention mechanism, preserving the
+        stable global structure while explicitly modeling sparse corruptions or
+        salient details, leading to improved generalization and robustness.
+
+    Foundational Mathematics:
+        The decomposition is achieved by solving the Principal Component
+        Pursuit (PCP) convex optimization problem. Given the raw attention
+        matrix `A`, PCP seeks to find `L` and `S` such that:
+
+            min_{L,S} ||L||_* + lambda * ||S||_1   subject to   A = L + S
+
+        -   `||L||_*` is the **nuclear norm** of `L` (the sum of its singular
+            values). Minimizing the nuclear norm is a convex relaxation for
+            minimizing the rank of the matrix, thus encouraging `L` to be
+            low-rank.
+        -   `||S||_1` is the **L1 norm** of `S` (the sum of the absolute values
+            of its elements). Minimizing the L1 norm is a standard technique
+            for inducing sparsity, encouraging most elements of `S` to be zero.
+        -   `lambda` is a regularization parameter that balances the trade-off
+            between the low-rankness of `L` and the sparsity of `S`.
+
+        This problem is typically solved using iterative methods, such as the
+        Alternating Direction Method of Multipliers (ADMM), which involves
+        repeatedly applying singular value thresholding to update `L` and
+        soft-thresholding to update `S`.
+
+    References:
+        - The foundational theory for Principal Component Pursuit was
+          introduced in:
+          Candès, E. J., Li, X., Ma, Y., & Wright, J. (2011). "Robust
+          Principal Component Analysis?". Journal of the ACM.
 """
 
 import keras
