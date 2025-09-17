@@ -1,19 +1,69 @@
-"""
-This module provides a `TransformerLayer`, a highly configurable and generic
-implementation of the fundamental building block of Transformer-based neural networks.
+"""Implements the foundational building block of a Transformer network.
 
-This layer encapsulates the two primary sub-layers of a standard Transformer:
-a configurable multi-head attention mechanism and a position-wise feed-forward network. Both
-sub-layers are wrapped with residual connections and normalization, which are crucial
-for enabling the training of very deep networks.
+This layer encapsulates the two primary sub-components of a standard Transformer
+architecture: a multi-head self-attention mechanism and a position-wise
+feed-forward network. Each sub-component is enclosed within a residual
+connection followed by layer normalization, a crucial design pattern that
+enables the stable training of deep sequential models. The layer's purpose is
+to transform an input sequence of vectors into an output sequence of the same
+length, where each output vector is a contextually-aware representation of its
+corresponding input vector.
 
-A key feature of this implementation is its flexibility. It is designed to serve as a
-versatile component for research and development, allowing for easy experimentation
-with different attention mechanisms, normalization techniques and feed-forward network architectures,
-including Mixture of Experts (MoE).
+Architectural and Mathematical Underpinnings:
 
-This configurability makes the layer an excellent tool for architectural experimentation
-and for building custom Transformer variants.
+1.  **Multi-Head Self-Attention (MHSA)**: This mechanism allows the model to
+    weigh the importance of different words (or tokens) in the input sequence
+    when processing a specific word. It is based on the Scaled Dot-Product
+    Attention formula:
+
+        Attention(Q, K, V) = softmax( (Q @ K.T) / sqrt(d_k) ) @ V
+
+    -   **Intuition**: For each token, we create a "Query" (Q) vector. For all
+        tokens in the sequence, we create "Key" (K) and "Value" (V) vectors.
+        The dot product `Q @ K.T` computes a similarity score between the
+        current token and every other token. This score is scaled by `sqrt(d_k)`
+        for numerical stability, and a softmax is applied to obtain attention
+        weights. Finally, a weighted sum of all Value vectors is computed,
+        producing an output that is a rich, context-aware representation of
+        the original token.
+    -   **Multi-Head**: Instead of a single attention function, MHSA performs
+        this operation multiple times in parallel with different, learned
+        linear projections for Q, K, and V. Each parallel run is a "head."
+        This allows the model to jointly attend to information from different
+        representational subspaces at different positions. The outputs of all
+        heads are concatenated and linearly projected to produce the final
+        result.
+
+2.  **Position-wise Feed-Forward Network (FFN)**: Following the attention
+    mechanism, each position in the sequence is processed independently by a
+    simple two-layer MLP:
+
+        FFN(x) = activation(x @ W₁ + b₁) @ W₂ + b₂
+
+    This sub-layer introduces non-linearity and increases the model's
+    representational capacity, allowing it to learn more complex functions.
+
+3.  **Residual Connections and Layer Normalization**: Each of the two sub-layers
+    (MHSA and FFN) is wrapped in a residual connection and a normalization
+    layer. The standard configuration is `LayerNorm(x + Sublayer(x))`. This
+    design is critical for mitigating the vanishing gradient problem, enabling
+    the construction of Transformers with dozens or even hundreds of layers.
+    This implementation supports two common variants:
+    -   **Post-Normalization** (original design): Normalization is applied
+        after the residual connection.
+    -   **Pre-Normalization**: Normalization is applied to the input of each
+        sub-layer, which often leads to more stable training for very deep
+        models.
+
+This layer's highly configurable nature allows for swapping its core components
+(e.g., replacing the FFN with a Mixture of Experts layer), making it a versatile
+tool for architectural research.
+
+References:
+    - Vaswani, A., et al. (2017). Attention Is All You Need. *NeurIPS*.
+    - Ba, J. L., et al. (2016). Layer Normalization. *arXiv preprint*.
+    - Xiong, R., et al. (2020). On Layer Normalization in the Transformer
+      Architecture. *ICML*. (Analysis of Pre-LN vs. Post-LN).
 """
 
 import keras

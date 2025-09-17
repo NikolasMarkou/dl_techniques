@@ -1,12 +1,88 @@
-"""
-General Purpose Configurable Text Encoder
+"""Implement a highly configurable, Transformer-based text encoder.
 
-This module provides a highly configurable text encoder that can be adapted for various
-natural language processing architectures. It uses factory patterns for all components
-(attention, FFN, normalization, embeddings) to enable maximum flexibility and experimentation.
+This layer provides a versatile and modular framework for constructing a wide
+range of Transformer encoder architectures. It is designed to create deep,
+bidirectional representations of text, making it suitable for natural
+language understanding tasks like text classification, named entity
+recognition, and question answering. Its primary design principle is
+configurability, allowing researchers and engineers to compose different
+architectural components to build models ranging from classic BERT-style
+architectures to more modern variants.
 
-The encoder supports different embedding strategies, attention mechanisms, normalization
-types, and feed-forward networks through a unified factory-based interface.
+Architecture and Core Concepts:
+
+The layer follows the fundamental architecture of the encoder side of the
+original Transformer model. The core operation is to process an entire
+sequence of text at once, allowing every token to attend to every other token.
+This "bidirectional" self-attention mechanism is what enables the model to
+build a contextually rich understanding of each token based on its complete
+surrounding text.
+
+The architecture is composed of three main stages:
+
+1.  **Input Embedding Stage:** This stage converts input token IDs into a
+    continuous representation that incorporates semantic, positional, and (if
+    applicable) segment information. The key innovation here is the
+    flexibility in positional encoding. Beyond traditional learned or fixed
+    sinusoidal embeddings, it supports modern techniques like Rotary Position
+    Embeddings (RoPE), which inject relative positional information more
+    effectively.
+
+2.  **Transformer Layer Stack:** The core of the encoder is a stack of
+    identical Transformer layers. Each layer refines the token
+    representations through two main sub-layers: a self-attention mechanism
+    and a position-wise feed-forward network (FFN). This class allows for
+    extensive configuration of these layers, including the choice between
+    pre-layer and post-layer normalization (a critical factor for training
+    stability), different normalization techniques (e.g., LayerNorm vs.
+    RMSNorm), and various FFN architectures (e.g., standard MLP vs. gated
+    variants like SwiGLU).
+
+3.  **Output Pooling Stage:** For tasks that require a single, fixed-size
+    vector representation of the entire input sequence, the layer can apply a
+    pooling strategy to the final token representations. This might involve
+    using the representation of a special `[CLS]` token, or applying mean or
+    max pooling across the sequence.
+
+By exposing these architectural choices as configuration parameters, this
+class serves as a factory for a family of encoder models, promoting rapid
+experimentation and adaptation to new research findings.
+
+Mathematical Foundation:
+
+The cornerstone of the encoder is the self-attention mechanism, calculated as:
+`Attention(Q, K, V) = softmax((Q K^T) / sqrt(d_k)) V`
+
+Unlike a decoder, the attention mechanism here is not causally masked,
+meaning the softmax is computed over the entire sequence. This allows
+information to flow bidirectionally.
+
+A key mathematical concept supported is Rotary Position Embeddings (RoPE).
+Instead of adding positional vectors to the token embeddings, RoPE rotates
+the query and key vectors based on their absolute position. The rotation is
+designed such that the dot product between a query at position `m` and a key
+at position `n` inherently depends only on their relative position `m-n`.
+This elegantly injects relative positional awareness directly into the
+attention mechanism, often leading to improved performance on long sequences.
+
+References:
+
+The design of this layer is based on a rich history of research in natural
+language processing, primarily originating from:
+-   Vaswani, A., et al. (2017). "Attention Is All You Need." This paper
+    introduced the original Transformer architecture.
+-   Devlin, J., et al. (2018). "BERT: Pre-training of Deep Bidirectional
+    Transformers for Language Understanding." This work established the
+    Transformer encoder as a dominant paradigm for NLU tasks.
+
+The modern, configurable components are based on subsequent innovations:
+-   Su, J., et al. (2021). "RoFormer: Enhanced Transformer with Rotary
+    Position Embedding." This paper introduced RoPE.
+-   Zhang, B., & Sennrich, R. (2019). "Root Mean Square Layer
+    Normalization."
+-   Shazeer, N. (2020). "GLU Variants Improve Transformer," which popularized
+    architectures like SwiGLU.
+
 """
 
 import keras

@@ -17,10 +17,9 @@ from typing import Optional, Tuple, Dict, Any, Literal
 # ---------------------------------------------------------------------
 
 from ..utils.logger import logger
-from .attention.fnet_fourier_transform import FNetFourierTransform
-
 from .ffn import create_ffn_layer
 from .norms import create_normalization_layer
+from .attention.fnet_fourier_transform import FNetFourierTransform
 
 # ---------------------------------------------------------------------
 # Type definitions

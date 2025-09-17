@@ -1,45 +1,59 @@
-"""
-This module provides the `ModalityProjection` layer, a critical component for
-multimodal architectures like Vision-Language Models (VLMs).
+"""Projects visual features into a language model's embedding space.
 
-Its primary function is to act as a "bridge" between the visual and textual
-modalities. It takes high-dimensional feature vectors from a vision encoder (e.g.,
-the output of a Vision Transformer) and transforms them into a format that is
-compatible with a language model's embedding space. This alignment is essential for
-the language model to be able to "understand" and reason about the visual input.
+This layer serves as a critical bridge in Vision-Language Models (VLMs),
+transforming visual representations from an image encoder into a format
+compatible with a language model's textual embedding space. Its design
+addresses two fundamental challenges: aligning the distinct statistical
+properties of visual and textual modalities, and managing the computational
+burden imposed by long sequences of visual tokens.
 
-This layer achieves this alignment through a two-stage process that prioritizes
-computational efficiency:
+Architectural and Mathematical Underpinnings:
 
-1.  **Efficient Token Reduction via Pixel Shuffle:**
-    -   Before any learned projection, the layer first reduces the number of visual
-        tokens. This is a crucial optimization for handling high-resolution visual
-        features, as the computational cost of attention in the subsequent language
-        model is quadratic with respect to the sequence length.
-    -   Instead of using pooling or a strided convolution (which discard information),
-        it employs `PixelShuffle` (a space-to-depth operation). This operation
-        rearranges spatial information into the channel dimension, effectively merging
-        small blocks of tokens (e.g., a 2x2 block) into a single, richer token. This
-        reduces the token count significantly while preserving all the original
-        information.
+The layer employs a two-stage process that prioritizes both information
+preservation and computational efficiency.
 
-2.  **Cross-Modality Linear Projection:**
-    -   After the token sequence has been shortened, the resulting feature vectors
-        are passed through a standard linear (`Dense`) layer.
-    -   This is the main projection step, which learns a mapping from the (rearranged)
-        visual feature space to the target `output_dim`. This `output_dim` is typically
-        chosen to match the embedding dimension of the language model that will
-        receive these features.
+1.  **Information-Preserving Token Reduction**: The primary computational
+    bottleneck in processing visual features with a Transformer-based
+    language model is the quadratic complexity of the self-attention
+    mechanism with respect to sequence length. High-resolution images
+    produce a large number of visual tokens, making direct processing
+    infeasible.
 
-3.  **Optional Post-Processing:**
-    -   To stabilize the output and introduce additional non-linearity, the layer can
-        optionally apply a `GELU` activation and a `LayerNormalization` layer. Layer
-        normalization is standard practice in Transformer-based architectures to
-        ensure the outputs are well-conditioned for the subsequent model layers.
+    To mitigate this, the layer first reduces the number of tokens using a
+    space-to-depth transformation, commonly known as `PixelShuffle`.
+    Unlike pooling or strided convolutions which discard spatial
+    information, this operation is a lossless rearrangement. For a given
+    `scale_factor` `s`, it reshapes `s x s` blocks of spatial tokens into a
+    single, more descriptive token by folding the spatial dimensions into
+    the channel dimension. This reduces the sequence length by a factor of
+    `s²` while preserving all the original information, concentrating it
+    into a richer, more compact sequence of tokens.
 
-In essence, this layer provides a computationally efficient and effective method to
-not only align visual and textual representations but also to reduce the sequence
-length of visual tokens, making the overall VLM more performant.
+2.  **Cross-Modal Linear Projection**: After the sequence is shortened, the
+    resulting tokens are passed through a `Dense` layer. This is the core
+    projector that learns an affine transformation to map the (reshaped)
+    visual feature space into the target language embedding space. The
+    weights of this projection, `y = xW + b`, are learned end-to-end,
+    allowing the model to discover the optimal alignment between visual
+    concepts and their corresponding representations in the language model's
+    semantic space. Optional GELU activation and Layer Normalization are
+    applied to stabilize training and match the architectural conventions of
+    modern Transformers.
+
+This design provides an efficient and effective mechanism for cross-modal
+grounding, enabling language models to seamlessly integrate and reason about
+visual information.
+
+References:
+    - Shi, W., et al. (2016). Real-Time Single Image and Video
+      Super-Resolution Using an Efficient Sub-Pixel Convolutional Neural
+      Network. *CVPR*. (Introduced the concept of Pixel Shuffle).
+    - Radford, A., et al. (2021). Learning Transferable Visual Models From
+      Natural Language Supervision. *ICML*. (Established the pattern for
+      projecting modalities in CLIP).
+    - Alayrac, J., et al. (2022). Flamingo: a Visual Language Model for
+      Few-Shot Learning. *NeurIPS*. (Demonstrates advanced projection
+      architectures in VLMs).
 """
 
 import keras

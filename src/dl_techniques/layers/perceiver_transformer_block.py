@@ -1,4 +1,61 @@
-"""Complete Perceiver transformer block with cross-attention and MLP."""
+"""Implements a Perceiver-style Transformer block with decoupled cross-attention.
+
+This layer is a fundamental component of the Perceiver architecture, designed to
+address the quadratic complexity bottleneck of standard Transformers when dealing
+with very large input sequences (e.g., flattened image patches, audio samples).
+It achieves this by decoupling the main processing pathway from the input data
+through an asymmetric cross-attention mechanism.
+
+Architectural and Mathematical Underpinnings:
+
+The core innovation of the Perceiver architecture, encapsulated in this block,
+is the use of a small, fixed-size latent array that acts as the query in the
+attention mechanism. This latent array attends to the much larger input data
+array, which provides the keys and values. This design transforms the attention
+mechanism from self-attention to cross-attention.
+
+1.  **Asymmetric Cross-Attention**: A standard Transformer block performs
+    self-attention, where the queries, keys, and values are all derived from the
+    same input sequence `X`:
+
+        `Output = Attention(Q=X, K=X, V=X)`
+
+    The computational complexity of this operation is `O(N²)`, where `N` is the
+    sequence length of `X`. This is prohibitive for large `N`. This Perceiver
+    block, however, uses a separate, smaller latent array `L` for queries:
+
+        `L_updated = Attention(Q=L, K=X, V=X)`
+
+    The complexity is now `O(M*N)`, where `M` is the sequence length of the
+    latent array and `N` is the length of the input array. Since `M` is typically
+    small and constant (e.g., 256 or 512), the complexity scales linearly with
+    the input size `N`, making it tractable for very high-dimensional data.
+
+2.  **Information Bottleneck**: The latent array serves as an information
+    bottleneck. It is forced to iteratively distill the most salient information
+    from the large input array via the cross-attention mechanism. This process
+    effectively compresses the input into a compact, fixed-size latent
+    representation.
+
+3.  **Standard Transformer Structure**: Beyond the critical modification to the
+    attention mechanism, the rest of the block follows the standard, robust design
+    of a modern Transformer layer. It employs pre-normalization (applying Layer
+    Normalization before each sub-layer) and residual connections around both the
+    cross-attention module and the subsequent position-wise Feed-Forward Network
+    (FFN). This ensures stable training and efficient gradient flow.
+
+        `L' = L + CrossAttention(LN(L), LN(X))`
+        `L_out = L' + FFN(LN(L'))`
+
+This architectural pattern allows the model to process vast amounts of raw sensory
+data while maintaining a manageable computational cost in its main processing
+pathway.
+
+References:
+    - Jaegle, A., et al. (2021). Perceiver: General Perception with Iterative
+      Attention. *ICML*.
+    - Vaswani, A., et al. (2017). Attention Is All You Need. *NeurIPS*.
+"""
 
 import keras
 from typing import Optional, Any, Dict, Tuple, Union, List

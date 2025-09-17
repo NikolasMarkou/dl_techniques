@@ -1,5 +1,5 @@
 """
-emory-Augmented Neural Network (MANN) based on
+Memory-Augmented Neural Network (MANN) based on
 the Neural Turing Machine (NTM) architecture.
 
 **What is this?**

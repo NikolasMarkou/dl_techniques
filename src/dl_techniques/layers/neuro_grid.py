@@ -1,221 +1,78 @@
-"""
-NeuroGrid: Differentiable N-Dimensional Memory Lattice with Probabilistic Addressing.
+"""Implements a differentiable, n-dimensional memory with probabilistic addressing.
 
-A structured memory layer that maps inputs to an n-dimensional grid of learnable latent vectors
-through probabilistic addressing. Combines the topology-preserving properties of Self-Organizing
-Maps with fully differentiable operations, enabling end-to-end training in modern deep learning
-architectures including transformers.
+This layer provides a structured, spatially organized memory system that is fully
+differentiable, enabling end-to-end training within modern deep learning
+frameworks. It bridges the gap between the topology-preserving properties of
+classical Self-Organizing Maps (SOMs) and the requirements of gradient-based
+optimization, offering a powerful mechanism for learning structured
+representations.
 
-**Architecture Overview:**
-```
-Input → [Dense₁, Dense₂, ..., DenseN] → [Softmax/T₁, Softmax/T₂, ..., Softmax/TN]
-      → Outer Product → Joint Probability → Soft Lookup → Weighted Output
-```
+Architectural and Mathematical Underpinnings:
 
-The layer projects inputs through N separate networks (one per grid dimension), applies
-temperature-controlled softmax to create probability distributions, combines them via outer
-product to form joint addressing probabilities, then performs a soft lookup into the grid.
+The core architecture consists of two main components: a probabilistic
+addressing mechanism and an n-dimensional grid of learnable latent vectors
+(the memory lattice). The goal is to perform a "soft lookup" where an input
+vector is mapped not to a single memory location, but to a weighted average
+of all memory locations, with weights determined by learned similarity.
 
-**Key Features:**
-- **Structured Memory**: Learnable n-dimensional grid with spatial organization
-- **Probabilistic Addressing**: Soft, differentiable lookup operations
-- **Temperature Control**: Learnable parameter for addressing sharpness/smoothness
-- **Quality Assessment**: Built-in input quality analysis based on addressing behavior
-- **Transformer Compatible**: Handles both 2D and 3D inputs seamlessly
-- **Entropy Regularization**: Optional sharpening of probability distributions
+1.  **Factorized, Probabilistic Addressing**: For an n-dimensional grid of
+    shape (d₁, d₂, ..., dₙ), the addressing is factorized across dimensions.
+    An input vector `x` is fed into `n` independent projection networks,
+    `f₁, f₂, ..., fₙ`. Each network `fᵢ` outputs a logit vector of size `dᵢ`.
+    These logits are then transformed into a probability distribution `Pᵢ`
+    over the `i`-th dimension using a temperature-controlled softmax:
 
-**Mathematical Foundation:**
-For input x, compute dimension probabilities P_i = softmax(Dense_i(x) / temperature),
-form joint probability P_joint = P₁ ⊗ P₂ ⊗ ... ⊗ P_n, then output weighted sum
-Σ P_joint[indices] × Grid[indices] across all grid positions.
+        Pᵢ = softmax(fᵢ(x) / T)
 
-**Practical Applications:**
+    The temperature parameter `T` controls the sharpness of the distribution.
+    A low temperature results in a sparse, focused distribution (akin to a
+    hard lookup), while a high temperature yields a smooth, diffuse
+    distribution. This continuous, differentiable transformation is the key
+    departure from the discrete Best Matching Unit (BMU) search in a
+    traditional SOM.
 
-1. **Basic Structured Memory for Feature Learning:**
-```python
-# Create 3D grid for organized representation learning
-layer = NeuroGrid(
-    grid_shape=[16, 12, 8],     # 3D grid: 16×12×8 = 1536 positions
-    latent_dim=128,              # Each position stores 128-dim vector
-    temperature=1.0,             # Initial addressing temperature
-    learnable_temperature=True   # Adapt during training
-)
+2.  **Joint Probability via Outer Product**: The individual dimensional
+    probabilities `P₁, P₂, ..., Pₙ` are combined to form a joint probability
+    distribution over the entire n-dimensional grid. This is achieved through
+    an outer product (tensor product):
 
-# Process standard feature vectors
-features = keras.Input(shape=(256,))
-structured_output = layer(features)  # Shape: (batch, 128)
-```
+        P_joint = P₁ ⊗ P₂ ⊗ ... ⊗ Pₙ
 
-2. **Transformer Integration for Token-Level Memory:**
-```python
-# Enhanced transformer with structured token memory
-class TransformerWithMemory(keras.Model):
-    def __init__(self, vocab_size, embed_dim=768, seq_len=512):
-        super().__init__()
-        self.embedding = keras.layers.Embedding(vocab_size, embed_dim)
+    The resulting tensor `P_joint` has the shape (d₁, d₂, ..., dₙ), where each
+    element `P_joint[i₁, i₂, ..., iₙ]` represents the probability of addressing
+    the memory cell at that specific coordinate. This compositional approach
+    is inspired by Product Key Memories, allowing for a vast addressable
+    memory space with a modest number of parameters.
 
-        # Structured memory for each token
-        self.token_memory = NeuroGrid(
-            grid_shape=[20, 15, 10],    # Rich 3D memory structure
-            latent_dim=embed_dim,       # Match embedding dimension
-            temperature=0.5,            # Sharp addressing
-            entropy_regularizer_strength=0.1
-        )
+3.  **Differentiable Soft Lookup**: The final output is the expectation of the
+    latent vectors in the memory grid `G`, weighted by the joint probability
+    distribution. This is a weighted sum over all grid positions:
 
-        self.attention = keras.layers.MultiHeadAttention(12, 64)
-        self.ffn = keras.layers.Dense(embed_dim)
+        Output = Σ_{i₁, i₂, ..., iₙ} P_joint[i₁, i₂, ..., iₙ] * G[i₁, i₂, ..., iₙ]
 
-    def call(self, tokens):
-        x = self.embedding(tokens)          # (batch, seq_len, embed_dim)
-        memory_enhanced = self.token_memory(x)  # Enhanced tokens
+    This operation is fully differentiable with respect to both the grid
+    vectors `G` and the parameters of the projection networks `fᵢ`. During
+    training, gradients flow through this weighted sum, simultaneously
+    updating the memory content (`G`) and the addressing logic (`fᵢ`) to
+    minimize the task-specific loss. This process encourages semantically
+    similar inputs to activate neighboring regions of the grid, leading to an
+    emergent, self-organized topological representation of the input space.
 
-        # Residual connection preserves sequence structure
-        x = x + memory_enhanced
+This layer serves as a modern reinterpretation of classic unsupervised
+learning algorithms, reformulated for deep learning. By replacing discrete,
+non-differentiable operations with their probabilistic, soft counterparts, it
+integrates the powerful concept of structured, topologically-aware memory
+directly into end-to-end trainable models.
 
-        # Standard transformer processing
-        attended = self.attention(x, x)
-        return self.ffn(x + attended)
-```
-
-3. **Quality-Aware Data Processing Pipeline:**
-```python
-# Data quality assessment and filtering system
-quality_assessor = NeuroGrid(
-    grid_shape=[24, 16],
-    latent_dim=64,
-    temperature=0.8,
-    learnable_temperature=True
-)
-
-def robust_inference(inputs, confidence_threshold=0.7):
-    # Assess input quality using addressing behavior
-    quality_info = quality_assessor.compute_input_quality(inputs)
-
-    # Separate high-quality from questionable samples
-    filtered = quality_assessor.filter_by_quality_threshold(
-        inputs,
-        quality_threshold=confidence_threshold,
-        quality_measure='overall_quality'
-    )
-
-    # Process reliable samples with full model
-    if filtered['high_quality_inputs'].shape[0] > 0:
-        reliable_results = main_model(filtered['high_quality_inputs'])
-
-    # Flag uncertain samples for review
-    uncertain_count = filtered['low_quality_inputs'].shape[0]
-    if uncertain_count > 0:
-        logger.warning(f"Flagged {uncertain_count} samples for manual review")
-
-    return reliable_results, filtered['high_quality_mask']
-```
-
-4. **Multi-Scale Hierarchical Processing:**
-```python
-# Hierarchical feature extraction with multiple grids
-class HierarchicalProcessor(keras.Model):
-    def __init__(self, input_dim, output_dim):
-        super().__init__()
-        # Coarse-scale global patterns
-        self.global_grid = NeuroGrid([8, 8], latent_dim=output_dim//2)
-
-        # Fine-scale local patterns
-        self.local_grid = NeuroGrid([32, 24], latent_dim=output_dim//2)
-
-        self.combiner = keras.layers.Dense(output_dim)
-
-    def call(self, inputs):
-        global_features = self.global_grid(inputs)    # Broad patterns
-        local_features = self.local_grid(inputs)      # Detailed patterns
-
-        # Combine multi-scale representations
-        combined = keras.layers.concatenate([global_features, local_features])
-        return self.combiner(combined)
-```
-
-5. **Dynamic Temperature Control for Training Phases:**
-```python
-# Adaptive addressing during different training phases
-memory_layer = NeuroGrid([15, 12], latent_dim=128, learnable_temperature=True)
-
-class TemperatureScheduler(keras.callbacks.Callback):
-    def __init__(self, memory_layer):
-        self.memory_layer = memory_layer
-
-    def on_epoch_begin(self, epoch, logs=None):
-        # Gradually sharpen addressing during training
-        if epoch < 10:
-            temp = 2.0    # Smooth addressing early
-        elif epoch < 50:
-            temp = 1.0    # Medium sharpness
-        else:
-            temp = 0.5    # Sharp addressing later
-
-        self.memory_layer.set_temperature(temp)
-
-    def on_epoch_end(self, epoch, logs=None):
-        current_temp = self.memory_layer.get_current_temperature()
-        print(f"Epoch {epoch}: Temperature = {current_temp:.3f}")
-
-# Use in training
-scheduler = TemperatureScheduler(memory_layer)
-model.fit(x_train, y_train, callbacks=[scheduler])
-```
-
-6. **Anomaly Detection Through Addressing Analysis:**
-```python
-# Detect out-of-distribution samples via addressing patterns
-anomaly_detector = NeuroGrid([20, 16], latent_dim=32)
-
-# Train on normal data to learn typical addressing patterns
-normal_features = anomaly_detector(normal_training_data)
-
-def detect_anomalies(test_data, sensitivity=0.3):
-    quality_measures = anomaly_detector.compute_input_quality(test_data)
-
-    # Low confidence suggests unfamiliar patterns
-    confidence_scores = quality_measures['addressing_confidence']
-    anomaly_mask = confidence_scores < sensitivity
-
-    # Additional quality indicators
-    entropy_scores = quality_measures['addressing_entropy']
-    high_uncertainty = entropy_scores > np.log(320) / 2  # Half max entropy
-
-    # Combine indicators for robust detection
-    final_anomaly_mask = anomaly_mask | high_uncertainty
-
-    return {
-        'anomalies': test_data[final_anomaly_mask],
-        'anomaly_scores': 1 - confidence_scores,
-        'normal_samples': test_data[~final_anomaly_mask]
-    }
-
-# Production anomaly monitoring
-results = detect_anomalies(incoming_data)
-if results['anomalies'].shape[0] > 0:
-    alert_system.trigger(f"Detected {len(results['anomalies'])} anomalies")
-```
-
-**Input/Output Specifications:**
-- **2D Input**: (batch_size, input_dim) → (batch_size, latent_dim)
-- **3D Input**: (batch_size, seq_len, embed_dim) → (batch_size, seq_len, latent_dim)
-
-**Performance Considerations:**
-- Computational complexity: O(batch_size × prod(grid_shape) × latent_dim)
-- Memory usage scales linearly with grid size and latent dimension
-- For large grids (>10⁶ positions), consider hierarchical decomposition
-- Temperature learning typically converges within 10-20 epochs
-
-**Quality Measures Available:**
-- `addressing_confidence`: Peak probability concentration (0-1, higher better)
-- `addressing_entropy`: Distribution uncertainty (0-log|Grid|, lower better)
-- `dimension_consistency`: Cross-dimensional coherence (0-1, higher better)
-- `grid_coherence`: Structural alignment (0-1, higher better)
-- `overall_quality`: Composite score (0-1, higher better)
-
-The layer naturally develops spatially organized representations where similar inputs
-activate neighboring grid regions, providing interpretable structure while maintaining
-full differentiability for gradient-based optimization.
+References:
+    - Kohonen, T. (1990). The Self-Organizing Map. *Proceedings of the IEEE*.
+      (Conceptual foundation for topological data representation).
+    - Graves, A., et al. (2014). Neural Turing Machines. *arXiv preprint*.
+      (Pioneered differentiable addressing for external memory).
+    - Lample, G., et al. (2019). Large Memory Layers with Product Keys. *NeurIPS*.
+      (Inspiration for compositional, factorized addressing).
+    - Hinton, G., et al. (2015). Distilling the Knowledge in a Neural Network.
+      *arXiv preprint*. (Popularized the use of temperature in softmax).
 """
 
 import keras
@@ -226,7 +83,6 @@ from typing import List, Tuple, Optional, Union, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
 from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 from ..initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
 

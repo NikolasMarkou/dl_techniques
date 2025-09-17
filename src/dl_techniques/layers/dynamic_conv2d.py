@@ -1,11 +1,67 @@
+"""Implements a 2D convolution with input-dependent dynamic kernel aggregation.
+
+This layer enhances the representational power of a standard convolution by
+dynamically adapting its behavior to each input instance. Instead of employing a
+single, static convolutional kernel, it maintains a set of `K` parallel
+"expert" kernels. For each input feature map, a lightweight attention mechanism
+generates a set of mixing coefficients, which are then used to compute a
+weighted sum of the outputs from the expert kernels.
+
+Architectural and Mathematical Underpinnings:
+
+The core principle is to replace the static linear transformation of a
+standard convolution with an input-dependent, non-linear function. This is
+achieved by aggregating multiple linear functions (the expert convolutions)
+with weights determined by the input itself.
+
+1.  **Parallel Convolution Experts**: The layer maintains `K` separate `Conv2D`
+    operations, each with its own learnable kernel `W_k` and bias `b_k`. For a
+    given input `x`, each expert computes a separate output feature map:
+
+        y_k = conv(x, W_k) + b_k
+
+2.  **Input-Dependent Attention Mechanism**: A small gating network computes `K`
+    attention scores, `π_k(x)`, that determine how to combine the expert
+    outputs. This network follows a Squeeze-and-Excitation architecture:
+    a.  **Squeeze**: The input `x` is spatially compressed into a channel
+        descriptor vector via Global Average Pooling (GAP). This vector serves
+        as a compact, global summary of the input's content.
+    b.  **Excitation**: This summary vector is passed through a two-layer
+        fully-connected network. This network learns a non-linear mapping
+        from the input's global features to the optimal mixing strategy for
+        the kernels.
+    c.  **Weight Generation**: The final layer of the attention network outputs
+        `K` logits, which are converted into a probability distribution over
+        the kernels using a temperature-controlled softmax function:
+
+            π(x) = softmax(attention_network(GAP(x)) / τ)
+
+        The temperature `τ` is a crucial hyperparameter that controls the
+        sparsity of the attention weights. High temperatures encourage smoother,
+        more uniform weights (useful for stabilizing early training), while
+        low temperatures lead to a "harder" selection where only a few expert
+        kernels are chosen.
+
+3.  **Dynamic Output Aggregation**: The final output of the layer is the
+    weighted sum of the individual expert outputs, using the dynamically
+    computed attention scores `π_k(x)` as the weights:
+
+        y_dynamic = Σ_{k=1 to K} π_k(x) * y_k
+
+This entire process is differentiable, allowing the kernel weights `W_k`, bias
+terms `b_k`, and the parameters of the attention network to be jointly
+optimized via backpropagation. The layer learns not only a set of specialized
+feature detectors (the kernels) but also the logic for when and how to combine
+them, effectively increasing the model's capacity without a significant increase
+in width or depth.
+
+References:
+    - Chen, Y., et al. (2019). Dynamic Convolution: Attention over
+      Convolution Kernels. *CVPR*.
+"""
+
 import keras
 from typing import Optional, Union, Tuple, Any, Dict, List
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

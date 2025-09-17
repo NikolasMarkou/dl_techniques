@@ -1,240 +1,75 @@
-"""
-Multi-Modal Fusion Layer: A Unified Framework for Cross-Modal Information Integration
+"""Implements a unified framework for multi-modal information fusion.
 
-This module implements a comprehensive, factory-based multi-modal fusion layer that addresses
-the fundamental challenge of combining information from heterogeneous data modalities
-(e.g., vision, text, audio) in deep learning architectures. The layer provides eight distinct
-fusion strategies, each with different computational properties and theoretical foundations,
-enabling researchers and practitioners to experiment with various approaches to multi-modal
-learning within a single, consistent interface.
+This layer provides a modular and extensible framework for combining feature
+representations from multiple, heterogeneous data modalities (e.g., vision,
+language, audio). It serves as a factory that implements several distinct
+fusion strategies, each grounded in different theoretical assumptions about
+how cross-modal interactions should be modeled. The primary goal is to learn a
+joint representation that is more informative than the sum of its parts.
 
-## Theoretical Foundation
+Architectural and Conceptual Underpinnings:
 
-Multi-modal fusion addresses the core challenge of learning joint representations from
-different data modalities that may have vastly different statistical properties, dimensionalities,
-and semantic structures. The key insight is that different fusion strategies capture different
-types of cross-modal interactions:
+The layer is designed around a strategy pattern, where a high-level interface
+delegates the core fusion logic to one of several underlying implementations.
+This allows for easy experimentation with different approaches to modeling the
+complex relationships between modalities. The core strategies fall into several
+conceptual categories:
 
-**Early vs. Late Fusion**: Concatenation represents early fusion (combining raw features),
-while attention-based methods represent late fusion (combining processed representations).
+1.  **Early Fusion (Concatenation)**: This is the simplest strategy, where
+    feature vectors from all modalities are concatenated and then passed
+    through a learned linear projection.
+        `Y = W[X₁; X₂; ...; Xₙ] + b`
+    The intuition is to preserve all information from all modalities and allow a
+    subsequent feed-forward network to learn the complex cross-modal
+    interactions implicitly. It is a robust and often surprisingly effective
+    baseline.
 
-**Additive vs. Multiplicative Interactions**: Addition captures linear relationships between
-modalities, while multiplication and bilinear methods capture higher-order interactions.
+2.  **Element-wise Fusion (Addition & Multiplication)**: These strategies assume
+    that the input modalities have been projected into a semantically aligned
+    space.
+    -   **Addition**: `Y = W(X₁ + X₂ + ... + Xₙ) + b`. This assumes modalities
+        provide complementary, independent evidence.
+    -   **Multiplication**: `Y = W(X₁ ⊙ X₂ ⊙ ... ⊙ Xₙ) + b`. This captures
+        synergistic interactions, where the presence of a feature in one
+        modality amplifies orgates the effect of a feature in another.
 
-**Symmetric vs. Asymmetric Fusion**: Cross-attention allows asymmetric information flow
-(one modality attending to another), while element-wise operations are symmetric.
+3.  **Interaction-based Fusion (Bilinear & Tensor)**: These methods explicitly
+    model higher-order, multiplicative interactions between all pairs of
+    features across modalities.
+    -   **Bilinear Pooling**: For two modalities, this is conceptually
+        equivalent to computing an outer product and projecting it:
+        `Y = W(X₁ ⊗ X₂) + b`. It captures a rich set of pairwise feature
+        interactions but is computationally expensive, scaling quadratically
+        with the feature dimension (`O(d²)`).
+    -   **Tensor Fusion**: An extension of bilinear pooling that creates a
+        multi-dimensional tensor to model higher-order interactions among
+        multiple modalities, often using low-rank approximations to remain
+        computationally tractable.
 
-## Mathematical Formulations
+4.  **Attention-based Fusion (Cross-Attention)**: This is the most powerful and
+    flexible strategy, forming the basis of modern multi-modal Transformers.
+    Each modality acts as a query to attend to the others, which serve as keys
+    and values.
+        `X'₁ = X₁ + Attention(Q=X₁, K=X₂, V=X₂)`
+        `X'₂ = X₂ + Attention(Q=X₂, K=X₁, V=X₁)`
+    This allows each modality to dynamically select and integrate the most
+    relevant information from the others in a context-dependent manner. It
+    excels at modeling asymmetric relationships where, for example, a textual
+    query needs to ground itself in specific regions of an image.
 
-Given modalities X₁ ∈ ℝᵇˣˢ¹ˣᵈ, X₂ ∈ ℝᵇˣˢ²ˣᵈ, ..., Xₙ ∈ ℝᵇˣˢⁿˣᵈ where b=batch_size,
-s=sequence_length, d=embed_dim, the fusion strategies implement:
+By providing these varied strategies within a single interface, this layer
+enables systematic exploration of the optimal way to integrate multi-modal
+information for a given task.
 
-**Cross-Attention**:
-    Yᵢ = Xᵢ + ∑ⱼ≠ᵢ Attention(Xᵢ, Xⱼ, Xⱼ) + FFN(LayerNorm(Yᵢ))
-    Enables bidirectional information exchange with learned attention weights.
-
-**Concatenation**:
-    Y = W[X₁ ∘ X₂ ∘ ... ∘ Xₙ] + b
-    Simple but effective for preserving all modal information.
-
-**Gated Fusion**:
-    Y = W[σ(G₁(X₁)) ⊙ X₁ ∘ σ(G₂(X₂)) ⊙ X₂ ∘ ... ∘ σ(Gₙ(Xₙ)) ⊙ Xₙ] + b
-    Where σ=sigmoid, G=gate networks, ⊙=element-wise multiplication.
-
-**Bilinear Pooling**:
-    Y = W(X₁ ⊗ X₂) + b where ⊗ denotes outer product
-    Captures all pairwise feature interactions but computationally expensive.
-
-**Tensor Fusion**:
-    Y = W_final([W₁(concat(X)) ∘ W₂(concat(X)) ∘ ... ∘ Wₖ(concat(X))]) + b
-    Multi-head projection approach balancing expressiveness and efficiency.
-
-## Key Design Principles
-
-1. **Factory-Based Architecture**: Uses dependency injection through factories for attention,
-   FFN, and normalization components, enabling easy experimentation and extension.
-
-2. **Strategy Pattern**: Each fusion method is implemented as a separate strategy, allowing
-   runtime selection and easy addition of new approaches.
-
-3. **Modality Agnostic**: Works with any number of modalities (≥2) as long as they share
-   the same embedding dimension.
-
-4. **Serialization-First Design**: Full Keras 3 compatibility with proper save/load support
-   for production deployment.
-
-## Usage Guidelines and Strategy Selection
-
-**Cross-Attention**: Best for scenarios where modalities should dynamically attend to each
-other (e.g., image captioning, visual question answering). Computationally expensive but
-highly expressive. Use when you need bidirectional information flow and have sufficient
-computational resources.
-
-**Concatenation**: Simplest and often most effective baseline. Use when modalities are
-complementary rather than redundant, and when you want to preserve all information.
-Memory usage scales linearly with number of modalities.
-
-**Addition/Multiplication**: Efficient for scenarios where modalities have similar semantic
-structure. Addition works well when modalities provide independent evidence for the same
-concepts. Multiplication emphasizes agreement between modalities.
-
-**Gated Fusion**: Use when you need learned modality weighting - the model can learn to
-emphasize or suppress different modalities based on input. Particularly useful when
-modality reliability varies across samples.
-
-**Bilinear Pooling**: Captures rich interactions but expensive (O(d²) complexity). Use only
-for small embedding dimensions or when pairwise feature interactions are crucial.
-
-**Tensor Fusion**: Good balance between expressiveness and efficiency. Use when you need
-richer representations than concatenation but want better computational properties than
-full bilinear pooling.
-
-**Attention Pooling**: Use when you need fixed-size representations from variable-length
-sequences across modalities, such as in retrieval or classification tasks.
-
-## References
-
-Core multi-modal fusion concepts:
-- Baltrusaitis, T., Ahuja, C., & Morency, L. P. (2018). "Multimodal machine learning: A survey and taxonomy"
-- Ramachandram, D., & Taylor, G. W. (2017). "Deep multimodal learning: A survey on recent advances and trends"
-
-Attention mechanisms:
-- Vaswani, A., et al. (2017). "Attention is all you need" (Transformer architecture)
-- Luong, M. T., et al. (2015). "Effective approaches to attention-based neural machine translation"
-
-Specific fusion techniques:
-- Gao, Y., et al. (2016). "Compact bilinear pooling for visual question answering and visual grounding"
-- Liu, Z., et al. (2018). "Efficient low-rank multimodal fusion with modality-specific factors"
-- Zadeh, A., et al. (2017). "Tensor fusion network for multimodal sentiment analysis"
-
-Vision-language applications:
-- Anderson, P., et al. (2018). "Bottom-up and top-down attention for image captioning and VQA"
-- Lu, J., et al. (2019). "ViLBERT: Pretraining task-agnostic visiolinguistic representations"
-- Li, L. H., et al. (2020). "Oscar: Object-semantics aligned pre-training for vision-language tasks"
-
-## Examples
-
-### Basic Cross-Modal Attention (Vision-Language)
-```python
-# Bidirectional fusion between vision and text features
-fusion = MultiModalFusion(
-    embed_dim=768,
-    fusion_strategy='cross_attention',
-    num_fusion_layers=6,          # Deep interaction
-    attention_type='multi_head',
-    num_heads=12,
-    dropout_rate=0.1
-)
-
-# Forward pass with vision and text embeddings
-vision_features = keras.ops.random.normal((32, 196, 768))  # 32 samples, 196 patches
-text_features = keras.ops.random.normal((32, 128, 768))    # 32 samples, 128 tokens
-fused_vision, fused_text = fusion([vision_features, text_features])
-```
-
-### Efficient Gated Fusion for Resource-Constrained Settings
-```python
-# Lightweight fusion with learned modality weighting
-fusion = MultiModalFusion(
-    embed_dim=384,
-    fusion_strategy='gated',
-    ffn_type='swiglu',           # Modern activation
-    norm_type='rms_norm',        # Efficient normalization
-    dropout_rate=0.1
-)
-
-# Works with any number of modalities
-audio_features = keras.ops.random.normal((16, 100, 384))
-text_features = keras.ops.random.normal((16, 64, 384))
-vision_features = keras.ops.random.normal((16, 49, 384))
-fused = fusion([audio_features, text_features, vision_features])
-```
-
-### Multi-Head Projection Fusion for Rich Representations
-```python
-# Advanced tensor fusion with multiple projection heads
-fusion = MultiModalFusion(
-    embed_dim=1024,
-    fusion_strategy='tensor_fusion',
-    num_tensor_projections=8,    # Multiple projection heads
-    activation='gelu',
-    dropout_rate=0.1
-)
-
-# Captures complex cross-modal interactions
-modality1 = keras.ops.random.normal((8, 256, 1024))
-modality2 = keras.ops.random.normal((8, 128, 1024))
-rich_fusion = fusion([modality1, modality2])
-```
-
-### Attention Pooling for Fixed-Size Representations
-```python
-# Convert variable-length sequences to fixed representations
-fusion = MultiModalFusion(
-    embed_dim=512,
-    fusion_strategy='attention_pooling',
-    attention_type='differential',  # Advanced attention variant
-    num_heads=8
-)
-
-# Different sequence lengths -> fixed output size
-short_seq = keras.ops.random.normal((4, 32, 512))
-long_seq = keras.ops.random.normal((4, 256, 512))
-pooled = fusion([short_seq, long_seq])  # Shape: (4, 512)
-```
-
-### Bilinear Fusion for Rich Pairwise Interactions
-```python
-# Captures all pairwise feature interactions (expensive but expressive)
-fusion = MultiModalFusion(
-    embed_dim=256,               # Smaller dim due to O(d²) complexity
-    fusion_strategy='bilinear',
-    activation='relu'
-)
-
-# Only supports exactly 2 modalities
-x1 = keras.ops.random.normal((16, 64, 256))
-x2 = keras.ops.random.normal((16, 48, 256))
-bilinear_features = fusion([x1, x2])
-```
-
-### Integration in Custom Architectures
-```python
-class MultiModalTransformer(keras.Model):
-    def __init__(self, embed_dim=768, **kwargs):
-        super().__init__(**kwargs)
-
-        # Multiple fusion strategies in sequence
-        self.early_fusion = MultiModalFusion(
-            embed_dim=embed_dim,
-            fusion_strategy='concatenation'
-        )
-
-        self.deep_fusion = MultiModalFusion(
-            embed_dim=embed_dim,
-            fusion_strategy='cross_attention',
-            num_fusion_layers=4,
-            attention_type='group_query',  # Efficient attention
-            attention_config={'n_kv_head': 4}
-        )
-
-        self.final_fusion = MultiModalFusion(
-            embed_dim=embed_dim,
-            fusion_strategy='gated'
-        )
-
-    def call(self, vision, text, training=None):
-        # Early fusion
-        early = self.early_fusion([vision, text], training=training)
-
-        # Deep bidirectional fusion
-        v_deep, t_deep = self.deep_fusion([vision, text], training=training)
-
-        # Final adaptive fusion
-        final = self.final_fusion([v_deep, t_deep], training=training)
-        return final
-```
-
+References:
+    - Baltrusaitis, T., et al. (2018). Multimodal Machine Learning: A Survey
+      and Taxonomy. *IEEE Transactions on Pattern Analysis and Machine
+      Intelligence*.
+    - Vaswani, A., et al. (2017). Attention Is All You Need. *NeurIPS*.
+    - Zadeh, A., et al. (2017). Tensor Fusion Network for Multimodal Sentiment
+      Analysis. *EMNLP*.
+    - Lu, J., et al. (2019). ViLBERT: Pretraining Task-Agnostic Visiolinguistic
+      Representations for Vision-and-Language Tasks. *NeurIPS*.
 """
 
 import keras

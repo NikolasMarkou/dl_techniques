@@ -1,14 +1,73 @@
-"""
-Residual Path (ResPath) Layer for Enhanced U-Net Skip Connections.
+"""Implement a residual path to bridge the semantic gap in U-Net skip connections.
 
-This layer implements a sophisticated skip connection enhancement mechanism,
-inspired by ACC-UNet, to address the semantic gap between encoder and
-decoder features in U-Net architectures. By processing encoder features
-through a series of residual blocks, it progressively refines them to better
-match the semantic level of the decoder.
+This layer provides a sophisticated feature refinement mechanism for the skip
+connections in U-Net-like architectures. It addresses a common challenge in
+encoder-decoder models known as the "semantic gap." This gap arises because
+features from early encoder layers are rich in low-level spatial detail but
+semantically weak, while features in the corresponding decoder layer are
+semantically strong but spatially coarse. Simply concatenating these disparate
+feature maps can lead to a semantic mismatch and hinder model performance.
 
-This implementation follows modern Keras 3 best practices for creating robust,
-serializable composite layers.
+Architecture and Core Concepts:
+
+The ResPath layer is inserted into the skip connection path. Instead of passing
+encoder features directly to the decoder, it first processes them through a
+series of `num_blocks` identical residual blocks. The number of blocks is
+typically chosen based on the depth of the skip connection; connections from
+earlier in the encoder (with a larger semantic gap) receive more residual
+blocks.
+
+Each residual block in the path is designed to progressively enrich the
+semantic content of the feature maps while preserving their high-resolution
+spatial information. A block consists of:
+
+1.  **Convolutional Layer:** A standard 3x3 convolution extracts local
+    features.
+2.  **Squeeze-and-Excitation (SE) Block:** This is a crucial component for
+    adaptive feature recalibration. The SE block learns to model
+    interdependencies between channels, selectively amplifying informative
+    feature channels while suppressing less useful ones for the given input.
+3.  **Residual Connection:** An identity shortcut adds the input of the block
+    to its output. This allows for the stable training of a deep stack of
+    blocks, ensuring that gradients can flow easily and preventing the
+    degradation of feature quality.
+
+By stacking these blocks, the ResPath effectively creates a small, dedicated
+convolutional network within the skip connection itself. This internal network
+learns to transform the low-level encoder features into a more abstract,
+semantically-aligned representation that can be more effectively fused with
+the decoder's feature maps.
+
+Mathematical Foundation:
+
+The core of each block is the residual learning principle. If `x` is the
+input to a block and `F(x)` is the transformation applied by the convolutional
+and SE layers, the output `y` is computed as:
+`y = F(x) + x`
+
+This formulation allows the block to easily learn an identity mapping (`F(x)=0`)
+if no further refinement is needed, which simplifies the optimization landscape
+for very deep models. The Squeeze-and-Excitation block performs a
+channel-wise recalibration by computing a scaling factor for each channel based
+on global information, making the feature maps more discriminative.
+
+References:
+
+The architectural pattern of using stacked residual blocks to refine skip
+connections was notably proposed in:
+-   Oktay, O., et al. (2018). "Attention U-Net: Learning Where to Look for
+    the Pancreas." While this paper focused on attention gates, the idea of
+    processing skip connections gained traction.
+-   The specific "ResPath" with Squeeze-and-Excitation is inspired by models
+    like ACC-UNet, which integrate advanced attention and context-aware
+    modules into the U-Net framework.
+
+The foundational concepts upon which this layer is built are:
+-   Ronneberger, O., et al. (2015). "U-Net: Convolutional Networks for
+    Biomedical Image Segmentation."
+-   He, K., et al. (2016). "Deep Residual Learning for Image Recognition."
+-   Hu, J., et al. (2018). "Squeeze-and-Excitation Networks."
+
 """
 
 import keras

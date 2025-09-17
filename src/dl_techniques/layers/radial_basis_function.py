@@ -1,3 +1,65 @@
+"""A Radial Basis Function (RBF) layer with center repulsion.
+
+This layer implements a layer of Radial Basis Function units, which are
+powerful for function approximation and pattern recognition tasks. Unlike
+standard sigmoidal neurons, RBF units respond to localized regions of the
+input space, making them effective at learning local features.
+
+Architecture and Mathematical Foundation:
+    The core of the RBF layer is a set of units, each with a 'center'
+    vector that has the same dimensionality as the input. The activation of
+    each unit is determined by the proximity of the input vector to its
+    center. This relationship is formalized by the Gaussian RBF function:
+
+    φᵢ(x) = exp(-γᵢ ||x - cᵢ||²)
+
+    Where:
+    - `x` is the input vector.
+    - `cᵢ` is the center vector of the i-th RBF unit.
+    - `γᵢ` is the trainable width (or precision) parameter for the i-th unit.
+      It controls the radius of influence, or the "receptiveness," of the
+      neuron. A larger gamma results in a more localized, narrower response.
+    - `||·||²` denotes the squared Euclidean distance.
+
+    The output of the layer is a vector where each element is the activation
+    `φᵢ(x)` from the corresponding RBF unit.
+
+Enhanced Center Repulsion:
+    A common issue when training RBF networks with gradient descent is
+    "center collapse," where multiple centers converge to the same location,
+    leading to redundant units and poor coverage of the input space. This
+    implementation mitigates this with an adaptive repulsion mechanism.
+
+    During training, a penalty term is added to the model's loss, which
+    activates only when two centers `cᵢ` and `cⱼ` become too close. The
+    repulsion potential `V_rep` is defined as:
+
+    V_rep(cᵢ, cⱼ) = α · D · max(0, d_min·(1 + μ) - ||cᵢ - cⱼ||)²
+
+    - The force is proportional to the `repulsion_strength` (α) and is only
+      applied when the distance `||cᵢ - cⱼ||` falls below a threshold defined
+      by the `min_center_distance` (d_min) and a `safety_margin` (μ).
+    - Crucially, the penalty is scaled by the input dimensionality (D). This
+      makes the `repulsion_strength` hyperparameter more stable and less
+      dependent on the number of features in the input data.
+
+References:
+    - Moody, J., & Darken, C. J. (1989). "Fast learning in networks of
+      locally-tuned processing units." This is a foundational paper that
+      established RBF networks as a competitive architecture, often trained
+      with a hybrid approach of unsupervised center selection followed by
+      supervised weight training.
+    - Bishop, C. M. (1995). "Neural Networks for Pattern Recognition." This
+      textbook provides a comprehensive theoretical treatment of RBF
+      networks, detailing their properties as universal approximators and
+      their connection to techniques like kernel density estimation.
+    - Schwenker, F., Kestler, H. A., & Palm, G. (2001). "Three learning
+      phases for radial-basis-function networks." This work reviews and
+      analyzes different strategies for training RBF networks, including
+      fully supervised methods where centers are adapted via gradient
+      descent, which is the approach this layer facilitates.
+"""
+
 import keras
 from keras import ops
 from typing import Optional, Union, Tuple, Dict, Any

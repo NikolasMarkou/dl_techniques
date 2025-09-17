@@ -1,3 +1,25 @@
+"""Implements the MobileOne block using structural reparameterization.
+
+The MobileOne block is a convolutional building block designed for high
+performance on mobile devices. It uses a multi-branch architecture during
+training that can be fused into a single, efficient convolutional
+layer at inference time. This technique, known as structural
+reparameterization, provides enhanced representational power during
+training without sacrificing inference speed.
+
+The training-time architecture comprises several parallel branches: one
+or more main convolutional branches, a 1x1 'scale' branch, and an
+optional skip connection. The outputs of these branches are summed. For
+inference, the parameters of all branches are mathematically fused into
+a single convolutional kernel and bias, which significantly reduces
+computational cost.
+
+This layer supports an optional Squeeze-and-Excitation (SE) module for
+channel-wise feature recalibration. It is designed for building
+MobileOne-based models in Keras and includes methods to switch between
+training and inference configurations.
+"""
+
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
 from keras import layers, initializers, regularizers, activations

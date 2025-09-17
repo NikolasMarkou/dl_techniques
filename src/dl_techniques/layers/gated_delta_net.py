@@ -1,3 +1,73 @@
+"""Implement a Gated Delta Network, a linear-time transformer variant.
+
+This layer provides a sophisticated, recurrent mechanism for sequence modeling,
+designed to overcome the limitations of both standard quadratic attention and
+simpler linear-time architectures. It fuses concepts from associative memory,
+classic neural network learning rules, and modern gated state-space models
+to achieve high performance on tasks requiring long-context understanding and
+in-context retrieval.
+
+Architecture and Core Concepts:
+
+The Gated DeltaNet operates as a linear transformer, processing sequences
+with a recurrent state update that has linear time complexity O(N) with
+respect to sequence length. Its primary innovation lies in how it updates its
+internal state matrix `S`, which represents the model's associative memory.
+This update is governed by a "gated delta rule," which combines two
+complementary principles:
+
+1.  **The Delta Rule for Associative Memory:** At each timestep `t`, the model
+    updates its memory state `S` based on the current key-value pair
+    `(K_t, V_t)`. Unlike vanilla linear attention which uses a simple
+    additive update (`S_t = S_{t-1} + K_t ⊗ V_t`), this layer employs a
+    delta rule. Originating from error-correction learning (e.g., the
+    Widrow-Hoff rule), the delta rule performs a more targeted and powerful
+    update. It modifies the memory `S` to better associate `K_t` with `V_t`,
+    effectively minimizing the "prediction error" for the current step. This
+    makes the model exceptionally adept at forming and recalling precise
+    key-value associations, a crucial capability for in-context learning.
+
+2.  **Adaptive Gating Mechanism:** The delta update is modulated by two
+    learned, data-dependent gates, `α` (alpha) and `β` (beta), inspired by
+    the gating in LSTMs and other modern state-space models like Mamba.
+    -   `α_t` acts as a "forget" or "persistence" gate, controlling how much
+        of the previous memory state `S_{t-1}` is carried over to the next
+        step. A value near 1 preserves memory, while a value near 0 allows
+        for rapid erasure of outdated or irrelevant information.
+    -   `β_t` acts as a "learning rate" or "update strength" gate, scaling
+        the magnitude of the delta rule update for the current timestep.
+
+The synergy of these two components allows for highly flexible memory
+management. The gating enables the model to dynamically control the lifespan
+of information, while the delta rule provides a precise mechanism for writing
+new, error-corrected information into memory.
+
+Mathematical Foundation:
+
+The conceptual update at each timestep `t` can be summarized as:
+`S_t = α_t * S_{t-1} + β_t * ΔS_t`
+where `ΔS_t` is the memory update derived from the delta rule using the
+current key `K_t` and value `V_t`. This formulation allows the network to
+learn complex temporal dependencies by deciding when to preserve, forget, or
+intensely update its associative memory based on the input sequence.
+
+Additional architectural features like short convolutions on Q, K, and V are
+used to inject local, position-aware context into the representations before
+the main recurrent update, further enhancing the model's performance.
+
+References:
+
+This architecture builds upon a line of research aimed at creating more
+efficient and powerful sequence models. The core concepts are derived from:
+-   Schlag, I., et al. (2021), which introduced the use of the delta rule
+    for associative memory in linear transformers (DeltaNet).
+-   Recent work on state-space models like Mamba, which demonstrated the
+    power of selective, gated state updates.
+-   The combined "Gated DeltaNet" architecture, which explicitly merges these
+    two ideas for improved performance on long-context tasks.
+
+"""
+
 import keras
 from typing import Any, Dict, Optional, Tuple, Union
 from keras import initializers, layers, ops, regularizers
@@ -6,9 +76,8 @@ from keras import initializers, layers, ops, regularizers
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.utils.logger import logger
-
+from dl_techniques.layers.norms import create_normalization_layer
 
 # ---------------------------------------------------------------------
 

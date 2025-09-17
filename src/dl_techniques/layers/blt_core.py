@@ -1,3 +1,81 @@
+"""Fuse entropy-based byte processing with iterative hierarchical reasoning.
+
+This layer implements a sophisticated architecture designed for complex reasoning
+tasks directly on raw byte sequences. It uniquely combines two powerful concepts:
+a Transformer that operates on dynamically-sized, information-aware patches of
+bytes, and a stateful, recurrent reasoning engine that iteratively refines its
+understanding of the input through multiple hierarchical thinking steps.
+
+The model is motivated by the need to process long, unstructured byte streams
+(e.g., source code, binary files, complex documents) where fixed-size tokenization
+is suboptimal and where problems require multi-step, abstract reasoning rather
+than simple pattern matching.
+
+Architectural and Mathematical Foundations:
+The architecture is best understood as two parallel, interacting streams: a
+**Byte Processing Pipeline** and a **Hierarchical Reasoning Engine**.
+
+1.  **Byte Processing Pipeline**: This stream handles the direct transformation
+    of raw bytes into predictions. Its key innovation is the **Dynamic Patcher**,
+    which replaces conventional fixed-size tokenization.
+    -   **Information-Theoretic Patching**: An `EntropyModel`, itself a small
+        transformer, first computes the per-byte information entropy `H(b) =
+        -Σ p(b) log p(b)` for each byte `b` in the sequence. The sequence is
+        then dynamically segmented into patches at points of low entropy,
+        based on a learned `entropy_threshold`. The intuition is to group
+        information-sparse regions (e.g., padding, repeated characters) into
+        large patches and information-dense regions into smaller, more granular
+        patches. This focuses the model's capacity on the most complex parts
+        of the input.
+    -   **Hierarchical Encoding/Decoding**: A `LocalEncoder` processes bytes
+        within each patch, a `GlobalTransformer` processes the sequence of
+        patch representations, and a `LocalDecoder` generates final byte
+        predictions, conditioned on the globally-aware patch context.
+
+2.  **Hierarchical Reasoning Engine (HRE)**: This is a stateful, recurrent
+    module designed to mimic iterative thought. It maintains two latent states:
+    a high-level state `z_h` (representing an abstract plan or summary) and a
+    low-level state `z_l` (representing detailed, grounded features).
+    -   **Reasoning Cycles**: The model performs a series of `h_cycles` and
+        `l_cycles`. Within each high-level cycle, the model performs multiple
+        low-level cycles where `z_l` is updated based on both the input from
+        the byte stream and the current high-level plan `z_h`. After the low-level
+        cycles, `z_h` is updated based on the newly refined `z_l`. This
+        process allows the model to iteratively refine its understanding,
+        alternating between detailed analysis and abstract planning.
+
+3.  **Pipeline-Engine Interaction**: The two streams are not independent. The
+    patch representations from the byte pipeline are projected into the
+    reasoning space to serve as the primary input for the HRE. Conversely, the
+    final, refined high-level state `z_h` from the HRE is projected back into
+    the byte processing space, providing crucial top-down context to the
+    `GlobalTransformer` before final predictions are made.
+
+4.  **Adaptive Computation**: A `q_head` is trained to predict whether the
+    reasoning process for a given input has converged. It outputs "halt" and
+    "continue" logits based on the final reasoning state. This allows the model
+    to dynamically allocate computational resources, performing more reasoning
+    cycles for difficult inputs and halting early for simpler ones, improving
+    efficiency.
+
+The optional `puzzle_embedding` provides a mechanism to condition the entire
+reasoning process on a specific task or context, analogous to a prompt.
+
+References:
+    -   **Hierarchical Reasoning**: The iterative, dual-state reasoning
+        engine is inspired by architectures designed for abstract visual and
+        logical reasoning.
+        Nguyen et al. "A Hierarchical Reasoning Model for Abstract
+        Visual Reasoning". https://arxiv.org/abs/2212.03052
+
+    -   **Adaptive Computation**: The halting mechanism is a common technique
+        for creating dynamically computed networks.
+        Graves, A. "Adaptive Computation Time for Recurrent Neural Networks".
+        https://arxiv.org/abs/1603.08983
+        Banino et al. "PonderNet: Learning to Ponder".
+        https://arxiv.org/abs/2107.05407
+"""
+
 import math
 import keras
 from typing import Optional, Union

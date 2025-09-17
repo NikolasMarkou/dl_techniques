@@ -1,10 +1,75 @@
-"""
-This module provides an `AnchorGenerator` layer, a fundamental component for modern
-anchor-based object detection models like YOLOv12.
+"""Generate a multi-scale grid of anchor points for object detection.
 
-The layer generates anchor points (center coordinates) for multiple feature map levels,
-storing them as non-trainable weights in the computational graph for efficient access
-during training and inference.
+This layer serves a critical, albeit simple, role in modern anchor-based
+object detection models. It pre-computes and stores the spatial center
+coordinates (x, y) of every grid cell across multiple feature map scales.
+By embedding these coordinates as non-trainable weights, it provides a highly
+efficient mechanism for downstream prediction heads to access this spatial
+information without re-computing it on every forward pass.
+
+Architecture and Core Concepts:
+
+The design of this layer is rooted in the principles of modern object
+detection architectures that use feature pyramids to detect objects of
+varying sizes. A deep neural network backbone produces feature maps at
+different levels of spatial resolution. Deeper feature maps are smaller and
+have a larger "stride" relative to the input image, making them suitable for
+detecting large objects. Conversely, shallower feature maps have a smaller
+stride and are better for detecting small objects.
+
+This layer takes the dimensions of the input image and a list of these
+strides to perform its core function:
+
+1.  **Grid Generation:** For each stride level, it calculates the
+    corresponding feature map's height and width. It then generates a 2D
+    grid of points representing the center of each cell in that feature map.
+    For example, a 640x640 image with a stride of 8 results in an 80x80
+    feature map. This layer generates the 6,400 center points for that grid.
+
+2.  **Coordinate Scaling:** The grid coordinates are scaled back to the
+    input image's coordinate space. This means that each anchor point's
+    (x, y) value corresponds to a specific location on the original image.
+
+3.  **Static Storage:** The crucial architectural choice is to compute this
+    entire multi-level grid only once, during the model's construction phase
+    (the `build` method). The resulting tensor of anchor points is stored as a
+    non-trainable layer weight. This makes the anchor grid a static, baked-in
+    part of the model graph, ensuring zero computational overhead during
+    training or inference. The `call` method simply retrieves these stored
+    weights and tiles them to match the batch size of the input.
+
+This layer's output provides the fundamental spatial scaffolding upon which
+the model's prediction heads operate. The heads learn to predict offsets
+from these fixed anchor points to determine the final bounding box locations.
+
+Mathematical Foundation:
+
+The calculation for the center coordinate of a grid cell `(i, j)` on a
+feature map with a given `stride` is straightforward:
+-   `x_center = (j + 0.5) * stride`
+-   `y_center = (i + 0.5) * stride`
+
+Here, `i` and `j` are the row and column indices of the cell in the feature
+grid. The `+ 0.5` term is critical for shifting the coordinate from the top-left
+corner of the grid cell to its exact center. This process is repeated for
+all cells across all specified stride levels, and the results are
+concatenated into a single comprehensive tensor of anchor points.
+
+References:
+
+The concept of using a grid and predicting relative to its cells is a
+foundational idea in single-shot object detectors. This approach was
+popularized by:
+-   Redmon, J., et al. (2016). "You Only Look Once: Unified, Real-Time
+    Object Detection." (YOLOv1), which introduced the idea of dividing the
+    image into a grid and having cells predict object properties.
+
+The use of multiple grids from a feature pyramid to handle objects at
+different scales is a direct application of the principles from:
+-   Lin, T. Y., et al. (2017). "Feature Pyramid Networks for Object
+    Detection." (FPN), which established the feature pyramid as a standard,
+    effective component for multi-scale detection.
+
 """
 
 import keras

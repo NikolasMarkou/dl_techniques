@@ -1,9 +1,163 @@
 """
-Task-specific heads and utilities for Vision Language Models.
+An autoregressive decoder head for generating text conditioned on vision.
 
-This module provides specialized heads for different vision-language tasks
-such as image captioning, visual question answering, and contrastive learning.
-Following modern Keras 3 best practices for robust serialization.
+This layer implements a multi-layer Transformer decoder, a standard
+architecture for sequence-to-sequence tasks, specifically adapted for image
+captioning. Its purpose is to generate a descriptive text sequence one token
+at a time, conditioned on a set of static visual features extracted from an
+image encoder.
+
+Architectural and Mathematical Underpinnings:
+
+The head is composed of a stack of identical decoder layers. Each layer contains
+three main sub-components designed to integrate textual and visual information:
+
+1.  **Masked Multi-Head Self-Attention**: This mechanism processes the text
+    sequence generated so far. It allows each token in the partial caption to
+    attend to all preceding tokens, capturing the grammatical and semantic
+    structure of the language. A causal mask is applied to prevent positions
+    from attending to subsequent positions, which is essential for maintaining
+    the autoregressive property (i.e., the prediction of a token can only
+    depend on the tokens that came before it).
+
+        `SelfAttn(Q_t, K_t, V_t) = softmax((Q_t @ K_t.T + M) / sqrt(d_k)) @ V_t`
+        (where `M` is the causal mask and `Q_t, K_t, V_t` are derived from the
+        text features).
+
+2.  **Multi-Head Cross-Attention**: This is the core mechanism for multimodal
+    fusion. The text features (acting as the Query) attend to the visual
+    features (acting as the Key and Value). This allows the decoder at each
+    generation step to "look at" the image and focus on the most relevant
+    visual regions to inform the next token prediction. This step is what
+    grounds the generated text in the visual content.
+
+        `CrossAttn(Q_t, K_v, V_v) = softmax((Q_t @ K_v.T) / sqrt(d_k)) @ V_v`
+        (where `Q_t` is from the text path and `K_v, V_v` are from the vision
+        features).
+
+3.  **Position-wise Feed-Forward Network (FFN)**: Following the attention
+    blocks, a standard FFN is applied to introduce non-linearity and further
+    process the fused representation.
+
+Each of these sub-layers is wrapped with residual connections and layer
+normalization (pre-norm or post-norm) to ensure stable training of the deep
+stack. Finally, a linear projection layer maps the output of the final decoder
+layer to the vocabulary space, producing logits for the next token in the
+sequence.
+
+References:
+    - Vaswani, A., et al. (2017). Attention Is All You Need. *NeurIPS*.
+    - Anderson, P., et al. (2018). Bottom-Up and Top-Down Attention for
+      Image Captioning and VQA. *CVPR*.
+    - "Show, Attend and Tell: Neural Image Caption Generation with Visual
+      Attention." (Xu et al., 2015).
+
+---
+A multimodal fusion and classification head for Visual Question Answering.
+
+This layer is designed to solve the Visual Question Answering (VQA) task,
+which requires predicting an answer to a textual question based on the content
+of an image. It achieves this by first fusing the representations from the
+vision and text modalities into a single, joint vector, and then passing this
+joint representation through a classifier to predict the final answer.
+
+Architectural and Mathematical Underpinnings:
+
+The VQA process implemented by this head consists of two main stages:
+
+1.  **Multimodal Fusion via Pooling**: The primary challenge is to effectively
+    combine the sequential features from the image (e.g., a sequence of patch
+    embeddings) and the question (a sequence of token embeddings) into a
+    single fixed-size vector. This layer supports several strategies:
+    -   **Simple Pooling (`mean`, `max`)**: This represents a late-fusion
+        approach where each modality is first summarized independently into a
+        single vector (e.g., by taking the mean of all token embeddings).
+        The resulting summary vectors are then concatenated. This is
+        computationally efficient but may fail to capture fine-grained
+        interactions between specific words and specific image regions.
+    -   **Attention Pooling**: This is a more sophisticated fusion strategy. It
+        uses cross-attention to allow the vision and text features to interact
+        before they are summarized. For instance, the text features can act as
+        queries to attend to the vision features, creating a text-aware summary
+        of the image. This allows the model to learn which parts of the image
+        are most relevant to the given question. The final representation is
+        typically a concatenation of the pooled, attended features from both
+        modalities.
+
+        `V_attended = Attention(Q=T, K=V, V=V)`
+        `T_attended = Attention(Q=V, K=T, V=T)`
+        `joint_vector = [pool(V_attended); pool(T_attended)]`
+
+2.  **Answer Classification**: Once a joint representation vector is obtained,
+    it is passed through a Multi-Layer Perceptron (MLP). This classifier learns
+    a non-linear mapping from the fused feature space to the space of possible
+    answers. The final layer outputs logits over the answer vocabulary.
+
+This architecture effectively distills information from two distinct,
+variable-length sequences into a unified representation suitable for making a
+single, holistic classification decision.
+
+References:
+    - Antol, S., et al. (2015). VQA: Visual Question Answering. *ICCV*.
+    - Lu, J., et al. (2019). ViLBERT: Pretraining Task-Agnostic Visiolinguistic
+      Representations for Vision-and-Language Tasks. *NeurIPS*.
+
+---
+A projection head for contrastive image-text alignment.
+
+This layer implements the core logic of contrastive language-image
+pre-training, as popularized by models like CLIP. Its purpose is not to
+perform a specific downstream task, but to learn a shared, multimodal
+embedding space. In this space, the vector representations of an image and its
+corresponding text caption are close together, while representations of
+non-matching pairs are far apart.
+
+Architectural and Mathematical Underpinnings:
+
+The learning process is driven by a contrastive objective, and this head is
+responsible for preparing the features for that objective. The process involves
+three key steps:
+
+1.  **Linear Projection**: Features from the vision and text encoders are first
+    passed through separate `Dense` layers. These layers learn to project the
+    features from their original, modality-specific spaces into a common,
+    lower-dimensional embedding space where they can be meaningfully compared.
+
+        `v_proj = v_features @ W_vision`
+        `t_proj = t_features @ W_text`
+
+2.  **L2 Normalization**: The projected vectors are then L2-normalized, forcing
+    them to lie on the surface of a unit hypersphere.
+
+        `v_norm = v_proj / ||v_proj||₂`
+        `t_norm = t_proj / ||t_proj||₂`
+
+    This step is crucial. It transforms the learning objective from maximizing
+    an unbounded dot product to maximizing the cosine similarity between
+    vectors. This makes the training process more stable and prevents the model
+    from trivially achieving low loss by simply increasing the magnitude of the
+    embeddings.
+
+3.  **Similarity Calculation and Temperature Scaling**: The final step is to
+    compute the cosine similarity between every vision embedding and every text
+    embedding in a batch, forming a `(batch_size, batch_size)` similarity
+    matrix.
+
+        `Similarity_matrix = v_norm @ t_norm.T`
+
+    This matrix is then scaled by a learnable temperature parameter `τ`. The
+    resulting logits are used by an external contrastive loss function (e.g.,
+    InfoNCE), where the diagonal elements represent positive pairs and the
+    off-diagonal elements represent negative pairs. The temperature `τ`
+    controls the sharpness of the distribution, influencing how much the model
+    penalizes hard-negative examples.
+
+References:
+    - Radford, A., et al. (2021). Learning Transferable Visual Models From
+      Natural Language Supervision. *ICML*. (The CLIP paper).
+    - He, K., et al. (2020). Momentum Contrast for Unsupervised Visual
+      Representation Learning. *CVPR*. (Popularized momentum for contrastive
+      learning).
 """
 
 import keras

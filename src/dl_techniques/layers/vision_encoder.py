@@ -1,12 +1,69 @@
-"""
-General Purpose Configurable Vision Encoder
+"""Encapsulates a configurable, general-purpose Vision Transformer encoder.
 
-This module provides a highly configurable vision encoder that can be adapted for various
-vision transformer architectures. It uses factory patterns for all components (attention,
-FFN, normalization, patch embedding) to enable maximum flexibility and experimentation.
+This layer implements the core architecture of a Vision Transformer (ViT),
+which processes images by treating them as a sequence of flattened patches. It
+provides a flexible and modular framework that can be configured to replicate
+various ViT-style architectures, serving as a unified backbone for a wide
+range of computer vision tasks.
 
-The encoder supports different patch embedding strategies, attention mechanisms, normalization
-types, and feed-forward networks through a unified factory-based interface.
+Architectural and Mathematical Underpinnings:
+
+The fundamental innovation of the Vision Transformer is the application of the
+highly successful Transformer architecture, originally designed for natural
+language processing, to image data. This is achieved through a specific
+sequence of transformations that convert a 2D grid of pixels into a 1D sequence
+of vectors that the Transformer can process.
+
+1.  **Patchification and Embedding**: An input image `I ∈ ℝ^(H×W×C)` is first
+    divided into a grid of `N` non-overlapping patches, where each patch
+    `pᵢ ∈ ℝ^(P×P×C)`. These 2D patches are then flattened into vectors and
+    linearly projected into a `D`-dimensional embedding space via a learnable
+    weight matrix `E`. This is the critical step that transforms spatial data
+    into a sequence format.
+
+        `z₀ = [x_class; E*p₁; E*p₂; ...; E*p_N] + E_pos`
+
+    -   **`[x_class]` Token**: Inspired by BERT, a learnable `[CLS]` (class)
+        token embedding is prepended to the sequence of patch embeddings. The
+        final state of this token after passing through the encoder serves as
+        the aggregate image representation for classification tasks.
+    -   **Positional Embeddings `E_pos`**: Since the self-attention mechanism is
+        permutation-invariant, explicit positional information must be added to
+        the patch embeddings to retain their spatial arrangement. These are
+        learnable embeddings, one for each position in the sequence.
+
+2.  **Transformer Encoder Stack**: The resulting sequence of embeddings `z₀` is
+    then processed by a stack of `L` identical Transformer layers. Each layer
+    applies two main sub-layers:
+    -   **Multi-Head Self-Attention (MHSA)**: This allows each patch embedding
+        to be updated by attending to and integrating information from all
+        other patch embeddings in the sequence. It enables the model to learn
+        long-range dependencies and contextual relationships between different
+        parts of the image.
+    -   **Position-wise Feed-Forward Network (FFN)**: A simple MLP applied
+        independently to each patch embedding, providing non-linearity and
+        increasing representational capacity.
+
+    Each sub-layer is enclosed in a residual connection and followed by layer
+    normalization, ensuring stable training of deep models. The output of the
+    final layer, `z_L`, is a sequence of contextually rich patch
+    representations.
+
+3.  **Factory-Based Design Philosophy**: This implementation is intentionally
+    generic, utilizing a factory pattern for its core components (patch
+    embedding, attention, normalization, FFN). This design choice allows the
+    single `VisionEncoder` class to be configured to instantiate a wide variety
+    of architectural variants from the literature (e.g., the standard ViT,
+    SigLIP with its two-stage patch embedder, or efficient models using RMSNorm
+    and SwiGLU). This flexibility supports rapid experimentation and architectural
+    research within a unified and maintainable codebase.
+
+References:
+    - Dosovitskiy, A., et al. (2020). An Image is Worth 16x16 Words:
+      Transformers for Image Recognition at Scale. *ICLR*.
+    - Vaswani, A., et al. (2017). Attention Is All You Need. *NeurIPS*.
+    - Zhai, X., et al. (2023). Sigmoid Loss for Language Image Pre-Training.
+      *ICCV*. (Introduced the SigLIP architecture and patch embedder).
 """
 
 import keras

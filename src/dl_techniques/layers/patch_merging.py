@@ -1,3 +1,27 @@
+"""Downsamples feature maps by merging adjacent patches.
+
+This layer implements the patch merging technique from the Swin Transformer
+paper, which reduces spatial dimensions while increasing the channel dimension
+to create hierarchical feature representations.
+
+The layer reshapes an input tensor of shape `(B, H, W, C)` into a tensor
+of shape `(B, H/2, W/2, 2*C)`. It does this by first concatenating the
+features from non-overlapping 2x2 patches, which results in a shape of
+`(B, H/2, W/2, 4*C)`. A `LayerNormalization` is applied, followed by a
+`Dense` layer that projects the features from `4*C` to `2*C`. This layer
+can automatically handle odd input resolutions by padding.
+
+Examples:
+
+    ```python
+    # Downsample a 56x56 feature map with 96 channels
+    input_tensor = keras.Input(shape=(56, 56, 96))
+    merging_layer = PatchMerging(dim=96, name="patch_merging")
+    output_tensor = merging_layer(input_tensor)
+    # The output shape will be (None, 28, 28, 192)
+    ```
+"""
+
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
 from keras import ops, layers, initializers, regularizers

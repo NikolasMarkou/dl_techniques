@@ -1,9 +1,81 @@
-"""
-Matrix Product States (MPS) Layer Implementation
+"""Implement a layer based on the Matrix Product State tensor network.
 
-This module implements a Matrix Product State-inspired tensor decomposition layer
-that efficiently captures long-range correlations in input data using quantum-inspired
-tensor networks.
+This layer provides a highly efficient parameterization for linear
+transformations, inspired by the Matrix Product State (MPS) formalism from
+quantum many-body physics. It is designed to replace standard dense (fully
+connected) layers, offering a dramatic reduction in the number of trainable
+parameters while effectively capturing complex, long-range correlations
+between input features. It is particularly well-suited for data where an
+underlying sequential or 1D spatial structure exists.
+
+Architecture and Core Concepts:
+
+A standard dense layer is described by a single weight matrix `W` that connects
+every input neuron to every output neuron. For high-dimensional data, this
+matrix becomes prohibitively large. The MPS layer addresses this by decomposing
+this large, notional weight tensor into a "tensor train"—a chain of smaller,
+three-dimensional "core" tensors.
+
+The core architectural principles are:
+
+1.  **Tensor Decomposition:** The layer parameterizes the transformation as a
+    product of smaller matrices. For an input vector of dimension `N`, there
+    are `N` core tensors. Each core tensor is associated with a specific input
+    feature.
+
+2.  **Sequential Contraction:** The forward pass is a sequential process that
+    resembles a sweep along this chain of tensors. Starting with a boundary
+    vector, the model iteratively contracts this vector with the next core
+    tensor in the chain, where the core tensor itself has been modulated by
+    the corresponding input feature value.
+
+3.  **The Bond Dimension:** The expressiveness of the layer is controlled by a
+    hyperparameter called the "bond dimension" (`bond_dim`). This dimension
+    governs the size of the "virtual" indices that connect adjacent core
+    tensors in the chain. It can be interpreted as the capacity of the
+    information channel flowing between features. A larger bond dimension allows
+    the model to capture more complex correlations (higher "entanglement") at
+    the cost of more parameters.
+
+This structure imposes a strong inductive bias, assuming that correlations can
+be efficiently passed along a 1D chain. This leads to a parameter count that
+scales *linearly* with the input dimension, as opposed to the quadratic
+scaling of a dense layer.
+
+Mathematical Foundation:
+
+The core idea is to represent a high-order weight tensor `W_{i_1, i_2, ..., i_N}`
+as a trace over a product of matrices (or 3-tensors):
+`W_{i_1, ..., i_N} = Tr[A^{(1)}_{i_1} A^{(2)}_{i_2} ... A^{(N)}_{i_N}]`
+
+In the forward pass, this translates to a sequential matrix-vector
+multiplication. Given an input vector `x = [x_1, ..., x_N]`, the output is
+computed by contracting a "feature matrix" `M_i = x_i * A^{(i)}` for each
+feature. The process can be conceptually written as:
+`output = v_0 * M_1 * M_2 * ... * M_N * P`
+
+where `v_0` is an initial boundary vector, each `M_i` is a matrix derived
+from the `i`-th core tensor and input feature `x_i`, and `P` is a final
+projection matrix to map the result to the desired output dimension. This
+sequential product structure allows interactions between distant features
+`x_i` and `x_j` to be captured through the chain of matrix multiplications.
+
+References:
+
+The application of tensor networks, particularly Matrix Product States, to
+machine learning was pioneered in several key papers:
+
+-   Stoudenmire, E., & Schwab, D. J. (2016). "Supervised Learning with
+    Tensor Networks." This work laid a clear foundation for using MPS and
+    other tensor networks for supervised classification tasks.
+-   Novikov, A., et al. (2015). "Tensorizing Neural Networks." This paper
+    introduced the "Tensor Train" decomposition (mathematically equivalent
+    to MPS) as a general method for reducing parameter counts in neural
+    networks.
+-   Cohen, N., Sharir, O., & Shashua, A. (2016). "On the Expressive Power of
+    Deep Learning: A Tensor Analysis," which explored the hierarchical
+    tensor decompositions inherent in deep neural networks.
+
 """
 
 import keras

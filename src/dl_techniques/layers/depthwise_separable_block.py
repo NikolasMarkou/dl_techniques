@@ -1,3 +1,72 @@
+"""Implements the depthwise separable convolution block, a core of MobileNet.
+
+This layer provides a highly efficient alternative to the standard 2D
+convolution layer by factorizing the operation into two distinct, simpler
+steps. The design is motivated by the hypothesis that spatial and
+cross-channel correlations in convolutional network feature maps can be
+decoupled and learned separately. This decomposition leads to a drastic
+reduction in computational cost and model parameters, making it a
+cornerstone of modern, efficient architectures designed for mobile and
+edge devices.
+
+Architecture and Core Concepts:
+
+A standard convolution operation performs spatial filtering and channel
+mixing in a single, monolithic step. A depthwise separable convolution
+decomposes this into two sequential steps:
+
+1.  **Depthwise Convolution (Spatial Filtering):** In the first step, a
+    single spatial filter (e.g., 3x3) is applied independently to *each*
+    input channel. This step learns spatial patterns and features, such as
+    edges or textures, within each channel individually. It does not combine
+    or mix information across different channels.
+
+2.  **Pointwise Convolution (Channel Mixing):** The second step uses a 1x1
+    convolution to project the features from the depthwise step onto a new
+    channel space. This operation is purely a linear combination of the
+    channels at each spatial location. Its function is to mix the
+    spatially-filtered information from the previous step to generate new,
+    rich features.
+
+By separating these two functions, the model can learn representations far
+more efficiently. The intuition is that spatial correlations and
+cross-channel correlations are sufficiently independent that they do not need
+to be learned simultaneously in a large, multidimensional kernel.
+
+Mathematical Foundation:
+
+The efficiency gain comes from the dramatic reduction in parameters. For a
+standard 3x3 convolution with `C_in` input channels and `C_out` output
+channels, the number of parameters is `3 * 3 * C_in * C_out`.
+
+In contrast, a depthwise separable convolution has:
+-   `3 * 3 * C_in` parameters for the depthwise step.
+-   `1 * 1 * C_in * C_out` parameters for the pointwise step.
+
+The ratio of reduction is approximately `(3*3 + C_out) / (3*3 * C_out)`, which
+for a reasonable number of output channels, results in an ~8-9x reduction in
+both parameters and computational cost, with only a small, often negligible,
+loss in accuracy.
+
+References:
+
+While the concept of separable convolutions has existed for some time, its
+application as a core component of modern, efficient deep neural networks
+was popularized by the following seminal works:
+
+-   Howard, A. G., et al. (2017). "MobileNets: Efficient Convolutional
+    Neural Networks for Mobile Vision Applications." This paper introduced
+    the MobileNetV1 architecture, which demonstrated the remarkable
+    effectiveness of depthwise separable convolutions for creating small,
+    fast, and accurate models for mobile devices.
+-   Chollet, F. (2017). "Xception: Deep Learning with Depthwise Separable
+    Convolutions." This work further explored the idea, proposing that a
+    stack of depthwise separable convolution blocks could outperform even
+    large-scale architectures like Inception V3 by making more efficient
+    use of model parameters.
+
+"""
+
 import keras
 from dl_techniques.utils.logger import logger
 from typing import Optional, Union, Dict, Any, Tuple
@@ -7,7 +76,7 @@ from typing import Optional, Union, Dict, Any, Tuple
 @keras.saving.register_keras_serializable()
 class DepthwiseSeparableBlock(keras.layers.Layer):
     """
-    Depthwise separable convolution block for MobileNetV1.
+    Depthwise separable convolution block.
 
     This block implements the core building block of MobileNetV1, which decomposes
     standard convolution into two separate layers for computational efficiency:

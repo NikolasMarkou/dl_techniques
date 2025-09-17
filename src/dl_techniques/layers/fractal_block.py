@@ -1,9 +1,51 @@
-"""
-FractalBlock layer implementation for FractalNet architecture.
+"""Implement the recursive fractal block from the FractalNet architecture.
 
-This module provides the recursive fractal block that implements the fractal
-expansion rule: F_{k+1}(x) = 0.5 * (DP(F_k(x)) + DP(F_k(x)))
-where DP is drop-path (stochastic depth) and F_1(x) = B(x) is the base block.
+This layer constructs a deep, self-similar network structure by recursively
+applying a simple expansion rule, providing an alternative to residual
+connections for training ultra-deep networks. The core principle is to create
+a rich ensemble of diverse computational paths within a single, unified
+architecture.
+
+Architectural and Conceptual Underpinnings:
+
+The FractalNet architecture is built upon a recursive design pattern. A
+`FractalBlock` of depth `k` is defined as the composition of two parallel
+`FractalBlock` sub-modules, each of depth `k-1`. The outputs of these two
+parallel branches, which have shared architectural motifs but independent
+parameters, are averaged to produce the final output. The base case for this
+recursion, a block of depth `1`, is a standard computational unit, such as a
+simple convolutional block.
+
+This expansion rule results in a computational structure that resembles a
+binary tree. A block of depth `k` contains `2^(k-1)` leaf nodes (base blocks)
+and an exponential number of distinct paths from input to output. This design
+implicitly trains an ensemble of sub-networks of varying depths, as any path
+from the root to a leaf constitutes a valid, shallower network.
+
+Foundational Mathematics and Regularization:
+
+The recursive expansion is formally defined as:
+    `F_k(x) = 0.5 * (path_1 + path_2)`
+
+where each path is a regularized application of the block of the previous
+depth, `F_{k-1}`. The key to training such a deep, redundant structure is the
+regularization strategy known as "drop-path."
+
+Drop-path is a form of stochastic depth where entire branches of the fractal
+are randomly dropped during training. This forces the network to learn
+meaningful representations without relying on any single computational path.
+By randomly sampling sub-networks during each training step, drop-path ensures
+that all paths, from the shallowest to the deepest, are trained to contribute
+to the final task.
+
+At inference time, all paths are active, and their outputs are averaged. This
+process is analogous to averaging the predictions of an exponential ensemble
+of networks that were trained jointly, which provides the robustness and strong
+performance characteristic of the FractalNet architecture.
+
+References:
+    - Larsson, G., et al. (2017). FractalNet: Ultra-Deep Neural Networks
+      without Residuals. *ICLR*.
 """
 
 import keras

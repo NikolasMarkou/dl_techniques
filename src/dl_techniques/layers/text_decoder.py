@@ -1,3 +1,86 @@
+"""Implement a configurable, Transformer-based text decoder stack.
+
+This layer serves as a high-level component for building decoder-only
+autoregressive language models, encapsulating the core logic of token
+embedding, positional encoding, and a stack of causal self-attention blocks.
+It is designed to be highly configurable, allowing for the construction of
+various modern transformer architectures by composing different underlying
+mechanisms for embeddings, attention, and normalization.
+
+Architecture and Core Concepts:
+
+The fundamental design follows the decoder side of the original Transformer
+architecture, which has become the de facto standard for large language
+models (LLMs). The primary purpose of this architecture is to model the
+probability distribution of a sequence of tokens, P(x_i | x_1, ..., x_{i-1}),
+making it inherently suited for text generation.
+
+The core operational principles are:
+
+1.  **Input Representation:** The process begins by converting a sequence of
+    integer token IDs into a dense vector space representation. This is
+    achieved by summing a token embedding (which captures semantic meaning)
+    and a positional embedding (which injects information about the token's
+    position in the sequence, compensating for the architecture's lack of
+    inherent sequential awareness).
+
+2.  **Causal Self-Attention:** The sequence of embeddings is then processed by
+    a stack of identical transformer layers. The central mechanism in each
+    layer is masked multi-head self-attention. The "causal" or "look-ahead"
+    mask is the defining feature of a decoder. It ensures that the
+    representation for a token at position `i` can only be influenced by
+    tokens at positions less than or equal to `i`. This restriction is
+    critical for maintaining the autoregressive property, preventing the model
+    from "cheating" by looking at future tokens during training.
+
+3.  **Feed-Forward Networks:** Each attention sub-layer is followed by a
+    pointwise feed-forward network (FFN), which introduces additional
+    non-linearity and capacity, allowing the model to learn more complex
+    transformations of the token representations.
+
+4.  **Layer Normalization and Residuals:** The entire stack is stabilized by
+    residual connections and layer normalization, which are applied around
+    each sub-layer (attention and FFN). This layer supports both "pre-norm"
+    and "post-norm" configurations, a key architectural choice affecting
+    training dynamics and stability.
+
+This layer's configurability allows for the exploration of architectural
+variants popularized by recent research, such as substituting standard Layer
+Normalization with RMSNorm, or replacing the standard FFN with more advanced
+variants like SwiGLU.
+
+Mathematical Foundation:
+
+The attention mechanism calculates a weighted sum of value vectors, where the
+weights are determined by the similarity between query and key vectors. For a
+sequence `X`, the output `Z` is computed as:
+`Attention(Q, K, V) = softmax((Q K^T) / sqrt(d_k) + M) V`
+
+Here, `Q`, `K`, and `V` are linear projections of the input `X`. The term `d_k`
+is the dimension of the key vectors, used for scaling. The crucial component
+for a decoder is the mask `M`, a matrix where `M_ij = -inf` for `j > i` and
+`0` otherwise. This ensures that the softmax output for connections to future
+tokens is zero, enforcing causality.
+
+References:
+
+The architecture implemented here is a configurable version of the decoder
+stack first proposed in:
+-   Vaswani, A., et al. (2017). "Attention Is All You Need." This paper
+    introduced the original Transformer architecture.
+
+The decoder-only variant was popularized by the GPT series of models, which
+demonstrated its effectiveness for generative pre-training:
+-   Radford, A., et al. (2018). "Improving Language Understanding by
+    Generative Pre-Training."
+
+Modern components available through this layer's configuration options are
+based on subsequent research, such as:
+-   Zhang, B., & Sennrich, R. (2019). "Root Mean Square Layer Normalization."
+-   Shazeer, N. (2020). "GLU Variants Improve Transformer."
+
+"""
+
 import keras
 from keras import ops, layers, initializers
 from typing import Optional, Dict, Any, Literal, Tuple
@@ -5,8 +88,9 @@ from typing import Optional, Dict, Any, Literal, Tuple
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
-from ..utils.masking import create_causal_mask
+
 from .embedding import create_embedding_layer
+from ..utils.masking import create_causal_mask
 from .norms import create_normalization_layer, NormalizationType
 from .transformer import TransformerLayer, AttentionType, FFNType, NormalizationPosition
 

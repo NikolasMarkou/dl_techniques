@@ -1,34 +1,58 @@
-"""
-Squeeze-and-Excitation Layer
-===========================
+"""Implement a Squeeze-and-Excitation block for channel-wise feature recalibration.
 
-Modern Keras 3 implementation of the Squeeze-and-Excitation (SE) block as described in:
-"Squeeze-and-Excitation Networks" (Hu et al., 2019)
-https://arxiv.org/abs/1709.01507
+This layer introduces a mechanism for adaptive, channel-wise feature
+recalibration. It enhances the representational power of a convolutional
+network by explicitly modeling the interdependencies between channels. The core
+idea is to use global information from the entire feature map to selectively
+emphasize informative feature channels and suppress less useful ones, allowing
+the network to learn what to "pay attention to."
 
-This implementation follows modern Keras 3 patterns while acknowledging that SE blocks
-fundamentally require input channel information to create properly sized sub-layers.
+Architectural and Mathematical Underpinnings:
 
-Architecture:
-------------
-The SE block consists of:
-1. Global average pooling (squeeze)
-2. Two-layer bottleneck (excitation):
-   - Dimensionality reduction (1x1 conv)
-   - Configurable activation (default: ReLU)
-   - Dimensionality restoration (1x1 conv)
-   - Sigmoid activation
-3. Channel-wise scaling
+The Squeeze-and-Excitation (SE) block is a lightweight computational unit that
+can be integrated into any standard convolutional block. It operates in three
+distinct stages:
 
-The computation flow is:
-input -> global_pool -> conv_reduce -> activation -> conv_restore -> sigmoid -> scale -> output
+1.  **Squeeze (Global Information Embedding)**: The first step aggregates global
+    spatial information into a channel descriptor. This is achieved by applying
+    Global Average Pooling (GAP) to the input feature map `X ∈ ℝ^(H×W×C)`,
+    producing a vector `z ∈ ℝ^(1×1×C)`. Each element `z_c` is the mean
+    activation for the c-th channel across all spatial locations:
 
-Design Note:
------------
-This layer creates sub-layers in build() because the SE mechanism fundamentally
-requires knowledge of input channels to determine bottleneck dimensions. This is
-a necessary exception to the general Keras 3 pattern, handled with extra care
-for serialization robustness.
+        z_c = (1 / (H * W)) * Σ_{i=1 to H} Σ_{j=1 to W} X_c(i, j)
+
+    This operation effectively creates a compact summary of the global receptive
+    field for each channel.
+
+2.  **Excitation (Adaptive Recalibration)**: This stage learns a non-linear,
+    non-mutually-exclusive relationship between channels. The channel
+    descriptor `z` is passed through a simple gating mechanism, typically a
+    two-layer bottleneck MLP implemented with 1x1 convolutions. This network
+    first reduces the channel dimension by a `reduction_ratio` `r` and then
+    restores it, followed by a sigmoid activation to produce a set of channel
+    weights `s ∈ ℝ^(1×1×C)`:
+
+        s = σ(W₂ * δ(W₁ * z))
+
+    Here, `W₁ ∈ ℝ^((C/r)×C)` and `W₂ ∈ ℝ^(C×(C/r))` are the weights of the two
+    convolutional layers, `δ` is a ReLU activation, and `σ` is the sigmoid
+-    function. The sigmoid ensures that the learned weights are normalized
+    between 0 and 1, representing the relative importance of each channel.
+
+3.  **Scale (Feature Recalibration)**: The final step applies the learned channel
+    weights to the original input feature map. The output of the SE block is
+    obtained by rescaling the input `X` with the activations `s`:
+
+        X_scaled_c = s_c * X_c
+
+    This is an element-wise multiplication where the scalar `s_c` (the c-th
+    element of `s`) is broadcast across the entire spatial extent of the
+    corresponding input channel `X_c`. This operation adaptively modulates the
+    activations of each feature channel based on the global context captured
+    by the squeeze-and-excitation mechanism.
+
+References:
+    - Hu, J., et al. (2018). Squeeze-and-Excitation Networks. *CVPR*.
 """
 
 import keras

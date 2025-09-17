@@ -1,39 +1,77 @@
-"""
-Differentiable K-Means Layer for Neural Networks.
+"""Implement a differentiable K-means clustering layer for deep networks.
 
-This module implements a differentiable K-means clustering layer that can be seamlessly
-integrated into neural network architectures. Unlike traditional K-means, this implementation
-uses soft assignments, momentum-based centroid updates, and repulsive forces to enable
-stable end-to-end training through backpropagation.
+This layer embeds a clustering mechanism directly into a neural network,
+enabling end-to-end training of cluster centroids. It provides a
+differentiable alternative to the traditional K-means algorithm by
+substituting its discrete, non-differentiable operations (hard assignment,
+centroid recalculation) with continuous, gradient-based approximations.
 
-Mathematical Background
------------------------
+The design incorporates several modern techniques to ensure stable and
+effective training within a deep learning context, such as soft assignments,
+momentum-based updates, and a novel centroid repulsion mechanism.
 
-Traditional K-means clustering partitions data points into K clusters by minimizing:
-    J = Σᵢ Σⱼ wᵢⱼ ||xᵢ - cⱼ||²
+Architecture and Core Concepts:
 
-Where:
-- xᵢ are data points
-- cⱼ are cluster centroids
-- wᵢⱼ ∈ {0,1} are hard assignments
+The core of the layer's differentiability lies in its use of "soft
+assignments." Instead of assigning each input vector to the single closest
+centroid (a non-differentiable `argmin` operation), the layer computes a
+probability distribution over all centroids.
 
-The differentiable version replaces hard assignments with soft assignments:
-    wᵢⱼ = softmax(-||xᵢ - cⱼ||² / τ)
+Key mechanisms include:
 
-Where τ is the temperature parameter controlling assignment softness.
+1.  **Soft Assignments:** The layer calculates the squared Euclidean distance
+    from an input vector to each of the `K` centroids. These distances are
+    then passed through a temperature-controlled softmax function. The
+    `temperature` parameter controls the "softness" of the assignment: lower
+    temperatures produce sharper, more confident distributions (approaching a
+    one-hot encoding), while higher temperatures result in smoother, more
+    uncertain assignments.
 
-Key Features
-------------
+2.  **Differentiable Centroid Updates:** During training, the centroids are
+    updated based on these soft assignments. The new position for each
+    centroid is calculated as a weighted average of all input vectors, where
+    the weights are the assignment probabilities. This replaces the discrete
+    re-averaging step in standard K-means with a smooth, differentiable
+    operation.
 
-1. **Soft Assignments**: Uses temperature-scaled softmax for differentiable clustering
-2. **Momentum Updates**: Incorporates momentum for stable centroid learning
-3. **Centroid Repulsion**: Prevents centroid collapse through inter-centroid repulsive forces
-4. **Flexible Output**: Supports both assignment probabilities and mixture reconstructions
-5. **Multi-axis Clustering**: Can cluster along arbitrary tensor dimensions
-6. **Orthonormal Initialization**: Uses orthogonal initialization when possible for better convergence
+3.  **Momentum and Repulsion:** To stabilize training, the layer includes two
+    additional forces. A momentum term smooths the centroid updates over
+    time, preventing drastic oscillations. More importantly, a "repulsion
+    force" is applied between centroids. This force actively pushes centroids
+    apart if their pairwise distance falls below a predefined threshold,
+    counteracting the common failure mode of "centroid collapse" where
+    multiple centroids converge to the same point in the feature space. This
+    encourages the centroids to span the data manifold more effectively.
 
-Author: DL-Techniques Team
-License: MIT
+Mathematical Foundation:
+
+The soft assignment probability `a_ij` of an input vector `x_i` to a
+centroid `c_j` is calculated as:
+`a_ij = softmax(-||x_i - c_j||² / τ)_j`
+where `τ` is the temperature.
+
+The update to a centroid `c_j` is conceptually a combination of a data-driven
+pull, a repulsive push from other centroids, and momentum:
+`Δc_j ∝ ( (Σ_i a_ij * x_i) / (Σ_i a_ij) - c_j ) + Σ_{k≠j} Repel(c_j, c_k)`
+This update is then smoothed using a momentum buffer before being applied,
+ensuring stable convergence.
+
+References:
+
+This layer's design synthesizes ideas from the broader field of deep
+clustering and representation learning. While K-means is a classical
+algorithm, its integration into neural networks in a differentiable manner is
+a more recent development.
+
+-   The concept of soft assignments is related to fuzzy c-means clustering
+    and is a common technique in differentiable clustering.
+-   The end-to-end learning of a "codebook" or dictionary of centroids is a
+    central idea in methods like Vector-Quantized Variational Autoencoders
+    (VQ-VAE), as introduced by van den Oord, A., et al. (2017).
+-   The use of repulsion or other diversity-promoting regularizers on the
+    centroids is a technique employed to prevent codebook collapse in such
+    models.
+
 """
 
 import keras

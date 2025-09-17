@@ -1,8 +1,73 @@
-"""
-Random Fourier Features (RFF) Layer for Kernel Approximation.
+"""Implement a Random Fourier Features (RFF) mapping to approximate kernel methods.
 
-This module implements Random Fourier Features for efficient kernel approximation,
-achieving significant memory reduction (up to 1200x) while maintaining accuracy.
+This layer provides an efficient, scalable alternative to traditional kernel
+machines (e.g., Support Vector Machines with an RBF kernel) by leveraging a
+randomized feature map. The core problem that RFF addresses is the
+computational and memory cost of kernel methods, which typically require the
+computation and storage of an `N x N` kernel matrix, where `N` is the number
+of data points. This `O(N^2)` complexity makes them intractable for large-scale
+datasets.
+
+This layer circumvents that limitation by creating an explicit, low-dimensional
+feature mapping `φ(x)` such that the inner product in the new feature space
+approximates the desired kernel function: `k(x, y) ≈ φ(x)^T φ(y)`. This
+transforms the non-linear kernel problem into a linear one in the randomized
+feature space, which can then be solved efficiently with standard methods like
+linear regression or logistic regression.
+
+Architecture and Core Concepts:
+
+The architecture is composed of two main parts: a fixed, non-trainable random
+feature mapping, followed by a standard trainable linear layer.
+
+1.  **Random Feature Mapping:** This is the heart of the RFF method. The input
+    data `x` is projected into a higher-dimensional space using a randomly
+    generated and subsequently fixed weight matrix `ω` and bias vector `b`.
+    This projection is then passed through a cosine non-linearity. The matrix
+    `ω` and vector `b` are sampled from specific distributions dictated by the
+    kernel one wishes to approximate. They are *not* learned during training;
+    their role is to define a static, randomized basis that effectively
+    approximates the kernel's feature space.
+
+2.  **Trainable Linear Transformation:** The resulting random features `φ(x)` are
+    then fed into a standard dense (fully-connected) layer. This is where all
+    the learning occurs. The model learns to perform its task (e.g.,
+    classification or regression) by finding the optimal linear combination of
+    these fixed random features.
+
+By separating the non-linear feature mapping (which is randomized and fixed)
+from the model training (which becomes a simple linear problem), RFF achieves
+significant computational savings while maintaining strong performance.
+
+Mathematical Foundation:
+
+The theoretical underpinning of this method is Bochner's theorem, which states
+that any continuous, shift-invariant kernel `k(x, y) = k(x - y)` is the
+Fourier transform of a non-negative measure. For the widely used Gaussian
+RBF kernel, `k(x,y) = exp(-γ²||x-y||²)`, this corresponding measure is a
+Gaussian distribution.
+
+The RFF method is a Monte Carlo approximation of this Fourier integral. To
+approximate the RBF kernel, we sample `D` random frequency vectors `ω_i` from a
+Gaussian distribution `N(0, γ²I)` and `D` random phase shifts `b_i` from a
+uniform distribution `Uniform(0, 2π)`.
+
+The feature map `φ(x)` for an input `x` is then constructed as:
+`φ(x) = sqrt(2/D) * [cos(ω_1^T x + b_1), ..., cos(ω_D^T x + b_D)]`
+
+This mapping has the remarkable property that the expected value of the inner
+product `E[φ(x)^T φ(y)]` is equal to the RBF kernel `k(x, y)`. For a
+sufficiently large number of features `D`, the inner product provides a
+high-quality approximation of the kernel, allowing a linear model trained on
+`φ(x)` to effectively replicate the behavior of a powerful kernel machine.
+
+References:
+
+The foundational work that introduced Random Fourier Features is:
+-   Rahimi, A., & Recht, B. (2007). "Random Features for Large-Scale Kernel
+    Machines." This paper demonstrated how this randomized approach could
+    drastically scale up kernel methods to datasets with millions of examples.
+
 """
 
 import keras
