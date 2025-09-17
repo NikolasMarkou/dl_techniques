@@ -2,16 +2,17 @@
 MobileNetV2: Inverted Residuals and Linear Bottlenecks
 ======================================================
 
-A complete implementation of MobileNetV2 architecture with inverted residual blocks
-and linear bottlenecks. This implementation follows modern Keras 3 best practices
-for custom models with proper serialization support.
+A complete implementation of MobileNetV2 architecture using Universal
+Inverted Bottleneck blocks configured to replicate the original inverted
+residuals and linear bottlenecks. This implementation follows modern Keras 3
+best practices for custom models with proper serialization support.
 
 Based on: "MobileNetV2: Inverted Residuals and Linear Bottlenecks"
 Paper: https://arxiv.org/abs/1801.04381
 
 Key Features:
 ------------
-- Inverted residual blocks with linear bottlenecks
+- Universal Inverted Bottleneck blocks configured as inverted residuals
 - Expansion layers with lightweight depthwise convolutions
 - Residual connections between bottleneck layers
 - Width multiplier (α) for model scaling
@@ -22,12 +23,12 @@ Architecture Overview:
 ---------------------
 MobileNetV2 consists of:
 1. **Initial Conv**: Standard 3x3 convolution with stride 2 and 32 filters
-2. **Inverted Residual Blocks**: 17 blocks organized in stages
+2. **Bottleneck Blocks**: 17 `UniversalInvertedBottleneck` blocks organized in stages
 3. **Final Conv**: 1x1 convolution expanding to 1280 channels
 4. **Global Average Pooling**: Reduces spatial dimensions
 5. **Classifier**: Fully connected layer for classification
 
-Inverted Residual Block:
+Inverted Residual Block (emulated by UniversalInvertedBottleneck):
 - Expansion: 1x1 conv to expand channels (with ReLU6)
 - Depthwise: 3x3 depthwise conv (with ReLU6)
 - Projection: 1x1 conv to project back (LINEAR - no activation)
@@ -56,21 +57,24 @@ from typing import Tuple, Optional, Dict, Any, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.inverted_residual_block import InvertedResidualBlock
+from dl_techniques.layers.universal_inverted_bottleneck import UniversalInvertedBottleneck
 
 # ---------------------------------------------------------------------
 
+
 @keras.saving.register_keras_serializable()
 class MobileNetV2(keras.Model):
-    """MobileNetV2 classification model with inverted residual blocks.
+    """MobileNetV2 classification model built with Universal Inverted Bottleneck blocks.
 
     This class implements the full MobileNetV2 architecture, an efficient
     convolutional neural network designed for mobile and embedded vision
-    applications. It utilizes inverted residuals and linear bottlenecks to
+    applications. It utilizes `UniversalInvertedBottleneck` (UIB) layers configured
+    to replicate the original's inverted residuals and linear bottlenecks.
 
     **Intent**: To provide a production-ready, configurable, and easily
     serializable implementation of the MobileNetV2 model. This serves as a
-    best-practice example for building complex custom models in Keras 3.
+    best-practice example for building complex custom models in Keras 3,
+    leveraging a flexible and unified building block (UIB).
 
     **Architecture**:
     ```
@@ -78,7 +82,7 @@ class MobileNetV2(keras.Model):
            ↓
     Initial Conv: 3x3 Conv2D(32, stride=2) -> BN -> ReLU6
            ↓
-    Bottleneck Blocks: Sequence of 17 InvertedResidualBlock layers
+    Bottleneck Blocks: Sequence of 17 UniversalInvertedBottleneck layers
            ↓
     Final Conv: 1x1 Conv2D(1280) -> BN -> ReLU6
            ↓
@@ -91,8 +95,8 @@ class MobileNetV2(keras.Model):
 
     **Data Flow**:
     1. An initial convolution layer performs downsampling and feature extraction.
-    2. A series of 7 bottleneck stages, built from `InvertedResidualBlock` layers,
-       progressively extracts features and reduces spatial dimensions.
+    2. A series of 7 bottleneck stages, built from `UniversalInvertedBottleneck`
+       layers, progressively extracts features and reduces spatial dimensions.
     3. A final 1x1 convolution expands the feature map to a high-dimensional space.
     4. Global average pooling converts the feature map into a single feature vector.
     5. A fully-connected classifier with softmax activation produces class probabilities.
@@ -117,7 +121,7 @@ class MobileNetV2(keras.Model):
 
     Attributes:
         initial_conv, initial_bn, initial_relu: Layers for the first block.
-        blocks: A list of `InvertedResidualBlock` instances.
+        blocks: A list of `UniversalInvertedBottleneck` instances.
         last_conv, last_bn, last_relu: Layers for the final feature extraction.
         global_avg_pool: Global average pooling layer.
         dropout: Dropout layer (if used).
@@ -205,22 +209,34 @@ class MobileNetV2(keras.Model):
         self.initial_bn = layers.BatchNormalization(name='conv1_bn')
         self.initial_relu = layers.ReLU(max_value=6, name='conv1_relu6')
 
-        # Inverted Residual Blocks
+        # Bottleneck Blocks (using UniversalInvertedBottleneck)
         self.blocks = []
         block_id = 0
         for t, c, n, s in self.ARCHITECTURE:
             output_channels = self._make_divisible(c * self.width_multiplier)
             for i in range(n):
                 stride = s if i == 0 else 1
-                self.blocks.append(InvertedResidualBlock(
-                    filters=output_channels, expansion_factor=t, stride=stride,
-                    block_id=block_id, kernel_initializer=self.kernel_initializer,
-                    kernel_regularizer=self.kernel_regularizer, name=f'block_{block_id}'
+                self.blocks.append(UniversalInvertedBottleneck(
+                    filters=output_channels,
+                    expansion_factor=t,
+                    stride=stride,
+                    kernel_size=3,              # Standard for MobileNetV2
+                    use_dw1=True,               # Emulates MobileNetV2 block
+                    use_dw2=False,              # Emulates MobileNetV2 block
+                    activation_type='relu',     # Use ReLU...
+                    activation_args={'max_value': 6}, # ...with max_value=6 (ReLU6)
+                    normalization_type='batch_norm',
+                    use_bias=False,
+                    kernel_initializer=self.kernel_initializer,
+                    kernel_regularizer=self.kernel_regularizer,
+                    name=f'block_{block_id}'
                 ))
                 block_id += 1
 
         # Final Convolution
-        last_channels = self._make_divisible(1280 * self.width_multiplier) if self.width_multiplier > 1.0 else 1280
+        # FIX: Always scale the last convolution layer's channels. The original
+        # conditional logic was incorrect for multipliers < 1.0.
+        last_channels = self._make_divisible(1280 * self.width_multiplier)
         self.last_conv = layers.Conv2D(
             last_channels, 1, padding='same', use_bias=False,
             kernel_initializer=self.kernel_initializer,
@@ -302,8 +318,9 @@ class MobileNetV2(keras.Model):
     def summary(self, **kwargs):
         """Print model summary with additional information."""
         # Build the model if it hasn't been built yet
-        if not self.built and self._input_shape:
-            self.build((None, *self._input_shape))
+        if not self.built:
+            input_tensor = keras.Input(shape=self.input_shape_config)
+            self.build(input_tensor.shape)
 
         super().summary(**kwargs)
 
@@ -312,9 +329,9 @@ class MobileNetV2(keras.Model):
         total_params = self.count_params()
 
         logger.info("MobileNetV2 Configuration:")
-        logger.info(f"  - Input shape: {self._input_shape}")
+        logger.info(f"  - Input shape: {self.input_shape_config}")
         logger.info(f"  - Width multiplier (α): {self.width_multiplier}")
-        logger.info(f"  - Number of inverted residual blocks: {total_blocks}")
+        logger.info(f"  - Number of bottleneck blocks: {total_blocks}")
         logger.info(f"  - Include top: {self.include_top}")
         if self.include_top:
             logger.info(f"  - Number of classes: {self.num_classes}")
@@ -366,4 +383,4 @@ def create_mobilenetv2(
 
     return model
 
-# ------------------------------------------------------------------------
+# ---------------------------------------------------------------------

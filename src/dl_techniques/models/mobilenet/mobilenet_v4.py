@@ -63,7 +63,7 @@ from typing import List, Tuple, Optional, Dict, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.attention.mobile_mqa import MobileMQA
-from dl_techniques.layers.universal_inverted_bottleneck import UIB
+from dl_techniques.layers.universal_inverted_bottleneck import UniversalInvertedBottleneck
 
 # ---------------------------------------------------------------------
 
@@ -310,7 +310,7 @@ class MobileNetV4(keras.Model):
 
         for block_idx in range(depth):
             block_stride = stage_stride if block_idx == 0 else 1
-            block = UIB(
+            block = UniversalInvertedBottleneck(
                 filters=dim,
                 stride=block_stride,
                 block_type=block_type,

@@ -2,17 +2,17 @@
 MobileNetV3: Efficient Mobile Networks with Hardware-Aware NAS
 ==============================================================
 
-A complete implementation of MobileNetV3 architecture with inverted residual blocks,
-squeeze-and-excite modules, and hard-swish activation. This version follows modern
-Keras 3 best practices for custom models.
+A complete implementation of MobileNetV3 architecture built with the flexible
+Universal Inverted Bottleneck (UIB) layer. This version follows modern
+Keras 3 best practices for custom models with proper serialization support.
 
 Based on: "Searching for MobileNetV3"
 Paper: https://arxiv.org/abs/1905.02244
 
 Key Features:
 ------------
-- Inverted residual blocks with linear bottlenecks
-- Squeeze-and-Excite attention modules
+- Universal Inverted Bottleneck blocks configured to replicate MobileNetV3's design
+- Squeeze-and-Excite attention modules (via UIB)
 - Hard-swish (h-swish) activation for efficiency
 - Optimized first and last layers
 - Support for Large and Small variants
@@ -22,7 +22,7 @@ Architecture Overview:
 ---------------------
 MobileNetV3 consists of:
 1. **Stem**: Initial convolution with hard-swish
-2. **Body**: Stack of inverted residual blocks with optional SE
+2. **Body**: Stack of `UniversalInvertedBottleneck` blocks with optional SE
 3. **Head**: Efficient last stage with optimized structure
 
 Model Variants:
@@ -54,325 +54,7 @@ from typing import Tuple, Optional, Dict, Any, Literal, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.activations.hard_swish import HardSwish
-from dl_techniques.layers.activations.hard_sigmoid import HardSigmoid
-
-# ---------------------------------------------------------------------
-# Squeeze and Excitation Module
-# ---------------------------------------------------------------------
-
-
-@keras.saving.register_keras_serializable()
-class SqueezeExcitationV3(layers.Layer):
-    """Squeeze-and-Excitation module for MobileNetV3.
-
-    Applies channel-wise attention using global pooling and two FC layers
-    with hard-sigmoid activation for efficiency on mobile devices.
-
-    Args:
-        filters: Integer, number of input/output filters.
-        se_ratio: Float, reduction ratio for squeeze operation.
-            The squeeze layer will have filters // se_ratio channels.
-        use_bias: Boolean, whether to use bias in convolution layers.
-        kernel_initializer: Initializer for convolution kernels.
-        kernel_regularizer: Regularizer for convolution kernels.
-        **kwargs: Additional arguments for Layer base class.
-
-    Example:
-        >>> se = SqueezeExcitationV3(filters=96, se_ratio=4)
-        >>> x = keras.random.normal((2, 7, 7, 96))
-        >>> output = se(x)  # Shape: (2, 7, 7, 96)
-    """
-
-    def __init__(
-            self,
-            filters: int,
-            se_ratio: float = 4.0,
-            use_bias: bool = True,
-            kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            **kwargs
-    ):
-        super().__init__(**kwargs)
-
-        self.filters = filters
-        self.se_ratio = se_ratio
-        self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
-
-        # Calculate squeeze dimension (fixed at 1/4 of expansion in MobileNetV3)
-        self.squeeze_filters = max(1, int(filters // se_ratio))
-
-        # Create layers in __init__
-        self.global_pool = layers.GlobalAveragePooling2D(keepdims=True, name="se_pool")
-        self.fc1 = layers.Conv2D(
-            self.squeeze_filters,
-            kernel_size=1,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="se_reduce"
-        )
-        self.relu = layers.ReLU(name="se_relu")
-        self.fc2 = layers.Conv2D(
-            filters,
-            kernel_size=1,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="se_expand"
-        )
-        self.hard_sigmoid = HardSigmoid(name="se_hsigmoid")
-
-    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        """Apply squeeze-and-excitation."""
-        x = self.global_pool(inputs)
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.fc2(x)
-        x = self.hard_sigmoid(x)
-        return inputs * x
-
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Output shape is same as input shape."""
-        return input_shape
-
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
-        config = super().get_config()
-        config.update({
-            "filters": self.filters,
-            "se_ratio": self.se_ratio,
-            "use_bias": self.use_bias,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
-        })
-        return config
-
-
-# ---------------------------------------------------------------------
-# Inverted Residual Block
-# ---------------------------------------------------------------------
-
-
-@keras.saving.register_keras_serializable()
-class InvertedResidualV3(layers.Layer):
-    """MobileNetV3 inverted residual bottleneck block.
-
-    Implements the inverted residual structure with:
-    - 1x1 expansion convolution (if expansion != 1)
-    - Depthwise convolution
-    - Optional squeeze-and-excitation
-    - 1x1 projection convolution
-    - Residual connection when stride=1 and in_filters=out_filters
-
-    Args:
-        expansion_filters: Integer, number of channels in expansion.
-        out_filters: Integer, number of output channels.
-        kernel_size: Integer, size of depthwise convolution kernel.
-        stride: Integer, stride for depthwise convolution.
-        use_se: Boolean, whether to use squeeze-and-excitation.
-        activation: String, activation function ("relu" or "hswish").
-        use_residual: Boolean, whether to use residual connection.
-        kernel_initializer: Initializer for convolution kernels.
-        kernel_regularizer: Regularizer for convolution kernels.
-        **kwargs: Additional arguments for Layer base class.
-
-    Example:
-        >>> block = InvertedResidualV3(
-        ...     expansion_filters=96,
-        ...     out_filters=40,
-        ...     kernel_size=5,
-        ...     stride=2,
-        ...     use_se=True,
-        ...     activation="relu"
-        ... )
-        >>> x = keras.random.normal((2, 56, 56, 24))
-        >>> output = block(x)  # Shape: (2, 28, 28, 40)
-    """
-
-    def __init__(
-            self,
-            expansion_filters: int,
-            out_filters: int,
-            kernel_size: int = 3,
-            stride: int = 1,
-            use_se: bool = False,
-            activation: Literal["relu", "hswish"] = "relu",
-            use_residual: bool = True,
-            kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            **kwargs
-    ):
-        super().__init__(**kwargs)
-
-        self.expansion_filters = expansion_filters
-        self.out_filters = out_filters
-        self.kernel_size = kernel_size
-        self.stride = stride
-        self.use_se = use_se
-        self.activation = activation
-        self.use_residual = use_residual
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
-
-        # Choose activation function
-        if activation == "relu":
-            self.activation_fn = layers.ReLU()
-        elif activation == "hswish":
-            self.activation_fn = HardSwish()
-        else:
-            raise ValueError(f"Unsupported activation: {activation}")
-
-        # Build sub-layers - will be built properly in build() method
-        self.expand_conv = None
-        self.expand_bn = None
-        self.expand_activation = None
-
-        self.depthwise_conv = layers.DepthwiseConv2D(
-            kernel_size=kernel_size,
-            strides=stride,
-            padding='same',
-            use_bias=False,
-            depthwise_initializer=kernel_initializer,
-            depthwise_regularizer=kernel_regularizer,
-            name="depthwise"
-        )
-        self.depthwise_bn = layers.BatchNormalization(name="depthwise_bn")
-        self.depthwise_activation = self.activation_fn
-
-        if use_se:
-            self.se = SqueezeExcitationV3(
-                filters=expansion_filters,
-                se_ratio=4.0,
-                kernel_initializer=kernel_initializer,
-                kernel_regularizer=kernel_regularizer,
-                name="se"
-            )
-        else:
-            self.se = None
-
-        self.project_conv = layers.Conv2D(
-            out_filters,
-            kernel_size=1,
-            strides=1,
-            padding='same',
-            use_bias=False,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            name="project"
-        )
-        self.project_bn = layers.BatchNormalization(name="project_bn")
-        # Note: No activation after projection (linear bottleneck)
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer and sub-layers."""
-        in_filters = input_shape[-1]
-
-        # Determine if we need expansion
-        self.use_expansion = (in_filters != self.expansion_filters)
-
-        if self.use_expansion:
-            self.expand_conv = layers.Conv2D(
-                self.expansion_filters,
-                kernel_size=1,
-                strides=1,
-                padding='same',
-                use_bias=False,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                name="expand"
-            )
-            self.expand_bn = layers.BatchNormalization(name="expand_bn")
-            self.expand_activation = self.activation_fn
-
-            # Build expansion layers
-            self.expand_conv.build(input_shape)
-            expand_shape = self.expand_conv.compute_output_shape(input_shape)
-            self.expand_bn.build(expand_shape)
-            depthwise_input_shape = expand_shape
-        else:
-            depthwise_input_shape = input_shape
-
-        # Build depthwise layers
-        self.depthwise_conv.build(depthwise_input_shape)
-        depthwise_shape = self.depthwise_conv.compute_output_shape(depthwise_input_shape)
-        self.depthwise_bn.build(depthwise_shape)
-
-        # Build SE if used
-        if self.se is not None:
-            self.se.build(depthwise_shape)
-
-        # Build projection layers
-        self.project_conv.build(depthwise_shape)
-        project_shape = self.project_conv.compute_output_shape(depthwise_shape)
-        self.project_bn.build(project_shape)
-
-        # Determine if residual connection should be used
-        self.use_residual_connection = (
-                self.use_residual and
-                self.stride == 1 and
-                in_filters == self.out_filters
-        )
-
-        super().build(input_shape)
-
-    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        """Forward pass through the block."""
-        x = inputs
-
-        # Expansion
-        if self.use_expansion:
-            x = self.expand_conv(x)
-            x = self.expand_bn(x, training=training)
-            x = self.expand_activation(x)
-
-        # Depthwise
-        x = self.depthwise_conv(x)
-        x = self.depthwise_bn(x, training=training)
-        x = self.depthwise_activation(x)
-
-        # Squeeze-and-excitation
-        if self.se is not None:
-            x = self.se(x, training=training)
-
-        # Projection
-        x = self.project_conv(x)
-        x = self.project_bn(x, training=training)
-
-        # Residual connection
-        if self.use_residual_connection:
-            x = layers.Add()([inputs, x])
-
-        return x
-
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute output shape."""
-        batch_size, height, width, _ = input_shape
-
-        # Account for stride
-        if self.stride > 1:
-            height = height // self.stride if height else None
-            width = width // self.stride if width else None
-
-        return (batch_size, height, width, self.out_filters)
-
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
-        config = super().get_config()
-        config.update({
-            "expansion_filters": self.expansion_filters,
-            "out_filters": self.out_filters,
-            "kernel_size": self.kernel_size,
-            "stride": self.stride,
-            "use_se": self.use_se,
-            "activation": self.activation,
-            "use_residual": self.use_residual,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
-        })
-        return config
-
+from dl_techniques.layers.universal_inverted_bottleneck import UniversalInvertedBottleneck
 
 # ---------------------------------------------------------------------
 # MobileNetV3 Model
@@ -381,11 +63,12 @@ class InvertedResidualV3(layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class MobileNetV3(keras.Model):
-    """MobileNetV3 model implementation with inverted residual blocks and SE.
+    """MobileNetV3 model implemented with Universal Inverted Bottleneck blocks.
 
     A highly efficient mobile architecture discovered through platform-aware NAS
     and optimized with NetAdapt, featuring hard-swish activation and an efficient
-    last stage design.
+    last stage design. This implementation leverages the `UniversalInvertedBottleneck`
+    layer for its core building blocks.
 
     Args:
         num_classes: Integer, number of output classes for classification.
@@ -430,16 +113,16 @@ class MobileNetV3(keras.Model):
         (120, 40, 5, 1, True, "relu"),
         (120, 40, 5, 1, True, "relu"),
         # Stage 4
-        (240, 80, 3, 2, False, "hswish"),  # 14x14
-        (200, 80, 3, 1, False, "hswish"),
-        (184, 80, 3, 1, False, "hswish"),
-        (184, 80, 3, 1, False, "hswish"),
-        (480, 112, 3, 1, True, "hswish"),
-        (672, 112, 3, 1, True, "hswish"),
+        (240, 80, 3, 2, False, "hard_swish"),  # 14x14
+        (200, 80, 3, 1, False, "hard_swish"),
+        (184, 80, 3, 1, False, "hard_swish"),
+        (184, 80, 3, 1, False, "hard_swish"),
+        (480, 112, 3, 1, True, "hard_swish"),
+        (672, 112, 3, 1, True, "hard_swish"),
         # Stage 5
-        (672, 160, 5, 2, True, "hswish"),  # 7x7
-        (960, 160, 5, 1, True, "hswish"),
-        (960, 160, 5, 1, True, "hswish"),
+        (672, 160, 5, 2, True, "hard_swish"),  # 7x7
+        (960, 160, 5, 1, True, "hard_swish"),
+        (960, 160, 5, 1, True, "hard_swish"),
     ]
 
     SMALL_CONFIG = [
@@ -450,15 +133,15 @@ class MobileNetV3(keras.Model):
         (72, 24, 3, 2, False, "relu"),  # 28x28
         (88, 24, 3, 1, False, "relu"),
         # Stage 3
-        (96, 40, 5, 2, True, "hswish"),  # 14x14
-        (240, 40, 5, 1, True, "hswish"),
-        (240, 40, 5, 1, True, "hswish"),
-        (120, 48, 5, 1, True, "hswish"),
-        (144, 48, 5, 1, True, "hswish"),
+        (96, 40, 5, 2, True, "hard_swish"),  # 14x14
+        (240, 40, 5, 1, True, "hard_swish"),
+        (240, 40, 5, 1, True, "hard_swish"),
+        (120, 48, 5, 1, True, "hard_swish"),
+        (144, 48, 5, 1, True, "hard_swish"),
         # Stage 4
-        (288, 96, 5, 2, True, "hswish"),  # 7x7
-        (576, 96, 5, 1, True, "hswish"),
-        (576, 96, 5, 1, True, "hswish"),
+        (288, 96, 5, 2, True, "hard_swish"),  # 7x7
+        (576, 96, 5, 1, True, "hard_swish"),
+        (576, 96, 5, 1, True, "hard_swish"),
     ]
 
     def __init__(
@@ -491,7 +174,7 @@ class MobileNetV3(keras.Model):
         self.weight_decay = weight_decay
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.include_top = include_top
-        self._input_shape = input_shape or (224, 224, 3)
+        self.input_shape_config = input_shape or (224, 224, 3)
 
         # Get configuration for the variant
         if variant == "large":
@@ -515,7 +198,8 @@ class MobileNetV3(keras.Model):
                 new_value += divisor
             return new_value
 
-        # Build the model layers
+        # --- Build the model layers ---
+
         # Initial stem
         first_filter = make_divisible(16 * width_multiplier)
         self.stem_conv = layers.Conv2D(
@@ -529,25 +213,35 @@ class MobileNetV3(keras.Model):
             name="stem_conv"
         )
         self.stem_bn = layers.BatchNormalization(name="stem_bn")
-        self.stem_activation = HardSwish(name="stem_hswish")
+        self.stem_activation = HardSwish(name="stem_hard_swish")
 
-        # Build inverted residual blocks
+        # Build inverted residual blocks using UniversalInvertedBottleneck
         self.blocks = []
         in_channels = first_filter
 
-        for i, (exp_size, out_channels, kernel, stride, use_se, activation) in enumerate(self.block_configs):
+        for i, (exp_size, out_size, kernel, stride, use_se, activation) in enumerate(self.block_configs):
             # Apply width multiplier
-            exp_channels = make_divisible(exp_size * width_multiplier)
-            out_channels = make_divisible(out_channels * width_multiplier)
+            exp_channels = make_divisible(exp_size * self.width_multiplier)
+            out_channels = make_divisible(out_size * self.width_multiplier)
 
-            block = InvertedResidualV3(
-                expansion_filters=exp_channels,
-                out_filters=out_channels,
+            # Calculate expansion factor required by UIB
+            if in_channels == 0:
+                raise ValueError("Input channels cannot be zero.")
+            expansion_factor = exp_channels // in_channels
+
+            block = UniversalInvertedBottleneck(
+                filters=out_channels,
+                expansion_factor=expansion_factor,
                 kernel_size=kernel,
                 stride=stride,
-                use_se=use_se,
-                activation=activation,
-                use_residual=(stride == 1 and in_channels == out_channels),
+                use_squeeze_excitation=use_se,
+                activation_type=activation,
+                normalization_type='batch_norm',
+                use_bias=False,
+                use_dw1=True,  # Standard inverted bottleneck structure
+                use_dw2=False,
+                se_ratio=4.0,  # MobileNetV3 uses a fixed SE ratio of 4
+                se_activation='relu',  # Activation before expansion in SE
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"block_{i}"
@@ -568,7 +262,7 @@ class MobileNetV3(keras.Model):
             name="last_conv"
         )
         self.last_bn = layers.BatchNormalization(name="last_bn")
-        self.last_activation = HardSwish(name="last_hswish")
+        self.last_activation = HardSwish(name="last_hard_swish")
 
         # Head
         if self.include_top:
@@ -582,12 +276,13 @@ class MobileNetV3(keras.Model):
                 kernel_regularizer=self.kernel_regularizer,
                 name="head_conv"
             )
-            self.head_activation = HardSwish(name="head_hswish")
+            self.head_activation = HardSwish(name="head_hard_swish")
             self.dropout = layers.Dropout(dropout_rate, name="dropout")
 
             # Classifier
             self.classifier = layers.Dense(
                 num_classes,
+                activation='softmax',  # Add softmax for classification
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name="classifier"
@@ -658,7 +353,8 @@ class MobileNetV3(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
-        config = {
+        config = super().get_config()
+        config.update({
             "num_classes": self.num_classes,
             "variant": self.variant,
             "width_multiplier": self.width_multiplier,
@@ -666,21 +362,16 @@ class MobileNetV3(keras.Model):
             "weight_decay": self.weight_decay,
             "kernel_initializer": initializers.serialize(self.kernel_initializer),
             "include_top": self.include_top,
-            "input_shape": self._input_shape,
-        }
-        base_config = super().get_config()
-        return {**base_config, **config}
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "MobileNetV3":
-        """Create model from configuration."""
-        return cls(**config)
+            "input_shape": self.input_shape_config,
+        })
+        return config
 
     def summary(self, **kwargs):
         """Print model summary with additional information."""
         # Build the model if it hasn't been built yet
-        if not self.built and self._input_shape:
-            self.build((None,) + self._input_shape)
+        if not self.built:
+            input_tensor = keras.Input(shape=self.input_shape_config)
+            self.build(input_tensor.shape)
 
         super().summary(**kwargs)
 
@@ -689,7 +380,7 @@ class MobileNetV3(keras.Model):
 
         logger.info("MobileNetV3 Configuration:")
         logger.info(f"  - Variant: {self.variant}")
-        logger.info(f"  - Input shape: {self._input_shape}")
+        logger.info(f"  - Input shape: {self.input_shape_config}")
         logger.info(f"  - Width multiplier: {self.width_multiplier}")
         logger.info(f"  - Number of blocks: {len(self.blocks)}")
         logger.info(f"  - Include top: {self.include_top}")
@@ -744,4 +435,4 @@ def create_mobilenetv3(
 
     return model
 
-# ------------------------------------------------------------------------
+# ---------------------------------------------------------------------
