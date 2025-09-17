@@ -1,12 +1,54 @@
-"""
-FNet: Fourier Transform-based Attention Replacement with Factory Pattern
+"""Implement an FNet block using Fourier Transforms for token mixing.
 
-This module implements the FNet architecture from "FNet: Mixing Tokens with Fourier Transforms"
-(Lee-Thorp et al., 2021), which replaces self-attention with parameter-free Fourier transforms
-for efficient token mixing in transformer-style architectures.
+This layer constitutes a complete encoder block from the FNet architecture,
+serving as a highly efficient drop-in replacement for a standard Transformer
+encoder. It adheres to the canonical pre-normalization structure of
+`[sublayer -> residual -> norm]`, but critically substitutes the computationally
+expensive self-attention mechanism with a parameter-free Fourier Transform.
 
-This refined version uses the normalization and FFN factory patterns for better modularity
-and consistency across the dl_techniques framework.
+Architectural and Mathematical Foundations:
+The design philosophy of FNet is rooted in the hypothesis that the primary
+role of the self-attention layer in models like BERT is to facilitate token
+mixing across the sequence, and that this can be achieved far more
+efficiently without the need for content-based, quadratic-complexity dot-
+product attention.
+
+The block consists of two main sub-layers:
+1.  **Token Mixing Sub-layer**: This is where FNet diverges from the standard
+    Transformer. Instead of self-attention, it applies a 2D Discrete Fourier
+    Transform (DFT) to the input sequence. The input tensor, with shape
+    `(sequence_length, hidden_dim)`, is treated as a 2D signal.
+    -   First, a DFT is applied along the sequence length dimension. The DFT
+        decomposes the sequence of token vectors into its frequency
+        components. A fundamental property of the DFT is that each frequency
+        component is a linear combination of *all* input elements.
+    -   Second, another DFT is applied along the hidden dimension.
+    -   The real part of the resulting complex tensor is retained.
+
+    This two-dimensional Fourier Transform operation, `y = Real(FFT(FFT(x)))`,
+    ensures that every element in the output tensor is a function of every
+    element in the input tensor. It provides a comprehensive, global mixing of
+    information both across tokens and within the feature dimensions of each
+    token. This entire operation is parameter-free and can be computed
+    efficiently with the Fast Fourier Transform (FFT) algorithm in
+    O(N log N) time, a significant improvement over self-attention's O(N^2).
+
+2.  **Channel Mixing Sub-layer**: This is a standard position-wise Feed-Forward
+    Network (FFN), identical to the one used in the original Transformer. This
+    sub-layer is responsible for learning complex, content-based feature
+    transformations.
+
+The core trade-off is sacrificing the dynamic, content-aware weighting of
+self-attention for the static, parameter-free mixing of the Fourier Transform.
+The FNet model demonstrates that for many tasks, the powerful FFN is capable of
+learning the necessary content-specific relationships, while the Fourier
+Transform provides a sufficiently effective and much faster mechanism for
+global information exchange.
+
+References:
+    - Lee-Thorp et al. "FNet: Mixing Tokens with Fourier Transforms".
+      The original paper proposing the FNet architecture.
+      https://arxiv.org/abs/2105.03824
 """
 
 import keras

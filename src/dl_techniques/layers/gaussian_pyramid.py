@@ -1,3 +1,46 @@
+"""Construct a multi-scale Gaussian pyramid representation of an image.
+
+This layer implements the classic Gaussian pyramid, a foundational technique
+in computer vision for analyzing images at multiple scales. The pyramid is a
+sequence of images, where each subsequent level is a low-pass filtered and
+downsampled version of its predecessor. This hierarchical structure enables
+algorithms to efficiently find features and objects at various sizes.
+
+Architectural and Mathematical Foundations:
+The construction of a Gaussian pyramid is an iterative process involving two
+key steps at each level: smoothing and subsampling.
+
+1.  **Smoothing (Convolution with a Gaussian Kernel)**: Before downsampling,
+    the image is convolved with a Gaussian filter. This is a critical
+    low-pass filtering operation that removes high-frequency components. The
+    2D Gaussian function is defined as:
+        `G(x, y) = (1 / (2 * pi * sigma^2)) * exp(-(x^2 + y^2) / (2 * sigma^2))`
+    This filter is chosen because it is separable, circularly symmetric, and
+    its Fourier transform is also a Gaussian, providing a smooth frequency
+    cutoff.
+
+2.  **Subsampling (Downsampling)**: After blurring, the image resolution is
+    reduced, typically by a factor of 2 in each dimension.
+
+The theoretical motivation for the initial smoothing step is rooted in the
+Nyquist-Shannon sampling theorem. Directly subsampling an image can lead to
+aliasing artifacts (e.g., moiré patterns), where high-frequency signals in
+the original image are misinterpreted as low-frequency signals in the
+downsampled version. The Gaussian blur acts as an anti-aliasing filter by
+ensuring that the signal's bandwidth is sufficiently limited before sampling,
+thus preserving the integrity of the representation at coarser scales.
+
+The resulting pyramid contains versions of the image at different levels of
+resolution and blur, forming a compact and effective basis for scale-invariant
+feature detection, image registration, and texture analysis.
+
+References:
+    - Burt, P. J. and Adelson, E. H. "The Laplacian Pyramid as a Compact
+      Image Code". This is the seminal paper that introduced both the Gaussian
+      and Laplacian pyramid concepts.
+      https://doi.org/10.1109/T-C.1983.225452
+"""
+
 import keras
 from keras import ops
 from typing import Tuple, Union, Optional, Sequence, List, Dict, Any

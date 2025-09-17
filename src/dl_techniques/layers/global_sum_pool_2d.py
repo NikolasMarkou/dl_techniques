@@ -1,7 +1,51 @@
+"""Pool features globally by summing over spatial dimensions.
+
+This layer performs a global reduction operation on spatial feature maps,
+transforming a 4D tensor `(batch, height, width, channels)` into a 2D
+tensor `(batch, channels)` by summing all elements across the spatial
+dimensions (height and width) for each channel independently.
+
+Architectural and Mathematical Foundations:
+Global pooling layers are essential components in modern convolutional neural
+networks, typically used near the output to aggregate spatial features into a
+fixed-size vector representation before a final classification or regression
+head. While `GlobalAveragePooling2D` and `GlobalMaxPooling2D` are more
+common, `GlobalSumPooling2D` serves a distinct and critical purpose.
+
+The mathematical operation for each channel `c` in the output vector `y` is:
+    `y_c = Σ_{h=1..H, w=1..W} x_{h,w,c}`
+where `x` is the input feature map of shape `(H, W)`.
+
+The key intuition lies in what this summation represents. Unlike average
+pooling, which normalizes by the spatial area and measures the average
+feature presence, or max pooling, which identifies the peak feature response,
+sum pooling measures the *total magnitude* or *integral* of the feature
+activation across the entire spatial map.
+
+This property makes it uniquely suited for tasks where the total quantity of
+a feature is more important than its average intensity or peak presence. A
+prominent application is in object counting and density estimation. For
+instance, if a convolutional channel is trained to activate in the presence
+of a specific object (e.g., a cell), the sum of its activation map provides
+a direct estimate of the total number of objects in the image. The model
+effectively learns to produce a density map, where the integral (sum)
+corresponds to the count.
+
+By preserving the total activation, this layer avoids the ambiguity present
+in average pooling, where a large, weakly-activated area can produce the same
+output as a small, strongly-activated area.
+
+References:
+    - Lempitsky, V. and Zisserman, A. "Learning To Count Objects in Images".
+      While this paper uses density maps and integral images, the core concept
+      of summing a feature map to obtain a count is foundational to the use
+      case for global sum pooling.
+      https://www.robots.ox.ac.uk/~vgg/publications/2010/Lempitsky10/
+"""
+
 import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple
-
 
 # ---------------------------------------------------------------------
 

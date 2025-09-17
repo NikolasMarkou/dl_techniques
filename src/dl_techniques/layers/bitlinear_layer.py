@@ -1,15 +1,64 @@
-"""
-BitLinear Layer Implementation
+"""Implement a bit-quantized linear layer for efficient language models.
 
-A Keras implementation of bit-aware linear layer for quantization-aware training,
-based on "The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits".
+This layer provides a Keras implementation of the linear layer proposed in the
+BitNet architecture, designed to enable 1-bit Large Language Models (LLMs). It
+replaces standard floating-point matrix multiplication with low-bit integer
+operations, drastically reducing memory footprint and computational cost. This is
+achieved through a quantization-aware training (QAT) process that simulates
+low-bit quantization during the forward pass while maintaining high-precision
+latent weights for stable gradient updates.
 
-Key features:
-- Low-bit quantization (e.g., 1.58-bit with values -1, 0, 1)
-- Quantization-aware training with straight-through estimator
-- Customizable quantization strategies and bit-widths
-- Different measurement methods for scaling
-- Optional layer normalization
+Architectural and Mathematical Foundations:
+The core idea is to quantize both the input activations and the layer's weights
+to a very low bit-width (e.g., 1.58 bits, representing the set `{-1, 0, 1}`)
+before the linear transformation. The process for a given tensor (either
+weights `W` or activations `X`) involves two main steps:
+
+1.  **Scaling (Centering)**: Before quantization, the tensor is centered and
+    scaled. A scaling factor `gamma` is computed by taking a representative
+    measure of the tensor's magnitude (e.g., its absolute mean or absolute
+    maximum) across the feature dimension. The tensor is then scaled by this
+    factor.
+        `W_scaled = (W - mean(W)) / gamma`
+
+2.  **Quantization**: The scaled tensor is then quantized to the target low-bit
+    range. For 1.58-bit quantization, this is a simple rounding and clamping
+    operation:
+        `W_quant = clip(round(W_scaled), -1, 1)`
+
+The main linear operation is then performed using these quantized, low-bit
+tensors, which can be executed very efficiently on hardware:
+    `Output_quant = MatMul(X_quant, W_quant)`
+
+Finally, the output is de-quantized by the scaling factors to return it to a
+floating-point representation compatible with subsequent layers.
+
+**Gradient Propagation with Straight-Through Estimator (STE)**:
+A fundamental challenge is that the rounding and clamping operations in the
+quantization step have zero or undefined gradients, which prevents standard
+backpropagation. To overcome this, the layer employs the Straight-Through
+Estimator (STE).
+
+During the backward pass, the gradient is allowed to "pass through" the non-
+differentiable quantization function as if it were an identity function.
+The gradient of the loss `L` with respect to the original high-precision
+weights `W` is approximated as:
+    `dL/dW ≈ dL/dW_quant`
+
+This allows the high-precision latent weights to be updated using standard
+gradient descent, effectively learning to produce values that are robust to
+the subsequent quantization step. The model learns to minimize the post-
+quantization error, making it "quantization-aware."
+
+References:
+    - Wang et al. "The Era of 1-bit LLMs: All Large Language Models are in
+      1.58 Bits". The foundational paper for this layer.
+      https://arxiv.org/abs/2402.17764
+
+    - Bengio et al. "Estimating or Propagating Gradients Through Stochastic
+      Neurons for Conditional Computation". One of the key papers introducing
+      the Straight-Through Estimator.
+      https://arxiv.org/abs/1308.3432
 """
 
 import copy

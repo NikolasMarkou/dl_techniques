@@ -1,107 +1,46 @@
-"""Applies a depthwise 2D Gaussian blur to image-like tensors.
+"""Apply a 2D Gaussian blur using a depthwise convolution.
 
-This layer performs a 2D convolution using a fixed, pre-computed Gaussian
-kernel. Since it uses a depthwise convolution, each input channel is filtered
-independently with the same Gaussian kernel. This is useful for image
-preprocessing, smoothing, and anti-aliasing.
+This layer implements a Gaussian filter, a fundamental low-pass filter used
+for smoothing images and reducing high-frequency noise. The filtering is
+achieved by convolving the input image with a kernel whose weights are derived
+from a 2D Gaussian distribution. This operation is a cornerstone of many
+computer vision algorithms, often serving as a preprocessing step to enhance
+feature stability.
 
-By default, the filter weights are not trainable, making this a static
-transformation layer.
+Architectural and Mathematical Foundations:
+The core of this layer is the 2D Gaussian function, which is used to generate
+the convolution kernel. The function is defined as:
 
-Args:
-    kernel_size (Tuple[int, int]): The height and width of the 2D Gaussian
-        kernel. Defaults to `(5, 5)`.
-    strides (Union[Tuple[int, int], List[int]]): The strides of the
-        convolution along the height and width. A stride greater than 1 will
-        downsample the input. Defaults to `(1, 1)`.
-    sigma (Union[float, Tuple[float, float]]): The standard deviation of the
-        Gaussian distribution.
-        - If a single float is provided, it's used for both height and width.
-        - If a tuple `(sigma_h, sigma_w)` is provided, it allows for
-          anisotropic (non-uniform) filtering.
-        - If set to -1 or `None` (default), sigma is automatically calculated
-          based on `kernel_size` to fit the kernel window.
-    padding (str): One of `"valid"` or `"same"` (case-insensitive).
-        Defaults to `"same"`.
-    data_format (Optional[str]): The ordering of the dimensions in the inputs.
-        `"channels_last"` (default) corresponds to inputs with shape
-        `(batch, height, width, channels)`, while `"channels_first"`
-        corresponds to inputs with shape `(batch, channels, height, width)`.
-        If `None`, the Keras backend default is used.
-    trainable (bool): If `True`, the Gaussian kernel weights can be trained.
-        Defaults to `False`, keeping the filter fixed.
-    **kwargs: Additional keyword arguments passed to the `Layer` base class.
+    G(x, y) = (1 / (2 * pi * sigma^2)) * exp(-(x^2 + y^2) / (2 * sigma^2))
 
-Input shape:
-    4D tensor with shape:
-    - If `data_format="channels_last"`: `(batch_size, height, width, channels)`
-    - If `data_format="channels_first"`: `(batch_size, channels, height, width)`
+The parameter `sigma` (standard deviation) controls the "spread" of the bell-
+shaped curve. A larger `sigma` results in a wider curve, leading to a kernel
+that averages pixels over a larger neighborhood, producing a more pronounced
+blur. Conversely, a smaller `sigma` yields a sharper kernel with less blur.
 
-Output shape:
-    4D tensor with shape:
-    - If `padding="same"` and `strides=(1, 1)`, the output has the same
-      shape as the input.
-    - If `strides > 1`, the spatial dimensions (height, width) will be
-      downsampled. For example, with `strides=(2, 2)`, the output height and
-      width will be approximately halved.
-    - The output shape will be:
-        - `(batch_size, new_height, new_width, channels)` for `"channels_last"`
-        - `(batch_size, channels, new_height, new_width)` for `"channels_first"`
+To create the discrete convolution kernel, this continuous function is sampled
+at integer coordinates `(x, y)` over a grid defined by `kernel_size`. The
+resulting values are then normalized to sum to 1, ensuring that the overall
+brightness of the image is preserved after filtering.
 
-Use Cases:
+The filtering operation is implemented as a **depthwise convolution**. This is a
+critical architectural choice. In image processing, blurring is typically
+performed independently on each color channel (e.g., R, G, B). A depthwise
+convolution naturally enforces this by applying a separate filter to each input
+channel. In this implementation, the *same* Gaussian kernel is replicated for
+each channel, ensuring that all channels are blurred consistently. This approach
+prevents unnatural color mixing ("bleeding") between channels and is both
+conceptually sound and computationally efficient.
 
-1.  **Standard Image Smoothing:**
-    Apply a simple blur to reduce noise, with no change in image dimensions.
-    ```python
-    import keras
-    import numpy as np
+References:
+    - Gonzalez, R. C., & Woods, R. E. "Digital Image Processing". This text
+      provides a comprehensive background on Gaussian filtering and its
+      mathematical properties in the context of image processing.
 
-    # Input: 64x64 RGB images
-    input_tensor = keras.Input(shape=(64, 64, 3))
-
-    # Apply a 5x5 Gaussian blur with sigma=1.5
-    smoothed_tensor = GaussianFilter(kernel_size=(5, 5), sigma=1.5)(input_tensor)
-
-    model = keras.Model(inputs=input_tensor, outputs=smoothed_tensor)
-    # model.output_shape -> (None, 64, 64, 3)
-    ```
-
-2.  **Downsampling with Anti-Aliasing:**
-    Use strides to downsample an image. The Gaussian blur acts as an
-    anti-aliasing filter, preventing artifacts that can occur from naive
-    resizing.
-    ```python
-    # Input: 64x64 RGB images
-    input_tensor = keras.Input(shape=(64, 64, 3))
-
-    # Downsample by a factor of 2, applying a blur first
-    downsampled_tensor = GaussianFilter(
-        kernel_size=(5, 5),
-        strides=(2, 2),
-        sigma=1.5,
-        padding="same"
-    )(input_tensor)
-
-    model = keras.Model(inputs=input_tensor, outputs=downsampled_tensor)
-    # model.output_shape -> (None, 32, 32, 3)
-    ```
-
-3.  **Anisotropic Filtering (e.g., Motion Blur):**
-    Apply a stronger blur along one axis than the other by providing a
-    tuple for `sigma`.
-    ```python
-    # Input: 64x64 RGB images
-    input_tensor = keras.Input(shape=(64, 64, 3))
-
-    # Apply a stronger horizontal blur than vertical
-    motion_blurred = GaussianFilter(
-        kernel_size=(3, 9),
-        sigma=(1.0, 4.0) # sigma_height=1.0, sigma_width=4.0
-    )(input_tensor)
-
-    model = keras.Model(inputs=input_tensor, outputs=motion_blurred)
-    # model.output_shape -> (None, 64, 64, 3)
-    ```
+    - Canny, J. "A Computational Approach to Edge Detection". This seminal
+      paper demonstrates the use of Gaussian smoothing as a critical first
+      step to reduce noise before computing image gradients for edge detection.
+      https://doi.org/10.1109/TPAMI.1986.4767851
 """
 
 import keras

@@ -1,3 +1,65 @@
+"""Implements a differentiable, learnable arithmetic operator.
+
+    This layer provides a mechanism for a neural network to learn the optimal
+    arithmetic combination of its inputs, moving beyond fixed operations like
+    addition or concatenation. It is inspired by techniques in Neural
+_   Architecture Search (NAS), where the choice of operation is made a
+    learnable part of the network itself.
+
+    Architecture:
+        The core principle is to create a "soft," differentiable selection over
+        a predefined set of primitive arithmetic operations (e.g., add,
+        multiply, max). Instead of making a discrete, non-differentiable
+        choice of one operation, this layer computes the result of *all*
+        candidate operations and then combines them through a weighted sum.
+
+        The weights for this combination are determined by a learnable parameter
+        vector, where each element corresponds to an operation. This vector is
+        passed through a softmax function to produce a probability
+        distribution, representing the "importance" of each operation.
+
+    Foundational Mathematics:
+        The selection of operations is governed by the softmax function, often
+        with a temperature parameter `T`. Given a vector of learnable weights
+        `w` (one `w_i` for each operation `f_i`), the probability `p_i` for
+        selecting the i-th operation is:
+
+            p_i = exp(w_i / T) / sum_j(exp(w_j / T))
+
+        The temperature `T` is a learnable parameter that controls the sharpness
+        of the probability distribution. As `T -> 0`, the distribution
+        approaches a one-hot vector (a "hard" selection), concentrating all
+        probability on a single operation. As `T -> infinity`, it approaches a
+        uniform distribution, treating all operations equally. This allows the
+        model to explore different operations during early training phases and
+        converge to a more decisive choice later.
+
+        The final output `Y` is a convex combination of the results of each
+        operation `f_i(X)` applied to the input tensor(s) `X`, scaled by a
+        learnable factor `s`:
+
+            Y = s * sum_i(p_i * f_i(X))
+
+        This formulation makes the entire process end-to-end differentiable.
+        Gradients can flow back through the weighted sum and the softmax
+        function to update the operation weights `w`, the temperature `T`, and
+        the scaling factor `s`, allowing the network to learn the most
+        suitable arithmetic transformation for the task at hand.
+
+    References:
+        - The concept of a continuous relaxation over a discrete set of
+          operations is a cornerstone of differentiable NAS, famously
+          popularized by the DARTS framework.
+          Liu, H., Simonyan, K., & Yang, Y. (2018). "DARTS: Differentiable
+          Architecture Search".
+
+        - The use of temperature to control the sharpness of a softmax
+          distribution is a widely used technique, notably in knowledge
+          distillation to create "soft targets."
+          Hinton, G., Vinyals, O., & Dean, J. (2015). "Distilling the
+          Knowledge in a Neural Network".
+"""
+
 import keras
 from keras import ops
 from typing import List, Optional, Union, Any, Dict, Tuple
