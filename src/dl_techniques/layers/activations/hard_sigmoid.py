@@ -1,5 +1,4 @@
 import keras
-from keras import ops
 from typing import Optional, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -97,7 +96,7 @@ class HardSigmoid(keras.layers.Layer):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        # No parameters to store or validate for this simple activation
+        self.activation = keras.layers.ReLU(max_value=6.0)
 
     def call(
             self,
@@ -118,7 +117,7 @@ class HardSigmoid(keras.layers.Layer):
         """
         # Apply hard-sigmoid: ReLU6(x + 3) / 6
         # This is equivalent to: max(0, min(6, x + 3)) / 6
-        return ops.relu(inputs + 3.0, max_value=6.0) / 6.0
+        return self.activation(inputs + 3.0) / 6.0
 
     def compute_output_shape(
             self,

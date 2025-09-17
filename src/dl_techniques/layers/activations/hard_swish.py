@@ -1,5 +1,4 @@
 import keras
-from keras import ops
 from typing import Optional, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -121,7 +120,6 @@ class HardSwish(keras.layers.Layer):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        # No parameters to store or validate for this simple activation
         self.activation = keras.layers.ReLU(max_value=6.0)
 
     def call(
