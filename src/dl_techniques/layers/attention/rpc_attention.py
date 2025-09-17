@@ -64,9 +64,6 @@ from typing import Optional, Union, Tuple, Any, Dict
 from keras import ops, layers, initializers, regularizers
 
 # ---------------------------------------------------------------------
-# RPC-Attention Layer
-# ---------------------------------------------------------------------
-
 
 @keras.saving.register_keras_serializable()
 class RPCAttention(keras.layers.Layer):
@@ -584,3 +581,5 @@ class RPCAttention(keras.layers.Layer):
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------
