@@ -294,51 +294,42 @@ class WindowAttention(keras.layers.Layer):
         super().build(input_shape)
 
     def call(
-        self,
-        x: keras.KerasTensor,
-        training: Optional[bool] = None
+            self,
+            inputs: keras.KerasTensor,
+            attention_mask: Optional[keras.KerasTensor] = None,
+            training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass of the WindowAttention layer.
 
         Args:
-            x: Input tensor of shape (B, N, C) where N = window_size * window_size.
+            inputs: Input tensor of shape (B, N, C) where N = window_size * window_size.
+            attention_mask: Optional attention mask of shape (B, N) to hide padded tokens.
+                  Values should be 1 for tokens to attend to and 0 for padded tokens.
             training: Boolean indicating whether the layer should behave in
                 training mode or inference mode.
 
         Returns:
             Output tensor of shape (B, N, C).
-
-        Raises:
-            ValueError: If input sequence length does not match window_size².
         """
-        B = ops.shape(x)[0]
-        N = ops.shape(x)[1]
-        C = ops.shape(x)[2]
+        B = ops.shape(inputs)[0]
+        N = ops.shape(inputs)[1]
+        C = ops.shape(inputs)[2]
 
-        # Validate that the input sequence length matches the window size squared
         expected_n = self.window_size * self.window_size
         if N != expected_n:
             raise ValueError(
                 f"Input sequence length ({N}) does not match the square of the window_size "
-                f"({self.window_size}^2 = {expected_n}). WindowAttention requires "
-                f"the input to be a single window of tokens."
+                f"({self.window_size}^2 = {expected_n})."
             )
 
-        # Generate qkv matrices
-        qkv = self.qkv(x, training=training)  # (B, N, 3*C)
+        qkv = self.qkv(inputs, training=training)
         qkv = ops.reshape(qkv, (B, N, 3, self.num_heads, self.head_dim))
-        qkv = ops.transpose(qkv, (2, 0, 3, 1, 4))  # (3, B, num_heads, N, head_dim)
+        qkv = ops.transpose(qkv, (2, 0, 3, 1, 4))
+        q, k, v = qkv[0], qkv[1], qkv[2]
 
-        # Separate q, k, v
-        q, k, v = qkv[0], qkv[1], qkv[2]  # Each has shape (B, num_heads, N, head_dim)
-
-        # Scale query
         q = q * self.scale
+        attn = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2)))
 
-        # Compute attention scores
-        attn = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2)))  # (B, num_heads, N, N)
-
-        # Add relative position bias
         relative_position_bias = ops.take(
             self.relative_position_bias_table,
             ops.reshape(self.relative_position_index, (-1,)),
@@ -346,31 +337,40 @@ class WindowAttention(keras.layers.Layer):
         )
         relative_position_bias = ops.reshape(
             relative_position_bias,
-            (self.window_size * self.window_size, self.window_size * self.window_size, -1)
+            (expected_n, expected_n, -1)
         )
-        relative_position_bias = ops.transpose(
-            relative_position_bias, (2, 0, 1)
-        )  # (num_heads, N, N)
-        attn = attn + ops.expand_dims(relative_position_bias, 0)  # (B, num_heads, N, N)
+        relative_position_bias = ops.transpose(relative_position_bias, (2, 0, 1))
+        attn = attn + ops.expand_dims(relative_position_bias, 0)
 
-        # Apply softmax
+        # >>> START OF MASKING LOGIC
+        if attention_mask is not None:
+            # Reshape mask for broadcasting: (B, N) -> (B, 1, 1, N)
+            # This will be broadcast across heads and query positions
+            broadcast_mask = ops.reshape(attention_mask, (B, 1, 1, N))
+
+            # Create the additive mask: 0 for valid tokens, a large negative number for masked ones
+            # Keras ops doesn't have a direct equivalent of -np.inf, so we use a large negative value
+            # from the dtype of the attention scores.
+            inf = ops.convert_to_tensor(-1e9, dtype=attn.dtype)
+            additive_mask = (1.0 - broadcast_mask) * inf
+
+            # Add the mask to the attention scores
+            attn = attn + additive_mask
+        # <<< END OF MASKING LOGIC
+
         attn = ops.softmax(attn, axis=-1)
-
-        # Apply attention dropout
         if self.attn_dropout is not None:
             attn = self.attn_dropout(attn, training=training)
 
-        # Apply attention to values
-        x = ops.matmul(attn, v)  # (B, num_heads, N, head_dim)
-        x = ops.transpose(x, (0, 2, 1, 3))  # (B, N, num_heads, head_dim)
-        x = ops.reshape(x, (B, N, C))  # (B, N, C)
+        inputs = ops.matmul(attn, v)
+        inputs = ops.transpose(inputs, (0, 2, 1, 3))
+        inputs = ops.reshape(inputs, (B, N, C))
 
-        # Output projection
-        x = self.proj(x, training=training)
+        inputs = self.proj(inputs, training=training)
         if self.proj_dropout is not None:
-            x = self.proj_dropout(x, training=training)
+            inputs = self.proj_dropout(inputs, training=training)
 
-        return x
+        return inputs
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
