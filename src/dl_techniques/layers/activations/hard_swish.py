@@ -1,8 +1,8 @@
-# Core Keras imports - always use full paths
 import keras
-from keras import layers, ops
-from typing import Optional, Union, Tuple, Dict, Any
+from keras import ops
+from typing import Optional, Tuple, Dict, Any
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class HardSwish(keras.layers.Layer):

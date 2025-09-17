@@ -20,6 +20,8 @@ from .basis_function import BasisFunction
 from .expanded_activations import (
     GELU, SiLU, xATLU, xGELU, xSiLU, EluPlusOne
 )
+from .hard_sigmoid import HardSigmoid
+from .hard_swish import HardSwish
 from .mish import Mish, SaturatedMish
 from .relu_k import ReLUK
 from .squash import SquashLayer
@@ -38,6 +40,8 @@ ActivationType = Literal[
     'xgelu',
     'xsilu',
     'elu_plus_one',
+    'hard_sigmoid',
+    'hard_swish',
     'mish',
     'saturated_mish',
     'relu_k',
@@ -123,6 +127,20 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'required_params': [],
         'optional_params': {},
         'use_case': 'Ensures outputs are strictly positive, useful for rate parameters in distributions.'
+    },
+    'hard_sigmoid': {
+        'class': HardSigmoid,
+        'description': 'Hard-sigmoid activation, a computationally efficient approximation of sigmoid.',
+        'required_params': [],
+        'optional_params': {},
+        'use_case': 'Efficient gating in mobile networks and squeeze-and-excitation modules.'
+    },
+    'hard_swish': {
+        'class': HardSwish,
+        'description': 'Hard-swish activation, a computationally efficient variant of Swish/SiLU.',
+        'required_params': [],
+        'optional_params': {},
+        'use_case': 'High-performance activation for mobile-optimized models like MobileNetV3.'
     },
     'mish': {
         'class': Mish,
@@ -254,6 +272,9 @@ def validate_activation_config(activation_type: str, **kwargs: Any) -> None:
                     raise ValueError(f"Unknown {param_name}: '{kwargs[param_name]}'")
 
 
+# ---------------------------------------------------------------------
+
+
 def create_activation_layer(
     activation_type: ActivationType,
     name: Optional[str] = None,
@@ -348,6 +369,7 @@ def create_activation_layer(
         logger.error(error_msg)
         raise ValueError(error_msg) from e
 
+# ---------------------------------------------------------------------
 
 def create_activation_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     """

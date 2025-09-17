@@ -2,6 +2,7 @@ import keras
 from keras import ops
 from typing import Optional, Tuple, Dict, Any
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class HardSigmoid(keras.layers.Layer):
@@ -149,3 +150,5 @@ class HardSigmoid(keras.layers.Layer):
         config = super().get_config()
         # No additional parameters to add for this simple activation
         return config
+
+# ---------------------------------------------------------------------
