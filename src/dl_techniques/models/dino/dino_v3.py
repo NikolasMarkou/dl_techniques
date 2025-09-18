@@ -17,16 +17,16 @@ Usage Examples:
 -------------
 ```python
 # ImageNet model (224x224 input)
-model = DinoV3Model.from_variant("base", num_classes=1000)
+model = DINOv3.from_variant("base", num_classes=1000)
 
 # CIFAR-10 model (32x32 input)
-model = DinoV3Model.from_variant("small", image_size=(32, 32), num_classes=10)
+model = DINOv3.from_variant("small", image_size=(32, 32), num_classes=10)
 
 # Feature extraction model
-model = create_dinov3("large", include_top=False)
+model = create_dino_v3("large", include_top=False)
 
 # Custom configuration
-model = create_dinov3("tiny", stochastic_depth_rate=0.2)
+model = create_dino_v3("tiny", stochastic_depth_rate=0.2)
 ```
 """
 
@@ -45,7 +45,7 @@ from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class DinoV3Model(keras.Model):
+class DINOv3(keras.Model):
     """
     DinoV3 (Data-efficient Image Transformers) Model Implementation.
 
@@ -76,7 +76,7 @@ class DinoV3Model(keras.Model):
             head is added. Defaults to 1000.
         embed_dim: Integer, embedding dimension. Must be positive and typically
             divisible by num_heads. Defaults to 768.
-        num_layers: Integer, number of transformer layers. Must be positive.
+        depth: Integer, number of transformer layers. Must be positive.
             Defaults to 12.
         num_heads: Integer, number of attention heads per layer. Must be positive
             and divide embed_dim evenly. Defaults to 12.
@@ -122,52 +122,52 @@ class DinoV3Model(keras.Model):
 
     Example:
         >>> # Create DinoV3-Base for ImageNet
-        >>> model = DinoV3Model.from_variant("base", num_classes=1000)
+        >>> model = DINOv3.from_variant("base", num_classes=1000)
         >>>
         >>> # Create DinoV3-Small for CIFAR-10
-        >>> model = DinoV3Model.from_variant("small", image_size=(32, 32), num_classes=10)
+        >>> model = DINOv3.from_variant("small", image_size=(32, 32), num_classes=10)
         >>>
         >>> # Create feature extraction model
-        >>> model = DinoV3Model.from_variant("large", include_top=False)
+        >>> model = DINOv3.from_variant("large", include_top=False)
 
     References:
         - Oquab, Maxime, et al. "DINOv2: Learning Robust Visual Features without Supervision"
         - Dosovitskiy, Alexey, et al. "An image is worth 16x16 words: Transformers for image recognition at scale"
     """
 
-    # Model variant configurations
+    # Model variant configurations - Updated to use 'depth' instead of 'num_layers'
     MODEL_VARIANTS = {
         "tiny": {
             "embed_dim": 192,
-            "num_layers": 12,
+            "depth": 12,
             "num_heads": 3,
             "mlp_ratio": 4.0,
             "patch_size": (16, 16)
         },
         "small": {
             "embed_dim": 384,
-            "num_layers": 12,
+            "depth": 12,
             "num_heads": 6,
             "mlp_ratio": 4.0,
             "patch_size": (16, 16)
         },
         "base": {
             "embed_dim": 768,
-            "num_layers": 12,
+            "depth": 12,
             "num_heads": 12,
             "mlp_ratio": 4.0,
             "patch_size": (16, 16)
         },
         "large": {
             "embed_dim": 1024,
-            "num_layers": 24,
+            "depth": 24,
             "num_heads": 16,
             "mlp_ratio": 4.0,
             "patch_size": (16, 16)
         },
         "giant": {
             "embed_dim": 1536,
-            "num_layers": 40,
+            "depth": 40,
             "num_heads": 24,
             "mlp_ratio": 4.0,
             "patch_size": (14, 14),
@@ -186,7 +186,7 @@ class DinoV3Model(keras.Model):
         patch_size: Tuple[int, int] = (16, 16),
         num_classes: int = 1000,
         embed_dim: int = 768,
-        num_layers: int = 12,
+        depth: int = 12,  # Renamed from num_layers
         num_heads: int = 12,
         mlp_ratio: float = 4.0,
         dropout_rate: float = 0.1,
@@ -213,8 +213,8 @@ class DinoV3Model(keras.Model):
             raise ValueError(f"image_size {image_size} must be divisible by patch_size {patch_size}")
         if embed_dim <= 0:
             raise ValueError(f"embed_dim must be positive, got {embed_dim}")
-        if num_layers <= 0:
-            raise ValueError(f"num_layers must be positive, got {num_layers}")
+        if depth <= 0:  # Changed validation from num_layers to depth
+            raise ValueError(f"depth must be positive, got {depth}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
         if embed_dim % num_heads != 0:
@@ -233,7 +233,7 @@ class DinoV3Model(keras.Model):
         self.patch_size = patch_size
         self.num_classes = num_classes
         self.embed_dim = embed_dim
-        self.num_layers = num_layers
+        self.depth = depth  # Store as depth instead of num_layers
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
         self.dropout_rate = dropout_rate
@@ -271,7 +271,7 @@ class DinoV3Model(keras.Model):
 
         logger.info(
             f"Created DinoV3 model for input {image_size + (3,)} "
-            f"with {num_layers} layers, {embed_dim} embedding dim"
+            f"with {depth} layers, {embed_dim} embedding dim"
         )
 
     def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
@@ -378,9 +378,9 @@ class DinoV3Model(keras.Model):
         Returns:
             Encoded tensor
         """
-        for i in range(self.num_layers):
+        for i in range(self.depth):  # Changed from self.num_layers to self.depth
             # Calculate stochastic depth rate for this layer (linear scaling)
-            layer_drop_rate = self.stochastic_depth_rate * i / (self.num_layers - 1) if self.num_layers > 1 else 0.0
+            layer_drop_rate = self.stochastic_depth_rate * i / (self.depth - 1) if self.depth > 1 else 0.0
 
             encoder_layer = TransformerLayer(
                 hidden_size=self.embed_dim,
@@ -477,7 +477,7 @@ class DinoV3Model(keras.Model):
         num_classes: int = 1000,
         include_top: bool = True,
         **kwargs: Any
-    ) -> "DinoV3Model":
+    ) -> "DINOv3":
         """
         Create a DinoV3 model from a predefined variant.
 
@@ -496,11 +496,11 @@ class DinoV3Model(keras.Model):
 
         Example:
             >>> # Create DinoV3-Base for ImageNet
-            >>> model = DinoV3Model.from_variant("base", num_classes=1000)
+            >>> model = DINOv3.from_variant("base", num_classes=1000)
             >>> # Create DinoV3-Small for CIFAR-10
-            >>> model = DinoV3Model.from_variant("small", image_size=(32, 32), num_classes=10)
+            >>> model = DINOv3.from_variant("small", image_size=(32, 32), num_classes=10)
             >>> # Feature extraction model
-            >>> model = DinoV3Model.from_variant("large", include_top=False)
+            >>> model = DINOv3.from_variant("large", include_top=False)
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -532,7 +532,7 @@ class DinoV3Model(keras.Model):
             'patch_size': self.patch_size,
             'num_classes': self.num_classes,
             'embed_dim': self.embed_dim,
-            'num_layers': self.num_layers,
+            'depth': self.depth,  # Changed from num_layers to depth
             'num_heads': self.num_heads,
             'mlp_ratio': self.mlp_ratio,
             'dropout_rate': self.dropout_rate,
@@ -552,7 +552,7 @@ class DinoV3Model(keras.Model):
         return config
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "DinoV3Model":
+    def from_config(cls, config: Dict[str, Any]) -> "DINOv3":
         """
         Create model from configuration.
 
@@ -593,7 +593,7 @@ class DinoV3Model(keras.Model):
         logger.info(f"  - Number of patches: {self.num_patches} ({self.num_patches_h}x{self.num_patches_w})")
         logger.info(f"  - Sequence length: {self.sequence_length}")
         logger.info(f"  - Embedding dimension: {self.embed_dim}")
-        logger.info(f"  - Number of layers: {self.num_layers}")
+        logger.info(f"  - Number of layers: {self.depth}")  # Changed from num_layers
         logger.info(f"  - Number of heads: {self.num_heads}")
         logger.info(f"  - Head dimension: {self.embed_dim // self.num_heads}")
         logger.info(f"  - MLP ratio: {self.mlp_ratio}")
@@ -611,14 +611,14 @@ class DinoV3Model(keras.Model):
 # Factory Functions
 # ---------------------------------------------------------------------
 
-def create_dinov3(
+def create_dino_v3(  # Renamed from create_dinov3
     variant: str = "base",
     image_size: Tuple[int, int] = (224, 224),
     num_classes: int = 1000,
     include_top: bool = True,
     pretrained: bool = False,
     **kwargs: Any
-) -> DinoV3Model:
+) -> DINOv3:
     """
     Convenience function to create DinoV3 models.
 
@@ -635,16 +635,16 @@ def create_dinov3(
 
     Example:
         >>> # Create DinoV3-Base for ImageNet
-        >>> model = create_dinov3("base", num_classes=1000)
+        >>> model = create_dino_v3("base", num_classes=1000)
         >>> # Create DinoV3-Small for CIFAR-10
-        >>> model = create_dinov3("small", image_size=(32, 32), num_classes=10)
+        >>> model = create_dino_v3("small", image_size=(32, 32), num_classes=10)
         >>> # Create DinoV3-Large for feature extraction
-        >>> model = create_dinov3("large", include_top=False)
+        >>> model = create_dino_v3("large", include_top=False)
     """
     if pretrained:
         logger.warning("Pretrained weights are not yet implemented")
 
-    return DinoV3Model.from_variant(
+    return DINOv3.from_variant(
         variant,
         image_size=image_size,
         num_classes=num_classes,
