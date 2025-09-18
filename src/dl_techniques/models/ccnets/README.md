@@ -1,460 +1,430 @@
-# CCNets: Causal Cooperative Networks
+# Causal Cooperative Networks (CCNets) Framework
 
-> *"In the Three Kingdoms, balance through cooperation creates stability where competition breeds chaos."*
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Keras 3.8.0](https://img.shields.io/badge/keras-3.8.0-red.svg)](https://keras.io/)
+[![TensorFlow 2.18.0](https://img.shields.io/badge/tensorflow-2.18.0-orange.svg)](https://www.tensorflow.org/)
 
-**CCNets** is a revolutionary neural network architecture that implements **explainable cooperative learning** through three specialized networks working in harmony. Inspired by the Three Kingdoms political philosophy, CCNets moves beyond adversarial training to create stable, interpretable AI systems.
+A model-agnostic meta-framework for implementing Causal Cooperative Networks (CCNets) - neural architectures that learn true causal relationships rather than mere associations.
 
-## 🌟 Overview
+## 🚀 Overview
 
-Traditional machine learning has evolved through distinct eras:
-- **Supervised Era**: Single networks (efficient but rigid)
-- **Adversarial Era**: Two competing networks (innovative but unstable)  
-- **Cooperative Era**: **Three collaborative networks (stable and explainable)** ← *We are here*
+Modern deep learning excels at learning associations but struggles with causation. CCNets bridge this gap by employing three cooperative neural networks that continuously verify each other's reasoning, forcing the system to learn the true data-generating process.
 
-CCNets implements this cooperative paradigm through three specialized networks that each serve a unique role while working together toward common objectives.
+### Key Innovation
 
-## 🏛️ Architecture Philosophy
+Unlike traditional neural networks that learn `P(Y|X)` (correlation), CCNets decompose the problem into three causal components:
 
-### The Three Networks
+- **Explainer**: Models `P(E|X)` - Extracts latent causes/context
+- **Reasoner**: Models `P(Y|X,E)` - Performs context-aware inference  
+- **Producer**: Models `P(X|Y,E)` - Verifies by reconstruction/generation
 
-```mermaid
-graph LR
-    subgraph Inputs
-        A[Input Data]
-        GT[Ground Truth Labels]
-    end
+This tripartite architecture enables **counterfactual reasoning** - the ability to answer "what if" questions impossible for standard classifiers.
 
-    subgraph "CCNets Networks"
-        E[Explainer Network]
-        R[Reasoner Network]
-        P[Producer Network]
-    end
+## 📋 Table of Contents
 
-    subgraph Outputs
-        Prediction[Final Prediction]
-        Generated[Generated Data]
-        Reconstructed[Reconstructed Data]
-    end
-    
-    A --> E
-    A --> R
-    
-    E -- "Explanation<br>Vector" --> R
-    E -- "Explanation<br>Vector" --> P
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Core Concepts](#core-concepts)
+- [Framework Architecture](#framework-architecture)
+- [Usage Guide](#usage-guide)
+- [Advanced Features](#advanced-features)
+- [API Reference](#api-reference)
+- [Examples](#examples)
+- [Contributing](#contributing)
+- [License](#license)
 
-    R -- "Predicted<br>Label" --> P
-    R --> Prediction
-    
-    GT -- "Ground Truth<br>Label" --> P
-    
-    P -- "Generation" --> Generated
-    P -- "Reconstruction" --> Reconstructed
+## 🔧 Installation
 
-    classDef explainer fill:#e1f5fe,stroke:#333
-    classDef reasoner fill:#f3e5f5,stroke:#333
-    classDef producer fill:#e8f5e8,stroke:#333
-
-    class E explainer
-    class R reasoner
-    class P producer
-```
-
-1. **🧠 Explainer Network**: Creates compressed, interpretable explanation vectors from input data
-2. **⚖️ Reasoner Network**: Makes predictions using both raw input and explanations
-3. **🏭 Producer Network**: Generates and reconstructs data from labels and explanations
-
-### Mathematical Framework
-
-CCNets optimizes three fundamental losses:
+### Requirements
 
 ```python
-# Core Loss Functions
-inference_loss = |reconstructed_observation - generated_observation|
-generation_loss = |generated_observation - input_observation|
-reconstruction_loss = |reconstructed_observation - input_observation|
+python >= 3.11
+keras == 3.8.0
+tensorflow == 2.18.0
+numpy >= 1.21.0
 ```
 
-Each network optimizes its own **cooperative objective**:
+### Setup
 
-```python
-# Network-Specific Cooperative Objectives
-explainer_error = inference_loss + generation_loss - reconstruction_loss
-reasoner_error = reconstruction_loss + inference_loss - generation_loss
-producer_error = generation_loss + reconstruction_loss - inference_loss
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/ccnet-framework.git
+cd ccnet-framework
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Import the framework
+from ccnets import CCNetOrchestrator, CCNetConfig, CCNetTrainer
 ```
 
-This creates a balanced system where each network contributes to overall performance while maintaining its specialized role.
-
-## 🚀 Key Features
-
-- ✨ **Built-in Explainability**: Automatic explanation vector generation
-- 🤝 **Cooperative Learning**: Three networks working together, not against each other
-- 🔄 **Bidirectional Inference**: Both prediction and data generation capabilities
-- 🎯 **Gradient Isolation**: Proper training dynamics with isolated network objectives
-- 📊 **Cross-Verification**: Multiple pathways for validating predictions
-- 🔧 **Flexible Architecture**: Easily adaptable to different domains
-- 💾 **Production Ready**: Full serialization and deployment support
-
-## 🎯 Quick Start
-
-### Basic Usage
+## ⚡ Quick Start
 
 ```python
 import keras
-import numpy as np
-from dl_techniques.models.ccnets import create_ccnets_model
+from ccnets import CCNetOrchestrator, CCNetConfig, wrap_keras_model
 
-# 1. Create synthetic data
-X_train = np.random.randn(1000, 20).astype(np.float32)
-y_train = keras.utils.to_categorical(
-    np.random.randint(0, 5, 1000), 5
-).astype(np.float32)
+# 1. Define your three models
+explainer = keras.Sequential([...])  # Your model for P(E|X)
+reasoner = keras.Sequential([...])   # Your model for P(Y|X,E)
+producer = keras.Sequential([...])   # Your model for P(X|Y,E)
 
-# 2. Create CCNets model
-model = create_ccnets_model(
-    input_dim=20,           # Input feature dimension
-    explanation_dim=8,      # Compressed explanation dimension
-    output_dim=5,           # Number of classes
-    loss_weights=[1.0, 1.0, 1.0]  # Equal weighting
+# 2. Create orchestrator
+orchestrator = CCNetOrchestrator(
+    explainer=wrap_keras_model(explainer),
+    reasoner=wrap_keras_model(reasoner),
+    producer=wrap_keras_model(producer),
+    config=CCNetConfig(explanation_dim=128)
 )
 
-# 3. Compile and train
-model.compile(optimizer='adam')
+# 3. Train with automatic orchestration
+trainer = CCNetTrainer(orchestrator)
+trainer.train(train_dataset, epochs=50)
 
-# Training with CCNets format: ([observations, labels], targets)
-for epoch in range(10):
-    for i in range(0, len(X_train), 32):
-        batch_x = X_train[i:i+32]
-        batch_y = y_train[i:i+32] 
-        data = ((batch_x, batch_y), None)
-        metrics = model.train_step(data)
-        
-        if i % 320 == 0:  # Print every 10 batches
-            print(f"Epoch {epoch+1}, Loss: {metrics['loss']:.4f}")
-
-# 4. Make predictions with explanations
-predictions = model.predict_step(X_train[:10])
-print("Predictions shape:", predictions['predictions'].shape)
-print("Explanations shape:", predictions['explanations'].shape)
-print("Reconstructions shape:", predictions['reconstructions'].shape)
+# 4. Generate counterfactuals
+x_counterfactual = orchestrator.counterfactual_generation(x_reference, y_target)
 ```
 
-### Advanced Configuration
+## 🧠 Core Concepts
+
+### Mathematical Foundation
+
+CCNets enforce three fundamental conditions for causal learning:
+
+1. **Independence**: `P(Y, E) = P(Y) * P(E)`
+   - Explicit and latent causes are independent
+   
+2. **Conditional Dependence**: `P(Y | X, E) ≠ P(Y | X)`
+   - Context is essential for accurate inference
+   
+3. **Necessity & Sufficiency**: Modeled by `P(X | Y, E)`
+   - Both causes together fully explain the effect
+
+### The Three Losses
+
+The framework computes three fundamental losses that measure different aspects of causal consistency:
+
+| Loss | Formula | Meaning |
+|------|---------|---------|
+| **Generation Loss** | `\|\|X_generated - X_input\|\|` | Quality of generation from true causes |
+| **Reconstruction Loss** | `\|\|X_reconstructed - X_input\|\|` | Total inference + reconstruction error |
+| **Inference Loss** | `\|\|X_reconstructed - X_generated\|\|` | Error attributable to incorrect inference |
+
+### Causal Credit Assignment
+
+Each network receives a specialized error signal computed from the three losses:
+
+- **Explainer Error** = `Inference + Generation - Reconstruction`
+- **Reasoner Error** = `Reconstruction + Inference - Generation`
+- **Producer Error** = `Generation + Reconstruction - Inference`
+
+This unique credit assignment ensures each network learns its specific causal role.
+
+## 🏗️ Framework Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   CCNetOrchestrator                     │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │              Forward Pass Flow                  │    │
+│  │                                                 │    │
+│  │    X ──► Explainer ──► E ──┐                    │    │
+│  │    │                       ▼                    │    │
+│  │    └──────────────► Reasoner ──► Y_inf          │    │
+│  │                            │                    │    │
+│  │    Y_truth ──┐             ▼                    │    │
+│  │              ├──► Producer ──► X_gen            │    │
+│  │    Y_inf ────┤      │                           │    │
+│  │              └──────┴──────► X_recon            │    │
+│  └─────────────────────────────────────────────────┘    │
+│                                                         │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │           Loss Computation Engine               │    │
+│  │                                                 │    │
+│  │  • Generation Loss    = ||X_gen - X||           │    │
+│  │  • Reconstruction Loss = ||X_recon - X||        │    │
+│  │  • Inference Loss     = ||X_recon - X_gen||     │    │
+│  └─────────────────────────────────────────────────┘    │
+│                                                         │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │         Gradient Isolation & Routing            │    │
+│  │                                                 │    │
+│  │  • Explainer ← Explainer Error (freeze others)  │    │
+│  │  • Reasoner  ← Reasoner Error (freeze others)   │    │
+│  │  • Producer  ← Producer Error (freeze others)   │    │
+│  └─────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Component Overview
+
+| Component | Description | Input | Output |
+|-----------|-------------|-------|--------|
+| **CCNetModule** | Protocol defining model interface | - | - |
+| **CCNetOrchestrator** | Main orchestration engine | 3 models + config | Managed training |
+| **CCNetConfig** | Configuration container | Parameters | Settings |
+| **CCNetTrainer** | High-level training manager | Orchestrator | Training loop |
+| **CCNetLosses** | Loss value container | Tensors | 3 losses |
+| **CCNetModelErrors** | Error signal container | Losses | 3 errors |
+
+## 📖 Usage Guide
+
+### Model Requirements
+
+Any neural network can be used with CCNet as long as it implements the correct interface:
+
+#### Explainer Requirements
+```python
+def explainer(x: Tensor) -> Tensor:
+    """
+    Args:
+        x: Input observation [batch, ...]
+    Returns:
+        e: Latent explanation [batch, explanation_dim]
+    """
+```
+
+#### Reasoner Requirements
+```python
+def reasoner(x: Tensor, e: Tensor) -> Tensor:
+    """
+    Args:
+        x: Input observation [batch, ...]
+        e: Latent explanation [batch, explanation_dim]
+    Returns:
+        y: Predicted labels [batch, num_classes]
+    """
+```
+
+#### Producer Requirements
+```python
+def producer(y: Tensor, e: Tensor) -> Tensor:
+    """
+    Args:
+        y: Class labels [batch, num_classes]
+        e: Latent explanation [batch, explanation_dim]
+    Returns:
+        x: Generated observation [batch, ...]
+    """
+```
+
+### Configuration Options
 
 ```python
-# Create model with custom network architectures
-model = create_ccnets_model(
-    input_dim=100,
-    explanation_dim=32,
-    output_dim=10,
-    explainer_kwargs={
-        'hidden_dims': [256, 128, 64],
-        'dropout_rate': 0.2,
-        'use_batch_norm': True,
-        'activation': 'gelu'
+config = CCNetConfig(
+    explanation_dim=128,          # Dimension of latent vector E
+    loss_type='l2',              # 'l1', 'l2', or 'huber'
+    learning_rates={             # Per-module learning rates
+        'explainer': 1e-3,
+        'reasoner': 1e-3,
+        'producer': 1e-3
     },
-    reasoner_kwargs={
-        'hidden_dims': [256, 128],
-        'fusion_dim': 512,
-        'dropout_rate': 0.15,
-        'output_activation': 'softmax'
-    },
-    producer_kwargs={
-        'hidden_dims': [128, 256, 512],
-        'dropout_rate': 0.1,
-        'output_activation': 'sigmoid'
-    },
-    loss_weights=[1.2, 1.0, 0.8]  # Emphasize inference consistency
+    gradient_clip_norm=1.0,      # Max gradient norm (None to disable)
+    use_mixed_precision=False,   # Enable mixed precision training
+    sequential_data=False,       # Enable causal masking for sequences
+    verification_weight=1.0      # Weight for verification losses
 )
 ```
 
-### Custom Training Loop
+### Training Workflow
 
 ```python
-import tensorflow as tf
-
-# Create dataset
-train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+# 1. Prepare your data
+train_dataset = tf.data.Dataset.from_tensor_slices((x_train, y_train))
 train_dataset = train_dataset.batch(32).shuffle(1000)
 
-# Compile model
-model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.001))
+# 2. Create trainer with callbacks
+trainer = CCNetTrainer(orchestrator)
 
-# Training loop with detailed monitoring
-for epoch in range(epochs):
-    print(f"\nEpoch {epoch + 1}/{epochs}")
-    
-    for step, (x_batch, y_batch) in enumerate(train_dataset):
-        # CCNets data format
-        data = ((x_batch, y_batch), None)
-        
-        # Training step with cooperative learning
-        metrics = model.train_step(data)
-        
-        if step % 20 == 0:
-            print(f"  Step {step}: "
-                  f"total={metrics['loss']:.4f}, "
-                  f"inference={metrics['inference_loss']:.4f}, "
-                  f"generation={metrics['generation_loss']:.4f}, "
-                  f"reconstruction={metrics['reconstruction_loss']:.4f}")
+# 3. Define custom callbacks
+early_stopping = EarlyStoppingCallback(patience=10, threshold=1e-4)
+
+def metrics_callback(epoch, metrics):
+    print(f"Epoch {epoch}: Generation Loss = {metrics['generation_loss']:.4f}")
+
+# 4. Train with automatic orchestration
+trainer.train(
+    train_dataset=train_dataset,
+    epochs=100,
+    validation_dataset=val_dataset,
+    callbacks=[early_stopping, metrics_callback]
+)
+
+# 5. Access training history
+history = trainer.history
 ```
 
-## 🔍 Understanding CCNets Output
+## 🔬 Advanced Features
 
-### Predictions and Explanations
+### Counterfactual Generation
+
+Generate "what if" scenarios by mixing causes:
 
 ```python
-# Get model outputs
-outputs = model([X_test, y_test], training=False)
+# "What would this '3' look like if it were an '8' in the same style?"
+x_reference = load_image_of_3()
+y_target = one_hot_encode(8)
 
-explanation_vectors = outputs['explanation_vector']      # Interpretable features
-predicted_labels = outputs['inferred_label']            # Classification predictions  
-generated_data = outputs['generated_observation']       # Generated from ground truth
-reconstructed_data = outputs['reconstructed_observation'] # Generated from predictions
-
-# Analyze explanation vectors
-print(f"Explanation statistics:")
-print(f"  Mean: {np.mean(explanation_vectors):.4f}")
-print(f"  Std: {np.std(explanation_vectors):.4f}")  
-print(f"  Range: [{np.min(explanation_vectors):.4f}, {np.max(explanation_vectors):.4f}]")
-
-# Measure reconstruction quality
-reconstruction_error = np.mean(np.abs(X_test - reconstructed_data))
-print(f"Reconstruction error: {reconstruction_error:.4f}")
+x_counterfactual = orchestrator.counterfactual_generation(x_reference, y_target)
 ```
 
-### Cooperative Learning Analysis
+### Style Transfer
+
+Combine content from one observation with style from another:
 
 ```python
-# Analyze cooperative behavior
-losses = model.compute_losses(X_test, y_test, outputs)
+# "Draw this '7' in the style of that '4'"
+x_content = load_image_of_7()
+x_style = load_image_of_4()
 
-print("Loss Components:")
-print(f"  Inference Loss: {losses['inference_loss']:.4f}")     # Pathway consistency
-print(f"  Generation Loss: {losses['generation_loss']:.4f}")   # Generation fidelity
-print(f"  Reconstruction Loss: {losses['reconstruction_loss']:.4f}") # Reconstruction fidelity
-
-print("\nCooperative Objectives:")
-print(f"  Explainer Error: {losses['explainer_error']:.4f}")   # Focus: inference + generation
-print(f"  Reasoner Error: {losses['reasoner_error']:.4f}")     # Focus: reconstruction + inference  
-print(f"  Producer Error: {losses['producer_error']:.4f}")     # Focus: generation + reconstruction
-
-# Cooperation score (lower = better cooperation)
-cooperation_score = (losses['inference_loss'] + 
-                    losses['generation_loss'] + 
-                    losses['reconstruction_loss']) / 3
-print(f"Cooperation Score: {cooperation_score:.4f}")
+x_transferred = orchestrator.style_transfer(x_content, x_style)
 ```
 
-## 📊 Visualization
+### Causal Disentanglement
 
-CCNets provides built-in visualization tools:
+Extract the independent causal factors:
 
 ```python
-from dl_techniques.models.ccnets.ccnets_examples import visualize_explanations
+y_explicit, e_latent = orchestrator.disentangle_causes(x_input)
 
-# Visualize explanation patterns and relationships
-visualize_explanations(
-    model=model,
-    X_sample=X_test[:100],
-    y_sample=y_test[:100],
-    save_path="ccnets_analysis.png"
+print(f"Explicit cause (label): {y_explicit}")
+print(f"Latent cause (style): {e_latent}")
+```
+
+### Consistency Verification
+
+Check if the model's reasoning is internally consistent:
+
+```python
+is_consistent = orchestrator.verify_consistency(x_input, threshold=0.01)
+
+if is_consistent:
+    print("Model reasoning is causally consistent")
+```
+
+### Sequential Data Support
+
+For time series and text, use the specialized orchestrator:
+
+```python
+from ccnets import SequentialCCNetOrchestrator
+
+# Producer will use reverse causality via sequence reversal
+seq_orchestrator = SequentialCCNetOrchestrator(
+    explainer=transformer_explainer,
+    reasoner=transformer_reasoner,
+    producer=reverse_transformer_producer,  # Implements reverse-causal mask
+    config=CCNetConfig(sequential_data=True)
 )
 ```
 
-This creates a comprehensive visualization showing:
-- Explanation vector heatmaps
-- Prediction confidence distributions  
-- Explanation norm vs reconstruction error relationships
-- Class-wise explanation patterns
-
-## 🧪 Use Cases
-
-### 1. Explainable Image Classification
-
-```python
-# CIFAR-10 with explanations
-model = create_ccnets_model(
-    input_dim=3072,  # 32x32x3 flattened
-    explanation_dim=64,
-    output_dim=10,
-    explainer_kwargs={'hidden_dims': [1024, 512, 256]},
-    reasoner_kwargs={'hidden_dims': [512, 256]},
-    producer_kwargs={'hidden_dims': [256, 512, 1024]}
-)
-```
-
-### 2. Anomaly Detection with Reconstruction
-
-```python
-# High reconstruction error indicates anomalies
-predictions = model.predict_step(test_data)
-reconstruction_errors = np.mean(
-    np.abs(test_data - predictions['reconstructions']), axis=1
-)
-anomalies = test_data[reconstruction_errors > threshold]
-```
-
-### 3. Data Augmentation via Generation
-
-```python
-# Generate new samples from existing labels
-synthetic_data = model.producer_network([labels, explanations])
-```
-
-### 4. Model Interpretability
-
-```python
-# Analyze what the model learned
-explanations = model.explainer_network(input_data)
-
-# Find most important explanation dimensions
-explanation_importance = np.std(explanations, axis=0)
-top_dimensions = np.argsort(explanation_importance)[-5:]
-print(f"Most informative explanation dimensions: {top_dimensions}")
-```
-
-## 🔧 API Reference
+## 📚 API Reference
 
 ### Core Classes
 
-#### `CCNetsModel`
-The main cooperative learning model.
+#### CCNetOrchestrator
 
 ```python
-CCNetsModel(
-    explainer_network: keras.Model,
-    reasoner_network: keras.Model, 
-    producer_network: keras.Model,
-    loss_weights: List[float] = [1.0, 1.0, 1.0],
+class CCNetOrchestrator:
+    def __init__(self, explainer, reasoner, producer, config=None)
+    def forward_pass(self, x_input, y_truth, training=True) -> Dict
+    def compute_losses(self, tensors) -> CCNetLosses
+    def compute_model_errors(self, losses) -> CCNetModelErrors
+    def train_step(self, x_input, y_truth) -> Dict[str, float]
+    def evaluate(self, x_input, y_truth) -> Dict[str, float]
+    def counterfactual_generation(self, x_reference, y_target) -> Tensor
+    def style_transfer(self, x_content, x_style) -> Tensor
+    def disentangle_causes(self, x_input) -> Tuple[Tensor, Tensor]
+    def verify_consistency(self, x_input, threshold=0.01) -> bool
+    def save_models(self, base_path: str)
+    def load_models(self, base_path: str)
+```
+
+#### CCNetConfig
+
+```python
+@dataclass
+class CCNetConfig:
+    explanation_dim: int = 128
+    loss_type: str = 'l2'
+    learning_rates: Dict[str, float]
+    gradient_clip_norm: Optional[float] = 1.0
     use_mixed_precision: bool = False
+    sequential_data: bool = False
+    verification_weight: float = 1.0
+```
+
+#### CCNetTrainer
+
+```python
+class CCNetTrainer:
+    def __init__(self, orchestrator, metrics_callback=None)
+    def train(self, train_dataset, epochs, validation_dataset=None, callbacks=None)
+    @property
+    def history(self) -> Dict[str, List[float]]
+```
+
+### Utility Functions
+
+```python
+def wrap_keras_model(model: keras.Model) -> CCNetModule
+"""Wrap a Keras model to comply with CCNetModule protocol."""
+```
+
+## 🎯 Examples
+
+### MNIST Digit Generation
+
+Complete example for handwritten digit generation with style control:
+
+```python
+from examples.mnist_ccnet import create_mnist_ccnet, train_mnist_ccnet
+
+# Create and train CCNet for MNIST
+orchestrator, trainer = train_mnist_ccnet()
+
+# Generate a '3' in the style of a '7'
+x_3 = load_digit_3()
+x_7 = load_digit_7()
+x_3_in_style_of_7 = orchestrator.style_transfer(x_3, x_7)
+```
+
+### Text Generation with GPT
+
+Example using transformers for causal text generation:
+
+```python
+from examples.text_ccnet import create_text_ccnet
+
+# Create CCNet with GPT-style transformers
+orchestrator = create_text_ccnet(
+    vocab_size=50000,
+    sequence_length=512,
+    explanation_dim=256
 )
+
+# Generate text with specific style
+text_formal = "The results demonstrate..."
+text_casual = "So basically what happened was..."
+style_swapped = orchestrator.style_transfer(text_formal, text_casual)
 ```
 
-#### `ExplainerNetwork`
-Creates explanation vectors from input data.
+### Time Series Forecasting
+
+Example for causal time series analysis:
 
 ```python
-ExplainerNetwork(
-    input_dim: int,
-    explanation_dim: int,
-    hidden_dims: List[int] = [512, 256],
-    activation: str = 'relu',
-    dropout_rate: float = 0.3
+from examples.timeseries_ccnet import create_timeseries_ccnet
+
+# Create CCNet for time series
+orchestrator = create_timeseries_ccnet(
+    input_features=10,
+    sequence_length=100,
+    explanation_dim=64
 )
+
+# Counterfactual forecasting: "What if the trend had been different?"
+actual_series = load_stock_prices()
+alternative_trend = create_upward_trend()
+counterfactual = orchestrator.counterfactual_generation(actual_series, alternative_trend)
 ```
-
-#### `ReasonerNetwork`
-Makes predictions from inputs and explanations.
-
-```python
-ReasonerNetwork(
-    input_dim: int,
-    explanation_dim: int,
-    output_dim: int,
-    hidden_dims: List[int] = [512, 256],
-    fusion_dim: int = 512,
-    output_activation: str = 'softmax'
-)
-```
-
-#### `ProducerNetwork`
-Generates/reconstructs data from labels and explanations.
-
-```python
-ProducerNetwork(
-    label_dim: int,
-    explanation_dim: int,
-    output_dim: int,
-    hidden_dims: List[int] = [256, 512],
-    output_activation: str = 'sigmoid'
-)
-```
-
-### Factory Functions
-
-#### `create_ccnets_model()`
-Convenient factory function for creating complete CCNets models.
-
-```python
-create_ccnets_model(
-    input_dim: int,
-    explanation_dim: int,
-    output_dim: int,
-    explainer_kwargs: Dict = {},
-    reasoner_kwargs: Dict = {},
-    producer_kwargs: Dict = {},
-    loss_weights: List[float] = [1.0, 1.0, 1.0]
-) -> CCNetsModel
-```
-
-## 🎯 Best Practices
-
-### 1. **Choosing Architecture Dimensions**
-
-```python
-# Rule of thumb for explanation dimension
-explanation_dim = min(input_dim // 4, 64)  # Compress but retain information
-
-# Network depth based on problem complexity
-simple_problem = {'hidden_dims': [64, 32]}      # < 1000 features
-medium_problem = {'hidden_dims': [256, 128, 64]} # 1000-10000 features  
-complex_problem = {'hidden_dims': [512, 256, 128, 64]} # > 10000 features
-```
-
-### 2. **Loss Weight Tuning**
-
-```python
-# Start with equal weights
-loss_weights = [1.0, 1.0, 1.0]
-
-# Emphasize explanation consistency for interpretability
-loss_weights = [1.5, 1.0, 1.0]  
-
-# Emphasize reconstruction for anomaly detection
-loss_weights = [1.0, 1.0, 1.5]
-
-# Emphasize generation for data augmentation
-loss_weights = [1.0, 1.5, 1.0]
-```
-
-### 3. **Training Strategies**
-
-```python
-# Warm-up training: Start with lower learning rate
-optimizer = keras.optimizers.Adam(learning_rate=0.0001)
-
-# Gradual loss weight adjustment
-def adjust_weights(epoch):
-    if epoch < 10:
-        return [0.5, 1.0, 1.0]  # Focus on generation first
-    else:
-        return [1.0, 1.0, 1.0]  # Then balance all objectives
-```
-
-### 4. **Monitoring Training**
-
-Key metrics to watch:
-- **Cooperation Score**: `(inference + generation + reconstruction) / 3` → should decrease
-- **Error Balance**: `std([explainer_error, reasoner_error, producer_error])` → should be stable
-- **Explanation Variance**: `std(explanation_vectors)` → should be meaningful (> 0.1)
-- **Reconstruction Quality**: `mean(|input - reconstruction|)` → should decrease
-
-## 🔬 Research Applications
-
-CCNets enables several research directions:
-
-### Explainable AI Research
-- Study explanation vector patterns across different domains
-- Compare CCNets explanations with other XAI methods (LIME, SHAP)
-- Investigate explanation stability and consistency
-
-### Cooperative Learning Theory
-- Experiment with different cooperative objective formulations
-- Study the effects of loss weight scheduling
-- Analyze network specialization emergence
-
-### Multi-Modal Learning
-- Extend to vision-language tasks
-- Implement cross-modal explanation transfer
-- Study cooperative learning in multi-modal settings
