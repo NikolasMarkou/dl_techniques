@@ -7,6 +7,11 @@ import keras
 import tensorflow as tf
 import numpy as np
 from typing import Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.models.ccnets import (
     CCNetOrchestrator,
     CCNetConfig,
@@ -14,11 +19,11 @@ from dl_techniques.models.ccnets import (
     EarlyStoppingCallback,
     wrap_keras_model
 )
+from dl_techniques.utils.logger import logger
 
-
-# ==============================================================================
+# ---------------------------------------------------------------------
 # Model Definitions
-# ==============================================================================
+# ---------------------------------------------------------------------
 
 class MNISTExplainer(keras.Model):
     """
@@ -410,9 +415,9 @@ class MNISTProducer(keras.Model):
         return x_generated
 
 
-# ==============================================================================
+# ---------------------------------------------------------------------
 # Training Script
-# ==============================================================================
+# ---------------------------------------------------------------------
 
 def create_mnist_ccnet(
         explanation_dim: int = 128,
@@ -529,7 +534,7 @@ def train_mnist_ccnet():
     """
     Main training script for MNIST CCNet.
     """
-    print("Creating CCNet for MNIST...")
+    logger.info("Creating CCNet for MNIST...")
     orchestrator = create_mnist_ccnet(
         explanation_dim=128,
         learning_rate=1e-3,
@@ -537,10 +542,10 @@ def train_mnist_ccnet():
         l2_regularization=1e-4
     )
 
-    print("Preparing data...")
+    logger.info("Preparing data...")
     train_dataset, val_dataset = prepare_mnist_data()
 
-    print("Setting up trainer...")
+    logger.info("Setting up trainer...")
     trainer = CCNetTrainer(orchestrator)
 
     # Create early stopping callback
@@ -549,7 +554,7 @@ def train_mnist_ccnet():
     # Custom callback for printing counterfactual examples
     def counterfactual_callback(epoch, metrics, orch):
         if epoch % 5 == 0:
-            print(f"\n--- Epoch {epoch} Counterfactual Test ---")
+            logger.info(f"\n--- Epoch {epoch} Counterfactual Test ---")
 
             # Get a sample batch
             for x_batch, y_batch in val_dataset.take(1):
@@ -563,37 +568,40 @@ def train_mnist_ccnet():
                 # Generate counterfactual
                 x_counter = orch.counterfactual_generation(x_ref, y_target)
 
-                print(f"Generated counterfactual shape: {x_counter.shape}")
+                logger.info(f"Generated counterfactual shape: {x_counter.shape}")
                 break
 
-    print("Starting training...")
+    logger.info("Starting training...")
     try:
         trainer.train(
             train_dataset=train_dataset,
-            epochs=50,
+            epochs=10,
             validation_dataset=val_dataset,
-            callbacks=[early_stopping, counterfactual_callback]
+            callbacks=[
+                early_stopping,
+                counterfactual_callback
+            ]
         )
     except StopIteration:
-        print("Training stopped early due to convergence.")
+        logger.info("Training stopped early due to convergence.")
 
-    print("\nTraining complete!")
-    print(f"Final losses:")
+    logger.info("Training complete!")
+    logger.info(f"Final losses:")
     for key in ['generation_loss', 'reconstruction_loss', 'inference_loss']:
         if trainer.history[key]:
-            print(f"  {key}: {trainer.history[key][-1]:.4f}")
+            logger.info(f"  {key}: {trainer.history[key][-1]:.4f}")
 
     # Save models
-    print("\nSaving models...")
+    logger.info("Saving models...")
     orchestrator.save_models("mnist_ccnet")
-    print("Models saved successfully!")
+    logger.info("Models saved successfully!")
 
     return orchestrator, trainer
 
 
-# ==============================================================================
+# ---------------------------------------------------------------------
 # Inference Examples
-# ==============================================================================
+# ---------------------------------------------------------------------
 
 def demonstrate_ccnet_capabilities(orchestrator: CCNetOrchestrator):
     """
@@ -602,9 +610,9 @@ def demonstrate_ccnet_capabilities(orchestrator: CCNetOrchestrator):
     Args:
         orchestrator: Trained CCNet orchestrator.
     """
-    print("\n" + "=" * 60)
-    print("CCNet Capability Demonstrations")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("CCNet Capability Demonstrations")
+    logger.info("=" * 60)
 
     # Load test data
     (x_test, y_test) = keras.datasets.mnist.load_data()[1]
@@ -613,17 +621,17 @@ def demonstrate_ccnet_capabilities(orchestrator: CCNetOrchestrator):
     y_test_onehot = keras.utils.to_categorical(y_test, 10)
 
     # 1. Disentanglement
-    print("\n1. Cause Disentanglement:")
+    logger.info("1. Cause Disentanglement:")
     sample_idx = 0
     x_sample = x_test[sample_idx:sample_idx + 1]
     y_explicit, e_latent = orchestrator.disentangle_causes(x_sample)
 
-    print(f"   Original label: {y_test[sample_idx]}")
-    print(f"   Inferred label: {np.argmax(y_explicit)}")
-    print(f"   Latent dimension: {e_latent.shape}")
+    logger.info(f"   Original label: {y_test[sample_idx]}")
+    logger.info(f"   Inferred label: {np.argmax(y_explicit)}")
+    logger.info(f"   Latent dimension: {e_latent.shape}")
 
     # 2. Counterfactual Generation
-    print("\n2. Counterfactual Generation:")
+    logger.info("2. Counterfactual Generation:")
     # Change a '3' to look like an '8' in the same style
     idx_3 = np.where(y_test == 3)[0][0]
     x_3 = x_test[idx_3:idx_3 + 1]
@@ -632,10 +640,10 @@ def demonstrate_ccnet_capabilities(orchestrator: CCNetOrchestrator):
     y_8 = keras.ops.scatter_update(y_8, [[0, 8]], [1.0])
 
     x_counterfactual = orchestrator.counterfactual_generation(x_3, y_8)
-    print(f"   Generated '8' in style of '3': shape {x_counterfactual.shape}")
+    logger.info(f"   Generated '8' in style of '3': shape {x_counterfactual.shape}")
 
     # 3. Style Transfer
-    print("\n3. Style Transfer:")
+    logger.info("3. Style Transfer:")
     idx_content = np.where(y_test == 7)[0][0]
     idx_style = np.where(y_test == 4)[0][0]
 
@@ -643,18 +651,20 @@ def demonstrate_ccnet_capabilities(orchestrator: CCNetOrchestrator):
     x_style = x_test[idx_style:idx_style + 1]
 
     x_transferred = orchestrator.style_transfer(x_content, x_style)
-    print(f"   Transferred '7' with style of '4': shape {x_transferred.shape}")
+    logger.info(f"   Transferred '7' with style of '4': shape {x_transferred.shape}")
 
     # 4. Consistency Verification
-    print("\n4. Internal Consistency Check:")
+    logger.info("4. Internal Consistency Check:")
     consistent_samples = 0
     for i in range(100):
         if orchestrator.verify_consistency(x_test[i:i + 1], threshold=0.05):
             consistent_samples += 1
 
-    print(f"   Consistency rate: {consistent_samples}/100 samples")
+    logger.info(f"   Consistency rate: {consistent_samples}/100 samples")
 
-    print("\n" + "=" * 60)
+    logger.info( "=" * 60)
+
+# ==============================================================================
 
 
 if __name__ == "__main__":
@@ -664,4 +674,4 @@ if __name__ == "__main__":
     # Demonstrate capabilities
     demonstrate_ccnet_capabilities(orchestrator)
 
-    print("\nCCNet training and demonstration complete!")
+    logger.info("\nCCNet training and demonstration complete!")
