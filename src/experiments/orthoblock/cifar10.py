@@ -55,7 +55,7 @@ from typing import Dict, Any, List, Tuple, Callable, Optional
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
-from dl_techniques.layers.experimental.orthoblock import OrthoBlock
+from dl_techniques.layers.orthoblock import OrthoBlock
 from dl_techniques.utils.datasets import load_and_preprocess_cifar10
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig

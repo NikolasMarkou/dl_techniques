@@ -1,0 +1,163 @@
+import keras
+import math
+from keras import layers
+from keras import ops
+from typing import Optional, Dict, Any, Tuple
+
+# ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable()
+class PositionEmbeddingSine2D(layers.Layer):
+    """
+    Generates 2D sinusoidal positional encodings for image-like feature maps.
+
+    This layer creates fixed, non-learnable 2D positional encodings based on sine
+    and cosine functions of different frequencies. These encodings provide spatial
+    awareness to models like transformers when processing 2D data. The generated
+    encodings are typically added to the input feature map.
+
+    **Intent**: Provide a standard, non-learnable method for encoding spatial
+    information in 2D feature maps, critical for attention-based models that
+    do not inherently process positional data.
+
+    **Architecture**:
+    ```
+    Input(shape=[batch, H, W, C])
+           ↓
+    Generate 1D coordinate grids for Y and X axes
+           ↓
+    Normalize coordinates to a fixed range (optional)
+           ↓
+    Apply sinusoidal functions of varying frequencies:
+      - PE(pos, 2i)   = sin(pos / temp^(2i/d))
+      - PE(pos, 2i+1) = cos(pos / temp^(2i/d))
+           ↓
+    Concatenate Y-axis and X-axis encodings
+           ↓
+    Transpose to channels-first format
+           ↓
+    Output(shape=[batch, 2 * num_pos_feats, H, W])
+    ```
+
+    **Mathematical Operation**:
+    For each position `(y, x)` and feature dimension `i`, the encoding is:
+        P_y(y, 2i)   = sin(y / T^(2i/d))
+        P_y(y, 2i+1) = cos(y / T^(2i/d))
+        P_x(x, 2i)   = sin(x / T^(2i/d))
+        P_x(x, 2i+1) = cos(x / T^(2i/d))
+    Where:
+    - `d` is `num_pos_feats`
+    - `T` is `temperature`
+
+    Args:
+        num_pos_feats: Integer, the number of features for the positional encoding.
+            This corresponds to half the channel dimension of the final encoding.
+            Defaults to 64.
+        temperature: Float, the temperature value that controls the frequency of
+            the sine and cosine functions. Defaults to 10000.0.
+        normalize: Boolean, if True, normalizes the positional encodings by the
+            spatial dimensions before applying trigonometric functions.
+            Defaults to True.
+        scale: Float, a scaling factor for the normalized positional encodings.
+            Only used if `normalize` is True. Defaults to 2 * math.pi.
+        **kwargs: Additional arguments for the Layer base class.
+
+    Input shape:
+        A 4D tensor with shape `(batch_size, height, width, channels)`. The channel
+        dimension is not used but the spatial dimensions are required.
+
+    Output shape:
+        A 4D tensor with shape `(batch_size, 2 * num_pos_feats, height, width)`.
+
+    Example:
+        ```python
+        # For a feature map from a CNN
+        inputs = keras.Input(shape=(32, 32, 256))
+
+        # Create positional encoding layer
+        pos_encoding_layer = PositionEmbeddingSine2D(num_pos_feats=128)
+
+        # Generate positional encodings
+        # Output shape will be (batch, 256, 32, 32)
+        pos_encodings = pos_encoding_layer(inputs)
+
+        # The encodings would typically be added to the input features
+        # after reshaping/transposing the input.
+        ```
+    """
+
+    def __init__(
+        self,
+        num_pos_feats: int = 64,
+        temperature: float = 10000.0,
+        normalize: bool = True,
+        scale: float = 2 * math.pi,
+        **kwargs: Any
+    ):
+        super().__init__(**kwargs)
+
+        # Validate inputs
+        if num_pos_feats <= 0:
+            raise ValueError(f"num_pos_feats must be positive, got {num_pos_feats}")
+        if temperature <= 0:
+            raise ValueError(f"temperature must be positive, got {temperature}")
+
+        # Store configuration
+        self.num_pos_feats = num_pos_feats
+        self.temperature = temperature
+        self.normalize = normalize
+        self.scale = scale
+
+    def call(self, inputs: keras.KerasTensor, mask: Optional[keras.KerasTensor] = None) -> keras.KerasTensor:
+        """Forward pass to generate positional encodings."""
+        if mask is None:
+            # Assumes a 4D input (B, H, W, C), mask should be (B, H, W)
+            mask = ops.zeros(ops.shape(inputs)[:3], dtype="bool")
+
+        not_mask = ~mask
+        y_embed = ops.cumsum(ops.cast(not_mask, "float32"), axis=1)
+        x_embed = ops.cumsum(ops.cast(not_mask, "float32"), axis=2)
+
+        if self.normalize:
+            eps = 1e-6
+            y_embed = (y_embed - 0.5) / (y_embed[:, -1:, :] + eps) * self.scale
+            x_embed = (x_embed - 0.5) / (x_embed[:, :, -1:] + eps) * self.scale
+
+        dim_t = ops.arange(self.num_pos_feats, dtype="float32")
+        dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_pos_feats)
+
+        pos_x = x_embed[..., None] / dim_t
+        pos_y = y_embed[..., None] / dim_t
+
+        pos_x = ops.stack(
+            [ops.sin(pos_x[..., 0::2]), ops.cos(pos_x[..., 1::2])], axis=4
+        )
+        pos_x = ops.reshape(pos_x, (*ops.shape(pos_x)[:3], -1))
+
+        pos_y = ops.stack(
+            [ops.sin(pos_y[..., 0::2]), ops.cos(pos_y[..., 1::2])], axis=4
+        )
+        pos_y = ops.reshape(pos_y, (*ops.shape(pos_y)[:3], -1))
+
+        pos = ops.concatenate([pos_y, pos_x], axis=3)
+        # Transpose to (batch, H, W, channels) -> (batch, channels, H, W)
+        pos = ops.transpose(pos, [0, 3, 1, 2])
+        return pos
+
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Compute the output shape of the layer."""
+        batch_size, h, w = input_shape[0], input_shape[1], input_shape[2]
+        return batch_size, 2 * self.num_pos_feats, h, w
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return configuration for serialization."""
+        config = super().get_config()
+        config.update({
+            "num_pos_feats": self.num_pos_feats,
+            "temperature": self.temperature,
+            "normalize": self.normalize,
+            "scale": self.scale
+        })
+        return config
+
+# ---------------------------------------------------------------------

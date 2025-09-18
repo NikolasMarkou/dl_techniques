@@ -12,7 +12,7 @@ import keras
 import tempfile
 import os
 
-from dl_techniques.layers.experimental.orthoblock import OrthoBlock
+from dl_techniques.layers.orthoblock import OrthoBlock
 
 
 class TestOrthoBlock:

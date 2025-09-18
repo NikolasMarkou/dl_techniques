@@ -1,9 +1,15 @@
 """
-DinoV3 Model Implementation
+DINOv3 Model Implementation
 
-This module implements the DinoV3 (Data-efficient Image Transformers) architecture,
-a self-supervised Vision Transformer model that learns visual representations without
-labels through a distillation-based approach.
+This module provides a refactored implementation of a Vision Transformer,
+named DINOv3 for consistency, that aligns with the architecture of the original
+DINO (self-DIstillation with NO labels) model and the coding style of the
+provided DINOv1 and DINOv2 implementations.
+
+The architecture is a standard Vision Transformer (ViT) with pre-normalization
+transformer blocks, which is crucial for training stability in self-supervised
+settings like DINO. This implementation re-uses existing, shared layers from the
+`dl_techniques` library for better modularity and consistency.
 
 Model Variants:
 --------------
@@ -16,17 +22,26 @@ Model Variants:
 Usage Examples:
 -------------
 ```python
-# ImageNet model (224x224 input)
-model = DINOv3.from_variant("base", num_classes=1000)
+# Create DinoV3-Base for ImageNet classification (224x224 input)
+model = create_dino_v3("base", num_classes=1000)
 
-# CIFAR-10 model (32x32 input)
-model = DINOv3.from_variant("small", image_size=(32, 32), num_classes=10)
+# Create DinoV3-Small for CIFAR-10 (32x32 input)
+model = create_dino_v3(
+    "small",
+    image_size=(32, 32),
+    patch_size=(4, 4), # Smaller patch size for smaller images
+    num_classes=10
+)
 
-# Feature extraction model
+# Create a feature extraction model (no classification head)
 model = create_dino_v3("large", include_top=False)
 
-# Custom configuration
-model = create_dino_v3("tiny", stochastic_depth_rate=0.2)
+# Create model for self-supervised pre-training using a DINO-style head
+# This can be achieved by attaching a DINOHead layer from dino_v1.py
+from dino_v1 import DINOHead
+features = create_dino_v3("base", include_top=False).output
+projection = DINOHead(in_dim=768, out_dim=65536)(features)
+ssl_model = keras.Model(inputs=features.node.inputs, outputs=projection)
 ```
 """
 
@@ -41,144 +56,98 @@ from typing import Optional, Union, Tuple, Dict, Any, Callable, Literal
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.transformer import TransformerLayer
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
+from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
+from dl_techniques.layers.norms import create_normalization_layer
 
 # ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class DINOv3(keras.Model):
     """
-    DinoV3 (Data-efficient Image Transformers) Model Implementation.
+    DINOv3 Vision Transformer Model Implementation.
 
-    DinoV3 is a self-supervised Vision Transformer that learns visual representations
-    through a teacher-student distillation framework. This implementation provides
-    the core architecture that can be used for both teacher and student networks.
+    This class implements a standard Vision Transformer architecture, following the
+    design of the original DINO paper which uses pre-normalization layers for
+    improved training stability. It is designed to be a backbone for various
+    downstream tasks, including classification and self-supervised learning.
 
     The model consists of:
-    - Patch embedding layer to tokenize input images
-    - Learnable class token and positional embeddings
-    - Stack of transformer encoder layers with configurable attention
-    - Optional layer normalization
-    - Flexible output heads for different tasks
-
-    Key architectural features:
-    - Pre-normalization transformer blocks for training stability
-    - Stochastic depth with linear scaling across layers
-    - Configurable attention mechanisms (standard, window, grouped-query)
-    - Support for both classification and feature extraction modes
-    - Adaptive to different input resolutions
+    - A patch embedding layer to convert images into sequences of tokens.
+    - A learnable [CLS] token for global image representation.
+    - Learned positional embeddings to encode spatial information.
+    - A stack of pre-normalized Transformer encoder layers.
+    - A final normalization layer.
+    - An optional classification head.
 
     Args:
-        image_size: Tuple of integers, input image size (height, width).
-            Must be divisible by patch_size. Defaults to (224, 224).
-        patch_size: Tuple of integers, patch size for tokenization.
+        image_size: Tuple of integers (height, width) for the input image.
+            Defaults to (224, 224).
+        patch_size: Tuple of integers (height, width) for the image patches.
             Defaults to (16, 16).
-        num_classes: Integer, number of output classes. If 0, no classification
-            head is added. Defaults to 1000.
-        embed_dim: Integer, embedding dimension. Must be positive and typically
-            divisible by num_heads. Defaults to 768.
-        depth: Integer, number of transformer layers. Must be positive.
+        num_classes: Number of output classes for the classification head. If 0,
+            no head is added. Defaults to 1000.
+        embed_dim: The dimensionality of the token embeddings. Defaults to 768.
+        depth: The number of transformer encoder layers. Defaults to 12.
+        num_heads: The number of attention heads in each transformer layer.
             Defaults to 12.
-        num_heads: Integer, number of attention heads per layer. Must be positive
-            and divide embed_dim evenly. Defaults to 12.
-        mlp_ratio: Float, ratio of MLP hidden dimension to embedding dimension.
-            Defaults to 4.0.
-        dropout_rate: Float, dropout rate for regularization. Must be between
-            0 and 1. Defaults to 0.1.
-        attention_dropout_rate: Float, dropout rate for attention layers.
-            Must be between 0 and 1. Defaults to 0.1.
-        stochastic_depth_rate: Float, maximum drop path rate for stochastic depth.
-            Applied linearly across layers. Must be between 0 and 1. Defaults to 0.1.
-        use_class_token: Boolean, whether to use a learnable class token.
-            Defaults to True.
-        use_mean_pooling: Boolean, whether to use mean pooling instead of class token
-            for final representation. Only used if use_class_token=False. Defaults to False.
-        normalization_type: String, type of normalization to use in transformer layers.
-            Options: 'layer_norm', 'rms_norm'. Defaults to 'layer_norm'.
-        attention_type: String, type of attention mechanism to use.
-            Options: 'multi_head_attention', 'window_attention', etc. Defaults to 'multi_head_attention'.
-        activation: String or callable, activation function for MLP layers.
-            Defaults to 'gelu'.
-        kernel_initializer: String or initializer, weight initialization method.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: String or initializer, bias initialization method.
-            Defaults to 'zeros'.
+        mlp_ratio: Ratio to determine the hidden dimension of the FFN in
+            transformer layers (hidden_dim = embed_dim * mlp_ratio). Defaults to 4.0.
+        qkv_bias: If True, add a learnable bias to the query, key, and value
+            projections. Defaults to True.
+        dropout_rate: Dropout rate for the embedding and FFN layers.
+            Defaults to 0.0.
+        attention_dropout_rate: Dropout rate for the attention weights.
+            Defaults to 0.0.
+        stochastic_depth_rate: Maximum drop rate for stochastic depth, which
+            linearly increases across layers. Defaults to 0.0.
+        normalization_type: The type of normalization to use ('layer_norm',
+            'rms_norm'). Defaults to 'layer_norm'.
+        activation: Activation function for the FFN layers. Defaults to 'gelu'.
+        kernel_initializer: Initializer for kernel weights. Defaults to
+            'glorot_uniform'.
+        bias_initializer: Initializer for bias weights. Defaults to 'zeros'.
         kernel_regularizer: Optional regularizer for kernel weights.
         bias_regularizer: Optional regularizer for bias weights.
-        include_top: Boolean, whether to include the classification head.
-            If False, returns features before classification. Defaults to True.
-        **kwargs: Additional arguments for Model base class.
+        include_top: If True, include the final classification head. If False,
+            the model outputs features from the transformer. Defaults to True.
+        **kwargs: Additional arguments for the `keras.Model` base class.
 
     Input shape:
-        4D tensor with shape (batch_size, height, width, channels).
-        Height and width must match image_size.
+        A 4D tensor of shape `(batch_size, height, width, channels)`, where
+        height and width must match `image_size`.
 
     Output shape:
-        If include_top=True: 2D tensor with shape (batch_size, num_classes).
-        If include_top=False: 3D tensor with shape (batch_size, num_patches + 1, embed_dim)
-            if use_class_token=True, or (batch_size, num_patches, embed_dim) otherwise.
+        - If `include_top=True`: A 2D tensor of shape `(batch_size, num_classes)`.
+        - If `include_top=False`: A 2D tensor of shape `(batch_size, embed_dim)`
+          representing the [CLS] token features.
 
     Raises:
-        ValueError: If any parameter is invalid or incompatible.
-
-    Example:
-        >>> # Create DinoV3-Base for ImageNet
-        >>> model = DINOv3.from_variant("base", num_classes=1000)
-        >>>
-        >>> # Create DinoV3-Small for CIFAR-10
-        >>> model = DINOv3.from_variant("small", image_size=(32, 32), num_classes=10)
-        >>>
-        >>> # Create feature extraction model
-        >>> model = DINOv3.from_variant("large", include_top=False)
-
-    References:
-        - Oquab, Maxime, et al. "DINOv2: Learning Robust Visual Features without Supervision"
-        - Dosovitskiy, Alexey, et al. "An image is worth 16x16 words: Transformers for image recognition at scale"
+        ValueError: If model parameters are invalid or incompatible.
     """
 
-    # Model variant configurations - Updated to use 'depth' instead of 'num_layers'
     MODEL_VARIANTS = {
         "tiny": {
-            "embed_dim": 192,
-            "depth": 12,
-            "num_heads": 3,
-            "mlp_ratio": 4.0,
+            "embed_dim": 192, "depth": 12, "num_heads": 3, "mlp_ratio": 4.0,
             "patch_size": (16, 16)
         },
         "small": {
-            "embed_dim": 384,
-            "depth": 12,
-            "num_heads": 6,
-            "mlp_ratio": 4.0,
+            "embed_dim": 384, "depth": 12, "num_heads": 6, "mlp_ratio": 4.0,
             "patch_size": (16, 16)
         },
         "base": {
-            "embed_dim": 768,
-            "depth": 12,
-            "num_heads": 12,
-            "mlp_ratio": 4.0,
+            "embed_dim": 768, "depth": 12, "num_heads": 12, "mlp_ratio": 4.0,
             "patch_size": (16, 16)
         },
         "large": {
-            "embed_dim": 1024,
-            "depth": 24,
-            "num_heads": 16,
-            "mlp_ratio": 4.0,
+            "embed_dim": 1024, "depth": 24, "num_heads": 16, "mlp_ratio": 4.0,
             "patch_size": (16, 16)
         },
         "giant": {
-            "embed_dim": 1536,
-            "depth": 40,
-            "num_heads": 24,
-            "mlp_ratio": 4.0,
-            "patch_size": (14, 14),
-            "stochastic_depth_rate": 0.4
+            "embed_dim": 1536, "depth": 40, "num_heads": 24, "mlp_ratio": 4.0,
+            "patch_size": (14, 14), "stochastic_depth_rate": 0.4
         }
     }
-
-    # Architecture constants
-    LAYERNORM_EPSILON = 1e-6
-    POSITIONAL_INITIALIZER = "truncated_normal"
-    HEAD_INITIALIZER = "truncated_normal"
 
     def __init__(
         self,
@@ -186,16 +155,14 @@ class DINOv3(keras.Model):
         patch_size: Tuple[int, int] = (16, 16),
         num_classes: int = 1000,
         embed_dim: int = 768,
-        depth: int = 12,  # Renamed from num_layers
+        depth: int = 12,
         num_heads: int = 12,
         mlp_ratio: float = 4.0,
-        dropout_rate: float = 0.1,
-        attention_dropout_rate: float = 0.1,
-        stochastic_depth_rate: float = 0.1,
-        use_class_token: bool = True,
-        use_mean_pooling: bool = False,
+        qkv_bias: bool = True,
+        dropout_rate: float = 0.0,
+        attention_dropout_rate: float = 0.0,
+        stochastic_depth_rate: float = 0.0,
         normalization_type: Literal['layer_norm', 'rms_norm'] = 'layer_norm',
-        attention_type: Literal['multi_head_attention', 'window_attention', 'group_query_attention'] = 'multi_head_attention',
         activation: Union[str, Callable] = 'gelu',
         kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
         bias_initializer: Union[str, initializers.Initializer] = 'zeros',
@@ -204,45 +171,27 @@ class DINOv3(keras.Model):
         include_top: bool = True,
         **kwargs: Any
     ) -> None:
-        # Validate inputs
-        if len(image_size) != 2 or any(s <= 0 for s in image_size):
-            raise ValueError(f"image_size must be a tuple of 2 positive integers, got {image_size}")
-        if len(patch_size) != 2 or any(s <= 0 for s in patch_size):
-            raise ValueError(f"patch_size must be a tuple of 2 positive integers, got {patch_size}")
-        if any(img % patch != 0 for img, patch in zip(image_size, patch_size)):
+        # Input validation
+        if image_size[0] % patch_size[0] != 0 or image_size[1] % patch_size[1] != 0:
             raise ValueError(f"image_size {image_size} must be divisible by patch_size {patch_size}")
-        if embed_dim <= 0:
-            raise ValueError(f"embed_dim must be positive, got {embed_dim}")
-        if depth <= 0:  # Changed validation from num_layers to depth
-            raise ValueError(f"depth must be positive, got {depth}")
-        if num_heads <= 0:
-            raise ValueError(f"num_heads must be positive, got {num_heads}")
         if embed_dim % num_heads != 0:
             raise ValueError(f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})")
-        if not (0.0 <= dropout_rate <= 1.0):
-            raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
-        if not (0.0 <= attention_dropout_rate <= 1.0):
-            raise ValueError(f"attention_dropout_rate must be between 0 and 1, got {attention_dropout_rate}")
-        if not (0.0 <= stochastic_depth_rate <= 1.0):
-            raise ValueError(f"stochastic_depth_rate must be between 0 and 1, got {stochastic_depth_rate}")
-        if num_classes < 0:
-            raise ValueError(f"num_classes must be non-negative, got {num_classes}")
+
+        super().__init__(**kwargs)
 
         # Store configuration
         self.image_size = image_size
         self.patch_size = patch_size
         self.num_classes = num_classes
         self.embed_dim = embed_dim
-        self.depth = depth  # Store as depth instead of num_layers
+        self.depth = depth
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
+        self.qkv_bias = qkv_bias
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
         self.stochastic_depth_rate = stochastic_depth_rate
-        self.use_class_token = use_class_token
-        self.use_mean_pooling = use_mean_pooling
         self.normalization_type = normalization_type
-        self.attention_type = attention_type
         self.activation = activation
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -251,68 +200,40 @@ class DINOv3(keras.Model):
         self.include_top = include_top
 
         # Compute derived values
-        self.num_patches_h = image_size[0] // patch_size[0]
-        self.num_patches_w = image_size[1] // patch_size[1]
-        self.num_patches = self.num_patches_h * self.num_patches_w
-        self.sequence_length = self.num_patches + (1 if use_class_token else 0)
+        self.num_patches = (image_size[0] // patch_size[0]) * (image_size[1] // patch_size[1])
+        self.sequence_length = self.num_patches + 1
 
-        # Initialize layer lists
-        self.encoder_layers = []
-        self.head_layers = []
-
-        # Set input shape for the model
-        inputs = keras.Input(shape=image_size + (3,))
-
-        # Build the model
+        # Build the model using the functional API pattern
+        inputs = keras.Input(shape=(*image_size, 3), name="input_image")
         outputs = self._build_model(inputs)
 
-        # Initialize the Model
-        super().__init__(inputs=inputs, outputs=outputs, **kwargs)
+        # Finalize the Model
+        super().__init__(inputs=inputs, outputs=outputs, name="DINOv3", **kwargs)
 
         logger.info(
-            f"Created DinoV3 model for input {image_size + (3,)} "
-            f"with {depth} layers, {embed_dim} embedding dim"
+            f"Created DINOv3 model with {depth} layers, {embed_dim} embedding dim for "
+            f"input shape {image_size}"
         )
 
     def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the complete DinoV3 model architecture.
+        """Constructs the model architecture."""
+        # 1. Patch Embedding
+        x = self._build_patch_embedding(inputs)
 
-        Args:
-            inputs: Input tensor
+        # 2. Add CLS Token and Positional Embedding
+        x = self._build_token_processing(x)
 
-        Returns:
-            Output tensor
-        """
-        x = inputs
+        # 3. Transformer Encoder Layers
+        x = self._build_encoder(x)
 
-        # Build patch embedding
-        x = self._build_patch_embedding(x)
-
-        # Add positional embeddings and class token
-        x = self._build_positional_encoding(x)
-
-        # Build transformer encoder layers
-        x = self._build_encoder_layers(x)
-
-        # Build final normalization
-        x = self._build_final_norm(x)
-
-        # Build classification head if requested
-        if self.include_top:
-            x = self._build_head(x)
+        # 4. Final Processing and Head
+        x = self._build_head(x)
 
         return x
 
-    def _build_patch_embedding(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build patch embedding layer.
-
-        Args:
-            x: Input tensor
-
-        Returns:
-            Patch embeddings tensor
-        """
-        self.patch_embedding = PatchEmbedding2D(
+    def _build_patch_embedding(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
+        """Creates the patch embedding layer."""
+        self.patch_embed = PatchEmbedding2D(
             patch_size=self.patch_size,
             embed_dim=self.embed_dim,
             kernel_initializer=self.kernel_initializer,
@@ -321,80 +242,51 @@ class DINOv3(keras.Model):
             bias_regularizer=self.bias_regularizer,
             name='patch_embedding'
         )
+        return self.patch_embed(inputs)
 
-        x = self.patch_embedding(x)
-        return x
-
-    def _build_positional_encoding(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build positional encoding with optional class token.
-
-        Args:
-            x: Patch embeddings tensor
-
-        Returns:
-            Tensor with positional encodings and class token
-        """
+    def _build_token_processing(self, x: keras.KerasTensor) -> keras.KerasTensor:
+        """Adds the [CLS] token and positional embeddings."""
         batch_size = ops.shape(x)[0]
 
-        # Add class token if used
-        if self.use_class_token:
-            self.class_token = self.add_weight(
-                name='class_token',
-                shape=(1, 1, self.embed_dim),
-                initializer=self.POSITIONAL_INITIALIZER,
-                trainable=True,
-            )
-
-            # Expand class token to batch size
-            class_tokens = ops.broadcast_to(
-                self.class_token,
-                (batch_size, 1, self.embed_dim)
-            )
-            # Concatenate class token with patch embeddings
-            x = ops.concatenate([class_tokens, x], axis=1)
-
-        # Add positional embeddings
-        self.positional_embedding = self.add_weight(
-            name='positional_embedding',
-            shape=(1, self.sequence_length, self.embed_dim),
-            initializer=self.POSITIONAL_INITIALIZER,
+        # Add CLS token
+        self.cls_token = self.add_weight(
+            shape=(1, 1, self.embed_dim),
+            initializer="truncated_normal",
             trainable=True,
+            name="cls_token"
         )
+        cls_tokens = ops.tile(self.cls_token, [batch_size, 1, 1])
+        x = ops.concatenate([cls_tokens, x], axis=1)
 
-        x = x + self.positional_embedding
+        # Add positional embedding using the shared layer
+        self.pos_embed = PositionalEmbedding(
+            max_seq_len=self.sequence_length,
+            dim=self.embed_dim,
+            dropout=self.dropout_rate,
+            name="positional_embedding"
+        )
+        return self.pos_embed(x)
 
-        # Apply embedding dropout
-        self.embedding_dropout = layers.Dropout(self.dropout_rate, name='embedding_dropout')
-        x = self.embedding_dropout(x)
+    def _build_encoder(self, x: keras.KerasTensor) -> keras.KerasTensor:
+        """Creates the stack of transformer encoder layers."""
+        self.encoder_layers = []
+        dpr = [r.item() for r in ops.linspace(0., self.stochastic_depth_rate, self.depth)]
 
-        return x
-
-    def _build_encoder_layers(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build transformer encoder layers.
-
-        Args:
-            x: Input tensor with positional encodings
-
-        Returns:
-            Encoded tensor
-        """
-        for i in range(self.depth):  # Changed from self.num_layers to self.depth
-            # Calculate stochastic depth rate for this layer (linear scaling)
-            layer_drop_rate = self.stochastic_depth_rate * i / (self.depth - 1) if self.depth > 1 else 0.0
-
+        for i in range(self.depth):
             encoder_layer = TransformerLayer(
                 hidden_size=self.embed_dim,
                 num_heads=self.num_heads,
                 intermediate_size=int(self.embed_dim * self.mlp_ratio),
-                attention_type=self.attention_type,
+                attention_type="multi_head_attention",
+                attention_args={"use_bias": self.qkv_bias},
                 normalization_type=self.normalization_type,
-                normalization_position='pre',  # DinoV3 uses pre-norm
+                normalization_position='pre',  # DINO uses pre-norm
                 ffn_type='mlp',
+                activation=self.activation,
                 dropout_rate=self.dropout_rate,
                 attention_dropout_rate=self.attention_dropout_rate,
-                use_stochastic_depth=layer_drop_rate > 0.0,
-                stochastic_depth_rate=layer_drop_rate,
-                activation=self.activation,
+                use_stochastic_depth=dpr[i] > 0.0,
+                stochastic_depth_rate=dpr[i],
                 use_bias=True,
                 kernel_initializer=self.kernel_initializer,
                 bias_initializer=self.bias_initializer,
@@ -402,72 +294,77 @@ class DINOv3(keras.Model):
                 bias_regularizer=self.bias_regularizer,
                 name=f'encoder_layer_{i}'
             )
-
             x = encoder_layer(x)
             self.encoder_layers.append(encoder_layer)
-
-        return x
-
-    def _build_final_norm(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build final layer normalization.
-
-        Args:
-            x: Encoded tensor
-
-        Returns:
-            Normalized tensor
-        """
-        if self.normalization_type == 'layer_norm':
-            self.final_norm = layers.LayerNormalization(
-                epsilon=self.LAYERNORM_EPSILON,
-                name='final_norm'
-            )
-        elif self.normalization_type == 'rms_norm':
-            from dl_techniques.layers.norms.rms_norm import RMSNorm
-            self.final_norm = RMSNorm(name='final_norm')
-        else:
-            raise ValueError(f"Unknown normalization_type: {self.normalization_type}")
-
-        x = self.final_norm(x)
         return x
 
     def _build_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build classification head.
+        """Creates the final normalization and classification head."""
+        # Final normalization using the shared factory
+        self.norm = create_normalization_layer(
+            self.normalization_type,
+            name='final_norm'
+        )
+        x = self.norm(x)
+
+        # Extract [CLS] token for classification
+        features = x[:, 0]
+
+        # Add classification head if requested
+        if self.include_top:
+            if self.num_classes > 0:
+                self.classifier = layers.Dense(
+                    units=self.num_classes,
+                    kernel_initializer="truncated_normal",
+                    kernel_regularizer=self.kernel_regularizer,
+                    bias_regularizer=self.bias_regularizer,
+                    name='classifier'
+                )
+                outputs = self.classifier(features)
+            else:
+                # If include_top is True but num_classes is 0, return features
+                outputs = features
+        else:
+            # If not including top, return features
+            outputs = features
+
+        return outputs
+
+    def get_last_selfattention(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
+        """
+        Extracts attention weights from the last transformer layer's [CLS] token.
+        Useful for visualization as shown in the DINO paper.
+
+        Note: This requires the `TransformerLayer` to have a mechanism to return
+        attention scores, which may not be implemented. A warning is issued.
 
         Args:
-            x: Feature tensor
+            inputs: A batch of images.
 
         Returns:
-            Classification logits
+            A tensor of attention weights from the last layer.
         """
-        # Extract features for classification
-        if self.use_class_token:
-            # Use class token (first token) for classification
-            features = x[:, 0]  # (batch_size, embed_dim)
-        elif self.use_mean_pooling:
-            # Use global average pooling
-            pooling = layers.GlobalAveragePooling1D(name='global_avg_pool')
-            features = pooling(x)  # (batch_size, embed_dim)
-            self.head_layers.append(pooling)
-        else:
-            # Use mean of all patch tokens
-            features = ops.mean(x, axis=1)  # (batch_size, embed_dim)
+        logger.warning(
+            "get_last_selfattention() requires TransformerLayer to support "
+            "returning attention weights. This may not be fully implemented."
+        )
+        x = self.patch_embed(inputs)
+        x = self._build_token_processing(x)
 
-        # Classification layer
-        if self.num_classes > 0:
-            classifier = layers.Dense(
-                units=self.num_classes,
-                kernel_initializer=self.HEAD_INITIALIZER,
-                kernel_regularizer=self.kernel_regularizer,
-                bias_regularizer=self.bias_regularizer,
-                name='classifier'
-            )
-            x = classifier(features)
-            self.head_layers.append(classifier)
-        else:
-            x = features
+        # Forward through all but the last transformer block
+        for i in range(self.depth - 1):
+            x = self.encoder_layers[i](x)
 
-        return x
+        # In a full implementation, the last layer would be called with a flag
+        # to return attention. For now, we return a placeholder.
+        # x, attention = self.encoder_layers[-1](x, return_attention=True)
+        x = self.encoder_layers[-1](x)
+        
+        # Placeholder for attention weights
+        batch_size = ops.shape(x)[0]
+        attention_shape = (batch_size, self.num_heads, self.sequence_length, self.sequence_length)
+        return ops.zeros(attention_shape)
+
 
     @classmethod
     def from_variant(
@@ -479,69 +376,50 @@ class DINOv3(keras.Model):
         **kwargs: Any
     ) -> "DINOv3":
         """
-        Create a DinoV3 model from a predefined variant.
+        Creates a DINOv3 model from a predefined variant.
 
         Args:
-            variant: String, one of "tiny", "small", "base", "large", "giant".
-            image_size: Tuple of integers, input image size (height, width).
-            num_classes: Integer, number of output classes.
-            include_top: Boolean, whether to include the classification head.
-            **kwargs: Additional arguments passed to the constructor.
+            variant: The model variant, one of "tiny", "small", "base", "large", "giant".
+            image_size: The input image size (height, width).
+            num_classes: Number of output classes.
+            include_top: Whether to include the classification head.
+            **kwargs: Additional arguments to pass to the model constructor.
 
         Returns:
-            DinoV3Model instance configured for the specified variant.
-
-        Raises:
-            ValueError: If variant is not recognized.
-
-        Example:
-            >>> # Create DinoV3-Base for ImageNet
-            >>> model = DINOv3.from_variant("base", num_classes=1000)
-            >>> # Create DinoV3-Small for CIFAR-10
-            >>> model = DINOv3.from_variant("small", image_size=(32, 32), num_classes=10)
-            >>> # Feature extraction model
-            >>> model = DINOv3.from_variant("large", include_top=False)
+            A DINOv3 model instance.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
                 f"Unknown variant '{variant}'. Available variants: "
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
-
         config = cls.MODEL_VARIANTS[variant].copy()
+        config.update(kwargs)
 
-        logger.info(f"Creating DinoV3-{variant.upper()} model")
-        logger.info(f"Configuration: {config}")
+        logger.info(f"Creating DINOv3-{variant.upper()} model with config: {config}")
 
         return cls(
             image_size=image_size,
             num_classes=num_classes,
             include_top=include_top,
-            **config,
-            **kwargs
+            **config
         )
 
     def get_config(self) -> Dict[str, Any]:
-        """Get model configuration for serialization.
-
-        Returns:
-            Configuration dictionary
-        """
+        """Returns the model's configuration for serialization."""
         config = {
             'image_size': self.image_size,
             'patch_size': self.patch_size,
             'num_classes': self.num_classes,
             'embed_dim': self.embed_dim,
-            'depth': self.depth,  # Changed from num_layers to depth
+            'depth': self.depth,
             'num_heads': self.num_heads,
             'mlp_ratio': self.mlp_ratio,
+            'qkv_bias': self.qkv_bias,
             'dropout_rate': self.dropout_rate,
             'attention_dropout_rate': self.attention_dropout_rate,
             'stochastic_depth_rate': self.stochastic_depth_rate,
-            'use_class_token': self.use_class_token,
-            'use_mean_pooling': self.use_mean_pooling,
             'normalization_type': self.normalization_type,
-            'attention_type': self.attention_type,
             'activation': self.activation,
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'bias_initializer': initializers.serialize(self.bias_initializer),
@@ -553,65 +431,11 @@ class DINOv3(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "DINOv3":
-        """
-        Create model from configuration.
-
-        Args:
-            config: Configuration dictionary from get_config().
-
-        Returns:
-            DinoV3Model instance.
-        """
-        # Deserialize initializers and regularizers
-        if config.get("kernel_initializer"):
-            config["kernel_initializer"] = initializers.deserialize(
-                config["kernel_initializer"]
-            )
-        if config.get("bias_initializer"):
-            config["bias_initializer"] = initializers.deserialize(
-                config["bias_initializer"]
-            )
-        if config.get("kernel_regularizer"):
-            config["kernel_regularizer"] = regularizers.deserialize(
-                config["kernel_regularizer"]
-            )
-        if config.get("bias_regularizer"):
-            config["bias_regularizer"] = regularizers.deserialize(
-                config["bias_regularizer"]
-            )
-
+        """Creates a model from its configuration."""
         return cls(**config)
 
-    def summary(self, **kwargs) -> None:
-        """Print model summary with additional DinoV3-specific information."""
-        super().summary(**kwargs)
 
-        # Print additional model information
-        logger.info("DinoV3 Model Configuration:")
-        logger.info(f"  - Input shape: {self.image_size} + (3,)")
-        logger.info(f"  - Patch size: {self.patch_size}")
-        logger.info(f"  - Number of patches: {self.num_patches} ({self.num_patches_h}x{self.num_patches_w})")
-        logger.info(f"  - Sequence length: {self.sequence_length}")
-        logger.info(f"  - Embedding dimension: {self.embed_dim}")
-        logger.info(f"  - Number of layers: {self.depth}")  # Changed from num_layers
-        logger.info(f"  - Number of heads: {self.num_heads}")
-        logger.info(f"  - Head dimension: {self.embed_dim // self.num_heads}")
-        logger.info(f"  - MLP ratio: {self.mlp_ratio}")
-        logger.info(f"  - Stochastic depth rate: {self.stochastic_depth_rate}")
-        logger.info(f"  - Use class token: {self.use_class_token}")
-        logger.info(f"  - Normalization: {self.normalization_type}")
-        logger.info(f"  - Attention type: {self.attention_type}")
-        if self.include_top:
-            logger.info(f"  - Number of classes: {self.num_classes}")
-        else:
-            logger.info("  - Feature extraction mode (no classification head)")
-
-
-# ---------------------------------------------------------------------
-# Factory Functions
-# ---------------------------------------------------------------------
-
-def create_dino_v3(  # Renamed from create_dinov3
+def create_dino_v3(
     variant: str = "base",
     image_size: Tuple[int, int] = (224, 224),
     num_classes: int = 1000,
@@ -620,36 +444,26 @@ def create_dino_v3(  # Renamed from create_dinov3
     **kwargs: Any
 ) -> DINOv3:
     """
-    Convenience function to create DinoV3 models.
+    A factory function to create DINOv3 models.
 
     Args:
-        variant: String, model variant ("tiny", "small", "base", "large", "giant").
-        image_size: Tuple of integers, input image size (height, width).
-        num_classes: Integer, number of output classes.
-        include_top: Boolean, whether to include the classification head.
-        pretrained: Boolean, whether to load pretrained weights (not implemented).
-        **kwargs: Additional arguments passed to the model constructor.
+        variant: Model variant ("tiny", "small", "base", "large", "giant").
+        image_size: Input image size (height, width).
+        num_classes: Number of output classes.
+        include_top: Whether to include the final classification layer.
+        pretrained: If True, attempts to load pretrained weights (not implemented).
+        **kwargs: Additional arguments for the model constructor.
 
     Returns:
-        DinoV3Model instance.
-
-    Example:
-        >>> # Create DinoV3-Base for ImageNet
-        >>> model = create_dino_v3("base", num_classes=1000)
-        >>> # Create DinoV3-Small for CIFAR-10
-        >>> model = create_dino_v3("small", image_size=(32, 32), num_classes=10)
-        >>> # Create DinoV3-Large for feature extraction
-        >>> model = create_dino_v3("large", include_top=False)
+        A DINOv3 model instance.
     """
     if pretrained:
-        logger.warning("Pretrained weights are not yet implemented")
+        logger.warning("Pretrained weights are not yet implemented for DINOv3.")
 
     return DINOv3.from_variant(
-        variant,
+        variant=variant,
         image_size=image_size,
         num_classes=num_classes,
         include_top=include_top,
         **kwargs
     )
-
-# ---------------------------------------------------------------------

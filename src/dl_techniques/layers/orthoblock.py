@@ -18,11 +18,12 @@ from typing import Optional, Union, Any, Tuple, Dict, Callable
 # Framework-specific imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.norms.rms_norm import RMSNorm
-from dl_techniques.layers.layer_scale import LearnableMultiplier
-from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
-from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
-from dl_techniques.initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
+from .norms.rms_norm import RMSNorm
+from .layer_scale import LearnableMultiplier
+from ..constraints.value_range_constraint import ValueRangeConstraint
+from ..regularizers.binary_preference import BinaryPreferenceRegularizer
+from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
+from ..initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
 
 # ---------------------------------------------------------------------
 
@@ -49,9 +50,9 @@ class OrthoBlock(keras.layers.Layer):
            ↓
     RMSNorm(stabilize activations)
            ↓
-    ConstrainedScale([0,1] learnable gates)
-           ↓
     Activation(user-specified)
+           ↓
+    ConstrainedScale([0,1] learnable gates)
            ↓
     Output(shape=[..., units])
     ```
@@ -97,8 +98,6 @@ class OrthoBlock(keras.layers.Layer):
             String name or Initializer instance. Defaults to 'glorot_uniform'.
         bias_initializer: Initializer for the bias vector. Only used when
             use_bias=True. Defaults to 'zeros'.
-        kernel_regularizer: Optional additional regularizer for kernel weights.
-            Applied in addition to orthonormal regularization. Defaults to None.
         bias_regularizer: Optional regularizer for the bias vector.
             Defaults to None.
         scale_initial_value: Float, initial value for constrained scale parameters.
@@ -133,7 +132,6 @@ class OrthoBlock(keras.layers.Layer):
             activation='gelu',
             ortho_reg_factor=0.02,        # Stronger orthogonal regularization
             scale_initial_value=0.3,      # Start with more closed gates
-            kernel_regularizer=keras.regularizers.L2(1e-4)  # Additional L2 reg
         )
 
         # In a deep network for feature decorrelation
@@ -169,9 +167,8 @@ class OrthoBlock(keras.layers.Layer):
         ortho_reg_factor: float = 0.01,
         kernel_initializer: Union[str, keras.initializers.Initializer] = OrthogonalHypersphereInitializer(),
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
-        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-        scale_initial_value: float = 0.9,
+        scale_initial_value: float = 0.5,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -191,13 +188,14 @@ class OrthoBlock(keras.layers.Layer):
         self.ortho_reg_factor = ortho_reg_factor
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.scale_initial_value = scale_initial_value
 
         # CREATE orthonormal regularizer
         self.ortho_reg = SoftOrthonormalConstraintRegularizer(
-            lambda_coefficient=self.ortho_reg_factor
+            lambda_coefficient=self.ortho_reg_factor,
+            l1_coefficient=1e-5,
+            use_matrix_scaling=True
         )
 
         # CREATE all sub-layers in __init__ (modern Keras 3 pattern)
@@ -207,11 +205,12 @@ class OrthoBlock(keras.layers.Layer):
             activation=None,  # Activation applied separately at the end
             use_bias=self.use_bias,
             kernel_initializer=OrthogonalHypersphereInitializer(),
-            bias_initializer=self.bias_initializer,
             kernel_regularizer=self.ortho_reg,  # Orthonormal regularization
+            bias_initializer=self.bias_initializer,
             bias_regularizer=self.bias_regularizer,
             name="ortho_dense"
         )
+
 
         # RMS normalization for activation stabilization
         self.norm = RMSNorm(
@@ -224,7 +223,7 @@ class OrthoBlock(keras.layers.Layer):
         self.constrained_scale = LearnableMultiplier(
             multiplier_type="CHANNEL",
             initializer=keras.initializers.Constant(self.scale_initial_value),
-            regularizer=keras.regularizers.L1(1e-5),  # Encourage sparsity
+            regularizer=BinaryPreferenceRegularizer(multiplier=1e-4),  # Encourage sparsity
             constraint=ValueRangeConstraint(min_value=0.0, max_value=1.0),
             name="constrained_scale"
         )
@@ -281,14 +280,14 @@ class OrthoBlock(keras.layers.Layer):
         # Stage 2: RMS normalization for activation stabilization
         z_norm = self.norm(z, training=training)
 
-        # Stage 3: Constrained scaling for learnable feature gating
-        z_scaled = self.constrained_scale(z_norm, training=training)
-
-        # Stage 4: Apply final activation function
+        # Stage 3: Apply activation function
         if self.activation is not None:
-            outputs = self.activation(z_scaled)
+            z_norm = self.activation(z_norm)
         else:
-            outputs = z_scaled
+            z_norm = z_norm
+
+        # Stage 4: Constrained scaling for learnable feature gating
+        outputs = self.constrained_scale(z_norm, training=training)
 
         return outputs
 
@@ -327,7 +326,6 @@ class OrthoBlock(keras.layers.Layer):
             "ortho_reg_factor": self.ortho_reg_factor,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
-            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
             "scale_initial_value": self.scale_initial_value,
         })
