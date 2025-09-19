@@ -1089,7 +1089,7 @@ def train_mnist_ccnet_with_visualizations(epochs: int = 20):
     # Visualization callback
     def visualization_callback(epoch, metrics, orch):
         if epoch % 5 == 0:
-            logger.info(f"\n--- Epoch {epoch} Visualizations ---")
+            logger.info(f"--- Epoch {epoch} Visualizations ---")
 
             # Save intermediate visualizations
             if epoch > 0:
@@ -1111,7 +1111,7 @@ def train_mnist_ccnet_with_visualizations(epochs: int = 20):
     except StopIteration:
         logger.info("Training stopped early due to convergence.")
 
-    logger.info("\n" + "=" * 60)
+    logger.info("=" * 60)
     logger.info("Training complete! Generating final visualizations...")
     logger.info("=" * 60)
 
@@ -1126,14 +1126,14 @@ def train_mnist_ccnet_with_visualizations(epochs: int = 20):
     visualizer.create_summary_report(orchestrator, trainer, x_test[:1000], y_test[:1000])
 
     # Save models
-    logger.info("\nSaving models...")
+    logger.info("Saving models...")
     save_path = visualizer.experiment_dir / "models"
     save_path.mkdir(exist_ok=True)
     orchestrator.save_models(str(save_path / "mnist_ccnet"))
     logger.info(f"Models saved to {save_path}")
 
-    logger.info(f"\nAll visualizations saved to: {visualizer.experiment_dir}")
-    logger.info("\nCCNet training and visualization complete!")
+    logger.info(f"All visualizations saved to: {visualizer.experiment_dir}")
+    logger.info("CCNet training and visualization complete!")
 
     return orchestrator, trainer, visualizer
 
