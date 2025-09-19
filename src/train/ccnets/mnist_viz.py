@@ -794,13 +794,13 @@ class CCNetVisualizer:
 
 
 # ---------------------------------------------------------------------
-# Model Definitions (Same as before, included for completeness)
+# Model Definitions (Refined)
 # ---------------------------------------------------------------------
 
 class MNISTExplainer(keras.Model):
     """
     Explainer network for MNIST: P(E|X)
-    Extracts latent style/context from digit images.
+    Extracts latent style/context from digit images using a modern CNN architecture.
     """
 
     def __init__(
@@ -815,48 +815,78 @@ class MNISTExplainer(keras.Model):
         self.dropout_rate = dropout_rate
         self.regularizer = keras.regularizers.L2(l2_regularization) if l2_regularization > 0 else None
 
-        # Layers will be built in build() method
-        self.conv1 = None
-        self.conv2 = None
-        self.conv3 = None
-        self.pool = None
-        self.flatten = None
-        self.dropout = None
-        self.fc1 = None
-        self.fc2 = None
-        self.fc_latent = None
-        self.batch_norm1 = None
-        self.batch_norm2 = None
+        # Layers will be built in the build() method
+        self.conv1, self.bn1, self.act1, self.pool1 = None, None, None, None
+        self.conv2, self.bn2, self.act2, self.pool2 = None, None, None, None
+        self.conv3, self.bn3, self.act3, self.pool3 = None, None, None, None
+        self.flatten, self.dropout, self.fc1, self.bn_fc1, self.act_fc1 = None, None, None, None, None
+        self.fc2, self.bn_fc2, self.act_fc2, self.fc_latent = None, None, None, None
 
     def build(self, input_shape: Tuple[int, ...]):
         super().build(input_shape)
 
-        self.conv1 = keras.layers.Conv2D(32, 3, activation='relu', padding='same', kernel_regularizer=self.regularizer)
-        self.conv2 = keras.layers.Conv2D(64, 3, activation='relu', padding='same', kernel_regularizer=self.regularizer)
-        self.conv3 = keras.layers.Conv2D(128, 3, activation='relu', padding='same', kernel_regularizer=self.regularizer)
-        self.pool = keras.layers.MaxPooling2D(2)
+        # Block 1: 28x28 -> 14x14
+        self.conv1 = keras.layers.Conv2D(32, 3, padding='same', kernel_regularizer=self.regularizer)
+        self.bn1 = keras.layers.BatchNormalization()
+        self.act1 = keras.layers.LeakyReLU(0.2)
+        self.pool1 = keras.layers.MaxPooling2D(2)
+
+        # Block 2: 14x14 -> 7x7
+        self.conv2 = keras.layers.Conv2D(64, 3, padding='same', kernel_regularizer=self.regularizer)
+        self.bn2 = keras.layers.BatchNormalization()
+        self.act2 = keras.layers.LeakyReLU(0.2)
+        self.pool2 = keras.layers.MaxPooling2D(2)
+
+        # Block 3: 7x7 -> 3x3
+        self.conv3 = keras.layers.Conv2D(128, 3, padding='same', kernel_regularizer=self.regularizer)
+        self.bn3 = keras.layers.BatchNormalization()
+        self.act3 = keras.layers.LeakyReLU(0.2)
+        self.pool3 = keras.layers.MaxPooling2D(2)
+
+        # Classifier Head
         self.flatten = keras.layers.Flatten()
         self.dropout = keras.layers.Dropout(self.dropout_rate)
-        self.batch_norm1 = keras.layers.BatchNormalization()
-        self.batch_norm2 = keras.layers.BatchNormalization()
-        self.fc1 = keras.layers.Dense(512, activation='relu', kernel_regularizer=self.regularizer)
-        self.fc2 = keras.layers.Dense(256, activation='relu', kernel_regularizer=self.regularizer)
+
+        self.fc1 = keras.layers.Dense(512, kernel_regularizer=self.regularizer)
+        self.bn_fc1 = keras.layers.BatchNormalization()
+        self.act_fc1 = keras.layers.LeakyReLU(0.2)
+
+        self.fc2 = keras.layers.Dense(256, kernel_regularizer=self.regularizer)
+        self.bn_fc2 = keras.layers.BatchNormalization()
+        self.act_fc2 = keras.layers.LeakyReLU(0.2)
+
         self.fc_latent = keras.layers.Dense(self.explanation_dim, kernel_regularizer=self.regularizer)
 
     def call(self, x: tf.Tensor, training: bool = False) -> tf.Tensor:
+        # Feature extraction
         x = self.conv1(x)
-        x = self.pool(x)
-        x = self.batch_norm1(x, training=training)
+        x = self.bn1(x, training=training)
+        x = self.act1(x)
+        x = self.pool1(x)
+
         x = self.conv2(x)
-        x = self.pool(x)
-        x = self.batch_norm2(x, training=training)
+        x = self.bn2(x, training=training)
+        x = self.act2(x)
+        x = self.pool2(x)
+
         x = self.conv3(x)
-        x = self.pool(x)
+        x = self.bn3(x, training=training)
+        x = self.act3(x)
+        x = self.pool3(x)
+
+        # Latent vector generation
         x = self.flatten(x)
         x = self.dropout(x, training=training)
+
         x = self.fc1(x)
+        x = self.bn_fc1(x, training=training)
+        x = self.act_fc1(x)
         x = self.dropout(x, training=training)
+
         x = self.fc2(x)
+        x = self.bn_fc2(x, training=training)
+        x = self.act_fc2(x)
+
         e_latent = self.fc_latent(x)
         return e_latent
 
@@ -864,7 +894,7 @@ class MNISTExplainer(keras.Model):
 class MNISTReasoner(keras.Model):
     """
     Reasoner network for MNIST: P(Y|X,E)
-    Performs context-aware digit classification.
+    Performs context-aware digit classification using refined feature extraction.
     """
 
     def __init__(
@@ -881,41 +911,69 @@ class MNISTReasoner(keras.Model):
         self.dropout_rate = dropout_rate
         self.regularizer = keras.regularizers.L2(l2_regularization) if l2_regularization > 0 else None
 
-        self.conv1 = None
-        self.conv2 = None
-        self.pool = None
-        self.flatten = None
-        self.dropout = None
-        self.fc_combine = None
-        self.fc_hidden = None
-        self.fc_output = None
-        self.batch_norm = None
+        # Layers will be built in the build() method
+        self.conv1, self.bn1, self.act1, self.pool1 = None, None, None, None
+        self.conv2, self.bn2, self.act2, self.pool2 = None, None, None, None
+        self.flatten, self.dropout, self.fc_combine, self.bn_combine, self.act_combine = None, None, None, None, None
+        self.fc_hidden, self.bn_hidden, self.act_hidden, self.fc_output = None, None, None, None
 
     def build(self, input_shape):
         super().build(input_shape)
 
-        self.conv1 = keras.layers.Conv2D(32, 3, activation='relu', padding='same', kernel_regularizer=self.regularizer)
-        self.conv2 = keras.layers.Conv2D(64, 3, activation='relu', padding='same', kernel_regularizer=self.regularizer)
-        self.pool = keras.layers.MaxPooling2D(2)
+        # Image feature extractor
+        self.conv1 = keras.layers.Conv2D(32, 3, padding='same', kernel_regularizer=self.regularizer)
+        self.bn1 = keras.layers.BatchNormalization()
+        self.act1 = keras.layers.LeakyReLU(0.2)
+        self.pool1 = keras.layers.MaxPooling2D(2)
+
+        self.conv2 = keras.layers.Conv2D(64, 3, padding='same', kernel_regularizer=self.regularizer)
+        self.bn2 = keras.layers.BatchNormalization()
+        self.act2 = keras.layers.LeakyReLU(0.2)
+        self.pool2 = keras.layers.MaxPooling2D(2)
+
         self.flatten = keras.layers.Flatten()
-        self.batch_norm = keras.layers.BatchNormalization()
-        self.fc_combine = keras.layers.Dense(512, activation='relu', kernel_regularizer=self.regularizer)
-        self.fc_hidden = keras.layers.Dense(256, activation='relu', kernel_regularizer=self.regularizer)
+
+        # Combined processing head
+        self.fc_combine = keras.layers.Dense(512, kernel_regularizer=self.regularizer)
+        self.bn_combine = keras.layers.BatchNormalization()
+        self.act_combine = keras.layers.LeakyReLU(0.2)
+
+        self.fc_hidden = keras.layers.Dense(256, kernel_regularizer=self.regularizer)
+        self.bn_hidden = keras.layers.BatchNormalization()
+        self.act_hidden = keras.layers.LeakyReLU(0.2)
+
         self.dropout = keras.layers.Dropout(self.dropout_rate)
-        self.fc_output = keras.layers.Dense(self.num_classes, activation='softmax', kernel_regularizer=self.regularizer)
+        self.fc_output = keras.layers.Dense(self.num_classes, activation='softmax',
+                                            kernel_regularizer=self.regularizer)
 
     def call(self, x: tf.Tensor, e: tf.Tensor, training: bool = False) -> tf.Tensor:
+        # Extract features from the image
         img_features = self.conv1(x)
-        img_features = self.pool(img_features)
-        img_features = self.batch_norm(img_features, training=training)
+        img_features = self.bn1(img_features, training=training)
+        img_features = self.act1(img_features)
+        img_features = self.pool1(img_features)
+
         img_features = self.conv2(img_features)
-        img_features = self.pool(img_features)
+        img_features = self.bn2(img_features, training=training)
+        img_features = self.act2(img_features)
+        img_features = self.pool2(img_features)
+
         img_features = self.flatten(img_features)
+
+        # Combine image features with latent explanation
         combined = keras.ops.concatenate([img_features, e], axis=-1)
+
+        # Process combined features
         combined = self.fc_combine(combined)
+        combined = self.bn_combine(combined, training=training)
+        combined = self.act_combine(combined)
         combined = self.dropout(combined, training=training)
+
         combined = self.fc_hidden(combined)
+        combined = self.bn_hidden(combined, training=training)
+        combined = self.act_hidden(combined)
         combined = self.dropout(combined, training=training)
+
         y_probs = self.fc_output(combined)
         return y_probs
 
@@ -923,7 +981,8 @@ class MNISTReasoner(keras.Model):
 class MNISTProducer(keras.Model):
     """
     Producer network for MNIST: P(X|Y,E)
-    Generates/reconstructs digit images from label and style.
+    Generates/reconstructs digit images from label and style, using an improved
+    upsampling architecture to prevent checkerboard artifacts.
     """
 
     def __init__(
@@ -940,54 +999,82 @@ class MNISTProducer(keras.Model):
         self.dropout_rate = dropout_rate
         self.regularizer = keras.regularizers.L2(l2_regularization) if l2_regularization > 0 else None
 
-        self.fc_input = None
-        self.fc_hidden1 = None
-        self.fc_hidden2 = None
-        self.fc_reshape = None
-        self.dropout = None
-        self.reshape = None
-        self.conv_transpose1 = None
-        self.conv_transpose2 = None
-        self.conv_transpose3 = None
-        self.conv_output = None
-        self.batch_norm1 = None
-        self.batch_norm2 = None
+        # Layers will be built in the build() method
+        self.fc1, self.bn_fc1, self.act_fc1 = None, None, None
+        self.fc2, self.bn_fc2, self.act_fc2 = None, None, None
+        self.reshape, self.dropout = None, None
+
+        self.up1, self.conv1, self.bn_up1, self.act_up1 = None, None, None, None
+        self.up2, self.conv2, self.bn_up2, self.act_up2 = None, None, None, None
+        self.conv3, self.bn_up3, self.act_up3 = None, None, None
+        self.conv_out = None
 
     def build(self, input_shape):
         super().build(input_shape)
 
-        self.fc_input = keras.layers.Dense(256, activation='relu', kernel_regularizer=self.regularizer)
-        self.fc_hidden1 = keras.layers.Dense(512, activation='relu', kernel_regularizer=self.regularizer)
-        self.fc_hidden2 = keras.layers.Dense(1024, activation='relu', kernel_regularizer=self.regularizer)
-        self.fc_reshape = keras.layers.Dense(7 * 7 * 128, activation='relu', kernel_regularizer=self.regularizer)
+        # Initial projection from latent vectors to a spatial representation
+        self.fc1 = keras.layers.Dense(512, kernel_regularizer=self.regularizer)
+        self.bn_fc1 = keras.layers.BatchNormalization()
+        self.act_fc1 = keras.layers.LeakyReLU(0.2)
+
+        self.fc2 = keras.layers.Dense(7 * 7 * 128, kernel_regularizer=self.regularizer)
+        self.bn_fc2 = keras.layers.BatchNormalization()
+        self.act_fc2 = keras.layers.LeakyReLU(0.2)
+
         self.reshape = keras.layers.Reshape((7, 7, 128))
         self.dropout = keras.layers.Dropout(self.dropout_rate)
-        self.batch_norm1 = keras.layers.BatchNormalization()
-        self.batch_norm2 = keras.layers.BatchNormalization()
-        self.conv_transpose1 = keras.layers.Conv2DTranspose(64, 3, strides=2, padding='same', activation='relu',
-                                                            kernel_regularizer=self.regularizer)
-        self.conv_transpose2 = keras.layers.Conv2DTranspose(32, 3, strides=2, padding='same', activation='relu',
-                                                            kernel_regularizer=self.regularizer)
-        self.conv_transpose3 = keras.layers.Conv2DTranspose(16, 3, padding='same', activation='relu',
-                                                            kernel_regularizer=self.regularizer)
-        self.conv_output = keras.layers.Conv2D(1, 3, padding='same', activation='sigmoid',
-                                               kernel_regularizer=self.regularizer)
+
+        # Upsampling Block 1: 7x7 -> 14x14
+        self.up1 = keras.layers.UpSampling2D(size=(2, 2))
+        self.conv1 = keras.layers.Conv2D(64, 3, padding='same', kernel_regularizer=self.regularizer)
+        self.bn_up1 = keras.layers.BatchNormalization()
+        self.act_up1 = keras.layers.LeakyReLU(0.2)
+
+        # Upsampling Block 2: 14x14 -> 28x28
+        self.up2 = keras.layers.UpSampling2D(size=(2, 2))
+        self.conv2 = keras.layers.Conv2D(32, 3, padding='same', kernel_regularizer=self.regularizer)
+        self.bn_up2 = keras.layers.BatchNormalization()
+        self.act_up2 = keras.layers.LeakyReLU(0.2)
+
+        # Refinement Block at 28x28
+        self.conv3 = keras.layers.Conv2D(16, 3, padding='same', kernel_regularizer=self.regularizer)
+        self.bn_up3 = keras.layers.BatchNormalization()
+        self.act_up3 = keras.layers.LeakyReLU(0.2)
+
+        # Output layer
+        self.conv_out = keras.layers.Conv2D(1, 3, padding='same', activation='sigmoid',
+                                            kernel_regularizer=self.regularizer)
 
     def call(self, y: tf.Tensor, e: tf.Tensor, training: bool = False) -> tf.Tensor:
         combined = keras.ops.concatenate([y, e], axis=-1)
-        x = self.fc_input(combined)
+
+        # Project and reshape
+        x = self.fc1(combined)
+        x = self.bn_fc1(x, training=training)
+        x = self.act_fc1(x)
         x = self.dropout(x, training=training)
-        x = self.fc_hidden1(x)
-        x = self.dropout(x, training=training)
-        x = self.fc_hidden2(x)
-        x = self.fc_reshape(x)
+
+        x = self.fc2(x)
+        x = self.bn_fc2(x, training=training)
+        x = self.act_fc2(x)
         x = self.reshape(x)
-        x = self.conv_transpose1(x)
-        x = self.batch_norm1(x, training=training)
-        x = self.conv_transpose2(x)
-        x = self.batch_norm2(x, training=training)
-        x = self.conv_transpose3(x)
-        x_generated = self.conv_output(x)
+
+        # Upsample to generate image
+        x = self.up1(x)
+        x = self.conv1(x)
+        x = self.bn_up1(x, training=training)
+        x = self.act_up1(x)
+
+        x = self.up2(x)
+        x = self.conv2(x)
+        x = self.bn_up2(x, training=training)
+        x = self.act_up2(x)
+
+        x = self.conv3(x)
+        x = self.bn_up3(x, training=training)
+        x = self.act_up3(x)
+
+        x_generated = self.conv_out(x)
         return x_generated
 
 
@@ -1139,7 +1226,7 @@ def train_mnist_ccnet_with_visualizations(epochs: int = 20):
 
 
 if __name__ == "__main__":
-    orchestrator, trainer, visualizer = train_mnist_ccnet_with_visualizations(epochs=20)
+    orchestrator, trainer, visualizer = train_mnist_ccnet_with_visualizations(epochs=10)
 
     logger.info("\n" + "=" * 60)
     logger.info("EXPERIMENT COMPLETE")
