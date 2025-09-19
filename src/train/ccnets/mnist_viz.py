@@ -1232,7 +1232,7 @@ def train_mnist_ccnet_with_visualizations(epochs: int = 20):
 if __name__ == "__main__":
     orchestrator, trainer, visualizer = train_mnist_ccnet_with_visualizations(epochs=20)
 
-    logger.info("\n" + "=" * 60)
+    logger.info("=" * 60)
     logger.info("EXPERIMENT COMPLETE")
     logger.info(f"Results directory: {visualizer.experiment_dir}")
     logger.info("=" * 60)
