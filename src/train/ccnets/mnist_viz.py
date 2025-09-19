@@ -886,8 +886,12 @@ class MNISTExplainer(keras.Model):
         x = self.fc2(x)
         x = self.bn_fc2(x, training=training)
         x = self.act_fc2(x)
+        # Get the raw latent vector
+        e_latent_raw = self.fc_latent(x)
 
-        e_latent = self.fc_latent(x)
+        # Normalize the vector to have a unit length (L2 norm of 1)
+        e_latent = tf.math.l2_normalize(e_latent_raw, axis=-1)
+
         return e_latent
 
 
