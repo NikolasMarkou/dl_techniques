@@ -135,25 +135,25 @@ class CCNetOrchestrator:
         # Apply verification weight to balance losses
         w = self.config.verification_weight
 
-        # Explainer: Inference + Generation - Reconstruction
+        # Detach the negative terms from the computation graph
+        gen_loss_no_grad = tf.stop_gradient(losses.generation_loss)
+        recon_loss_no_grad = tf.stop_gradient(losses.reconstruction_loss)
+
         explainer_error = (
                 losses.inference_loss +
                 w * losses.generation_loss -
-                losses.reconstruction_loss
+                recon_loss_no_grad  # Use detached value
         )
-
-        # Reasoner: Reconstruction + Inference - Generation
         reasoner_error = (
                 losses.reconstruction_loss +
                 losses.inference_loss -
-                w * losses.generation_loss
+                gen_loss_no_grad  # Use detached value
         )
-
-        # Producer: Generation + Reconstruction - Inference
+        # The producer error is likely fine as is, but could also be stabilized.
         producer_error = (
                 w * losses.generation_loss +
                 losses.reconstruction_loss -
-                losses.inference_loss
+                tf.stop_gradient(losses.inference_loss)
         )
 
         return CCNetModelErrors(
