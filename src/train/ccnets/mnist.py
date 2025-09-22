@@ -1221,7 +1221,7 @@ def prepare_mnist_data() -> Tuple[tf.data.Dataset, tf.data.Dataset]:
 
     # Create TensorFlow datasets
     train_ds = tf.data.Dataset.from_tensor_slices((x_train, y_train))
-    train_ds = train_ds.shuffle(1000).batch(128).prefetch(tf.data.AUTOTUNE)
+    train_ds = train_ds.shuffle(1001).batch(128).prefetch(tf.data.AUTOTUNE)
 
     val_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test))
     val_ds = val_ds.batch(128).prefetch(tf.data.AUTOTUNE)
