@@ -5,9 +5,6 @@ Visualization Framework Core Module
 A modular, extensible visualization framework for machine learning experiments.
 Provides a plugin-based architecture for creating various types of visualizations
 with ready-made templates and full customization support.
-
-Author: ML Visualization Framework
-Version: 2.0.0
 """
 
 from __future__ import annotations
@@ -22,6 +19,7 @@ from typing import Dict, List, Optional, Tuple, Any, Union, Callable, Type
 from enum import Enum
 import json
 import logging
+import contextlib
 
 # Configure matplotlib and seaborn defaults
 plt.style.use('seaborn-v0_8-whitegrid')
@@ -115,8 +113,8 @@ class PlotConfig:
     transparent_background: bool = False
     bbox_inches: str = "tight"
 
-    def apply_style(self) -> None:
-        """Apply the configured style to matplotlib."""
+    def get_style_params(self) -> Dict[str, Any]:
+        """Get matplotlib rcParams for the configured style."""
         style_map = {
             PlotStyle.MINIMAL: {
                 'axes.spines.top': False,
@@ -160,11 +158,12 @@ class PlotConfig:
             }
         }
 
+        params = {}
         if self.style in style_map:
-            plt.rcParams.update(style_map[self.style])
+            params.update(style_map[self.style])
 
         # Apply font settings
-        plt.rcParams.update({
+        params.update({
             'font.family': self.font_family,
             'axes.titlesize': self.title_fontsize,
             'axes.labelsize': self.label_fontsize,
@@ -172,6 +171,23 @@ class PlotConfig:
             'ytick.labelsize': self.tick_fontsize,
             'legend.fontsize': self.legend_fontsize,
         })
+
+        return params
+
+    @contextlib.contextmanager
+    def style_context(self):
+        """Context manager for temporarily applying style settings."""
+        # Store current rcParams
+        old_params = {key: plt.rcParams[key] for key in self.get_style_params().keys()
+                      if key in plt.rcParams}
+
+        try:
+            # Apply new params
+            plt.rcParams.update(self.get_style_params())
+            yield
+        finally:
+            # Restore old params
+            plt.rcParams.update(old_params)
 
 
 @dataclass
@@ -382,9 +398,6 @@ class VisualizationManager:
         self.plugins: Dict[str, VisualizationPlugin] = {}
         self.templates: Dict[str, Type[VisualizationPlugin]] = {}
 
-        # Apply configured style
-        self.config.apply_style()
-
         if auto_discover:
             self._discover_plugins()
 
@@ -405,6 +418,12 @@ class VisualizationManager:
 
         template_class = self.templates[template_name]
         return template_class(self.config, self.context)
+
+    @contextlib.contextmanager
+    def style_context(self):
+        """Context manager for applying this manager's style settings."""
+        with self.config.style_context():
+            yield
 
     def visualize(
             self,
@@ -445,19 +464,20 @@ class VisualizationManager:
                 logger.warning("No suitable plugin found for data")
                 return None
 
-        # Create visualization
+        # Create visualization with style context
         try:
-            fig = plugin.create_visualization(data, **kwargs)
+            with self.style_context():
+                fig = plugin.create_visualization(data, **kwargs)
 
-            if save:
-                plugin.save_figure(fig, plugin.name)
+                if save:
+                    plugin.save_figure(fig, plugin.name)
 
-            if show:
-                plt.show()
-            else:
-                plt.close(fig)
+                if show:
+                    plt.show()
+                else:
+                    plt.close(fig)
 
-            return fig
+                return fig
 
         except Exception as e:
             logger.error(f"Error creating visualization with {plugin.name}: {e}")
@@ -490,56 +510,78 @@ class VisualizationManager:
             rows = max(pos[0] for pos in layout.values()) + 1
             cols = max(pos[1] for pos in layout.values()) + 1
 
-        fig = plt.figure(figsize=(self.config.fig_size[0] * cols, self.config.fig_size[1] * rows))
-        gs = fig.add_gridspec(rows, cols, hspace=0.3, wspace=0.3)
+        with self.style_context():
+            fig = plt.figure(figsize=(self.config.fig_size[0] * cols, self.config.fig_size[1] * rows))
+            gs = fig.add_gridspec(rows, cols, hspace=0.3, wspace=0.3)
 
-        for idx, (plugin_name, plugin_data) in enumerate(data.items()):
-            if layout and plugin_name in layout:
-                row, col = layout[plugin_name]
-            else:
-                row = idx // cols
-                col = idx % cols
+            for idx, (plugin_name, plugin_data) in enumerate(data.items()):
+                if layout and plugin_name in layout:
+                    row, col = layout[plugin_name]
+                else:
+                    row = idx // cols
+                    col = idx % cols
 
-            ax = fig.add_subplot(gs[row, col])
+                ax = fig.add_subplot(gs[row, col])
 
-            # Get or create plugin
-            if plugin_name in self.plugins:
-                plugin = self.plugins[plugin_name]
-            else:
+                # Get or create plugin
+                if plugin_name in self.plugins:
+                    plugin = self.plugins[plugin_name]
+                else:
+                    try:
+                        plugin = self.create_plugin_from_template(plugin_name)
+                    except ValueError:
+                        logger.warning(f"Plugin '{plugin_name}' not found, skipping")
+                        continue
+
+                # Create visualization in subplot
                 try:
-                    plugin = self.create_plugin_from_template(plugin_name)
-                except ValueError:
-                    logger.warning(f"Plugin '{plugin_name}' not found, skipping")
-                    continue
+                    plugin.create_visualization(plugin_data, ax=ax)
+                except Exception as e:
+                    logger.error(f"Error creating visualization for {plugin_name}: {e}")
 
-            # Create visualization in subplot
-            try:
-                plugin.create_visualization(plugin_data, ax=ax)
-            except Exception as e:
-                logger.error(f"Error creating visualization for {plugin_name}: {e}")
+            if save:
+                save_path = self.context.get_save_path(f"dashboard.{self.config.save_format}")
+                fig.savefig(
+                    save_path,
+                    dpi=self.config.save_dpi,
+                    format=self.config.save_format,
+                    bbox_inches=self.config.bbox_inches
+                )
 
-        if save:
-            save_path = self.context.get_save_path(f"dashboard.{self.config.save_format}")
-            fig.savefig(
-                save_path,
-                dpi=self.config.save_dpi,
-                format=self.config.save_format,
-                bbox_inches=self.config.bbox_inches
-            )
-
-        if show:
-            plt.show()
-        else:
-            plt.close(fig)
+            if show:
+                plt.show()
+            else:
+                plt.close(fig)
 
         return fig
 
     def _find_suitable_plugin(self, data: Any) -> Optional[VisualizationPlugin]:
-        """Find a suitable plugin for the given data."""
+        """
+        Find a suitable plugin for the given data.
+
+        Raises:
+            ValueError: If multiple plugins can handle the data (ambiguous case)
+
+        Returns:
+            The suitable plugin, or None if no plugin can handle the data
+        """
+        suitable_plugins = []
+
         for plugin in self.plugins.values():
             if plugin.can_handle(data):
-                return plugin
-        return None
+                suitable_plugins.append(plugin)
+
+        if len(suitable_plugins) == 0:
+            return None
+        elif len(suitable_plugins) == 1:
+            return suitable_plugins[0]
+        else:
+            # Multiple plugins can handle the data - force disambiguation
+            plugin_names = [p.name for p in suitable_plugins]
+            raise ValueError(
+                f"Multiple plugins can handle this data type: {plugin_names}. "
+                f"Please specify the plugin_name parameter to disambiguate."
+            )
 
     def _discover_plugins(self) -> None:
         """Auto-discover and load available plugins."""

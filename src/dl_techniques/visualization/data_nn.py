@@ -714,9 +714,16 @@ class WeightVisualization(VisualizationPlugin):
                     # Visualize weight matrix
                     if len(weights.shape) == 2:
                         im = ax.imshow(weights, cmap='RdBu_r', aspect='auto')
-                    elif len(weights.shape) == 4:  # Conv weights
-                        # Show first few filters
-                        w_reshaped = weights[:, :, 0, :min(16, weights.shape[3])]
+                    elif len(weights.shape) == 4:  # Conv weights - FIXED
+                        # Average over input channels for proper visualization
+                        if weights.shape[2] > 1:
+                            # Average across input channels (axis=2)
+                            w_averaged = np.mean(weights, axis=2)  # Shape: (h, w, out_channels)
+                            # Select first few output filters
+                            w_reshaped = w_averaged[:, :, :min(16, weights.shape[3])]
+                        else:
+                            # Single input channel
+                            w_reshaped = weights[:, :, 0, :min(16, weights.shape[3])]
                         im = ax.imshow(self._arrange_filters(w_reshaped),
                                        cmap='RdBu_r', aspect='auto')
                     else:
@@ -726,30 +733,36 @@ class WeightVisualization(VisualizationPlugin):
                     plt.colorbar(im, ax=ax, fraction=0.046)
 
         elif plot_type == 'filters':
-            # For convolutional layers, show filters
-            fig = plt.figure(figsize=(12, 8))
-            n_cols = 4
-            n_rows = (n_layers + n_cols - 1) // n_cols
-
-            plot_idx = 1
+            # For convolutional layers, show filters - FIXED
+            # Pre-filter to only include convolutional layers
+            conv_layers_to_show = []
             for layer_name in layers_to_show:
                 weights_list = weight_data.weights[layer_name]
+                if len(weights_list) > 0 and len(weights_list[0].shape) == 4:
+                    conv_layers_to_show.append(layer_name)
 
-                if len(weights_list) > 0:
-                    weights = weights_list[0]
+            if not conv_layers_to_show:
+                fig, ax = plt.subplots(figsize=(8, 6))
+                ax.text(0.5, 0.5, 'No convolutional layers found',
+                       ha='center', va='center', transform=ax.transAxes)
+                ax.axis('off')
+            else:
+                n_conv_layers = len(conv_layers_to_show)
+                fig = plt.figure(figsize=(12, 3 * ((n_conv_layers + 3) // 4)))
+                n_cols = min(4, n_conv_layers)
+                n_rows = (n_conv_layers + n_cols - 1) // n_cols
 
-                    if len(weights.shape) == 4:  # Conv2D weights
-                        ax = plt.subplot(n_rows, n_cols, plot_idx)
+                for plot_idx, layer_name in enumerate(conv_layers_to_show, 1):
+                    weights = weight_data.weights[layer_name][0]  # Conv2D weights
+                    ax = plt.subplot(n_rows, n_cols, plot_idx)
 
-                        # Show first 16 filters
-                        n_filters = min(16, weights.shape[3])
-                        filter_grid = self._create_filter_grid(weights, n_filters)
+                    # Show first 16 filters
+                    n_filters = min(16, weights.shape[3])
+                    filter_grid = self._create_filter_grid(weights, n_filters)
 
-                        ax.imshow(filter_grid, cmap='gray')
-                        ax.set_title(f'{layer_name[:15]}\n({n_filters} filters)')
-                        ax.axis('off')
-
-                        plot_idx += 1
+                    ax.imshow(filter_grid, cmap='gray')
+                    ax.set_title(f'{layer_name[:15]}\n({n_filters} filters)')
+                    ax.axis('off')
 
         model_name = weight_data.model_name if hasattr(weight_data, 'model_name') else "Model"
         plt.suptitle(f'Weight Analysis - {model_name}',

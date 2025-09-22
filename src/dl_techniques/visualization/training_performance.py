@@ -9,14 +9,10 @@ and experiment comparisons.
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from matplotlib.patches import Rectangle
-import seaborn as sns
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass
-import keras
 
 from .core import VisualizationPlugin, CompositeVisualization, PlotConfig, VisualizationContext
 
@@ -34,12 +30,15 @@ class TrainingHistory:
     val_loss: Optional[List[float]] = None
     train_metrics: Dict[str, List[float]] = None
     val_metrics: Dict[str, List[float]] = None
+    grad_norms: Optional[Dict[str, List[float]]] = None
 
     def __post_init__(self):
         if self.train_metrics is None:
             self.train_metrics = {}
         if self.val_metrics is None:
             self.val_metrics = {}
+        if self.grad_norms is None:
+            self.grad_norms = {}
 
 
 @dataclass
@@ -193,7 +192,27 @@ class LearningRateScheduleVisualization(VisualizationPlugin):
         return "Visualize learning rate schedule over training"
 
     def can_handle(self, data: Any) -> bool:
-        return isinstance(data, (list, dict)) and "learning_rate" in str(data)
+        """
+        Check if this plugin can handle the given data.
+
+        Accepts:
+        - A list of numeric values (learning rates)
+        - A dict where values are lists of numeric values
+        """
+        # Check if data is a list of numbers
+        if isinstance(data, list):
+            return all(isinstance(x, (int, float, np.number)) for x in data)
+
+        # Check if data is a dict with list values
+        if isinstance(data, dict):
+            for value in data.values():
+                if not isinstance(value, list):
+                    return False
+                if not all(isinstance(x, (int, float, np.number)) for x in value):
+                    return False
+            return True
+
+        return False
 
     def create_visualization(
             self,
@@ -434,11 +453,39 @@ class ConvergenceAnalysis(CompositeVisualization):
 
     def _plot_gradient_flow(self, ax: plt.Axes, data: Any, **kwargs):
         """Plot gradient flow magnitude over time."""
-        # This would require gradient data - placeholder for now
-        ax.text(0.5, 0.5, 'Gradient Flow\n(Requires gradient data)',
-                ha='center', va='center', transform=ax.transAxes)
+        if isinstance(data, TrainingHistory):
+            histories = {"Model": data}
+        else:
+            histories = data
+
+        plotted_anything = False
+        # The key we expect in the grad_norms dictionary.
+        # This could be made a parameter in the future for more flexibility.
+        grad_metric_name = "global_grad_norm"
+
+        for idx, (name, hist) in enumerate(histories.items()):
+            # Check if gradient data is available for this history
+            if hist.grad_norms and grad_metric_name in hist.grad_norms:
+                grad_data = hist.grad_norms[grad_metric_name]
+                if grad_data:  # Ensure the list is not empty
+                    color = self.config.color_scheme.get_model_color(name, idx)
+                    ax.plot(hist.epochs[:len(grad_data)], grad_data,
+                            label=name, color=color, linewidth=2)
+                    plotted_anything = True
+
         ax.set_xlabel('Epoch')
-        ax.set_ylabel('Gradient Magnitude')
+        ax.set_ylabel('Global Gradient Norm (L2)')
+        ax.set_yscale('log')
+        ax.grid(True, which="both", ls="--", alpha=0.3)
+
+        if plotted_anything:
+            ax.legend(fontsize=8)
+        else:
+            # Provide an informative message if no data was found
+            ax.text(0.5, 0.5,
+                    f'Gradient Flow\n(Requires "{grad_metric_name}" in TrainingHistory.grad_norms)',
+                    ha='center', va='center', transform=ax.transAxes,
+                    fontsize=9, color='gray')
 
     def _plot_validation_gap(self, ax: plt.Axes, data: Any, **kwargs):
         """Plot gap between training and validation loss."""
@@ -648,9 +695,16 @@ class PerformanceDashboard(CompositeVisualization):
     def create_visualization(
             self,
             data: ModelComparison,
+            metric_to_display: Optional[str] = None,  # FIXED: Allow user to specify metric
             **kwargs
     ) -> plt.Figure:
-        """Create comprehensive performance dashboard."""
+        """
+        Create comprehensive performance dashboard.
+
+        Args:
+            data: ModelComparison data
+            metric_to_display: Specific metric to display in metric comparison (None = all metrics)
+        """
 
         fig = plt.figure(figsize=(16, 12))
         gs = gridspec.GridSpec(3, 3, figure=fig, hspace=0.3, wspace=0.3)
@@ -660,9 +714,9 @@ class PerformanceDashboard(CompositeVisualization):
             ax1 = fig.add_subplot(gs[0, :2])
             self._plot_training_curves(ax1, data.histories)
 
-        # 2. Metric comparison bars
+        # 2. Metric comparison bars - FIXED
         ax2 = fig.add_subplot(gs[0, 2])
-        self._plot_metric_bars(ax2, data)
+        self._plot_metric_bars(ax2, data, metric_to_display)
 
         # 3. Performance heatmap
         ax3 = fig.add_subplot(gs[1, :2])
@@ -692,21 +746,52 @@ class PerformanceDashboard(CompositeVisualization):
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-    def _plot_metric_bars(self, ax: plt.Axes, data: ModelComparison):
-        """Plot key metrics as bars."""
-        # Select top metrics
-        key_metrics = ['accuracy', 'loss', 'f1_score']
-        available_metrics = [m for m in key_metrics if any(m in data.metrics[model]
-                                                           for model in data.model_names)]
+    def _plot_metric_bars(self, ax: plt.Axes, data: ModelComparison,
+                         metric_to_display: Optional[str] = None):
+        """
+        Plot metrics as bars.
 
-        if available_metrics:
-            metric = available_metrics[0]
+        FIXED: Now allows specification of which metric to display,
+        or displays all metrics as grouped bars if not specified.
+        """
+        # Get all available metrics
+        all_metrics = set()
+        for model_metrics in data.metrics.values():
+            all_metrics.update(model_metrics.keys())
+
+        if not all_metrics:
+            ax.text(0.5, 0.5, 'No metrics available',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.axis('off')
+            return
+
+        # Determine which metrics to display
+        if metric_to_display:
+            # User specified a metric
+            if metric_to_display not in all_metrics:
+                # Metric not found - show available metrics
+                ax.text(0.5, 0.5,
+                       f'Metric "{metric_to_display}" not found.\nAvailable: {", ".join(sorted(all_metrics))}',
+                       ha='center', va='center', transform=ax.transAxes)
+                ax.axis('off')
+                return
+            metrics_to_show = [metric_to_display]
+        else:
+            # No metric specified - show all metrics
+            metrics_to_show = sorted(list(all_metrics))
+
+        n_models = len(data.model_names)
+        n_metrics = len(metrics_to_show)
+
+        if n_metrics == 1:
+            # Single metric - simple bar chart
+            metric = metrics_to_show[0]
             values = [data.metrics[model].get(metric, 0) for model in data.model_names]
             colors = [self.config.color_scheme.get_model_color(m, i)
-                      for i, m in enumerate(data.model_names)]
+                     for i, m in enumerate(data.model_names)]
 
-            bars = ax.bar(range(len(data.model_names)), values, color=colors, alpha=0.7)
-            ax.set_xticks(range(len(data.model_names)))
+            bars = ax.bar(range(n_models), values, color=colors, alpha=0.7)
+            ax.set_xticks(range(n_models))
             ax.set_xticklabels(data.model_names, rotation=45, ha='right')
             ax.set_title(f'{metric.title()} Comparison')
             ax.set_ylabel(metric.title())
@@ -714,7 +799,28 @@ class PerformanceDashboard(CompositeVisualization):
             # Add value labels
             for bar, val in zip(bars, values):
                 ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
-                        f'{val:.3f}', ha='center', va='bottom', fontsize=8)
+                       f'{val:.3f}', ha='center', va='bottom', fontsize=8)
+        else:
+            # Multiple metrics - grouped bar chart
+            x = np.arange(n_models)
+            width = 0.8 / n_metrics
+
+            for i, metric in enumerate(metrics_to_show):
+                values = [data.metrics[model].get(metric, 0) for model in data.model_names]
+                offset = (i - n_metrics / 2) * width + width / 2
+                bars = ax.bar(x + offset, values, width, label=metric, alpha=0.8)
+
+                # Add value labels for smaller sets
+                if n_models <= 3 and n_metrics <= 3:
+                    for bar, val in zip(bars, values):
+                        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                               f'{val:.2f}', ha='center', va='bottom', fontsize=7)
+
+            ax.set_xticks(x)
+            ax.set_xticklabels(data.model_names, rotation=45, ha='right')
+            ax.set_title('Metrics Comparison')
+            ax.set_ylabel('Value')
+            ax.legend(fontsize=8)
 
         ax.grid(True, alpha=0.3, axis='y')
 
