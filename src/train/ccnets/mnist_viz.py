@@ -526,7 +526,7 @@ class CCNetExperiment:
         try:
             trainer.train(
                 train_dataset, epochs, validation_dataset=val_dataset,
-                callbacks=[EarlyStoppingCallback(patience=5, threshold=1e-4)]
+                callbacks=[EarlyStoppingCallback(patience=5, error_threshold=1e-4)]
             )
         except StopIteration:
             logger.info("Training stopped early due to convergence.")
@@ -593,8 +593,6 @@ class CCNetExperiment:
 
         logger.info("Saving models...")
         models_dir = self.viz_manager.context.get_save_path("models")
-        # The above line is a cleaner way to get the path, but the original works too:
-        # models_dir = self.viz_manager.context.output_dir / self.viz_manager.context.experiment_name / self.viz_manager.context.timestamp / "models"
 
         models_dir.mkdir(parents=True, exist_ok=True)
         orchestrator.save_models(str(models_dir / "mnist_ccnet"))
