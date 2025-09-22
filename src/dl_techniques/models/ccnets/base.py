@@ -43,6 +43,10 @@ class CCNetConfig:
         explainer_weights: Weights for the explainer error terms.
         reasoner_weights: Weights for the reasoner error terms.
         producer_weights: Weights for the producer error terms.
+        kl_weight: Weight for the KL divergence regularization on the latent space.
+                   Forces the latent distribution towards a standard normal.
+        dynamic_weighting: If True, dynamically balances loss term weights during
+                           training to prevent any single loss from dominating.
     """
     explanation_dim: int = 128
     loss_type: str = 'l2'
@@ -66,6 +70,8 @@ class CCNetConfig:
         'generation': 1.0,
         'reconstruction': 1.0
     })
+    kl_weight: float = 0.01
+    dynamic_weighting: bool = False
 
 
 # ---------------------------------------------------------------------
@@ -101,7 +107,7 @@ class CCNetModelErrors:
     Container for the three model-specific error signals.
 
     Attributes:
-        explainer_error: Weighted sum of inference and generation losses.
+        explainer_error: Weighted sum of inference, generation, and KL losses.
         reasoner_error: Weighted sum of reconstruction and inference losses.
         producer_error: Weighted sum of generation and reconstruction losses.
     """
@@ -116,5 +122,3 @@ class CCNetModelErrors:
             'reasoner_error': float(keras.ops.convert_to_numpy(self.reasoner_error)),
             'producer_error': float(keras.ops.convert_to_numpy(self.producer_error))
         }
-
-# ---------------------------------------------------------------------

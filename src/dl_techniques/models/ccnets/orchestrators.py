@@ -23,7 +23,8 @@ class CCNetOrchestrator:
         Initialize the CCNet orchestrator.
 
         Args:
-            explainer: Neural network module modeling P(E|X).
+            explainer: Neural network module modeling P(E|X). Must output a
+                       tuple of (mu, log_var) for latent space regularization.
             reasoner: Neural network module modeling P(Y|X,E).
             producer: Neural network module modeling P(X|Y,E).
             config: Configuration object for the framework.
@@ -82,8 +83,13 @@ class CCNetOrchestrator:
         Returns:
             Dictionary containing all intermediate tensors.
         """
-        # Step 1: Extract latent explanation
-        e_latent = self.explainer(x_input, training=training)
+        # Step 1: Extract latent explanation distribution (mu, log_var)
+        mu, log_var = self.explainer(x_input, training=training)
+
+        # Step 1.5: Sample from the latent distribution using reparameterization trick
+        std = keras.ops.exp(0.5 * log_var)
+        epsilon = keras.ops.random_normal(shape=keras.ops.shape(mu))
+        e_latent = mu + epsilon * std
 
         # Step 2: Infer label using observation and explanation
         y_inferred = self.reasoner(x_input, e_latent, training=training)
@@ -97,6 +103,8 @@ class CCNetOrchestrator:
         return {
             'x_input': x_input,
             'y_truth': y_truth,
+            'mu': mu,
+            'log_var': log_var,
             'e_latent': e_latent,
             'y_inferred': y_inferred,
             'x_reconstructed': x_reconstructed,
@@ -123,20 +131,31 @@ class CCNetOrchestrator:
             inference_loss=inference_loss
         )
 
-    def compute_model_errors(self, losses: CCNetLosses) -> CCNetModelErrors:
+    def compute_model_errors(
+            self,
+            losses: CCNetLosses,
+            tensors: Dict[str, tf.Tensor]
+    ) -> CCNetModelErrors:
         """
         Compute model-specific error signals from the fundamental losses.
-        This uses a stable, additive formulation.
+        This uses a stable, additive formulation and includes KL regularization.
 
         Args:
             losses: CCNetLosses object.
+            tensors: Dictionary of tensors from forward pass, for KL loss calc.
 
         Returns:
             CCNetModelErrors object containing error signals for each module.
         """
+        # KL divergence loss to regularize the latent space
+        kl_loss = -0.5 * keras.ops.mean(
+            1 + tensors['log_var'] - keras.ops.square(tensors['mu']) - keras.ops.exp(tensors['log_var'])
+        )
+
         explainer_error = (
                 self.config.explainer_weights['inference'] * losses.inference_loss +
-                self.config.explainer_weights['generation'] * losses.generation_loss
+                self.config.explainer_weights['generation'] * losses.generation_loss +
+                self.config.kl_weight * kl_loss
         )
         reasoner_error = (
                 self.config.reasoner_weights['reconstruction'] * losses.reconstruction_loss +
@@ -168,7 +187,7 @@ class CCNetOrchestrator:
             y_truth: Ground truth label batch.
 
         Returns:
-            Dictionary of scalar loss and error tensors.
+            Dictionary of scalar loss, error, and gradient norm tensors.
         """
         # Tapes for each model
         with tf.GradientTape() as explainer_tape, \
@@ -177,7 +196,7 @@ class CCNetOrchestrator:
             # Perform a single forward pass
             tensors = self.forward_pass(x_input, y_truth, training=True)
             losses = self.compute_losses(tensors)
-            errors = self.compute_model_errors(losses)
+            errors = self.compute_model_errors(losses, tensors)
 
         # Gradient computation for each model
         explainer_vars = self.explainer.trainable_variables
@@ -188,6 +207,11 @@ class CCNetOrchestrator:
 
         producer_vars = self.producer.trainable_variables
         producer_grads = producer_tape.gradient(errors.producer_error, producer_vars)
+
+        # --- Monitoring: Compute gradient norms before clipping ---
+        explainer_grad_norm = tf.linalg.global_norm(explainer_grads)
+        reasoner_grad_norm = tf.linalg.global_norm(reasoner_grads)
+        producer_grad_norm = tf.linalg.global_norm(producer_grads)
 
         # Gradient clipping
         if self.config.gradient_clip_norm:
@@ -216,7 +240,10 @@ class CCNetOrchestrator:
             'inference_loss': losses.inference_loss,
             'explainer_error': errors.explainer_error,
             'reasoner_error': errors.reasoner_error,
-            'producer_error': errors.producer_error
+            'producer_error': errors.producer_error,
+            'explainer_grad_norm': explainer_grad_norm,
+            'reasoner_grad_norm': reasoner_grad_norm,
+            'producer_grad_norm': producer_grad_norm
         }
 
     def evaluate(
@@ -236,7 +263,7 @@ class CCNetOrchestrator:
         """
         tensors = self.forward_pass(x_input, y_truth, training=False)
         losses = self.compute_losses(tensors)
-        errors = self.compute_model_errors(losses)
+        errors = self.compute_model_errors(losses, tensors)
 
         return {
             'generation_loss': losses.generation_loss,
@@ -266,8 +293,9 @@ class CCNetOrchestrator:
         Returns:
             Generated counterfactual observation.
         """
-        # Extract style from reference
-        e_style = self.explainer(x_reference, training=False)
+        # Extract style from reference (we only need the mean for generation)
+        mu, _ = self.explainer(x_reference, training=False)
+        e_style = mu
 
         # Generate with new label but same style
         x_counterfactual = self.producer(y_target, e_style, training=False)
@@ -290,10 +318,12 @@ class CCNetOrchestrator:
             Generated observation with content from x_content and style from x_style.
         """
         # Extract style from style reference
-        e_style = self.explainer(x_style, training=False)
+        mu_style, _ = self.explainer(x_style, training=False)
+        e_style = mu_style
 
         # Infer label from content reference
-        e_content_latent = self.explainer(x_content, training=False)
+        mu_content, log_var_content = self.explainer(x_content, training=False)
+        e_content_latent = mu_content # Use mean for inference
         y_content = self.reasoner(x_content, e_content_latent, training=False)
 
         # Generate with content label and style
@@ -312,10 +342,12 @@ class CCNetOrchestrator:
             x_input: Input observation.
 
         Returns:
-            Tuple of (explicit_cause, latent_cause).
+            Tuple of (explicit_cause, latent_cause). Latent cause is the mean
+            of the learned distribution.
         """
-        # Extract latent cause
-        e_latent = self.explainer(x_input, training=False)
+        # Extract latent cause distribution
+        mu, _ = self.explainer(x_input, training=False)
+        e_latent = mu
 
         # Infer explicit cause
         y_explicit = self.reasoner(x_input, e_latent, training=False)
@@ -430,7 +462,10 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
             Dictionary containing all intermediate tensors.
         """
         # Standard forward pass for Explainer and Reasoner
-        e_latent = self.explainer(x_input, training=training)
+        mu, log_var = self.explainer(x_input, training=training)
+        std = keras.ops.exp(0.5 * log_var)
+        epsilon = keras.ops.random_normal(shape=keras.ops.shape(mu))
+        e_latent = mu + epsilon * std
         y_inferred = self.reasoner(x_input, e_latent, training=training)
 
         # Producer uses reverse causality via sequence reversal trick
@@ -450,6 +485,8 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
         return {
             'x_input': x_input,
             'y_truth': y_truth,
+            'mu': mu,
+            'log_var': log_var,
             'e_latent': e_latent,
             'y_inferred': y_inferred,
             'x_reconstructed': x_reconstructed,

@@ -90,16 +90,19 @@ These are intermediate calculations that measure the pixel-wise difference betwe
 
 ### **The Three Model Errors: Assigning Causal Blame**
 
-The three losses are not directly backpropagated. Instead, they are combined in unique ways to create a final error signal for each of the three networks. During the backpropagation for one network, the others are "frozen" (e.g., via `torch.no_grad()` or setting `requires_grad=False`) so that the updates are precisely targeted.
+The three losses are not directly backpropagated. Instead, they are combined in unique ways to create a final, stable error signal for each of the three networks. During the backpropagation for one network, the others are "frozen" so that the updates are precisely targeted.
 
-**1. Explainer Error = `Inference Loss + Generation Loss - Reconstruction Loss`**
-*   **Breakdown**: The Explainer is penalized (`+`) if its style vector `E` leads to a large `Inference Loss` (meaning the context wasn't clear enough for the Reasoner) or a large `Generation Loss` (meaning the context was not descriptive enough for the Producer). It is rewarded (`-`) for contributing to a large `Reconstruction Loss` *if* the inference was wrong, as this helps to clearly signal the Reasoner's mistake. It is taught to provide explanations that are clear, descriptive, and useful for both inference and generation.
+**1. Explainer Error = `w_inf * Inference Loss + w_gen * Generation Loss`**
+*   **Breakdown**: The Explainer is penalized for producing a latent explanation `E` that is ambiguous for the Reasoner (high `Inference Loss`) or insufficient for the Producer (high `Generation Loss`). It is incentivized to create explanations that are maximally useful for both downstream tasks.
 
-**2. Reasoner Error = `Reconstruction Loss + Inference Loss - Generation Loss`**
-*   **Breakdown**: The Reasoner is penalized (`+`) for its mistakes that manifest as a high `Reconstruction Loss` and a high `Inference Loss`. This directly punishes it for making the wrong prediction. It receives a "reward" (`-`) from a low `Generation Loss`, which acts as a baseline, indicating that the task is solvable with the right information.
+**2. Reasoner Error = `w_rec * Reconstruction Loss + w_inf * Inference Loss`**
+*   **Breakdown**: The Reasoner is penalized directly for its inference errors, which manifest as both high `Reconstruction Loss` (the total pipeline failed) and high `Inference Loss` (the failure was specifically the inference step).
 
-**3. Producer Error = `Generation Loss + Reconstruction Loss - Inference Loss`**
-*   **Breakdown**: The Producer is penalized (`+`) for failing at its two main tasks: generating from the truth (`Generation Loss`) and reconstructing from the inference (`Reconstruction Loss`). It is rewarded (`-`) for a low `Inference Loss`, because if the Reasoner's inference was correct, `X_reconstructed` and `X_generated` should be identical, and the Producer's job is to make them so.
+**3. Producer Error = `w_gen * Generation Loss + w_rec * Reconstruction Loss`**
+*   **Breakdown**: The Producer is penalized for failures in its two core functions: generating from ground truth (`Generation Loss`) and reconstructing from the system's inference (`Reconstruction Loss`).
+
+#### Doctrinal Note on Error Stability
+*Previous iterations of this doctrine utilized a subtractive component in the error calculation to model a conceptual "reward." This was found to be operationally unsound, creating the potential for negative losses and unstable gradient dynamics. The current additive formulation is a more robust implementation that guarantees a positive definite error landscape, ensuring stable convergence while implicitly optimizing the same systemic objectives.*
 
 ---
 
