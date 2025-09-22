@@ -125,15 +125,31 @@ class ReconstructionQualityViz(VisualizationPlugin):
     def create_visualization(self, data: Dict[str, Any], ax: Optional[plt.Axes] = None, **kwargs) -> plt.Figure:
         orchestrator: CCNetOrchestrator = data["orchestrator"]
         x_data, y_data = data["x_data"], data["y_data"]
-        num_samples = data.get("num_samples", 10)
+        num_samples = data.get("num_samples", 5)  # Reduced for dashboard view
 
-        fig, axes = plt.subplots(
-            num_samples, 5, figsize=(15, 3 * num_samples),
-            gridspec_kw={'wspace': 0.3, 'hspace': 0.4}
-        )
-        fig.suptitle("Reconstruction Quality Analysis", fontsize=16, fontweight="bold")
+        # --- START OF FIX ---
+        if ax is not None:
+            # Drawing inside a dashboard
+            fig = ax.get_figure()
+            ax.set_title("Reconstruction Quality Analysis", fontsize=14, fontweight="bold")
+            ax.axis('off')  # Hide container axis
+
+            from matplotlib.gridspec import GridSpecFromSubplotSpec
+            gs_sub = GridSpecFromSubplotSpec(num_samples, 5, subplot_spec=ax.get_subplotspec(), wspace=0.3, hspace=0.4)
+            axes = np.array([fig.add_subplot(gs_sub[i, j]) for i in range(num_samples) for j in range(5)]).reshape(
+                num_samples, 5)
+
+        else:
+            # Standalone plot
+            fig, axes = plt.subplots(
+                num_samples, 5, figsize=(15, 3 * num_samples),
+                gridspec_kw={'wspace': 0.3, 'hspace': 0.4}
+            )
+            fig.suptitle("Reconstruction Quality Analysis", fontsize=16, fontweight="bold")
+        # --- END OF FIX ---
 
         for i in range(num_samples):
+            # The rest of the function remains the same...
             x_input = x_data[i: i + 1]
             y_truth = keras.utils.to_categorical([y_data[i]], 10)
             tensors = orchestrator.forward_pass(x_input, y_truth, training=False)
@@ -521,26 +537,65 @@ class CCNetExperiment:
         return orchestrator, trainer
 
     def generate_final_report(self, orchestrator: CCNetOrchestrator, trainer: CCNetTrainer):
+        """
+        Generates and saves all visualizations, including a final dashboard.
+        """
         logger.info("=" * 60)
         logger.info("Generating final visualizations...")
         logger.info("=" * 60)
 
-        report_data = {'orchestrator': orchestrator, 'x_data': self.x_test, 'y_data': self.y_test}
+        # --- START OF FIX ---
 
+        # 1. Define data for standalone, high-detail visualizations.
+        # These will use the default, higher number of samples.
+        report_data = {
+            'orchestrator': orchestrator,
+            'x_data': self.x_test,
+            'y_data': self.y_test
+        }
+
+        # 2. Define data specifically for the more compact dashboard view.
+        # By passing a smaller `num_samples`, we ensure the plots are readable
+        # when rendered inside a smaller subplot on the dashboard.
+        dashboard_recon_data = {
+            'orchestrator': orchestrator,
+            'x_data': self.x_test,
+            'y_data': self.y_test,
+            'num_samples': 3  # Show only 3 reconstruction examples on the dashboard
+        }
+        dashboard_latent_data = {
+            'orchestrator': orchestrator,
+            'x_data': self.x_test,
+            'y_data': self.y_test,
+            'num_samples': 500  # Use fewer samples for faster t-SNE on the dashboard
+        }
+
+        # 3. Generate and save the individual, full-sized plots.
+        logger.info("Generating standalone visualizations...")
         self.viz_manager.visualize(trainer.history, "ccnet_training_history", show=False)
         self.viz_manager.visualize(report_data, "ccnet_reconstruction_quality", show=False)
         self.viz_manager.visualize(report_data, "ccnet_counterfactual_matrix", show=False)
         self.viz_manager.visualize(report_data, "ccnet_latent_space", show=False)
 
+        # 4. Define the data for the multi-plot dashboard.
+        # Note how we use the specialized, smaller data dictionaries here.
         dashboard_data = {
             "ccnet_training_history": trainer.history,
-            "ccnet_reconstruction_quality": report_data,
-            "ccnet_latent_space": report_data,
+            "ccnet_reconstruction_quality": dashboard_recon_data,
+            "ccnet_latent_space": dashboard_latent_data,
         }
+
+        # 5. Generate and save the final dashboard.
+        logger.info("Generating final dashboard...")
         self.viz_manager.create_dashboard(dashboard_data, show=False)
 
+        # --- END OF FIX ---
+
         logger.info("Saving models...")
-        models_dir = self.viz_manager.context.output_dir / self.viz_manager.context.experiment_name / self.viz_manager.context.timestamp / "models"
+        models_dir = self.viz_manager.context.get_save_path("models")
+        # The above line is a cleaner way to get the path, but the original works too:
+        # models_dir = self.viz_manager.context.output_dir / self.viz_manager.context.experiment_name / self.viz_manager.context.timestamp / "models"
+
         models_dir.mkdir(parents=True, exist_ok=True)
         orchestrator.save_models(str(models_dir / "mnist_ccnet"))
         logger.info(f"Models saved to {models_dir}")

@@ -326,38 +326,53 @@ class CompositeVisualization(VisualizationPlugin):
             **kwargs
     ) -> plt.Figure:
         """Create a composite visualization with multiple subplots."""
-        if ax is not None:
-            logger.warning(
-                f"{self.__class__.__name__} is a composite visualization and cannot be drawn "
-                f"on a single provided axis. A new figure will be created."
-            )
-
         if not self.subplots:
             raise ValueError("No subplots added to composite visualization")
 
         n_plots = len(self.subplots)
         if layout is None:
-            # Auto-determine layout
             cols = min(default_cols, n_plots)
             rows = (n_plots + cols - 1) // cols
             layout = (rows, cols)
 
-        fig, axes = plt.subplots(*layout, figsize=self.config.fig_size)
-        if n_plots == 1:
-            axes = [axes]
-        elif layout[0] == 1 or layout[1] == 1:
-            axes = axes.flatten()
+        # --- START OF FIX ---
+
+        if ax is not None:
+            # We are drawing inside a subplot provided by a dashboard.
+            # Use GridSpecFromSubplotSpec to create a nested layout.
+            fig = ax.get_figure()
+            ax.axis('off')  # Hide the container axis ticks and labels
+
+            # Create a nested GridSpec within the provided ax
+            from matplotlib.gridspec import GridSpecFromSubplotSpec
+            gs_sub = GridSpecFromSubplotSpec(*layout, subplot_spec=ax.get_subplotspec(), hspace=0.3, wspace=0.3)
+
+            axes_list = [fig.add_subplot(gs_sub[i]) for i in range(n_plots)]
+
+            for idx, (name, plot_func) in enumerate(self.subplots[:n_plots]):
+                ax_sub = axes_list[idx]
+                plot_func(ax_sub, data, **kwargs)
+                ax_sub.set_title(name,
+                                 fontsize=self.config.title_fontsize * 0.8)  # Slightly smaller titles for subplots
+
         else:
-            axes = axes.flatten()
+            # Original behavior: create a new figure if no axis is provided.
+            fig, axes = plt.subplots(*layout, figsize=self.config.fig_size)
+            if n_plots == 1:
+                axes_list = [axes]
+            else:
+                axes_list = axes.flatten()
 
-        for idx, (name, plot_func) in enumerate(self.subplots[:n_plots]):
-            ax_sub = axes[idx]
-            plot_func(ax_sub, data, **kwargs)
-            ax_sub.set_title(name, fontsize=self.config.title_fontsize)
+            for idx, (name, plot_func) in enumerate(self.subplots[:n_plots]):
+                ax_sub = axes_list[idx]
+                plot_func(ax_sub, data, **kwargs)
+                ax_sub.set_title(name, fontsize=self.config.title_fontsize)
 
-        # Hide unused subplots
-        for idx in range(n_plots, len(axes)):
-            axes[idx].set_visible(False)
+            # Hide unused subplots
+            for idx in range(n_plots, len(axes_list)):
+                axes_list[idx].set_visible(False)
+
+        # --- END OF FIX ---
 
         return fig
 
