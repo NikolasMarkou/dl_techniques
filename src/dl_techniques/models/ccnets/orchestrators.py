@@ -88,7 +88,7 @@ class CCNetOrchestrator:
 
         # Step 1.5: Sample from the latent distribution using reparameterization trick
         std = keras.ops.exp(0.5 * log_var)
-        epsilon = keras.ops.random_normal(shape=keras.ops.shape(mu))
+        epsilon = keras.random_normal(shape=keras.ops.shape(mu))
         e_latent = mu + epsilon * std
 
         # Step 2: Infer label using observation and explanation
@@ -464,7 +464,7 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
         # Standard forward pass for Explainer and Reasoner
         mu, log_var = self.explainer(x_input, training=training)
         std = keras.ops.exp(0.5 * log_var)
-        epsilon = keras.ops.random_normal(shape=keras.ops.shape(mu))
+        epsilon = keras.random.normal(shape=keras.ops.shape(mu))
         e_latent = mu + epsilon * std
         y_inferred = self.reasoner(x_input, e_latent, training=training)
 
