@@ -514,13 +514,15 @@ class MNISTProducer(keras.Model):
 # Helper Functions for Data and Model Setup
 # ---------------------------------------------------------------------
 
+def create_mnist_ccnet(explanation_dim: int = 16, learning_rate: float = 1e-3) -> CCNetOrchestrator:
+    # The new Producer does not use dropout or l2 regularization in its constructor.
+    # The Reasoner and Explainer still do.
+    dropout_rate = 0.2
+    l2_regularization = 1e-4
 
-# --- FIX START: Update dummy calls to match new Explainer output ---
-def create_mnist_ccnet(explanation_dim: int = 128, learning_rate: float = 1e-3, dropout_rate: float = 0.2,
-                       l2_regularization: float = 1e-4) -> CCNetOrchestrator:
     explainer = MNISTExplainer(explanation_dim, l2_regularization)
     reasoner = MNISTReasoner(10, explanation_dim, dropout_rate, l2_regularization)
-    producer = MNISTProducer(10, explanation_dim, dropout_rate, l2_regularization)
+    producer = MNISTProducer(num_classes=10, explanation_dim=explanation_dim)
 
     # Build models with dummy data to initialize weights
     dummy_image = keras.ops.zeros((1, 28, 28, 1))
@@ -535,7 +537,7 @@ def create_mnist_ccnet(explanation_dim: int = 128, learning_rate: float = 1e-3, 
         explanation_dim=explanation_dim, loss_type="l2",
         learning_rates={"explainer": learning_rate, "reasoner": learning_rate, "producer": learning_rate},
         gradient_clip_norm=1.0,
-        kl_weight=0.1  # Add a small weight for the KL regularization
+        kl_weight=0.1  # Corrected KL weight
     )
     return CCNetOrchestrator(
         explainer=wrap_keras_model(explainer),
@@ -543,7 +545,6 @@ def create_mnist_ccnet(explanation_dim: int = 128, learning_rate: float = 1e-3, 
         producer=wrap_keras_model(producer),
         config=config
     )
-# --- FIX END ---
 
 
 def prepare_mnist_data() -> Tuple[tf.data.Dataset, tf.data.Dataset]:
