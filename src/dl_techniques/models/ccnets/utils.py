@@ -12,7 +12,7 @@ from .orchestrators import CCNetOrchestrator
 
 class EarlyStoppingCallback:
     """
-    Early stopping callback based on convergence criteria.
+    Early stopping callback based on the convergence of model errors.
     """
 
     def __init__(self, patience: int = 5, threshold: float = 1e-4):
@@ -25,26 +25,27 @@ class EarlyStoppingCallback:
         """
         self.patience = patience
         self.threshold = threshold
-        self.best_loss = float('inf')
+        self.best_error = float('inf')
         self.wait = 0
 
     def __call__(self, epoch: int, metrics: Dict[str, float], orchestrator: CCNetOrchestrator):
         """Check for early stopping condition."""
-        # Use sum of all three losses as convergence metric
-        total_loss = (
-                metrics['generation_loss'] +
-                metrics['reconstruction_loss'] +
-                metrics['inference_loss']
+        # Use the sum of the model-specific errors as the convergence metric.
+        # This is a more direct measure of the system's learning objectives.
+        total_error = (
+                metrics['explainer_error'] +
+                metrics['reasoner_error'] +
+                metrics['producer_error']
         )
 
-        if total_loss < self.best_loss - self.threshold:
-            self.best_loss = total_loss
+        if total_error < self.best_error - self.threshold:
+            self.best_error = total_error
             self.wait = 0
         else:
             self.wait += 1
 
         if self.wait >= self.patience:
-            print(f"\nEarly stopping at epoch {epoch + 1}")
+            print(f"\nEarly stopping at epoch {epoch + 1} due to convergence of model errors.")
             orchestrator.save_models(f"ccnet_checkpoint_epoch_{epoch}")
             raise StopIteration("Early stopping triggered")
 

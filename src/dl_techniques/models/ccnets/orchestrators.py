@@ -2,15 +2,8 @@ import keras
 import tensorflow as tf
 from typing import Dict, Optional, Tuple
 
-# ------------------------------------------------------------------------------
-# local imports
-# ------------------------------------------------------------------------------
-
-
 from .losses import L1Loss, L2Loss, HuberLoss
 from .base import CCNetModule, CCNetConfig, CCNetLosses, CCNetModelErrors
-
-# ------------------------------------------------------------------------------
 
 
 class CCNetOrchestrator:
@@ -133,6 +126,7 @@ class CCNetOrchestrator:
     def compute_model_errors(self, losses: CCNetLosses) -> CCNetModelErrors:
         """
         Compute model-specific error signals from the fundamental losses.
+        This uses a stable, additive formulation.
 
         Args:
             losses: CCNetLosses object.
@@ -140,28 +134,17 @@ class CCNetOrchestrator:
         Returns:
             CCNetModelErrors object containing error signals for each module.
         """
-        # Apply verification weight to balance losses
-        w = self.config.verification_weight
-
-        # CORRECT IMPLEMENTATION:
-        # The negative terms MUST backpropagate to serve as a penalty/reward signal.
-        # Do NOT detach them from the computation graph. The gradient tape isolation
-        # in train_step() correctly assigns the updates.
-
         explainer_error = (
-                losses.inference_loss +
-                w * losses.generation_loss -
-                losses.reconstruction_loss  # Keep the gradient
+                self.config.explainer_weights['inference'] * losses.inference_loss +
+                self.config.explainer_weights['generation'] * losses.generation_loss
         )
         reasoner_error = (
-                losses.reconstruction_loss +
-                losses.inference_loss -
-                losses.generation_loss  # Keep the gradient
+                self.config.reasoner_weights['reconstruction'] * losses.reconstruction_loss +
+                self.config.reasoner_weights['inference'] * losses.inference_loss
         )
         producer_error = (
-                w * losses.generation_loss +
-                losses.reconstruction_loss -
-                losses.inference_loss  # Keep the gradient
+                self.config.producer_weights['generation'] * losses.generation_loss +
+                self.config.producer_weights['reconstruction'] * losses.reconstruction_loss
         )
 
         return CCNetModelErrors(
@@ -178,6 +161,7 @@ class CCNetOrchestrator:
     ) -> Dict[str, tf.Tensor]:
         """
         Perform a single training step with causal credit assignment.
+        This implementation uses separate gradient tapes for efficiency.
 
         Args:
             x_input: Input observation batch.
@@ -186,44 +170,44 @@ class CCNetOrchestrator:
         Returns:
             Dictionary of scalar loss and error tensors.
         """
-        # Forward pass and loss computation
-        with tf.GradientTape(persistent=True) as tape:
+        # Tapes for each model
+        with tf.GradientTape() as explainer_tape, \
+                tf.GradientTape() as reasoner_tape, \
+                tf.GradientTape() as producer_tape:
+            # Perform a single forward pass
             tensors = self.forward_pass(x_input, y_truth, training=True)
             losses = self.compute_losses(tensors)
             errors = self.compute_model_errors(losses)
 
-        # Backpropagate to Explainer
+        # Gradient computation for each model
         explainer_vars = self.explainer.trainable_variables
-        explainer_grads = tape.gradient(errors.explainer_error, explainer_vars)
+        explainer_grads = explainer_tape.gradient(errors.explainer_error, explainer_vars)
+
+        reasoner_vars = self.reasoner.trainable_variables
+        reasoner_grads = reasoner_tape.gradient(errors.reasoner_error, reasoner_vars)
+
+        producer_vars = self.producer.trainable_variables
+        producer_grads = producer_tape.gradient(errors.producer_error, producer_vars)
+
+        # Gradient clipping
         if self.config.gradient_clip_norm:
             explainer_grads = [
                 tf.clip_by_norm(g, self.config.gradient_clip_norm) if g is not None else None
                 for g in explainer_grads
             ]
-        self.optimizers['explainer'].apply_gradients(zip(explainer_grads, explainer_vars))
-
-        # Backpropagate to Reasoner
-        reasoner_vars = self.reasoner.trainable_variables
-        reasoner_grads = tape.gradient(errors.reasoner_error, reasoner_vars)
-        if self.config.gradient_clip_norm:
             reasoner_grads = [
                 tf.clip_by_norm(g, self.config.gradient_clip_norm) if g is not None else None
                 for g in reasoner_grads
             ]
-        self.optimizers['reasoner'].apply_gradients(zip(reasoner_grads, reasoner_vars))
-
-        # Backpropagate to Producer
-        producer_vars = self.producer.trainable_variables
-        producer_grads = tape.gradient(errors.producer_error, producer_vars)
-        if self.config.gradient_clip_norm:
             producer_grads = [
                 tf.clip_by_norm(g, self.config.gradient_clip_norm) if g is not None else None
                 for g in producer_grads
             ]
-        self.optimizers['producer'].apply_gradients(zip(producer_grads, producer_vars))
 
-        # Clean up tape
-        del tape
+        # Apply gradients
+        self.optimizers['explainer'].apply_gradients(zip(explainer_grads, explainer_vars))
+        self.optimizers['reasoner'].apply_gradients(zip(reasoner_grads, reasoner_vars))
+        self.optimizers['producer'].apply_gradients(zip(producer_grads, producer_vars))
 
         # Return losses as dictionary of tensors
         return {
@@ -389,7 +373,8 @@ class CCNetOrchestrator:
 
 class SequentialCCNetOrchestrator(CCNetOrchestrator):
     """
-    Extended orchestrator for sequential data with causal masking support.
+    Extended orchestrator for sequential data.
+    Implements reverse causality for the Producer via sequence reversal.
     """
 
     def __init__(
@@ -405,46 +390,18 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
         Args:
             explainer: Sequential model for P(E|X).
             reasoner: Sequential model for P(Y|X,E).
-            producer: Sequential model with reverse causality for P(X|Y,E).
+            producer: Sequential model that will operate on reversed sequences.
             config: Configuration (should have sequential_data=True).
         """
         super().__init__(explainer, reasoner, producer, config)
 
         if not self.config.sequential_data:
+            # Enforce sequential mode if using this orchestrator
             self.config.sequential_data = True
-
-    def apply_causal_mask(
-            self,
-            attention_scores: tf.Tensor,
-            reverse: bool = False
-    ) -> tf.Tensor:
-        """
-        Apply causal or reverse-causal mask to attention scores.
-
-        Args:
-            attention_scores: Raw attention scores [batch, seq_len, seq_len].
-            reverse: If True, apply reverse-causal mask.
-
-        Returns:
-            Masked attention scores.
-        """
-        seq_len = keras.ops.shape(attention_scores)[-1]
-
-        if reverse:
-            # Create reverse-causal mask (can see future, not past)
-            mask = keras.ops.tril(keras.ops.ones((seq_len, seq_len)), k=-1)
-        else:
-            # Create standard causal mask (can see past, not future)
-            mask = keras.ops.triu(keras.ops.ones((seq_len, seq_len)), k=1)
-
-        # Apply mask (set masked positions to large negative value)
-        masked_scores = attention_scores - mask * 1e9
-
-        return masked_scores
 
     def reverse_sequence(self, sequence: tf.Tensor) -> tf.Tensor:
         """
-        Reverse a sequence along the time dimension.
+        Reverse a sequence along the time dimension (axis 1).
 
         Args:
             sequence: Input sequence [batch, seq_len, ...].
@@ -461,7 +418,8 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
             training: bool = True
     ) -> Dict[str, tf.Tensor]:
         """
-        Forward pass with sequential data handling.
+        Forward pass with sequential data handling. The Producer uses the
+        sequence reversal trick to achieve reverse-causal modeling.
 
         Args:
             x_input: Sequential input [batch, seq_len, features].
@@ -475,7 +433,7 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
         e_latent = self.explainer(x_input, training=training)
         y_inferred = self.reasoner(x_input, e_latent, training=training)
 
-        # Producer uses reverse causality (via sequence reversal trick)
+        # Producer uses reverse causality via sequence reversal trick
         # Reverse inputs
         y_inferred_rev = self.reverse_sequence(y_inferred)
         y_truth_rev = self.reverse_sequence(y_truth)

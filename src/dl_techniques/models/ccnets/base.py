@@ -3,6 +3,7 @@ import tensorflow as tf
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Protocol, List
 
+
 # ---------------------------------------------------------------------
 
 class CCNetModule(Protocol):
@@ -20,6 +21,11 @@ class CCNetModule(Protocol):
         """Get trainable variables of the module."""
         pass
 
+    def save(self, filepath: str):
+        """Save the model."""
+        pass
+
+
 # ---------------------------------------------------------------------
 
 @dataclass
@@ -34,7 +40,9 @@ class CCNetConfig:
         gradient_clip_norm: Maximum norm for gradient clipping (None to disable).
         use_mixed_precision: Whether to use mixed precision training.
         sequential_data: Whether the data is sequential (enables causal masking).
-        verification_weight: Weight for verification losses vs inference losses.
+        explainer_weights: Weights for the explainer error terms.
+        reasoner_weights: Weights for the reasoner error terms.
+        producer_weights: Weights for the producer error terms.
     """
     explanation_dim: int = 128
     loss_type: str = 'l2'
@@ -46,7 +54,19 @@ class CCNetConfig:
     gradient_clip_norm: Optional[float] = 1.0
     use_mixed_precision: bool = False
     sequential_data: bool = False
-    verification_weight: float = 1.0
+    explainer_weights: Dict[str, float] = field(default_factory=lambda: {
+        'inference': 1.0,
+        'generation': 1.0
+    })
+    reasoner_weights: Dict[str, float] = field(default_factory=lambda: {
+        'reconstruction': 1.0,
+        'inference': 1.0
+    })
+    producer_weights: Dict[str, float] = field(default_factory=lambda: {
+        'generation': 1.0,
+        'reconstruction': 1.0
+    })
+
 
 # ---------------------------------------------------------------------
 
@@ -72,6 +92,7 @@ class CCNetLosses:
             'inference_loss': float(keras.ops.convert_to_numpy(self.inference_loss))
         }
 
+
 # ---------------------------------------------------------------------
 
 @dataclass
@@ -80,9 +101,9 @@ class CCNetModelErrors:
     Container for the three model-specific error signals.
 
     Attributes:
-        explainer_error: Inference + Generation - Reconstruction
-        reasoner_error: Reconstruction + Inference - Generation
-        producer_error: Generation + Reconstruction - Inference
+        explainer_error: Weighted sum of inference and generation losses.
+        reasoner_error: Weighted sum of reconstruction and inference losses.
+        producer_error: Weighted sum of generation and reconstruction losses.
     """
     explainer_error: keras.ops.array
     reasoner_error: keras.ops.array
