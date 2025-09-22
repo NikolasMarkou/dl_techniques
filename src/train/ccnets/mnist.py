@@ -417,47 +417,96 @@ class MNISTReasoner(keras.Model):
 
 @keras.saving.register_keras_serializable()
 class MNISTProducer(keras.Model):
-    def __init__(self, num_classes: int = 10, explanation_dim: int = 128, dropout_rate: float = 0.2,
-                 l2_regularization: float = 1e-4, **kwargs: Any) -> None:
+    """
+    Corrected Producer using class embedding for content and latent vector for
+    style modulation (via AdaIN-like mechanism).
+    """
+    def __init__(self, num_classes: int = 10, explanation_dim: int = 16, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.num_classes, self.explanation_dim, self.dropout_rate = num_classes, explanation_dim, dropout_rate
-        self.regularizer = keras.regularizers.L2(l2_regularization) if l2_regularization > 0 else None
-        self.fc1 = keras.layers.Dense(512, kernel_regularizer=self.regularizer)
-        self.bn_fc1 = keras.layers.BatchNormalization()
-        self.act_fc1 = keras.layers.LeakyReLU(negative_slope=0.2)
-        self.fc2 = keras.layers.Dense(7 * 7 * 128, kernel_regularizer=self.regularizer)
-        self.bn_fc2 = keras.layers.BatchNormalization()
-        self.act_fc2 = keras.layers.LeakyReLU(negative_slope=0.2)
-        self.reshape = keras.layers.Reshape((7, 7, 128))
-        self.dropout = keras.layers.Dropout(dropout_rate)
+        self.num_classes = num_classes
+        self.explanation_dim = explanation_dim
+
+        # Content pathway from class label
+        self.label_embedding = keras.layers.Embedding(num_classes, 512)
+        self.fc_content = keras.layers.Dense(7 * 7 * 128, activation='relu')
+        self.reshape_content = keras.layers.Reshape((7, 7, 128))
+
+        # Style pathway from latent vector
+        self.style_transform_1 = keras.layers.Dense(256, activation='relu') # For conv1
+        self.style_transform_2 = keras.layers.Dense(128, activation='relu') # For conv2
+        self.style_transform_3 = keras.layers.Dense(64, activation='relu') # For conv3
+
+        # Decoder blocks
         self.up1 = keras.layers.UpSampling2D(size=(2, 2))
-        self.conv1 = keras.layers.Conv2D(64, 3, padding="same", kernel_regularizer=self.regularizer)
-        self.bn_up1 = keras.layers.BatchNormalization()
-        self.act_up1 = keras.layers.LeakyReLU(negative_slope=0.2)
+        self.conv1 = keras.layers.Conv2D(128, 3, padding="same")
+        self.norm1 = keras.layers.BatchNormalization(center=False, scale=False)
+        self.act1 = keras.layers.LeakyReLU(negative_slope=0.2)
+
         self.up2 = keras.layers.UpSampling2D(size=(2, 2))
-        self.conv2 = keras.layers.Conv2D(32, 3, padding="same", kernel_regularizer=self.regularizer)
-        self.bn_up2 = keras.layers.BatchNormalization()
-        self.act_up2 = keras.layers.LeakyReLU(negative_slope=0.2)
-        self.conv3 = keras.layers.Conv2D(16, 3, padding="same", kernel_regularizer=self.regularizer)
-        self.bn_up3 = keras.layers.BatchNormalization()
-        self.act_up3 = keras.layers.LeakyReLU(negative_slope=0.2)
-        self.conv_out = keras.layers.Conv2D(1, 3, padding="same", activation="sigmoid",
-                                            kernel_regularizer=self.regularizer)
+        self.conv2 = keras.layers.Conv2D(64, 3, padding="same")
+        self.norm2 = keras.layers.BatchNormalization(center=False, scale=False)
+        self.act2 = keras.layers.LeakyReLU(negative_slope=0.2)
+
+        self.up3 = keras.layers.UpSampling2D(size=(2, 2))
+        self.conv3 = keras.layers.Conv2D(32, 3, padding="same")
+        self.norm3 = keras.layers.BatchNormalization(center=False, scale=False)
+        self.act3 = keras.layers.LeakyReLU(negative_slope=0.2)
+
+        self.conv_out = keras.layers.Conv2D(1, 3, padding="same", activation="sigmoid")
+
+    def apply_style(self, content_tensor, style_vector):
+        # Reshape style vector to broadcast with content tensor
+        num_channels = keras.ops.shape(content_tensor)[-1]
+        style_params = style_vector[:, :2*num_channels] # Get scale and bias
+        scale = style_params[:, :num_channels]
+        bias = style_params[:, num_channels:]
+
+        scale = keras.ops.expand_dims(keras.ops.expand_dims(scale, 1), 1)
+        bias = keras.ops.expand_dims(keras.ops.expand_dims(bias, 1), 1)
+
+        return content_tensor * (scale + 1) + bias
 
     def call(self, y: keras.KerasTensor, e: keras.KerasTensor, training: Optional[bool] = False) -> keras.KerasTensor:
-        combined = keras.ops.concatenate([y, e], axis=-1)
-        x = self.dropout(self.act_fc1(self.bn_fc1(self.fc1(combined), training=training)), training=training)
-        x = self.reshape(self.act_fc2(self.bn_fc2(self.fc2(x), training=training)))
-        x = self.act_up1(self.bn_up1(self.conv1(self.up1(x)), training=training))
-        x = self.act_up2(self.bn_up2(self.conv2(self.up2(x)), training=training))
-        x = self.act_up3(self.bn_up3(self.conv3(x), training=training))
+        # Convert one-hot y to class indices for embedding
+        y_indices = keras.ops.argmax(y, axis=-1)
+
+        # Content pathway
+        c = self.label_embedding(y_indices)
+        c = self.fc_content(c)
+        c = self.reshape_content(c)
+
+        # Style pathway
+        style1 = self.style_transform_1(e)
+        style2 = self.style_transform_2(e)
+        style3 = self.style_transform_3(e)
+
+        # Decoder
+        x = self.up1(c)
+        x = self.conv1(x)
+        x = self.norm1(x, training=training)
+        x = self.apply_style(x, style1)
+        x = self.act1(x)
+
+        x = self.up2(x)
+        x = self.conv2(x)
+        x = self.norm2(x, training=training)
+        x = self.apply_style(x, style2)
+        x = self.act2(x)
+
+        x = self.up3(x)
+        x = self.conv3(x)
+        x = self.norm3(x, training=training)
+        x = self.apply_style(x, style3)
+        x = self.act3(x)
+
         return self.conv_out(x)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
-        config.update({"num_classes": self.num_classes, "explanation_dim": self.explanation_dim,
-                       "dropout_rate": self.dropout_rate,
-                       "l2_regularization": self.regularizer.l2 if self.regularizer else 0.0})
+        config.update({
+            "num_classes": self.num_classes,
+            "explanation_dim": self.explanation_dim
+        })
         return config
 
 
@@ -486,7 +535,7 @@ def create_mnist_ccnet(explanation_dim: int = 128, learning_rate: float = 1e-3, 
         explanation_dim=explanation_dim, loss_type="l2",
         learning_rates={"explainer": learning_rate, "reasoner": learning_rate, "producer": learning_rate},
         gradient_clip_norm=1.0,
-        kl_weight=0.001  # Add a small weight for the KL regularization
+        kl_weight=0.1  # Add a small weight for the KL regularization
     )
     return CCNetOrchestrator(
         explainer=wrap_keras_model(explainer),
@@ -540,7 +589,7 @@ class CCNetExperiment:
 
     def run(self, epochs: int = 20) -> Tuple[CCNetOrchestrator, CCNetTrainer]:
         logger.info("Creating CCNet for MNIST...")
-        orchestrator = create_mnist_ccnet()
+        orchestrator = create_mnist_ccnet(explanation_dim=8)
         logger.info("Preparing data...")
         train_dataset, val_dataset = prepare_mnist_data()
         logger.info("Setting up trainer...")
