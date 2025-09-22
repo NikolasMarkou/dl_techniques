@@ -169,7 +169,7 @@ class PlotConfig:
             'axes.titlesize': self.title_fontsize,
             'axes.labelsize': self.label_fontsize,
             'xtick.labelsize': self.tick_fontsize,
-            'ytick.labelsize': self.tick_fontsize, # FIX: Was legend_fontsize
+            'ytick.labelsize': self.tick_fontsize,
             'legend.fontsize': self.legend_fontsize,
         })
 
@@ -304,6 +304,7 @@ class CompositeVisualization(VisualizationPlugin):
             data: Any,
             ax: Optional[plt.Axes] = None,
             layout: Optional[Tuple[int, int]] = None,
+            default_cols: int = 3,
             **kwargs
     ) -> plt.Figure:
         """Create a composite visualization with multiple subplots."""
@@ -319,7 +320,7 @@ class CompositeVisualization(VisualizationPlugin):
         n_plots = len(self.subplots)
         if layout is None:
             # Auto-determine layout
-            cols = min(3, n_plots)
+            cols = min(default_cols, n_plots)
             rows = (n_plots + cols - 1) // cols
             layout = (rows, cols)
 

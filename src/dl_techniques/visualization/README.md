@@ -78,6 +78,8 @@ Visualize how your learning rate changes over time, which is essential for debug
 
 ```python
 # Data: A list of learning rate values per epoch
+from visualization import LearningRateScheduleVisualization
+
 lr_data = np.concatenate([
     np.linspace(1e-3, 1e-4, 50),
     np.linspace(1e-4, 1e-5, 50)

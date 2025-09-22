@@ -11,17 +11,24 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-from matplotlib.patches import Rectangle, Circle, FancyBboxPatch
-import seaborn as sns
+from matplotlib.patches import FancyBboxPatch
 from typing import Dict, List, Optional, Tuple, Any, Union
 from dataclasses import dataclass
-from scipy import stats
 from scipy.stats import gaussian_kde
 import keras
 
-from .core import VisualizationPlugin, CompositeVisualization, PlotConfig, VisualizationContext
+from .core import VisualizationPlugin
 
+LAYER_COLORS = {
+    'Dense': 'blue',
+    'Conv2D': 'green',
+    'MaxPooling2D': 'red',
+    'Dropout': 'gray',
+    'BatchNormalization': 'purple',
+    'Flatten': 'orange',
+    'InputLayer': 'lightblue',
+    'Input': 'lightblue'
+}
 
 # =============================================================================
 # Data Structures
@@ -55,6 +62,15 @@ class WeightData:
 
     layer_names: List[str]
     weights: Dict[str, List[np.ndarray]]  # layer_name -> [weights, biases]
+    model_name: Optional[str] = None
+
+
+@dataclass
+class GradientData:
+    """Container for neural network gradient data."""
+
+    layer_names: List[str]
+    gradients: Dict[str, np.ndarray]  # layer_name -> gradients
     model_name: Optional[str] = None
 
 
@@ -402,21 +418,10 @@ class NetworkArchitectureVisualization(VisualizationPlugin):
         y_positions = np.linspace(0.9, 0.1, n_layers)
         x_center = 0.5
 
-        # Color map for layer types
-        layer_colors = {
-            'Dense': 'blue',
-            'Conv2D': 'green',
-            'MaxPooling2D': 'red',
-            'Dropout': 'gray',
-            'BatchNormalization': 'purple',
-            'Flatten': 'orange',
-            'Input': 'lightblue'
-        }
-
         for i, (layer_info, y_pos) in enumerate(zip(layers_info, y_positions)):
             # Get color
             layer_type = layer_info['type']
-            color = layer_colors.get(layer_type, 'lightgray')
+            color = LAYER_COLORS.get(layer_type, 'lightgray')
 
             # Draw layer box
             width = 0.2
@@ -462,14 +467,38 @@ class NetworkArchitectureVisualization(VisualizationPlugin):
     def _plot_horizontal_architecture(self, ax: plt.Axes, layers_info: List[Dict],
                                       show_params: bool, show_shapes: bool):
         """Plot architecture horizontally."""
-
         n_layers = len(layers_info)
         x_positions = np.linspace(0.1, 0.9, n_layers)
         y_center = 0.5
 
-        # Similar to vertical but rotated
-        # Implementation would be similar with x/y swapped
-        pass  # Simplified for brevity
+        for i, (layer_info, x_pos) in enumerate(zip(layers_info, x_positions)):
+            layer_type = layer_info['type']
+            color = LAYER_COLORS.get(layer_type, 'lightgray')
+
+            width, height = 0.1, 0.4
+            rect = FancyBboxPatch((x_pos - width / 2, y_center - height / 2), width, height,
+                                  boxstyle="round,pad=0.01", facecolor=color,
+                                  edgecolor='black', alpha=0.7, linewidth=1)
+            ax.add_patch(rect)
+
+            ax.text(x_pos, y_center, layer_type, ha='center', va='center',
+                    fontsize=9, fontweight='bold', rotation=90)
+            ax.text(x_pos, y_center - height / 2 - 0.02, layer_info['name'][:15],
+                    ha='center', va='top', fontsize=8, style='italic')
+
+            if show_params:
+                ax.text(x_pos, y_center + height / 2 + 0.02, f"{layer_info['params']:,}",
+                        ha='center', va='bottom', fontsize=8, rotation=45)
+            if show_shapes and layer_info['output_shape']:
+                ax.text(x_pos + width / 2 + 0.01, y_center, str(layer_info['output_shape']),
+                        ha='left', va='center', fontsize=7, color='gray', rotation=-45)
+
+            if i < n_layers - 1:
+                ax.plot([x_pos + width / 2, x_positions[i + 1] - width / 2],
+                        [y_center, y_center], 'k-', alpha=0.5, linewidth=1)
+
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
 
 
 # =============================================================================
@@ -890,17 +919,18 @@ class GradientVisualization(VisualizationPlugin):
         return "Visualize gradient flow and magnitudes"
 
     def can_handle(self, data: Any) -> bool:
-        return isinstance(data, dict) and 'gradients' in str(data)
+        return isinstance(data, GradientData)
 
     def create_visualization(
             self,
-            data: Dict[str, np.ndarray],  # layer_name -> gradients
+            data: GradientData,
             plot_type: str = 'flow',  # 'flow', 'distribution', 'vanishing'
             **kwargs
     ) -> plt.Figure:
         """Create gradient visualization."""
 
-        layer_names = list(data.keys())
+        layer_names = data.layer_names
+        gradients = data.gradients
         n_layers = len(layer_names)
 
         if plot_type == 'flow':
@@ -909,7 +939,7 @@ class GradientVisualization(VisualizationPlugin):
             # Calculate gradient norms
             grad_norms = []
             for layer_name in layer_names:
-                grad = data[layer_name]
+                grad = gradients[layer_name]
                 norm = np.linalg.norm(grad.flatten())
                 grad_norms.append(norm)
 
@@ -949,7 +979,7 @@ class GradientVisualization(VisualizationPlugin):
 
             for idx, layer_name in enumerate(layer_names[:len(axes)]):
                 ax = axes[idx]
-                grads = data[layer_name].flatten()
+                grads = gradients[layer_name].flatten()
 
                 ax.hist(grads, bins=50, alpha=0.7, edgecolor='black')
                 ax.axvline(0, color='red', linestyle='--', alpha=0.5)
@@ -974,7 +1004,7 @@ class GradientVisualization(VisualizationPlugin):
             # Analyze gradient vanishing
             vanishing_scores = []
             for layer_name in layer_names:
-                grad = data[layer_name].flatten()
+                grad = gradients[layer_name].flatten()
                 # Score based on how many gradients are near zero
                 vanishing = np.mean(np.abs(grad) < 1e-6)
                 vanishing_scores.append(vanishing * 100)

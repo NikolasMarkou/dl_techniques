@@ -113,13 +113,13 @@ class ConfusionMatrixVisualization(VisualizationPlugin):
 
         # Normalize if requested
         if normalize == 'true':
-            cm_norm = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-10) # FIX: Add epsilon
+            cm_norm = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-10)
             title_suffix = ' (Row Normalized)'
         elif normalize == 'pred':
-            cm_norm = cm.astype('float') / (cm.sum(axis=0)[np.newaxis, :] + 1e-10) # FIX: Add epsilon
+            cm_norm = cm.astype('float') / (cm.sum(axis=0)[np.newaxis, :] + 1e-10)
             title_suffix = ' (Column Normalized)'
         elif normalize == 'all':
-            cm_norm = cm.astype('float') / (cm.sum() + 1e-10) # FIX: Add epsilon
+            cm_norm = cm.astype('float') / (cm.sum() + 1e-10)
             title_suffix = ' (Overall Normalized)'
         else:
             cm_norm = cm.astype('float')
@@ -179,7 +179,7 @@ class ConfusionMatrixVisualization(VisualizationPlugin):
         for idx, (model_name, results) in enumerate(data.results.items()):
             ax = axes[idx]
             self._single_confusion_matrix(ax, results, normalize, show_percentages, cmap)
-            ax.set_title(model_name) # Override default title with model name
+            ax.set_title(model_name)  # Override default title with model name
 
         # Hide unused subplots
         for idx in range(n_models, len(axes)):
@@ -311,12 +311,15 @@ class ROCPRCurves(VisualizationPlugin):
 
             # Handle multi-class
             if len(results.y_prob.shape) == 2 and results.y_prob.shape[1] > 2:
-                # Skip for multi-class (would need one curve per class)
-                continue
-
-            # Binary classification
-            y_prob_pos = results.y_prob[:, 1] if len(results.y_prob.shape) == 2 else results.y_prob
-            precision, recall, thresholds = precision_recall_curve(results.y_true, y_prob_pos)
+                # Use micro-average for multi-class
+                from sklearn.preprocessing import label_binarize
+                n_classes = results.y_prob.shape[1]
+                y_true_bin = label_binarize(results.y_true, classes=range(n_classes))
+                precision, recall, _ = precision_recall_curve(y_true_bin.ravel(), results.y_prob.ravel())
+            else:
+                # Binary classification
+                y_prob_pos = results.y_prob[:, 1] if len(results.y_prob.shape) == 2 else results.y_prob
+                precision, recall, thresholds = precision_recall_curve(results.y_true, y_prob_pos)
 
             pr_auc = auc(recall, precision)
 
@@ -325,7 +328,7 @@ class ROCPRCurves(VisualizationPlugin):
                     label=f'{model_name} (AUC = {pr_auc:.3f})')
 
             # Mark thresholds if requested
-            if show_thresholds:
+            if show_thresholds and 'thresholds' in locals():
                 n_points = min(10, len(thresholds))
                 indices = np.linspace(0, len(thresholds) - 1, n_points, dtype=int)
                 ax.scatter(recall[indices], precision[indices],
@@ -810,8 +813,6 @@ class ErrorAnalysisDashboard(VisualizationPlugin):
             x_data: np.ndarray
     ):
         """Show examples of errors within a container axis."""
-        # FIX: This method now plots inside the provided ax_container using a sub-gridspec,
-        # preventing it from breaking the main dashboard layout.
         incorrect_mask = data.y_true != data.y_pred
         incorrect_indices = np.where(incorrect_mask)[0]
 
