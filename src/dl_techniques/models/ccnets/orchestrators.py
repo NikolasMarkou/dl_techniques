@@ -2,8 +2,16 @@ import keras
 import tensorflow as tf
 from typing import Dict, Optional, Tuple
 
+# ------------------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------------------
+
+
 from .losses import L1Loss, L2Loss, HuberLoss
 from .base import CCNetModule, CCNetConfig, CCNetLosses, CCNetModelErrors
+
+# ------------------------------------------------------------------------------
+
 
 class CCNetOrchestrator:
     """
@@ -135,25 +143,25 @@ class CCNetOrchestrator:
         # Apply verification weight to balance losses
         w = self.config.verification_weight
 
-        # Detach the negative terms from the computation graph
-        gen_loss_no_grad = tf.stop_gradient(losses.generation_loss)
-        recon_loss_no_grad = tf.stop_gradient(losses.reconstruction_loss)
+        # CORRECT IMPLEMENTATION:
+        # The negative terms MUST backpropagate to serve as a penalty/reward signal.
+        # Do NOT detach them from the computation graph. The gradient tape isolation
+        # in train_step() correctly assigns the updates.
 
         explainer_error = (
                 losses.inference_loss +
                 w * losses.generation_loss -
-                recon_loss_no_grad  # Use detached value
+                losses.reconstruction_loss  # Keep the gradient
         )
         reasoner_error = (
                 losses.reconstruction_loss +
                 losses.inference_loss -
-                gen_loss_no_grad  # Use detached value
+                losses.generation_loss  # Keep the gradient
         )
-        # The producer error is likely fine as is, but could also be stabilized.
         producer_error = (
                 w * losses.generation_loss +
                 losses.reconstruction_loss -
-                tf.stop_gradient(losses.inference_loss)
+                losses.inference_loss  # Keep the gradient
         )
 
         return CCNetModelErrors(

@@ -5,20 +5,20 @@ CCNet MNIST Experiment using the Visualization Framework
 This script demonstrates a complete training and analysis workflow for a
 Counter-Causal Net (CCNet) on the MNIST dataset, fully integrated with the
 visualization framework.
-
-It defines custom, experiment-specific visualization plugins and uses the
-VisualizationManager to generate a comprehensive report.
 """
-from __future__ import annotations
 
 import keras
 import numpy as np
+import seaborn as sns
 import tensorflow as tf
 import matplotlib.pyplot as plt
-import seaborn as sns
-from typing import Dict, Any, Optional, Tuple
 from sklearn.manifold import TSNE
 from scipy.stats import gaussian_kde
+from typing import Dict, Any, Optional, Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.visualization import (
     VisualizationManager,
@@ -36,9 +36,9 @@ from dl_techniques.models.ccnets import (
 from dl_techniques.utils.logger import logger
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Custom Visualization Plugins for CCNet
-# =============================================================================
+# ---------------------------------------------------------------------
 
 
 class CCNetTrainingHistoryViz(CompositeVisualization):
@@ -294,9 +294,9 @@ class LatentSpaceAnalysisViz(CompositeVisualization):
         ax.grid(True, alpha=0.3, axis='y')
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Keras Model Definitions
-# =============================================================================
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -423,9 +423,9 @@ class MNISTProducer(keras.Model):
         return config
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Helper Functions for Data and Model Setup
-# =============================================================================
+# ---------------------------------------------------------------------
 
 
 def create_mnist_ccnet(explanation_dim: int = 128, learning_rate: float = 1e-3, dropout_rate: float = 0.2,
@@ -466,9 +466,9 @@ def prepare_mnist_data() -> Tuple[tf.data.Dataset, tf.data.Dataset]:
     return train_ds, val_ds
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Main Training & Visualization Workflow
-# =============================================================================
+# ---------------------------------------------------------------------
 
 
 class CCNetExperiment:
@@ -521,7 +521,9 @@ class CCNetExperiment:
         return orchestrator, trainer
 
     def generate_final_report(self, orchestrator: CCNetOrchestrator, trainer: CCNetTrainer):
-        logger.info("=" * 60 + "\nGenerating final visualizations...\n" + "=" * 60)
+        logger.info("=" * 60)
+        logger.info("Generating final visualizations...")
+        logger.info("=" * 60)
 
         report_data = {'orchestrator': orchestrator, 'x_data': self.x_test, 'y_data': self.y_test}
 
@@ -538,18 +540,17 @@ class CCNetExperiment:
         self.viz_manager.create_dashboard(dashboard_data, show=False)
 
         logger.info("Saving models...")
-        # FIX: Simplified and corrected save path logic
         models_dir = self.viz_manager.context.output_dir / self.viz_manager.context.experiment_name / self.viz_manager.context.timestamp / "models"
         models_dir.mkdir(parents=True, exist_ok=True)
         orchestrator.save_models(str(models_dir / "mnist_ccnet"))
         logger.info(f"Models saved to {models_dir}")
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Main Execution
-# =============================================================================
+# ---------------------------------------------------------------------
 
 
 if __name__ == "__main__":
-    experiment = CCNetExperiment(experiment_name="ccnet_mnist_refactored")
-    orchestrator, trainer = experiment.run(epochs=20)
+    experiment = CCNetExperiment(experiment_name="ccnets_mnist")
+    orchestrator, trainer = experiment.run(epochs=5)
