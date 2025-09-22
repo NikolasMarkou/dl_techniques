@@ -414,26 +414,21 @@ class MNISTProducer(keras.Model):
         return content_tensor * (scale + 1) + bias
 
     def call(self, y: keras.KerasTensor, e: keras.KerasTensor, training: Optional[bool] = False) -> keras.KerasTensor:
-        # CORRECTED: Use differentiable matmul for soft lookup instead of argmax.
         c = keras.ops.matmul(y, self.label_embedding.weights[0])
         c = self.fc_content(c)
         c = self.reshape_content(c)
-
         style1 = self.style_transform_1(e)
         style2 = self.style_transform_2(e)
-
         x = self.up1(c)
         x = self.conv1(x)
         x = self.norm1(x, training=training)
         x = self.apply_style(x, style1)
         x = self.act1(x)
-
         x = self.up2(x)
         x = self.conv2(x)
         x = self.norm2(x, training=training)
         x = self.apply_style(x, style2)
         x = self.act2(x)
-
         return self.conv_out(x)
 
     def get_config(self) -> Dict[str, Any]:
@@ -458,12 +453,19 @@ def create_mnist_ccnet(explanation_dim: int = 16, learning_rate: float = 1e-3) -
     reasoner = MNISTReasoner(10, explanation_dim, dropout_rate, l2_regularization)
     producer = MNISTProducer(num_classes=10, explanation_dim=explanation_dim)
 
+    # Build models with dummy data to initialize weights
     dummy_image = keras.ops.zeros((1, 28, 28, 1))
-    dummy_label = keras.ops.zeros((1, 10))
+    dummy_label_one_hot = keras.ops.zeros((1, 10))
+    dummy_label_indices = keras.ops.zeros((1,), dtype="int32")
+
     mu, _ = explainer(dummy_image)
     dummy_latent = mu
+
+    # CORRECTED: Explicitly build the embedding layer before its weights are accessed
+    _ = producer.label_embedding(dummy_label_indices)
+
     _ = reasoner(dummy_image, dummy_latent)
-    _ = producer(dummy_label, dummy_latent)
+    _ = producer(dummy_label_one_hot, dummy_latent)
 
     config = CCNetConfig(
         explanation_dim=explanation_dim, loss_type="l2",
