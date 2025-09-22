@@ -316,8 +316,6 @@ class LatentSpaceAnalysisViz(CompositeVisualization):
 # Keras Model Definitions
 # ---------------------------------------------------------------------
 
-
-# --- FIX START: Update MNISTExplainer to output (mu, log_var) ---
 @keras.saving.register_keras_serializable()
 class MNISTExplainer(keras.Model):
     """
@@ -369,7 +367,6 @@ class MNISTExplainer(keras.Model):
             "l2_regularization": self.regularizer.l2 if self.regularizer else 0.0
         })
         return config
-# --- FIX END ---
 
 
 @keras.saving.register_keras_serializable()
@@ -419,7 +416,7 @@ class MNISTReasoner(keras.Model):
 class MNISTProducer(keras.Model):
     """
     Corrected Producer using class embedding for content and latent vector for
-    style modulation (via AdaIN-like mechanism).
+    style modulation (via AdaIN-like mechanism). Outputs a 28x28 image.
     """
     def __init__(self, num_classes: int = 10, explanation_dim: int = 16, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -432,32 +429,27 @@ class MNISTProducer(keras.Model):
         self.reshape_content = keras.layers.Reshape((7, 7, 128))
 
         # Style pathway from latent vector
-        self.style_transform_1 = keras.layers.Dense(256, activation='relu') # For conv1
-        self.style_transform_2 = keras.layers.Dense(128, activation='relu') # For conv2
-        self.style_transform_3 = keras.layers.Dense(64, activation='relu') # For conv3
+        self.style_transform_1 = keras.layers.Dense(256, activation='relu') # For conv1 channels (128*2)
+        self.style_transform_2 = keras.layers.Dense(128, activation='relu') # For conv2 channels (64*2)
 
         # Decoder blocks
-        self.up1 = keras.layers.UpSampling2D(size=(2, 2))
+        self.up1 = keras.layers.UpSampling2D(size=(2, 2)) # 7x7 -> 14x14
         self.conv1 = keras.layers.Conv2D(128, 3, padding="same")
         self.norm1 = keras.layers.BatchNormalization(center=False, scale=False)
         self.act1 = keras.layers.LeakyReLU(negative_slope=0.2)
 
-        self.up2 = keras.layers.UpSampling2D(size=(2, 2))
+        self.up2 = keras.layers.UpSampling2D(size=(2, 2)) # 14x14 -> 28x28
         self.conv2 = keras.layers.Conv2D(64, 3, padding="same")
         self.norm2 = keras.layers.BatchNormalization(center=False, scale=False)
         self.act2 = keras.layers.LeakyReLU(negative_slope=0.2)
-
-        self.up3 = keras.layers.UpSampling2D(size=(2, 2))
-        self.conv3 = keras.layers.Conv2D(32, 3, padding="same")
-        self.norm3 = keras.layers.BatchNormalization(center=False, scale=False)
-        self.act3 = keras.layers.LeakyReLU(negative_slope=0.2)
 
         self.conv_out = keras.layers.Conv2D(1, 3, padding="same", activation="sigmoid")
 
     def apply_style(self, content_tensor, style_vector):
         # Reshape style vector to broadcast with content tensor
         num_channels = keras.ops.shape(content_tensor)[-1]
-        style_params = style_vector[:, :2*num_channels] # Get scale and bias
+        # Derives scale and bias from the style vector
+        style_params = style_vector
         scale = style_params[:, :num_channels]
         bias = style_params[:, num_channels:]
 
@@ -478,26 +470,19 @@ class MNISTProducer(keras.Model):
         # Style pathway
         style1 = self.style_transform_1(e)
         style2 = self.style_transform_2(e)
-        style3 = self.style_transform_3(e)
 
         # Decoder
-        x = self.up1(c)
+        x = self.up1(c) # 7x7 -> 14x14
         x = self.conv1(x)
         x = self.norm1(x, training=training)
         x = self.apply_style(x, style1)
         x = self.act1(x)
 
-        x = self.up2(x)
+        x = self.up2(x) # 14x14 -> 28x28
         x = self.conv2(x)
         x = self.norm2(x, training=training)
         x = self.apply_style(x, style2)
         x = self.act2(x)
-
-        x = self.up3(x)
-        x = self.conv3(x)
-        x = self.norm3(x, training=training)
-        x = self.apply_style(x, style3)
-        x = self.act3(x)
 
         return self.conv_out(x)
 
@@ -514,9 +499,8 @@ class MNISTProducer(keras.Model):
 # Helper Functions for Data and Model Setup
 # ---------------------------------------------------------------------
 
+
 def create_mnist_ccnet(explanation_dim: int = 16, learning_rate: float = 1e-3) -> CCNetOrchestrator:
-    # The new Producer does not use dropout or l2 regularization in its constructor.
-    # The Reasoner and Explainer still do.
     dropout_rate = 0.2
     l2_regularization = 1e-4
 
@@ -527,8 +511,7 @@ def create_mnist_ccnet(explanation_dim: int = 16, learning_rate: float = 1e-3) -
     # Build models with dummy data to initialize weights
     dummy_image = keras.ops.zeros((1, 28, 28, 1))
     dummy_label = keras.ops.zeros((1, 10))
-    # The dummy latent vector is now the 'mu' part of the explainer's output
-    mu, log_var = explainer(dummy_image)
+    mu, _ = explainer(dummy_image)
     dummy_latent = mu
     _ = reasoner(dummy_image, dummy_latent)
     _ = producer(dummy_label, dummy_latent)
@@ -537,7 +520,7 @@ def create_mnist_ccnet(explanation_dim: int = 16, learning_rate: float = 1e-3) -
         explanation_dim=explanation_dim, loss_type="l2",
         learning_rates={"explainer": learning_rate, "reasoner": learning_rate, "producer": learning_rate},
         gradient_clip_norm=1.0,
-        kl_weight=0.1  # Corrected KL weight
+        kl_weight=0.1
     )
     return CCNetOrchestrator(
         explainer=wrap_keras_model(explainer),
@@ -590,7 +573,7 @@ class CCNetExperiment:
 
     def run(self, epochs: int = 20) -> Tuple[CCNetOrchestrator, CCNetTrainer]:
         logger.info("Creating CCNet for MNIST...")
-        orchestrator = create_mnist_ccnet(explanation_dim=8)
+        orchestrator = create_mnist_ccnet(explanation_dim=16)
         logger.info("Preparing data...")
         train_dataset, val_dataset = prepare_mnist_data()
         logger.info("Setting up trainer...")
