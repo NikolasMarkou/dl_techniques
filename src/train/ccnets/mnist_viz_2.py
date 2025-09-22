@@ -1,17 +1,30 @@
+"""
+CCNet MNIST Experiment using the Visualization Framework
+=========================================================
+
+This script demonstrates a complete training and analysis workflow for a
+Counter-Causal Net (CCNet) on the MNIST dataset, fully integrated with the
+visualization framework.
+
+It defines custom, experiment-specific visualization plugins and uses the
+VisualizationManager to generate a comprehensive report.
+"""
 from __future__ import annotations
 
-from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
-
 import keras
-import matplotlib.gridspec as gridspec
-import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
 import tensorflow as tf
-from scipy.stats import gaussian_kde
+import matplotlib.pyplot as plt
+import seaborn as sns
+from typing import Dict, Any, Optional, Tuple
 from sklearn.manifold import TSNE
+from scipy.stats import gaussian_kde
+
+from dl_techniques.visualization import (
+    VisualizationManager,
+    VisualizationPlugin,
+    CompositeVisualization,
+)
 
 from dl_techniques.models.ccnets import (
     CCNetConfig,
@@ -22,1771 +35,514 @@ from dl_techniques.models.ccnets import (
 )
 from dl_techniques.utils.logger import logger
 
-# Set style for better plots
-plt.style.use("seaborn-v0_8-darkgrid")
-sns.set_palette("husl")
-
 
 # =============================================================================
-# Visualization Utilities
+# Custom Visualization Plugins for CCNet
 # =============================================================================
 
 
-class CCNetVisualizer:
-    """
-    Comprehensive visualization utilities for CCNet analysis.
+class CCNetTrainingHistoryViz(CompositeVisualization):
+    """Visualizes the complete loss landscape of CCNet training."""
 
-    This class provides methods for visualizing various aspects of CCNet training
-    and performance, including loss curves, reconstructions, counterfactuals,
-    style transfer, and latent space analysis.
+    @property
+    def name(self) -> str:
+        return "ccnet_training_history"
 
-    Attributes:
-        results_dir: Directory to save visualization results.
-        timestamp: Timestamp for the current experiment.
-        experiment_dir: Directory for the current experiment's results.
+    @property
+    def description(self) -> str:
+        return "Plots all CCNet-specific losses and derived errors."
 
-    Example:
-        >>> visualizer = CCNetVisualizer(results_dir="results")
-        >>> visualizer.plot_training_history(trainer.history)
-        >>> visualizer.visualize_counterfactual_generation(orchestrator, x_test, y_test)
-    """
-
-    def __init__(self, results_dir: str = "results") -> None:
-        """
-        Initialize visualizer with results directory.
-
-        Args:
-            results_dir: Directory to save visualization results.
-        """
-        self.results_dir = Path(results_dir)
-        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.experiment_dir = self.results_dir / f"ccnet_mnist_{self.timestamp}"
-
-        # Create directory structure
-        self._create_directories()
-        logger.info(f"Visualization results will be saved to: {self.experiment_dir}")
-
-    def _create_directories(self) -> None:
-        """Create necessary directory structure for saving visualizations."""
-        directories = [
-            "losses",
-            "counterfactuals",
-            "style_transfer",
-            "reconstructions",
-            "latent_space",
-            "generation_quality",
-        ]
-
-        self.experiment_dir.mkdir(parents=True, exist_ok=True)
-        for directory in directories:
-            (self.experiment_dir / directory).mkdir(exist_ok=True)
-
-    def plot_training_history(self, history: Dict[str, List[float]]) -> None:
-        """
-        Plot comprehensive training history with all losses and errors.
-
-        Args:
-            history: Training history dictionary containing loss values.
-        """
-        fig = plt.figure(figsize=(18, 10))
-        gs = gridspec.GridSpec(2, 3, figure=fig)
-
-        # Plot fundamental losses
-        loss_configs = [
-            (0, 0, "generation_loss", "Generation Loss", "||X_generated - X_input||", "blue"),
-            (0, 1, "reconstruction_loss", "Reconstruction Loss",
-             "||X_reconstructed - X_input||", "orange"),
-            (0, 2, "inference_loss", "Inference Loss",
-             "||X_reconstructed - X_generated||", "green"),
-        ]
-
-        for row, col, key, title, subtitle, color in loss_configs:
-            ax = fig.add_subplot(gs[row, col])
-            ax.plot(history[key], label=title.split()[0], linewidth=2, color=color)
-            ax.set_title(f"{title}\n{subtitle}", fontsize=12, fontweight="bold")
-            ax.set_xlabel("Epoch")
-            ax.set_ylabel("Loss")
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-
-        # Plot model errors
-        error_configs = [
-            (1, 0, "explainer_error", "Explainer Error", "Inf + Gen - Rec", "red"),
-            (1, 1, "reasoner_error", "Reasoner Error", "Rec + Inf - Gen", "purple"),
-            (1, 2, "producer_error", "Producer Error", "Gen + Rec - Inf", "brown"),
-        ]
-
-        for row, col, key, title, subtitle, color in error_configs:
-            ax = fig.add_subplot(gs[row, col])
-            ax.plot(history[key], label=title.split()[0], linewidth=2, color=color)
-            ax.set_title(f"{title}\n{subtitle}", fontsize=12, fontweight="bold")
-            ax.set_xlabel("Epoch")
-            ax.set_ylabel("Error")
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-
-        plt.suptitle(
-            "CCNet Training History - Complete Loss Landscape",
-            fontsize=14,
-            fontweight="bold",
-            y=1.02,
-        )
-        plt.tight_layout()
-
-        save_path = self.experiment_dir / "losses" / "training_history.png"
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        plt.close()
-        logger.info(f"Training history saved to {save_path}")
-
-    def plot_convergence_analysis(self, history: Dict[str, List[float]]) -> None:
-        """
-        Plot convergence analysis showing how losses converge to equilibrium.
-
-        Args:
-            history: Training history dictionary containing loss values.
-        """
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-        # Combined losses plot
-        ax = axes[0]
-        loss_types = [
-            ("generation_loss", "Generation", "blue"),
-            ("reconstruction_loss", "Reconstruction", "orange"),
-            ("inference_loss", "Inference", "green"),
-        ]
-
-        for key, label, color in loss_types:
-            ax.plot(history[key], label=label, linewidth=2, alpha=0.8, color=color)
-
-        ax.set_xlabel("Epoch", fontsize=12)
-        ax.set_ylabel("Loss", fontsize=12)
-        ax.set_title("Loss Convergence Over Time", fontsize=14, fontweight="bold")
-        ax.legend(loc="best")
-        ax.grid(True, alpha=0.3)
-
-        # Total system error
-        ax = axes[1]
-        total_error = self._calculate_total_error(history)
-
-        ax.plot(total_error, linewidth=3, color="darkblue")
-        ax.fill_between(range(len(total_error)), total_error, alpha=0.3)
-        ax.set_xlabel("Epoch", fontsize=12)
-        ax.set_ylabel("Total System Error", fontsize=12)
-        ax.set_title("CCNet System Convergence", fontsize=14, fontweight="bold")
-        ax.grid(True, alpha=0.3)
-
-        # Add convergence threshold line
-        if total_error:
-            convergence_threshold = min(total_error) * 1.1
-            ax.axhline(
-                y=convergence_threshold,
-                color="red",
-                linestyle="--",
-                alpha=0.5,
-                label="Convergence Threshold",
-            )
-            ax.legend()
-
-        plt.suptitle(
-            "CCNet Convergence Analysis", fontsize=16, fontweight="bold", y=1.02
-        )
-        plt.tight_layout()
-
-        save_path = self.experiment_dir / "losses" / "convergence_analysis.png"
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        plt.close()
-        logger.info("Convergence analysis saved")
-
-    def _calculate_total_error(
-        self, history: Dict[str, List[float]]
-    ) -> List[float]:
-        """Calculate total system error from individual losses."""
-        return [
-            g + r + i
-            for g, r, i in zip(
-                history["generation_loss"],
-                history["reconstruction_loss"],
-                history["inference_loss"],
-            )
-        ]
-
-    def visualize_reconstruction_quality(
-        self,
-        orchestrator: CCNetOrchestrator,
-        x_test: np.ndarray,
-        y_test: np.ndarray,
-        num_samples: int = 10,
-    ) -> None:
-        """
-        Visualize reconstruction quality comparing original, reconstructed, and generated images.
-
-        Args:
-            orchestrator: Trained CCNet orchestrator.
-            x_test: Test images of shape (n_samples, 28, 28, 1).
-            y_test: Test labels of shape (n_samples,).
-            num_samples: Number of samples to visualize.
-        """
-        fig = plt.figure(figsize=(15, 3 * num_samples))
-        gs = gridspec.GridSpec(
-            num_samples, 5, figure=fig, wspace=0.3, hspace=0.4
+    def can_handle(self, data: Any) -> bool:
+        return isinstance(data, dict) and all(
+            k in data for k in ["generation_loss", "explainer_error"]
         )
 
-        for i in range(num_samples):
-            x_input = x_test[i : i + 1]
-            y_truth = keras.utils.to_categorical([y_test[i]], 10)
-
-            # Get all outputs
-            tensors = orchestrator.forward_pass(
-                x_input, y_truth, training=False
-            )
-
-            self._plot_reconstruction_row(
-                fig, gs, i, x_input, tensors, y_test[i]
-            )
-
-        plt.suptitle(
-            "Reconstruction Quality Analysis",
-            fontsize=16,
-            fontweight="bold",
-            y=1.00,
-        )
-
-        save_path = self.experiment_dir / "reconstructions" / "quality_comparison.png"
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        plt.close()
-        logger.info("Reconstruction quality visualization saved")
-
-    def _plot_reconstruction_row(
-        self,
-        fig: plt.Figure,
-        gs: gridspec.GridSpec,
-        row_idx: int,
-        x_input: np.ndarray,
-        tensors: Dict[str, tf.Tensor],
-        true_label: int,
-    ) -> None:
-        """Plot a single row in the reconstruction quality visualization."""
-        # Original
-        ax = fig.add_subplot(gs[row_idx, 0])
-        ax.imshow(x_input[0, :, :, 0], cmap="gray")
-        ax.set_title(f"Original\nLabel: {true_label}", fontsize=10)
-        ax.axis("off")
-
-        # Reconstructed
-        ax = fig.add_subplot(gs[row_idx, 1])
-        ax.imshow(tensors["x_reconstructed"][0, :, :, 0], cmap="gray")
-        y_pred = np.argmax(tensors["y_inferred"][0])
-        color = "green" if y_pred == true_label else "red"
-        ax.set_title(f"Reconstructed\nInferred: {y_pred}", fontsize=10, color=color)
-        ax.axis("off")
-
-        # Generated
-        ax = fig.add_subplot(gs[row_idx, 2])
-        ax.imshow(tensors["x_generated"][0, :, :, 0], cmap="gray")
-        ax.set_title(f"Generated\nTrue: {true_label}", fontsize=10)
-        ax.axis("off")
-
-        # Difference maps
-        self._plot_difference_maps(
-            fig, gs, row_idx, x_input, tensors
-        )
-
-    def _plot_difference_maps(
-        self,
-        fig: plt.Figure,
-        gs: gridspec.GridSpec,
-        row_idx: int,
-        x_input: np.ndarray,
-        tensors: Dict[str, tf.Tensor],
-    ) -> None:
-        """Plot difference maps for reconstruction and generation errors."""
-        # Reconstruction error
-        ax = fig.add_subplot(gs[row_idx, 3])
-        diff_recon = np.abs(
-            tensors["x_reconstructed"][0, :, :, 0] - x_input[0, :, :, 0]
-        )
-        ax.imshow(diff_recon, cmap="hot")
-        ax.set_title(f"Recon Error\nMAE: {np.mean(diff_recon):.3f}", fontsize=10)
-        ax.axis("off")
-
-        # Generation error
-        ax = fig.add_subplot(gs[row_idx, 4])
-        diff_gen = np.abs(
-            tensors["x_generated"][0, :, :, 0] - x_input[0, :, :, 0]
-        )
-        ax.imshow(diff_gen, cmap="hot")
-        ax.set_title(f"Gen Error\nMAE: {np.mean(diff_gen):.3f}", fontsize=10)
-        ax.axis("off")
-
-    def visualize_counterfactual_generation(
-        self,
-        orchestrator: CCNetOrchestrator,
-        x_test: np.ndarray,
-        y_test: np.ndarray,
-    ) -> None:
-        """
-        Visualize counterfactual generation capabilities.
-
-        Args:
-            orchestrator: Trained CCNet orchestrator.
-            x_test: Test images of shape (n_samples, 28, 28, 1).
-            y_test: Test labels of shape (n_samples,).
-        """
-        self._plot_counterfactual_matrix(orchestrator, x_test, y_test)
-        self._plot_counterfactual_sequence(orchestrator, x_test, y_test)
-
-    def _plot_counterfactual_matrix(
-        self,
-        orchestrator: CCNetOrchestrator,
-        x_test: np.ndarray,
-        y_test: np.ndarray,
-    ) -> None:
-        """Create a grid showing counterfactual transformations."""
-        source_digits = [0, 1, 3, 5, 7]
-        target_digits = [0, 2, 4, 6, 8, 9]
-
-        fig = plt.figure(
-            figsize=(len(target_digits) * 2 + 2, len(source_digits) * 2 + 1)
-        )
-        gs = gridspec.GridSpec(
-            len(source_digits) + 1,
-            len(target_digits) + 1,
-            figure=fig,
-            wspace=0.1,
-            hspace=0.1,
-        )
-
-        # Headers
-        self._add_counterfactual_headers(fig, gs, target_digits)
-
-        # Generate and plot counterfactuals
-        for i, source in enumerate(source_digits):
-            self._plot_counterfactual_row(
-                fig, gs, i, source, target_digits, orchestrator, x_test, y_test
-            )
-
-        plt.suptitle(
-            'Counterfactual Generation Matrix\n"What if this digit were drawn as..."',
-            fontsize=16,
-            fontweight="bold",
-            y=0.98,
-        )
-
-        save_path = self.experiment_dir / "counterfactuals" / "counterfactual_matrix.png"
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        plt.close()
-        logger.info("Counterfactual matrix saved")
-
-    def _add_counterfactual_headers(
-        self,
-        fig: plt.Figure,
-        gs: gridspec.GridSpec,
-        target_digits: List[int],
-    ) -> None:
-        """Add column headers for counterfactual matrix."""
-        for j, target in enumerate(target_digits):
-            ax = fig.add_subplot(gs[0, j + 1])
-            ax.text(
-                0.5, 0.5, f"→ {target}",
-                ha="center", va="center", fontsize=14, fontweight="bold"
-            )
-            ax.axis("off")
-
-    def _plot_counterfactual_row(
-        self,
-        fig: plt.Figure,
-        gs: gridspec.GridSpec,
-        row_idx: int,
-        source_digit: int,
-        target_digits: List[int],
-        orchestrator: CCNetOrchestrator,
-        x_test: np.ndarray,
-        y_test: np.ndarray,
-    ) -> None:
-        """Plot a single row of counterfactual transformations."""
-        # Row header (original)
-        idx = np.where(y_test == source_digit)[0][0]
-        x_source = x_test[idx : idx + 1]
-
-        ax = fig.add_subplot(gs[row_idx + 1, 0])
-        ax.imshow(x_source[0, :, :, 0], cmap="gray")
-        ax.set_title(f"{source_digit} →", fontsize=12, fontweight="bold", rotation=0)
-        ax.axis("off")
-
-        # Generate counterfactuals
-        for j, target in enumerate(target_digits):
-            y_target = keras.ops.zeros((1, 10))
-            y_target = keras.ops.scatter_update(y_target, [[0, target]], [1.0])
-
-            x_counterfactual = orchestrator.counterfactual_generation(
-                x_source, y_target
-            )
-
-            ax = fig.add_subplot(gs[row_idx + 1, j + 1])
-            ax.imshow(x_counterfactual[0, :, :, 0], cmap="gray")
-
-            # Highlight diagonal (same digit)
-            if source_digit == target:
-                ax.patch.set_edgecolor("green")
-                ax.patch.set_linewidth(3)
-
-            ax.axis("off")
-
-    def _plot_counterfactual_sequence(
-        self,
-        orchestrator: CCNetOrchestrator,
-        x_test: np.ndarray,
-        y_test: np.ndarray,
-    ) -> None:
-        """Plot detailed counterfactual transformation sequence."""
-        source_digit = 3
-        idx = np.where(y_test == source_digit)[0][2]  # Third instance
-        x_source = x_test[idx : idx + 1]
-
-        fig = plt.figure(figsize=(20, 4))
-        gs = gridspec.GridSpec(2, 10, figure=fig, hspace=0.3)
-
-        # Show endpoints
-        ax = fig.add_subplot(gs[0, 0])
-        ax.imshow(x_source[0, :, :, 0], cmap="gray")
-        ax.set_title("Original\n(3)", fontsize=11, fontweight="bold", color="blue")
-        ax.axis("off")
-
-        # Generate all counterfactuals
-        for target in range(10):
-            row = 0 if target < 5 else 1
-            col = (target % 5) * 2 + 1
-
-            y_target = keras.ops.zeros((1, 10))
-            y_target = keras.ops.scatter_update(y_target, [[0, target]], [1.0])
-
-            x_counter = orchestrator.counterfactual_generation(x_source, y_target)
-
-            ax = fig.add_subplot(gs[row, col : col + 2])
-            ax.imshow(x_counter[0, :, :, 0], cmap="gray")
-            color = "green" if target == source_digit else "black"
-            ax.set_title(f'As "{target}"', fontsize=11, color=color)
-            ax.axis("off")
-
-        plt.suptitle(
-            "Counterfactual Sequence: Preserving Style Across All Digits",
-            fontsize=14,
-            fontweight="bold",
-            y=1.05,
-        )
-
-        save_path = self.experiment_dir / "counterfactuals" / "counterfactual_sequence.png"
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        plt.close()
-        logger.info("Counterfactual sequence saved")
-
-    def visualize_style_transfer(
-        self,
-        orchestrator: CCNetOrchestrator,
-        x_test: np.ndarray,
-        y_test: np.ndarray,
-    ) -> None:
-        """
-        Visualize style transfer capabilities.
-
-        Args:
-            orchestrator: Trained CCNet orchestrator.
-            x_test: Test images of shape (n_samples, 28, 28, 1).
-            y_test: Test labels of shape (n_samples,).
-        """
-        content_digits = [1, 2, 7, 8]
-        style_digits = [3, 4, 5, 9]
-
-        fig = plt.figure(figsize=(16, 12))
-        gs = gridspec.GridSpec(
-            len(content_digits),
-            len(style_digits) + 2,
-            figure=fig,
-            wspace=0.2,
-            hspace=0.3,
-        )
-
-        for i, content_digit in enumerate(content_digits):
-            self._plot_style_transfer_row(
-                fig, gs, i, content_digit, style_digits,
-                orchestrator, x_test, y_test
-            )
-
-        plt.suptitle(
-            "Style Transfer Matrix: Content × Style",
-            fontsize=16,
-            fontweight="bold",
-            y=0.98,
-        )
-
-        save_path = self.experiment_dir / "style_transfer" / "style_transfer_matrix.png"
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        plt.close()
-        logger.info("Style transfer matrix saved")
-
-    def _plot_style_transfer_row(
-        self,
-        fig: plt.Figure,
-        gs: gridspec.GridSpec,
-        row_idx: int,
-        content_digit: int,
-        style_digits: List[int],
-        orchestrator: CCNetOrchestrator,
-        x_test: np.ndarray,
-        y_test: np.ndarray,
-    ) -> None:
-        """Plot a single row of style transfer examples."""
-        # Content source
-        idx_content = np.where(y_test == content_digit)[0][0]
-        x_content = x_test[idx_content : idx_content + 1]
-
-        ax = fig.add_subplot(gs[row_idx, 0])
-        ax.imshow(x_content[0, :, :, 0], cmap="gray")
-        ax.set_title(f"Content\n({content_digit})", fontsize=11, fontweight="bold")
-        ax.axis("off")
-
-        # Arrow
-        ax = fig.add_subplot(gs[row_idx, 1])
-        ax.text(0.5, 0.5, "→", ha="center", va="center", fontsize=20)
-        ax.axis("off")
-
-        for j, style_digit in enumerate(style_digits):
-            # Style source
-            idx_style = np.where(y_test == style_digit)[0][1]
-            x_style = x_test[idx_style : idx_style + 1]
-
-            # Perform style transfer
-            x_transferred = orchestrator.style_transfer(x_content, x_style)
-
-            ax = fig.add_subplot(gs[row_idx, j + 2])
-            ax.imshow(x_transferred[0, :, :, 0], cmap="gray")
-
-            if row_idx == 0:
-                # Show style source label above
-                ax.set_title(f"Style: {style_digit}", fontsize=10)
-
-            ax.axis("off")
-
-    def visualize_latent_space(
-        self,
-        orchestrator: CCNetOrchestrator,
-        x_test: np.ndarray,
-        y_test: np.ndarray,
-        num_samples: int = 1000,
-    ) -> None:
-        """
-        Visualize the learned latent space using t-SNE.
-
-        Args:
-            orchestrator: Trained CCNet orchestrator.
-            x_test: Test images of shape (n_samples, 28, 28, 1).
-            y_test: Test labels of shape (n_samples,).
-            num_samples: Number of samples to visualize.
-        """
-        # Extract latent representations
-        latent_vectors, labels = self._extract_latent_vectors(
-            orchestrator, x_test, y_test, num_samples
-        )
-
-        # Apply t-SNE
-        logger.info("Computing t-SNE embedding...")
-        tsne = TSNE(n_components=2, random_state=42, perplexity=30)
-        latent_2d = tsne.fit_transform(latent_vectors)
-
-        # Create visualizations
-        self._plot_latent_space_tsne(latent_2d, labels)
-        self._plot_latent_statistics(latent_vectors, labels)
-
-    def _extract_latent_vectors(
-        self,
-        orchestrator: CCNetOrchestrator,
-        x_test: np.ndarray,
-        y_test: np.ndarray,
-        num_samples: int,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Extract latent vectors from test samples."""
-        num_samples = min(num_samples, len(x_test))
-        indices = np.random.choice(len(x_test), num_samples, replace=False)
-
-        latent_vectors = []
-        labels = []
-
-        for idx in indices:
-            x_sample = x_test[idx : idx + 1]
-            _, e_latent = orchestrator.disentangle_causes(x_sample)
-            latent_vectors.append(keras.ops.convert_to_numpy(e_latent[0]))
-            labels.append(y_test[idx])
-
-        return np.array(latent_vectors), np.array(labels)
-
-    def _plot_latent_space_tsne(
-        self, latent_2d: np.ndarray, labels: np.ndarray
-    ) -> None:
-        """Plot t-SNE visualization of latent space."""
-        fig, axes = plt.subplots(1, 2, figsize=(16, 7))
-
-        # Colored by digit class
-        ax = axes[0]
-        scatter = ax.scatter(
-            latent_2d[:, 0],
-            latent_2d[:, 1],
-            c=labels,
-            cmap="tab10",
-            s=20,
-            alpha=0.6,
-        )
-        ax.set_title(
-            "Latent Space Colored by Digit Class",
-            fontsize=14,
-            fontweight="bold",
-        )
-        ax.set_xlabel("t-SNE Component 1")
-        ax.set_ylabel("t-SNE Component 2")
-        plt.colorbar(scatter, ax=ax, label="Digit")
-
-        # Density plot
-        ax = axes[1]
-        xy = latent_2d.T
-        z = gaussian_kde(xy)(xy)
-        scatter = ax.scatter(
-            latent_2d[:, 0],
-            latent_2d[:, 1],
-            c=z,
-            cmap="viridis",
-            s=20,
-            alpha=0.6,
-        )
-        ax.set_title("Latent Space Density", fontsize=14, fontweight="bold")
-        ax.set_xlabel("t-SNE Component 1")
-        ax.set_ylabel("t-SNE Component 2")
-        plt.colorbar(scatter, ax=ax, label="Density")
-
-        plt.suptitle(
-            "CCNet Latent Space Visualization (E vectors)",
-            fontsize=16,
-            fontweight="bold",
-            y=1.02,
-        )
-        plt.tight_layout()
-
-        save_path = self.experiment_dir / "latent_space" / "tsne_visualization.png"
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        plt.close()
-        logger.info("Latent space visualization saved")
-
-    def _plot_latent_statistics(
-        self, latent_vectors: np.ndarray, labels: np.ndarray
-    ) -> None:
-        """Plot statistics of the latent space."""
-        fig, axes = plt.subplots(2, 2, figsize=(14, 12))
-
-        # Latent dimension activation patterns
-        ax = axes[0, 0]
-        mean_activations = np.mean(np.abs(latent_vectors), axis=0)
-        ax.bar(range(len(mean_activations)), mean_activations, color="steelblue")
-        ax.set_title(
-            "Mean Activation per Latent Dimension",
-            fontsize=12,
-            fontweight="bold",
-        )
-        ax.set_xlabel("Latent Dimension")
-        ax.set_ylabel("Mean |Activation|")
-        ax.grid(True, alpha=0.3)
-
-        # Variance per dimension
-        ax = axes[0, 1]
-        var_activations = np.var(latent_vectors, axis=0)
-        ax.bar(range(len(var_activations)), var_activations, color="coral")
-        ax.set_title(
-            "Variance per Latent Dimension", fontsize=12, fontweight="bold"
-        )
-        ax.set_xlabel("Latent Dimension")
-        ax.set_ylabel("Variance")
-        ax.grid(True, alpha=0.3)
-
-        # Per-class latent norms
-        ax = axes[1, 0]
-        latent_norms = np.linalg.norm(latent_vectors, axis=1)
-        for digit in range(10):
-            digit_norms = latent_norms[labels == digit]
-            ax.violinplot(
-                [digit_norms],
-                positions=[digit],
-                widths=0.7,
-                showmeans=True,
-                showmedians=True,
-            )
-        ax.set_title(
-            "Latent Vector Norms by Digit Class",
-            fontsize=12,
-            fontweight="bold",
-        )
-        ax.set_xlabel("Digit")
-        ax.set_ylabel("||E|| (L2 Norm)")
-        ax.set_xticks(range(10))
-        ax.grid(True, alpha=0.3, axis="y")
-
-        # Correlation matrix of top dimensions
-        ax = axes[1, 1]
-        top_k = 10
-        top_dims = np.argsort(mean_activations)[-top_k:]
-        corr_matrix = np.corrcoef(latent_vectors[:, top_dims].T)
-        im = ax.imshow(
-            corr_matrix, cmap="coolwarm", vmin=-1, vmax=1, aspect="auto"
-        )
-        ax.set_title(
-            f"Correlation Matrix (Top {top_k} Dimensions)",
-            fontsize=12,
-            fontweight="bold",
-        )
-        ax.set_xlabel("Dimension Index")
-        ax.set_ylabel("Dimension Index")
-        plt.colorbar(im, ax=ax, label="Correlation")
-
-        plt.suptitle(
-            "Latent Space Statistics Analysis",
-            fontsize=14,
-            fontweight="bold",
-            y=1.02,
-        )
-        plt.tight_layout()
-
-        save_path = self.experiment_dir / "latent_space" / "latent_statistics.png"
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        plt.close()
-        logger.info("Latent statistics saved")
-
-    def create_summary_report(
-        self,
-        orchestrator: CCNetOrchestrator,
-        trainer: CCNetTrainer,
-        x_test: np.ndarray,
-        y_test: np.ndarray,
-    ) -> None:
-        """
-        Create a comprehensive summary report.
-
-        Args:
-            orchestrator: Trained CCNet orchestrator.
-            trainer: CCNet trainer with history.
-            x_test: Test images of shape (n_samples, 28, 28, 1).
-            y_test: Test labels of shape (n_samples,).
-        """
-        fig = plt.figure(figsize=(20, 24))
-        gs = gridspec.GridSpec(6, 4, figure=fig, hspace=0.3, wspace=0.3)
-
-        # Add various summary components
-        self._add_training_curves(fig, gs, trainer)
-        self._add_final_metrics(fig, gs, trainer)
-        self._add_reconstruction_examples(fig, gs, orchestrator, x_test, y_test)
-        self._add_counterfactual_examples(fig, gs, orchestrator, x_test, y_test)
-        self._add_consistency_check(fig, gs, orchestrator, x_test)
-        self._add_model_info(fig, gs, orchestrator, trainer)
-
-        plt.suptitle(
-            "CCNet Training & Evaluation Summary Report",
-            fontsize=16,
-            fontweight="bold",
-            y=0.995,
-        )
-
-        save_path = self.experiment_dir / "summary_report.png"
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        plt.close()
-        logger.info(f"Summary report saved to {save_path}")
-
-    def _add_training_curves(
-        self, fig: plt.Figure, gs: gridspec.GridSpec, trainer: CCNetTrainer
-    ) -> None:
-        """Add training curves to summary report."""
-        ax = fig.add_subplot(gs[0, :2])
-        ax.plot(trainer.history["generation_loss"], label="Generation", linewidth=2)
-        ax.plot(
-            trainer.history["reconstruction_loss"],
-            label="Reconstruction",
-            linewidth=2
-        )
-        ax.plot(trainer.history["inference_loss"], label="Inference", linewidth=2)
-        ax.set_title("Training Progress", fontsize=12, fontweight="bold")
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.add_subplot("Fundamental Losses", self._plot_fundamental_losses)
+        self.add_subplot("Model Errors", self._plot_model_errors)
+        self.add_subplot("Loss Convergence", self._plot_loss_convergence)
+        self.add_subplot("System Convergence", self._plot_system_convergence)
+
+    def _plot_fundamental_losses(self, ax: plt.Axes, data: Dict[str, Any], **kwargs):
+        loss_keys = ["generation_loss", "reconstruction_loss", "inference_loss"]
+        for key in loss_keys:
+            if key in data and data[key]:
+                ax.plot(data[key], label=key.replace("_loss", "").title(), linewidth=2)
+        ax.set_title("Fundamental Losses")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-    def _add_final_metrics(
-        self, fig: plt.Figure, gs: gridspec.GridSpec, trainer: CCNetTrainer
-    ) -> None:
-        """Add final metrics to summary report."""
-        ax = fig.add_subplot(gs[0, 2:])
+    def _plot_model_errors(self, ax: plt.Axes, data: Dict[str, Any], **kwargs):
+        error_keys = ["explainer_error", "reasoner_error", "producer_error"]
+        for key in error_keys:
+            if key in data and data[key]:
+                ax.plot(data[key], label=key.replace("_error", "").title(), linewidth=2)
+        ax.set_title("Derived Model Errors")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Error")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
 
-        final_metrics = {
-            "Generation": trainer.history["generation_loss"][-1]
-            if trainer.history["generation_loss"]
-            else 0,
-            "Reconstruction": trainer.history["reconstruction_loss"][-1]
-            if trainer.history["reconstruction_loss"]
-            else 0,
-            "Inference": trainer.history["inference_loss"][-1]
-            if trainer.history["inference_loss"]
-            else 0,
-        }
+    def _plot_loss_convergence(self, ax: plt.Axes, data: Dict[str, Any], **kwargs):
+        self._plot_fundamental_losses(ax, data, **kwargs)
+        ax.set_title("Loss Convergence Over Time")
 
-        bars = ax.bar(
-            final_metrics.keys(),
-            final_metrics.values(),
-            color=["blue", "orange", "green"],
-        )
-        ax.set_title("Final Loss Values", fontsize=12, fontweight="bold")
-        ax.set_ylabel("Loss")
+    def _plot_system_convergence(self, ax: plt.Axes, data: Dict[str, Any], **kwargs):
+        required_keys = ["generation_loss", "reconstruction_loss", "inference_loss"]
+        if not all(k in data and data[k] for k in required_keys):
+            ax.text(0.5, 0.5, "Incomplete loss data for convergence plot.", ha='center', va='center')
+            return
 
-        for bar, value in zip(bars, final_metrics.values()):
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.01,
-                f"{value:.4f}",
-                ha="center",
-                va="bottom",
-            )
-        ax.grid(True, alpha=0.3, axis="y")
+        total_error = [
+            g + r + i
+            for g, r, i in zip(data["generation_loss"], data["reconstruction_loss"], data["inference_loss"])
+        ]
+        ax.plot(total_error, linewidth=3, color="darkblue")
+        ax.fill_between(range(len(total_error)), total_error, alpha=0.3)
+        ax.set_title("Total System Error Convergence")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Total System Error")
+        ax.grid(True, alpha=0.3)
 
-    def _add_reconstruction_examples(
-        self,
-        fig: plt.Figure,
-        gs: gridspec.GridSpec,
-        orchestrator: CCNetOrchestrator,
-        x_test: np.ndarray,
-        y_test: np.ndarray,
-    ) -> None:
-        """Add reconstruction examples to summary report."""
-        ax = fig.add_subplot(gs[1:3, :])
-        ax.axis("off")
-        ax.text(
-            0.5,
-            0.98,
-            "Reconstruction Examples",
-            ha="center",
-            va="top",
-            fontsize=14,
-            fontweight="bold",
-            transform=ax.transAxes,
+
+class ReconstructionQualityViz(VisualizationPlugin):
+    @property
+    def name(self) -> str:
+        return "ccnet_reconstruction_quality"
+
+    @property
+    def description(self) -> str:
+        return "Compares original, reconstructed, generated images and error maps."
+
+    def can_handle(self, data: Any) -> bool:
+        return isinstance(data, dict) and all(
+            k in data for k in ["orchestrator", "x_data", "y_data"]
         )
 
-        # Create sub-grid for examples
-        sub_gs = gridspec.GridSpecFromSubplotSpec(
-            4, 5, subplot_spec=gs[1:3, :], wspace=0.1, hspace=0.2
+    def create_visualization(self, data: Dict[str, Any], ax: Optional[plt.Axes] = None, **kwargs) -> plt.Figure:
+        orchestrator: CCNetOrchestrator = data["orchestrator"]
+        x_data, y_data = data["x_data"], data["y_data"]
+        num_samples = data.get("num_samples", 10)
+
+        fig, axes = plt.subplots(
+            num_samples, 5, figsize=(15, 3 * num_samples),
+            gridspec_kw={'wspace': 0.3, 'hspace': 0.4}
+        )
+        fig.suptitle("Reconstruction Quality Analysis", fontsize=16, fontweight="bold")
+
+        for i in range(num_samples):
+            x_input = x_data[i: i + 1]
+            y_truth = keras.utils.to_categorical([y_data[i]], 10)
+            tensors = orchestrator.forward_pass(x_input, y_truth, training=False)
+            y_pred = np.argmax(tensors["y_inferred"][0])
+
+            axes[i, 0].imshow(x_input[0, :, :, 0], cmap="gray")
+            axes[i, 1].imshow(tensors["x_reconstructed"][0, :, :, 0], cmap="gray")
+            axes[i, 2].imshow(tensors["x_generated"][0, :, :, 0], cmap="gray")
+
+            diff_recon = np.abs(tensors["x_reconstructed"][0, :, :, 0] - x_input[0, :, :, 0])
+            axes[i, 3].imshow(diff_recon, cmap="hot")
+            diff_gen = np.abs(tensors["x_generated"][0, :, :, 0] - x_input[0, :, :, 0])
+            axes[i, 4].imshow(diff_gen, cmap="hot")
+
+            axes[i, 0].set_title(f"Original\nLabel: {y_data[i]}")
+            color = "green" if y_pred == y_data[i] else "red"
+            axes[i, 1].set_title(f"Reconstructed\nInferred: {y_pred}", color=color)
+            axes[i, 2].set_title(f"Generated\nTrue: {y_data[i]}")
+            axes[i, 3].set_title(f"Recon Error\nMAE: {np.mean(diff_recon):.3f}")
+            axes[i, 4].set_title(f"Gen Error\nMAE: {np.mean(diff_gen):.3f}")
+
+            for j in range(5):
+                axes[i, j].axis("off")
+        return fig
+
+
+class CounterfactualMatrixViz(VisualizationPlugin):
+    @property
+    def name(self) -> str:
+        return "ccnet_counterfactual_matrix"
+
+    @property
+    def description(self) -> str:
+        return "Generates a matrix of counterfactual digits."
+
+    def can_handle(self, data: Any) -> bool:
+        return isinstance(data, dict) and all(
+            k in data for k in ["orchestrator", "x_data", "y_data"]
         )
 
-        for i in range(4):
-            idx = np.random.randint(0, len(x_test))
-            x_sample = x_test[idx : idx + 1]
-            y_truth = keras.utils.to_categorical([y_test[idx]], 10)
+    def create_visualization(self, data: Dict[str, Any], ax: Optional[plt.Axes] = None, **kwargs) -> plt.Figure:
+        orchestrator: CCNetOrchestrator = data["orchestrator"]
+        x_data, y_data = data["x_data"], data["y_data"]
+        source_digits = data.get("source_digits", [0, 1, 3, 5, 7])
+        target_digits = data.get("target_digits", [0, 2, 4, 6, 8, 9])
 
-            tensors = orchestrator.forward_pass(x_sample, y_truth, training=False)
-
-            # Show visualizations
-            self._add_reconstruction_example_row(
-                fig, sub_gs, i, x_sample, tensors
-            )
-
-    def _add_reconstruction_example_row(
-        self,
-        fig: plt.Figure,
-        sub_gs: gridspec.GridSpecFromSubplotSpec,
-        row_idx: int,
-        x_sample: np.ndarray,
-        tensors: Dict[str, tf.Tensor],
-    ) -> None:
-        """Add a single row of reconstruction examples."""
-        titles = ["Original", "Reconstructed", "Generated", "Recon Error", "Gen Error"]
-
-        for col_idx, title in enumerate(titles):
-            ax_sub = fig.add_subplot(sub_gs[row_idx, col_idx])
-
-            if col_idx == 0:  # Original
-                ax_sub.imshow(x_sample[0, :, :, 0], cmap="gray")
-            elif col_idx == 1:  # Reconstructed
-                ax_sub.imshow(tensors["x_reconstructed"][0, :, :, 0], cmap="gray")
-            elif col_idx == 2:  # Generated
-                ax_sub.imshow(tensors["x_generated"][0, :, :, 0], cmap="gray")
-            elif col_idx == 3:  # Recon Error
-                diff = np.abs(
-                    tensors["x_reconstructed"][0, :, :, 0] - x_sample[0, :, :, 0]
-                )
-                ax_sub.imshow(diff, cmap="hot")
-            else:  # Gen Error
-                diff = np.abs(
-                    tensors["x_generated"][0, :, :, 0] - x_sample[0, :, :, 0]
-                )
-                ax_sub.imshow(diff, cmap="hot")
-
-            if row_idx == 0:
-                ax_sub.set_title(title, fontsize=9)
-            ax_sub.axis("off")
-
-    def _add_counterfactual_examples(
-        self,
-        fig: plt.Figure,
-        gs: gridspec.GridSpec,
-        orchestrator: CCNetOrchestrator,
-        x_test: np.ndarray,
-        y_test: np.ndarray,
-    ) -> None:
-        """Add counterfactual examples to summary report."""
-        ax = fig.add_subplot(gs[3:5, :])
-        ax.axis("off")
-        ax.text(
-            0.5,
-            0.98,
-            "Counterfactual Generation Examples",
-            ha="center",
-            va="top",
-            fontsize=14,
-            fontweight="bold",
-            transform=ax.transAxes,
+        rows, cols = len(source_digits), len(target_digits)
+        fig, axes = plt.subplots(
+            rows, cols + 1, figsize=(cols * 1.5 + 1.5, rows * 1.5),
+            gridspec_kw={'wspace': 0.1, 'hspace': 0.1}
+        )
+        fig.suptitle(
+            'Counterfactual Generation Matrix\n"What if this digit were drawn as..."',
+            fontsize=16, fontweight="bold"
         )
 
-        sub_gs2 = gridspec.GridSpecFromSubplotSpec(
-            2, 10, subplot_spec=gs[3:5, :], wspace=0.1, hspace=0.2
-        )
+        for i, source in enumerate(source_digits):
+            idx = np.where(y_data == source)[0][0]
+            x_source = x_data[idx: idx + 1]
+            axes[i, 0].imshow(x_source[0, :, :, 0], cmap="gray")
+            axes[i, 0].set_ylabel(f"{source} →", rotation=0, size='large', labelpad=20)
 
-        # Show counterfactual transformation
-        idx_3 = np.where(y_test == 3)[0][0]
-        x_3 = x_test[idx_3 : idx_3 + 1]
+            for j, target in enumerate(target_digits):
+                y_target = keras.utils.to_categorical([target], 10)
+                x_counter = orchestrator.counterfactual_generation(x_source, y_target)
+                axes[i, j + 1].imshow(x_counter[0, :, :, 0], cmap="gray")
 
-        for i in range(10):
-            row = i // 5
-            col = i % 5 * 2
+                if i == 0:
+                    axes[i, j + 1].set_title(f"→ {target}", size='large')
+                if source == target:
+                    axes[i, j + 1].patch.set_edgecolor("green")
+                    axes[i, j + 1].patch.set_linewidth(3)
 
-            y_target = keras.ops.zeros((1, 10))
-            y_target = keras.ops.scatter_update(y_target, [[0, i]], [1.0])
-            x_counter = orchestrator.counterfactual_generation(x_3, y_target)
+        for axis in axes.flatten():
+            axis.set_xticks([])
+            axis.set_yticks([])
+        return fig
 
-            ax_sub = fig.add_subplot(sub_gs2[row, col : col + 2])
-            ax_sub.imshow(x_counter[0, :, :, 0], cmap="gray")
-            ax_sub.set_title(f"{i}", fontsize=9)
-            ax_sub.axis("off")
 
-    def _add_consistency_check(
-        self,
-        fig: plt.Figure,
-        gs: gridspec.GridSpec,
-        orchestrator: CCNetOrchestrator,
-        x_test: np.ndarray,
-    ) -> None:
-        """Add consistency check to summary report."""
-        ax = fig.add_subplot(gs[5, :2])
+class LatentSpaceAnalysisViz(CompositeVisualization):
+    @property
+    def name(self) -> str:
+        return "ccnet_latent_space"
 
-        consistency_results = []
-        for _ in range(100):
-            idx = np.random.randint(0, min(1000, len(x_test)))
-            is_consistent = orchestrator.verify_consistency(
-                x_test[idx : idx + 1], threshold=0.05
-            )
-            consistency_results.append(is_consistent)
+    @property
+    def description(self) -> str:
+        return "Visualizes latent space with t-SNE and statistical plots."
 
-        consistency_rate = sum(consistency_results) / len(consistency_results)
+    def can_handle(self, data: Any) -> bool:
+        return isinstance(data, dict) and all(k in data for k in ["orchestrator", "x_data", "y_data"])
 
-        ax.pie(
-            [consistency_rate, 1 - consistency_rate],
-            labels=["Consistent", "Inconsistent"],
-            colors=["green", "red"],
-            autopct="%1.1f%%",
-            startangle=90,
-        )
-        ax.set_title(
-            f"Consistency Check\n({len(consistency_results)} samples)",
-            fontsize=12,
-            fontweight="bold",
-        )
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.latent_vectors = None
+        self.labels = None
+        self.latent_2d = None
+        self.add_subplot("t-SNE Colored by Class", self._plot_tsne_class)
+        self.add_subplot("t-SNE Density", self._plot_tsne_density)
+        self.add_subplot("Mean Activation", self._plot_mean_activation)
+        self.add_subplot("Latent Norms by Class", self._plot_latent_norms)
 
-    def _add_model_info(
-        self,
-        fig: plt.Figure,
-        gs: gridspec.GridSpec,
-        orchestrator: CCNetOrchestrator,
-        trainer: CCNetTrainer,
-    ) -> None:
-        """Add model information to summary report."""
-        ax = fig.add_subplot(gs[5, 2:])
-        ax.axis("off")
+    def _prepare_data(self, data: Dict[str, Any]):
+        if self.latent_vectors is not None:
+            return
 
-        final_gen = (
-            trainer.history["generation_loss"][-1]
-            if trainer.history["generation_loss"]
-            else 0
-        )
-        final_rec = (
-            trainer.history["reconstruction_loss"][-1]
-            if trainer.history["reconstruction_loss"]
-            else 0
-        )
-        final_inf = (
-            trainer.history["inference_loss"][-1]
-            if trainer.history["inference_loss"]
-            else 0
-        )
+        orchestrator: CCNetOrchestrator = data["orchestrator"]
+        x_data, y_data = data["x_data"], data["y_data"]
+        num_samples = data.get("num_samples", 1000)
 
-        info_text = f"""
-        Model Configuration:
-        • Explanation Dimension: {orchestrator.config.explanation_dim}
-        • Loss Type: {orchestrator.config.loss_type}
-        • Learning Rates: {orchestrator.config.learning_rates}
-        • Gradient Clipping: {orchestrator.config.gradient_clip_norm}
-        • Verification Weight: {orchestrator.config.verification_weight}
+        indices = np.random.choice(len(x_data), min(num_samples, len(x_data)), replace=False)
 
-        Training Summary:
-        • Total Epochs: {len(trainer.history['generation_loss'])}
-        • Final Gen Loss: {final_gen:.4f}
-        • Final Rec Loss: {final_rec:.4f}
-        • Final Inf Loss: {final_inf:.4f}
-        """
+        latent_vectors, labels = [], []
+        for idx in indices:
+            x_sample = x_data[idx: idx + 1]
+            _, e_latent = orchestrator.disentangle_causes(x_sample)
+            latent_vectors.append(keras.ops.convert_to_numpy(e_latent[0]))
+            labels.append(y_data[idx])
 
-        ax.text(
-            0.1,
-            0.9,
-            info_text,
-            transform=ax.transAxes,
-            fontsize=10,
-            verticalalignment="top",
-            family="monospace",
-        )
+        self.latent_vectors = np.array(latent_vectors)
+        self.labels = np.array(labels)
+
+        logger.info("Computing t-SNE embedding for latent space...")
+        tsne = TSNE(n_components=2, random_state=42, perplexity=30, n_iter=300)
+        self.latent_2d = tsne.fit_transform(self.latent_vectors)
+
+    def _plot_tsne_class(self, ax: plt.Axes, data: Dict[str, Any], **kwargs):
+        self._prepare_data(data)
+        scatter = ax.scatter(self.latent_2d[:, 0], self.latent_2d[:, 1], c=self.labels, cmap="tab10", s=20, alpha=0.7)
+        ax.set_xlabel("t-SNE Component 1");
+        ax.set_ylabel("t-SNE Component 2")
+        ax.get_figure().colorbar(scatter, ax=ax, label="Digit");
+        ax.grid(True, alpha=0.3)
+
+    def _plot_tsne_density(self, ax: plt.Axes, data: Dict[str, Any], **kwargs):
+        self._prepare_data(data)
+        xy = self.latent_2d.T
+        z = gaussian_kde(xy)(xy)
+        scatter = ax.scatter(self.latent_2d[:, 0], self.latent_2d[:, 1], c=z, cmap="viridis", s=20, alpha=0.7)
+        ax.set_xlabel("t-SNE Component 1");
+        ax.set_ylabel("t-SNE Component 2")
+        ax.get_figure().colorbar(scatter, ax=ax, label="Density");
+        ax.grid(True, alpha=0.3)
+
+    def _plot_mean_activation(self, ax: plt.Axes, data: Dict[str, Any], **kwargs):
+        self._prepare_data(data)
+        mean_activations = np.mean(np.abs(self.latent_vectors), axis=0)
+        ax.bar(range(len(mean_activations)), mean_activations, color="steelblue")
+        ax.set_xlabel("Latent Dimension");
+        ax.set_ylabel("Mean |Activation|")
+        ax.grid(True, alpha=0.3, axis='y')
+
+    def _plot_latent_norms(self, ax: plt.Axes, data: Dict[str, Any], **kwargs):
+        self._prepare_data(data)
+        latent_norms = np.linalg.norm(self.latent_vectors, axis=1)
+        sns.violinplot(x=self.labels, y=latent_norms, ax=ax, palette="husl", inner="quartile")
+        ax.set_xlabel("Digit Class");
+        ax.set_ylabel("||E|| (L2 Norm)")
+        ax.grid(True, alpha=0.3, axis='y')
 
 
 # =============================================================================
-# Model Definitions
+# Keras Model Definitions
 # =============================================================================
 
 
 @keras.saving.register_keras_serializable()
 class MNISTExplainer(keras.Model):
-    """
-    Explainer network for MNIST: P(E|X).
-
-    Extracts latent style/context from digit images using a modern CNN architecture.
-    The explainer learns to disentangle style factors from digit identity.
-
-    Args:
-        explanation_dim: Dimension of the latent explanation vector.
-        dropout_rate: Dropout rate for regularization.
-        l2_regularization: L2 regularization strength for weights.
-        **kwargs: Additional arguments for Model base class.
-
-    Input shape:
-        4D tensor with shape: `(batch_size, 28, 28, 1)`.
-
-    Output shape:
-        2D tensor with shape: `(batch_size, explanation_dim)`.
-        L2-normalized latent vectors representing style/context.
-
-    Example:
-        >>> explainer = MNISTExplainer(explanation_dim=128, dropout_rate=0.2)
-        >>> x = keras.ops.random.normal(shape=(32, 28, 28, 1))
-        >>> e_latent = explainer(x, training=True)
-        >>> assert e_latent.shape == (32, 128)
-    """
-
-    def __init__(
-        self,
-        explanation_dim: int = 128,
-        dropout_rate: float = 0.2,
-        l2_regularization: float = 1e-4,
-        **kwargs: Any
-    ) -> None:
-        """Initialize the Explainer network."""
+    def __init__(self, explanation_dim: int = 128, dropout_rate: float = 0.2, l2_regularization: float = 1e-4,
+                 **kwargs: Any) -> None:
         super().__init__(**kwargs)
-
-        self.explanation_dim = explanation_dim
-        self.dropout_rate = dropout_rate
-        self.regularizer = (
-            keras.regularizers.L2(l2_regularization)
-            if l2_regularization > 0
-            else None
-        )
-
-        # Create all layers in __init__ (following modern Keras patterns)
-        # Convolutional blocks
-        self.conv1 = keras.layers.Conv2D(
-            32, 3, padding="same", kernel_regularizer=self.regularizer
-        )
+        self.explanation_dim, self.dropout_rate = explanation_dim, dropout_rate
+        self.regularizer = keras.regularizers.L2(l2_regularization) if l2_regularization > 0 else None
+        self.conv1 = keras.layers.Conv2D(32, 5, padding="same", kernel_regularizer=self.regularizer)
         self.bn1 = keras.layers.BatchNormalization()
         self.act1 = keras.layers.LeakyReLU(negative_slope=0.2)
         self.pool1 = keras.layers.MaxPooling2D(2)
-
-        self.conv2 = keras.layers.Conv2D(
-            64, 3, padding="same", kernel_regularizer=self.regularizer
-        )
+        self.conv2 = keras.layers.Conv2D(64, 3, padding="same", kernel_regularizer=self.regularizer)
         self.bn2 = keras.layers.BatchNormalization()
         self.act2 = keras.layers.LeakyReLU(negative_slope=0.2)
         self.pool2 = keras.layers.MaxPooling2D(2)
-
-        self.conv3 = keras.layers.Conv2D(
-            128, 3, padding="same", kernel_regularizer=self.regularizer
-        )
+        self.conv3 = keras.layers.Conv2D(128, 3, padding="same", kernel_regularizer=self.regularizer)
         self.bn3 = keras.layers.BatchNormalization()
         self.act3 = keras.layers.LeakyReLU(negative_slope=0.2)
-        self.pool3 = keras.layers.MaxPooling2D(2)
-
-        # Dense layers
+        self.pool3 = keras.layers.GlobalMaxPool2D()
         self.flatten = keras.layers.Flatten()
-        self.dropout = keras.layers.Dropout(dropout_rate)
+        self.fc_latent = keras.layers.Dense(explanation_dim, kernel_regularizer=self.regularizer)
 
-        self.fc1 = keras.layers.Dense(
-            512, kernel_regularizer=self.regularizer
-        )
-        self.bn_fc1 = keras.layers.BatchNormalization()
-        self.act_fc1 = keras.layers.LeakyReLU(negative_slope=0.2)
-
-        self.fc2 = keras.layers.Dense(
-            256, kernel_regularizer=self.regularizer
-        )
-        self.bn_fc2 = keras.layers.BatchNormalization()
-        self.act_fc2 = keras.layers.LeakyReLU(negative_slope=0.2)
-
-        self.fc_latent = keras.layers.Dense(
-            explanation_dim, kernel_regularizer=self.regularizer
-        )
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the model layers.
-
-        Args:
-            input_shape: Shape of input tensor.
-        """
-        # Build all sub-layers explicitly (important for serialization)
-        super().build(input_shape)
-
-        # Build convolutional layers
-        self.conv1.build(input_shape)
-        conv1_out = self.conv1.compute_output_shape(input_shape)
-        self.bn1.build(conv1_out)
-        pool1_out = self.pool1.compute_output_shape(conv1_out)
-
-        self.conv2.build(pool1_out)
-        conv2_out = self.conv2.compute_output_shape(pool1_out)
-        self.bn2.build(conv2_out)
-        pool2_out = self.pool2.compute_output_shape(conv2_out)
-
-        self.conv3.build(pool2_out)
-        conv3_out = self.conv3.compute_output_shape(pool2_out)
-        self.bn3.build(conv3_out)
-        pool3_out = self.pool3.compute_output_shape(conv3_out)
-
-        # Build dense layers
-        flatten_out = self.flatten.compute_output_shape(pool3_out)
-        self.fc1.build(flatten_out)
-        fc1_out = self.fc1.compute_output_shape(flatten_out)
-        self.bn_fc1.build(fc1_out)
-
-        self.fc2.build(fc1_out)
-        fc2_out = self.fc2.compute_output_shape(fc1_out)
-        self.bn_fc2.build(fc2_out)
-
-        self.fc_latent.build(fc2_out)
-
-    def call(
-        self, x: keras.KerasTensor, training: Optional[bool] = False
-    ) -> keras.KerasTensor:
-        """
-        Forward pass through the explainer network.
-
-        Args:
-            x: Input tensor of shape (batch_size, 28, 28, 1).
-            training: Whether the model is in training mode.
-
-        Returns:
-            L2-normalized latent explanation vector.
-        """
-        # Feature extraction
-        x = self.conv1(x)
-        x = self.bn1(x, training=training)
-        x = self.act1(x)
-        x = self.pool1(x)
-
-        x = self.conv2(x)
-        x = self.bn2(x, training=training)
-        x = self.act2(x)
-        x = self.pool2(x)
-
-        x = self.conv3(x)
-        x = self.bn3(x, training=training)
-        x = self.act3(x)
-        x = self.pool3(x)
-
-        # Latent vector generation
-        x = self.flatten(x)
-        x = self.dropout(x, training=training)
-
-        x = self.fc1(x)
-        x = self.bn_fc1(x, training=training)
-        x = self.act_fc1(x)
-        x = self.dropout(x, training=training)
-
-        x = self.fc2(x)
-        x = self.bn_fc2(x, training=training)
-        x = self.act_fc2(x)
-
-        # Get the raw latent vector
-        e_latent_raw = self.fc_latent(x)
-
-        # Normalize to unit length (L2 norm of 1)
-        e_latent = tf.math.l2_normalize(e_latent_raw, axis=-1)
-
-        return e_latent
+    def call(self, x: keras.KerasTensor, training: Optional[bool] = False) -> keras.KerasTensor:
+        x = self.pool1(self.act1(self.bn1(self.conv1(x), training=training)))
+        x = self.pool2(self.act2(self.bn2(self.conv2(x), training=training)))
+        x = self.pool3(self.act3(self.bn3(self.conv3(x), training=training)))
+        return tf.math.l2_normalize(self.fc_latent(self.flatten(x)), axis=-1)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
         config = super().get_config()
-        config.update({
-            "explanation_dim": self.explanation_dim,
-            "dropout_rate": self.dropout_rate,
-            "l2_regularization": (
-                self.regularizer.l2 if self.regularizer else 0.0
-            ),
-        })
+        config.update({"explanation_dim": self.explanation_dim, "dropout_rate": self.dropout_rate,
+                       "l2_regularization": self.regularizer.l2 if self.regularizer else 0.0})
         return config
 
 
 @keras.saving.register_keras_serializable()
 class MNISTReasoner(keras.Model):
-    """
-    Reasoner network for MNIST: P(Y|X,E).
-
-    Performs context-aware digit classification using both the input image
-    and the extracted latent explanation vector.
-
-    Args:
-        num_classes: Number of output classes (10 for MNIST).
-        explanation_dim: Dimension of the latent explanation vector.
-        dropout_rate: Dropout rate for regularization.
-        l2_regularization: L2 regularization strength for weights.
-        **kwargs: Additional arguments for Model base class.
-
-    Input shape:
-        - x: 4D tensor with shape `(batch_size, 28, 28, 1)`.
-        - e: 2D tensor with shape `(batch_size, explanation_dim)`.
-
-    Output shape:
-        2D tensor with shape: `(batch_size, num_classes)`.
-        Softmax probabilities over digit classes.
-
-    Example:
-        >>> reasoner = MNISTReasoner(num_classes=10, explanation_dim=128)
-        >>> x = keras.ops.random.normal(shape=(32, 28, 28, 1))
-        >>> e = keras.ops.random.normal(shape=(32, 128))
-        >>> y_probs = reasoner(x, e, training=True)
-        >>> assert y_probs.shape == (32, 10)
-    """
-
-    def __init__(
-        self,
-        num_classes: int = 10,
-        explanation_dim: int = 128,
-        dropout_rate: float = 0.2,
-        l2_regularization: float = 1e-4,
-        **kwargs: Any
-    ) -> None:
-        """Initialize the Reasoner network."""
+    def __init__(self, num_classes: int = 10, explanation_dim: int = 128, dropout_rate: float = 0.2,
+                 l2_regularization: float = 1e-4, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-
-        self.num_classes = num_classes
-        self.explanation_dim = explanation_dim
-        self.dropout_rate = dropout_rate
-        self.regularizer = (
-            keras.regularizers.L2(l2_regularization)
-            if l2_regularization > 0
-            else None
-        )
-
-        # Image feature extractor
-        self.conv1 = keras.layers.Conv2D(
-            32, 3, padding="same", kernel_regularizer=self.regularizer
-        )
+        self.num_classes, self.explanation_dim, self.dropout_rate = num_classes, explanation_dim, dropout_rate
+        self.regularizer = keras.regularizers.L2(l2_regularization) if l2_regularization > 0 else None
+        self.conv1 = keras.layers.Conv2D(32, 3, padding="same", kernel_regularizer=self.regularizer)
         self.bn1 = keras.layers.BatchNormalization()
         self.act1 = keras.layers.LeakyReLU(negative_slope=0.2)
         self.pool1 = keras.layers.MaxPooling2D(2)
-
-        self.conv2 = keras.layers.Conv2D(
-            64, 3, padding="same", kernel_regularizer=self.regularizer
-        )
+        self.conv2 = keras.layers.Conv2D(64, 3, padding="same", kernel_regularizer=self.regularizer)
         self.bn2 = keras.layers.BatchNormalization()
         self.act2 = keras.layers.LeakyReLU(negative_slope=0.2)
         self.pool2 = keras.layers.MaxPooling2D(2)
-
         self.flatten = keras.layers.Flatten()
-
-        # Combined processing head
-        self.fc_combine = keras.layers.Dense(
-            512, kernel_regularizer=self.regularizer
-        )
+        self.fc_combine = keras.layers.Dense(512, kernel_regularizer=self.regularizer)
         self.bn_combine = keras.layers.BatchNormalization()
         self.act_combine = keras.layers.LeakyReLU(negative_slope=0.2)
-
-        self.fc_hidden = keras.layers.Dense(
-            256, kernel_regularizer=self.regularizer
-        )
+        self.fc_hidden = keras.layers.Dense(256, kernel_regularizer=self.regularizer)
         self.bn_hidden = keras.layers.BatchNormalization()
         self.act_hidden = keras.layers.LeakyReLU(negative_slope=0.2)
-
         self.dropout = keras.layers.Dropout(dropout_rate)
-        self.fc_output = keras.layers.Dense(
-            num_classes, activation="softmax", kernel_regularizer=self.regularizer
-        )
+        self.fc_output = keras.layers.Dense(num_classes, activation="softmax", kernel_regularizer=self.regularizer)
 
-    def build(self, input_shape: Any) -> None:
-        """
-        Build the model layers.
-
-        Note: For models with multiple inputs, Keras calls build with
-        the full model's input shape, not individual inputs.
-        """
-        super().build(input_shape)
-
-    def call(
-        self,
-        x: keras.KerasTensor,
-        e: keras.KerasTensor,
-        training: Optional[bool] = False,
-    ) -> keras.KerasTensor:
-        """
-        Forward pass through the reasoner network.
-
-        Args:
-            x: Input image tensor of shape (batch_size, 28, 28, 1).
-            e: Latent explanation tensor of shape (batch_size, explanation_dim).
-            training: Whether the model is in training mode.
-
-        Returns:
-            Softmax probabilities over digit classes.
-        """
-        # Extract features from the image
-        img_features = self.conv1(x)
-        img_features = self.bn1(img_features, training=training)
-        img_features = self.act1(img_features)
-        img_features = self.pool1(img_features)
-
-        img_features = self.conv2(img_features)
-        img_features = self.bn2(img_features, training=training)
-        img_features = self.act2(img_features)
-        img_features = self.pool2(img_features)
-
-        img_features = self.flatten(img_features)
-
-        # Combine image features with latent explanation
-        combined = keras.ops.concatenate([img_features, e], axis=-1)
-
-        # Process combined features
-        combined = self.fc_combine(combined)
-        combined = self.bn_combine(combined, training=training)
-        combined = self.act_combine(combined)
-        combined = self.dropout(combined, training=training)
-
-        combined = self.fc_hidden(combined)
-        combined = self.bn_hidden(combined, training=training)
-        combined = self.act_hidden(combined)
-        combined = self.dropout(combined, training=training)
-
-        y_probs = self.fc_output(combined)
-        return y_probs
+    def call(self, x: keras.KerasTensor, e: keras.KerasTensor, training: Optional[bool] = False) -> keras.KerasTensor:
+        img_features = self.pool1(self.act1(self.bn1(self.conv1(x), training=training)))
+        img_features = self.pool2(self.act2(self.bn2(self.conv2(img_features), training=training)))
+        combined = keras.ops.concatenate([self.flatten(img_features), e], axis=-1)
+        combined = self.dropout(self.act_combine(self.bn_combine(self.fc_combine(combined), training=training)),
+                                training=training)
+        combined = self.dropout(self.act_hidden(self.bn_hidden(self.fc_hidden(combined), training=training)),
+                                training=training)
+        return self.fc_output(combined)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
         config = super().get_config()
-        config.update({
-            "num_classes": self.num_classes,
-            "explanation_dim": self.explanation_dim,
-            "dropout_rate": self.dropout_rate,
-            "l2_regularization": (
-                self.regularizer.l2 if self.regularizer else 0.0
-            ),
-        })
+        config.update({"num_classes": self.num_classes, "explanation_dim": self.explanation_dim,
+                       "dropout_rate": self.dropout_rate,
+                       "l2_regularization": self.regularizer.l2 if self.regularizer else 0.0})
         return config
 
 
 @keras.saving.register_keras_serializable()
 class MNISTProducer(keras.Model):
-    """
-    Producer network for MNIST: P(X|Y,E).
-
-    Generates/reconstructs digit images from label and style information,
-    using an improved upsampling architecture to prevent checkerboard artifacts.
-
-    Args:
-        num_classes: Number of digit classes (10 for MNIST).
-        explanation_dim: Dimension of the latent explanation vector.
-        dropout_rate: Dropout rate for regularization.
-        l2_regularization: L2 regularization strength for weights.
-        **kwargs: Additional arguments for Model base class.
-
-    Input shape:
-        - y: 2D tensor with shape `(batch_size, num_classes)`.
-        - e: 2D tensor with shape `(batch_size, explanation_dim)`.
-
-    Output shape:
-        4D tensor with shape: `(batch_size, 28, 28, 1)`.
-        Generated digit images with values in [0, 1].
-
-    Example:
-        >>> producer = MNISTProducer(num_classes=10, explanation_dim=128)
-        >>> y = keras.ops.one_hot(keras.ops.array([3, 7, 1]), 10)
-        >>> e = keras.ops.random.normal(shape=(3, 128))
-        >>> x_generated = producer(y, e, training=True)
-        >>> assert x_generated.shape == (3, 28, 28, 1)
-    """
-
-    def __init__(
-        self,
-        num_classes: int = 10,
-        explanation_dim: int = 128,
-        dropout_rate: float = 0.2,
-        l2_regularization: float = 1e-4,
-        **kwargs: Any
-    ) -> None:
-        """Initialize the Producer network."""
+    def __init__(self, num_classes: int = 10, explanation_dim: int = 128, dropout_rate: float = 0.2,
+                 l2_regularization: float = 1e-4, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-
-        self.num_classes = num_classes
-        self.explanation_dim = explanation_dim
-        self.dropout_rate = dropout_rate
-        self.regularizer = (
-            keras.regularizers.L2(l2_regularization)
-            if l2_regularization > 0
-            else None
-        )
-
-        # Initial projection layers
+        self.num_classes, self.explanation_dim, self.dropout_rate = num_classes, explanation_dim, dropout_rate
+        self.regularizer = keras.regularizers.L2(l2_regularization) if l2_regularization > 0 else None
         self.fc1 = keras.layers.Dense(512, kernel_regularizer=self.regularizer)
         self.bn_fc1 = keras.layers.BatchNormalization()
         self.act_fc1 = keras.layers.LeakyReLU(negative_slope=0.2)
-
-        self.fc2 = keras.layers.Dense(
-            7 * 7 * 128, kernel_regularizer=self.regularizer
-        )
+        self.fc2 = keras.layers.Dense(7 * 7 * 128, kernel_regularizer=self.regularizer)
         self.bn_fc2 = keras.layers.BatchNormalization()
         self.act_fc2 = keras.layers.LeakyReLU(negative_slope=0.2)
-
         self.reshape = keras.layers.Reshape((7, 7, 128))
         self.dropout = keras.layers.Dropout(dropout_rate)
-
-        # Upsampling blocks
         self.up1 = keras.layers.UpSampling2D(size=(2, 2))
-        self.conv1 = keras.layers.Conv2D(
-            64, 3, padding="same", kernel_regularizer=self.regularizer
-        )
+        self.conv1 = keras.layers.Conv2D(64, 3, padding="same", kernel_regularizer=self.regularizer)
         self.bn_up1 = keras.layers.BatchNormalization()
         self.act_up1 = keras.layers.LeakyReLU(negative_slope=0.2)
-
         self.up2 = keras.layers.UpSampling2D(size=(2, 2))
-        self.conv2 = keras.layers.Conv2D(
-            32, 3, padding="same", kernel_regularizer=self.regularizer
-        )
+        self.conv2 = keras.layers.Conv2D(32, 3, padding="same", kernel_regularizer=self.regularizer)
         self.bn_up2 = keras.layers.BatchNormalization()
         self.act_up2 = keras.layers.LeakyReLU(negative_slope=0.2)
-
-        # Refinement block
-        self.conv3 = keras.layers.Conv2D(
-            16, 3, padding="same", kernel_regularizer=self.regularizer
-        )
+        self.conv3 = keras.layers.Conv2D(16, 3, padding="same", kernel_regularizer=self.regularizer)
         self.bn_up3 = keras.layers.BatchNormalization()
         self.act_up3 = keras.layers.LeakyReLU(negative_slope=0.2)
+        self.conv_out = keras.layers.Conv2D(1, 3, padding="same", activation="sigmoid",
+                                            kernel_regularizer=self.regularizer)
 
-        # Output layer
-        self.conv_out = keras.layers.Conv2D(
-            1, 3, padding="same", activation="sigmoid",
-            kernel_regularizer=self.regularizer
-        )
-
-    def build(self, input_shape: Any) -> None:
-        """
-        Build the model layers.
-
-        Note: For models with multiple inputs, Keras calls build with
-        the full model's input shape, not individual inputs.
-        """
-        super().build(input_shape)
-
-    def call(
-        self,
-        y: keras.KerasTensor,
-        e: keras.KerasTensor,
-        training: Optional[bool] = False,
-    ) -> keras.KerasTensor:
-        """
-        Forward pass through the producer network.
-
-        Args:
-            y: One-hot encoded label tensor of shape (batch_size, num_classes).
-            e: Latent explanation tensor of shape (batch_size, explanation_dim).
-            training: Whether the model is in training mode.
-
-        Returns:
-            Generated image tensor of shape (batch_size, 28, 28, 1).
-        """
+    def call(self, y: keras.KerasTensor, e: keras.KerasTensor, training: Optional[bool] = False) -> keras.KerasTensor:
         combined = keras.ops.concatenate([y, e], axis=-1)
-
-        # Project and reshape
-        x = self.fc1(combined)
-        x = self.bn_fc1(x, training=training)
-        x = self.act_fc1(x)
-        x = self.dropout(x, training=training)
-
-        x = self.fc2(x)
-        x = self.bn_fc2(x, training=training)
-        x = self.act_fc2(x)
-        x = self.reshape(x)
-
-        # Upsample to generate image
-        x = self.up1(x)
-        x = self.conv1(x)
-        x = self.bn_up1(x, training=training)
-        x = self.act_up1(x)
-
-        x = self.up2(x)
-        x = self.conv2(x)
-        x = self.bn_up2(x, training=training)
-        x = self.act_up2(x)
-
-        x = self.conv3(x)
-        x = self.bn_up3(x, training=training)
-        x = self.act_up3(x)
-
-        x_generated = self.conv_out(x)
-        return x_generated
+        x = self.dropout(self.act_fc1(self.bn_fc1(self.fc1(combined), training=training)), training=training)
+        x = self.reshape(self.act_fc2(self.bn_fc2(self.fc2(x), training=training)))
+        x = self.act_up1(self.bn_up1(self.conv1(self.up1(x)), training=training))
+        x = self.act_up2(self.bn_up2(self.conv2(self.up2(x)), training=training))
+        x = self.act_up3(self.bn_up3(self.conv3(x), training=training))
+        return self.conv_out(x)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
         config = super().get_config()
-        config.update({
-            "num_classes": self.num_classes,
-            "explanation_dim": self.explanation_dim,
-            "dropout_rate": self.dropout_rate,
-            "l2_regularization": (
-                self.regularizer.l2 if self.regularizer else 0.0
-            ),
-        })
+        config.update({"num_classes": self.num_classes, "explanation_dim": self.explanation_dim,
+                       "dropout_rate": self.dropout_rate,
+                       "l2_regularization": self.regularizer.l2 if self.regularizer else 0.0})
         return config
 
 
 # =============================================================================
-# Training Functions
+# Helper Functions for Data and Model Setup
 # =============================================================================
 
 
-def create_mnist_ccnet(
-    explanation_dim: int = 128,
-    learning_rate: float = 1e-3,
-    dropout_rate: float = 0.2,
-    l2_regularization: float = 1e-4,
-) -> CCNetOrchestrator:
-    """
-    Create a complete CCNet for MNIST.
+def create_mnist_ccnet(explanation_dim: int = 128, learning_rate: float = 1e-3, dropout_rate: float = 0.2,
+                       l2_regularization: float = 1e-4) -> CCNetOrchestrator:
+    explainer = MNISTExplainer(explanation_dim, dropout_rate, l2_regularization)
+    reasoner = MNISTReasoner(10, explanation_dim, dropout_rate, l2_regularization)
+    producer = MNISTProducer(10, explanation_dim, dropout_rate, l2_regularization)
 
-    Args:
-        explanation_dim: Dimension of latent explanation vectors.
-        learning_rate: Learning rate for all models.
-        dropout_rate: Dropout rate for regularization.
-        l2_regularization: L2 regularization strength.
-
-    Returns:
-        Configured CCNetOrchestrator ready for training.
-    """
-    # Create models
-    explainer = MNISTExplainer(
-        explanation_dim=explanation_dim,
-        dropout_rate=dropout_rate,
-        l2_regularization=l2_regularization,
-    )
-
-    reasoner = MNISTReasoner(
-        num_classes=10,
-        explanation_dim=explanation_dim,
-        dropout_rate=dropout_rate,
-        l2_regularization=l2_regularization,
-    )
-
-    producer = MNISTProducer(
-        num_classes=10,
-        explanation_dim=explanation_dim,
-        dropout_rate=dropout_rate,
-        l2_regularization=l2_regularization,
-    )
-
-    # Build models with dummy input
     dummy_image = keras.ops.zeros((1, 28, 28, 1))
     dummy_label = keras.ops.zeros((1, 10))
     dummy_latent = keras.ops.zeros((1, explanation_dim))
-
     _ = explainer(dummy_image)
     _ = reasoner(dummy_image, dummy_latent)
     _ = producer(dummy_label, dummy_latent)
 
-    # Wrap and configure
-    explainer_wrapped = wrap_keras_model(explainer)
-    reasoner_wrapped = wrap_keras_model(reasoner)
-    producer_wrapped = wrap_keras_model(producer)
-
     config = CCNetConfig(
-        explanation_dim=explanation_dim,
-        loss_type="l2",
-        learning_rates={
-            "explainer": learning_rate,
-            "reasoner": learning_rate,
-            "producer": learning_rate,
-        },
-        gradient_clip_norm=1.0,
-        use_mixed_precision=False,
-        sequential_data=False,
-        verification_weight=1.0,
+        explanation_dim=explanation_dim, loss_type="l2",
+        learning_rates={"explainer": learning_rate, "reasoner": learning_rate, "producer": learning_rate},
+        gradient_clip_norm=1.0
     )
-
     return CCNetOrchestrator(
-        explainer=explainer_wrapped,
-        reasoner=reasoner_wrapped,
-        producer=producer_wrapped,
-        config=config,
+        explainer=wrap_keras_model(explainer),
+        reasoner=wrap_keras_model(reasoner),
+        producer=wrap_keras_model(producer),
+        config=config
     )
 
 
 def prepare_mnist_data() -> Tuple[tf.data.Dataset, tf.data.Dataset]:
-    """
-    Prepare MNIST dataset for CCNet training.
-
-    Returns:
-        Tuple of (train_dataset, val_dataset) ready for training.
-    """
     (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
+    x_train, x_test = (d.astype("float32") / 255.0 for d in (x_train, x_test))
+    x_train, x_test = (np.expand_dims(d, axis=-1) for d in (x_train, x_test))
+    y_train, y_test = (keras.utils.to_categorical(d, 10) for d in (y_train, y_test))
 
-    # Normalize to [0, 1] range
-    x_train = x_train.astype("float32") / 255.0
-    x_test = x_test.astype("float32") / 255.0
-
-    # Add channel dimension
-    x_train = np.expand_dims(x_train, axis=-1)
-    x_test = np.expand_dims(x_test, axis=-1)
-
-    # One-hot encode labels
-    y_train = keras.utils.to_categorical(y_train, 10)
-    y_test = keras.utils.to_categorical(y_test, 10)
-
-    # Create TF datasets
-    train_dataset = tf.data.Dataset.from_tensor_slices((x_train, y_train))
-    train_dataset = (
-        train_dataset.batch(32)
-        .shuffle(1000)
-        .prefetch(tf.data.AUTOTUNE)
-    )
-
-    val_dataset = tf.data.Dataset.from_tensor_slices((x_test, y_test))
-    val_dataset = val_dataset.batch(32).prefetch(tf.data.AUTOTUNE)
-
-    return train_dataset, val_dataset
+    train_ds = tf.data.Dataset.from_tensor_slices((x_train, y_train)).batch(128).shuffle(1000).prefetch(
+        tf.data.AUTOTUNE)
+    val_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test)).batch(128).prefetch(tf.data.AUTOTUNE)
+    return train_ds, val_ds
 
 
-def train_mnist_ccnet_with_visualizations(epochs: int = 20) -> Tuple[
-    CCNetOrchestrator, CCNetTrainer, CCNetVisualizer
-]:
-    """
-    Main training script with comprehensive visualizations.
+# =============================================================================
+# Main Training & Visualization Workflow
+# =============================================================================
 
-    Args:
-        epochs: Number of training epochs.
 
-    Returns:
-        Tuple of (orchestrator, trainer, visualizer) after training.
-    """
-    # Initialize visualizer
-    visualizer = CCNetVisualizer(results_dir="results")
+class CCNetExperiment:
+    """Manages the full CCNet experiment workflow."""
 
-    logger.info("Creating CCNet for MNIST...")
-    orchestrator = create_mnist_ccnet(
-        explanation_dim=128,
-        learning_rate=1e-3,
-        dropout_rate=0.2,
-        l2_regularization=1e-4,
-    )
+    def __init__(self, experiment_name: str, results_dir: str = "results"):
+        self.viz_manager = VisualizationManager(experiment_name=experiment_name, output_dir=results_dir)
+        self._register_plugins()
+        self.x_test, self.y_test = self._load_test_data()
 
-    logger.info("Preparing data...")
-    train_dataset, val_dataset = prepare_mnist_data()
+    def _register_plugins(self):
+        # FIX: Instantiate plugins and register the instances, not the classes.
+        # This works around the bug in the core framework's lazy instantiation.
+        plugin_classes = [
+            CCNetTrainingHistoryViz,
+            ReconstructionQualityViz,
+            CounterfactualMatrixViz,
+            # StyleTransferViz, # Assuming this would be defined as well
+            LatentSpaceAnalysisViz,
+        ]
+        for plugin_class in plugin_classes:
+            instance = plugin_class(self.viz_manager.config, self.viz_manager.context)
+            self.viz_manager.register_plugin(instance)
 
-    # Prepare test data for visualizations
-    (x_test, y_test) = keras.datasets.mnist.load_data()[1]
-    x_test = x_test.astype("float32") / 255.0
-    x_test = np.expand_dims(x_test, axis=-1)
+    def _load_test_data(self) -> tuple[np.ndarray, np.ndarray]:
+        (_, _), (x_test, y_test) = keras.datasets.mnist.load_data()
+        x_test = (x_test.astype("float32") / 255.0)[..., np.newaxis]
+        return x_test, y_test
 
-    logger.info("Setting up trainer...")
-    trainer = CCNetTrainer(orchestrator)
+    def run(self, epochs: int = 20) -> Tuple[CCNetOrchestrator, CCNetTrainer]:
+        logger.info("Creating CCNet for MNIST...");
+        orchestrator = create_mnist_ccnet()
+        logger.info("Preparing data...");
+        train_dataset, val_dataset = prepare_mnist_data()
+        logger.info("Setting up trainer...");
+        trainer = CCNetTrainer(orchestrator)
 
-    # Early stopping callback
-    early_stopping = EarlyStoppingCallback(patience=10, threshold=1e-4)
+        logger.info("Starting training...")
+        try:
+            trainer.train(
+                train_dataset, epochs, validation_dataset=val_dataset,
+                callbacks=[EarlyStoppingCallback(patience=5, threshold=1e-4)]
+            )
+        except StopIteration:
+            logger.info("Training stopped early due to convergence.")
 
-    # Visualization callback
-    def visualization_callback(
-        epoch: int, metrics: Dict[str, float], orch: CCNetOrchestrator
-    ) -> None:
-        """Callback for periodic visualizations during training."""
-        if epoch % 5 == 0:
-            logger.info(f"--- Epoch {epoch} Visualizations ---")
+        self.generate_final_report(orchestrator, trainer)
+        logger.info(
+            f"All visualizations saved to: {self.viz_manager.context.output_dir / self.viz_manager.context.experiment_name}")
+        return orchestrator, trainer
 
-            # Save intermediate visualizations
-            if epoch > 0:
-                visualizer.plot_training_history(trainer.history)
-                visualizer.visualize_reconstruction_quality(
-                    orch, x_test[:100], y_test[:100], num_samples=5
-                )
+    def generate_final_report(self, orchestrator: CCNetOrchestrator, trainer: CCNetTrainer):
+        logger.info("=" * 60 + "\nGenerating final visualizations...\n" + "=" * 60)
 
-                if epoch % 10 == 0:
-                    visualizer.visualize_counterfactual_generation(
-                        orch, x_test[:1000], y_test[:1000]
-                    )
-                    visualizer.visualize_style_transfer(
-                        orch, x_test[:1000], y_test[:1000]
-                    )
+        report_data = {'orchestrator': orchestrator, 'x_data': self.x_test, 'y_data': self.y_test}
 
-    logger.info("Starting training...")
-    try:
-        trainer.train(
-            train_dataset=train_dataset,
-            epochs=epochs,
-            validation_dataset=val_dataset,
-            callbacks=[early_stopping, visualization_callback],
-        )
-    except StopIteration:
-        logger.info("Training stopped early due to convergence.")
+        self.viz_manager.visualize(trainer.history, "ccnet_training_history", show=False)
+        self.viz_manager.visualize(report_data, "ccnet_reconstruction_quality", show=False)
+        self.viz_manager.visualize(report_data, "ccnet_counterfactual_matrix", show=False)
+        self.viz_manager.visualize(report_data, "ccnet_latent_space", show=False)
 
-    logger.info("=" * 60)
-    logger.info("Training complete! Generating final visualizations...")
-    logger.info("=" * 60)
+        dashboard_data = {
+            "ccnet_training_history": trainer.history,
+            "ccnet_reconstruction_quality": report_data,
+            "ccnet_latent_space": report_data,
+        }
+        self.viz_manager.create_dashboard(dashboard_data, show=False)
 
-    # Generate comprehensive final visualizations
-    visualizer.plot_training_history(trainer.history)
-    visualizer.plot_convergence_analysis(trainer.history)
-    visualizer.visualize_reconstruction_quality(
-        orchestrator, x_test[:500], y_test[:500], num_samples=10
-    )
-    visualizer.visualize_counterfactual_generation(
-        orchestrator, x_test[:1000], y_test[:1000]
-    )
-    visualizer.visualize_style_transfer(
-        orchestrator, x_test[:1000], y_test[:1000]
-    )
-    visualizer.visualize_latent_space(
-        orchestrator, x_test[:2000], y_test[:2000], num_samples=1000
-    )
-    visualizer.create_summary_report(
-        orchestrator, trainer, x_test[:1000], y_test[:1000]
-    )
-
-    # Save models
-    logger.info("Saving models...")
-    save_path = visualizer.experiment_dir / "models"
-    save_path.mkdir(exist_ok=True)
-    orchestrator.save_models(str(save_path / "mnist_ccnet"))
-    logger.info(f"Models saved to {save_path}")
-
-    logger.info(f"All visualizations saved to: {visualizer.experiment_dir}")
-    logger.info("CCNet training and visualization complete!")
-
-    return orchestrator, trainer, visualizer
+        logger.info("Saving models...")
+        # FIX: Simplified and corrected save path logic
+        models_dir = self.viz_manager.context.output_dir / self.viz_manager.context.experiment_name / self.viz_manager.context.timestamp / "models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        orchestrator.save_models(str(models_dir / "mnist_ccnet"))
+        logger.info(f"Models saved to {models_dir}")
 
 
 # =============================================================================
@@ -1795,12 +551,5 @@ def train_mnist_ccnet_with_visualizations(epochs: int = 20) -> Tuple[
 
 
 if __name__ == "__main__":
-    # Run the complete training and visualization pipeline
-    orchestrator, trainer, visualizer = train_mnist_ccnet_with_visualizations(
-        epochs=20
-    )
-
-    logger.info("=" * 60)
-    logger.info("EXPERIMENT COMPLETE")
-    logger.info(f"Results directory: {visualizer.experiment_dir}")
-    logger.info("=" * 60)
+    experiment = CCNetExperiment(experiment_name="ccnet_mnist_refactored")
+    orchestrator, trainer = experiment.run(epochs=20)
