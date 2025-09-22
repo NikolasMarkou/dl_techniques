@@ -50,7 +50,7 @@ class CCNetTrainingHistoryViz(CompositeVisualization):
 
     @property
     def description(self) -> str:
-        return "Plots all CCNet-specific losses and derived errors."
+        return "Plots all CCNet-specific losses, errors, and gradient norms."
 
     def can_handle(self, data: Any) -> bool:
         return isinstance(data, dict) and all(
@@ -61,7 +61,7 @@ class CCNetTrainingHistoryViz(CompositeVisualization):
         super().__init__(*args, **kwargs)
         self.add_subplot("Fundamental Losses", self._plot_fundamental_losses)
         self.add_subplot("Model Errors", self._plot_model_errors)
-        self.add_subplot("Loss Convergence", self._plot_loss_convergence)
+        self.add_subplot("Gradient Norms", self._plot_gradient_norms)
         self.add_subplot("System Convergence", self._plot_system_convergence)
 
     def _plot_fundamental_losses(self, ax: plt.Axes, data: Dict[str, Any], **kwargs):
@@ -86,9 +86,17 @@ class CCNetTrainingHistoryViz(CompositeVisualization):
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-    def _plot_loss_convergence(self, ax: plt.Axes, data: Dict[str, Any], **kwargs):
-        self._plot_fundamental_losses(ax, data, **kwargs)
-        ax.set_title("Loss Convergence Over Time")
+    def _plot_gradient_norms(self, ax: plt.Axes, data: Dict[str, Any], **kwargs):
+        grad_keys = ["explainer_grad_norm", "reasoner_grad_norm", "producer_grad_norm"]
+        for key in grad_keys:
+            if key in data and data[key]:
+                ax.plot(data[key], label=key.replace("_grad_norm", "").title(), linewidth=2)
+        ax.set_title("Gradient Norms (L2)")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Gradient L2 Norm")
+        ax.set_yscale('log')  # Gradients can vary widely, log scale is better
+        ax.legend()
+        ax.grid(True, alpha=0.3)
 
     def _plot_system_convergence(self, ax: plt.Axes, data: Dict[str, Any], **kwargs):
         required_keys = ["generation_loss", "reconstruction_loss", "inference_loss"]
@@ -125,31 +133,25 @@ class ReconstructionQualityViz(VisualizationPlugin):
     def create_visualization(self, data: Dict[str, Any], ax: Optional[plt.Axes] = None, **kwargs) -> plt.Figure:
         orchestrator: CCNetOrchestrator = data["orchestrator"]
         x_data, y_data = data["x_data"], data["y_data"]
-        num_samples = data.get("num_samples", 5)  # Reduced for dashboard view
+        num_samples = data.get("num_samples", 5)
 
-        # --- START OF FIX ---
         if ax is not None:
-            # Drawing inside a dashboard
             fig = ax.get_figure()
             ax.set_title("Reconstruction Quality Analysis", fontsize=14, fontweight="bold")
-            ax.axis('off')  # Hide container axis
+            ax.axis('off')
 
             from matplotlib.gridspec import GridSpecFromSubplotSpec
             gs_sub = GridSpecFromSubplotSpec(num_samples, 5, subplot_spec=ax.get_subplotspec(), wspace=0.3, hspace=0.4)
             axes = np.array([fig.add_subplot(gs_sub[i, j]) for i in range(num_samples) for j in range(5)]).reshape(
                 num_samples, 5)
-
         else:
-            # Standalone plot
             fig, axes = plt.subplots(
                 num_samples, 5, figsize=(15, 3 * num_samples),
                 gridspec_kw={'wspace': 0.3, 'hspace': 0.4}
             )
             fig.suptitle("Reconstruction Quality Analysis", fontsize=16, fontweight="bold")
-        # --- END OF FIX ---
 
         for i in range(num_samples):
-            # The rest of the function remains the same...
             x_input = x_data[i: i + 1]
             y_truth = keras.utils.to_categorical([y_data[i]], 10)
             tensors = orchestrator.forward_pass(x_input, y_truth, training=False)
@@ -278,9 +280,9 @@ class LatentSpaceAnalysisViz(CompositeVisualization):
     def _plot_tsne_class(self, ax: plt.Axes, data: Dict[str, Any], **kwargs):
         self._prepare_data(data)
         scatter = ax.scatter(self.latent_2d[:, 0], self.latent_2d[:, 1], c=self.labels, cmap="tab10", s=20, alpha=0.7)
-        ax.set_xlabel("t-SNE Component 1");
+        ax.set_xlabel("t-SNE Component 1")
         ax.set_ylabel("t-SNE Component 2")
-        ax.get_figure().colorbar(scatter, ax=ax, label="Digit");
+        ax.get_figure().colorbar(scatter, ax=ax, label="Digit")
         ax.grid(True, alpha=0.3)
 
     def _plot_tsne_density(self, ax: plt.Axes, data: Dict[str, Any], **kwargs):
@@ -288,16 +290,16 @@ class LatentSpaceAnalysisViz(CompositeVisualization):
         xy = self.latent_2d.T
         z = gaussian_kde(xy)(xy)
         scatter = ax.scatter(self.latent_2d[:, 0], self.latent_2d[:, 1], c=z, cmap="viridis", s=20, alpha=0.7)
-        ax.set_xlabel("t-SNE Component 1");
+        ax.set_xlabel("t-SNE Component 1")
         ax.set_ylabel("t-SNE Component 2")
-        ax.get_figure().colorbar(scatter, ax=ax, label="Density");
+        ax.get_figure().colorbar(scatter, ax=ax, label="Density")
         ax.grid(True, alpha=0.3)
 
     def _plot_mean_activation(self, ax: plt.Axes, data: Dict[str, Any], **kwargs):
         self._prepare_data(data)
         mean_activations = np.mean(np.abs(self.latent_vectors), axis=0)
         ax.bar(range(len(mean_activations)), mean_activations, color="steelblue")
-        ax.set_xlabel("Latent Dimension");
+        ax.set_xlabel("Latent Dimension")
         ax.set_ylabel("Mean |Activation|")
         ax.grid(True, alpha=0.3, axis='y')
 
@@ -305,7 +307,7 @@ class LatentSpaceAnalysisViz(CompositeVisualization):
         self._prepare_data(data)
         latent_norms = np.linalg.norm(self.latent_vectors, axis=1)
         sns.violinplot(x=self.labels, y=latent_norms, ax=ax, palette="husl", inner="quartile")
-        ax.set_xlabel("Digit Class");
+        ax.set_xlabel("Digit Class")
         ax.set_ylabel("||E|| (L2 Norm)")
         ax.grid(True, alpha=0.3, axis='y')
 
@@ -315,39 +317,59 @@ class LatentSpaceAnalysisViz(CompositeVisualization):
 # ---------------------------------------------------------------------
 
 
+# --- FIX START: Update MNISTExplainer to output (mu, log_var) ---
 @keras.saving.register_keras_serializable()
 class MNISTExplainer(keras.Model):
-    def __init__(self, explanation_dim: int = 128, dropout_rate: float = 0.2, l2_regularization: float = 1e-4,
-                 **kwargs: Any) -> None:
+    """
+    Updated Explainer model to support VAE-style latent space regularization.
+    Outputs a tuple of (mean, log_variance) for the latent distribution.
+    """
+    def __init__(self, explanation_dim: int = 128, l2_regularization: float = 1e-4, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.explanation_dim, self.dropout_rate = explanation_dim, dropout_rate
+        self.explanation_dim = explanation_dim
         self.regularizer = keras.regularizers.L2(l2_regularization) if l2_regularization > 0 else None
+
+        # Convolutional feature extractor
         self.conv1 = keras.layers.Conv2D(32, 5, padding="same", kernel_regularizer=self.regularizer)
         self.bn1 = keras.layers.BatchNormalization()
         self.act1 = keras.layers.LeakyReLU(negative_slope=0.2)
         self.pool1 = keras.layers.MaxPooling2D(2)
+
         self.conv2 = keras.layers.Conv2D(64, 3, padding="same", kernel_regularizer=self.regularizer)
         self.bn2 = keras.layers.BatchNormalization()
         self.act2 = keras.layers.LeakyReLU(negative_slope=0.2)
         self.pool2 = keras.layers.MaxPooling2D(2)
+
         self.conv3 = keras.layers.Conv2D(128, 3, padding="same", kernel_regularizer=self.regularizer)
         self.bn3 = keras.layers.BatchNormalization()
         self.act3 = keras.layers.LeakyReLU(negative_slope=0.2)
         self.pool3 = keras.layers.GlobalMaxPool2D()
-        self.flatten = keras.layers.Flatten()
-        self.fc_latent = keras.layers.Dense(explanation_dim, kernel_regularizer=self.regularizer)
 
-    def call(self, x: keras.KerasTensor, training: Optional[bool] = False) -> keras.KerasTensor:
+        self.flatten = keras.layers.Flatten()
+
+        # Output heads for mean (mu) and log variance (log_var)
+        self.fc_mu = keras.layers.Dense(explanation_dim, name="mu", kernel_regularizer=self.regularizer)
+        self.fc_log_var = keras.layers.Dense(explanation_dim, name="log_var", kernel_regularizer=self.regularizer)
+
+    def call(self, x: keras.KerasTensor, training: Optional[bool] = False) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         x = self.pool1(self.act1(self.bn1(self.conv1(x), training=training)))
         x = self.pool2(self.act2(self.bn2(self.conv2(x), training=training)))
         x = self.pool3(self.act3(self.bn3(self.conv3(x), training=training)))
-        return tf.math.l2_normalize(self.fc_latent(self.flatten(x)), axis=-1)
+        features = self.flatten(x)
+
+        # Compute mu and log_var from the extracted features
+        mu = self.fc_mu(features)
+        log_var = self.fc_log_var(features)
+        return mu, log_var
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
-        config.update({"explanation_dim": self.explanation_dim, "dropout_rate": self.dropout_rate,
-                       "l2_regularization": self.regularizer.l2 if self.regularizer else 0.0})
+        config.update({
+            "explanation_dim": self.explanation_dim,
+            "l2_regularization": self.regularizer.l2 if self.regularizer else 0.0
+        })
         return config
+# --- FIX END ---
 
 
 @keras.saving.register_keras_serializable()
@@ -444,23 +466,27 @@ class MNISTProducer(keras.Model):
 # ---------------------------------------------------------------------
 
 
+# --- FIX START: Update dummy calls to match new Explainer output ---
 def create_mnist_ccnet(explanation_dim: int = 128, learning_rate: float = 1e-3, dropout_rate: float = 0.2,
                        l2_regularization: float = 1e-4) -> CCNetOrchestrator:
-    explainer = MNISTExplainer(explanation_dim, dropout_rate, l2_regularization)
+    explainer = MNISTExplainer(explanation_dim, l2_regularization)
     reasoner = MNISTReasoner(10, explanation_dim, dropout_rate, l2_regularization)
     producer = MNISTProducer(10, explanation_dim, dropout_rate, l2_regularization)
 
+    # Build models with dummy data to initialize weights
     dummy_image = keras.ops.zeros((1, 28, 28, 1))
     dummy_label = keras.ops.zeros((1, 10))
-    dummy_latent = keras.ops.zeros((1, explanation_dim))
-    _ = explainer(dummy_image)
+    # The dummy latent vector is now the 'mu' part of the explainer's output
+    mu, log_var = explainer(dummy_image)
+    dummy_latent = mu
     _ = reasoner(dummy_image, dummy_latent)
     _ = producer(dummy_label, dummy_latent)
 
     config = CCNetConfig(
         explanation_dim=explanation_dim, loss_type="l2",
         learning_rates={"explainer": learning_rate, "reasoner": learning_rate, "producer": learning_rate},
-        gradient_clip_norm=1.0
+        gradient_clip_norm=1.0,
+        kl_weight=0.001  # Add a small weight for the KL regularization
     )
     return CCNetOrchestrator(
         explainer=wrap_keras_model(explainer),
@@ -468,6 +494,7 @@ def create_mnist_ccnet(explanation_dim: int = 128, learning_rate: float = 1e-3, 
         producer=wrap_keras_model(producer),
         config=config
     )
+# --- FIX END ---
 
 
 def prepare_mnist_data() -> Tuple[tf.data.Dataset, tf.data.Dataset]:
@@ -496,13 +523,10 @@ class CCNetExperiment:
         self.x_test, self.y_test = self._load_test_data()
 
     def _register_plugins(self):
-        # FIX: Instantiate plugins and register the instances, not the classes.
-        # This works around the bug in the core framework's lazy instantiation.
         plugin_classes = [
             CCNetTrainingHistoryViz,
             ReconstructionQualityViz,
             CounterfactualMatrixViz,
-            # StyleTransferViz, # Assuming this would be defined as well
             LatentSpaceAnalysisViz,
         ]
         for plugin_class in plugin_classes:
@@ -515,11 +539,11 @@ class CCNetExperiment:
         return x_test, y_test
 
     def run(self, epochs: int = 20) -> Tuple[CCNetOrchestrator, CCNetTrainer]:
-        logger.info("Creating CCNet for MNIST...");
+        logger.info("Creating CCNet for MNIST...")
         orchestrator = create_mnist_ccnet()
-        logger.info("Preparing data...");
+        logger.info("Preparing data...")
         train_dataset, val_dataset = prepare_mnist_data()
-        logger.info("Setting up trainer...");
+        logger.info("Setting up trainer...")
         trainer = CCNetTrainer(orchestrator)
 
         logger.info("Starting training...")
@@ -544,52 +568,38 @@ class CCNetExperiment:
         logger.info("Generating final visualizations...")
         logger.info("=" * 60)
 
-        # --- START OF FIX ---
-
-        # 1. Define data for standalone, high-detail visualizations.
-        # These will use the default, higher number of samples.
         report_data = {
             'orchestrator': orchestrator,
             'x_data': self.x_test,
             'y_data': self.y_test
         }
-
-        # 2. Define data specifically for the more compact dashboard view.
-        # By passing a smaller `num_samples`, we ensure the plots are readable
-        # when rendered inside a smaller subplot on the dashboard.
         dashboard_recon_data = {
             'orchestrator': orchestrator,
             'x_data': self.x_test,
             'y_data': self.y_test,
-            'num_samples': 3  # Show only 3 reconstruction examples on the dashboard
+            'num_samples': 3
         }
         dashboard_latent_data = {
             'orchestrator': orchestrator,
             'x_data': self.x_test,
             'y_data': self.y_test,
-            'num_samples': 500  # Use fewer samples for faster t-SNE on the dashboard
+            'num_samples': 500
         }
 
-        # 3. Generate and save the individual, full-sized plots.
         logger.info("Generating standalone visualizations...")
         self.viz_manager.visualize(trainer.history, "ccnet_training_history", show=False)
         self.viz_manager.visualize(report_data, "ccnet_reconstruction_quality", show=False)
         self.viz_manager.visualize(report_data, "ccnet_counterfactual_matrix", show=False)
         self.viz_manager.visualize(report_data, "ccnet_latent_space", show=False)
 
-        # 4. Define the data for the multi-plot dashboard.
-        # Note how we use the specialized, smaller data dictionaries here.
         dashboard_data = {
             "ccnet_training_history": trainer.history,
             "ccnet_reconstruction_quality": dashboard_recon_data,
             "ccnet_latent_space": dashboard_latent_data,
         }
 
-        # 5. Generate and save the final dashboard.
         logger.info("Generating final dashboard...")
         self.viz_manager.create_dashboard(dashboard_data, show=False)
-
-        # --- END OF FIX ---
 
         logger.info("Saving models...")
         models_dir = self.viz_manager.context.get_save_path("models")
