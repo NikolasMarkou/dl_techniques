@@ -15,13 +15,15 @@ from .orchestrators import CCNetOrchestrator
 class CCNetTrainer:
     """
     High-level trainer for CCNet models with built-in callbacks, dynamic
-    weighting, and advanced monitoring of losses, errors, and gradient norms.
+    weighting, KL annealing, and advanced monitoring of losses, errors,
+    and gradient norms.
     """
 
     def __init__(
             self,
             orchestrator: CCNetOrchestrator,
-            metrics_callback: Optional[Callable] = None
+            metrics_callback: Optional[Callable] = None,
+            kl_annealing_epochs: Optional[int] = None
     ):
         """
         Initialize CCNet trainer.
@@ -29,9 +31,14 @@ class CCNetTrainer:
         Args:
             orchestrator: CCNet orchestrator instance.
             metrics_callback: Optional callback for metrics logging.
+            kl_annealing_epochs: Number of epochs to linearly anneal the KL
+                                 weight from 0 to its configured value.
         """
         self.orchestrator = orchestrator
         self.metrics_callback = metrics_callback
+        self.kl_annealing_epochs = kl_annealing_epochs
+        # Store initial KL weight for annealing schedule
+        self.initial_kl_weight = self.orchestrator.config.kl_weight
         # Initialize history to store all relevant metrics
         self.history = defaultdict(list)
         # Initialize moving averages for dynamic weighting and monitoring
@@ -57,6 +64,13 @@ class CCNetTrainer:
         for epoch in range(epochs):
             print(f"Epoch {epoch + 1}/{epochs}")
             print("-" * 30)
+
+            # Apply KL annealing if enabled
+            if self.kl_annealing_epochs is not None and self.kl_annealing_epochs > 0:
+                annealing_ratio = min(1.0, (epoch + 1) / self.kl_annealing_epochs)
+                new_kl_weight = self.initial_kl_weight * annealing_ratio
+                self.orchestrator.config.kl_weight = new_kl_weight
+                print(f"  KL Annealing: Current Weight = {new_kl_weight:.4f}")
 
             # Training loop
             train_losses = []
@@ -114,8 +128,8 @@ class CCNetTrainer:
         """Update exponential moving average of losses."""
         for key, value in current_losses.items():
             self.loss_moving_averages[key] = (
-                self.ema_alpha * value.numpy() +
-                (1 - self.ema_alpha) * self.loss_moving_averages[key]
+                    self.ema_alpha * value.numpy() +
+                    (1 - self.ema_alpha) * self.loss_moving_averages[key]
             )
 
     def _update_dynamic_weights(self):
@@ -146,7 +160,9 @@ class CCNetTrainer:
         gen_loss = losses['generation_loss'].numpy()
         rec_loss = losses['reconstruction_loss'].numpy()
         inf_loss = losses['inference_loss'].numpy()
-        print(f"  Batch {batch_idx:04d} -> Gen: {gen_loss:.4f}, Rec: {rec_loss:.4f}, Inf: {inf_loss:.4f}")
+        acc = losses.get('batch_accuracy', np.array(0.0)).numpy()
+        print(
+            f"  Batch {batch_idx:04d} -> Acc: {acc:.3f}, Gen: {gen_loss:.4f}, Rec: {rec_loss:.4f}, Inf: {inf_loss:.4f}")
 
     def _log_epoch_summary(self, stage: str, metrics: Dict[str, float]):
         """Log a summary of metrics for an epoch."""
@@ -156,8 +172,11 @@ class CCNetTrainer:
         expl_err = metrics.get('explainer_error', 0)
         reas_err = metrics.get('reasoner_error', 0)
         prod_err = metrics.get('producer_error', 0)
+        accuracy = metrics.get('batch_accuracy')
 
         print(f"\n{stage} Summary:")
+        if accuracy is not None:
+            print(f"  Accuracy: {accuracy:.4f}")
         print(f"  Losses -> Gen: {gen_loss:.4f}, Rec: {rec_loss:.4f}, Inf: {inf_loss:.4f}")
         print(f"  Errors -> Exp: {expl_err:.4f}, Rea: {reas_err:.4f}, Pro: {prod_err:.4f}")
 

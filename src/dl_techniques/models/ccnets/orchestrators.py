@@ -17,7 +17,8 @@ class CCNetOrchestrator:
             explainer: CCNetModule,
             reasoner: CCNetModule,
             producer: CCNetModule,
-            config: Optional[CCNetConfig] = None
+            config: Optional[CCNetConfig] = None,
+            reasoner_acc_threshold: float = 0.98
     ):
         """
         Initialize the CCNet orchestrator.
@@ -28,11 +29,14 @@ class CCNetOrchestrator:
             reasoner: Neural network module modeling P(Y|X,E).
             producer: Neural network module modeling P(X|Y,E).
             config: Configuration object for the framework.
+            reasoner_acc_threshold: Accuracy threshold below which the Reasoner
+                                    will be trained. Prevents premature convergence.
         """
         self.explainer = explainer
         self.reasoner = reasoner
         self.producer = producer
         self.config = config or CCNetConfig()
+        self.reasoner_acc_threshold = reasoner_acc_threshold
 
         # Initialize loss function
         self._init_loss_function()
@@ -180,7 +184,8 @@ class CCNetOrchestrator:
     ) -> Dict[str, tf.Tensor]:
         """
         Perform a single training step with causal credit assignment.
-        This implementation uses separate gradient tapes for efficiency.
+        This implementation uses separate gradient tapes and conditional
+        Reasoner training to prevent premature convergence.
 
         Args:
             x_input: Input observation batch.
@@ -198,15 +203,26 @@ class CCNetOrchestrator:
             losses = self.compute_losses(tensors)
             errors = self.compute_model_errors(losses, tensors)
 
-        # Gradient computation for each model
+        # Calculate batch accuracy for conditional training
+        y_true_labels = keras.ops.argmax(y_truth, axis=-1)
+        y_pred_labels = keras.ops.argmax(tensors['y_inferred'], axis=-1)
+        batch_accuracy = keras.ops.mean(
+            keras.ops.cast(keras.ops.equal(y_true_labels, y_pred_labels), dtype='float32')
+        )
+
+        # Gradient computation for Explainer and Producer
         explainer_vars = self.explainer.trainable_variables
         explainer_grads = explainer_tape.gradient(errors.explainer_error, explainer_vars)
 
-        reasoner_vars = self.reasoner.trainable_variables
-        reasoner_grads = reasoner_tape.gradient(errors.reasoner_error, reasoner_vars)
-
         producer_vars = self.producer.trainable_variables
         producer_grads = producer_tape.gradient(errors.producer_error, producer_vars)
+
+        # Conditional gradient computation for Reasoner
+        reasoner_vars = self.reasoner.trainable_variables
+        if batch_accuracy < self.reasoner_acc_threshold:
+            reasoner_grads = reasoner_tape.gradient(errors.reasoner_error, reasoner_vars)
+        else:
+            reasoner_grads = [tf.zeros_like(v) for v in reasoner_vars]
 
         # --- Monitoring: Compute gradient norms before clipping ---
         explainer_grad_norm = tf.linalg.global_norm(explainer_grads)
@@ -230,8 +246,9 @@ class CCNetOrchestrator:
 
         # Apply gradients
         self.optimizers['explainer'].apply_gradients(zip(explainer_grads, explainer_vars))
-        self.optimizers['reasoner'].apply_gradients(zip(reasoner_grads, reasoner_vars))
         self.optimizers['producer'].apply_gradients(zip(producer_grads, producer_vars))
+        if batch_accuracy < self.reasoner_acc_threshold:
+            self.optimizers['reasoner'].apply_gradients(zip(reasoner_grads, reasoner_vars))
 
         # Return losses as dictionary of tensors
         return {
@@ -243,7 +260,8 @@ class CCNetOrchestrator:
             'producer_error': errors.producer_error,
             'explainer_grad_norm': explainer_grad_norm,
             'reasoner_grad_norm': reasoner_grad_norm,
-            'producer_grad_norm': producer_grad_norm
+            'producer_grad_norm': producer_grad_norm,
+            'batch_accuracy': batch_accuracy
         }
 
     def evaluate(
