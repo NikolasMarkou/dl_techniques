@@ -6,18 +6,22 @@ Ready-made templates for data analysis, distribution visualization,
 and neural network specific visualizations.
 """
 
-from __future__ import annotations
-
+import keras
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch
-from typing import Dict, List, Optional, Tuple, Any, Union
 from dataclasses import dataclass
 from scipy.stats import gaussian_kde
-import keras
+from matplotlib.patches import FancyBboxPatch
+from typing import Dict, List, Optional, Tuple, Any, Union
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from .core import VisualizationPlugin
+
+# ---------------------------------------------------------------------
 
 LAYER_COLORS = {
     'Dense': 'blue',
@@ -30,9 +34,9 @@ LAYER_COLORS = {
     'Input': 'lightblue'
 }
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Data Structures
-# =============================================================================
+# ---------------------------------------------------------------------
 
 @dataclass
 class DatasetInfo:
@@ -74,9 +78,9 @@ class GradientData:
     model_name: Optional[str] = None
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Data Distribution Templates
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class DataDistributionAnalysis(VisualizationPlugin):
     """Comprehensive data distribution analysis."""
@@ -349,9 +353,9 @@ class ClassBalanceVisualization(VisualizationPlugin):
         ax.axis('off')
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Neural Network Architecture Visualization
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class NetworkArchitectureVisualization(VisualizationPlugin):
     """Visualize neural network architecture."""
@@ -501,9 +505,9 @@ class NetworkArchitectureVisualization(VisualizationPlugin):
         ax.set_ylim(0, 1)
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Activation Visualization Templates
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class ActivationVisualization(VisualizationPlugin):
     """Visualize neural network activations."""
@@ -624,9 +628,9 @@ class ActivationVisualization(VisualizationPlugin):
         return fig
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Weight Visualization Templates
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class WeightVisualization(VisualizationPlugin):
     """Visualize neural network weights."""
@@ -839,9 +843,9 @@ class WeightVisualization(VisualizationPlugin):
         return grid
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Feature Map Visualization
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class FeatureMapVisualization(VisualizationPlugin):
     """Visualize convolutional feature maps."""
@@ -916,9 +920,9 @@ class FeatureMapVisualization(VisualizationPlugin):
         return fig
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Gradient Visualization
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class GradientVisualization(VisualizationPlugin):
     """Visualize gradients during training."""

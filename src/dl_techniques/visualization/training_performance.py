@@ -6,20 +6,21 @@ Ready-made templates for visualizing training dynamics, model performance,
 and experiment comparisons.
 """
 
-from __future__ import annotations
-
 import numpy as np
 import matplotlib.pyplot as plt
+from dataclasses import dataclass
 import matplotlib.gridspec as gridspec
 from typing import Dict, List, Optional, Any, Union
-from dataclasses import dataclass
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from .core import VisualizationPlugin, CompositeVisualization, PlotConfig, VisualizationContext
 
-
-# =============================================================================
+# ---------------------------------------------------------------------
 # Data Structures
-# =============================================================================
+# ---------------------------------------------------------------------
 
 @dataclass
 class TrainingHistory:
@@ -51,9 +52,9 @@ class ModelComparison:
     predictions: Optional[Dict[str, np.ndarray]] = None
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Training Visualization Templates
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class TrainingCurvesVisualization(VisualizationPlugin):
     """Visualization for training curves with multiple metrics."""
@@ -251,9 +252,9 @@ class LearningRateScheduleVisualization(VisualizationPlugin):
         return fig
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Model Comparison Templates
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class ModelComparisonBarChart(VisualizationPlugin):
     """Bar chart comparison of model metrics."""
@@ -404,9 +405,9 @@ class PerformanceRadarChart(VisualizationPlugin):
         return fig
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Convergence Analysis Templates
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class ConvergenceAnalysis(CompositeVisualization):
     """Comprehensive convergence analysis visualization."""
@@ -532,9 +533,9 @@ class ConvergenceAnalysis(CompositeVisualization):
         ax.grid(True, alpha=0.3)
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Overfitting Detection Template
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class OverfittingAnalysis(VisualizationPlugin):
     """Visualization for detecting and analyzing overfitting."""
@@ -671,9 +672,9 @@ class OverfittingAnalysis(VisualizationPlugin):
         return None
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Performance Summary Dashboard
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class PerformanceDashboard(CompositeVisualization):
     """Comprehensive performance dashboard."""
@@ -907,3 +908,5 @@ class PerformanceDashboard(CompositeVisualization):
         ax.set_xlabel('Models')
         ax.grid(True, alpha=0.3, axis='y')
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+
+# ---------------------------------------------------------------------

@@ -9,17 +9,19 @@ with ready-made templates and full customization support.
 
 from __future__ import annotations
 
-import seaborn as sns
-import matplotlib.pyplot as plt
-from pathlib import Path
-from abc import ABC, abstractmethod
-from datetime import datetime
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Any, Union, Callable, Type
-from enum import Enum
+
 import json
 import logging
 import contextlib
+import seaborn as sns
+from enum import Enum
+from pathlib import Path
+from datetime import datetime
+import matplotlib.pyplot as plt
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, Any, Union, Callable, Type
+
 
 # Configure matplotlib and seaborn defaults
 plt.style.use('seaborn-v0_8-whitegrid')
@@ -29,9 +31,9 @@ sns.set_palette("husl")
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Configuration Classes
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class PlotStyle(Enum):
     """Available plot styles."""
@@ -210,9 +212,9 @@ class VisualizationContext:
         return save_dir / filename
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Base Classes
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class VisualizationPlugin(ABC):
     """Abstract base class for visualization plugins."""
@@ -360,9 +362,9 @@ class CompositeVisualization(VisualizationPlugin):
         return fig
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Visualization Manager
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class VisualizationManager:
     """
@@ -606,9 +608,9 @@ class VisualizationManager:
         logger.info(f"Saved metadata to {metadata_path}")
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Utility Functions
-# =============================================================================
+# ---------------------------------------------------------------------
 
 def setup_logging(level: str = "INFO") -> None:
     """Setup logging configuration."""

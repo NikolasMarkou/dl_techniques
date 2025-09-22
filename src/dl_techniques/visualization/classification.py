@@ -6,29 +6,29 @@ Ready-made templates for classification tasks, confusion matrices,
 ROC curves, and model evaluation visualizations.
 """
 
-from __future__ import annotations
-
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.gridspec import GridSpecFromSubplotSpec
-import seaborn as sns
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass
 from sklearn.metrics import (
     confusion_matrix, classification_report, roc_curve, auc,
-    precision_recall_curve, f1_score, accuracy_score
+    precision_recall_curve, accuracy_score
 )
-import keras
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from .core import VisualizationPlugin, CompositeVisualization, PlotConfig, VisualizationContext
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Data Structures
-# =============================================================================
+# ---------------------------------------------------------------------
 
 @dataclass
 class ClassificationResults:
@@ -49,9 +49,9 @@ class MultiModelClassification:
     dataset_name: Optional[str] = None
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Confusion Matrix Templates
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class ConfusionMatrixVisualization(VisualizationPlugin):
     """Enhanced confusion matrix visualization."""
@@ -193,9 +193,9 @@ class ConfusionMatrixVisualization(VisualizationPlugin):
         return fig
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # ROC and PR Curve Templates
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class ROCPRCurves(VisualizationPlugin):
     """ROC and Precision-Recall curves visualization."""
@@ -343,9 +343,9 @@ class ROCPRCurves(VisualizationPlugin):
         ax.grid(True, alpha=0.3)
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Classification Report Visualization
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class ClassificationReportVisualization(VisualizationPlugin):
     """Visual representation of classification reports."""
@@ -443,9 +443,9 @@ class ClassificationReportVisualization(VisualizationPlugin):
         return fig
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Per-Class Performance Analysis
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class PerClassAnalysis(CompositeVisualization):
     """Detailed per-class performance analysis."""
@@ -619,9 +619,9 @@ class PerClassAnalysis(CompositeVisualization):
         ax.grid(True, alpha=0.3)
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Error Analysis Dashboard
-# =============================================================================
+# ---------------------------------------------------------------------
 
 class ErrorAnalysisDashboard(VisualizationPlugin):
     """Comprehensive error analysis dashboard."""
