@@ -608,4 +608,4 @@ class CCNetExperiment:
 
 if __name__ == "__main__":
     experiment = CCNetExperiment(experiment_name="ccnets_mnist")
-    orchestrator, trainer = experiment.run(epochs=50)
+    orchestrator, trainer = experiment.run(epochs=10)
