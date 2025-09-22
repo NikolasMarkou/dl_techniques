@@ -94,7 +94,7 @@ class CCNetTrainingHistoryViz(CompositeVisualization):
         ax.set_title("Gradient Norms (L2)")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Gradient L2 Norm")
-        ax.set_yscale('log')  # Gradients can vary widely, log scale is better
+        ax.set_yscale('log')
         ax.legend()
         ax.grid(True, alpha=0.3)
 
@@ -135,21 +135,8 @@ class ReconstructionQualityViz(VisualizationPlugin):
         x_data, y_data = data["x_data"], data["y_data"]
         num_samples = data.get("num_samples", 5)
 
-        if ax is not None:
-            fig = ax.get_figure()
-            ax.set_title("Reconstruction Quality Analysis", fontsize=14, fontweight="bold")
-            ax.axis('off')
-
-            from matplotlib.gridspec import GridSpecFromSubplotSpec
-            gs_sub = GridSpecFromSubplotSpec(num_samples, 5, subplot_spec=ax.get_subplotspec(), wspace=0.3, hspace=0.4)
-            axes = np.array([fig.add_subplot(gs_sub[i, j]) for i in range(num_samples) for j in range(5)]).reshape(
-                num_samples, 5)
-        else:
-            fig, axes = plt.subplots(
-                num_samples, 5, figsize=(15, 3 * num_samples),
-                gridspec_kw={'wspace': 0.3, 'hspace': 0.4}
-            )
-            fig.suptitle("Reconstruction Quality Analysis", fontsize=16, fontweight="bold")
+        fig, axes = plt.subplots(num_samples, 5, figsize=(15, 3 * num_samples))
+        fig.suptitle("Reconstruction Quality Analysis", fontsize=16, fontweight="bold")
 
         for i in range(num_samples):
             x_input = x_data[i: i + 1]
@@ -199,10 +186,7 @@ class CounterfactualMatrixViz(VisualizationPlugin):
         target_digits = data.get("target_digits", [0, 2, 4, 6, 8, 9])
 
         rows, cols = len(source_digits), len(target_digits)
-        fig, axes = plt.subplots(
-            rows, cols + 1, figsize=(cols * 1.5 + 1.5, rows * 1.5),
-            gridspec_kw={'wspace': 0.1, 'hspace': 0.1}
-        )
+        fig, axes = plt.subplots(rows, cols + 1, figsize=(cols * 1.5 + 1.5, rows * 1.5))
         fig.suptitle(
             'Counterfactual Generation Matrix\n"What if this digit were drawn as..."',
             fontsize=16, fontweight="bold"
@@ -318,34 +302,23 @@ class LatentSpaceAnalysisViz(CompositeVisualization):
 
 @keras.saving.register_keras_serializable()
 class MNISTExplainer(keras.Model):
-    """
-    Updated Explainer model to support VAE-style latent space regularization.
-    Outputs a tuple of (mean, log_variance) for the latent distribution.
-    """
     def __init__(self, explanation_dim: int = 128, l2_regularization: float = 1e-4, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.explanation_dim = explanation_dim
         self.regularizer = keras.regularizers.L2(l2_regularization) if l2_regularization > 0 else None
-
-        # Convolutional feature extractor
         self.conv1 = keras.layers.Conv2D(32, 5, padding="same", kernel_regularizer=self.regularizer)
         self.bn1 = keras.layers.BatchNormalization()
         self.act1 = keras.layers.LeakyReLU(negative_slope=0.2)
         self.pool1 = keras.layers.MaxPooling2D(2)
-
         self.conv2 = keras.layers.Conv2D(64, 3, padding="same", kernel_regularizer=self.regularizer)
         self.bn2 = keras.layers.BatchNormalization()
         self.act2 = keras.layers.LeakyReLU(negative_slope=0.2)
         self.pool2 = keras.layers.MaxPooling2D(2)
-
         self.conv3 = keras.layers.Conv2D(128, 3, padding="same", kernel_regularizer=self.regularizer)
         self.bn3 = keras.layers.BatchNormalization()
         self.act3 = keras.layers.LeakyReLU(negative_slope=0.2)
         self.pool3 = keras.layers.GlobalMaxPool2D()
-
         self.flatten = keras.layers.Flatten()
-
-        # Output heads for mean (mu) and log variance (log_var)
         self.fc_mu = keras.layers.Dense(explanation_dim, name="mu", kernel_regularizer=self.regularizer)
         self.fc_log_var = keras.layers.Dense(explanation_dim, name="log_var", kernel_regularizer=self.regularizer)
 
@@ -354,8 +327,6 @@ class MNISTExplainer(keras.Model):
         x = self.pool2(self.act2(self.bn2(self.conv2(x), training=training)))
         x = self.pool3(self.act3(self.bn3(self.conv3(x), training=training)))
         features = self.flatten(x)
-
-        # Compute mu and log_var from the extracted features
         mu = self.fc_mu(features)
         log_var = self.fc_log_var(features)
         return mu, log_var
@@ -414,71 +385,50 @@ class MNISTReasoner(keras.Model):
 
 @keras.saving.register_keras_serializable()
 class MNISTProducer(keras.Model):
-    """
-    Corrected Producer using class embedding for content and latent vector for
-    style modulation (via AdaIN-like mechanism). Outputs a 28x28 image.
-    """
     def __init__(self, num_classes: int = 10, explanation_dim: int = 16, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.num_classes = num_classes
         self.explanation_dim = explanation_dim
-
-        # Content pathway from class label
         self.label_embedding = keras.layers.Embedding(num_classes, 512)
         self.fc_content = keras.layers.Dense(7 * 7 * 128, activation='relu')
         self.reshape_content = keras.layers.Reshape((7, 7, 128))
-
-        # Style pathway from latent vector
-        self.style_transform_1 = keras.layers.Dense(256, activation='relu') # For conv1 channels (128*2)
-        self.style_transform_2 = keras.layers.Dense(128, activation='relu') # For conv2 channels (64*2)
-
-        # Decoder blocks
-        self.up1 = keras.layers.UpSampling2D(size=(2, 2)) # 7x7 -> 14x14
+        self.style_transform_1 = keras.layers.Dense(256, activation='relu')
+        self.style_transform_2 = keras.layers.Dense(128, activation='relu')
+        self.up1 = keras.layers.UpSampling2D(size=(2, 2))
         self.conv1 = keras.layers.Conv2D(128, 3, padding="same")
         self.norm1 = keras.layers.BatchNormalization(center=False, scale=False)
         self.act1 = keras.layers.LeakyReLU(negative_slope=0.2)
-
-        self.up2 = keras.layers.UpSampling2D(size=(2, 2)) # 14x14 -> 28x28
+        self.up2 = keras.layers.UpSampling2D(size=(2, 2))
         self.conv2 = keras.layers.Conv2D(64, 3, padding="same")
         self.norm2 = keras.layers.BatchNormalization(center=False, scale=False)
         self.act2 = keras.layers.LeakyReLU(negative_slope=0.2)
-
         self.conv_out = keras.layers.Conv2D(1, 3, padding="same", activation="sigmoid")
 
     def apply_style(self, content_tensor, style_vector):
-        # Reshape style vector to broadcast with content tensor
         num_channels = keras.ops.shape(content_tensor)[-1]
-        # Derives scale and bias from the style vector
         style_params = style_vector
         scale = style_params[:, :num_channels]
         bias = style_params[:, num_channels:]
-
         scale = keras.ops.expand_dims(keras.ops.expand_dims(scale, 1), 1)
         bias = keras.ops.expand_dims(keras.ops.expand_dims(bias, 1), 1)
-
         return content_tensor * (scale + 1) + bias
 
     def call(self, y: keras.KerasTensor, e: keras.KerasTensor, training: Optional[bool] = False) -> keras.KerasTensor:
-        # Convert one-hot y to class indices for embedding
-        y_indices = keras.ops.argmax(y, axis=-1)
-
-        # Content pathway
-        c = self.label_embedding(y_indices)
+        # CORRECTED: Use differentiable matmul for soft lookup instead of argmax.
+        c = keras.ops.matmul(y, self.label_embedding.weights[0])
         c = self.fc_content(c)
         c = self.reshape_content(c)
 
-        # Style pathway
         style1 = self.style_transform_1(e)
         style2 = self.style_transform_2(e)
 
-        # Decoder
-        x = self.up1(c) # 7x7 -> 14x14
+        x = self.up1(c)
         x = self.conv1(x)
         x = self.norm1(x, training=training)
         x = self.apply_style(x, style1)
         x = self.act1(x)
 
-        x = self.up2(x) # 14x14 -> 28x28
+        x = self.up2(x)
         x = self.conv2(x)
         x = self.norm2(x, training=training)
         x = self.apply_style(x, style2)
@@ -508,7 +458,6 @@ def create_mnist_ccnet(explanation_dim: int = 16, learning_rate: float = 1e-3) -
     reasoner = MNISTReasoner(10, explanation_dim, dropout_rate, l2_regularization)
     producer = MNISTProducer(num_classes=10, explanation_dim=explanation_dim)
 
-    # Build models with dummy data to initialize weights
     dummy_image = keras.ops.zeros((1, 28, 28, 1))
     dummy_label = keras.ops.zeros((1, 10))
     mu, _ = explainer(dummy_image)
@@ -535,9 +484,7 @@ def prepare_mnist_data() -> Tuple[tf.data.Dataset, tf.data.Dataset]:
     x_train, x_test = (d.astype("float32") / 255.0 for d in (x_train, x_test))
     x_train, x_test = (np.expand_dims(d, axis=-1) for d in (x_train, x_test))
     y_train, y_test = (keras.utils.to_categorical(d, 10) for d in (y_train, y_test))
-
-    train_ds = tf.data.Dataset.from_tensor_slices((x_train, y_train)).batch(128).shuffle(1000).prefetch(
-        tf.data.AUTOTUNE)
+    train_ds = tf.data.Dataset.from_tensor_slices((x_train, y_train)).batch(128).shuffle(1000).prefetch(tf.data.AUTOTUNE)
     val_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test)).batch(128).prefetch(tf.data.AUTOTUNE)
     return train_ds, val_ds
 
@@ -548,8 +495,6 @@ def prepare_mnist_data() -> Tuple[tf.data.Dataset, tf.data.Dataset]:
 
 
 class CCNetExperiment:
-    """Manages the full CCNet experiment workflow."""
-
     def __init__(self, experiment_name: str, results_dir: str = "results"):
         self.viz_manager = VisualizationManager(experiment_name=experiment_name, output_dir=results_dir)
         self._register_plugins()
@@ -557,10 +502,8 @@ class CCNetExperiment:
 
     def _register_plugins(self):
         plugin_classes = [
-            CCNetTrainingHistoryViz,
-            ReconstructionQualityViz,
-            CounterfactualMatrixViz,
-            LatentSpaceAnalysisViz,
+            CCNetTrainingHistoryViz, ReconstructionQualityViz,
+            CounterfactualMatrixViz, LatentSpaceAnalysisViz,
         ]
         for plugin_class in plugin_classes:
             instance = plugin_class(self.viz_manager.config, self.viz_manager.context)
@@ -578,7 +521,6 @@ class CCNetExperiment:
         train_dataset, val_dataset = prepare_mnist_data()
         logger.info("Setting up trainer...")
         trainer = CCNetTrainer(orchestrator)
-
         logger.info("Starting training...")
         try:
             trainer.train(
@@ -587,39 +529,19 @@ class CCNetExperiment:
             )
         except StopIteration:
             logger.info("Training stopped early due to convergence.")
-
         self.generate_final_report(orchestrator, trainer)
         logger.info(
             f"All visualizations saved to: {self.viz_manager.context.output_dir / self.viz_manager.context.experiment_name}")
         return orchestrator, trainer
 
     def generate_final_report(self, orchestrator: CCNetOrchestrator, trainer: CCNetTrainer):
-        """
-        Generates and saves all visualizations, including a final dashboard.
-        """
         logger.info("=" * 60)
         logger.info("Generating final visualizations...")
         logger.info("=" * 60)
+        report_data = {'orchestrator': orchestrator, 'x_data': self.x_test, 'y_data': self.y_test}
+        dashboard_recon_data = {**report_data, 'num_samples': 3}
+        dashboard_latent_data = {**report_data, 'num_samples': 500}
 
-        report_data = {
-            'orchestrator': orchestrator,
-            'x_data': self.x_test,
-            'y_data': self.y_test
-        }
-        dashboard_recon_data = {
-            'orchestrator': orchestrator,
-            'x_data': self.x_test,
-            'y_data': self.y_test,
-            'num_samples': 3
-        }
-        dashboard_latent_data = {
-            'orchestrator': orchestrator,
-            'x_data': self.x_test,
-            'y_data': self.y_test,
-            'num_samples': 500
-        }
-
-        logger.info("Generating standalone visualizations...")
         self.viz_manager.visualize(trainer.history, "ccnet_training_history", show=False)
         self.viz_manager.visualize(report_data, "ccnet_reconstruction_quality", show=False)
         self.viz_manager.visualize(report_data, "ccnet_counterfactual_matrix", show=False)
@@ -630,13 +552,10 @@ class CCNetExperiment:
             "ccnet_reconstruction_quality": dashboard_recon_data,
             "ccnet_latent_space": dashboard_latent_data,
         }
-
-        logger.info("Generating final dashboard...")
         self.viz_manager.create_dashboard(dashboard_data, show=False)
 
         logger.info("Saving models...")
         models_dir = self.viz_manager.context.get_save_path("models")
-
         models_dir.mkdir(parents=True, exist_ok=True)
         orchestrator.save_models(str(models_dir / "mnist_ccnet"))
         logger.info(f"Models saved to {models_dir}")
