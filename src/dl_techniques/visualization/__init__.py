@@ -2,8 +2,10 @@ __author__ = "Nikolas Markou"
 __version__ = "1.0.0"
 
 
-# --- Core Components ---
-# Make the most important classes available at the top level.
+# =============================================================================
+# Core Framework Components
+# =============================================================================
+# Expose the main classes for managing, configuring, and extending the framework.
 from .core import (
     VisualizationManager,
     PlotConfig,
@@ -15,8 +17,10 @@ from .core import (
     setup_logging,
 )
 
-# --- Data Structures ---
-# Expose all data containers for easy type hinting and instantiation.
+# =============================================================================
+# Standardized Data Structures
+# =============================================================================
+# Expose all data containers for easy type hinting and instantiation by the user.
 from .training_performance import (
     TrainingHistory,
     ModelComparison,
@@ -29,19 +33,26 @@ from .data_nn import (
     DatasetInfo,
     ActivationData,
     WeightData,
+    GradientData,  # Added missing data structure
 )
 
-# --- Visualization Plugin Templates ---
-# Users can import these to register them manually if needed.
+# =============================================================================
+# Visualization Plugin Templates
+# =============================================================================
+# Users can import these classes to register them with the VisualizationManager.
+
+# --- Training & Performance ---
 from .training_performance import (
     TrainingCurvesVisualization,
+    LearningRateScheduleVisualization,
     ModelComparisonBarChart,
     PerformanceRadarChart,
     ConvergenceAnalysis,
     OverfittingAnalysis,
     PerformanceDashboard,
-    LearningRateScheduleVisualization,
 )
+
+# --- Classification Analysis ---
 from .classification import (
     ConfusionMatrixVisualization,
     ROCPRCurves,
@@ -49,6 +60,8 @@ from .classification import (
     PerClassAnalysis,
     ErrorAnalysisDashboard,
 )
+
+# --- Data & Neural Network Inspection ---
 from .data_nn import (
     DataDistributionAnalysis,
     ClassBalanceVisualization,
@@ -58,19 +71,13 @@ from .data_nn import (
     FeatureMapVisualization,
     GradientVisualization,
 )
-from .examples import (
-    ExperimentComparisonDashboard,
-    LossLandscapeVisualization,
-    AttentionVisualization,
-    EmbeddingVisualization,
-    MLExperimentWorkflow, # Exposing this is great for users
-)
 
-
-# --- Public API Control ---
-# Defines what `from vizframework import *` will import.
+# =============================================================================
+# Public API Control
+# =============================================================================
+# Defines what `from visualization import *` will import.
 __all__ = [
-    # Core
+    # Core Components
     "VisualizationManager",
     "PlotConfig",
     "PlotStyle",
@@ -88,15 +95,16 @@ __all__ = [
     "DatasetInfo",
     "ActivationData",
     "WeightData",
+    "GradientData",
 
     # Training & Performance Plugins
     "TrainingCurvesVisualization",
+    "LearningRateScheduleVisualization",
     "ModelComparisonBarChart",
     "PerformanceRadarChart",
     "ConvergenceAnalysis",
     "OverfittingAnalysis",
     "PerformanceDashboard",
-    "LearningRateScheduleVisualization",
 
     # Classification Plugins
     "ConfusionMatrixVisualization",
@@ -113,11 +121,4 @@ __all__ = [
     "WeightVisualization",
     "FeatureMapVisualization",
     "GradientVisualization",
-
-    # Specialized/Example Plugins
-    "ExperimentComparisonDashboard",
-    "LossLandscapeVisualization",
-    "AttentionVisualization",
-    "EmbeddingVisualization",
-    "MLExperimentWorkflow",
 ]
