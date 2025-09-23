@@ -234,21 +234,32 @@ class CCNetOrchestrator:
         producer_grads = producer_tape.gradient(errors.producer_error, producer_vars)
 
         reasoner_vars = self.reasoner.trainable_variables
-        if train_reasoner:
-            reasoner_grads = reasoner_tape.gradient(errors.reasoner_error, reasoner_vars)
-        else:
-            reasoner_grads = [tf.zeros_like(v) for v in reasoner_vars]
+
+        # CORRECTED: Use tf.cond for robust conditional graph execution.
+        # This prevents the "variable is None" error by explicitly defining
+        # both branches of the computation for the graph compiler.
+        def compute_reasoner_grads():
+            return reasoner_tape.gradient(errors.reasoner_error, reasoner_vars)
+
+        def make_zero_grads():
+            return [tf.zeros_like(v) for v in reasoner_vars]
+
+        reasoner_grads = tf.cond(
+            train_reasoner,
+            true_fn=compute_reasoner_grads,
+            false_fn=make_zero_grads
+        )
 
         # --- Monitor, Filter, and Clip Gradients for Stability ---
         explainer_grad_norm = tf.linalg.global_norm(explainer_grads)
         reasoner_grad_norm = tf.linalg.global_norm(reasoner_grads)
         producer_grad_norm = tf.linalg.global_norm(producer_grads)
 
-        explainer_grads = [g if g is not None and tf.reduce_all(tf.math.is_finite(g)) else tf.zeros_like(v)
+        explainer_grads = [g if g is not None else tf.zeros_like(v)
                            for g, v in zip(explainer_grads, explainer_vars)]
-        producer_grads = [g if g is not None and tf.reduce_all(tf.math.is_finite(g)) else tf.zeros_like(v)
+        producer_grads = [g if g is not None else tf.zeros_like(v)
                           for g, v in zip(producer_grads, producer_vars)]
-        reasoner_grads = [g if g is not None and tf.reduce_all(tf.math.is_finite(g)) else tf.zeros_like(v)
+        reasoner_grads = [g if g is not None else tf.zeros_like(v)
                           for g, v in zip(reasoner_grads, reasoner_vars)]
 
         clip_norm = self.config.gradient_clip_norm
@@ -260,6 +271,9 @@ class CCNetOrchestrator:
         # --- Apply Gradients ---
         self.optimizers['explainer'].apply_gradients(zip(explainer_grads, explainer_vars))
         self.optimizers['producer'].apply_gradients(zip(producer_grads, producer_vars))
+
+        # We still use the Python conditional here, but it's safe because
+        # reasoner_grads is now guaranteed to be a valid list of tensors.
         if train_reasoner:
             self.optimizers['reasoner'].apply_gradients(zip(reasoner_grads, reasoner_vars))
 
