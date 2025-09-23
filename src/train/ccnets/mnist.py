@@ -1208,7 +1208,7 @@ def prepare_mnist_data(
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
     """
     Prepare MNIST dataset for training and validation with configurable
-    data augmentation applied to the training set.
+    data augmentation applied to the training set using Keras layers.
 
     Args:
         batch_size: The number of samples per batch.
@@ -1226,6 +1226,7 @@ def prepare_mnist_data(
     """
     # Load MNIST data
     (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
+    img_height, img_width = x_train.shape[1:]
 
     # Normalize and reshape images
     x_train = x_train.astype("float32") / 255.0
@@ -1237,32 +1238,34 @@ def prepare_mnist_data(
     y_train = keras.utils.to_categorical(y_train, 10)
     y_test = keras.utils.to_categorical(y_test, 10)
 
-    # --- Augmentation Function using TensorFlow ops ---
-    def augment(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-        """
-        Applies configured augmentations to a single image.
-        """
-        image_augmented = image
-
-        # 1. Add small Gaussian noise if configured
-        if noise_stddev > 0:
-            noise = tf.random.normal(shape=tf.shape(image_augmented), stddev=noise_stddev)
-            image_augmented = image_augmented + noise
-
-        # 2. Apply random pixel shift if configured
+    # --- Build Augmentation Pipeline with Keras Layers ---
+    augmentation_layers = []
+    if apply_augmentation:
+        # 1. Add random translation layer if configured
         if max_translation > 0:
-            # The upper bound for tf.random.uniform with integers is exclusive
-            dx = tf.random.uniform([], -max_translation, max_translation + 1, dtype=tf.int32)
-            dy = tf.random.uniform([], -max_translation, max_translation + 1, dtype=tf.int32)
-            image_augmented = tf.image.translate(
-                image_augmented,
-                translations=[tf.cast(dx, tf.float32), tf.cast(dy, tf.float32)]
+            # Keras layers expect translation factors as a fraction of image size
+            translation_factor = max_translation / img_height
+            augmentation_layers.append(
+                keras.layers.RandomTranslation(
+                    height_factor=translation_factor,
+                    width_factor=translation_factor,
+                    fill_mode='constant',
+                    cval=0.0
+                )
             )
 
-        # Ensure pixel values remain in the [0, 1] range after augmentation
-        image_augmented = tf.clip_by_value(image_augmented, 0.0, 1.0)
+        # 2. Add Gaussian noise layer if configured
+        if noise_stddev > 0:
+            augmentation_layers.append(
+                keras.layers.GaussianNoise(stddev=noise_stddev)
+            )
 
-        return image_augmented, label
+    # Wrap layers in a Sequential model for easy application
+    if augmentation_layers:
+        augmentation_pipeline = keras.Sequential(augmentation_layers)
+    else:
+        # Create an identity function if no augmentation is specified
+        augmentation_pipeline = lambda x, training: x
 
     # Create the base training dataset
     train_ds = tf.data.Dataset.from_tensor_slices((x_train, y_train))
@@ -1270,9 +1273,12 @@ def prepare_mnist_data(
     # Chain dataset operations
     train_ds = train_ds.shuffle(shuffle_buffer_size)
 
-    # Conditionally apply the augmentation map
-    if apply_augmentation:
-        train_ds = train_ds.map(augment, num_parallel_calls=tf.data.AUTOTUNE)
+    # Apply the Keras layer-based augmentation pipeline
+    # The `training=True` flag activates the random transformations
+    train_ds = train_ds.map(
+        lambda x, y: (augmentation_pipeline(x, training=True), y),
+        num_parallel_calls=tf.data.AUTOTUNE
+    )
 
     # Apply batching and prefetching
     train_ds = train_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
