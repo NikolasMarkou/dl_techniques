@@ -1766,7 +1766,7 @@ if __name__ == "__main__":
             reasoner_dropout_rate=0.25
         ),
         training=TrainingConfig(
-            epochs=50,
+            epochs=100,
             learning_rates={
                 'explainer': 3e-4,
                 'reasoner': 3e-4,
