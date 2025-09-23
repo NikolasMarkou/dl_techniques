@@ -8,7 +8,7 @@ from collections import defaultdict
 # ---------------------------------------------------------------------
 
 from .orchestrators import CCNetOrchestrator
-
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
@@ -58,15 +58,15 @@ class CCNetTrainer:
             callbacks: Optional list of callback functions.
         """
         for epoch in range(epochs):
-            print(f"Epoch {epoch + 1}/{epochs}")
-            print("-" * 30)
+            logger.info(f"Epoch {epoch + 1}/{epochs}")
+            logger.info("-" * 30)
 
             # Apply KL annealing if enabled
             if self.kl_annealing_epochs is not None and self.kl_annealing_epochs > 0:
                 annealing_ratio = min(1.0, (epoch + 1) / self.kl_annealing_epochs)
                 new_kl_weight = self.initial_kl_weight * annealing_ratio
                 self.orchestrator.config.kl_weight = new_kl_weight
-                print(f"  KL Annealing: Current Weight = {new_kl_weight:.4f}")
+                logger.info(f"  KL Annealing: Current Weight = {new_kl_weight:.4f}")
 
             # Training loop
             train_losses = []
@@ -109,7 +109,7 @@ class CCNetTrainer:
                     for callback in callbacks:
                         callback(epoch, epoch_metrics, self.orchestrator)
                 except StopIteration:
-                    print("StopIteration caught from a callback. Halting training.")
+                    logger.info("StopIteration caught from a callback. Halting training.")
                     break
 
             if self.metrics_callback:
@@ -162,7 +162,7 @@ class CCNetTrainer:
         inf = losses['inference_loss'].numpy()
         acc = losses.get('batch_accuracy', np.array(0.0)).numpy()
         is_training = losses.get('reasoner_is_training', np.array(0.0)).numpy()
-        print(
+        logger.info(
             f"  Batch {batch_idx:04d} -> Acc: {acc:.3f}, Gen: {gen:.4f}, Rec: {rec:.4f}, Inf: {inf:.4f}, ReaTrain: {int(is_training)}")
 
     def _log_epoch_summary(self, stage: str, metrics: Dict[str, float]):
@@ -175,23 +175,23 @@ class CCNetTrainer:
         prod_err = metrics.get('producer_error', 0)
         accuracy = metrics.get('batch_accuracy')
 
-        print(f"\n{stage} Summary:")
+        logger.info(f"{stage} Summary:")
         if accuracy is not None:
-            print(f"  Accuracy: {accuracy:.4f}")
-        print(f"  Losses -> Gen: {gen:.4f}, Rec: {rec:.4f}, Inf: {inf:.4f}")
-        print(f"  Errors -> Exp: {expl_err:.4f}, Rea: {reas_err:.4f}, Pro: {prod_err:.4f}")
+            logger.info(f"  Accuracy: {accuracy:.4f}")
+        logger.info(f"  Losses -> Gen: {gen:.4f}, Rec: {rec:.4f}, Inf: {inf:.4f}")
+        logger.info(f"  Errors -> Exp: {expl_err:.4f}, Rea: {reas_err:.4f}, Pro: {prod_err:.4f}")
 
         if 'explainer_grad_norm' in metrics:
             expl_gn = metrics.get('explainer_grad_norm', 0)
             reas_gn = metrics.get('reasoner_grad_norm', 0)
             prod_gn = metrics.get('producer_grad_norm', 0)
-            print(f"  Grad Norms -> Exp: {expl_gn:.4f}, Rea: {reas_gn:.4f}, Pro: {prod_gn:.4f}")
+            logger.info(f"  Grad Norms -> Exp: {expl_gn:.4f}, Rea: {reas_gn:.4f}, Pro: {prod_gn:.4f}")
 
         if 'reasoner_is_training' in metrics:
             train_ratio = metrics.get('reasoner_is_training', 0)
-            print(f"  Reasoner Training Ratio: {train_ratio:.2%}")
+            logger.info(f"  Reasoner Training Ratio: {train_ratio:.2%}")
 
-        print("-" * 30)
+        logger.info("-" * 30)
 
     def _aggregate_metrics(self, losses_list: List[Dict[str, float]]) -> Dict[str, float]:
         """Aggregate metrics over all batches in an epoch."""

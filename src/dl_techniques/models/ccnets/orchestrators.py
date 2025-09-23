@@ -7,6 +7,7 @@ from typing import Dict, Optional, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
 from .losses import L1Loss, L2Loss, HuberLoss, PolynomialLoss
 from .base import CCNetModule, CCNetConfig, CCNetLosses, CCNetModelErrors
 from .control import ConvergenceControlStrategy, StaticThresholdStrategy

@@ -7,6 +7,7 @@ from typing import Dict, Optional
 
 from .base import CCNetModule
 from .orchestrators import CCNetOrchestrator
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
@@ -59,7 +60,7 @@ class EarlyStoppingCallback:
             self.wait_error += 1
 
         if self.wait_error >= self.patience:
-            print(f"\nEarly stopping at epoch {epoch + 1} due to convergence of model errors.")
+            logger.info(f"Early stopping at epoch {epoch + 1} due to convergence of model errors.")
             orchestrator.save_models(f"ccnet_checkpoint_epoch_{epoch}")
             raise StopIteration("Early stopping triggered by error convergence.")
 
@@ -76,7 +77,7 @@ class EarlyStoppingCallback:
                 self.wait_grad = 0
 
             if self.wait_grad >= self.patience:
-                print(f"\nEarly stopping at epoch {epoch + 1} due to gradient stagnation.")
+                logger.info(f"Early stopping at epoch {epoch + 1} due to gradient stagnation.")
                 orchestrator.save_models(f"ccnet_checkpoint_epoch_{epoch}")
                 raise StopIteration("Early stopping triggered by gradient stagnation.")
 
