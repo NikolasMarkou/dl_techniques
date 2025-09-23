@@ -826,8 +826,12 @@ class MNISTProducer(keras.Model):
                 negative_slope=config.producer_leaky_relu_alpha, name=f"act_{i+1}"
             ))
 
+        self.conv_out_1 = keras.layers.Conv2D(
+            32, 1, padding="same", activation="relu"
+        )
+
         # Output layer
-        self.conv_out = keras.layers.Conv2D(
+        self.conv_out_2 = keras.layers.Conv2D(
             1, 1, padding="same", activation="sigmoid"
         )
 
@@ -883,8 +887,8 @@ class MNISTProducer(keras.Model):
             if i < len(style_vectors):
                 x = self.apply_style(x, style_vectors[i])
             x = act(x)
-
-        return self.conv_out(x)
+        x = self.conv_out_1(x)
+        return self.conv_out_2(x)
 
     def get_config(self) -> Dict[str, Any]:
         """Get the configuration dictionary for model serialization."""
@@ -1207,7 +1211,7 @@ class CCNetExperiment:
 # =====================================================================
 
 if __name__ == "__main__":
-    # Create configuration (easy to modify all parameters here)
+    # Create configuration
     config = ExperimentConfig(
         model=ModelConfig(
             explanation_dim=16,
