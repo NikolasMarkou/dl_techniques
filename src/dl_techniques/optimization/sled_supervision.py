@@ -1,48 +1,29 @@
 """
-Self Logits Evolution Decoding (SLED) Module for Keras 3 / TensorFlow.
+Self Logits Evolution Decoding (SLED) Module for Keras 3.
 
-This module provides a Keras 3 implementation of the SLED algorithm, as
-described in the paper "SLED: Self Logits Evolution Decoding for Improving
-Factuality in Large Language Models" (arXiv:2411.02433). This version is
-specifically designed for use with a TensorFlow backend (v2.18+).
+This module provides a backend-agnostic Keras 3 implementation of the SLED
+algorithm, as described in the paper "SLED: Self Logits Evolution Decoding for
+Improving Factuality in Large Language Models" (arXiv:2411.02433). This code
+is fully portable and will run on any Keras backend (TensorFlow, PyTorch, JAX).
 
 SLED is an inference-time decoding framework that enhances the factual accuracy
 of Large Language Models (LLMs) without requiring fine-tuning or external
 knowledge bases. It operates by leveraging the "latent knowledge" from the
 model's earlier layers to correct and refine the output logits of the final layer.
 
-This implementation is structured as a general-purpose logits processor, making
-it adaptable to any Keras-based model that can provide access to the logits
-from multiple layers during generation.
-
 Key Features:
-- Implements the three-phase SLED process for Keras/TensorFlow.
+- Implements the three-phase SLED process using only the Keras 3 API.
+- Fully backend-agnostic (TensorFlow, PyTorch, JAX compatible).
 - Optimized for performance by focusing computations on the top-k tokens.
-- Fully configurable hyperparameters (evolution_rate, scale, temperature).
 - Follows a factory pattern (`sled_builder`) for easy instantiation from a
   configuration dictionary.
-- Prioritizes backend-agnostic `keras.ops` for compatibility, using `tf`
-  operations where necessary for advanced indexing.
-
-Mathematical Behavior:
-The processor takes a list of logit tensors (tf.Tensor) from all model layers.
-It computes a corrective update for the final layer's logits based on the
-divergence between early-layer and final-layer logits, steering the output
-distribution toward a more factually consistent result.
-
-1.  **Phase 1 (Estimate):** For each early layer, a "latent" probability
-    distribution is estimated by computing the cosine similarity between the
-    logit evolution vector (early_logits - final_logits) and the ideal gradient
-    for each potential token.
-2.  **Phase 2 (Ensemble):** The latent distributions from all early layers are
-    ensembled into a single `P_latent` distribution via a weighted average.
-3.  **Phase 3 (Self-Evolution):** The final logits are updated by taking a
-    gradient-like step that minimizes the KL divergence between the model's
-    output distribution and the estimated `P_latent`.
+- Uses `keras.ops.take_along_axis` for efficient, backend-agnostic gathering.
+- Replicates complex indexed scatter operations using a combination of
+  `keras.ops.one_hot` and `keras.ops.where` for maximum portability.
 
 Usage Example:
-    >>> import tensorflow as tf
     >>> import keras
+    >>> import numpy as np
     >>>
     >>> # Configuration for the SLED processor
     >>> config = {
@@ -56,28 +37,27 @@ Usage Example:
     ...     }
     ... }
     >>>
-    >>> # Build the processor using the factory
+    >>> # Build the processor
     >>> sled_processor = sled_builder(config)
     >>>
     >>> # --- In a model's generate loop ---
-    >>> # Assume we get logits from all layers for the last token
-    >>> B, V, N_LAYERS = 2, 50257, 32  # Batch, Vocab, Num Layers
+    >>> # The input can be a NumPy array, tf.Tensor, torch.Tensor, etc.
+    >>> B, V, N_LAYERS = 2, 50257, 32
     >>> all_logits_for_step = [
-    ...     tf.random.normal((B, V)) for _ in range(N_LAYERS)
+    ...     np.random.randn(B, V).astype("float32") for _ in range(N_LAYERS)
     ... ]
     >>>
-    >>> # Apply SLED to get the corrected logits
+    >>> # Apply SLED to get the corrected logits (returns a KerasTensor)
     >>> evolved_logits = sled_processor(all_logits_for_step)
     >>>
     >>> # The evolved_logits can now be used for token sampling or greedy search
-    >>> next_token = tf.argmax(evolved_logits, axis=-1)
+    >>> next_token = keras.ops.argmax(evolved_logits, axis=-1)
     >>> print(evolved_logits.shape)
     (2, 50257)
 """
-
 import keras
 from enum import Enum
-import tensorflow as tf
+from keras import KerasTensor
 from typing import Dict, List, Union
 
 # ---------------------------------------------------------------------
@@ -95,28 +75,35 @@ class SledEvolutionType(str, Enum):
 
 # ---------------------------------------------------------------------
 
-def _cosine_similarity(x1: tf.Tensor, x2: tf.Tensor, axis: int = -1, epsilon: float = 1e-8) -> tf.Tensor:
+def _cosine_similarity(
+    x1: KerasTensor, x2: KerasTensor, axis: int = -1, epsilon: float = 1e-8
+) -> KerasTensor:
     """
     Computes cosine similarity between two tensors along a specified axis.
+    This is a robust, backend-agnostic implementation using keras.ops.
 
     Args:
         x1: The first tensor.
         x2: The second tensor. Must be broadcastable to the shape of x1.
         axis: The axis along which to compute similarity.
-        epsilon: A small value to avoid division by zero.
+        epsilon: A small value to avoid division by zero for zero-vectors.
 
     Returns:
         A tensor containing the cosine similarity.
     """
     dot_product = keras.ops.sum(x1 * x2, axis=axis)
-    norm_x1 = keras.ops.sqrt(keras.ops.maximum(keras.ops.sum(keras.ops.square(x1), axis=axis), epsilon))
-    norm_x2 = keras.ops.sqrt(keras.ops.maximum(keras.ops.sum(keras.ops.square(x2), axis=axis), epsilon))
+    norm_x1 = keras.ops.sqrt(
+        keras.ops.maximum(keras.ops.sum(keras.ops.square(x1), axis=axis), epsilon)
+    )
+    norm_x2 = keras.ops.sqrt(
+        keras.ops.maximum(keras.ops.sum(keras.ops.square(x2), axis=axis), epsilon)
+    )
     return dot_product / (norm_x1 * norm_x2)
 
 
 class SledLogitsProcessor:
     """
-    A callable class that applies the SLED algorithm to a set of logits using Keras/TensorFlow.
+    A callable class that applies the SLED algorithm to a set of logits using the Keras API.
     """
     def __init__(
         self,
@@ -153,28 +140,28 @@ class SledLogitsProcessor:
         self.tau = temperature
         self.use_tau_in_update = use_tau_in_update
         self.eta = inactive_logit_value
-        logger.info(f"SLED Processor (Keras/TF) initialized with: alpha={self.alpha}, k={self.k}, tau={self.tau}")
+        logger.info(f"SLED Processor (Keras) initialized with: alpha={self.alpha}, k={self.k}, tau={self.tau}")
 
-    def __call__(self, all_logits: List[tf.Tensor]) -> tf.Tensor:
+    def __call__(self, all_logits: List[KerasTensor]) -> KerasTensor:
         """
         Applies the SLED algorithm to modify the final layer's logits.
 
         Args:
-            all_logits (List[tf.Tensor]): A list of logit tensors, one for each
-                layer of the model. Tensors should correspond to the next token
-                prediction logits, with shape [batch_size, vocab_size]. The list
-                must be ordered from the earliest layer (index 0) to the final
-                layer (index -1).
+            all_logits (List[KerasTensor]): A list of logit tensors (e.g., NumPy array,
+                tf.Tensor, torch.Tensor), one for each layer of the model. Tensors
+                should correspond to the next token prediction logits, with shape
+                [batch_size, vocab_size]. The list must be ordered from the
+                earliest layer (index 0) to the final layer (index -1).
 
         Returns:
-            tf.Tensor: The modified ("self-evolved") logits from the final
-                layer, with shape [batch_size, vocab_size].
+            KerasTensor: The modified ("self-evolved") logits from the final layer,
+                with shape [batch_size, vocab_size].
         """
         if not isinstance(all_logits, list) or len(all_logits) < 2:
-            raise ValueError("all_logits must be a list of at least two tensors (one early layer, one final layer).")
+            raise ValueError("all_logits must be a list of at least two tensors.")
 
-        logits_n_final = all_logits[-1]
-        early_logits_list = all_logits[:-1]
+        logits_n_final = keras.ops.convert_to_tensor(all_logits[-1])
+        early_logits_list = [keras.ops.convert_to_tensor(logits) for logits in all_logits[:-1]]
         dtype = logits_n_final.dtype
 
         # --- Setup and Pre-computation ---
@@ -187,7 +174,7 @@ class SledLogitsProcessor:
 
         # --- Phases 1 & 2: Estimate and Ensemble P_latent ---
         m_numerators = keras.ops.zeros((batch_size, self.k), dtype=dtype)
-        m_denominator = tf.constant(0.0, dtype=dtype)
+        m_denominator = keras.ops.zeros((), dtype=dtype)
         pe_k = keras.ops.one_hot(top_k_indices, vocab_size, dtype=dtype)
 
         for logits_n, p_n in zip(early_logits_list, early_p_list):
@@ -208,28 +195,27 @@ class SledLogitsProcessor:
         m_k = m_numerators / m_denominator
 
         # --- Phase 3: Self-Evolution ---
-        # We need tf.gather_nd and tf.tensor_scatter_nd_update for indexed operations
-        batch_indices = tf.range(batch_size, dtype=top_k_indices.dtype)
-        batch_indices = keras.ops.expand_dims(batch_indices, axis=-1)
-        # Create indices of shape [batch_size, k, 2] for gather_nd/scatter_nd
-        gather_indices = keras.ops.concatenate([
-            keras.ops.tile(batch_indices, [1, self.k]),
-            keras.ops.expand_dims(top_k_indices, axis=-1)
-        ], axis=-1)
-
-        p_n_final_k = tf.gather_nd(p_n_final, gather_indices)
+        # Use keras.ops.take_along_axis for backend-agnostic indexed gathering.
+        p_n_final_k = keras.ops.take_along_axis(p_n_final, top_k_indices, axis=1)
 
         update_term = self.alpha * (p_n_final_k - m_k)
         if self.use_tau_in_update:
             update_term /= self.tau
 
-        original_top_k_logits = tf.gather_nd(logits_n_final, gather_indices)
+        original_top_k_logits = keras.ops.take_along_axis(logits_n_final, top_k_indices, axis=1)
         updated_top_k_logits = original_top_k_logits - update_term
 
-        # Create base tensor and scatter the updated values
-        base_logits = keras.ops.full(keras.ops.shape(logits_n_final), self.eta, dtype=dtype)
-        evolved_logits = tf.tensor_scatter_nd_update(base_logits, gather_indices, updated_top_k_logits)
+        # Replicate scatter update using one-hot masking and keras.ops.where
+        # This is a highly portable, backend-agnostic way to perform an indexed update.
+        final_mask = keras.ops.sum(pe_k, axis=1)
+        updates_expanded = keras.ops.expand_dims(updated_top_k_logits, axis=-1)
+        scattered_updates = keras.ops.sum(pe_k * updates_expanded, axis=1)
 
+        evolved_logits = keras.ops.where(
+            keras.ops.cast(final_mask, "bool"),
+            scattered_updates,
+            self.eta
+        )
         return evolved_logits
 
 
@@ -237,10 +223,10 @@ def sled_builder(
     config: Dict[str, Union[str, Dict[str, Union[float, str, bool, int]]]]
 ) -> SledLogitsProcessor:
     """
-    Builds a SledLogitsProcessor from a configuration dictionary for Keras/TF.
+    Builds a SledLogitsProcessor from a configuration dictionary.
 
     This factory function parses a configuration object to instantiate and
-    return a callable SLED processor, ready for use in an LLM's decoding loop.
+    return a callable SLED processor, ready for use in any Keras 3 environment.
 
     Args:
         config (Dict): A configuration dictionary. Expected format:
@@ -257,10 +243,6 @@ def sled_builder(
 
     Returns:
         SledLogitsProcessor: An initialized, callable SLED processor instance.
-
-    Raises:
-        ValueError: If the config is invalid or the type is not supported.
-        TypeError: If config or its components have incorrect types.
     """
     if not isinstance(config, dict):
         raise TypeError("config must be a dictionary")
@@ -277,7 +259,7 @@ def sled_builder(
     if not isinstance(sled_params, dict):
         raise TypeError("'config' must be a dictionary containing SLED parameters")
 
-    logger.info(f"Building SLED processor (Keras/TF): type=[{sled_type}], params=[{sled_params}]")
+    logger.info(f"Building SLED processor (Keras): type=[{sled_type}], params=[{sled_params}]")
 
     if sled_type == SledEvolutionType.SLED_V1:
         try:
@@ -295,5 +277,3 @@ def sled_builder(
             f"Unknown SLED type: [{sled_type}]. "
             f"Supported types: {[t.value for t in SledEvolutionType]}"
         )
-
-# ---------------------------------------------------------------------
