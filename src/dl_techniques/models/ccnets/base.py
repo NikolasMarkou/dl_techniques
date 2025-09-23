@@ -1,8 +1,7 @@
 import keras
 import tensorflow as tf
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Protocol, List
-
+from typing import Dict, Optional, Protocol, List, Any
 
 # ---------------------------------------------------------------------
 
@@ -35,7 +34,9 @@ class CCNetConfig:
 
     Args:
         explanation_dim: Dimension of the latent explanation vector E.
-        loss_type: Type of loss function ('l1', 'l2', or 'huber').
+        loss_fn: Name of the loss function ('l1', 'l2', 'huber', or 'polynomial').
+        loss_fn_params: Dictionary of parameters for the chosen loss function.
+                        e.g., {'delta': 1.0} for huber, {'p': 1.5} for polynomial.
         learning_rates: Learning rates for each module.
         gradient_clip_norm: Maximum norm for gradient clipping (None to disable).
         use_mixed_precision: Whether to use mixed precision training.
@@ -49,7 +50,8 @@ class CCNetConfig:
                            training to prevent any single loss from dominating.
     """
     explanation_dim: int = 128
-    loss_type: str = 'l2'
+    loss_fn: str = 'l2'
+    loss_fn_params: Dict[str, Any] = field(default_factory=dict)
     learning_rates: Dict[str, float] = field(default_factory=lambda: {
         'explainer': 1e-3,
         'reasoner': 1e-3,

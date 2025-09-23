@@ -1,5 +1,6 @@
 import keras
 import tensorflow as tf
+import warnings
 from typing import Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
@@ -56,18 +57,32 @@ class CCNetOrchestrator:
 
     def _init_loss_function(self):
         """
-        Initialize the loss function based on configuration, allowing for
-        parameterized loss functions.
+        Initialize the loss function based on configuration, providing
+        backward compatibility for the legacy 'loss_type' attribute.
         """
+        loss_name = None
+        if hasattr(self.config, 'loss_fn'):
+            loss_name = self.config.loss_fn
+        elif hasattr(self.config, 'loss_type'):
+            loss_name = self.config.loss_type
+            warnings.warn(
+                "'loss_type' is deprecated. Please update your CCNetConfig to use 'loss_fn' instead.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+        else:
+            # Default to 'l2' if neither is found, matching the config default
+            loss_name = 'l2'
+
         loss_map = {
             'l1': L1Loss,
             'l2': L2Loss,
             'huber': HuberLoss,
             'polynomial': PolynomialLoss
         }
-        loss_class = loss_map.get(self.config.loss_fn)
+        loss_class = loss_map.get(loss_name)
         if loss_class is None:
-            raise ValueError(f"Unsupported loss function '{self.config.loss_fn}'. "
+            raise ValueError(f"Unsupported loss function '{loss_name}'. "
                              f"Supported types are: {list(loss_map.keys())}")
 
         # Instantiate the class with parameters from config
