@@ -110,7 +110,8 @@ class TrainingConfig:
     # Loss weights
     explainer_weights: Dict[str, float] = field(default_factory=lambda: {
         'inference': 1.0,
-        'generation': 1.0
+        'generation': 1.0,
+        'kl_divergence': 0.01
     })
     reasoner_weights: Dict[str, float] = field(default_factory=lambda: {
         'reconstruction': 1.0,
