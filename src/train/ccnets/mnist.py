@@ -1250,7 +1250,7 @@ def prepare_mnist_data(
                     height_factor=translation_factor,
                     width_factor=translation_factor,
                     fill_mode='constant',
-                    cval=0.0
+                    fill_value=0.0
                 )
             )
 
