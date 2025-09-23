@@ -820,16 +820,21 @@ class MNISTProducer(keras.Model):
 
     def call(
             self,
-            y_indices: keras.KerasTensor,
+            y: keras.KerasTensor,
             e: keras.KerasTensor,
             training: Optional[bool] = False
     ) -> keras.KerasTensor:
         """Forward pass through the producer network."""
-        # CORRECTED: Use the embedding layer directly with integer indices,
-        # which is the standard and correct way. The manual matmul is removed.
+        # CORRECTED: Add input conditioning to handle both integer indices (from
+        # training) and one-hot/probability vectors (from inference calls like
+        # counterfactual generation). This resolves the Reshape error.
+        if y.shape.rank > 1 and y.shape[-1] == self.config.num_classes:
+            y_indices = keras.ops.argmax(y, axis=-1)
+        else:
+            y_indices = y
+
         c: keras.KerasTensor = self.label_embedding(y_indices)
 
-        # The rest of the forward pass remains the same
         c = self.fc_content(c)
         c = self.reshape_content(c)
 
@@ -847,6 +852,11 @@ class MNISTProducer(keras.Model):
         x = self.conv_out_1(x)
         return self.conv_out_2(x)
 
+    def get_config(self) -> Dict[str, Any]:
+        """Adds serialization support, consistent with other models."""
+        base_config = super().get_config()
+        base_config.update({"config": self.config.__dict__})
+        return base_config
 
 # =====================================================================
 # HELPER FUNCTIONS
@@ -1021,7 +1031,9 @@ class CCNetExperiment:
             "random_state": vis_cfg.tsne_random_state
         }
         report_data = {
-            'orchestrator': orchestrator, 'x_data': self.x_test, 'y_data': self.y_test,
+            'orchestrator': orchestrator,
+            'x_data': self.x_test,
+            'y_data': self.y_test,
             'num_samples': vis_cfg.reconstruction_samples,
             'source_digits': vis_cfg.counterfactual_source_digits,
             'target_digits': vis_cfg.counterfactual_target_digits,
