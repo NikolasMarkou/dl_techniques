@@ -13,10 +13,11 @@ Examples:
         experiment = CCNetExperiment(config)
         orchestrator, trainer = experiment.run()
 
-        # Or customize configuration
+        # Or customize specific aspects
         config = ExperimentConfig(
             model=ModelConfig(explanation_dim=32),
-            training=TrainingConfig(epochs=100, batch_size=256)
+            training=TrainingConfig(epochs=100),
+            data=DataConfig(batch_size=256)
         )
         experiment = CCNetExperiment(config)
         orchestrator, trainer = experiment.run()
@@ -98,7 +99,7 @@ class TrainingConfig:
     learning_rate: float = 1e-3
 
     # CCNet-specific parameters
-    loss_fn: str = 'huber'  # Options: 'l1', 'l2', 'huber', 'polynomial'
+    loss_fn: str = 'l2'  # Options: 'l1', 'l2', 'huber', 'polynomial'
     loss_fn_params: Dict[str, Any] = field(default_factory=dict)
     gradient_clip_norm: Optional[float] = 1.0
     kl_weight: float = 0.1
@@ -128,6 +129,7 @@ class DataConfig:
     """Configuration for data loading and augmentation."""
 
     # Data loading
+    batch_size: int = 128
     shuffle_buffer_size: int = 60000
     prefetch_buffer_size: int = tf.data.AUTOTUNE
 
@@ -1217,13 +1219,13 @@ if __name__ == "__main__":
         ),
         training=TrainingConfig(
             epochs=100,
-            batch_size=128,
             learning_rate=1e-3,
             loss_fn='l2',
             kl_weight=0.1,
             dynamic_weighting=True
         ),
         data=DataConfig(
+            batch_size=128,
             apply_augmentation=True,
             noise_stddev=0.05,
             max_translation=2
