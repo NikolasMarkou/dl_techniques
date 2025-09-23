@@ -1219,7 +1219,11 @@ if __name__ == "__main__":
         ),
         training=TrainingConfig(
             epochs=100,
-            learning_rate=1e-3,
+            learning_rates={
+                'explainer': 1e-3,
+                'reasoner': 1e-3,
+                'producer': 3e-4
+            },
             loss_fn='huber',
             kl_weight=0.1,
             dynamic_weighting=True
