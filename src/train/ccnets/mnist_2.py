@@ -1756,7 +1756,7 @@ if __name__ == "__main__":
     # Configuration addressing posterior collapse and systemic imbalance
     config = ExperimentConfig(
         model=ModelConfig(
-            explanation_dim=16,
+            explanation_dim=4,
             explainer_l2_regularization=1e-5,
             reasoner_dropout_rate=0.25
         ),
