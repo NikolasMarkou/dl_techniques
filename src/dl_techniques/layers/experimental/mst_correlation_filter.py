@@ -1,8 +1,43 @@
 """
-High-performance, graph-based correlation matrix filter for Keras 3.
+A high-performance, graph-based structural regularizer for Keras 3.
 
-This module provides custom layers for denoising correlation matrices using
-graph-based structural regularization techniques.
+This module provides a custom Keras layer, `SystemicGraphFilter`, and its
+direct application within a Transformer's attention mechanism, `StructuredAttention`.
+The core protocol is designed to re-architect a neural network's epistemic
+process by imposing a learnable, structural prior on its internal data representations.
+
+**Incentive & Power Dynamics:**
+
+Neural networks are incentivized to minimize loss, but in high-dimensional,
+noisy environments, they often achieve this by overfitting to spurious,
+transient correlations. This leads to fragile models that fail to generalize.
+This layer introduces a new, higher-order incentive: to discover and enforce
+a sparse, stable, and structurally coherent dependency graph.
+
+It fundamentally alters the network's internal power dynamics by shifting from a
+"democratic" model, where every noisy signal has a vote, to a "technocratic"
+one, where informational authority is granted only to a select, structurally
+validated elite of high-affinity connections.
+
+**Systemic Function:**
+
+The layer operates as an information refinery, transmuting a high-entropy
+input (like a raw correlation or attention score matrix) into a low-entropy,
+structurally consistent output. This is achieved via two integrated stages:
+
+1.  **Structural Distillation:** It uses a sparse, top-k attention mechanism
+    to identify and isolate the system's core dependency backbone, effectively
+    filtering out the "noise" of weak, spurious connections.
+
+2.  **Coherent Diffusion:** It then propagates information exclusively along this
+    distilled backbone, using a series of graph convolutions. This enforces a
+    new systemic logic where all relationships are re-cast in a manner
+    consistent with the underlying structure.
+
+When integrated into a Transformer's self-attention (`StructuredAttention`),
+this protocol transforms the attention mechanism from a reactive, short-sighted
+process into a disciplined, strategic instrument that can discover more robust
+and generalizable patterns in complex data.
 """
 
 import keras
