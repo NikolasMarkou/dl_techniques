@@ -95,11 +95,10 @@ class TrainingConfig:
 
     # Basic training parameters
     epochs: int = 20
-    batch_size: int = 128
     learning_rate: float = 1e-3
 
     # CCNet-specific parameters
-    loss_fn: str = 'l2'  # Options: 'l1', 'l2', 'huber', 'polynomial'
+    loss_fn: str = 'huber'  # Options: 'l1', 'l2', 'huber', 'polynomial'
     loss_fn_params: Dict[str, Any] = field(default_factory=dict)
     gradient_clip_norm: Optional[float] = 1.0
     kl_weight: float = 0.1
@@ -1220,7 +1219,7 @@ if __name__ == "__main__":
             epochs=100,
             batch_size=128,
             learning_rate=1e-3,
-            loss_fn='l1',
+            loss_fn='l2',
             kl_weight=0.1,
             dynamic_weighting=True
         ),
@@ -1231,7 +1230,7 @@ if __name__ == "__main__":
         ),
         early_stopping=EarlyStoppingConfig(
             enabled=True,
-            patience=15,
+            patience=5,
             error_threshold=1e-4
         ),
         visualization=VisualizationConfig(
