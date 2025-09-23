@@ -1,14 +1,13 @@
 import keras
-import tensorflow as tf
 import warnings
+import tensorflow as tf
 from typing import Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-from .losses import L1Loss, L2Loss, HuberLoss, PolynomialLoss
+from .losses import LossFunction, L1Loss, L2Loss, HuberLoss, PolynomialLoss
 from .base import CCNetModule, CCNetConfig, CCNetLosses, CCNetModelErrors
 from .control import ConvergenceControlStrategy, StaticThresholdStrategy
 
@@ -58,23 +57,9 @@ class CCNetOrchestrator:
 
     def _init_loss_function(self):
         """
-        Initialize the loss function based on configuration, providing
-        backward compatibility for the legacy 'loss_type' attribute.
+        Initialize the loss function based on configuration.
         """
-        loss_name = None
-        if hasattr(self.config, 'loss_fn'):
-            loss_name = self.config.loss_fn
-        elif hasattr(self.config, 'loss_type'):
-            loss_name = self.config.loss_type
-            warnings.warn(
-                "'loss_type' is deprecated. Please update your CCNetConfig to use 'loss_fn' instead.",
-                DeprecationWarning,
-                stacklevel=2
-            )
-        else:
-            # Default to 'l2' if neither is found, matching the config default
-            loss_name = 'l2'
-
+        loss_name = getattr(self.config, 'loss_fn', 'l2')
         loss_map = {
             'l1': L1Loss,
             'l2': L2Loss,
@@ -85,9 +70,7 @@ class CCNetOrchestrator:
         if loss_class is None:
             raise ValueError(f"Unsupported loss function '{loss_name}'. "
                              f"Supported types are: {list(loss_map.keys())}")
-
-        # Instantiate the class with parameters from config
-        self.loss_fn = loss_class(**self.config.loss_fn_params)
+        self.loss_fn: LossFunction = loss_class(**self.config.loss_fn_params)
 
     def _init_optimizers(self):
         """Initialize optimizers for each module."""
@@ -172,40 +155,33 @@ class CCNetOrchestrator:
             tensors: Dict[str, tf.Tensor]
     ) -> CCNetModelErrors:
         """
-        Compute model-specific error signals from the fundamental losses.
-        This uses the specified additive-subtractive causal credit assignment
-        and includes KL regularization for the Explainer. Gradient blocking is
-        handled in the forward_pass, this function just combines the results.
-
-        Args:
-            losses: CCNetLosses object.
-            tensors: Dictionary of tensors from forward pass, for KL loss calc.
-
-        Returns:
-            CCNetModelErrors object containing error signals for each module.
+        Compute model-specific error signals using the stable, additive protocol
+        as specified in the canonical documentation (FOUNDATION.md).
+        This replaces the unstable subtractive protocol.
         """
-        # Causal credit assignment based on the specified protocol (Slides 26, 30, 34)
-        explainer_error_causal = losses.inference_loss + losses.generation_loss - losses.reconstruction_loss
-        reasoner_error_causal = losses.reconstruction_loss + losses.inference_loss - losses.generation_loss
-        producer_error_causal = losses.generation_loss + losses.reconstruction_loss - losses.inference_loss
-
-        # Compute KL divergence loss for the Explainer's latent space
+        # --- Compute KL Divergence Loss for Latent Space Regularization ---
         mu = tensors['mu']
         log_var = tensors['log_var']
         kl_loss = -0.5 * keras.ops.mean(
             keras.ops.sum(1 + log_var - keras.ops.square(mu) - keras.ops.exp(log_var), axis=1)
         )
 
-        # Combine causal error with KL regularization for the Explainer.
-        # The new config structure must be used, e.g., config.explainer_weights['kl_beta'].
+        # --- Stable Additive Error Formulation (Per Documentation) ---
         explainer_error = (
-                self.config.explainer_weights.get('causal_term', 1.0) * explainer_error_causal +
-                self.config.explainer_weights.get('kl_beta', 0.0) * kl_loss
+                self.config.explainer_weights['inference'] * losses.inference_loss +
+                self.config.explainer_weights['generation'] * losses.generation_loss +
+                self.config.explainer_weights['kl_divergence'] * kl_loss
         )
 
-        # Apply configured weights to the other module errors
-        reasoner_error = self.config.reasoner_weights.get('causal_term', 1.0) * reasoner_error_causal
-        producer_error = self.config.producer_weights.get('causal_term', 1.0) * producer_error_causal
+        reasoner_error = (
+                self.config.reasoner_weights['reconstruction'] * losses.reconstruction_loss +
+                self.config.reasoner_weights['inference'] * losses.inference_loss
+        )
+
+        producer_error = (
+                self.config.producer_weights['generation'] * losses.generation_loss +
+                self.config.producer_weights['reconstruction'] * losses.reconstruction_loss
+        )
 
         return CCNetModelErrors(
             explainer_error=explainer_error,
@@ -262,13 +238,10 @@ class CCNetOrchestrator:
             reasoner_grads = [tf.zeros_like(v) for v in reasoner_vars]
 
         # --- Monitor, Filter, and Clip Gradients for Stability ---
-        # 1. Compute norms from raw gradients for monitoring
         explainer_grad_norm = tf.linalg.global_norm(explainer_grads)
         reasoner_grad_norm = tf.linalg.global_norm(reasoner_grads)
         producer_grad_norm = tf.linalg.global_norm(producer_grads)
 
-        # 2. Filter out non-finite gradients (NaNs/Infs) to prevent training collapse.
-        #    Replace invalid gradients with zeros for the corresponding variables.
         explainer_grads = [g if g is not None and tf.reduce_all(tf.math.is_finite(g)) else tf.zeros_like(v)
                            for g, v in zip(explainer_grads, explainer_vars)]
         producer_grads = [g if g is not None and tf.reduce_all(tf.math.is_finite(g)) else tf.zeros_like(v)
@@ -276,7 +249,6 @@ class CCNetOrchestrator:
         reasoner_grads = [g if g is not None and tf.reduce_all(tf.math.is_finite(g)) else tf.zeros_like(v)
                           for g, v in zip(reasoner_grads, reasoner_vars)]
 
-        # 3. Apply per-tensor gradient clipping if configured
         clip_norm = self.config.gradient_clip_norm
         if clip_norm and clip_norm > 0:
             explainer_grads = [tf.clip_by_norm(g, clip_norm) for g in explainer_grads]
@@ -289,7 +261,6 @@ class CCNetOrchestrator:
         if train_reasoner:
             self.optimizers['reasoner'].apply_gradients(zip(reasoner_grads, reasoner_vars))
 
-        # Return a comprehensive dictionary of results
         return {
             'generation_loss': losses.generation_loss,
             'reconstruction_loss': losses.reconstruction_loss,
@@ -311,13 +282,6 @@ class CCNetOrchestrator:
     ) -> Dict[str, tf.Tensor]:
         """
         Evaluate the CCNet without training.
-
-        Args:
-            x_input: Input observation batch.
-            y_truth: Ground truth label batch.
-
-        Returns:
-            Dictionary of scalar loss and error tensors.
         """
         tensors = self.forward_pass(x_input, y_truth, training=False)
         losses = self.compute_losses(tensors)
@@ -339,16 +303,8 @@ class CCNetOrchestrator:
     ) -> tf.Tensor:
         """
         Generate counterfactual observations.
-
-        Args:
-            x_reference: Reference observation (provides style).
-            y_target: Target label (what to generate).
-
-        Returns:
-            Generated counterfactual observation.
         """
         mu, _ = self.explainer(x_reference, training=False)
-        # Use the mean of the latent distribution as the deterministic style vector
         e_style = mu
         x_counterfactual = self.producer(y_target, e_style, training=False)
         return x_counterfactual
@@ -360,23 +316,11 @@ class CCNetOrchestrator:
     ) -> tf.Tensor:
         """
         Perform style transfer between observations.
-
-        Args:
-            x_content: Observation providing the content (label).
-            x_style: Observation providing the style.
-
-        Returns:
-            Generated observation with content from x_content and style from x_style.
         """
         mu_style, _ = self.explainer(x_style, training=False)
         e_style = mu_style
-
-        # To get the content, we must also get the latent explanation for the content image
-        mu_content, log_var_content = self.explainer(x_content, training=False)
-        std = keras.ops.exp(0.5 * log_var_content)
-        epsilon = keras.random.normal(shape=keras.ops.shape(mu_content))
-        e_content_latent = mu_content + epsilon * std
-
+        mu_content, _ = self.explainer(x_content, training=False)
+        e_content_latent = mu_content
         y_content = self.reasoner(x_content, e_content_latent, training=False)
         x_transferred = self.producer(y_content, e_style, training=False)
         return x_transferred
@@ -387,18 +331,9 @@ class CCNetOrchestrator:
     ) -> Tuple[tf.Tensor, tf.Tensor]:
         """
         Disentangle the explicit and latent causes of an observation.
-
-        Args:
-            x_input: Input observation.
-
-        Returns:
-            Tuple of (explicit_cause, latent_cause).
         """
-        mu, log_var = self.explainer(x_input, training=False)
-        std = keras.ops.exp(0.5 * log_var)
-        epsilon = keras.random.normal(shape=keras.ops.shape(mu))
-        e_latent = mu + epsilon * std
-
+        mu, _ = self.explainer(x_input, training=False)
+        e_latent = mu
         y_explicit = self.reasoner(x_input, e_latent, training=False)
         return y_explicit, e_latent
 
@@ -409,13 +344,6 @@ class CCNetOrchestrator:
     ) -> bool:
         """
         Verify the internal consistency of the CCNet's reasoning.
-
-        Args:
-            x_input: Input observation to verify.
-            threshold: Maximum allowed reconstruction error.
-
-        Returns:
-            True if the network's reasoning is consistent.
         """
         y_explicit, e_latent = self.disentangle_causes(x_input)
         x_reconstructed = self.producer(y_explicit, e_latent, training=False)
@@ -423,17 +351,13 @@ class CCNetOrchestrator:
         return bool(keras.ops.convert_to_numpy(error) < threshold)
 
     def save_models(self, base_path: str):
-        """
-        Save all three models to disk.
-        """
+        """Save all three models to disk."""
         self.explainer.save(f"{base_path}_explainer.keras")
         self.reasoner.save(f"{base_path}_reasoner.keras")
         self.producer.save(f"{base_path}_producer.keras")
 
     def load_models(self, base_path: str):
-        """
-        Load all three models from disk.
-        """
+        """Load all three models from disk."""
         self.explainer = keras.models.load_model(f"{base_path}_explainer.keras")
         self.reasoner = keras.models.load_model(f"{base_path}_reasoner.keras")
         self.producer = keras.models.load_model(f"{base_path}_producer.keras")
@@ -460,9 +384,7 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
             self.config.sequential_data = True
 
     def reverse_sequence(self, sequence: tf.Tensor) -> tf.Tensor:
-        """
-        Reverse a sequence along the time dimension (axis 1).
-        """
+        """Reverse a sequence along the time dimension (axis 1)."""
         return keras.ops.flip(sequence, axis=1)
 
     def forward_pass(
@@ -475,41 +397,28 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
         Forward pass with sequential data handling. The Producer uses the
         sequence reversal trick to achieve reverse-causal modeling.
         """
-        # Step 1: Extract latent explanation distribution (mu, log_var)
         mu, log_var = self.explainer(x_input, training=training)
         std = keras.ops.exp(0.5 * log_var)
         epsilon = keras.random.normal(shape=keras.ops.shape(mu))
         e_latent = mu + epsilon * std
-
-        # --- PROTOCOL ENFORCEMENT for sequential data ---
         e_latent_no_grad = tf.stop_gradient(e_latent)
 
-        # Step 2: Infer label (forward in time) using gradient-detached explanation
         y_inferred = self.reasoner(x_input, e_latent_no_grad, training=training)
 
-        # Producer uses reverse causality via sequence reversal trick
         y_inferred_rev = self.reverse_sequence(y_inferred)
         y_truth_rev = self.reverse_sequence(y_truth)
 
-        # The reconstruction path uses the gradient-detached explanation
         e_latent_no_grad_rev = self.reverse_sequence(e_latent_no_grad)
         x_reconstructed_rev = self.producer(y_inferred_rev, e_latent_no_grad_rev, training=training)
 
-        # The generation path uses the original explanation to train the explainer
         e_latent_rev = self.reverse_sequence(e_latent)
         x_generated_rev = self.producer(y_truth_rev, e_latent_rev, training=training)
 
-        # Reverse outputs back to original order
         x_reconstructed = self.reverse_sequence(x_reconstructed_rev)
         x_generated = self.reverse_sequence(x_generated_rev)
 
         return {
-            'x_input': x_input,
-            'y_truth': y_truth,
-            'mu': mu,
-            'log_var': log_var,
-            'e_latent': e_latent,
-            'y_inferred': y_inferred,
-            'x_reconstructed': x_reconstructed,
-            'x_generated': x_generated
+            'x_input': x_input, 'y_truth': y_truth, 'mu': mu, 'log_var': log_var,
+            'e_latent': e_latent, 'y_inferred': y_inferred,
+            'x_reconstructed': x_reconstructed, 'x_generated': x_generated
         }

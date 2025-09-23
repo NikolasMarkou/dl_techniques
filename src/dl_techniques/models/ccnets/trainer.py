@@ -1,7 +1,8 @@
+import warnings
 import numpy as np
 import tensorflow as tf
-from typing import Dict, Optional, List, Callable
 from collections import defaultdict
+from typing import Dict, Optional, List, Callable
 
 # ---------------------------------------------------------------------
 # local imports
@@ -36,7 +37,8 @@ class CCNetTrainer:
         self.orchestrator = orchestrator
         self.metrics_callback = metrics_callback
         self.kl_annealing_epochs = kl_annealing_epochs
-        self.initial_kl_weight = self.orchestrator.config.kl_weight
+        # Store the initial KL weight from the corrected config structure
+        self.initial_kl_weight = self.orchestrator.config.explainer_weights.get('kl_divergence', 0.0)
         self.history = defaultdict(list)
         self.loss_moving_averages = defaultdict(lambda: 1.0)
         self.ema_alpha = 0.1  # Smoothing factor for exponential moving average
@@ -65,14 +67,20 @@ class CCNetTrainer:
             if self.kl_annealing_epochs is not None and self.kl_annealing_epochs > 0:
                 annealing_ratio = min(1.0, (epoch + 1) / self.kl_annealing_epochs)
                 new_kl_weight = self.initial_kl_weight * annealing_ratio
-                self.orchestrator.config.kl_weight = new_kl_weight
+                # CORRECTED: Update the KL weight in the new config structure
+                self.orchestrator.config.explainer_weights['kl_divergence'] = new_kl_weight
                 logger.info(f"  KL Annealing: Current Weight = {new_kl_weight:.4f}")
 
             # Training loop
             train_losses = []
             for batch_idx, (x_batch, y_batch) in enumerate(train_dataset):
-                # Apply dynamic weighting if enabled
+                # Dynamic weighting is deprecated and should not be used.
                 if self.orchestrator.config.dynamic_weighting:
+                    warnings.warn(
+                        "'dynamic_weighting' is deprecated and may cause instability. "
+                        "It is recommended to set this to False and tune weights manually.",
+                        DeprecationWarning
+                    )
                     self._update_dynamic_weights()
 
                 # Execute one training step
@@ -126,7 +134,6 @@ class CCNetTrainer:
     def _update_moving_averages(self, current_losses: Dict[str, tf.Tensor]):
         """Update exponential moving average of losses."""
         for key, value in current_losses.items():
-            # Ensure value is a numpy float for EMA calculation
             numpy_val = value.numpy() if hasattr(value, 'numpy') else value
             self.loss_moving_averages[key] = (
                     self.ema_alpha * numpy_val +
@@ -134,23 +141,23 @@ class CCNetTrainer:
             )
 
     def _update_dynamic_weights(self):
-        """Dynamically adjust loss weights to balance module training."""
+        """
+        [DEPRECATED] Dynamically adjust loss weights to balance module training.
+        This logic is based on the old error formulation and is likely to be unstable.
+        """
         epsilon = 1e-8
         rec_avg = self.loss_moving_averages['reconstruction_loss'] + epsilon
         gen_avg = self.loss_moving_averages['generation_loss'] + epsilon
         inf_avg = self.loss_moving_averages['inference_loss'] + epsilon
 
-        # Balance Reasoner
         total_reasoner = rec_avg + inf_avg
         self.orchestrator.config.reasoner_weights['reconstruction'] = inf_avg / total_reasoner
         self.orchestrator.config.reasoner_weights['inference'] = rec_avg / total_reasoner
 
-        # Balance Explainer
         total_explainer = gen_avg + inf_avg
         self.orchestrator.config.explainer_weights['generation'] = inf_avg / total_explainer
         self.orchestrator.config.explainer_weights['inference'] = gen_avg / total_explainer
 
-        # Balance Producer
         total_producer = gen_avg + rec_avg
         self.orchestrator.config.producer_weights['generation'] = rec_avg / total_producer
         self.orchestrator.config.producer_weights['reconstruction'] = gen_avg / total_producer

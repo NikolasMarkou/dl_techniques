@@ -3,6 +3,7 @@ import tensorflow as tf
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Protocol, List, Any
 
+
 # ---------------------------------------------------------------------
 
 class CCNetModule(Protocol):
@@ -36,33 +37,33 @@ class CCNetConfig:
         explanation_dim: Dimension of the latent explanation vector E.
         loss_fn: Name of the loss function ('l1', 'l2', 'huber', or 'polynomial').
         loss_fn_params: Dictionary of parameters for the chosen loss function.
-                        e.g., {'delta': 1.0} for huber, {'p': 1.5} for polynomial.
         learning_rates: Learning rates for each module.
         gradient_clip_norm: Maximum norm for gradient clipping (None to disable).
         use_mixed_precision: Whether to use mixed precision training.
         sequential_data: Whether the data is sequential (enables causal masking).
-        explainer_weights: Weights for the explainer error terms.
-        reasoner_weights: Weights for the reasoner error terms.
-        producer_weights: Weights for the producer error terms.
-        kl_weight: Weight for the KL divergence regularization on the latent space.
-                   Forces the latent distribution towards a standard normal.
-        dynamic_weighting: If True, dynamically balances loss term weights during
-                           training to prevent any single loss from dominating.
+        explainer_weights: Weights for the explainer's additive error terms.
+        reasoner_weights: Weights for the reasoner's additive error terms.
+        producer_weights: Weights for the producer's additive error terms.
+        dynamic_weighting: [DEPRECATED] If True, dynamically balances loss term weights.
+                           Known to cause instability with the causal protocol. Keep False.
     """
     explanation_dim: int = 128
     loss_fn: str = 'l2'
     loss_fn_params: Dict[str, Any] = field(default_factory=dict)
     learning_rates: Dict[str, float] = field(default_factory=lambda: {
-        'explainer': 1e-3,
-        'reasoner': 1e-3,
-        'producer': 1e-3
+        'explainer': 1e-4,
+        'reasoner': 1e-4,
+        'producer': 1e-4
     })
     gradient_clip_norm: Optional[float] = 1.0
     use_mixed_precision: bool = False
     sequential_data: bool = False
+
+    # CORRECTED: Weight structure aligned with the stable, additive doctrine.
     explainer_weights: Dict[str, float] = field(default_factory=lambda: {
         'inference': 1.0,
-        'generation': 1.0
+        'generation': 1.0,
+        'kl_divergence': 0.01  # KL weight is now part of the explainer's responsibility.
     })
     reasoner_weights: Dict[str, float] = field(default_factory=lambda: {
         'reconstruction': 1.0,
@@ -72,8 +73,7 @@ class CCNetConfig:
         'generation': 1.0,
         'reconstruction': 1.0
     })
-    kl_weight: float = 0.01
-    dynamic_weighting: bool = False
+    dynamic_weighting: bool = False  # This feature conflicts with the causal protocol and should not be used.
 
 
 # ---------------------------------------------------------------------

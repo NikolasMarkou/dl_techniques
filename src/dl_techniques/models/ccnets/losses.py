@@ -62,16 +62,11 @@ class HuberLoss(LossFunction):
 
 # ---------------------------------------------------------------------
 
-# ADDED: New PolynomialLoss class for flexible error penalization
 class PolynomialLoss(LossFunction):
     """
     A generalized loss function that computes the mean of the absolute error
     raised to a power 'p'. This provides a flexible way to control the
     system's aversion to large errors.
-    - p=1.0 recovers L1 loss.
-    - p=2.0 recovers L2 loss.
-    - p>2.0 creates hyper-aversion to large errors.
-    - 0<p<1.0 creates hyper-tolerance to large errors.
     """
     def __init__(self, p: float = 2.0):
         """
@@ -87,8 +82,6 @@ class PolynomialLoss(LossFunction):
     def __call__(self, y_true: keras.ops.array, y_pred: keras.ops.array) -> keras.ops.array:
         """Compute Polynomial loss."""
         error = keras.ops.abs(y_true - y_pred)
-        # Add a small epsilon for numerical stability if p is close to 0 or negative
-        # although we already guard for p > 0.
         epsilon = 1e-8
         powered_error = keras.ops.power(error + epsilon, self.p)
         return keras.ops.mean(powered_error)
