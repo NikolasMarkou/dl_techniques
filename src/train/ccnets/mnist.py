@@ -188,6 +188,61 @@ class ExperimentConfig:
     verbose: bool = True
 
 
+@keras.saving.register_keras_serializable()
+class FiLMLayer(keras.layers.Layer):
+    """
+    Feature-wise Linear Modulation (FiLM) Layer.
+
+    Applies an affine transformation to a content tensor based on a
+    style vector. It learns a projection from the style vector to generate
+    per-channel scaling (gamma) and shifting (beta) parameters.
+    """
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.style_projection: Optional[keras.layers.Dense] = None
+        self.num_channels: Optional[int] = None
+
+    def build(self, input_shape: List[tuple]) -> None:
+        """
+        Build the layer's weights.
+
+        Args:
+            input_shape: A list of two shapes: [content_shape, style_shape].
+        """
+        content_shape, _ = input_shape
+        self.num_channels = content_shape[-1]
+        self.style_projection = keras.layers.Dense(
+            self.num_channels * 2, name="style_projection"
+        )
+        super().build(input_shape)
+
+    def call(self, inputs: List[keras.KerasTensor]) -> keras.KerasTensor:
+        """
+        Apply the FiLM transformation.
+
+        Args:
+            inputs: A list containing [content_tensor, style_vector].
+
+        Returns:
+            The modulated content tensor.
+        """
+        content_tensor, style_vector = inputs
+
+        # Project style vector to get gamma (scale) and beta (bias)
+        gamma_beta = self.style_projection(style_vector)
+        gamma = gamma_beta[:, :self.num_channels]
+        beta = gamma_beta[:, self.num_channels:]
+
+        # Reshape for broadcasting
+        gamma = keras.ops.expand_dims(keras.ops.expand_dims(gamma, 1), 1)
+        beta = keras.ops.expand_dims(keras.ops.expand_dims(beta, 1), 1)
+
+        return content_tensor * (1 + gamma) + beta
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get the configuration dictionary for layer serialization."""
+        return super().get_config()
+
 # =====================================================================
 # VISUALIZATION PLUGINS (unchanged from original)
 # =====================================================================
@@ -759,6 +814,9 @@ class MNISTReasoner(keras.Model):
 class MNISTProducer(keras.Model):
     """
     Producer network for MNIST CCNet.
+
+    This corrected version uses dedicated FiLM layers for more expressive
+    style modulation, replacing the previous manual affine transformation.
     """
 
     def __init__(
@@ -795,18 +853,12 @@ class MNISTProducer(keras.Model):
             config.producer_initial_channels
         ))
 
-        # Style transformation layers
-        self.style_transforms = []
-        for units in config.producer_style_units:
-            self.style_transforms.append(
-                keras.layers.Dense(units, activation='relu')
-            )
-
         # Upsampling and convolution layers
         self.up_layers = []
         self.conv_layers = []
         self.norm_layers = []
         self.act_layers = []
+        self.film_layers = [] # FiLM layers for style modulation
 
         for i, filters in enumerate(config.producer_conv_filters):
             self.up_layers.append(keras.layers.UpSampling2D(
@@ -816,6 +868,7 @@ class MNISTProducer(keras.Model):
                 filters, 3, padding="same", name=f"conv_{i+1}"
             ))
             self.norm_layers.append(keras.layers.BatchNormalization(name=f"norm_{i+1}"))
+            self.film_layers.append(FiLMLayer(name=f"film_{i+1}")) # Instantiate FiLM
             self.act_layers.append(GoLU(
                 name=f"act_{i+1}"
             ))
@@ -828,25 +881,6 @@ class MNISTProducer(keras.Model):
         self.conv_out_2 = keras.layers.Conv2D(
             1, 1, padding="same", activation="sigmoid"
         )
-
-    def apply_style(
-        self,
-        content_tensor: keras.KerasTensor,
-        style_vector: keras.KerasTensor
-    ) -> keras.KerasTensor:
-        """Apply style modulation to content features."""
-        num_channels: int = keras.ops.shape(content_tensor)[-1]
-        style_params: keras.KerasTensor = style_vector
-
-        # Split style parameters into scale and bias
-        scale: keras.KerasTensor = style_params[:, :num_channels]
-        bias: keras.KerasTensor = style_params[:, num_channels:]
-
-        # Reshape for broadcasting
-        scale = keras.ops.expand_dims(keras.ops.expand_dims(scale, 1), 1)
-        bias = keras.ops.expand_dims(keras.ops.expand_dims(bias, 1), 1)
-
-        return content_tensor * (scale + 1) + bias
 
     def call(
         self,
@@ -862,31 +896,25 @@ class MNISTProducer(keras.Model):
         c = self.fc_content(c)
         c = self.reshape_content(c)
 
-        # Prepare style vectors
-        style_vectors = []
-        style_input = e
-        for transform in self.style_transforms:
-            style_input = transform(style_input)
-            style_vectors.append(style_input)
-
-        # Apply upsampling blocks with style modulation
+        # Apply upsampling blocks with FiLM-based style modulation
         x = c
-        for i, (up, conv, norm, act) in enumerate(zip(
+        for i, (up, conv, norm, film, act) in enumerate(zip(
             self.up_layers, self.conv_layers,
-            self.norm_layers, self.act_layers
+            self.norm_layers, self.film_layers, self.act_layers
         )):
             x = up(x)
             x = conv(x)
             x = norm(x, training=training)
-            if i < len(style_vectors):
-                x = self.apply_style(x, style_vectors[i])
+            x = film([x, e])  # Apply style modulation here
             x = act(x)
+
         x = self.conv_out_1(x)
         return self.conv_out_2(x)
 
     def get_config(self) -> Dict[str, Any]:
         """Get the configuration dictionary for model serialization."""
         base_config = super().get_config()
+        # Convert dataclass to dict for serialization
         config_dict = {k: v for k, v in self.config.__dict__.items()}
         base_config.update({"config": config_dict})
         return base_config
