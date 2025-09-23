@@ -1032,12 +1032,12 @@ class MNISTProducer(keras.Model):
         # Upsampling and convolution layers
         self.up1 = keras.layers.UpSampling2D(size=(2, 2), interpolation="nearest")
         self.conv1 = keras.layers.Conv2D(128, 3, padding="same")
-        self.norm1 = keras.layers.BatchNormalization(center=False, scale=False)
+        self.norm1 = keras.layers.BatchNormalization()
         self.act1 = keras.layers.LeakyReLU(negative_slope=0.1)
 
         self.up2 = keras.layers.UpSampling2D(size=(2, 2), interpolation="nearest")
         self.conv2 = keras.layers.Conv2D(64, 3, padding="same")
-        self.norm2 = keras.layers.BatchNormalization(center=False, scale=False)
+        self.norm2 = keras.layers.BatchNormalization()
         self.act2 = keras.layers.LeakyReLU(negative_slope=0.1)
 
         # Output layer
