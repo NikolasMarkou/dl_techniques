@@ -1220,7 +1220,7 @@ if __name__ == "__main__":
         training=TrainingConfig(
             epochs=100,
             learning_rate=1e-3,
-            loss_fn='l2',
+            loss_fn='huber',
             kl_weight=0.1,
             dynamic_weighting=True
         ),
@@ -1232,7 +1232,7 @@ if __name__ == "__main__":
         ),
         early_stopping=EarlyStoppingConfig(
             enabled=True,
-            patience=5,
+            patience=20,
             error_threshold=1e-4
         ),
         visualization=VisualizationConfig(
