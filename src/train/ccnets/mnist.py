@@ -1179,14 +1179,15 @@ def create_mnist_ccnet(
     # Configure CCNet
     config = CCNetConfig(
         explanation_dim=explanation_dim,
-        loss_type="l2",
+        loss_fn="l2",
         learning_rates={
             "explainer": learning_rate,
             "reasoner": learning_rate,
             "producer": learning_rate
         },
         gradient_clip_norm=1.0,
-        kl_weight=0.1
+        kl_weight=0.1,
+        dynamic_weighting=True,
     )
 
     # Create orchestrator
