@@ -50,7 +50,7 @@ from dl_techniques.models.ccnets import (
     wrap_keras_model,
 )
 from dl_techniques.utils.logger import logger
-
+from dl_techniques.layers.activations.golu import GoLU
 
 # =====================================================================
 # CENTRALIZED CONFIGURATION
@@ -68,7 +68,6 @@ class ModelConfig:
     explainer_conv_filters: List[int] = field(default_factory=lambda: [32, 64, 128])
     explainer_conv_kernels: List[int] = field(default_factory=lambda: [5, 3, 3])
     explainer_l2_regularization: float = 1e-4
-    explainer_leaky_relu_alpha: float = 0.1
 
     # Reasoner parameters
     reasoner_conv_filters: List[int] = field(default_factory=lambda: [32, 64])
@@ -76,7 +75,6 @@ class ModelConfig:
     reasoner_dense_units: List[int] = field(default_factory=lambda: [512, 256])
     reasoner_dropout_rate: float = 0.2
     reasoner_l2_regularization: float = 1e-4
-    reasoner_leaky_relu_alpha: float = 0.1
 
     # Producer parameters
     producer_initial_dense_units: int = 256
@@ -84,7 +82,6 @@ class ModelConfig:
     producer_initial_channels: int = 128
     producer_conv_filters: List[int] = field(default_factory=lambda: [128, 64])
     producer_style_units: List[int] = field(default_factory=lambda: [256, 128])
-    producer_leaky_relu_alpha: float = 0.1
 
 
 @dataclass
@@ -592,8 +589,7 @@ class MNISTExplainer(keras.Model):
                 name=f"conv_{i+1}"
             ))
             self.bn_layers.append(keras.layers.BatchNormalization(name=f"bn_{i+1}"))
-            self.act_layers.append(keras.layers.LeakyReLU(
-                negative_slope=config.explainer_leaky_relu_alpha,
+            self.act_layers.append(GoLU(
                 name=f"act_{i+1}"
             ))
             # Use GlobalMaxPool for the last layer, MaxPool for others
@@ -688,8 +684,7 @@ class MNISTReasoner(keras.Model):
                 name=f"conv_{i+1}"
             ))
             self.bn_layers.append(keras.layers.BatchNormalization(name=f"bn_{i+1}"))
-            self.act_layers.append(keras.layers.LeakyReLU(
-                negative_slope=config.reasoner_leaky_relu_alpha,
+            self.act_layers.append(GoLU(
                 name=f"act_{i+1}"
             ))
             self.pool_layers.append(keras.layers.MaxPooling2D(2, name=f"pool_{i+1}"))
@@ -707,8 +702,7 @@ class MNISTReasoner(keras.Model):
                 name=f"fc_{i+1}"
             ))
             self.bn_fc_layers.append(keras.layers.BatchNormalization(name=f"bn_fc_{i+1}"))
-            self.act_fc_layers.append(keras.layers.LeakyReLU(
-                negative_slope=config.reasoner_leaky_relu_alpha,
+            self.act_fc_layers.append(GoLU(
                 name=f"act_fc_{i+1}"
             ))
 
@@ -822,12 +816,12 @@ class MNISTProducer(keras.Model):
                 filters, 3, padding="same", name=f"conv_{i+1}"
             ))
             self.norm_layers.append(keras.layers.BatchNormalization(name=f"norm_{i+1}"))
-            self.act_layers.append(keras.layers.LeakyReLU(
-                negative_slope=config.producer_leaky_relu_alpha, name=f"act_{i+1}"
+            self.act_layers.append(GoLU(
+                name=f"act_{i+1}"
             ))
 
         self.conv_out_1 = keras.layers.Conv2D(
-            32, 1, padding="same", activation="relu"
+            32, 1, padding="same", activation="linear"
         )
 
         # Output layer
