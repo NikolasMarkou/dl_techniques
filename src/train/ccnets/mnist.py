@@ -83,7 +83,7 @@ class ModelConfig:
 
     # Producer parameters
     producer_initial_dense_units: int = 512
-    producer_initial_spatial_size: int = 7
+    producer_initial_spatial_size: int = 5
     producer_initial_channels: int = 128
     producer_conv_filters: List[int] = field(default_factory=lambda: [128, 64])
     producer_style_units: List[int] = field(default_factory=lambda: [256, 128])
@@ -831,7 +831,7 @@ class MNISTProducer(keras.Model):
 
         # Output layer
         self.conv_out = keras.layers.Conv2D(
-            1, 3, padding="same", activation="sigmoid"
+            1, 1, padding="same", activation="sigmoid"
         )
 
     def apply_style(
