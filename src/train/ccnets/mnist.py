@@ -888,7 +888,7 @@ class MNISTReasoner(keras.Model):
             32, 5, padding="same", kernel_regularizer=self.regularizer
         )
         self.bn1 = keras.layers.BatchNormalization()
-        self.act1 = keras.layers.LeakyReLU(negative_slope=0.2)
+        self.act1 = keras.layers.LeakyReLU(negative_slope=0.1)
         self.pool1 = keras.layers.MaxPooling2D(2)
 
         self.conv2 = keras.layers.Conv2D(
@@ -902,13 +902,13 @@ class MNISTReasoner(keras.Model):
 
         # Combination and classification layers
         self.fc_combine = keras.layers.Dense(
-            256, kernel_regularizer=self.regularizer
+            512, kernel_regularizer=self.regularizer
         )
         self.bn_combine = keras.layers.BatchNormalization()
         self.act_combine = keras.layers.LeakyReLU(negative_slope=0.1)
 
         self.fc_hidden = keras.layers.Dense(
-            128, kernel_regularizer=self.regularizer
+            256, kernel_regularizer=self.regularizer
         )
         self.bn_hidden = keras.layers.BatchNormalization()
         self.act_hidden = keras.layers.LeakyReLU(negative_slope=0.1)
@@ -1031,12 +1031,12 @@ class MNISTProducer(keras.Model):
 
         # Upsampling and convolution layers
         self.up1 = keras.layers.UpSampling2D(size=(2, 2), interpolation="nearest")
-        self.conv1 = keras.layers.Conv2D(64, 3, padding="same")
+        self.conv1 = keras.layers.Conv2D(128, 3, padding="same")
         self.norm1 = keras.layers.BatchNormalization(center=False, scale=False)
         self.act1 = keras.layers.LeakyReLU(negative_slope=0.1)
 
         self.up2 = keras.layers.UpSampling2D(size=(2, 2), interpolation="nearest")
-        self.conv2 = keras.layers.Conv2D(32, 3, padding="same")
+        self.conv2 = keras.layers.Conv2D(64, 3, padding="same")
         self.norm2 = keras.layers.BatchNormalization(center=False, scale=False)
         self.act2 = keras.layers.LeakyReLU(negative_slope=0.1)
 
