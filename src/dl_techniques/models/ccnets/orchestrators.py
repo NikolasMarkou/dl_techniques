@@ -7,6 +7,7 @@ from typing import Dict, Optional, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
 from .losses import L1Loss, L2Loss, HuberLoss, PolynomialLoss
 from .base import CCNetModule, CCNetConfig, CCNetLosses, CCNetModelErrors
 from .control import ConvergenceControlStrategy, StaticThresholdStrategy
@@ -232,11 +233,8 @@ class CCNetOrchestrator:
         with tf.GradientTape() as explainer_tape, \
                 tf.GradientTape() as reasoner_tape, \
                 tf.GradientTape() as producer_tape:
-
-            # The forward pass now correctly sets up the computation graph
             tensors = self.forward_pass(x_input, y_truth, training=True)
             losses = self.compute_losses(tensors)
-            # The model errors now use the correct causal formulas
             errors = self.compute_model_errors(losses, tensors)
 
         # Calculate batch accuracy for control strategy
@@ -246,34 +244,46 @@ class CCNetOrchestrator:
             keras.ops.cast(keras.ops.equal(y_true_labels, y_pred_labels), dtype='float32')
         )
 
-        # Delegate training decision to the control strategy (read-only in graph)
+        # Delegate training decision to the control strategy
         current_metrics = {'batch_accuracy': batch_accuracy}
         train_reasoner = self.control.should_train_reasoner(current_metrics)
 
-        # Compute gradients for all modules
+        # --- Compute Gradients ---
         explainer_vars = self.explainer.trainable_variables
         explainer_grads = explainer_tape.gradient(errors.explainer_error, explainer_vars)
+
         producer_vars = self.producer.trainable_variables
         producer_grads = producer_tape.gradient(errors.producer_error, producer_vars)
-        reasoner_vars = self.reasoner.trainable_variables
 
+        reasoner_vars = self.reasoner.trainable_variables
         if train_reasoner:
             reasoner_grads = reasoner_tape.gradient(errors.reasoner_error, reasoner_vars)
         else:
             reasoner_grads = [tf.zeros_like(v) for v in reasoner_vars]
 
-        # Compute gradient norms for monitoring
-        explainer_grad_norm = tf.linalg.global_norm(explainer_grads) if explainer_grads[0] is not None else 0.0
-        reasoner_grad_norm = tf.linalg.global_norm(reasoner_grads) if reasoner_grads[0] is not None else 0.0
-        producer_grad_norm = tf.linalg.global_norm(producer_grads) if producer_grads[0] is not None else 0.0
+        # --- Monitor, Filter, and Clip Gradients for Stability ---
+        # 1. Compute norms from raw gradients for monitoring
+        explainer_grad_norm = tf.linalg.global_norm(explainer_grads)
+        reasoner_grad_norm = tf.linalg.global_norm(reasoner_grads)
+        producer_grad_norm = tf.linalg.global_norm(producer_grads)
 
-        # Apply gradient clipping if configured
-        if self.config.gradient_clip_norm:
-            explainer_grads, _ = tf.clip_by_global_norm(explainer_grads, self.config.gradient_clip_norm)
-            reasoner_grads, _ = tf.clip_by_global_norm(reasoner_grads, self.config.gradient_clip_norm)
-            producer_grads, _ = tf.clip_by_global_norm(producer_grads, self.config.gradient_clip_norm)
+        # 2. Filter out non-finite gradients (NaNs/Infs) to prevent training collapse.
+        #    Replace invalid gradients with zeros for the corresponding variables.
+        explainer_grads = [g if g is not None and tf.reduce_all(tf.math.is_finite(g)) else tf.zeros_like(v)
+                           for g, v in zip(explainer_grads, explainer_vars)]
+        producer_grads = [g if g is not None and tf.reduce_all(tf.math.is_finite(g)) else tf.zeros_like(v)
+                          for g, v in zip(producer_grads, producer_vars)]
+        reasoner_grads = [g if g is not None and tf.reduce_all(tf.math.is_finite(g)) else tf.zeros_like(v)
+                          for g, v in zip(reasoner_grads, reasoner_vars)]
 
-        # Apply gradients
+        # 3. Apply per-tensor gradient clipping if configured
+        clip_norm = self.config.gradient_clip_norm
+        if clip_norm and clip_norm > 0:
+            explainer_grads = [tf.clip_by_norm(g, clip_norm) for g in explainer_grads]
+            reasoner_grads = [tf.clip_by_norm(g, clip_norm) for g in reasoner_grads]
+            producer_grads = [tf.clip_by_norm(g, clip_norm) for g in producer_grads]
+
+        # --- Apply Gradients ---
         self.optimizers['explainer'].apply_gradients(zip(explainer_grads, explainer_vars))
         self.optimizers['producer'].apply_gradients(zip(producer_grads, producer_vars))
         if train_reasoner:
@@ -474,7 +484,7 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
         # --- PROTOCOL ENFORCEMENT for sequential data ---
         e_latent_no_grad = tf.stop_gradient(e_latent)
 
-        # Step 2: Infer label (forward in time)
+        # Step 2: Infer label (forward in time) using gradient-detached explanation
         y_inferred = self.reasoner(x_input, e_latent_no_grad, training=training)
 
         # Producer uses reverse causality via sequence reversal trick
