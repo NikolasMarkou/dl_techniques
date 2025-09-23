@@ -1221,9 +1221,9 @@ if __name__ == "__main__":
         training=TrainingConfig(
             epochs=100,
             learning_rates={
-                'explainer': 1e-3,
-                'reasoner': 1e-3,
-                'producer': 3e-4
+                'explainer': 1e-4,
+                'reasoner': 1e-4,
+                'producer': 3e-3
             },
             loss_fn='l2',
             kl_weight=0.1,
