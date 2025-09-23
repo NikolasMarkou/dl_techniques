@@ -98,25 +98,27 @@ class CCNetOrchestrator:
         # Step 1: Extract latent explanation distribution (mu, log_var)
         mu, log_var = self.explainer(x_input, training=training)
 
-        # Step 1.5: Sample from the latent distribution using reparameterization trick
+        # Step 1.5: Sample from the latent distribution
         std = keras.ops.exp(0.5 * log_var)
         epsilon = keras.random.normal(shape=keras.ops.shape(mu))
         e_latent = mu + epsilon * std
 
-        # --- PROTOCOL ENFORCEMENT ---
-        # Create a version of the latent vector with no gradient path back to the explainer.
-        # This is used for the reconstruction loop, isolating it from the explainer's update.
         e_latent_no_grad = tf.stop_gradient(e_latent)
 
-        # Step 2: Infer label using observation and the gradient-detached explanation
-        y_inferred = self.reasoner(x_input, e_latent_no_grad, training=training)
+        # Step 2: Infer label probabilities (shape: [batch, 10])
+        y_inferred_probs = self.reasoner(x_input, e_latent_no_grad, training=training)
 
-        # Step 3: Reconstruct observation from inferred label and gradient-detached explanation
-        x_reconstructed = self.producer(y_inferred, e_latent_no_grad, training=training)
+        # --- PROTOCOL ENFORCEMENT: CONVERT TO INDICES ---
+        # The Producer's Embedding layer requires integer indices, not one-hot vectors.
+        # Convert the probability distributions to class indices.
+        y_inferred_indices = keras.ops.argmax(y_inferred_probs, axis=-1)
+        y_truth_indices = keras.ops.argmax(y_truth, axis=-1)
 
-        # Step 4: Generate observation from true label and the original, gradient-carrying explanation
-        # The explainer MUST receive a gradient from this path.
-        x_generated = self.producer(y_truth, e_latent, training=training)
+        # Step 3: Reconstruct observation using inferred indices
+        x_reconstructed = self.producer(y_inferred_indices, e_latent_no_grad, training=training)
+
+        # Step 4: Generate observation from true indices
+        x_generated = self.producer(y_truth_indices, e_latent, training=training)
 
         return {
             'x_input': x_input,
@@ -124,7 +126,7 @@ class CCNetOrchestrator:
             'mu': mu,
             'log_var': log_var,
             'e_latent': e_latent,
-            'y_inferred': y_inferred,
+            'y_inferred': y_inferred_probs,  # Return original probabilities for loss/accuracy calcs
             'x_reconstructed': x_reconstructed,
             'x_generated': x_generated
         }
@@ -394,8 +396,7 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
             training: bool = True
     ) -> Dict[str, tf.Tensor]:
         """
-        Forward pass with sequential data handling. The Producer uses the
-        sequence reversal trick to achieve reverse-causal modeling.
+        Forward pass with sequential data handling and correct index conversion.
         """
         mu, log_var = self.explainer(x_input, training=training)
         std = keras.ops.exp(0.5 * log_var)
@@ -403,22 +404,34 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
         e_latent = mu + epsilon * std
         e_latent_no_grad = tf.stop_gradient(e_latent)
 
-        y_inferred = self.reasoner(x_input, e_latent_no_grad, training=training)
+        # Infer label probabilities
+        y_inferred_probs = self.reasoner(x_input, e_latent_no_grad, training=training)
 
-        y_inferred_rev = self.reverse_sequence(y_inferred)
-        y_truth_rev = self.reverse_sequence(y_truth)
+        # --- PROTOCOL ENFORCEMENT: CONVERT TO INDICES ---
+        y_inferred_indices = keras.ops.argmax(y_inferred_probs, axis=-1)
+        y_truth_indices = keras.ops.argmax(y_truth, axis=-1)
 
+        # Reverse sequences for Producer
+        y_inferred_indices_rev = self.reverse_sequence(y_inferred_indices)
+        y_truth_indices_rev = self.reverse_sequence(y_truth_indices)
         e_latent_no_grad_rev = self.reverse_sequence(e_latent_no_grad)
-        x_reconstructed_rev = self.producer(y_inferred_rev, e_latent_no_grad_rev, training=training)
-
         e_latent_rev = self.reverse_sequence(e_latent)
-        x_generated_rev = self.producer(y_truth_rev, e_latent_rev, training=training)
 
+        # Generate with indices
+        x_reconstructed_rev = self.producer(y_inferred_indices_rev, e_latent_no_grad_rev, training=training)
+        x_generated_rev = self.producer(y_truth_indices_rev, e_latent_rev, training=training)
+
+        # Reverse outputs back
         x_reconstructed = self.reverse_sequence(x_reconstructed_rev)
         x_generated = self.reverse_sequence(x_generated_rev)
 
         return {
-            'x_input': x_input, 'y_truth': y_truth, 'mu': mu, 'log_var': log_var,
-            'e_latent': e_latent, 'y_inferred': y_inferred,
-            'x_reconstructed': x_reconstructed, 'x_generated': x_generated
+            'x_input': x_input,
+            'y_truth': y_truth,
+            'mu': mu,
+            'log_var': log_var,
+            'e_latent': e_latent,
+            'y_inferred': y_inferred_probs,
+            'x_reconstructed': x_reconstructed,
+            'x_generated': x_generated
         }
