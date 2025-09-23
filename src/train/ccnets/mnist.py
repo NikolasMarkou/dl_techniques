@@ -64,7 +64,7 @@ class ModelConfig:
     """Configuration for model architecture parameters."""
 
     # Shared parameters
-    explanation_dim: int = 16
+    explanation_dim: int = 8
     num_classes: int = 10
 
     # Explainer parameters
