@@ -1080,13 +1080,13 @@ if __name__ == "__main__":
             epochs=50,
             # CORRECTED: Harmonized learning rates to prevent producer dominance
             learning_rates={
-                'explainer': 3e-3,
-                'reasoner': 3e-3,
-                'producer': 3e-3
+                'explainer': 3e-4,
+                'reasoner': 3e-4,
+                'producer': 3e-4
             },
             # CORRECTED: Switched from volatile L2 loss to robust Huber loss
             # to prevent exploding gradients from large initial reconstruction errors.
-            loss_fn='huber',
+            loss_fn='l2',
             # CORRECTED: Deactivated unstable dynamic weighting
             dynamic_weighting=False,
             # CORRECTED: Drastically reduced KL weight to prevent posterior
