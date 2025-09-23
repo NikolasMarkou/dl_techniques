@@ -96,7 +96,11 @@ class TrainingConfig:
 
     # Basic training parameters
     epochs: int = 20
-    learning_rate: float = 1e-3
+    learning_rates: Dict[str, float] = field(default_factory=lambda: {
+        'explainer': 1e-3,
+        'reasoner': 1e-3,
+        'producer': 3e-4
+    })
 
     # CCNet-specific parameters
     loss_fn: str = 'huber'  # Options: 'l1', 'l2', 'huber', 'polynomial'
@@ -933,11 +937,7 @@ def create_mnist_ccnet(config: ExperimentConfig) -> CCNetOrchestrator:
         explanation_dim=config.model.explanation_dim,
         loss_fn=config.training.loss_fn,
         loss_fn_params=config.training.loss_fn_params,
-        learning_rates={
-            "explainer": config.training.learning_rate,
-            "reasoner": config.training.learning_rate,
-            "producer": config.training.learning_rate
-        },
+        learning_rates=config.training.learning_rates,  # <-- Pass the dictionary directly
         gradient_clip_norm=config.training.gradient_clip_norm,
         kl_weight=config.training.kl_weight,
         dynamic_weighting=config.training.dynamic_weighting,
