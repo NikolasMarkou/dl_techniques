@@ -76,7 +76,7 @@ class ModelConfig:
     # Reasoner parameters
     reasoner_conv_filters: List[int] = field(default_factory=lambda: [32, 64])
     reasoner_conv_kernels: List[int] = field(default_factory=lambda: [5, 3])
-    reasoner_dense_units: List[int] = field(default_factory=lambda: [512, 256])
+    reasoner_dense_units: List[int] = field(default_factory=lambda: [128, 64])
     reasoner_dropout_rate: float = 0.2
     reasoner_l2_regularization: float = 1e-4
     reasoner_leaky_relu_alpha: float = 0.1
@@ -86,7 +86,7 @@ class ModelConfig:
     producer_initial_spatial_size: int = 7
     producer_initial_channels: int = 128
     producer_conv_filters: List[int] = field(default_factory=lambda: [128, 64])
-    producer_style_units: List[int] = field(default_factory=lambda: [256, 128])
+    producer_style_units: List[int] = field(default_factory=lambda: [128, 64])
     producer_leaky_relu_alpha: float = 0.1
 
 
@@ -171,7 +171,7 @@ class VisualizationConfig:
 
     # t-SNE parameters
     tsne_perplexity: int = 30
-    tsne_n_iter: int = 300
+    tsne_max_iter: int = 300
     tsne_random_state: int = 42
 
     # Dashboard settings
@@ -469,7 +469,7 @@ class LatentSpaceAnalysisViz(CompositeVisualization):
         # Extract t-SNE config if provided
         self.tsne_config = data.get("tsne_config", {
             "perplexity": 30,
-            "n_iter": 300,
+            "max_iter": 300,
             "random_state": 42
         })
 
@@ -493,7 +493,7 @@ class LatentSpaceAnalysisViz(CompositeVisualization):
         tsne = TSNE(
             n_components=2,
             perplexity=self.tsne_config["perplexity"],
-            n_iter=self.tsne_config["n_iter"],
+            max_iter=self.tsne_config["max_iter"],
             random_state=self.tsne_config["random_state"]
         )
         self.latent_2d = tsne.fit_transform(self.latent_vectors)
@@ -1131,7 +1131,7 @@ class CCNetExperiment:
         # Prepare visualization data with t-SNE config
         tsne_config = {
             "perplexity": self.config.visualization.tsne_perplexity,
-            "n_iter": self.config.visualization.tsne_n_iter,
+            "max_iter": self.config.visualization.tsne_max_iter,
             "random_state": self.config.visualization.tsne_random_state
         }
 
@@ -1232,7 +1232,7 @@ if __name__ == "__main__":
             batch_size=128,
             apply_augmentation=True,
             noise_stddev=0.01,
-            max_translation=1
+            max_translation=2
         ),
         early_stopping=EarlyStoppingConfig(
             enabled=True,
