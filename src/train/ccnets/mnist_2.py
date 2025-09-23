@@ -51,7 +51,7 @@ from dl_techniques.models.ccnets import (
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.activations.golu import GoLU
-from dl_techniques.layers.regularizers.soft_orthonormal_constraint_regularizer import (
+from dl_techniques.regularizers.soft_orthogonal import (
     SoftOrthonormalConstraintRegularizer
 )
 
