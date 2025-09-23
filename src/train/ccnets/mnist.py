@@ -828,16 +828,11 @@ class MNISTReasoner(keras.Model):
             name="classifier"
         )
 
-    def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build sub-layers explicitly for proper serialization."""
-        if not isinstance(input_shape, list) or len(input_shape) != 2:
-            raise ValueError(
-                f"MNISTReasoner expects input_shape to be a list of 2 shapes "
-                f"[image_shape, explanation_shape], got {input_shape}"
-            )
-
-        image_shape, explanation_shape = input_shape
-        current_shape = image_shape
+        # For reasoner, input_shape represents the image input shape
+        # The explanation will be concatenated later
+        current_shape = input_shape
 
         # Build convolutional blocks
         for block in self.conv_blocks:
@@ -846,7 +841,8 @@ class MNISTReasoner(keras.Model):
 
         # Flatten and combine with explanation
         flat_shape = self.flatten.compute_output_shape(current_shape)
-        combined_dim = flat_shape[-1] + explanation_shape[-1]
+        # Assume explanation dimension from config for building
+        combined_dim = flat_shape[-1] + self.config.explanation_dim
         combined_shape = (flat_shape[0], combined_dim)
 
         # Build dense blocks
@@ -862,14 +858,11 @@ class MNISTReasoner(keras.Model):
 
     def call(
         self,
-        inputs: List[keras.KerasTensor],
+        x: keras.KerasTensor,
+        e: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass through reasoner network."""
-        if len(inputs) != 2:
-            raise ValueError(f"MNISTReasoner expects 2 inputs, got {len(inputs)}")
-
-        x, e = inputs  # image, explanation
 
         # Process image through convolutional blocks
         img_features = x
@@ -1001,15 +994,12 @@ class MNISTProducer(keras.Model):
             name="conv_out_2"
         )
 
-    def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build sub-layers explicitly for proper serialization."""
-        if not isinstance(input_shape, list) or len(input_shape) != 2:
-            raise ValueError(
-                f"MNISTProducer expects input_shape to be a list of 2 shapes "
-                f"[label_shape, explanation_shape], got {input_shape}"
-            )
-
-        label_shape, explanation_shape = input_shape
+        # For producer, input_shape represents the label input shape
+        # The explanation shape is known from config
+        label_shape = input_shape
+        explanation_shape = (label_shape[0], self.config.explanation_dim)
 
         # Build embedding and initial layers
         self.label_embedding.build(label_shape)
@@ -1055,14 +1045,11 @@ class MNISTProducer(keras.Model):
 
     def call(
         self,
-        inputs: List[keras.KerasTensor],
+        y: keras.KerasTensor,
+        e: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass through the producer network."""
-        if len(inputs) != 2:
-            raise ValueError(f"MNISTProducer expects 2 inputs, got {len(inputs)}")
-
-        y, e = inputs  # labels, explanations
 
         # Handle both integer indices and one-hot vectors
         if y.shape.rank > 1 and y.shape[-1] == self.config.num_classes:
@@ -1518,10 +1505,10 @@ def create_mnist_ccnet(config: ExperimentConfig) -> CCNetOrchestrator:
     mu, _ = explainer(dummy_image)
 
     # Initialize producer with proper input format
-    _ = producer([dummy_label_indices, dummy_latent])
+    _ = producer(dummy_label_indices, dummy_latent)
 
     # Initialize reasoner
-    _ = reasoner([dummy_image, dummy_latent])
+    _ = reasoner(dummy_image, dummy_latent)
 
     # Configure CCNet from training config
     ccnet_config = CCNetConfig(
