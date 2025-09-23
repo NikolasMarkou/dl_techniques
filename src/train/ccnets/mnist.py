@@ -1199,13 +1199,30 @@ def create_mnist_ccnet(
     )
 
 
-def prepare_mnist_data() -> Tuple[tf.data.Dataset, tf.data.Dataset]:
+def prepare_mnist_data(
+        batch_size: int = 128,
+        shuffle_buffer_size: int = 60000,
+        apply_augmentation: bool = True,
+        noise_stddev: float = 0.05,
+        max_translation: int = 2
+) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
     """
-    Prepare MNIST dataset for training and validation.
+    Prepare MNIST dataset for training and validation with configurable
+    data augmentation applied to the training set.
+
+    Args:
+        batch_size: The number of samples per batch.
+        shuffle_buffer_size: The size of the buffer used for shuffling the
+                             training data. Should be >= the number of samples.
+        apply_augmentation: If True, applies augmentation to the training set.
+        noise_stddev: The standard deviation of the Gaussian noise added to
+                      the training images. Set to 0 to disable.
+        max_translation: The maximum number of pixels to shift the training
+                         images horizontally or vertically. Set to 0 to disable.
 
     Returns:
         Tuple[tf.data.Dataset, tf.data.Dataset]:
-            Training and validation datasets.
+            A tuple containing the training and validation datasets.
     """
     # Load MNIST data
     (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
@@ -1220,12 +1237,49 @@ def prepare_mnist_data() -> Tuple[tf.data.Dataset, tf.data.Dataset]:
     y_train = keras.utils.to_categorical(y_train, 10)
     y_test = keras.utils.to_categorical(y_test, 10)
 
-    # Create TensorFlow datasets
-    train_ds = tf.data.Dataset.from_tensor_slices((x_train, y_train))
-    train_ds = train_ds.shuffle(1001).batch(128).prefetch(tf.data.AUTOTUNE)
+    # --- Augmentation Function using TensorFlow ops ---
+    def augment(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+        """
+        Applies configured augmentations to a single image.
+        """
+        image_augmented = image
 
+        # 1. Add small Gaussian noise if configured
+        if noise_stddev > 0:
+            noise = tf.random.normal(shape=tf.shape(image_augmented), stddev=noise_stddev)
+            image_augmented = image_augmented + noise
+
+        # 2. Apply random pixel shift if configured
+        if max_translation > 0:
+            # The upper bound for tf.random.uniform with integers is exclusive
+            dx = tf.random.uniform([], -max_translation, max_translation + 1, dtype=tf.int32)
+            dy = tf.random.uniform([], -max_translation, max_translation + 1, dtype=tf.int32)
+            image_augmented = tf.image.translate(
+                image_augmented,
+                translations=[tf.cast(dx, tf.float32), tf.cast(dy, tf.float32)]
+            )
+
+        # Ensure pixel values remain in the [0, 1] range after augmentation
+        image_augmented = tf.clip_by_value(image_augmented, 0.0, 1.0)
+
+        return image_augmented, label
+
+    # Create the base training dataset
+    train_ds = tf.data.Dataset.from_tensor_slices((x_train, y_train))
+
+    # Chain dataset operations
+    train_ds = train_ds.shuffle(shuffle_buffer_size)
+
+    # Conditionally apply the augmentation map
+    if apply_augmentation:
+        train_ds = train_ds.map(augment, num_parallel_calls=tf.data.AUTOTUNE)
+
+    # Apply batching and prefetching
+    train_ds = train_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+    # Create and prepare the validation dataset (no shuffling or augmentation)
     val_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test))
-    val_ds = val_ds.batch(128).prefetch(tf.data.AUTOTUNE)
+    val_ds = val_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
     return train_ds, val_ds
 
