@@ -21,9 +21,6 @@ Examples:
         )
         experiment = CCNetExperiment(config)
         orchestrator, trainer = experiment.run()
-
-Attributes:
-    logger: Module-level logger for tracking execution progress.
 """
 
 import keras
@@ -1224,7 +1221,7 @@ if __name__ == "__main__":
                 'reasoner': 1e-3,
                 'producer': 3e-4
             },
-            loss_fn='huber',
+            loss_fn='l2',
             kl_weight=0.1,
             dynamic_weighting=True
         ),
