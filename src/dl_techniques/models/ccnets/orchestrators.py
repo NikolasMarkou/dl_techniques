@@ -98,6 +98,11 @@ class CCNetOrchestrator:
         # Step 1: Extract latent explanation distribution (mu, log_var)
         mu, log_var = self.explainer(x_input, training=training)
 
+        # CORRECTED: Clip log_var to prevent numerical instability (NaNs) from
+        # the exp operation during the reparameterization trick. Unbounded
+        # positive values in log_var can cause std to become infinite.
+        log_var = tf.clip_by_value(log_var, -10.0, 10.0)
+
         # Step 1.5: Sample from the latent distribution
         std = keras.ops.exp(0.5 * log_var)
         epsilon = keras.random.normal(shape=keras.ops.shape(mu))
@@ -418,6 +423,10 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
         Forward pass with sequential data handling and correct index conversion.
         """
         mu, log_var = self.explainer(x_input, training=training)
+
+        # CORRECTED: Clip log_var to prevent numerical instability.
+        log_var = tf.clip_by_value(log_var, -10.0, 10.0)
+
         std = keras.ops.exp(0.5 * log_var)
         epsilon = keras.random.normal(shape=keras.ops.shape(mu))
         e_latent = mu + epsilon * std
