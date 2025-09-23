@@ -99,7 +99,7 @@ class TrainingConfig:
     learning_rate: float = 1e-3
 
     # CCNet-specific parameters
-    loss_fn: str = 'l2'  # Options: 'l1', 'l2', 'huber', 'polynomial'
+    loss_fn: str = 'huber'  # Options: 'l1', 'l2', 'huber', 'polynomial'
     loss_fn_params: Dict[str, Any] = field(default_factory=dict)
     gradient_clip_norm: Optional[float] = 1.0
     kl_weight: float = 0.1
