@@ -175,10 +175,15 @@ class CCNetOrchestrator:
                 self.config.explainer_weights['kl_divergence'] * kl_loss
         )
 
-        reasoner_error = (
-                self.config.reasoner_weights['reconstruction'] * losses.reconstruction_loss +
-                self.config.reasoner_weights['inference'] * losses.inference_loss
-        )
+        # --- CORRECTED: The Reasoner error must be a direct, differentiable
+        # --- classification loss. The original formulation based on reconstruction
+        # --- was severed by the non-differentiable argmax operation, preventing
+        # --- the Reasoner from receiving any gradients and causing the tf.cond error.
+        y_truth = tensors['y_truth']
+        y_inferred = tensors['y_inferred']
+        classification_loss = keras.losses.categorical_crossentropy(y_truth, y_inferred)
+        reasoner_error = keras.ops.mean(classification_loss)
+
 
         producer_error = (
                 self.config.producer_weights['generation'] * losses.generation_loss +
