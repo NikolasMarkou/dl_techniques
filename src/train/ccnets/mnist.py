@@ -82,8 +82,8 @@ class ModelConfig:
     reasoner_leaky_relu_alpha: float = 0.1
 
     # Producer parameters
-    producer_initial_dense_units: int = 512
-    producer_initial_spatial_size: int = 5
+    producer_initial_dense_units: int = 256
+    producer_initial_spatial_size: int = 7
     producer_initial_channels: int = 128
     producer_conv_filters: List[int] = field(default_factory=lambda: [128, 64])
     producer_style_units: List[int] = field(default_factory=lambda: [256, 128])
