@@ -261,6 +261,19 @@ class CCNetOrchestrator:
         )
 
         # --- Monitor, Filter, and Clip Gradients for Stability ---
+        # CORRECTED: Apply tf.clip_by_value to individual gradients *before*
+        # computing global norm or applying tf.clip_by_norm. This prevents
+        # individual gradient elements from becoming inf/NaN and poisoning
+        # the global norm calculation.
+        grad_value_clip_limit = 1e2  # e.g., clip individual gradient values to [-1000, 1000]
+
+        explainer_grads = [tf.clip_by_value(g, -grad_value_clip_limit, grad_value_clip_limit) if g is not None else tf.zeros_like(v)
+                           for g, v in zip(explainer_grads, explainer_vars)]
+        producer_grads = [tf.clip_by_value(g, -grad_value_clip_limit, grad_value_clip_limit) if g is not None else tf.zeros_like(v)
+                          for g, v in zip(producer_grads, producer_vars)]
+        reasoner_grads = [tf.clip_by_value(g, -grad_value_clip_limit, grad_value_clip_limit) if g is not None else tf.zeros_like(v)
+                          for g, v in zip(reasoner_grads, reasoner_vars)]
+
         explainer_grad_norm = tf.linalg.global_norm(explainer_grads)
         reasoner_grad_norm = tf.linalg.global_norm(reasoner_grads)
         producer_grad_norm = tf.linalg.global_norm(producer_grads)
