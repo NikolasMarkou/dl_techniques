@@ -33,8 +33,8 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 from scipy.stats import gaussian_kde
-from typing import Dict, Any, Optional, Tuple, List
 from dataclasses import dataclass, field
+from typing import Dict, Any, Optional, Tuple, List
 
 # ---------------------------------------------------------------------
 # Local imports
@@ -937,7 +937,7 @@ def create_mnist_ccnet(config: ExperimentConfig) -> CCNetOrchestrator:
         explanation_dim=config.model.explanation_dim,
         loss_fn=config.training.loss_fn,
         loss_fn_params=config.training.loss_fn_params,
-        learning_rates=config.training.learning_rates,  # <-- Pass the dictionary directly
+        learning_rates=config.training.learning_rates,
         gradient_clip_norm=config.training.gradient_clip_norm,
         kl_weight=config.training.kl_weight,
         dynamic_weighting=config.training.dynamic_weighting,
@@ -1231,16 +1231,16 @@ if __name__ == "__main__":
         data=DataConfig(
             batch_size=128,
             apply_augmentation=True,
-            noise_stddev=0.05,
-            max_translation=2
+            noise_stddev=0.01,
+            max_translation=1
         ),
         early_stopping=EarlyStoppingConfig(
             enabled=True,
             patience=20,
-            error_threshold=1e-4
+            error_threshold=1e-5
         ),
         visualization=VisualizationConfig(
-            experiment_name="ccnets_mnist_refactored",
+            experiment_name="ccnets_mnist",
             reconstruction_samples=5,
             latent_space_samples=1000,
             tsne_perplexity=30
