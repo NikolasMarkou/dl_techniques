@@ -9,7 +9,9 @@ simplifies the instantiation of both standard and custom activation functions.
 import keras
 from typing import Dict, Any, Literal, Optional
 
+# ---------------------------------------------------------------------
 # local imports
+# ---------------------------------------------------------------------
 from dl_techniques.utils.logger import logger
 
 from .adaptive_softmax import AdaptiveTemperatureSoftmax
@@ -17,6 +19,7 @@ from .basis_function import BasisFunction
 from .expanded_activations import (
     GELU, SiLU, xATLU, xGELU, xSiLU, EluPlusOne
 )
+from .golu import GoLU
 from .hard_sigmoid import HardSigmoid
 from .hard_swish import HardSwish
 from .mish import Mish, SaturatedMish
@@ -24,12 +27,14 @@ from .relu_k import ReLUK
 from .squash import SquashLayer
 from .thresh_max import ThreshMax
 
+# ---------------------------------------------------------------------
 
 # Type definition for Activation types
 ActivationType = Literal[
     'adaptive_softmax',
     'basis_function',
     'gelu',
+    'golu',
     'silu',
     'xatlu',
     'xgelu',
@@ -77,6 +82,16 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'required_params': [],
         'optional_params': {},
         'use_case': 'State-of-the-art activation for Transformer-based models.'
+    },
+    'golu': {
+        'class': GoLU,
+        'description': 'Gompertz Linear Unit, a self-gated activation using an asymmetrical Gompertz curve.',
+        'required_params': [],
+        'optional_params': {'alpha': 1.0, 'beta': 1.0, 'gamma': 1.0},
+        'use_case': (
+            'Asymmetrical self-gated activation intended to create smoother '
+            'loss landscapes and improve model generalization.'
+        )
     },
     'silu': {
         'class': SiLU,
@@ -276,6 +291,17 @@ def validate_activation_config(activation_type: str, **kwargs: Any) -> None:
                 f"entropy_threshold must be non-negative, "
                 f"got {entropy_threshold}"
             )
+
+    if activation_type == 'golu':
+        alpha = kwargs.get('alpha', 1.0)
+        beta = kwargs.get('beta', 1.0)
+        gamma = kwargs.get('gamma', 1.0)
+        if alpha <= 0.0:
+            raise ValueError(f"alpha must be positive, got {alpha}")
+        if beta <= 0.0:
+            raise ValueError(f"beta must be positive, got {beta}")
+        if gamma <= 0.0:
+            raise ValueError(f"gamma must be positive, got {gamma}")
 
     if activation_type == 'saturated_mish':
         alpha = kwargs.get('alpha', 3.0)

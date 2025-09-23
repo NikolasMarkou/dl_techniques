@@ -4,7 +4,7 @@ The `dl_techniques.layers.activations` module provides a comprehensive collectio
 
 ## Overview
 
-This module includes fifteen distinct activation layer types and a factory system for standardized instantiation and parameter validation. All layers are designed for modern Keras 3.x compatibility and support full serialization, making them suitable for any deep learning pipeline.
+This module includes sixteen distinct activation layer types and a factory system for standardized instantiation and parameter validation. All layers are designed for modern Keras 3.x compatibility and support full serialization, making them suitable for any deep learning pipeline.
 
 ## Available Activation Types
 
@@ -15,6 +15,7 @@ The following layers are supported by the factory system with automated paramete
 | `adaptive_softmax` | `AdaptiveTemperatureSoftmax` | Softmax with dynamic temperature based on input entropy. | Maintaining sharpness in softmax for large output spaces. |
 | `basis_function` | `BasisFunction` | Implements `b(x) = x * sigmoid(x)`, same as SiLU/Swish. | PowerMLP architectures; smooth, self-gated activation. |
 | `gelu` | `GELU` | Gaussian Error Linear Unit. | State-of-the-art activation for Transformer models. |
+| `golu` | `GoLU` | Gompertz Linear Unit, a self-gated activation using an asymmetrical Gompertz curve. | Asymmetrical self-gated activation for smoother loss landscapes and improved generalization. |
 | `hard_sigmoid` | `HardSigmoid` | Piecewise linear approximation of the sigmoid function. | Efficient gating in mobile architectures like MobileNetV3. |
 | `hard_swish` | `HardSwish` | Computationally efficient approximation of the Swish/SiLU function. | High-performance activation for mobile-optimized models. |
 | `silu` | `SiLU` | Sigmoid Linear Unit (Swish). | Self-gated activation that often outperforms ReLU. |
@@ -108,10 +109,24 @@ adaptive_softmax = create_activation_layer(
 **Optional:** `alpha_initializer` (default: 'zeros'), `alpha_regularizer` (default: None), `alpha_constraint` (default: None)
 
 ```python
+import keras
+
 xgelu_reg = create_activation_layer(
     'xgelu',
     alpha_initializer='ones',
     alpha_regularizer=keras.regularizers.L2(1e-4)
+)
+```
+
+### GoLU
+**Optional:** `alpha` (float, default: 1.0), `beta` (float, default: 1.0), `gamma` (float, default: 1.0)
+
+```python
+golu_layer = create_activation_layer(
+    'golu',
+    alpha=0.9,
+    beta=1.1,
+    gamma=1.0
 )
 ```
 
@@ -184,6 +199,9 @@ model = keras.Sequential([
 ### As an Argument to Other Layers
 
 ```python
+import keras
+from dl_techniques.layers.activations import create_activation_layer
+
 # The factory returns a layer instance, not a string or function
 # So it can be used directly where a layer is expected
 dense_layer = keras.layers.Dense(
@@ -195,6 +213,9 @@ dense_layer = keras.layers.Dense(
 ### In Custom Layers
 
 ```python
+import keras
+from dl_techniques.layers.activations import create_activation_layer
+
 @keras.saving.register_keras_serializable()
 class CustomBlock(keras.layers.Layer):
     def __init__(self, units, activation_type='relu', **act_kwargs, **kwargs):
@@ -202,17 +223,17 @@ class CustomBlock(keras.layers.Layer):
         self.units = units
         self.activation_type = activation_type
         self.act_kwargs = act_kwargs
-        
+
         self.dense = keras.layers.Dense(units)
         self.activation = create_activation_layer(
             activation_type,
             **act_kwargs
         )
-    
+
     def call(self, inputs):
         x = self.dense(inputs)
         return self.activation(x)
-    
+
     def get_config(self):
         config = super().get_config()
         config.update({
@@ -229,14 +250,16 @@ The factory performs comprehensive validation for layers with configurable param
 
 ### Value Range and Type Validation
 ```python
+from dl_techniques.layers.activations import create_activation_layer
+
 # Will raise ValueError: k must be a positive integer
-create_activation_layer('relu_k', k=-2)
+# create_activation_layer('relu_k', k=-2)
 
 # Will raise TypeError: k must be an integer
-create_activation_layer('relu_k', k=2.5)
+# create_activation_layer('relu_k', k=2.5)
 
 # Will raise ValueError: alpha must be positive
-create_activation_layer('saturated_mish', alpha=0)
+# create_activation_layer('saturated_mish', alpha=0)
 ```
 
 ## Logging and Debugging
@@ -291,7 +314,3 @@ Get comprehensive information about all available activation types.
 
 #### `ActivationType`
 A `Literal` type defining all valid activation type strings, such as `'gelu'`, `'hard_swish'`, `'xsilu'`, etc.
-
----
-### `factory.py` (Updated)
----
