@@ -15,8 +15,7 @@ from .orchestrators import CCNetOrchestrator
 class CCNetTrainer:
     """
     High-level trainer for CCNet models with built-in callbacks, dynamic
-    weighting, KL annealing, and advanced monitoring of losses, errors,
-    and gradient norms.
+    weighting, KL annealing, and advanced monitoring.
     """
 
     def __init__(
@@ -37,11 +36,8 @@ class CCNetTrainer:
         self.orchestrator = orchestrator
         self.metrics_callback = metrics_callback
         self.kl_annealing_epochs = kl_annealing_epochs
-        # Store initial KL weight for annealing schedule
         self.initial_kl_weight = self.orchestrator.config.kl_weight
-        # Initialize history to store all relevant metrics
         self.history = defaultdict(list)
-        # Initialize moving averages for dynamic weighting and monitoring
         self.loss_moving_averages = defaultdict(lambda: 1.0)
         self.ema_alpha = 0.1  # Smoothing factor for exponential moving average
 
@@ -79,10 +75,14 @@ class CCNetTrainer:
                 if self.orchestrator.config.dynamic_weighting:
                     self._update_dynamic_weights()
 
+                # Execute one training step
                 losses = self.orchestrator.train_step(x_batch, y_batch)
-                train_losses.append({k: v.numpy() for k, v in losses.items()})
 
-                # Update moving averages with the latest batch losses
+                # Update the state of the control strategy from the eager context
+                self.orchestrator.control.update_state(losses)
+
+                # Store and update metrics
+                train_losses.append({k: v.numpy() for k, v in losses.items()})
                 self._update_moving_averages(losses)
 
                 if batch_idx % 10 == 0:
@@ -96,7 +96,6 @@ class CCNetTrainer:
             if validation_dataset is not None:
                 val_metrics = self._run_evaluation(validation_dataset)
                 self._log_epoch_summary("Validation", val_metrics)
-                # Store validation metrics in history as well
                 for key, value in val_metrics.items():
                     self.history[f"val_{key}"].append(value)
 
@@ -127,48 +126,50 @@ class CCNetTrainer:
     def _update_moving_averages(self, current_losses: Dict[str, tf.Tensor]):
         """Update exponential moving average of losses."""
         for key, value in current_losses.items():
+            # Ensure value is a numpy float for EMA calculation
+            numpy_val = value.numpy() if hasattr(value, 'numpy') else value
             self.loss_moving_averages[key] = (
-                    self.ema_alpha * value.numpy() +
+                    self.ema_alpha * numpy_val +
                     (1 - self.ema_alpha) * self.loss_moving_averages[key]
             )
 
     def _update_dynamic_weights(self):
         """Dynamically adjust loss weights to balance module training."""
-        # Normalize weights to prevent scale explosion. Add epsilon for stability.
         epsilon = 1e-8
         rec_avg = self.loss_moving_averages['reconstruction_loss'] + epsilon
         gen_avg = self.loss_moving_averages['generation_loss'] + epsilon
         inf_avg = self.loss_moving_averages['inference_loss'] + epsilon
 
-        # Balance Reasoner: reconstruction vs inference
+        # Balance Reasoner
         total_reasoner = rec_avg + inf_avg
         self.orchestrator.config.reasoner_weights['reconstruction'] = inf_avg / total_reasoner
         self.orchestrator.config.reasoner_weights['inference'] = rec_avg / total_reasoner
 
-        # Balance Explainer: generation vs inference
+        # Balance Explainer
         total_explainer = gen_avg + inf_avg
         self.orchestrator.config.explainer_weights['generation'] = inf_avg / total_explainer
         self.orchestrator.config.explainer_weights['inference'] = gen_avg / total_explainer
 
-        # Balance Producer: generation vs reconstruction
+        # Balance Producer
         total_producer = gen_avg + rec_avg
         self.orchestrator.config.producer_weights['generation'] = rec_avg / total_producer
         self.orchestrator.config.producer_weights['reconstruction'] = gen_avg / total_producer
 
     def _print_progress(self, batch_idx: int, losses: Dict[str, tf.Tensor]):
         """Print training progress for a batch."""
-        gen_loss = losses['generation_loss'].numpy()
-        rec_loss = losses['reconstruction_loss'].numpy()
-        inf_loss = losses['inference_loss'].numpy()
+        gen = losses['generation_loss'].numpy()
+        rec = losses['reconstruction_loss'].numpy()
+        inf = losses['inference_loss'].numpy()
         acc = losses.get('batch_accuracy', np.array(0.0)).numpy()
+        is_training = losses.get('reasoner_is_training', np.array(0.0)).numpy()
         print(
-            f"  Batch {batch_idx:04d} -> Acc: {acc:.3f}, Gen: {gen_loss:.4f}, Rec: {rec_loss:.4f}, Inf: {inf_loss:.4f}")
+            f"  Batch {batch_idx:04d} -> Acc: {acc:.3f}, Gen: {gen:.4f}, Rec: {rec:.4f}, Inf: {inf:.4f}, ReaTrain: {int(is_training)}")
 
     def _log_epoch_summary(self, stage: str, metrics: Dict[str, float]):
         """Log a summary of metrics for an epoch."""
-        gen_loss = metrics.get('generation_loss', 0)
-        rec_loss = metrics.get('reconstruction_loss', 0)
-        inf_loss = metrics.get('inference_loss', 0)
+        gen = metrics.get('generation_loss', 0)
+        rec = metrics.get('reconstruction_loss', 0)
+        inf = metrics.get('inference_loss', 0)
         expl_err = metrics.get('explainer_error', 0)
         reas_err = metrics.get('reasoner_error', 0)
         prod_err = metrics.get('producer_error', 0)
@@ -177,7 +178,7 @@ class CCNetTrainer:
         print(f"\n{stage} Summary:")
         if accuracy is not None:
             print(f"  Accuracy: {accuracy:.4f}")
-        print(f"  Losses -> Gen: {gen_loss:.4f}, Rec: {rec_loss:.4f}, Inf: {inf_loss:.4f}")
+        print(f"  Losses -> Gen: {gen:.4f}, Rec: {rec:.4f}, Inf: {inf:.4f}")
         print(f"  Errors -> Exp: {expl_err:.4f}, Rea: {reas_err:.4f}, Pro: {prod_err:.4f}")
 
         if 'explainer_grad_norm' in metrics:
@@ -185,6 +186,11 @@ class CCNetTrainer:
             reas_gn = metrics.get('reasoner_grad_norm', 0)
             prod_gn = metrics.get('producer_grad_norm', 0)
             print(f"  Grad Norms -> Exp: {expl_gn:.4f}, Rea: {reas_gn:.4f}, Pro: {prod_gn:.4f}")
+
+        if 'reasoner_is_training' in metrics:
+            train_ratio = metrics.get('reasoner_is_training', 0)
+            print(f"  Reasoner Training Ratio: {train_ratio:.2%}")
+
         print("-" * 30)
 
     def _aggregate_metrics(self, losses_list: List[Dict[str, float]]) -> Dict[str, float]:

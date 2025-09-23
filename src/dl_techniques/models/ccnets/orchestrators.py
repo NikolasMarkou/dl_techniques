@@ -6,9 +6,9 @@ from typing import Dict, Optional, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from .losses import L1Loss, L2Loss, HuberLoss
+from .losses import L1Loss, L2Loss, HuberLoss, PolynomialLoss
 from .base import CCNetModule, CCNetConfig, CCNetLosses, CCNetModelErrors
-from .control import ConvergenceControlStrategy, StaticThresholdStrategy, AdaptiveDivergenceStrategy
+from .control import ConvergenceControlStrategy, StaticThresholdStrategy
 
 
 # ---------------------------------------------------------------------
@@ -25,7 +25,7 @@ class CCNetOrchestrator:
             reasoner: CCNetModule,
             producer: CCNetModule,
             config: Optional[CCNetConfig] = None,
-            control_strategy: Optional[ConvergenceControlStrategy] = AdaptiveDivergenceStrategy()
+            control_strategy: Optional[ConvergenceControlStrategy] = None
     ):
         """
         Initialize the CCNet orchestrator.
@@ -37,18 +37,17 @@ class CCNetOrchestrator:
             producer: Neural network module modeling P(X|Y,E).
             config: Configuration object for the framework.
             control_strategy: A strategy object that determines when to train the
-                              Reasoner to prevent premature convergence.
+                              Reasoner to prevent premature convergence. Defaults
+                              to StaticThresholdStrategy for backward compatibility.
         """
         self.explainer = explainer
         self.reasoner = reasoner
         self.producer = producer
         self.config = config or CCNetConfig()
-        self.control = control_strategy
+        self.control = control_strategy or StaticThresholdStrategy()
 
-        # Initialize loss function
+        # Initialize core components
         self._init_loss_function()
-
-        # Initialize optimizers
         self._init_optimizers()
 
         # Setup mixed precision if requested
@@ -56,13 +55,23 @@ class CCNetOrchestrator:
             self._setup_mixed_precision()
 
     def _init_loss_function(self):
-        """Initialize the loss function based on configuration."""
+        """
+        Initialize the loss function based on configuration, allowing for
+        parameterized loss functions.
+        """
         loss_map = {
-            'l1': L1Loss(),
-            'l2': L2Loss(),
-            'huber': HuberLoss()
+            'l1': L1Loss,
+            'l2': L2Loss,
+            'huber': HuberLoss,
+            'polynomial': PolynomialLoss
         }
-        self.loss_fn = loss_map.get(self.config.loss_type, L2Loss())
+        loss_class = loss_map.get(self.config.loss_fn)
+        if loss_class is None:
+            raise ValueError(f"Unsupported loss function '{self.config.loss_fn}'. "
+                             f"Supported types are: {list(loss_map.keys())}")
+
+        # Instantiate the class with parameters from config
+        self.loss_fn = loss_class(**self.config.loss_fn_params)
 
     def _init_optimizers(self):
         """Initialize optimizers for each module."""
@@ -191,8 +200,7 @@ class CCNetOrchestrator:
     ) -> Dict[str, tf.Tensor]:
         """
         Perform a single training step with causal credit assignment.
-        This implementation uses separate gradient tapes and delegates
-        Reasoner training decisions to a control strategy.
+        This implementation is compiled to a static graph for performance.
 
         Args:
             x_input: Input observation batch.
@@ -201,11 +209,10 @@ class CCNetOrchestrator:
         Returns:
             Dictionary of scalar loss, error, and gradient norm tensors.
         """
-        # Tapes for each model
         with tf.GradientTape() as explainer_tape, \
                 tf.GradientTape() as reasoner_tape, \
                 tf.GradientTape() as producer_tape:
-            # Perform a single forward pass
+
             tensors = self.forward_pass(x_input, y_truth, training=True)
             losses = self.compute_losses(tensors)
             errors = self.compute_model_errors(losses, tensors)
@@ -217,60 +224,43 @@ class CCNetOrchestrator:
             keras.ops.cast(keras.ops.equal(y_true_labels, y_pred_labels), dtype='float32')
         )
 
-        # Delegate training decision to the control strategy
-        current_metrics = {
-            'batch_accuracy': batch_accuracy,
-            'explainer_error': errors.explainer_error,
-            'reasoner_error': errors.reasoner_error,
-            'producer_error': errors.producer_error,
-        }
+        # Delegate training decision to the control strategy (read-only in graph)
+        current_metrics = {'batch_accuracy': batch_accuracy}
         train_reasoner = self.control.should_train_reasoner(current_metrics)
-        # Update strategy state after decision is made
-        self.control.update_state(current_metrics)
 
-        # Gradient computation for Explainer and Producer
+        # Compute gradients for all modules
         explainer_vars = self.explainer.trainable_variables
         explainer_grads = explainer_tape.gradient(errors.explainer_error, explainer_vars)
-
         producer_vars = self.producer.trainable_variables
         producer_grads = producer_tape.gradient(errors.producer_error, producer_vars)
-
-        # Conditional gradient computation for Reasoner
         reasoner_vars = self.reasoner.trainable_variables
+
         if train_reasoner:
             reasoner_grads = reasoner_tape.gradient(errors.reasoner_error, reasoner_vars)
         else:
-            # Assign zero gradients if Reasoner is not training
             reasoner_grads = [tf.zeros_like(v) for v in reasoner_vars]
 
-        # Monitoring: Compute gradient norms before clipping
+        # Compute gradient norms for monitoring
         explainer_grad_norm = tf.linalg.global_norm(explainer_grads)
         reasoner_grad_norm = tf.linalg.global_norm(reasoner_grads)
         producer_grad_norm = tf.linalg.global_norm(producer_grads)
 
-        # Gradient clipping
+        # Apply gradient clipping if configured
         if self.config.gradient_clip_norm:
-            explainer_grads = [
-                tf.clip_by_norm(g, self.config.gradient_clip_norm) if g is not None else None
-                for g in explainer_grads
-            ]
-            reasoner_grads = [
-                tf.clip_by_norm(g, self.config.gradient_clip_norm) if g is not None else None
-                for g in reasoner_grads
-            ]
-            producer_grads = [
-                tf.clip_by_norm(g, self.config.gradient_clip_norm) if g is not None else None
-                for g in producer_grads
-            ]
+            explainer_grads = [tf.clip_by_norm(g, self.config.gradient_clip_norm) if g is not None else None for g in
+                               explainer_grads]
+            reasoner_grads = [tf.clip_by_norm(g, self.config.gradient_clip_norm) if g is not None else None for g in
+                              reasoner_grads]
+            producer_grads = [tf.clip_by_norm(g, self.config.gradient_clip_norm) if g is not None else None for g in
+                              producer_grads]
 
         # Apply gradients
         self.optimizers['explainer'].apply_gradients(zip(explainer_grads, explainer_vars))
         self.optimizers['producer'].apply_gradients(zip(producer_grads, producer_vars))
-        # Apply Reasoner gradients only if it was allowed to train
         if train_reasoner:
             self.optimizers['reasoner'].apply_gradients(zip(reasoner_grads, reasoner_vars))
 
-        # Return losses and other metrics as a dictionary
+        # Return a comprehensive dictionary of results
         return {
             'generation_loss': losses.generation_loss,
             'reconstruction_loss': losses.reconstruction_loss,
@@ -282,8 +272,7 @@ class CCNetOrchestrator:
             'reasoner_grad_norm': reasoner_grad_norm,
             'producer_grad_norm': producer_grad_norm,
             'batch_accuracy': batch_accuracy,
-            # Added metric to monitor the control strategy's decision
-            'reasoner_is_training': tf.constant(1.0 if train_reasoner else 0.0, dtype='float32')
+            'reasoner_is_training': tf.cast(train_reasoner, dtype=tf.float32)
         }
 
     def evaluate(
@@ -322,10 +311,6 @@ class CCNetOrchestrator:
         """
         Generate counterfactual observations.
 
-        Given a reference observation and a target label, generate what the
-        observation would look like with the target label but in the style
-        of the reference.
-
         Args:
             x_reference: Reference observation (provides style).
             y_target: Target label (what to generate).
@@ -333,13 +318,9 @@ class CCNetOrchestrator:
         Returns:
             Generated counterfactual observation.
         """
-        # Extract style from reference (we only need the mean for generation)
         mu, _ = self.explainer(x_reference, training=False)
         e_style = mu
-
-        # Generate with new label but same style
         x_counterfactual = self.producer(y_target, e_style, training=False)
-
         return x_counterfactual
 
     def style_transfer(
@@ -357,18 +338,12 @@ class CCNetOrchestrator:
         Returns:
             Generated observation with content from x_content and style from x_style.
         """
-        # Extract style from style reference
         mu_style, _ = self.explainer(x_style, training=False)
         e_style = mu_style
-
-        # Infer label from content reference
-        mu_content, log_var_content = self.explainer(x_content, training=False)
-        e_content_latent = mu_content  # Use mean for inference
+        mu_content, _ = self.explainer(x_content, training=False)
+        e_content_latent = mu_content
         y_content = self.reasoner(x_content, e_content_latent, training=False)
-
-        # Generate with content label and style
         x_transferred = self.producer(y_content, e_style, training=False)
-
         return x_transferred
 
     def disentangle_causes(
@@ -382,16 +357,11 @@ class CCNetOrchestrator:
             x_input: Input observation.
 
         Returns:
-            Tuple of (explicit_cause, latent_cause). Latent cause is the mean
-            of the learned distribution.
+            Tuple of (explicit_cause, latent_cause).
         """
-        # Extract latent cause distribution
         mu, _ = self.explainer(x_input, training=False)
         e_latent = mu
-
-        # Infer explicit cause
         y_explicit = self.reasoner(x_input, e_latent, training=False)
-
         return y_explicit, e_latent
 
     def verify_consistency(
@@ -409,23 +379,14 @@ class CCNetOrchestrator:
         Returns:
             True if the network's reasoning is consistent.
         """
-        # Extract causes
         y_explicit, e_latent = self.disentangle_causes(x_input)
-
-        # Reconstruct from causes
         x_reconstructed = self.producer(y_explicit, e_latent, training=False)
-
-        # Compute reconstruction error
         error = keras.ops.mean(keras.ops.abs(x_reconstructed - x_input))
-
         return bool(keras.ops.convert_to_numpy(error) < threshold)
 
     def save_models(self, base_path: str):
         """
         Save all three models to disk.
-
-        Args:
-            base_path: Base path for saving models.
         """
         self.explainer.save(f"{base_path}_explainer.keras")
         self.reasoner.save(f"{base_path}_reasoner.keras")
@@ -434,9 +395,6 @@ class CCNetOrchestrator:
     def load_models(self, base_path: str):
         """
         Load all three models from disk.
-
-        Args:
-            base_path: Base path for loading models.
         """
         self.explainer = keras.models.load_model(f"{base_path}_explainer.keras")
         self.reasoner = keras.models.load_model(f"{base_path}_reasoner.keras")
@@ -459,32 +417,13 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
             config: Optional[CCNetConfig] = None,
             control_strategy: Optional[ConvergenceControlStrategy] = None
     ):
-        """
-        Initialize sequential CCNet orchestrator.
-
-        Args:
-            explainer: Sequential model for P(E|X).
-            reasoner: Sequential model for P(Y|X,E).
-            producer: Sequential model that will operate on reversed sequences.
-            config: Configuration (should have sequential_data=True).
-            control_strategy: A strategy object that determines when to train the
-                              Reasoner. Inherited from the base class.
-        """
         super().__init__(explainer, reasoner, producer, config, control_strategy)
-
         if not self.config.sequential_data:
-            # Enforce sequential mode if using this orchestrator
             self.config.sequential_data = True
 
     def reverse_sequence(self, sequence: tf.Tensor) -> tf.Tensor:
         """
         Reverse a sequence along the time dimension (axis 1).
-
-        Args:
-            sequence: Input sequence [batch, seq_len, ...].
-
-        Returns:
-            Reversed sequence.
         """
         return keras.ops.flip(sequence, axis=1)
 
@@ -497,14 +436,6 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
         """
         Forward pass with sequential data handling. The Producer uses the
         sequence reversal trick to achieve reverse-causal modeling.
-
-        Args:
-            x_input: Sequential input [batch, seq_len, features].
-            y_truth: Sequential labels [batch, seq_len, num_classes].
-            training: Whether in training mode.
-
-        Returns:
-            Dictionary containing all intermediate tensors.
         """
         # Standard forward pass for Explainer and Reasoner
         mu, log_var = self.explainer(x_input, training=training)
@@ -514,12 +445,9 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
         y_inferred = self.reasoner(x_input, e_latent, training=training)
 
         # Producer uses reverse causality via sequence reversal trick
-        # Reverse inputs
         y_inferred_rev = self.reverse_sequence(y_inferred)
         y_truth_rev = self.reverse_sequence(y_truth)
         e_latent_rev = self.reverse_sequence(e_latent)
-
-        # Generate with reversed sequences
         x_reconstructed_rev = self.producer(y_inferred_rev, e_latent_rev, training=training)
         x_generated_rev = self.producer(y_truth_rev, e_latent_rev, training=training)
 
