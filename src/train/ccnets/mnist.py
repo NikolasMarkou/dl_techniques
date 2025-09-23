@@ -975,8 +975,12 @@ class CCNetExperiment:
 
         callbacks = []
         if self.config.early_stopping.enabled:
+            # CORRECTED: Manually pass the expected arguments instead of unpacking
+            # the entire config dictionary which contains the unexpected 'enabled' key.
             callbacks.append(EarlyStoppingCallback(
-                **self.config.early_stopping.__dict__
+                patience=self.config.early_stopping.patience,
+                error_threshold=self.config.early_stopping.error_threshold,
+                grad_stagnation_threshold=self.config.early_stopping.grad_stagnation_threshold
             ))
 
         logger.info(f"Starting training for {self.config.training.epochs} epochs...")
