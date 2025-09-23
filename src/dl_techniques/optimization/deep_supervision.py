@@ -65,14 +65,14 @@ Usage Example:
 
 import numpy as np
 from enum import Enum
-from typing import Dict, Callable, Optional, Union, Any
+from typing import Dict, Callable, Optional, Union
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.constants import *
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.constants import TYPE_STR, CONFIG_STR
 
 # ---------------------------------------------------------------------
 
