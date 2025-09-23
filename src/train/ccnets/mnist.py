@@ -231,7 +231,10 @@ class FiLMLayer(keras.layers.Layer):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.style_projection: Optional[keras.layers.Dense] = None
+        # CORRECTED: Define separate projection layers for gamma and beta
+        # to allow for different activation functions.
+        self.gamma_projection: Optional[keras.layers.Dense] = None
+        self.beta_projection: Optional[keras.layers.Dense] = None
         self.num_channels: Optional[int] = None
 
     def build(self, input_shape: List[tuple]) -> None:
@@ -243,8 +246,16 @@ class FiLMLayer(keras.layers.Layer):
         """
         content_shape, _ = input_shape
         self.num_channels = content_shape[-1]
-        self.style_projection = keras.layers.Dense(
-            self.num_channels * 2, name="style_projection"
+
+        # CORRECTED: Use a tanh activation on gamma to constrain the scaling
+        # factor to a stable range [0, 2]. Beta remains linear. This is the
+        # critical fix for the NaN issue, preventing exploding activations
+        # inside the Producer network.
+        self.gamma_projection = keras.layers.Dense(
+            self.num_channels, name="gamma_projection", activation='tanh'
+        )
+        self.beta_projection = keras.layers.Dense(
+            self.num_channels, name="beta_projection", activation='linear'
         )
         super().build(input_shape)
 
@@ -261,9 +272,8 @@ class FiLMLayer(keras.layers.Layer):
         content_tensor, style_vector = inputs
 
         # Project style vector to get gamma (scale) and beta (bias)
-        gamma_beta = self.style_projection(style_vector)
-        gamma = gamma_beta[:, : self.num_channels]
-        beta = gamma_beta[:, self.num_channels:]
+        gamma = self.gamma_projection(style_vector)
+        beta = self.beta_projection(style_vector)
 
         # Reshape for broadcasting
         gamma = keras.ops.expand_dims(keras.ops.expand_dims(gamma, 1), 1)
