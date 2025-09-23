@@ -809,27 +809,33 @@ class MNISTProducer(keras.Model):
         self.conv_out_2 = keras.layers.Conv2D(1, 1, padding="same", activation="sigmoid")
 
     def call(
-        self, y: keras.KerasTensor, e: keras.KerasTensor, training: bool = False
+            self,
+            y_indices: keras.KerasTensor,
+            e: keras.KerasTensor,
+            training: Optional[bool] = False
     ) -> keras.KerasTensor:
-        c = keras.ops.matmul(y, self.label_embedding.weights[0])
-        c = self.reshape_content(self.fc_content(c))
+        """Forward pass through the producer network."""
+        # CORRECTED: Use the embedding layer directly with integer indices,
+        # which is the standard and correct way. The manual matmul is removed.
+        c: keras.KerasTensor = self.label_embedding(y_indices)
+
+        # The rest of the forward pass remains the same
+        c = self.fc_content(c)
+        c = self.reshape_content(c)
+
         x = c
-        for up, conv, norm, film, act in zip(
-            self.up_layers, self.conv_layers, self.norm_layers,
-            self.film_layers, self.act_layers
-        ):
+        for i, (up, conv, norm, film, act) in enumerate(zip(
+                self.up_layers, self.conv_layers,
+                self.norm_layers, self.film_layers, self.act_layers
+        )):
             x = up(x)
             x = conv(x)
             x = norm(x, training=training)
-            x = film([x, e])
+            x = film([x, e])  # Apply style modulation here
             x = act(x)
+
         x = self.conv_out_1(x)
         return self.conv_out_2(x)
-
-    def get_config(self) -> Dict[str, Any]:
-        base_config = super().get_config()
-        base_config.update({"config": self.config.__dict__})
-        return base_config
 
 
 # =====================================================================
@@ -838,17 +844,37 @@ class MNISTProducer(keras.Model):
 
 
 def create_mnist_ccnet(config: ExperimentConfig) -> CCNetOrchestrator:
-    """Create and initialize a CCNet for MNIST."""
+    """
+    Create and initialize a CCNet for MNIST digit classification.
+
+    Args:
+        config: Experiment configuration object.
+
+    Returns:
+        CCNetOrchestrator: Configured CCNet orchestrator instance.
+    """
+    # Initialize model components with configuration
     explainer = MNISTExplainer(config.model)
     reasoner = MNISTReasoner(config.model)
     producer = MNISTProducer(config.model)
 
-    dummy_img = keras.ops.zeros((1, 28, 28, 1))
-    dummy_label = keras.ops.zeros((1, 10))
-    dummy_latent, _ = explainer(dummy_img)
-    _ = producer(dummy_label, dummy_latent)
-    _ = reasoner(dummy_img, dummy_latent)
+    # Build models with dummy data to initialize weights
+    dummy_image: keras.KerasTensor = keras.ops.zeros((1, 28, 28, 1))
+    dummy_label_one_hot: keras.KerasTensor = keras.ops.zeros((1, 10))
+    dummy_label_indices: keras.KerasTensor = keras.ops.zeros((1,), dtype="int32")
 
+    # Initialize explainer
+    mu, _ = explainer(dummy_image)
+    dummy_latent: keras.KerasTensor = mu
+
+    # CORRECTED: Initialize the Producer with integer indices, not one-hot vectors.
+    # The original incorrect line was: _ = producer(dummy_label_one_hot, dummy_latent)
+    _ = producer(dummy_label_indices, dummy_latent)
+
+    # Initialize reasoner (this part is correct)
+    _ = reasoner(dummy_image, dummy_latent)
+
+    # Configure CCNet from training config
     ccnet_config = CCNetConfig(
         explanation_dim=config.model.explanation_dim,
         loss_fn=config.training.loss_fn,
@@ -860,6 +886,8 @@ def create_mnist_ccnet(config: ExperimentConfig) -> CCNetOrchestrator:
         reasoner_weights=config.training.reasoner_weights,
         producer_weights=config.training.producer_weights,
     )
+
+    # Create orchestrator
     return CCNetOrchestrator(
         explainer=wrap_keras_model(explainer),
         reasoner=wrap_keras_model(reasoner),
