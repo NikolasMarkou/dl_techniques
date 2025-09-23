@@ -333,7 +333,7 @@ class SoftOrthonormalConstraintRegularizer(keras.regularizers.Regularizer):
             lambda_coefficient: float = DEFAULT_SOFTORTHOGONAL_LAMBDA,
             l1_coefficient: float = DEFAULT_SOFTORTHOGONAL_L1,
             l2_coefficient: float = DEFAULT_SOFTORTHOGONAL_L2,
-            use_matrix_scaling: bool = False,
+            use_matrix_scaling: bool = True,
             **kwargs: Any
     ) -> None:
         """Initialize the soft orthonormal constraint regularizer.
