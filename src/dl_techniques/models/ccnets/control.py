@@ -10,7 +10,7 @@ class ConvergenceControlStrategy(ABC):
         """Update the internal state of the strategy with the latest metrics."""
         pass
 
-    @abstract.method
+    @abstractmethod
     def should_train_reasoner(self, metrics: Dict[str, tf.Tensor]) -> bool:
         """
         Determine if the Reasoner should be trained in the current step.
