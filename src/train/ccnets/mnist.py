@@ -51,6 +51,9 @@ from dl_techniques.models.ccnets import (
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.activations.golu import GoLU
+from dl_techniques.regularizers.soft_orthogonal import (
+    SoftOrthonormalConstraintRegularizer
+)
 
 # =====================================================================
 # CENTRALIZED CONFIGURATION
@@ -72,6 +75,12 @@ class ModelConfig:
         default_factory=lambda: [5, 3, 3]
     )
     explainer_l2_regularization: float = 1e-4
+
+    # Orthonormal regularization for explanation vectors
+    explainer_orthonormal_lambda: float = 1e-3
+    explainer_orthonormal_l1: float = 0.0
+    explainer_orthonormal_l2: float = 0.0
+    explainer_use_matrix_scaling: bool = True
 
     # Reasoner parameters
     reasoner_conv_filters: List[int] = field(
@@ -96,6 +105,12 @@ class ModelConfig:
     producer_style_units: List[int] = field(
         default_factory=lambda: [256, 128]
     )
+
+    # Orthonormal regularization for style projections
+    producer_orthonormal_lambda: float = 1e-3
+    producer_orthonormal_l1: float = 0.0
+    producer_orthonormal_l2: float = 0.0
+    producer_use_matrix_scaling: bool = True
 
 
 @dataclass
@@ -225,7 +240,7 @@ class ExperimentConfig:
 @keras.saving.register_keras_serializable()
 class FiLMLayer(keras.layers.Layer):
     """
-    Feature-wise Linear Modulation (FiLM) Layer.
+    Feature-wise Linear Modulation (FiLM) Layer with optional orthonormal regularization.
 
     Applies an affine transformation to a content tensor based on a
     style vector. It learns a projection from the style vector to generate
@@ -233,7 +248,8 @@ class FiLMLayer(keras.layers.Layer):
 
     **Intent**: Enable conditional generation by modulating feature maps
     based on style/condition vectors, commonly used in conditional GANs
-    and style transfer networks.
+    and style transfer networks. Optional orthonormal regularization helps
+    maintain diverse and non-redundant style projections.
 
     **Architecture**:
     ```
@@ -246,6 +262,7 @@ class FiLMLayer(keras.layers.Layer):
     ```
 
     Args:
+        kernel_regularizer: Optional regularizer for projection layers
         **kwargs: Additional arguments for Layer base class.
 
     Input shape:
@@ -260,11 +277,18 @@ class FiLMLayer(keras.layers.Layer):
         gamma_projection: Dense layer for scaling parameters
         beta_projection: Dense layer for shifting parameters
         num_channels: Number of channels to modulate
+        kernel_regularizer: Regularizer applied to projection layers
     """
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        **kwargs: Any
+    ) -> None:
         """Initialize FiLM layer with projection layers."""
         super().__init__(**kwargs)
+
+        self.kernel_regularizer = kernel_regularizer
 
         # These will be created in build() when we know the shape
         self.gamma_projection: Optional[keras.layers.Dense] = None
@@ -292,9 +316,11 @@ class FiLMLayer(keras.layers.Layer):
 
         # Create sub-layers in build() when we know the dimensions
         # Use tanh activation on gamma to constrain scaling to stable range
+        # Apply orthonormal regularization to gamma projection for better disentanglement
         self.gamma_projection = keras.layers.Dense(
             self.num_channels,
             activation='tanh',
+            kernel_regularizer=self.kernel_regularizer,
             name=f"{self.name}_gamma_projection"
         )
         self.beta_projection = keras.layers.Dense(
@@ -344,7 +370,11 @@ class FiLMLayer(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """Get the configuration dictionary for layer serialization."""
-        return super().get_config()
+        config = super().get_config()
+        config.update({
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer) if self.kernel_regularizer else None,
+        })
+        return config
 
 
 @keras.saving.register_keras_serializable()
@@ -651,9 +681,25 @@ class MNISTExplainer(keras.Model):
 
         self.config = config
 
-        # Create regularizer if specified
+        # Create orthonormal regularizer for style projections
+        self.orthonormal_regularizer = SoftOrthonormalConstraintRegularizer(
+            lambda_coefficient=config.producer_orthonormal_lambda,
+            l1_coefficient=config.producer_orthonormal_l1,
+            l2_coefficient=config.producer_orthonormal_l2,
+            use_matrix_scaling=config.producer_use_matrix_scaling
+        ) if config.producer_orthonormal_lambda > 0 else None
+
+        # Create regularizers
         l2_reg = config.explainer_l2_regularization
-        self.regularizer = keras.regularizers.L2(l2_reg) if l2_reg > 0 else None
+        self.l2_regularizer = keras.regularizers.L2(l2_reg) if l2_reg > 0 else None
+
+        # Orthonormal regularizer for explanation vectors
+        self.orthonormal_regularizer = SoftOrthonormalConstraintRegularizer(
+            lambda_coefficient=config.explainer_orthonormal_lambda,
+            l1_coefficient=config.explainer_orthonormal_l1,
+            l2_coefficient=config.explainer_orthonormal_l2,
+            use_matrix_scaling=config.explainer_use_matrix_scaling
+        ) if config.explainer_orthonormal_lambda > 0 else None
 
         # Create convolutional blocks
         self.conv_blocks: List[ConvBlock] = []
@@ -670,7 +716,7 @@ class MNISTExplainer(keras.Model):
                 use_pooling=use_pooling,
                 pool_size=2,
                 pool_type="max",
-                kernel_regularizer=self.regularizer,
+                kernel_regularizer=self.l2_regularizer,
                 name=f"conv_block_{i + 1}"
             )
             self.conv_blocks.append(block)
@@ -679,16 +725,16 @@ class MNISTExplainer(keras.Model):
         self.global_pool = keras.layers.GlobalMaxPooling2D(name="global_pool")
         self.flatten = keras.layers.Flatten(name="flatten")
 
-        # Variational head
+        # Variational head with orthonormal regularization
         self.fc_mu = keras.layers.Dense(
             config.explanation_dim,
             name="mu",
-            kernel_regularizer=self.regularizer
+            kernel_regularizer=self.orthonormal_regularizer
         )
         self.fc_log_var = keras.layers.Dense(
             config.explanation_dim,
             name="log_var",
-            kernel_regularizer=self.regularizer
+            kernel_regularizer=self.l2_regularizer  # Use L2 for variance, not orthonormal
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -740,6 +786,10 @@ class MNISTExplainer(keras.Model):
                 "explainer_conv_filters": self.config.explainer_conv_filters,
                 "explainer_conv_kernels": self.config.explainer_conv_kernels,
                 "explainer_l2_regularization": self.config.explainer_l2_regularization,
+                "explainer_orthonormal_lambda": self.config.explainer_orthonormal_lambda,
+                "explainer_orthonormal_l1": self.config.explainer_orthonormal_l1,
+                "explainer_orthonormal_l2": self.config.explainer_orthonormal_l2,
+                "explainer_use_matrix_scaling": self.config.explainer_use_matrix_scaling,
             }
         })
         return config
@@ -786,9 +836,9 @@ class MNISTReasoner(keras.Model):
 
         self.config = config
 
-        # Create regularizer if specified
+        # Create regularizers
         l2_reg = config.reasoner_l2_regularization
-        self.regularizer = keras.regularizers.L2(l2_reg) if l2_reg > 0 else None
+        self.l2_regularizer = keras.regularizers.L2(l2_reg) if l2_reg > 0 else None
 
         # Create convolutional blocks for image processing
         self.conv_blocks: List[ConvBlock] = []
@@ -802,7 +852,7 @@ class MNISTReasoner(keras.Model):
                 use_pooling=True,
                 pool_size=2,
                 pool_type="max",
-                kernel_regularizer=self.regularizer,
+                kernel_regularizer=self.l2_regularizer,
                 name=f"conv_block_{i + 1}"
             )
             self.conv_blocks.append(block)
@@ -816,7 +866,7 @@ class MNISTReasoner(keras.Model):
             block = DenseBlock(
                 units=units,
                 dropout_rate=config.reasoner_dropout_rate,
-                kernel_regularizer=self.regularizer,
+                kernel_regularizer=self.l2_regularizer,
                 name=f"dense_block_{i + 1}"
             )
             self.dense_blocks.append(block)
@@ -940,6 +990,14 @@ class MNISTProducer(keras.Model):
 
         self.config = config
 
+        # Create orthonormal regularizer for style projections
+        self.orthonormal_regularizer = SoftOrthonormalConstraintRegularizer(
+            lambda_coefficient=config.producer_orthonormal_lambda,
+            l1_coefficient=config.producer_orthonormal_l1,
+            l2_coefficient=config.producer_orthonormal_l2,
+            use_matrix_scaling=config.producer_use_matrix_scaling
+        ) if config.producer_orthonormal_lambda > 0 else None
+
         # Label embedding
         self.label_embedding = keras.layers.Embedding(
             input_dim=config.num_classes,
@@ -973,7 +1031,10 @@ class MNISTProducer(keras.Model):
                     name=f"conv_{i + 1}"
                 ),
                 'bn': keras.layers.BatchNormalization(name=f"norm_{i + 1}"),
-                'film': FiLMLayer(name=f"film_{i + 1}"),
+                'film': FiLMLayer(
+                    kernel_regularizer=self.orthonormal_regularizer,
+                    name=f"film_{i + 1}"
+                ),
                 'activation': GoLU(name=f"act_{i + 1}")
             }
             self.generation_blocks.append(block)
@@ -1090,6 +1151,10 @@ class MNISTProducer(keras.Model):
                 "producer_initial_channels": self.config.producer_initial_channels,
                 "producer_conv_filters": self.config.producer_conv_filters,
                 "producer_style_units": self.config.producer_style_units,
+                "producer_orthonormal_lambda": self.config.producer_orthonormal_lambda,
+                "producer_orthonormal_l1": self.config.producer_orthonormal_l1,
+                "producer_orthonormal_l2": self.config.producer_orthonormal_l2,
+                "producer_use_matrix_scaling": self.config.producer_use_matrix_scaling,
             }
         })
         return config
@@ -1469,8 +1534,13 @@ class LatentSpaceAnalysisViz(CompositeVisualization):
         self._prepare_data(data)
         latent_norms: np.ndarray = np.linalg.norm(self.latent_vectors, axis=1)
         sns.violinplot(
-            x=self.labels, y=latent_norms, ax=ax,
-            palette="husl", inner="quartile"
+            x=self.labels,
+            y=latent_norms,
+            hue=self.labels,
+            ax=ax,
+            palette="husl",
+            inner="quartile",
+            legend=False
         )
         ax.set_xlabel("Digit Class")
         ax.set_ylabel("||E|| (L2 Norm)")
@@ -1691,7 +1761,7 @@ if __name__ == "__main__":
     # Configuration addressing posterior collapse and systemic imbalance
     config = ExperimentConfig(
         model=ModelConfig(
-            explanation_dim=16,
+            explanation_dim=4,
             explainer_l2_regularization=1e-5,
             reasoner_dropout_rate=0.25
         ),
