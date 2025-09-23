@@ -962,8 +962,6 @@ def create_mnist_ccnet(config: ExperimentConfig) -> CCNetOrchestrator:
         loss_fn_params=config.training.loss_fn_params,
         learning_rates=config.training.learning_rates,
         gradient_clip_norm=config.training.gradient_clip_norm,
-        kl_weight=config.training.kl_weight,
-        dynamic_weighting=config.training.dynamic_weighting,
         use_mixed_precision=config.training.use_mixed_precision,
         explainer_weights=config.training.explainer_weights,
         reasoner_weights=config.training.reasoner_weights,
