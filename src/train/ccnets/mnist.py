@@ -1794,7 +1794,7 @@ if __name__ == "__main__":
             grad_stagnation_threshold=1e-4
         ),
         visualization=VisualizationConfig(
-            experiment_name="ccnets_mnist_refined",
+            experiment_name="ccnets_mnist",
             reconstruction_samples=5,
             latent_space_samples=2000,
             tsne_perplexity=40
