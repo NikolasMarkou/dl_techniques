@@ -51,10 +51,9 @@ from dl_techniques.models.ccnets import (
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.activations.golu import GoLU
-from dl_techniques.regularizers.soft_orthogonal import (
+from dl_techniques.layers.regularizers.soft_orthonormal_constraint_regularizer import (
     SoftOrthonormalConstraintRegularizer
 )
-
 
 # =====================================================================
 # CENTRALIZED CONFIGURATION
@@ -282,9 +281,9 @@ class FiLMLayer(keras.layers.Layer):
     """
 
     def __init__(
-            self,
-            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            **kwargs: Any
+        self,
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        **kwargs: Any
     ) -> None:
         """Initialize FiLM layer with projection layers."""
         super().__init__(**kwargs)
@@ -363,7 +362,7 @@ class FiLMLayer(keras.layers.Layer):
         return content_tensor * (1.0 + gamma) + beta
 
     def compute_output_shape(
-            self, input_shape: List[Tuple[Optional[int], ...]]
+        self, input_shape: List[Tuple[Optional[int], ...]]
     ) -> Tuple[Optional[int], ...]:
         """Compute output shape (same as content tensor)."""
         content_shape, _ = input_shape
@@ -373,8 +372,7 @@ class FiLMLayer(keras.layers.Layer):
         """Get the configuration dictionary for layer serialization."""
         config = super().get_config()
         config.update({
-            'kernel_regularizer': keras.regularizers.serialize(
-                self.kernel_regularizer) if self.kernel_regularizer else None,
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer) if self.kernel_regularizer else None,
         })
         return config
 
@@ -406,17 +404,17 @@ class ConvBlock(keras.layers.Layer):
     """
 
     def __init__(
-            self,
-            filters: int,
-            kernel_size: Union[int, Tuple[int, int]] = 3,
-            strides: Union[int, Tuple[int, int]] = 1,
-            padding: str = "same",
-            activation: str = "relu",
-            use_pooling: bool = False,
-            pool_size: Union[int, Tuple[int, int]] = 2,
-            pool_type: str = "max",
-            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            **kwargs: Any
+        self,
+        filters: int,
+        kernel_size: Union[int, Tuple[int, int]] = 3,
+        strides: Union[int, Tuple[int, int]] = 1,
+        padding: str = "same",
+        activation: str = "relu",
+        use_pooling: bool = False,
+        pool_size: Union[int, Tuple[int, int]] = 2,
+        pool_type: str = "max",
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        **kwargs: Any
     ) -> None:
         """Initialize ConvBlock with specified parameters."""
         super().__init__(**kwargs)
@@ -480,9 +478,9 @@ class ConvBlock(keras.layers.Layer):
         super().build(input_shape)
 
     def call(
-            self,
-            inputs: keras.KerasTensor,
-            training: Optional[bool] = None
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass through the convolutional block."""
         x = self.conv(inputs)
@@ -495,7 +493,7 @@ class ConvBlock(keras.layers.Layer):
         return x
 
     def compute_output_shape(
-            self, input_shape: Tuple[Optional[int], ...]
+        self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         """Compute output shape."""
         shape = self.conv.compute_output_shape(input_shape)
@@ -515,8 +513,7 @@ class ConvBlock(keras.layers.Layer):
             'use_pooling': self.use_pooling,
             'pool_size': self.pool_size,
             'pool_type': self.pool_type,
-            'kernel_regularizer': keras.regularizers.serialize(
-                self.kernel_regularizer) if self.kernel_regularizer else None,
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer) if self.kernel_regularizer else None,
         })
         return config
 
@@ -544,13 +541,13 @@ class DenseBlock(keras.layers.Layer):
     """
 
     def __init__(
-            self,
-            units: int,
-            activation: str = "relu",
-            dropout_rate: float = 0.0,
-            use_batch_norm: bool = True,
-            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            **kwargs: Any
+        self,
+        units: int,
+        activation: str = "relu",
+        dropout_rate: float = 0.0,
+        use_batch_norm: bool = True,
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        **kwargs: Any
     ) -> None:
         """Initialize DenseBlock with specified parameters."""
         super().__init__(**kwargs)
@@ -607,9 +604,9 @@ class DenseBlock(keras.layers.Layer):
         super().build(input_shape)
 
     def call(
-            self,
-            inputs: keras.KerasTensor,
-            training: Optional[bool] = None
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass through the dense block."""
         x = self.dense(inputs)
@@ -625,7 +622,7 @@ class DenseBlock(keras.layers.Layer):
         return x
 
     def compute_output_shape(
-            self, input_shape: Tuple[Optional[int], ...]
+        self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         """Compute output shape."""
         return self.dense.compute_output_shape(input_shape)
@@ -638,8 +635,7 @@ class DenseBlock(keras.layers.Layer):
             'activation': self.activation,
             'dropout_rate': self.dropout_rate,
             'use_batch_norm': self.use_batch_norm,
-            'kernel_regularizer': keras.regularizers.serialize(
-                self.kernel_regularizer) if self.kernel_regularizer else None,
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer) if self.kernel_regularizer else None,
         })
         return config
 
@@ -708,8 +704,8 @@ class MNISTExplainer(keras.Model):
         # Create convolutional blocks
         self.conv_blocks: List[ConvBlock] = []
         for i, (filters, kernel) in enumerate(zip(
-                config.explainer_conv_filters,
-                config.explainer_conv_kernels
+            config.explainer_conv_filters,
+            config.explainer_conv_kernels
         )):
             is_last = (i == len(config.explainer_conv_filters) - 1)
             use_pooling = not is_last  # No pooling on last block
@@ -761,9 +757,9 @@ class MNISTExplainer(keras.Model):
         super().build(input_shape)
 
     def call(
-            self,
-            x: keras.KerasTensor,
-            training: Optional[bool] = None
+        self,
+        x: keras.KerasTensor,
+        training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Forward pass through explainer network."""
         # Pass through convolutional blocks
@@ -847,8 +843,8 @@ class MNISTReasoner(keras.Model):
         # Create convolutional blocks for image processing
         self.conv_blocks: List[ConvBlock] = []
         for i, (filters, kernel) in enumerate(zip(
-                config.reasoner_conv_filters,
-                config.reasoner_conv_kernels
+            config.reasoner_conv_filters,
+            config.reasoner_conv_kernels
         )):
             block = ConvBlock(
                 filters=filters,
@@ -911,10 +907,10 @@ class MNISTReasoner(keras.Model):
         super().build(input_shape)
 
     def call(
-            self,
-            x: keras.KerasTensor,
-            e: keras.KerasTensor,
-            training: Optional[bool] = None
+        self,
+        x: keras.KerasTensor,
+        e: keras.KerasTensor,
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass through reasoner network."""
 
@@ -993,6 +989,14 @@ class MNISTProducer(keras.Model):
         super().__init__(**kwargs)
 
         self.config = config
+
+        # Create orthonormal regularizer for style projections
+        self.orthonormal_regularizer = SoftOrthonormalConstraintRegularizer(
+            lambda_coefficient=config.producer_orthonormal_lambda,
+            l1_coefficient=config.producer_orthonormal_l1,
+            l2_coefficient=config.producer_orthonormal_l2,
+            use_matrix_scaling=config.producer_use_matrix_scaling
+        ) if config.producer_orthonormal_lambda > 0 else None
 
         # Label embedding
         self.label_embedding = keras.layers.Embedding(
@@ -1101,10 +1105,10 @@ class MNISTProducer(keras.Model):
         super().build(input_shape)
 
     def call(
-            self,
-            y: keras.KerasTensor,
-            e: keras.KerasTensor,
-            training: Optional[bool] = None
+        self,
+        y: keras.KerasTensor,
+        e: keras.KerasTensor,
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass through the producer network."""
 
@@ -1147,6 +1151,10 @@ class MNISTProducer(keras.Model):
                 "producer_initial_channels": self.config.producer_initial_channels,
                 "producer_conv_filters": self.config.producer_conv_filters,
                 "producer_style_units": self.config.producer_style_units,
+                "producer_orthonormal_lambda": self.config.producer_orthonormal_lambda,
+                "producer_orthonormal_l1": self.config.producer_orthonormal_l1,
+                "producer_orthonormal_l2": self.config.producer_orthonormal_l2,
+                "producer_use_matrix_scaling": self.config.producer_use_matrix_scaling,
             }
         })
         return config
@@ -1186,7 +1194,7 @@ class CCNetTrainingHistoryViz(CompositeVisualization):
         self.add_subplot("System Convergence", self._plot_system_convergence)
 
     def _plot_fundamental_losses(
-            self, ax: plt.Axes, data: Dict[str, Any], **kwargs: Any
+        self, ax: plt.Axes, data: Dict[str, Any], **kwargs: Any
     ) -> None:
         loss_keys: List[str] = [
             "generation_loss", "reconstruction_loss", "inference_loss"
@@ -1205,7 +1213,7 @@ class CCNetTrainingHistoryViz(CompositeVisualization):
         ax.grid(True, alpha=0.3)
 
     def _plot_model_errors(
-            self, ax: plt.Axes, data: Dict[str, Any], **kwargs: Any
+        self, ax: plt.Axes, data: Dict[str, Any], **kwargs: Any
     ) -> None:
         error_keys: List[str] = [
             "explainer_error", "reasoner_error", "producer_error"
@@ -1224,7 +1232,7 @@ class CCNetTrainingHistoryViz(CompositeVisualization):
         ax.grid(True, alpha=0.3)
 
     def _plot_gradient_norms(
-            self, ax: plt.Axes, data: Dict[str, Any], **kwargs: Any
+        self, ax: plt.Axes, data: Dict[str, Any], **kwargs: Any
     ) -> None:
         grad_keys: List[str] = [
             "explainer_grad_norm", "reasoner_grad_norm", "producer_grad_norm"
@@ -1244,7 +1252,7 @@ class CCNetTrainingHistoryViz(CompositeVisualization):
         ax.grid(True, alpha=0.3)
 
     def _plot_system_convergence(
-            self, ax: plt.Axes, data: Dict[str, Any], **kwargs: Any
+        self, ax: plt.Axes, data: Dict[str, Any], **kwargs: Any
     ) -> None:
         required_keys: List[str] = [
             "generation_loss", "reconstruction_loss", "inference_loss"
@@ -1288,7 +1296,7 @@ class ReconstructionQualityViz(VisualizationPlugin):
         )
 
     def create_visualization(
-            self, data: Dict[str, Any], ax: Optional[plt.Axes] = None, **kwargs: Any
+        self, data: Dict[str, Any], ax: Optional[plt.Axes] = None, **kwargs: Any
     ) -> plt.Figure:
         orchestrator: CCNetOrchestrator = data["orchestrator"]
         x_data: np.ndarray = data["x_data"]
@@ -1362,7 +1370,7 @@ class CounterfactualMatrixViz(VisualizationPlugin):
         )
 
     def create_visualization(
-            self, data: Dict[str, Any], ax: Optional[plt.Axes] = None, **kwargs: Any
+        self, data: Dict[str, Any], ax: Optional[plt.Axes] = None, **kwargs: Any
     ) -> plt.Figure:
         orchestrator: CCNetOrchestrator = data["orchestrator"]
         x_data: np.ndarray = data["x_data"]
@@ -1481,7 +1489,7 @@ class LatentSpaceAnalysisViz(CompositeVisualization):
         self.latent_2d = tsne.fit_transform(self.latent_vectors)
 
     def _plot_tsne_class(
-            self, ax: plt.Axes, data: Dict[str, Any], **kwargs: Any
+        self, ax: plt.Axes, data: Dict[str, Any], **kwargs: Any
     ) -> None:
         self._prepare_data(data)
         scatter = ax.scatter(
@@ -1494,7 +1502,7 @@ class LatentSpaceAnalysisViz(CompositeVisualization):
         ax.grid(True, alpha=0.3)
 
     def _plot_tsne_density(
-            self, ax: plt.Axes, data: Dict[str, Any], **kwargs: Any
+        self, ax: plt.Axes, data: Dict[str, Any], **kwargs: Any
     ) -> None:
         self._prepare_data(data)
         xy: np.ndarray = self.latent_2d.T
@@ -1509,7 +1517,7 @@ class LatentSpaceAnalysisViz(CompositeVisualization):
         ax.grid(True, alpha=0.3)
 
     def _plot_mean_activation(
-            self, ax: plt.Axes, data: Dict[str, Any], **kwargs: Any
+        self, ax: plt.Axes, data: Dict[str, Any], **kwargs: Any
     ) -> None:
         self._prepare_data(data)
         mean_activations: np.ndarray = np.mean(
@@ -1521,7 +1529,7 @@ class LatentSpaceAnalysisViz(CompositeVisualization):
         ax.grid(True, alpha=0.3, axis='y')
 
     def _plot_latent_norms(
-            self, ax: plt.Axes, data: Dict[str, Any], **kwargs: Any
+        self, ax: plt.Axes, data: Dict[str, Any], **kwargs: Any
     ) -> None:
         self._prepare_data(data)
         latent_norms: np.ndarray = np.linalg.norm(self.latent_vectors, axis=1)
@@ -1700,7 +1708,7 @@ class CCNetExperiment:
         return orchestrator, trainer
 
     def generate_final_report(
-            self, orchestrator: CCNetOrchestrator, trainer: CCNetTrainer
+        self, orchestrator: CCNetOrchestrator, trainer: CCNetTrainer
     ) -> None:
         """Generate comprehensive visualization report."""
         logger.info("=" * 30 + " Generating Final Report " + "=" * 30)
