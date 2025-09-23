@@ -90,19 +90,29 @@ These are intermediate calculations that measure the pixel-wise difference betwe
 
 ### **The Three Model Errors: Assigning Causal Blame**
 
-The three losses are not directly backpropagated. Instead, they are combined in unique ways to create a final, stable error signal for each of the three networks. During the backpropagation for one network, the others are "frozen" so that the updates are precisely targeted.
+The three losses are not directly backpropagated. Instead, they are combined into a stable, additive error signal for each of the three networks. This formulation ensures that each module is penalized for specific failures relevant to its causal role. During the backpropagation for one network, the others are "frozen" so that updates are precisely targeted.
 
-**1. Explainer Error = `w_inf * Inference Loss + w_gen * Generation Loss`**
-*   **Breakdown**: The Explainer is penalized for producing a latent explanation `E` that is ambiguous for the Reasoner (high `Inference Loss`) or insufficient for the Producer (high `Generation Loss`). It is incentivized to create explanations that are maximally useful for both downstream tasks.
+**1. Explainer Error = `w_inf * Inference Loss + w_gen * Generation Loss + w_kl * KL Divergence`**
+*   **Breakdown**: The Explainer is penalized for producing a latent explanation `E` that is either ambiguous for the Reasoner (high `Inference Loss`) or insufficient for the Producer (high `Generation Loss`). The additional KL Divergence term acts as a regularizer, forcing the latent space `E` to be smooth and information-efficient (e.g., following a standard normal distribution). The Explainer is thus incentivized to create explanations that are maximally useful and generalizable.
 
 **2. Reasoner Error = `w_rec * Reconstruction Loss + w_inf * Inference Loss`**
-*   **Breakdown**: The Reasoner is penalized directly for its inference errors, which manifest as both high `Reconstruction Loss` (the total pipeline failed) and high `Inference Loss` (the failure was specifically the inference step).
+*   **Breakdown**: The Reasoner is penalized directly for its inference errors, which manifest as both high `Reconstruction Loss` (the total pipeline failed) and high `Inference Loss` (the failure was specifically the inference step). This focuses the gradient pressure squarely on the module's decision-making logic.
 
 **3. Producer Error = `w_gen * Generation Loss + w_rec * Reconstruction Loss`**
-*   **Breakdown**: The Producer is penalized for failures in its two core functions: generating from ground truth (`Generation Loss`) and reconstructing from the system's inference (`Reconstruction Loss`).
+*   **Breakdown**: The Producer is penalized for failures in its two core functions: generating from ground truth (`Generation Loss`) and reconstructing from the system's own inference (`Reconstruction Loss`). This ensures it becomes a high-fidelity engine for manifesting observations from their constituent causes.
 
-#### Doctrinal Note on Error Stability
-*Previous iterations of this doctrine utilized a subtractive component in the error calculation to model a conceptual "reward." This was found to be operationally unsound, creating the potential for negative losses and unstable gradient dynamics. The current additive formulation is a more robust implementation that guarantees a positive definite error landscape, ensuring stable convergence while implicitly optimizing the same systemic objectives.*
+### **The Evolution to a Stable Error Formulation**
+
+The current additive error formulation is the result of a crucial doctrinal evolution aimed at ensuring robust and stable training.
+
+**The Initial Subtractive Model:** Early conceptualizations of CCNet employed a subtractive component in the error calculation. For example, an error might be calculated as `Cost1 + Cost2 - Reward`, where one loss term was treated as a "reward" for a module. The theoretical goal was to create a competitive dynamic.
+
+**Why it Failed:** This approach was found to be operationally unsound. By introducing a negative (reward) term, the error function was no longer guaranteed to be positive. This could lead to several pathologies:
+1.  **Negative Losses:** The system could achieve a negative total error, a meaningless state for gradient-based optimization.
+2.  **Unstable Gradients:** The gradients could become erratic, causing the training process to diverge rather than converge.
+3.  **Pathological Equilibria:** The model could learn to minimize its error by exploiting the reward term, for instance, by one module succeeding at the direct expense of another, rather than all modules learning to cooperate effectively.
+
+**The Current Additive Model:** The shift to a purely additive, weighted sum of losses resolved these issues. By ensuring all components of the error signal are positive costs, the framework guarantees a positive definite error landscape. This means the system always has a clear direction for improvement—a lower energy state—and convergence is stable. This evolution marks a transition from a flawed competitive model to a robust, truly cooperative cost-minimization framework, which is the implementation used in this library.
 
 ---
 

@@ -2,9 +2,16 @@ import keras
 import tensorflow as tf
 from typing import Dict, Optional, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .losses import L1Loss, L2Loss, HuberLoss
 from .base import CCNetModule, CCNetConfig, CCNetLosses, CCNetModelErrors
+from .control import ConvergenceControlStrategy, StaticThresholdStrategy, AdaptiveDivergenceStrategy
 
+
+# ---------------------------------------------------------------------
 
 class CCNetOrchestrator:
     """
@@ -18,7 +25,7 @@ class CCNetOrchestrator:
             reasoner: CCNetModule,
             producer: CCNetModule,
             config: Optional[CCNetConfig] = None,
-            reasoner_acc_threshold: float = 0.98
+            control_strategy: Optional[ConvergenceControlStrategy] = AdaptiveDivergenceStrategy()
     ):
         """
         Initialize the CCNet orchestrator.
@@ -29,14 +36,14 @@ class CCNetOrchestrator:
             reasoner: Neural network module modeling P(Y|X,E).
             producer: Neural network module modeling P(X|Y,E).
             config: Configuration object for the framework.
-            reasoner_acc_threshold: Accuracy threshold below which the Reasoner
-                                    will be trained. Prevents premature convergence.
+            control_strategy: A strategy object that determines when to train the
+                              Reasoner to prevent premature convergence.
         """
         self.explainer = explainer
         self.reasoner = reasoner
         self.producer = producer
         self.config = config or CCNetConfig()
-        self.reasoner_acc_threshold = reasoner_acc_threshold
+        self.control = control_strategy
 
         # Initialize loss function
         self._init_loss_function()
@@ -184,8 +191,8 @@ class CCNetOrchestrator:
     ) -> Dict[str, tf.Tensor]:
         """
         Perform a single training step with causal credit assignment.
-        This implementation uses separate gradient tapes and conditional
-        Reasoner training to prevent premature convergence.
+        This implementation uses separate gradient tapes and delegates
+        Reasoner training decisions to a control strategy.
 
         Args:
             x_input: Input observation batch.
@@ -203,12 +210,23 @@ class CCNetOrchestrator:
             losses = self.compute_losses(tensors)
             errors = self.compute_model_errors(losses, tensors)
 
-        # Calculate batch accuracy for conditional training
+        # Calculate batch accuracy for control strategy
         y_true_labels = keras.ops.argmax(y_truth, axis=-1)
         y_pred_labels = keras.ops.argmax(tensors['y_inferred'], axis=-1)
         batch_accuracy = keras.ops.mean(
             keras.ops.cast(keras.ops.equal(y_true_labels, y_pred_labels), dtype='float32')
         )
+
+        # Delegate training decision to the control strategy
+        current_metrics = {
+            'batch_accuracy': batch_accuracy,
+            'explainer_error': errors.explainer_error,
+            'reasoner_error': errors.reasoner_error,
+            'producer_error': errors.producer_error,
+        }
+        train_reasoner = self.control.should_train_reasoner(current_metrics)
+        # Update strategy state after decision is made
+        self.control.update_state(current_metrics)
 
         # Gradient computation for Explainer and Producer
         explainer_vars = self.explainer.trainable_variables
@@ -219,12 +237,13 @@ class CCNetOrchestrator:
 
         # Conditional gradient computation for Reasoner
         reasoner_vars = self.reasoner.trainable_variables
-        if batch_accuracy < self.reasoner_acc_threshold:
+        if train_reasoner:
             reasoner_grads = reasoner_tape.gradient(errors.reasoner_error, reasoner_vars)
         else:
+            # Assign zero gradients if Reasoner is not training
             reasoner_grads = [tf.zeros_like(v) for v in reasoner_vars]
 
-        # --- Monitoring: Compute gradient norms before clipping ---
+        # Monitoring: Compute gradient norms before clipping
         explainer_grad_norm = tf.linalg.global_norm(explainer_grads)
         reasoner_grad_norm = tf.linalg.global_norm(reasoner_grads)
         producer_grad_norm = tf.linalg.global_norm(producer_grads)
@@ -247,10 +266,11 @@ class CCNetOrchestrator:
         # Apply gradients
         self.optimizers['explainer'].apply_gradients(zip(explainer_grads, explainer_vars))
         self.optimizers['producer'].apply_gradients(zip(producer_grads, producer_vars))
-        if batch_accuracy < self.reasoner_acc_threshold:
+        # Apply Reasoner gradients only if it was allowed to train
+        if train_reasoner:
             self.optimizers['reasoner'].apply_gradients(zip(reasoner_grads, reasoner_vars))
 
-        # Return losses as dictionary of tensors
+        # Return losses and other metrics as a dictionary
         return {
             'generation_loss': losses.generation_loss,
             'reconstruction_loss': losses.reconstruction_loss,
@@ -261,7 +281,9 @@ class CCNetOrchestrator:
             'explainer_grad_norm': explainer_grad_norm,
             'reasoner_grad_norm': reasoner_grad_norm,
             'producer_grad_norm': producer_grad_norm,
-            'batch_accuracy': batch_accuracy
+            'batch_accuracy': batch_accuracy,
+            # Added metric to monitor the control strategy's decision
+            'reasoner_is_training': tf.constant(1.0 if train_reasoner else 0.0, dtype='float32')
         }
 
     def evaluate(
@@ -341,7 +363,7 @@ class CCNetOrchestrator:
 
         # Infer label from content reference
         mu_content, log_var_content = self.explainer(x_content, training=False)
-        e_content_latent = mu_content # Use mean for inference
+        e_content_latent = mu_content  # Use mean for inference
         y_content = self.reasoner(x_content, e_content_latent, training=False)
 
         # Generate with content label and style
@@ -421,6 +443,8 @@ class CCNetOrchestrator:
         self.producer = keras.models.load_model(f"{base_path}_producer.keras")
 
 
+# ---------------------------------------------------------------------
+
 class SequentialCCNetOrchestrator(CCNetOrchestrator):
     """
     Extended orchestrator for sequential data.
@@ -432,7 +456,8 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
             explainer: CCNetModule,
             reasoner: CCNetModule,
             producer: CCNetModule,
-            config: Optional[CCNetConfig] = None
+            config: Optional[CCNetConfig] = None,
+            control_strategy: Optional[ConvergenceControlStrategy] = None
     ):
         """
         Initialize sequential CCNet orchestrator.
@@ -442,8 +467,10 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
             reasoner: Sequential model for P(Y|X,E).
             producer: Sequential model that will operate on reversed sequences.
             config: Configuration (should have sequential_data=True).
+            control_strategy: A strategy object that determines when to train the
+                              Reasoner. Inherited from the base class.
         """
-        super().__init__(explainer, reasoner, producer, config)
+        super().__init__(explainer, reasoner, producer, config, control_strategy)
 
         if not self.config.sequential_data:
             # Enforce sequential mode if using this orchestrator

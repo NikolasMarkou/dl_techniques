@@ -1,12 +1,8 @@
 # Causal Cooperative Networks (CCNets) Framework
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Keras 3.8.0](https://img.shields.io/badge/keras-3.8.0-red.svg)](https://keras.io/)
-[![TensorFlow 2.18.0](https://img.shields.io/badge/tensorflow-2.18.0-orange.svg)](https://www.tensorflow.org/)
-
 A model-agnostic meta-framework for implementing Causal Cooperative Networks (CCNets) - neural architectures that learn true causal relationships rather than mere associations.
 
-## 🚀 Overview
+## Overview
 
 Modern deep learning excels at learning associations but struggles with causation. CCNets bridge this gap by employing three cooperative neural networks that continuously verify each other's reasoning, forcing the system to learn the true data-generating process.
 
@@ -20,9 +16,8 @@ Unlike traditional neural networks that learn `P(Y|X)` (correlation), CCNets dec
 
 This tripartite architecture enables **counterfactual reasoning** - the ability to answer "what if" questions impossible for standard classifiers.
 
-## 📋 Table of Contents
+## Table of Contents
 
-- [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Core Concepts](#core-concepts)
 - [Framework Architecture](#framework-architecture)
@@ -33,32 +28,7 @@ This tripartite architecture enables **counterfactual reasoning** - the ability 
 - [Contributing](#contributing)
 - [License](#license)
 
-## 🔧 Installation
-
-### Requirements
-
-```python
-python >= 3.11
-keras == 3.8.0
-tensorflow == 2.18.0
-numpy >= 1.21.0
-```
-
-### Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/ccnet-framework.git
-cd ccnet-framework
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Import the framework
-from ccnets import CCNetOrchestrator, CCNetConfig, CCNetTrainer
-```
-
-## ⚡ Quick Start
+## Quick Start
 
 ```python
 import keras
@@ -85,7 +55,7 @@ trainer.train(train_dataset, epochs=50)
 x_counterfactual = orchestrator.counterfactual_generation(x_reference, y_target)
 ```
 
-## 🧠 Core Concepts
+## Core Concepts
 
 ### Mathematical Foundation
 
@@ -110,17 +80,23 @@ The framework computes three fundamental losses that measure different aspects o
 | **Reconstruction Loss** | `\|\|X_reconstructed - X_input\|\|` | Total inference + reconstruction error |
 | **Inference Loss** | `\|\|X_reconstructed - X_generated\|\|` | Error attributable to incorrect inference |
 
-### Causal Credit Assignment
+### Evolved Causal Credit Assignment
 
-Each network receives a specialized error signal computed from the three losses:
+Each network receives a specialized error signal computed from the three fundamental losses. The formulation has evolved from early conceptual models to ensure stable and robust training dynamics.
 
-- **Explainer Error** = `Inference + Generation - Reconstruction`
-- **Reasoner Error** = `Reconstruction + Inference - Generation`
-- **Producer Error** = `Generation + Reconstruction - Inference`
+- **Explainer Error** = `w_inf * Inference Loss + w_gen * Generation Loss + w_kl * KL Divergence`
+- **Reasoner Error** = `w_rec * Reconstruction Loss + w_inf * Inference Loss`
+- **Producer Error** = `w_gen * Generation Loss + w_rec * Reconstruction Loss`
 
-This unique credit assignment ensures each network learns its specific causal role.
+This unique credit assignment ensures each network learns its specific causal role:
+- The **Explainer** is penalized for producing a latent code `E` that is ambiguous for the Reasoner (high `Inference Loss`) or insufficient for the Producer (high `Generation Loss`). The KL term regularizes the latent space for efficiency and smoothness.
+- The **Reasoner** is penalized for both the total pipeline failure (`Reconstruction Loss`) and its specific decision-making error (`Inference Loss`), directly targeting its logical correctness.
+- The **Producer** is penalized for any failure in its ability to manifest an observation, whether from the system's own inference (`Reconstruction Loss`) or from ground-truth causes (`Generation Loss`).
 
-## 🏗️ Framework Architecture
+#### Note on the Evolution of the Error Formulation
+Previous iterations of this doctrine utilized a subtractive component in the error calculation to model a conceptual "reward." This was found to be operationally unsound, creating the potential for negative losses and unstable gradient dynamics. The current additive formulation is a more robust implementation that guarantees a positive definite error landscape, ensuring stable convergence while implicitly optimizing the same systemic objectives.
+
+## Framework Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -167,7 +143,7 @@ This unique credit assignment ensures each network learns its specific causal ro
 | **CCNetLosses** | Loss value container | Tensors | 3 losses |
 | **CCNetModelErrors** | Error signal container | Losses | 3 errors |
 
-## 📖 Usage Guide
+## Usage Guide
 
 ### Model Requirements
 
@@ -222,7 +198,11 @@ config = CCNetConfig(
     gradient_clip_norm=1.0,      # Max gradient norm (None to disable)
     use_mixed_precision=False,   # Enable mixed precision training
     sequential_data=False,       # Enable causal masking for sequences
-    verification_weight=1.0      # Weight for verification losses
+    explainer_weights={...},     # Weights for explainer losses
+    reasoner_weights={...},      # Weights for reasoner losses
+    producer_weights={...},      # Weights for producer losses
+    kl_weight=0.01,              # Weight for KL divergence
+    dynamic_weighting=False      # Enable automatic loss balancing
 )
 ```
 
@@ -254,7 +234,7 @@ trainer.train(
 history = trainer.history
 ```
 
-## 🔬 Advanced Features
+## Advanced Features
 
 ### Counterfactual Generation
 
@@ -318,7 +298,7 @@ seq_orchestrator = SequentialCCNetOrchestrator(
 )
 ```
 
-## 📚 API Reference
+## API Reference
 
 ### Core Classes
 
@@ -329,7 +309,7 @@ class CCNetOrchestrator:
     def __init__(self, explainer, reasoner, producer, config=None)
     def forward_pass(self, x_input, y_truth, training=True) -> Dict
     def compute_losses(self, tensors) -> CCNetLosses
-    def compute_model_errors(self, losses) -> CCNetModelErrors
+    def compute_model_errors(self, losses, tensors) -> CCNetModelErrors
     def train_step(self, x_input, y_truth) -> Dict[str, float]
     def evaluate(self, x_input, y_truth) -> Dict[str, float]
     def counterfactual_generation(self, x_reference, y_target) -> Tensor
@@ -351,7 +331,11 @@ class CCNetConfig:
     gradient_clip_norm: Optional[float] = 1.0
     use_mixed_precision: bool = False
     sequential_data: bool = False
-    verification_weight: float = 1.0
+    explainer_weights: Dict[str, float]
+    reasoner_weights: Dict[str, float]
+    producer_weights: Dict[str, float]
+    kl_weight: float = 0.01
+    dynamic_weighting: bool = False
 ```
 
 #### CCNetTrainer
@@ -371,7 +355,7 @@ def wrap_keras_model(model: keras.Model) -> CCNetModule
 """Wrap a Keras model to comply with CCNetModule protocol."""
 ```
 
-## 🎯 Examples
+## Examples
 
 ### MNIST Digit Generation
 
