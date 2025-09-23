@@ -1534,8 +1534,13 @@ class LatentSpaceAnalysisViz(CompositeVisualization):
         self._prepare_data(data)
         latent_norms: np.ndarray = np.linalg.norm(self.latent_vectors, axis=1)
         sns.violinplot(
-            x=self.labels, y=latent_norms, ax=ax,
-            palette="husl", inner="quartile"
+            x=self.labels,
+            y=latent_norms,
+            hue=self.labels,
+            ax=ax,
+            palette="husl",
+            inner="quartile",
+            legend=False
         )
         ax.set_xlabel("Digit Class")
         ax.set_ylabel("||E|| (L2 Norm)")
