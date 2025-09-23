@@ -768,21 +768,21 @@ class MNISTExplainer(keras.Model):
             32, 5, padding="same", kernel_regularizer=self.regularizer
         )
         self.bn1 = keras.layers.BatchNormalization()
-        self.act1 = keras.layers.LeakyReLU(negative_slope=0.2)
+        self.act1 = keras.layers.LeakyReLU(negative_slope=0.1)
         self.pool1 = keras.layers.MaxPooling2D(2)
 
         self.conv2 = keras.layers.Conv2D(
             64, 3, padding="same", kernel_regularizer=self.regularizer
         )
         self.bn2 = keras.layers.BatchNormalization()
-        self.act2 = keras.layers.LeakyReLU(negative_slope=0.2)
+        self.act2 = keras.layers.LeakyReLU(negative_slope=0.1)
         self.pool2 = keras.layers.MaxPooling2D(2)
 
         self.conv3 = keras.layers.Conv2D(
             128, 3, padding="same", kernel_regularizer=self.regularizer
         )
         self.bn3 = keras.layers.BatchNormalization()
-        self.act3 = keras.layers.LeakyReLU(negative_slope=0.2)
+        self.act3 = keras.layers.LeakyReLU(negative_slope=0.1)
         self.pool3 = keras.layers.GlobalMaxPool2D()
 
         # Variational layers
@@ -885,7 +885,7 @@ class MNISTReasoner(keras.Model):
 
         # Image processing layers
         self.conv1 = keras.layers.Conv2D(
-            32, 3, padding="same", kernel_regularizer=self.regularizer
+            32, 5, padding="same", kernel_regularizer=self.regularizer
         )
         self.bn1 = keras.layers.BatchNormalization()
         self.act1 = keras.layers.LeakyReLU(negative_slope=0.2)
@@ -895,23 +895,23 @@ class MNISTReasoner(keras.Model):
             64, 3, padding="same", kernel_regularizer=self.regularizer
         )
         self.bn2 = keras.layers.BatchNormalization()
-        self.act2 = keras.layers.LeakyReLU(negative_slope=0.2)
+        self.act2 = keras.layers.LeakyReLU(negative_slope=0.1)
         self.pool2 = keras.layers.MaxPooling2D(2)
 
         self.flatten = keras.layers.Flatten()
 
         # Combination and classification layers
         self.fc_combine = keras.layers.Dense(
-            512, kernel_regularizer=self.regularizer
-        )
-        self.bn_combine = keras.layers.BatchNormalization()
-        self.act_combine = keras.layers.LeakyReLU(negative_slope=0.2)
-
-        self.fc_hidden = keras.layers.Dense(
             256, kernel_regularizer=self.regularizer
         )
+        self.bn_combine = keras.layers.BatchNormalization()
+        self.act_combine = keras.layers.LeakyReLU(negative_slope=0.1)
+
+        self.fc_hidden = keras.layers.Dense(
+            128, kernel_regularizer=self.regularizer
+        )
         self.bn_hidden = keras.layers.BatchNormalization()
-        self.act_hidden = keras.layers.LeakyReLU(negative_slope=0.2)
+        self.act_hidden = keras.layers.LeakyReLU(negative_slope=0.1)
 
         self.dropout = keras.layers.Dropout(dropout_rate)
         self.fc_output = keras.layers.Dense(
@@ -1030,15 +1030,15 @@ class MNISTProducer(keras.Model):
         self.style_transform_2 = keras.layers.Dense(128, activation='relu')
 
         # Upsampling and convolution layers
-        self.up1 = keras.layers.UpSampling2D(size=(2, 2))
-        self.conv1 = keras.layers.Conv2D(128, 3, padding="same")
+        self.up1 = keras.layers.UpSampling2D(size=(2, 2), interpolation="nearest")
+        self.conv1 = keras.layers.Conv2D(64, 3, padding="same")
         self.norm1 = keras.layers.BatchNormalization(center=False, scale=False)
-        self.act1 = keras.layers.LeakyReLU(negative_slope=0.2)
+        self.act1 = keras.layers.LeakyReLU(negative_slope=0.1)
 
-        self.up2 = keras.layers.UpSampling2D(size=(2, 2))
-        self.conv2 = keras.layers.Conv2D(64, 3, padding="same")
+        self.up2 = keras.layers.UpSampling2D(size=(2, 2), interpolation="nearest")
+        self.conv2 = keras.layers.Conv2D(32, 3, padding="same")
         self.norm2 = keras.layers.BatchNormalization(center=False, scale=False)
-        self.act2 = keras.layers.LeakyReLU(negative_slope=0.2)
+        self.act2 = keras.layers.LeakyReLU(negative_slope=0.1)
 
         # Output layer
         self.conv_out = keras.layers.Conv2D(
