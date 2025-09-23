@@ -1,34 +1,3 @@
-"""
-Enhanced TensorFlow WeightWatcher - Comprehensive neural network weight analysis
-
-A diagnostic tool for analyzing TensorFlow/Keras neural network weight matrices using
-spectral methods, power-law analysis, and concentration metrics.
-
-Main Features:
-- Power-law analysis of eigenvalue distributions
-- Spectral metrics (entropy, stable rank, etc.)
-- Concentration analysis (Gini coefficient, dominance ratio, participation ratio)
-- Model comparison and smoothing capabilities
-- Comprehensive visualization and reporting
-
-Example Usage:
-    ```python
-    import keras
-    from dl_techniques.analysis.tf_weightwatcher import analyze_model, WeightWatcher
-
-    # Load your model
-    model = keras.models.load_model('my_model.keras')
-
-    # Quick analysis
-    results = analyze_model(model, plot=True, savedir='analysis_results')
-
-    # Detailed analysis
-    watcher = WeightWatcher(model)
-    analysis_df = watcher.analyze(concentration_analysis=True, plot=True)
-    summary = watcher.get_summary()
-    ```
-"""
-
 # Main classes and functions
 from .weightwatcher import WeightWatcher
 from .analyzer import (
@@ -76,7 +45,6 @@ from .constants import (
 
 # Version info
 __version__ = "2.0.0"
-__author__ = "Enhanced WeightWatcher Team"
 
 # Main exports
 __all__ = [

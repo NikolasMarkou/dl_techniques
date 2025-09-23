@@ -4,13 +4,13 @@ A comprehensive diagnostic tool for analyzing neural network weight matrices usi
 
 ## Features
 
-- **Power-Law Analysis**: Fit eigenvalue distributions to power-law models to assess training quality
-- **Spectral Metrics**: Calculate matrix entropy, stable rank, and other spectral properties
-- **Concentration Analysis**: Identify critical weights and information concentration patterns
-- **Model Comparison**: Compare models before/after optimization, pruning, or fine-tuning
-- **SVD Smoothing**: Apply singular value decomposition to improve model generalization
-- **Rich Visualizations**: Generate comprehensive plots and HTML reports
-- **Keras Integration**: Native support for Keras models with minimal dependencies
+-   **Power-Law Analysis**: Fit eigenvalue distributions to power-law models to assess training quality.
+-   **Spectral Metrics**: Calculate matrix entropy, stable rank, and other spectral properties.
+-   **Concentration Analysis**: Identify critical weights and information concentration patterns.
+-   **Model Comparison**: Compare models before/after optimization, pruning, or fine-tuning.
+-   **SVD Smoothing**: Apply singular value decomposition to improve model generalization.
+-   **Rich Visualizations**: Generate comprehensive plots and HTML reports.
+-   **Keras Integration**: Native support for Keras models with minimal dependencies.
 
 ## Installation
 
@@ -21,7 +21,7 @@ pip install keras tensorflow scipy matplotlib pandas
 Then add the WeightWatcher module to your project:
 
 ```python
-from dl_techniques.analysis.weightwatcher import WeightWatcher, analyze_model
+from dl_techniques.weightwatcher import WeightWatcher, analyze_model
 ```
 
 ## Quick Start
@@ -30,15 +30,15 @@ from dl_techniques.analysis.weightwatcher import WeightWatcher, analyze_model
 
 ```python
 import keras
-from dl_techniques.analysis.weightwatcher import analyze_model
+from dl_techniques.weightwatcher import analyze_model
 
 # Load your model
 model = keras.models.load_model('my_model.keras')
 
 # Perform comprehensive analysis
 results = analyze_model(
-    model, 
-    plot=True, 
+    model,
+    plot=True,
     concentration_analysis=True,
     savedir='analysis_results'
 )
@@ -51,7 +51,7 @@ print("Recommendations:", results['recommendations'])
 ### Detailed Analysis with WeightWatcher Class
 
 ```python
-from dl_techniques.analysis.weightwatcher import WeightWatcher
+from dl_techniques.weightwatcher import WeightWatcher
 
 # Initialize WeightWatcher
 watcher = WeightWatcher(model)
@@ -59,9 +59,9 @@ watcher = WeightWatcher(model)
 # Analyze with full options
 analysis_df = watcher.analyze(
     concentration_analysis=True,  # Enable concentration metrics
-    plot=True,                   # Generate visualizations
-    randomize=True,              # Compare with randomized weights
-    savefig='plots'              # Save plots directory
+    plot=True,                    # Generate visualizations
+    randomize=True,               # Compare with randomized weights
+    savefig='plots'               # Save plots directory
 )
 
 # Get summary metrics
@@ -77,27 +77,30 @@ print(f"Layer 5 has {len(evals)} eigenvalues")
 ## Key Metrics Explained
 
 ### Power-Law Exponent (α)
-- **α < 2.0**: May indicate over-training or memorization
-- **2.0 < α < 6.0**: Well-trained range, good generalization expected
-- **α > 6.0**: May indicate under-training
+
+-   **α < 2.0**: May indicate over-training or memorization.
+-   **2.0 < α < 6.0**: Well-trained range, good generalization expected.
+-   **α > 6.0**: May indicate under-training.
 
 ### Concentration Metrics
-- **Gini Coefficient**: Measures inequality in eigenvalue distribution (0=equal, 1=concentrated)
-- **Dominance Ratio**: Ratio of largest eigenvalue to sum of others
-- **Participation Ratio**: Measures localization in eigenvectors (lower = more concentrated)
-- **Concentration Score**: Combined metric indicating information concentration
+
+-   **Gini Coefficient**: Measures inequality in eigenvalue distribution (0=equal, 1=concentrated).
+-   **Dominance Ratio**: Ratio of largest eigenvalue to sum of others.
+-   **Participation Ratio**: Measures localization in eigenvectors (lower = more concentrated).
+-   **Concentration Score**: Combined metric indicating information concentration.
 
 ### Spectral Properties
-- **Stable Rank**: Effective rank of weight matrices
-- **Matrix Entropy**: Information distribution across eigenvalues
-- **Spectral Norm**: Largest eigenvalue (related to gradient flow)
+
+-   **Stable Rank**: Effective rank of weight matrices.
+-   **Matrix Entropy**: Information distribution across eigenvalues.
+-   **Spectral Norm**: Largest eigenvalue (related to gradient flow).
 
 ## Advanced Usage
 
 ### Model Comparison
 
 ```python
-from dl_techniques.analysis.weightwatcher import compare_models
+from dl_techniques.weightwatcher import compare_models
 
 # Compare original vs fine-tuned model
 comparison = compare_models(
@@ -116,7 +119,7 @@ for metric, values in comparison['metric_comparison'].items():
 ### SVD Smoothing
 
 ```python
-from dl_techniques.analysis.weightwatcher import create_smoothed_model
+from dl_techniques.weightwatcher import create_smoothed_model
 
 # Create smoothed version using DetX method
 smoothed_model, comparison = create_smoothed_model(
@@ -132,11 +135,11 @@ smoothed_model.save('smoothed_model.keras')
 ### Critical Layer Analysis
 
 ```python
-from dl_techniques.analysis.weightwatcher import get_critical_layers
+from dl_techniques.weightwatcher import get_critical_layers
 
 # Find layers with highest concentration
 critical_layers = get_critical_layers(
-    model, 
+    model,
     criterion='concentration',  # 'alpha', 'entropy', 'parameters'
     top_k=5
 )
@@ -149,8 +152,7 @@ for layer_info in critical_layers:
 ### Using Individual Metric Functions
 
 ```python
-from dl_techniques.analysis.weightwatcher.metrics import (
-    calculate_gini_coefficient,
+from dl_techniques.weightwatcher import (
     calculate_concentration_metrics,
     fit_powerlaw
 )
@@ -182,10 +184,11 @@ summary = watcher.get_summary()
 if summary['alpha'] < 2.0:
     print("⚠️  Model may be over-trained")
 elif summary['alpha'] > 6.0:
-    print("⚠️  Model may be under-trained") 
+    print("⚠️  Model may be under-trained")
 else:
     print("✅ Model training quality looks good")
 
+# Note: The '5.0' threshold is an example heuristic.
 if summary['concentration_score'] > 5.0:
     print("⚠️  High information concentration detected")
     print("   Be careful with pruning/quantization")
@@ -199,7 +202,7 @@ analysis_df = watcher.analyze()
 
 # Find problematic layers
 over_trained = analysis_df[analysis_df['alpha'] < 2.0]
-high_concentration = analysis_df[analysis_df['concentration_score'] > 
+high_concentration = analysis_df[analysis_df['concentration_score'] >
                                 analysis_df['concentration_score'].quantile(0.9)]
 
 print("Over-trained layers:", over_trained['name'].tolist())
@@ -210,11 +213,11 @@ print("High concentration layers:", high_concentration['name'].tolist())
 
 The analysis automatically generates:
 
-- **Power-law fit plots**: Eigenvalue distributions with fitted curves
-- **Layer comparison charts**: Metrics across different layers
-- **Concentration analysis plots**: Critical weight visualizations
-- **HTML reports**: Comprehensive analysis summaries
-- **CSV exports**: Detailed numerical results
+-   **Power-law fit plots**: Eigenvalue distributions with fitted curves.
+-   **Layer comparison charts**: Metrics across different layers.
+-   **Concentration analysis plots**: Critical weight visualizations.
+-   **HTML reports**: Comprehensive analysis summaries.
+-   **CSV exports**: Detailed numerical results.
 
 ## File Outputs
 
@@ -229,7 +232,7 @@ analysis_results/
 │   ├── layer_0_powerlaw.png
 │   ├── layer_1_powerlaw.png
 │   └── ...
-└── detailed_plots/          # Layer weight visualizations (if requested)
+└── detailed_plots/           # Layer weight visualizations (if requested)
     ├── layer_0_weights.png
     └── ...
 ```
@@ -237,48 +240,51 @@ analysis_results/
 ## Best Practices
 
 ### For Model Development
-1. **Monitor α during training**: Track power-law exponents to detect over/under-training
-2. **Check concentration metrics**: High concentration may indicate brittleness
-3. **Compare before/after optimization**: Use model comparison for validation
+
+1.  **Monitor α during training**: Track power-law exponents to detect over/under-training.
+2.  **Check concentration metrics**: High concentration may indicate brittleness.
+3.  **Compare before/after optimization**: Use model comparison for validation.
 
 ### For Model Optimization
-1. **Preserve critical layers**: Avoid aggressive pruning on high-concentration layers
-2. **Use SVD smoothing**: Can improve generalization on over-trained models
-3. **Validate with test data**: Always check performance impact of optimizations
+
+1.  **Preserve critical layers**: Avoid aggressive pruning on high-concentration layers.
+2.  **Use SVD smoothing**: Can improve generalization on over-trained models.
+3.  **Validate with test data**: Always check performance impact of optimizations.
 
 ### For Production Deployment
-1. **Document baseline metrics**: Keep analysis results for model versioning
-2. **Monitor drift**: Re-analyze models periodically to detect changes
-3. **Use for debugging**: Spectral analysis can help diagnose training issues
+
+1.  **Document baseline metrics**: Keep analysis results for model versioning.
+2.  **Monitor drift**: Re-analyze models periodically to detect changes.
+3.  **Use for debugging**: Spectral analysis can help diagnose training issues.
 
 ## API Reference
 
 ### Main Functions
 
-- `analyze_model(model, **kwargs)`: Comprehensive model analysis
-- `compare_models(model1, model2, **kwargs)`: Compare two models
-- `create_smoothed_model(model, method='detX')`: Apply SVD smoothing
-- `get_critical_layers(model, criterion='concentration')`: Find important layers
+-   `analyze_model(model, **kwargs)`: Comprehensive model analysis.
+-   `compare_models(model1, model2, **kwargs)`: Compare two models.
+-   `create_smoothed_model(model, method='detX')`: Apply SVD smoothing.
+-   `get_critical_layers(model, criterion='concentration')`: Find important layers.
 
 ### WeightWatcher Class
 
-- `analyze(**kwargs)`: Perform spectral analysis
-- `get_summary()`: Get aggregated metrics
-- `get_ESD(layer_id)`: Get eigenvalue spectrum for layer
-- `get_layer_concentration_metrics(layer_id)`: Detailed layer analysis
+-   `analyze(**kwargs)`: Perform spectral analysis.
+-   `get_summary()`: Get aggregated metrics.
+-   `get_ESD(layer_id)`: Get eigenvalue spectrum for layer.
+-   `get_layer_concentration_metrics(layer_id)`: Detailed layer analysis.
 
 ### Utility Functions
 
-- `infer_layer_type(layer)`: Determine layer type
-- `compute_weight_statistics(model)`: Basic weight statistics
-- `create_weight_visualization(model, layer_id)`: Visualize layer weights
+-   `infer_layer_type(layer)`: Determine layer type.
+-   `compute_weight_statistics(model)`: Basic weight statistics.
+-   `create_weight_visualization(model, layer_id)`: Visualize layer weights.
 
 ## Requirements
 
-- **Python**: 3.8+
-- **Keras**: 3.0+
-- **Required packages**: numpy, scipy, matplotlib, pandas
-- **Optional**: seaborn (for enhanced plots)
+-   **Python**: 3.8+
+-   **Keras**: 3.0+
+-   **Required packages**: numpy, scipy, matplotlib, pandas
+-   **Optional**: seaborn (for enhanced plots)
 
 ## Contributing
 
@@ -292,8 +298,8 @@ This project follows the same license as the parent `dl_techniques` package.
 
 If you use WeightWatcher in your research, please consider citing the theoretical foundations:
 
-- Martin, C. H., & Mahoney, M. W. (2019). "Traditional and Heavy-Tail Self Regularization in Neural Network Models"
-- Martin, C. H., & Mahoney, M. W. (2021). "Predicting trends in the quality of state-of-the-art neural networks without access to training or testing data"
+-   Martin, C. H., & Mahoney, M. W. (2019). "Traditional and Heavy-Tail Self Regularization in Neural Network Models"
+-   Martin, C. H., & Mahoney, M. W. (2021). "Predicting trends in the quality of state-of-the-art neural networks without access to training or testing data"
 
 ## Examples and Tutorials
 

@@ -11,12 +11,17 @@ import numpy as np
 import matplotlib.pyplot as plt
 from typing import Dict, List, Optional, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .constants import (
     LayerType, DEFAULT_BINS, DEFAULT_FIG_SIZE, DEFAULT_DPI
 )
 
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 def infer_layer_type(layer: keras.layers.Layer) -> LayerType:
     """
@@ -67,6 +72,7 @@ def infer_layer_type(layer: keras.layers.Layer) -> LayerType:
     else:
         return LayerType.UNKNOWN
 
+# ---------------------------------------------------------------------
 
 def get_layer_weights_and_bias(layer: keras.layers.Layer) -> Tuple[bool, Optional[np.ndarray], bool, Optional[np.ndarray]]:
     """
@@ -117,6 +123,7 @@ def get_layer_weights_and_bias(layer: keras.layers.Layer) -> Tuple[bool, Optiona
 
     return has_weights, weights, has_bias, bias
 
+# ---------------------------------------------------------------------
 
 def get_weight_matrices(
         weights: np.ndarray,
@@ -182,6 +189,7 @@ def get_weight_matrices(
 
     return Wmats, N, M, rf
 
+# ---------------------------------------------------------------------
 
 def plot_powerlaw_fit(
         evals: np.ndarray,
@@ -268,6 +276,7 @@ def plot_powerlaw_fit(
     except Exception as e:
         logger.warning(f"Error creating plots for layer {layer_id}: {e}")
 
+# ---------------------------------------------------------------------
 
 def create_weight_visualization(
         model: keras.Model,
@@ -345,6 +354,7 @@ def create_weight_visualization(
         logger.warning(f"Error creating visualization for layer {layer_index}: {e}")
         return None
 
+# ---------------------------------------------------------------------
 
 def compute_weight_statistics(
         model: keras.Model,
@@ -402,6 +412,7 @@ def compute_weight_statistics(
 
     return stats
 
+# ---------------------------------------------------------------------
 
 def extract_conv_filters(
         layer: keras.layers.Layer,
@@ -473,6 +484,7 @@ def extract_conv_filters(
 
     return None
 
+# ---------------------------------------------------------------------
 
 def save_layer_analysis_plots(
         model: keras.Model,
@@ -522,3 +534,5 @@ def save_layer_analysis_plots(
                     plt.close()
                 except Exception as e:
                     logger.warning(f"Error creating histogram for layer {layer_id}: {e}")
+
+# ---------------------------------------------------------------------

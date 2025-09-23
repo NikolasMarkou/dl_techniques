@@ -6,19 +6,22 @@ on neural network weight matrices, including advanced concentration and localiza
 """
 
 import numpy as np
-from keras import ops
 from scipy import stats
-from scipy.linalg import eigh
 from scipy.sparse.linalg import svds
 from typing import Dict, List, Optional, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from .constants import (
     EPSILON, EVALS_THRESH, OVER_TRAINED_THRESH, UNDER_TRAINED_THRESH,
-    DEFAULT_MIN_EVALS, DEFAULT_MAX_EVALS, DEFAULT_BINS
+    DEFAULT_MIN_EVALS, DEFAULT_MAX_EVALS, DEFAULT_BINS, MAX_CRITICAL_WEIGHTS_REPORTED,
+    CRITICAL_WEIGHT_THRESHOLD
 )
 
+# ---------------------------------------------------------------------
 
 def compute_eigenvalues(
         weight_matrices: List[np.ndarray],
@@ -94,6 +97,7 @@ def compute_eigenvalues(
 
     return np.sort(np.array(all_evals)), max_sv, min_sv, rank_loss
 
+# ---------------------------------------------------------------------
 
 def fit_powerlaw(
         evals: np.ndarray,
@@ -164,6 +168,7 @@ def fit_powerlaw(
 
     return alpha, xmin, D, sigma, num_pl_spikes, status, warning
 
+# ---------------------------------------------------------------------
 
 def calculate_matrix_entropy(singular_values: np.ndarray, N: int) -> float:
     """
@@ -205,6 +210,7 @@ def calculate_matrix_entropy(singular_values: np.ndarray, N: int) -> float:
         logger.warning(f"Error calculating matrix entropy: {e}")
         return -1.0
 
+# ---------------------------------------------------------------------
 
 def calculate_spectral_metrics(evals: np.ndarray, alpha: float) -> Dict[str, float]:
     """
@@ -241,6 +247,7 @@ def calculate_spectral_metrics(evals: np.ndarray, alpha: float) -> Dict[str, flo
         "stable_rank": norm / spectral_norm
     }
 
+# ---------------------------------------------------------------------
 
 def calculate_gini_coefficient(evals: np.ndarray) -> float:
     """
@@ -273,6 +280,7 @@ def calculate_gini_coefficient(evals: np.ndarray) -> float:
 
     return ((n + 1) / n) - (2 * np.sum(cum_evals)) / denominator
 
+# ---------------------------------------------------------------------
 
 def calculate_dominance_ratio(evals: np.ndarray) -> float:
     """
@@ -298,6 +306,7 @@ def calculate_dominance_ratio(evals: np.ndarray) -> float:
 
     return lambda_max / sum_others
 
+# ---------------------------------------------------------------------
 
 def calculate_participation_ratio(vector: np.ndarray) -> float:
     """
@@ -332,6 +341,7 @@ def calculate_participation_ratio(vector: np.ndarray) -> float:
 
     return numerator / denominator
 
+# ---------------------------------------------------------------------
 
 def get_top_eigenvectors(
         weight_matrix: np.ndarray,
@@ -348,8 +358,8 @@ def get_top_eigenvectors(
 
     Returns:
         Tuple containing:
-            - Array of eigenvalues (squared singular values).
-            - Array of eigenvectors (each column is an eigenvector).
+            - Array of top k eigenvalues of W @ W.T (squared singular values of W).
+            - Array of top k eigenvectors of W @ W.T (left singular vectors of W).
     """
     n, m = weight_matrix.shape
     min_dim = min(n, m)
@@ -371,6 +381,7 @@ def get_top_eigenvectors(
         logger.error(f"Eigenvector computation failed: {e}")
         return np.array([]), np.array([])
 
+# ---------------------------------------------------------------------
 
 def _power_iteration(
         matrix: np.ndarray,
@@ -423,12 +434,13 @@ def _power_iteration(
 
     return eigvals, eigvecs
 
+# ---------------------------------------------------------------------
 
 def find_critical_weights(
         weight_matrix: np.ndarray,
         eigenvectors: np.ndarray,
         eigenvalues: np.ndarray,
-        threshold: float = 0.1
+        threshold: float = CRITICAL_WEIGHT_THRESHOLD
 ) -> List[Tuple[int, int, float]]:
     """
     Find individual weights that contribute most to top eigenvectors.
@@ -489,6 +501,7 @@ def find_critical_weights(
 
     return sorted_critical_weights
 
+# ---------------------------------------------------------------------
 
 def calculate_concentration_metrics(
         weight_matrix: np.ndarray,
@@ -540,9 +553,11 @@ def calculate_concentration_metrics(
         'min_participation_ratio': np.min(participation_ratios) if participation_ratios else 0,
         'critical_weights': critical_weights[:10],  # Top 10 critical weights
         'critical_weight_count': len(critical_weights),
+        'critical_weights': critical_weights[:MAX_CRITICAL_WEIGHTS_REPORTED],
         'concentration_score': np.log1p(concentration_score)  # Log to manage extreme values
     }
 
+# ---------------------------------------------------------------------
 
 def jensen_shannon_distance(p: np.ndarray, q: np.ndarray) -> float:
     """
@@ -577,6 +592,7 @@ def jensen_shannon_distance(p: np.ndarray, q: np.ndarray) -> float:
 
     return distance
 
+# ---------------------------------------------------------------------
 
 def compute_detX_constraint(evals: np.ndarray) -> int:
     """
@@ -601,6 +617,7 @@ def compute_detX_constraint(evals: np.ndarray) -> int:
 
     return num_evals  # If no constraint is satisfied, keep all eigenvalues
 
+# ---------------------------------------------------------------------
 
 def smooth_matrix(W: np.ndarray, n_comp: int) -> np.ndarray:
     """
@@ -640,6 +657,7 @@ def smooth_matrix(W: np.ndarray, n_comp: int) -> np.ndarray:
         logger.warning(f"SVD failed: {e}, returning original matrix")
         return W
 
+# ---------------------------------------------------------------------
 
 def calculate_glorot_normalization_factor(N: int, M: int, rf: int) -> float:
     """
@@ -654,3 +672,6 @@ def calculate_glorot_normalization_factor(N: int, M: int, rf: int) -> float:
         Glorot normalization factor (float).
     """
     return np.sqrt(2 / ((N + M) * rf))
+
+# ---------------------------------------------------------------------
+
