@@ -121,17 +121,17 @@ class NanoVLM(keras.Model):
     """
     NanoVLM: Modern Compact Vision-Language Model using existing dl-techniques components.
 
-    A completely rewritten vision-language model that follows modern Keras 3 patterns
+    A completely rewritten vision_heads-language model that follows modern Keras 3 patterns
     and leverages existing components from the dl-techniques framework. This model
-    combines configurable vision encoding, flexible multi-modal fusion, and robust
+    combines configurable vision_heads encoding, flexible multi-modal fusion, and robust
     text processing through a unified, serializable architecture.
 
-    **Intent**: Provide a production-ready, configurable vision-language model that
+    **Intent**: Provide a production-ready, configurable vision_heads-language model that
     demonstrates proper integration of existing framework components while following
     modern Keras 3 design patterns for robust serialization and deployment.
 
     **Architecture Components**:
-    1. **VisionEncoder**: Configurable vision transformer with multiple architectural options
+    1. **VisionEncoder**: Configurable vision_heads transformer with multiple architectural options
     2. **TextDecoder/TextEncoder**: Flexible text processing with multiple embedding strategies
     3. **MultiModalFusion**: Advanced cross-modal fusion with 8 different strategies
     4. **Output Projection**: Final vocabulary prediction layer with optional weight tying
@@ -184,7 +184,7 @@ class NanoVLM(keras.Model):
 
     Output shape:
         3D tensor of shape (batch_size, combined_sequence_length, vocab_size)
-        where combined_sequence_length includes both vision and text tokens.
+        where combined_sequence_length includes both vision_heads and text tokens.
 
     Attributes:
         vision_encoder: VisionEncoder instance for image processing.
@@ -334,9 +334,9 @@ class NanoVLM(keras.Model):
             )
             self.text_config['vocab_size'] = self.vocab_size
 
-        # Enhance vision config for sequence output
+        # Enhance vision_heads config for sequence output
         if self.vision_config.get('output_mode') != 'none':
-            logger.info("Setting vision encoder output_mode to 'none' for sequence features")
+            logger.info("Setting vision_heads encoder output_mode to 'none' for sequence features")
             self.vision_config['output_mode'] = 'none'
 
         # Enhance fusion config with embedding dimension
@@ -414,9 +414,9 @@ class NanoVLM(keras.Model):
                 "or tuple of (image_shape, text_shape)"
             )
 
-        # Build vision encoder
+        # Build vision_heads encoder
         self.vision_encoder.build(image_shape)
-        logger.debug(f"Built vision encoder with input shape: {image_shape}")
+        logger.debug(f"Built vision_heads encoder with input shape: {image_shape}")
 
         # Build text component
         self.text_component.build(text_shape)
@@ -498,7 +498,7 @@ class NanoVLM(keras.Model):
             attention_mask = None
             token_type_ids = None
 
-        # 1. Process images through vision encoder
+        # 1. Process images through vision_heads encoder
         vision_features = self.vision_encoder(images, training=training)
         logger.debug(f"Vision features shape: {ops.shape(vision_features)}")
 
@@ -591,7 +591,7 @@ class NanoVLM(keras.Model):
             # Get logits and sample next token
             logits = self.output_projection(combined)
 
-            # Extract text logits (skip vision tokens)
+            # Extract text logits (skip vision_heads tokens)
             vision_seq_len = ops.shape(vision_features)[1]
             text_logits = logits[:, vision_seq_len:, :]
             next_token_logits = text_logits[:, -1, :]  # Last text position
@@ -646,7 +646,7 @@ class NanoVLM(keras.Model):
             batch_size = input_shape[0][0]
             text_seq_len = input_shape[1][1]
 
-        # Compute vision sequence length
+        # Compute vision_heads sequence length
         vision_output_shape = self.vision_encoder.compute_output_shape(
             input_shape['images'] if isinstance(input_shape, dict) else input_shape[0]
         )

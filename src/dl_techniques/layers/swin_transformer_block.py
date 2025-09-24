@@ -2,8 +2,8 @@
 Swin Transformer Block Implementation
 
 This module implements the core SwinTransformerBlock layer, which forms the fundamental
-building block of the Swin Transformer architecture - a hierarchical vision transformer
-that has revolutionized computer vision by achieving state-of-the-art performance across
+building block of the Swin Transformer architecture - a hierarchical vision_heads transformer
+that has revolutionized computer vision_heads by achieving state-of-the-art performance across
 multiple tasks including image classification, object detection, and semantic segmentation.
 
 Architecture Overview
@@ -139,7 +139,7 @@ class SwinTransformerBlock(keras.layers.Layer):
     connections and includes optional stochastic depth regularization.
 
     **Intent**: Implement the core building block of Swin Transformer architecture
-    for efficient vision transformers with linear computational complexity relative
+    for efficient vision_heads transformers with linear computational complexity relative
     to input size through windowed attention mechanisms.
 
     **Architecture**:

@@ -38,7 +38,7 @@ class ViT(keras.Model):
 
     This model implements the complete Vision Transformer architecture using the dl_techniques
     framework's factory system for consistent component creation. It supports different scales
-    and configurations for various vision tasks including classification, feature extraction,
+    and configurations for various vision_heads tasks including classification, feature extraction,
     and transfer learning.
 
     **Intent**: Provide a production-ready Vision Transformer implementation that leverages

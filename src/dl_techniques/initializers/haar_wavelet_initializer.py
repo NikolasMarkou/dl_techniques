@@ -18,7 +18,7 @@ The implementation offers:
    with Haar wavelet filters for wavelet decomposition.
 
 Wavelet transforms are particularly useful in:
-- Image processing and computer vision for multi-scale feature extraction
+- Image processing and computer vision_heads for multi-scale feature extraction
 - Signal denoising and compression
 - Edge and texture detection
 - Multi-resolution analysis

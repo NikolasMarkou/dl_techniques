@@ -394,7 +394,7 @@ def test_shuffle_model_integration(sample_vit_tokens: tf.Tensor, default_shuffle
 
 
 def test_shuffle_in_vision_pipeline(sample_vit_tokens: tf.Tensor) -> None:
-    """Test PixelShuffle in a vision processing pipeline."""
+    """Test PixelShuffle in a vision_heads processing pipeline."""
     inputs = keras.Input(shape=sample_vit_tokens.shape[1:])
 
     # Vision pipeline with pixel shuffle

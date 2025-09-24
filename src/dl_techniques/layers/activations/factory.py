@@ -167,7 +167,7 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'optional_params': {},
         'use_case': (
             'Smooth activation that can outperform ReLU and Swish in deep '
-            'vision and NLP models.'
+            'vision_heads and NLP models.'
         )
     },
     'saturated_mish': {

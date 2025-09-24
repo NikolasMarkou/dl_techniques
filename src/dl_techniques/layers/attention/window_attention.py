@@ -8,7 +8,7 @@ within each window, reducing computational complexity while maintaining effectiv
 ## Conceptual Overview
 
 Standard transformer attention computes relationships between all pairs of tokens in a sequence,
-leading to quadratic complexity O(N²) where N is the sequence length. For vision tasks with
+leading to quadratic complexity O(N²) where N is the sequence length. For vision_heads tasks with
 high-resolution images, this becomes computationally prohibitive as the number of patches grows.
 
 WindowAttention addresses this by:

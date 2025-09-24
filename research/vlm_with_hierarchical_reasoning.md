@@ -67,7 +67,7 @@ class VisionLanguageHRMCore(keras.layers.Layer):
     """
     Core multi-modal hierarchical reasoning engine.
     
-    Extends the base HRM architecture to handle vision-language inputs
+    Extends the base HRM architecture to handle vision_heads-language inputs
     with cross-modal fusion and task-adaptive processing.
     """
 ```
@@ -76,7 +76,7 @@ class VisionLanguageHRMCore(keras.layers.Layer):
 ```python
 class MultiModalInputProcessor(keras.layers.Layer):
     """
-    Processes and fuses vision and text inputs into unified embeddings.
+    Processes and fuses vision_heads and text inputs into unified embeddings.
     
     Components:
     - Vision encoder (SigLIP-based)
@@ -187,7 +187,7 @@ class MultiModalInputProcessor(keras.layers.Layer):
     """
     Multi-modal input processing for VLM-HRM.
     
-    Handles vision and text inputs, creates unified embeddings with
+    Handles vision_heads and text inputs, creates unified embeddings with
     modality-specific tokens and cross-modal fusion.
     """
     
@@ -315,11 +315,11 @@ class MultiModalInputProcessor(keras.layers.Layer):
         
         batch_size = ops.shape(images)[0]
         
-        # Process vision
+        # Process vision_heads
         vision_features = self.vision_encoder(images, training=training)
         vision_emb = self.vision_projector(vision_features, training=training)
         
-        # Add vision modality embedding
+        # Add vision_heads modality embedding
         vision_mod_token = self.modality_embeddings(0)  # VISION = 0
         vision_emb = vision_emb + ops.broadcast_to(
             ops.expand_dims(vision_mod_token, 0),
@@ -392,10 +392,10 @@ class MultiModalInputProcessor(keras.layers.Layer):
 @keras.saving.register_keras_serializable()
 class CrossModalFusionLayer(keras.layers.Layer):
     """
-    Cross-modal fusion layer for vision-text interaction.
+    Cross-modal fusion layer for vision_heads-text interaction.
     
     Creates fusion tokens that capture cross-modal relationships
-    between vision and text representations.
+    between vision_heads and text representations.
     """
     
     def __init__(
@@ -431,7 +431,7 @@ class CrossModalFusionLayer(keras.layers.Layer):
             trainable=True
         )
         
-        # Cross-attention from vision to fusion tokens
+        # Cross-attention from vision_heads to fusion tokens
         self.vision_to_fusion = layers.MultiHeadAttention(
             num_heads=self.num_heads,
             key_dim=self.embed_dim // self.num_heads,
@@ -604,7 +604,7 @@ class CrossModalAttentionBlock(keras.layers.Layer):
     Cross-modal attention block for inter-modality communication.
     
     Enables information exchange between different modalities
-    (vision, text, fusion) during reasoning.
+    (vision_heads, text, fusion) during reasoning.
     """
     
     def __init__(
@@ -684,7 +684,7 @@ class VisionLanguageHRMCore(keras.layers.Layer):
     Core Vision Language Hierarchical Reasoning Model.
     
     Integrates multi-modal input processing with hierarchical reasoning
-    for adaptive vision-language understanding.
+    for adaptive vision_heads-language understanding.
     """
     
     def __init__(
@@ -1011,9 +1011,9 @@ class VLMOutputSystem(keras.layers.Layer):
         # VQA (use task token)
         outputs["vqa_logits"] = self.vqa_head(task_token)
         
-        # Captioning (use all text positions, skip task/vision/fusion tokens)
+        # Captioning (use all text positions, skip task/vision_heads/fusion tokens)
         # Assuming structure: [TASK] + [VISION] + [TEXT] + [FUSION]
-        text_start = 1 + (224//16)**2 + 1  # Skip task + vision tokens  
+        text_start = 1 + (224//16)**2 + 1  # Skip task + vision_heads tokens  
         text_end = text_start + 512         # Text sequence length
         text_embeddings = z_h[:, text_start:text_end]
         outputs["caption_logits"] = self.caption_head(text_embeddings)
@@ -1659,7 +1659,7 @@ def visualize_cross_modal_attention(model, image, text, tokenizer):
     if "vision_text_attention" in outputs:
         attention_maps["vision_to_text"] = outputs["vision_text_attention"]
     
-    # Text-to-vision attention  
+    # Text-to-vision_heads attention  
     if "text_vision_attention" in outputs:
         attention_maps["text_to_vision"] = outputs["text_vision_attention"]
     

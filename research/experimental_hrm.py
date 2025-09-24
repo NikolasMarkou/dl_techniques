@@ -211,10 +211,10 @@ class VisionLanguageHRM(keras.Model):
     """
     Vision Language Model with Hierarchical Reasoning (VLM-HRM).
 
-    This model integrates a vision encoder and a text encoder with a dual-level
+    This model integrates a vision_heads encoder and a text encoder with a dual-level
     hierarchical reasoning core. It uses Adaptive Computation Time (ACT) to
     dynamically adjust the number of reasoning steps based on input complexity,
-    and supports multiple vision-language tasks through a unified architecture.
+    and supports multiple vision_heads-language tasks through a unified architecture.
 
     **Intent**: To create a state-of-the-art VLM that explicitly models
     hierarchical reasoning, balancing computational efficiency with deep
@@ -315,7 +315,7 @@ class VisionLanguageHRM(keras.Model):
         )(vision_input)
         patches_reshaped = layers.Reshape((-1, config.VISION_EMBED_DIM))(patches)
 
-        # Simple Transformer Encoder for vision
+        # Simple Transformer Encoder for vision_heads
         encoded_patches = HierarchicalReasoningModule(
             num_layers=4,  # A shallow encoder for this example
             model_dim=config.VISION_EMBED_DIM,
@@ -366,7 +366,7 @@ class VisionLanguageHRM(keras.Model):
 
     def _prepare_inputs(self, images: keras.KerasTensor, text_ids: keras.KerasTensor) -> Tuple[
         keras.KerasTensor, keras.KerasTensor]:
-        """Processes and fuses vision and text inputs."""
+        """Processes and fuses vision_heads and text inputs."""
         config = self.config
         batch_size = ops.shape(images)[0]
 

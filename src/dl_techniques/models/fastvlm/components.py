@@ -14,15 +14,15 @@ from dl_techniques.layers.layer_scale import LearnableMultiplier, MultiplierType
 @keras.saving.register_keras_serializable()
 class AttentionBlock(keras.layers.Layer):
     """
-    Attention block with vision-specific adaptations.
+    Attention block with vision_heads-specific adaptations.
 
     This layer wraps the TransformerLayer with
-    vision-specific configurations and preprocessing to work effectively with
+    vision_heads-specific configurations and preprocessing to work effectively with
     spatial feature maps from convolutional layers.
 
-    **Intent**: Provide a vision-optimized attention mechanism that leverages
+    **Intent**: Provide a vision_heads-optimized attention mechanism that leverages
     the powerful TransformerLayer from dl_techniques while adding spatial
-    awareness and efficient processing for vision tasks.
+    awareness and efficient processing for vision_heads tasks.
 
     **Architecture**:
     ```
@@ -99,7 +99,7 @@ class AttentionBlock(keras.layers.Layer):
             layer_scale_init=1e-5
         )
 
-        # In a vision model pipeline
+        # In a vision_heads model pipeline
         x = ConvolutionalStem(64)(image_input)  # [H/4, W/4, 64]
         x = RepMixerBlock(64)(x)                # Local feature mixing
         x = AttentionBlock(64, num_heads=4)(x)  # Global attention
@@ -108,7 +108,7 @@ class AttentionBlock(keras.layers.Layer):
     Note:
         The spatial flatten/reshape operations preserve the spatial structure
         while allowing transformer processing. This is more efficient than
-        using 2D positional encodings for vision tasks.
+        using 2D positional encodings for vision_heads tasks.
     """
 
     def __init__(
@@ -153,7 +153,7 @@ class AttentionBlock(keras.layers.Layer):
         self.height = None
         self.width = None
 
-        # CREATE transformer layer with vision-optimized settings
+        # CREATE transformer layer with vision_heads-optimized settings
         self.transformer = TransformerLayer(
             hidden_size=dim,
             num_heads=num_heads,

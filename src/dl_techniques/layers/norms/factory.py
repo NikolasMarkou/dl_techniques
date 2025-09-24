@@ -334,7 +334,7 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
         'global_response_norm': {
             'description': 'Global Response Normalization from ConvNeXt',
             'parameters': ['eps', 'gamma_initializer', 'beta_initializer'],
-            'use_case': 'ConvNeXt-style architectures and vision models'
+            'use_case': 'ConvNeXt-style architectures and vision_heads models'
         },
         'logit_norm': {
             'description': 'Temperature-scaled normalization for classification',

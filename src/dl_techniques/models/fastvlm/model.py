@@ -2,7 +2,7 @@
 FastVLM Model Implementation
 
 This module provides the FastVLM (Fast Vision Language Model) architecture,
-a hybrid vision model that efficiently combines convolutional and transformer-based
+a hybrid vision_heads model that efficiently combines convolutional and transformer-based
 components for high-performance image classification and feature extraction.
 """
 
@@ -24,15 +24,15 @@ from .components import AttentionBlock
 @keras.saving.register_keras_serializable()
 class FastVLM(keras.Model):
     """
-    FastVLM: A fast hybrid vision model combining efficient convolutions and transformers.
+    FastVLM: A fast hybrid vision_heads model combining efficient convolutions and transformers.
 
     This model implements the FastVLM architecture that efficiently combines
     convolutional feature extraction, efficient mixing operations (RepMixer),
-    and transformer-based attention for high-performance vision tasks while
+    and transformer-based attention for high-performance vision_heads tasks while
     maintaining computational efficiency.
 
-    **Intent**: Provide a state-of-the-art vision model that achieves excellent
-    performance on image classification and other vision tasks while being
+    **Intent**: Provide a state-of-the-art vision_heads model that achieves excellent
+    performance on image classification and other vision_heads tasks while being
     suitable for both research and production deployment scenarios.
 
     **Architecture**:

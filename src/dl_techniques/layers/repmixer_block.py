@@ -92,14 +92,14 @@ from .mobile_one_block import MobileOneBlock
 @keras.saving.register_keras_serializable()
 class RepMixerBlock(keras.layers.Layer):
     """
-    RepMixer block for efficient feature mixing in vision models.
+    RepMixer block for efficient feature mixing in vision_heads models.
 
     This layer implements the RepMixer architecture that efficiently combines
     token mixing (spatial interaction) and channel mixing (feature transformation)
     operations. It uses depthwise convolutions for token mixing and pointwise
     convolutions for channel mixing, with residual connections and normalization.
 
-    **Intent**: Provide an efficient alternative to self-attention for vision tasks
+    **Intent**: Provide an efficient alternative to self-attention for vision_heads tasks
     that maintains strong representational capacity while reducing computational cost,
     especially suitable for mobile and edge deployment scenarios.
 
@@ -408,7 +408,7 @@ class ConvolutionalStem(keras.layers.Layer):
     """
     Convolutional stem for FastVLM using MobileOne blocks.
 
-    This layer creates the initial feature extraction stage of a vision model
+    This layer creates the initial feature extraction stage of a vision_heads model
     using a sequence of MobileOne blocks with progressively reduced spatial
     dimensions and increased feature depth. It's designed to efficiently
     capture low-level visual features before passing to the main architecture.

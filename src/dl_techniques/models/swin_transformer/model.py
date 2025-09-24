@@ -2,7 +2,7 @@
 Swin Transformer Model Implementation
 ====================================
 
-A complete implementation of the Swin Transformer architecture with hierarchical vision
+A complete implementation of the Swin Transformer architecture with hierarchical vision_heads
 transformer using shifted windows. This implementation follows modern Keras 3 patterns
 for consistency and maintainability.
 

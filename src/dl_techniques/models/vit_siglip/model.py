@@ -45,7 +45,7 @@ class SigLIPVisionTransformer(keras.Model):
     This model implements the complete SigLIP Vision Transformer architecture using the dl_techniques
     framework's factory system for consistent component creation. It features a two-stage patch
     embedding approach that provides better feature extraction compared to standard ViT, along with
-    support for different scales and configurations for various vision tasks.
+    support for different scales and configurations for various vision_heads tasks.
 
     **Intent**: Provide a production-ready SigLIP Vision Transformer implementation that leverages
     the dl_techniques framework's modular components while following modern Keras 3 best
@@ -573,7 +573,7 @@ class SigLIPVisionTransformer(keras.Model):
 
     def get_cls_token(self, features: keras.KerasTensor) -> keras.KerasTensor:
         """
-        Extract CLS token from vision features for classification tasks.
+        Extract CLS token from vision_heads features for classification tasks.
 
         Args:
             features: Vision features from forward pass.
@@ -585,7 +585,7 @@ class SigLIPVisionTransformer(keras.Model):
 
     def get_patch_tokens(self, features: keras.KerasTensor) -> keras.KerasTensor:
         """
-        Extract patch tokens from vision features for dense prediction tasks.
+        Extract patch tokens from vision_heads features for dense prediction tasks.
 
         Args:
             features: Vision features from forward pass.

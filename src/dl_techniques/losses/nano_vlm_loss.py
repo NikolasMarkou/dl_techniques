@@ -12,10 +12,10 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class NanoVLMLoss(keras.losses.Loss):
-    """Autoregressive language modeling loss for vision-language training.
+    """Autoregressive language modeling loss for vision_heads-language training.
 
     This loss function implements the standard autoregressive language modeling
-    objective with proper token masking for vision-language models. It computes
+    objective with proper token masking for vision_heads-language models. It computes
     the cross-entropy loss between predicted and target tokens while ignoring
     padding tokens and applying optional label smoothing.
 

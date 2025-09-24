@@ -14,7 +14,7 @@ The model follows a multitask learning architecture with three main components:
    features (P3, P4, P5) from input images. This shared component enables efficient
    computation and knowledge transfer between tasks.
 
-2. **Task-Specific Heads**: Specialized heads for each computer vision task:
+2. **Task-Specific Heads**: Specialized heads for each computer vision_heads task:
    - Detection Head: Performs object detection with bounding box regression and
      classification using DFL (Distribution Focal Loss) regression
    - Segmentation Head: Generates pixel-level segmentation masks using a decoder
@@ -86,7 +86,7 @@ from typing import Optional, Tuple, Dict, Any, List, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.vision_task_types import (
+from dl_techniques.layers.vision_heads.task_types import (
     TaskType,
     TaskConfiguration,
     parse_task_list

@@ -4,7 +4,7 @@ This layer implements the core architecture of a Vision Transformer (ViT),
 which processes images by treating them as a sequence of flattened patches. It
 provides a flexible and modular framework that can be configured to replicate
 various ViT-style architectures, serving as a unified backbone for a wide
-range of computer vision tasks.
+range of computer vision_heads tasks.
 
 Architectural and Mathematical Underpinnings:
 
@@ -96,14 +96,14 @@ PoolingMode = Literal['cls', 'mean', 'max', 'none']
 @keras.saving.register_keras_serializable()
 class VisionEncoder(keras.layers.Layer):
     """
-    General purpose configurable vision encoder using factory-based components.
+    General purpose configurable vision_heads encoder using factory-based components.
 
-    This layer provides a highly flexible vision encoder that can be configured to create
-    various vision transformer architectures. It uses factory patterns for all major
+    This layer provides a highly flexible vision_heads encoder that can be configured to create
+    various vision_heads transformer architectures. It uses factory patterns for all major
     components (patch embedding, attention, normalization, FFN) to enable easy
     experimentation and architectural exploration.
 
-    **Intent**: Provide a single, configurable vision encoder that can replace multiple
+    **Intent**: Provide a single, configurable vision_heads encoder that can replace multiple
     specialized implementations by supporting different patch embedding strategies,
     attention mechanisms, normalization types, and feed-forward networks through
     factory-based component creation.
@@ -578,7 +578,7 @@ class VisionEncoder(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the vision encoder and all its sub-layers.
+        Build the vision_heads encoder and all its sub-layers.
 
         This method validates input shape and explicitly builds sub-layers
         for robust serialization following modern Keras 3 patterns.
@@ -649,7 +649,7 @@ class VisionEncoder(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Forward pass through the vision encoder.
+        Forward pass through the vision_heads encoder.
 
         Args:
             inputs: Input images tensor of shape [batch_size, height, width, channels]
@@ -830,8 +830,8 @@ def create_vision_encoder(
     Factory function to create a VisionEncoder with validated parameters.
 
     This function provides parameter validation and sensible defaults for creating
-    vision encoders with different architectural configurations. It supports all
-    major vision transformer variants through configurable components.
+    vision_heads encoders with different architectural configurations. It supports all
+    major vision_heads transformer variants through configurable components.
 
     Args:
         img_size: Input image size. Must be divisible by patch_size.

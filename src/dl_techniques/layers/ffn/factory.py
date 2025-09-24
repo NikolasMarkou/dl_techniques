@@ -148,7 +148,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'bias_regularizer': None,
             'activity_regularizer': None
         },
-        'use_case': 'Swin Transformer architectures and vision models'
+        'use_case': 'Swin Transformer architectures and vision_heads models'
     }
 }
 

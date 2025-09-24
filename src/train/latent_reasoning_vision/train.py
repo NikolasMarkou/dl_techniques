@@ -1,7 +1,7 @@
 """
 Latent Reasoning Vision Model Implementation
 
-This module implements a vision model using the three-layer conceptual framework:
+This module implements a vision_heads model using the three-layer conceptual framework:
 1. Transformations: Feature extraction and processing substrate
 2. Logic: Differentiable probabilistic reasoning with predicate modules
 3. Arithmetic: Differentiable counting via probability aggregation
@@ -343,7 +343,7 @@ class ReasoningBlock(layers.Layer):
 @keras.saving.register_keras_serializable()
 class LatentReasoningVisionModel(keras.Model):
     """
-    A vision model implementing the three-layer reasoning framework.
+    A vision_heads model implementing the three-layer reasoning framework.
 
     Architecture:
     1. Transformations: Feature extraction backbone + reasoning blocks

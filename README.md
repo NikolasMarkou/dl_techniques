@@ -272,7 +272,7 @@ Build a complete vision-language model:
 ```python
 from dl_techniques.models.fastvlm import FastVLM
 
-# Create a fast vision-language model
+# Create a fast vision_heads-language model
 vlm = FastVLM.from_variant(
     'base',
     vocab_size=32000,

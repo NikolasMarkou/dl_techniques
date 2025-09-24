@@ -67,7 +67,7 @@ class MobileNetV2(keras.Model):
     """MobileNetV2 classification model built with Universal Inverted Bottleneck blocks.
 
     This class implements the full MobileNetV2 architecture, an efficient
-    convolutional neural network designed for mobile and embedded vision
+    convolutional neural network designed for mobile and embedded vision_heads
     applications. It utilizes `UniversalInvertedBottleneck` (UIB) layers configured
     to replicate the original's inverted residuals and linear bottlenecks.
 

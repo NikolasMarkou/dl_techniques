@@ -187,7 +187,7 @@ class ComplexConv2D(ComplexLayer):
 
     **Intent**: Provide complex-valued convolutional processing for applications
     requiring phase and magnitude information, such as signal processing,
-    radar, sonar, and certain computer vision tasks where complex representations
+    radar, sonar, and certain computer vision_heads tasks where complex representations
     are natural.
 
     **Architecture**:

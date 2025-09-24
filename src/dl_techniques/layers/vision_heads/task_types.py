@@ -7,9 +7,9 @@ from typing import List, Set, Dict, Optional
 @unique
 class TaskType(Enum):
     """
-    Enumeration of supported computer vision tasks for multi-task models.
+    Enumeration of supported computer vision_heads tasks for multi-task models.
 
-    Each task represents a different computer vision capability that can be
+    Each task represents a different computer vision_heads capability that can be
     enabled in the multi-task architecture. Tasks are organized into categories
     for better understanding and compatibility checking.
 

@@ -27,11 +27,11 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class PixelShuffle(keras.layers.Layer):
-    """Pixel shuffle operation for reducing spatial tokens in vision transformers.
+    """Pixel shuffle operation for reducing spatial tokens in vision_heads transformers.
     
     Implements pixel shuffle to reduce the number of visual tokens by rearranging
     spatial information into channel dimensions, enabling more efficient processing
-    in vision-language models.
+    in vision_heads-language models.
     
     Args:
         scale_factor: Factor by which to reduce spatial dimensions (default: 2)
@@ -134,7 +134,7 @@ from dl_techniques.utils.logger import logger
 class SigLIPVisionTransformer(keras.layers.Layer):
     """SigLIP-based Vision Transformer for nanoVLM.
     
-    Implements a vision transformer following SigLIP architecture with 
+    Implements a vision_heads transformer following SigLIP architecture with 
     patch embedding, positional encoding, and transformer blocks.
     
     Args:
@@ -179,7 +179,7 @@ class SigLIPVisionTransformer(keras.layers.Layer):
         self._build_input_shape = None
         
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the vision transformer components."""
+        """Build the vision_heads transformer components."""
         self._build_input_shape = input_shape
         
         # Patch embedding using conv layers (following SigLIP)
@@ -249,7 +249,7 @@ class SigLIPVisionTransformer(keras.layers.Layer):
         super().build(input_shape)
         
     def call(self, inputs: keras.KerasTensor, training: bool = False) -> keras.KerasTensor:
-        """Forward pass through vision transformer.
+        """Forward pass through vision_heads transformer.
         
         Args:
             inputs: Input images of shape [batch, height, width, channels]
@@ -464,11 +464,11 @@ from dl_techniques.utils.logger import logger
 class NanoVLM(keras.Model):
     """nanoVLM: Compact Vision-Language Model.
     
-    A lightweight vision-language model combining SigLIP vision transformer
+    A lightweight vision_heads-language model combining SigLIP vision_heads transformer
     with SmolLM2 language decoder through efficient modality projection.
     
     Args:
-        vision_config: Configuration dict for vision transformer
+        vision_config: Configuration dict for vision_heads transformer
         language_config: Configuration dict for language decoder
         projection_config: Configuration dict for modality projection
         vocab_size: Vocabulary size for text embeddings (default: 32000)
@@ -561,7 +561,7 @@ class NanoVLM(keras.Model):
         images = inputs['images']
         text_tokens = inputs['text_tokens']
         
-        # Process images through vision encoder
+        # Process images through vision_heads encoder
         vision_features = self.vision_encoder(images, training=training)
         
         # Project visual features to language space
@@ -630,7 +630,7 @@ class NanoVLM(keras.Model):
             # Get current text embeddings
             text_embeddings = self.text_embedder(current_tokens, training=False)
             
-            # Combine with vision
+            # Combine with vision_heads
             combined_embeddings = ops.concatenate([vision_embeddings, text_embeddings], axis=1)
             
             # Forward through decoder
@@ -751,7 +751,7 @@ class NanoVLMLoss(keras.losses.Loss):
     """Loss function for nanoVLM training.
     
     Implements autoregressive language modeling loss with proper masking
-    for vision-language training.
+    for vision_heads-language training.
     
     Args:
         ignore_index: Token index to ignore in loss computation (default: 0)
@@ -1118,7 +1118,7 @@ def setup_different_learning_rates(model: keras.Model) -> Dict:
     projection_params = []
 
     for layer in model.layers:
-        if 'vision' in layer.name.lower():
+        if 'vision_heads' in layer.name.lower():
             vision_params.extend(layer.trainable_variables)
         elif 'projection' in layer.name.lower():
             projection_params.extend(layer.trainable_variables)
@@ -1360,7 +1360,7 @@ class TestNanoVLMLayers(unittest.TestCase):
         self.assertEqual(outputs.shape, (2, 50, 768))
         
     def test_vision_transformer_serialization(self):
-        """Test vision transformer serialization."""
+        """Test vision_heads transformer serialization."""
         from dl_techniques.layers.vision_transformer_siglip import SigLIPVisionTransformer
         
         # Create layer

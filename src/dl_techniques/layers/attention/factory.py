@@ -4,7 +4,7 @@ Attention Layer Factory for the dl_techniques Framework
 A comprehensive factory system for creating and managing various attention mechanisms
 with unified interfaces, type safety, parameter validation, and detailed documentation.
 This factory enables seamless integration and experimentation with different attention
-types across vision, NLP, and multi-modal architectures.
+types across vision_heads, NLP, and multi-modal architectures.
 
 The factory supports 15 different attention mechanisms, from standard multi-head attention
 to specialized variants like differential attention, mobile-optimized MQA, and hierarchical
@@ -143,7 +143,7 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'use_case': (
             'Experimental architectures requiring robust part-whole relationship modeling. '
             'Suitable for complex scene understanding, hierarchical feature grouping, and '
-            'disambiguation tasks in vision and language domains.'
+            'disambiguation tasks in vision_heads and language domains.'
         ),
         'complexity': 'O(n²) with additional routing overhead',
         'paper': 'Dynamic Routing Between Capsules + Self-Attention'
@@ -315,7 +315,7 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
     'mobile_mqa': {
         'class': MobileMQA,
         'description': (
-            'Mobile-optimized Multi-Query Attention designed for vision transformers on edge '
+            'Mobile-optimized Multi-Query Attention designed for vision_heads transformers on edge '
             'devices. Uses shared Key-Value projections with optional spatial downsampling to '
             'minimize memory bandwidth requirements while maintaining competitive performance '
             'on mobile hardware.'
@@ -328,7 +328,7 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'kernel_regularizer': None
         },
         'use_case': (
-            'Mobile vision transformers and edge AI applications where memory bandwidth is '
+            'Mobile vision_heads transformers and edge AI applications where memory bandwidth is '
             'the primary bottleneck. Optimized for mobile GPUs and specialized accelerators '
             'with limited memory I/O capabilities.'
         ),
@@ -353,7 +353,7 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'use_bias': False
         },
         'use_case': (
-            'Core building block for Transformer architectures across vision, NLP, and '
+            'Core building block for Transformer architectures across vision_heads, NLP, and '
             'multi-modal tasks. The default choice for most attention-based models requiring '
             'rich contextual understanding and sequence modeling capabilities.'
         ),
@@ -364,7 +364,7 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
     'non_local': {
         'class': NonLocalAttention,
         'description': (
-            'Computer vision attention mechanism capturing long-range spatial dependencies in '
+            'Computer vision_heads attention mechanism capturing long-range spatial dependencies in '
             '4D tensors. Computes weighted responses across all spatial positions to overcome '
             'limited receptive fields of convolutional operations, enabling global context '
             'reasoning in CNN architectures.'
@@ -440,7 +440,7 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'bias_regularizer': None
         },
         'use_case': (
-            'Multi-modal fusion with parameter constraints: vision-language models, '
+            'Multi-modal fusion with parameter constraints: vision_heads-language models, '
             'audio-visual processing, and sensor fusion in robotics. Ideal when model '
             'size is limited but cross-modal interaction is essential.'
         ),
@@ -493,7 +493,7 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'bias_regularizer': None
         },
         'use_case': (
-            'High-resolution vision transformers requiring scalable attention mechanisms. '
+            'High-resolution vision_heads transformers requiring scalable attention mechanisms. '
             'Core component of Swin-style architectures for image classification, object '
             'detection, and semantic segmentation where input resolution scalability is crucial.'
         ),

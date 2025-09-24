@@ -1,6 +1,6 @@
 """
 This module implements the Non-local Attention layer, a self-attention mechanism
-for computer vision tasks, based on the influential paper "Non-local Neural Networks".
+for computer vision_heads tasks, based on the influential paper "Non-local Neural Networks".
 
 Standard convolutional layers operate on a small, local neighborhood of pixels,
 limiting their receptive field. In contrast, this Non-local Attention layer captures
@@ -64,7 +64,7 @@ from typing import Any, Dict, Tuple, Optional, Literal, Union
 @keras.saving.register_keras_serializable()
 class NonLocalAttention(keras.layers.Layer):
     """
-    Non-local Self Attention Layer for computer vision tasks.
+    Non-local Self Attention Layer for computer vision_heads tasks.
 
     Implementation of the self-attention mechanism from "Non-local Neural Networks"
     (Wang et al., 2018) that captures long-range dependencies in feature

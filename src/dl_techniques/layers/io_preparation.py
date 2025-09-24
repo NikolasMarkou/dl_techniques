@@ -123,7 +123,7 @@ class NormalizationLayer(keras.layers.Layer):
     value range [source_min, source_max] to a target range [target_min, target_max].
     The transformation first clips values to the source range, normalizes to [0, 1],
     then scales to the target range. This is commonly used for data preprocessing,
-    especially in computer vision tasks.
+    especially in computer vision_heads tasks.
 
     **Intent**: Provide a robust, configurable normalization layer that can handle
     different data ranges and scaling requirements. Particularly useful for converting

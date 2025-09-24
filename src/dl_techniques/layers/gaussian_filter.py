@@ -4,7 +4,7 @@ This layer implements a Gaussian filter, a fundamental low-pass filter used
 for smoothing images and reducing high-frequency noise. The filtering is
 achieved by convolving the input image with a kernel whose weights are derived
 from a 2D Gaussian distribution. This operation is a cornerstone of many
-computer vision algorithms, often serving as a preprocessing step to enhance
+computer vision_heads algorithms, often serving as a preprocessing step to enhance
 feature stability.
 
 Architectural and Mathematical Foundations:

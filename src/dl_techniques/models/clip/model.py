@@ -33,9 +33,9 @@ from dl_techniques.layers.transformer import TransformerLayer
 @keras.saving.register_keras_serializable()
 class CLIPModel(keras.Model):
     """
-    CLIP model with integrated vision and text encoders.
+    CLIP model with integrated vision_heads and text encoders.
 
-    This model implements the complete CLIP architecture with vision and text processing
+    This model implements the complete CLIP architecture with vision_heads and text processing
     integrated within a single model class. It uses modern transformer components from
     the dl-techniques framework including GroupedQueryAttention, RMSNorm, and SwiGLU.
 
@@ -54,11 +54,11 @@ class CLIPModel(keras.Model):
     Args:
         # Vision encoder configuration
         image_size: Input image size (height and width). Default 224.
-        patch_size: Size of image patches for vision transformer. Default 16.
-        vision_layers: Number of transformer layers in vision encoder. Default 12.
-        vision_width: Hidden dimension of vision transformer. Default 768.
-        vision_heads: Number of attention heads in vision transformer. Default 12.
-        vision_kv_heads: Number of key-value heads for vision GQA. Default 4.
+        patch_size: Size of image patches for vision_heads transformer. Default 16.
+        vision_layers: Number of transformer layers in vision_heads encoder. Default 12.
+        vision_width: Hidden dimension of vision_heads transformer. Default 768.
+        vision_heads: Number of attention heads in vision_heads transformer. Default 12.
+        vision_kv_heads: Number of key-value heads for vision_heads GQA. Default 4.
 
         # Text encoder configuration
         vocab_size: Size of text vocabulary. Default 49408.
@@ -337,10 +337,10 @@ class CLIPModel(keras.Model):
         if isinstance(input_shape, dict):
             if 'image' in input_shape:
                 image_shape = input_shape['image']
-                # Build vision components
+                # Build vision_heads components
                 self.patch_conv.build(image_shape)
 
-                # Build vision transformer layers
+                # Build vision_heads transformer layers
                 vision_transformer_input_shape = (image_shape[0], self.vision_seq_len, self.vision_width)
                 for transformer_layer in self.vision_transformer_layers:
                     transformer_layer.build(vision_transformer_input_shape)
@@ -386,7 +386,7 @@ class CLIPModel(keras.Model):
         class_tokens = ops.broadcast_to(self.class_token, (batch_size, 1, self.vision_width))
         x = ops.concatenate([class_tokens, patches], axis=1)
 
-        # Apply vision transformer layers
+        # Apply vision_heads transformer layers
         for transformer_layer in self.vision_transformer_layers:
             x = transformer_layer(x, training=training)
 
@@ -545,10 +545,10 @@ def create_clip_model(
     Args:
         image_size: Size of input images. Default 224.
         patch_size: Size of image patches. Default 16.
-        vision_layers: Number of vision transformer layers. Default 12.
-        vision_width: Width of vision transformer. Default 768.
-        vision_heads: Number of attention heads in vision transformer. Default 12.
-        vision_kv_heads: Number of key-value heads in vision transformer for GQA. Default 4.
+        vision_layers: Number of vision_heads transformer layers. Default 12.
+        vision_width: Width of vision_heads transformer. Default 768.
+        vision_heads: Number of attention heads in vision_heads transformer. Default 12.
+        vision_kv_heads: Number of key-value heads in vision_heads transformer for GQA. Default 4.
         vocab_size: Vocabulary size for text encoder. Default 49408.
         context_length: Maximum text sequence length. Default 77.
         text_layers: Number of text transformer layers. Default 12.

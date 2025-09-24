@@ -2,14 +2,14 @@
 Pixel Shuffle Layer Implementation for Vision Transformers.
 
 This module implements a pixel shuffle operation specifically designed for reducing the number
-of spatial tokens in vision transformers while preserving spatial information by rearranging
-it into channel dimensions. This technique is crucial for efficient vision-language models
-and multi-scale vision processing.
+of spatial tokens in vision_heads transformers while preserving spatial information by rearranging
+it into channel dimensions. This technique is crucial for efficient vision_heads-language models
+and multi-scale vision_heads processing.
 
 Mathematical Foundation
 -----------------------
 
-The pixel shuffle operation performs a space-to-depth transformation on vision transformer
+The pixel shuffle operation performs a space-to-depth transformation on vision_heads transformer
 tokens arranged as [CLS_token, spatial_tokens]. Given an input with spatial dimensions
 H×W and C channels, the operation:
 
@@ -58,11 +58,11 @@ from typing import Optional, Tuple, Any, Dict
 @keras.saving.register_keras_serializable()
 class PixelShuffle(keras.layers.Layer):
     """
-    Pixel shuffle operation for reducing spatial tokens in vision transformers.
+    Pixel shuffle operation for reducing spatial tokens in vision_heads transformers.
 
     Implements pixel shuffle to reduce the number of visual tokens by rearranging
     spatial information into channel dimensions, enabling more efficient processing
-    in vision-language models. This operation is particularly useful for reducing
+    in vision_heads-language models. This operation is particularly useful for reducing
     computational complexity while preserving spatial information.
 
     The layer assumes input tokens are arranged as [CLS_token, spatial_tokens] where

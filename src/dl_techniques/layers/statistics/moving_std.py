@@ -42,7 +42,7 @@ class MovingStd(keras.layers.Layer):
     average pooling operations to efficiently compute expectations, processing each
     channel independently for multi-channel inputs.
 
-    The layer is designed for computer vision applications where local variability
+    The layer is designed for computer vision_heads applications where local variability
     information is crucial, such as texture classification, edge detection, and
     feature extraction for medical imaging. It provides a differentiable alternative
     to traditional sliding window standard deviation implementations.

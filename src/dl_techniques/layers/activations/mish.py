@@ -130,7 +130,7 @@ class Mish(keras.layers.Layer):
 
     Note:
         - Mish has been shown to outperform ReLU, Leaky ReLU, and Swish in
-          many computer vision and NLP tasks
+          many computer vision_heads and NLP tasks
         - The function is computationally more expensive than ReLU but the
           performance gains often justify the additional cost
         - Works particularly well in deeper networks

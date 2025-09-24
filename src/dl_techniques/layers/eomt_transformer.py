@@ -71,7 +71,7 @@ from .transformer import TransformerLayer
 @keras.saving.register_keras_serializable()
 class EomtTransformer(keras.layers.Layer):
     """
-    Configurable Encoder-only Mask Transformer layer for vision segmentation.
+    Configurable Encoder-only Mask Transformer layer for vision_heads segmentation.
 
     This layer extends the standard TransformerLayer with masked attention capabilities
     for instance segmentation tasks. It processes both patch tokens and learnable

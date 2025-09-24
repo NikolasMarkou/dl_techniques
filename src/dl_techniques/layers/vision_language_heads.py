@@ -1,5 +1,5 @@
 """
-An autoregressive decoder head for generating text conditioned on vision.
+An autoregressive decoder head for generating text conditioned on vision_heads.
 
 This layer implements a multi-layer Transformer decoder, a standard
 architecture for sequence-to-sequence tasks, specifically adapted for image
@@ -32,7 +32,7 @@ three main sub-components designed to integrate textual and visual information:
     grounds the generated text in the visual content.
 
         `CrossAttn(Q_t, K_v, V_v) = softmax((Q_t @ K_v.T) / sqrt(d_k)) @ V_v`
-        (where `Q_t` is from the text path and `K_v, V_v` are from the vision
+        (where `Q_t` is from the text path and `K_v, V_v` are from the vision_heads
         features).
 
 3.  **Position-wise Feed-Forward Network (FFN)**: Following the attention
@@ -58,7 +58,7 @@ A multimodal fusion and classification head for Visual Question Answering.
 This layer is designed to solve the Visual Question Answering (VQA) task,
 which requires predicting an answer to a textual question based on the content
 of an image. It achieves this by first fusing the representations from the
-vision and text modalities into a single, joint vector, and then passing this
+vision_heads and text modalities into a single, joint vector, and then passing this
 joint representation through a classifier to predict the final answer.
 
 Architectural and Mathematical Underpinnings:
@@ -76,9 +76,9 @@ The VQA process implemented by this head consists of two main stages:
         computationally efficient but may fail to capture fine-grained
         interactions between specific words and specific image regions.
     -   **Attention Pooling**: This is a more sophisticated fusion strategy. It
-        uses cross-attention to allow the vision and text features to interact
+        uses cross-attention to allow the vision_heads and text features to interact
         before they are summarized. For instance, the text features can act as
-        queries to attend to the vision features, creating a text-aware summary
+        queries to attend to the vision_heads features, creating a text-aware summary
         of the image. This allows the model to learn which parts of the image
         are most relevant to the given question. The final representation is
         typically a concatenation of the pooled, attended features from both
@@ -118,7 +118,7 @@ The learning process is driven by a contrastive objective, and this head is
 responsible for preparing the features for that objective. The process involves
 three key steps:
 
-1.  **Linear Projection**: Features from the vision and text encoders are first
+1.  **Linear Projection**: Features from the vision_heads and text encoders are first
     passed through separate `Dense` layers. These layers learn to project the
     features from their original, modality-specific spaces into a common,
     lower-dimensional embedding space where they can be meaningfully compared.
@@ -139,7 +139,7 @@ three key steps:
     embeddings.
 
 3.  **Similarity Calculation and Temperature Scaling**: The final step is to
-    compute the cosine similarity between every vision embedding and every text
+    compute the cosine similarity between every vision_heads embedding and every text
     embedding in a batch, forming a `(batch_size, batch_size)` similarity
     matrix.
 
@@ -180,12 +180,12 @@ class CaptioningHead(keras.layers.Layer):
     Captioning head for autoregressive text generation.
 
     This layer implements a multi-layer decoder for image captioning tasks
-    using cross-attention between text and vision features. It follows modern
+    using cross-attention between text and vision_heads features. It follows modern
     Keras 3 patterns for robust serialization and building.
 
     The architecture consists of:
     - Self-attention layers for text sequence modeling
-    - Cross-attention layers for attending to vision features
+    - Cross-attention layers for attending to vision_heads features
     - Feed-forward networks for transformation
     - RMS normalization for stability
     - Final vocabulary projection for token generation
@@ -283,7 +283,7 @@ class CaptioningHead(keras.layers.Layer):
         self.norm_layers = []
 
         for i in range(self.num_layers):
-            # Cross-attention to vision features
+            # Cross-attention to vision_heads features
             cross_attn = MultiHeadAttention(
                 embed_dim=self.embed_dim,
                 num_heads=self.num_heads,
@@ -342,7 +342,7 @@ class CaptioningHead(keras.layers.Layer):
             # Self-attention layers
             self.self_attention_layers[i].build(text_shape)
 
-            # Cross-attention layers - text queries, vision keys/values
+            # Cross-attention layers - text queries, vision_heads keys/values
             self.cross_attention_layers[i].build(text_shape)
 
             # Normalization layers
@@ -386,7 +386,7 @@ class CaptioningHead(keras.layers.Layer):
             )
             x = self.norm_layers[i * 3](x + attn_output)
 
-            # Cross-attention to vision features
+            # Cross-attention to vision_heads features
             cross_attn_output = self.cross_attention_layers[i](
                 x, context=vision_features, training=training
             )
@@ -435,7 +435,7 @@ class VQAHead(keras.layers.Layer):
     """
     Visual Question Answering head for answer classification/generation.
 
-    This layer combines vision and text features using various pooling strategies
+    This layer combines vision_heads and text features using various pooling strategies
     and processes them through a multi-layer classifier for VQA tasks.
 
     The architecture supports different pooling strategies:
@@ -532,7 +532,7 @@ class VQAHead(keras.layers.Layer):
         self.hidden_layers = []
         self.dropout_layers = []
 
-        prev_dim = self.embed_dim * 2  # Concatenated vision and text features
+        prev_dim = self.embed_dim * 2  # Concatenated vision_heads and text features
         for i, hidden_dim in enumerate(self.hidden_dims):
             if hidden_dim <= 0:
                 raise ValueError(f"All hidden dimensions must be positive, got {hidden_dim} at index {i}")
@@ -618,7 +618,7 @@ class VQAHead(keras.layers.Layer):
             vision_pooled = ops.max(vision_features, axis=1)
             text_pooled = ops.max(text_features, axis=1)
         elif self.pooling_strategy == "attention":
-            # Use cross-attention between vision and text for pooling
+            # Use cross-attention between vision_heads and text for pooling
             vision_attended = self.attention_pooling(
                 vision_features, context=text_features, training=training
             )
@@ -673,7 +673,7 @@ class ContrastiveHead(keras.layers.Layer):
     """
     Contrastive learning head for image-text matching.
 
-    This layer projects vision and text features to a shared embedding space
+    This layer projects vision_heads and text features to a shared embedding space
     and computes similarity scores for contrastive learning. Features are
     L2-normalized and similarity is computed with temperature scaling.
 
@@ -801,7 +801,7 @@ class ContrastiveHead(keras.layers.Layer):
 
         Returns:
             Dictionary containing projected features and similarity logits:
-            - vision_projected: L2-normalized vision projections
+            - vision_projected: L2-normalized vision_heads projections
             - text_projected: L2-normalized text projections
             - similarity_matrix: Raw cosine similarities
             - logits: Temperature-scaled similarities for contrastive loss

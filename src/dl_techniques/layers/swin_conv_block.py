@@ -42,7 +42,7 @@ framework.
         to easily bypass the block if needed.
 
 By integrating these two paradigms, the `SwinConvBlock` aims to create a more powerful
-and versatile building block for computer vision models, capable of learning a richer
+and versatile building block for computer vision_heads models, capable of learning a richer
 set of features than either approach could alone.
 """
 

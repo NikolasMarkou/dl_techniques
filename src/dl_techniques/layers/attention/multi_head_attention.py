@@ -1,6 +1,6 @@
 """Multi-Head Attention Layer with Mask Support.
 
-This module implements a Multi-Head Self-Attention mechanism optimized for vision 
+This module implements a Multi-Head Self-Attention mechanism optimized for vision_heads
 and sequence modeling tasks. The implementation follows Keras 3.x best practices 
 with backend-agnostic operations and comprehensive serialization support.
 
@@ -74,7 +74,7 @@ class MultiHeadAttention(keras.layers.Layer):
     and leveraging existing, well-tested implementations.
 
     **Intent**: Provide a streamlined, user-friendly interface specifically for
-    self-attention use cases (vision transformers, sequence modeling) while
+    self-attention use cases (vision_heads transformers, sequence modeling) while
     internally leveraging the robust `MultiHeadCrossAttention` implementation
     with its comprehensive serialization support and flexible masking capabilities.
 

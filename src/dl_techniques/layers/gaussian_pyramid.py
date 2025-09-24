@@ -1,7 +1,7 @@
 """Construct a multi-scale Gaussian pyramid representation of an image.
 
 This layer implements the classic Gaussian pyramid, a foundational technique
-in computer vision for analyzing images at multiple scales. The pyramid is a
+in computer vision_heads for analyzing images at multiple scales. The pyramid is a
 sequence of images, where each subsequent level is a low-pass filtered and
 downsampled version of its predecessor. This hierarchical structure enables
 algorithms to efficiently find features and objects at various sizes.
@@ -62,7 +62,7 @@ class GaussianPyramid(keras.layers.Layer):
     This layer creates a Gaussian pyramid by repeatedly applying Gaussian blur
     and downsampling to create multiple scales of the input image. Each level
     is a downsampled version of the previous level, creating a multi-scale
-    representation suitable for various computer vision tasks.
+    representation suitable for various computer vision_heads tasks.
 
     Args:
         levels: Integer, number of pyramid levels to generate. Must be >= 1.

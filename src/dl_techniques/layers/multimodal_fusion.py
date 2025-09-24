@@ -1,7 +1,7 @@
 """Implements a unified framework for multi-modal information fusion.
 
 This layer provides a modular and extensible framework for combining feature
-representations from multiple, heterogeneous data modalities (e.g., vision,
+representations from multiple, heterogeneous data modalities (e.g., vision_heads,
 language, audio). It serves as a factory that implements several distinct
 fusion strategies, each grounded in different theoretical assumptions about
 how cross-modal interactions should be modeled. The primary goal is to learn a

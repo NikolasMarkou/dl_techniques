@@ -153,7 +153,7 @@ def build_vision_language_model(max_text_len: int = 77, image_patches: int = 196
     # Cross-modal attention
     combined_features = ops.concatenate([visual_features, text_tokens], axis=1)
 
-    # Vision attends to text, text attends to vision
+    # Vision attends to text, text attends to vision_heads
     cross_attended = SharedWeightsCrossAttention(dim=768, num_heads=12)(
         combined_features, split_sizes=[image_patches, max_text_len]
     )

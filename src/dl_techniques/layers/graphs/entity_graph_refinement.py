@@ -47,7 +47,7 @@ directly from embedding sequences.
 
 ## Key Features
 
-- **Modality-Agnostic**: Compatible with any n-dimensional embeddings (text, vision, audio, etc.)
+- **Modality-Agnostic**: Compatible with any n-dimensional embeddings (text, vision_heads, audio, etc.)
 - **Directional Relationships**: Asymmetric adjacency matrix enables hierarchy and causality learning
 - **Dynamic Entity Library**: Adaptive entity representations that evolve during training
 - **Context-Aware Refinement**: Each refinement step uses global input context for better decisions

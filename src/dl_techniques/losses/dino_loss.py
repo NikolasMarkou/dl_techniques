@@ -87,7 +87,7 @@ class DINOLoss(keras.losses.Loss):
 
     Example:
         ```python
-        # Initialize for vision transformer with 65k dimensional output
+        # Initialize for vision_heads transformer with 65k dimensional output
         dino_loss = DINOLoss(out_dim=65536, student_temp=0.1, teacher_temp=0.04)
 
         # Compute loss in training loop
@@ -282,7 +282,7 @@ class iBOTPatchLoss(keras.losses.Loss):
 
     Example:
         ```python
-        # Initialize for vision transformer patches
+        # Initialize for vision_heads transformer patches
         ibot_loss = iBOTPatchLoss(out_dim=65536, student_temp=0.1)
 
         # Compute loss with masking

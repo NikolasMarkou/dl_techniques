@@ -29,7 +29,7 @@ Core Concepts and Optimizations:
         larger receptive field at a lower cost.
 
 3.  **Designed for 4D Image Tensors:**
-    -   This implementation is tailored for computer vision tasks, operating directly
+    -   This implementation is tailored for computer vision_heads tasks, operating directly
         on 4D feature maps of shape `(batch, height, width, channels)`. It internally
         flattens the spatial dimensions to perform attention and then reshapes the
         output back to the original 4D format.
@@ -122,7 +122,7 @@ class MobileMQA(keras.layers.Layer):
         ValueError: If num_heads is not positive.
 
     Note:
-        This implementation is optimized for computer vision tasks and operates on
+        This implementation is optimized for computer vision_heads tasks and operates on
         4D feature maps. The spatial dimensions are flattened for attention computation
         and then reshaped back to the original format.
     """

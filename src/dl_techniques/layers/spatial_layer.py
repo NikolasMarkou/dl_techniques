@@ -2,7 +2,7 @@
 This module provides a `SpatialLayer`, a custom Keras layer that dynamically
 generates spatial coordinate grids and injects them into a model.
 
-In many computer vision tasks, particularly those involving complex spatial reasoning
+In many computer vision_heads tasks, particularly those involving complex spatial reasoning
 or generative models, it is beneficial for the network to have explicit knowledge of
 pixel locations. Standard convolutional networks build this understanding implicitly
 through their local receptive fields, but providing coordinate information directly
@@ -51,7 +51,7 @@ class SpatialLayer(keras.layers.Layer):
     This layer creates normalized coordinate grids (x, y) that provide explicit spatial
     information to neural networks. It generates standardized coordinate features that
     can be concatenated with existing feature maps to enhance spatial reasoning capabilities
-    in computer vision tasks.
+    in computer vision_heads tasks.
 
     **Intent**: Enable explicit spatial awareness in neural networks by providing
     normalized coordinate information for each spatial location, improving performance

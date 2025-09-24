@@ -4,7 +4,7 @@ Comprehensive pytest test suite for CLIP (Contrastive Language-Image Pre-trainin
 This module provides extensive testing for the CLIP implementation including:
 - Model initialization and parameter validation
 - Architecture building and shape consistency
-- Forward pass functionality for vision and text encoding
+- Forward pass functionality for vision_heads and text encoding
 - Individual encoding operations (encode_image, encode_text)
 - Serialization and deserialization
 - Error handling and edge cases
@@ -13,7 +13,7 @@ This module provides extensive testing for the CLIP implementation including:
 
 Refined to match the actual integrated CLIPModel implementation that uses:
 - Direct configuration parameters in __init__ (no separate config class)
-- Integrated vision and text processing within CLIPModel
+- Integrated vision_heads and text processing within CLIPModel
 - Modern transformer architecture with TransformerLayer components
 """
 
@@ -121,11 +121,11 @@ class TestCLIPModelInitialization:
         with pytest.raises(ValueError, match="image_size.*must be divisible by.*patch_size"):
             CLIPModel(image_size=224, patch_size=15)
 
-        # Test invalid vision heads configuration
+        # Test invalid vision_heads heads configuration
         with pytest.raises(ValueError, match="vision_width.*must be divisible by.*vision_heads"):
             CLIPModel(vision_width=768, vision_heads=11)
 
-        # Test invalid vision GQA configuration
+        # Test invalid vision_heads GQA configuration
         with pytest.raises(ValueError, match="vision_heads.*must be divisible by.*vision_kv_heads"):
             CLIPModel(vision_heads=12, vision_kv_heads=5)
 
@@ -205,7 +205,7 @@ class TestCLIPModelBuilding:
             'text': (None, 32)
         })
 
-        # Test vision projection shape
+        # Test vision_heads projection shape
         test_vision_features = keras.random.normal((4, basic_config_params['vision_width']))
         vision_proj_output = model.vision_projection(test_vision_features)
         assert vision_proj_output.shape == (4, basic_config_params['embed_dim'])

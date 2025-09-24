@@ -291,7 +291,7 @@ class TrainingDataGenerator:
                 "Artificial intelligence systems use machine learning algorithms to process large datasets and extract meaningful patterns from complex information structures.",
                 "Deep neural networks consist of multiple layers that transform input data through weighted connections and nonlinear activation functions.",
                 "Natural language processing enables computers to understand, interpret, and generate human language in a contextually meaningful way.",
-                "Computer vision algorithms analyze visual data to identify objects, recognize faces, and understand complex scene relationships.",
+                "Computer vision_heads algorithms analyze visual data to identify objects, recognize faces, and understand complex scene relationships.",
                 "Reinforcement learning agents learn optimal behaviors through trial and error interactions with dynamic environments.",
             ],
             'scientific': [

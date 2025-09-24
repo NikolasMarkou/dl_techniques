@@ -56,7 +56,7 @@ from dl_techniques.layers.depthwise_separable_block import DepthwiseSeparableBlo
 class MobileNetV1(keras.Model):
     """MobileNetV1 model implementation with depthwise separable convolutions.
 
-    The original efficient architecture for mobile and embedded vision applications
+    The original efficient architecture for mobile and embedded vision_heads applications
     using depthwise separable convolutions to drastically reduce computation and
     model size while maintaining good accuracy.
 

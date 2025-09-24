@@ -639,7 +639,7 @@ class TestGeGLUFFNIntegration:
         assert predictions.shape == (2, seq_len, vocab_size)
 
     def test_vision_transformer_ffn(self) -> None:
-        """Test GeGLU FFN in a vision transformer setup."""
+        """Test GeGLU FFN in a vision_heads transformer setup."""
         img_size, patch_size, embed_dim = 32, 4, 192
         num_patches = (img_size // patch_size) ** 2  # 8*8 = 64
 

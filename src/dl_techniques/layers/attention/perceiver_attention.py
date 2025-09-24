@@ -178,7 +178,7 @@ class PerceiverAttention(keras.layers.Layer):
 
     Notes:
         This layer is particularly useful for:
-        - Cross-modal attention (vision-language, audio-visual)
+        - Cross-modal attention (vision_heads-language, audio-visual)
         - Latent bottleneck architectures (Perceiver, Perceiver IO)
         - Set-to-set transformations with different cardinalities
         - Memory-augmented networks with external memory

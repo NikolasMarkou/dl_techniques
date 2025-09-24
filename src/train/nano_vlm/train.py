@@ -63,7 +63,7 @@ def setup_different_learning_rates(model: keras.Model) -> Dict[str, Any]:
 
     for layer in model.layers:
         layer_name = layer.name.lower()
-        if 'vision' in layer_name or 'encoder' in layer_name:
+        if 'vision_heads' in layer_name or 'encoder' in layer_name:
             vision_params.extend(layer.trainable_variables)
         elif 'projection' in layer_name or 'connector' in layer_name:
             projection_params.extend(layer.trainable_variables)
@@ -75,7 +75,7 @@ def setup_different_learning_rates(model: keras.Model) -> Dict[str, Any]:
         "type": "cosine_decay",
         "warmup_steps": 500,
         "warmup_start_lr": 1e-9,
-        "learning_rate": 1e-5,  # Lower for pre-trained vision
+        "learning_rate": 1e-5,  # Lower for pre-trained vision_heads
         "decay_steps": 25000,
         "alpha": 0.0001
     }
@@ -142,7 +142,7 @@ class NanoVLMTrainer:
     """Custom trainer for nanoVLM with multi-optimizer support.
 
     This trainer implements differential learning rates for different components
-    of the nanoVLM model (vision encoder, language model, projection layers).
+    of the nanoVLM model (vision_heads encoder, language model, projection layers).
 
     Args:
         model (keras.Model): The nanoVLM model to train.
