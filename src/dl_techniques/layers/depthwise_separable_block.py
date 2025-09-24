@@ -1,14 +1,5 @@
 """Implements the depthwise separable convolution block, a core of MobileNet.
 
-This layer provides a highly efficient alternative to the standard 2D
-convolution layer by factorizing the operation into two distinct, simpler
-steps. The design is motivated by the hypothesis that spatial and
-cross-channel correlations in convolutional network feature maps can be
-decoupled and learned separately. This decomposition leads to a drastic
-reduction in computational cost and model parameters, making it a
-cornerstone of modern, efficient architectures designed for mobile and
-edge devices.
-
 Architecture and Core Concepts:
 
 A standard convolution operation performs spatial filtering and channel
@@ -40,10 +31,10 @@ standard 3x3 convolution with `C_in` input channels and `C_out` output
 channels, the number of parameters is `3 * 3 * C_in * C_out`.
 
 In contrast, a depthwise separable convolution has:
--   `3 * 3 * C_in` parameters for the depthwise step.
+-   `K * K * C_in` parameters for the depthwise step.
 -   `1 * 1 * C_in * C_out` parameters for the pointwise step.
 
-The ratio of reduction is approximately `(3*3 + C_out) / (3*3 * C_out)`, which
+The ratio of reduction is approximately `(K*K + C_out) / (K*K * C_out)`, which
 for a reasonable number of output channels, results in an ~8-9x reduction in
 both parameters and computational cost, with only a small, often negligible,
 loss in accuracy.
@@ -68,15 +59,22 @@ was popularized by the following seminal works:
 """
 
 import keras
-from dl_techniques.utils.logger import logger
 from typing import Optional, Union, Dict, Any, Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.activations import create_activation_layer
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class DepthwiseSeparableBlock(keras.layers.Layer):
     """
-    Depthwise separable convolution block.
+    Configurable depthwise separable convolution block.
 
     This block implements the core building block of MobileNetV1, which decomposes
     standard convolution into two separate layers for computational efficiency:
@@ -86,34 +84,37 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
 
     **Intent**: Provide an efficient convolutional building block for mobile and
     edge device deployment, reducing parameters by ~8-9x compared to standard
-    convolution while maintaining comparable accuracy.
+    convolution while maintaining comparable accuracy. Now with configurable
+    activation and normalization layers for maximum flexibility.
 
     **Architecture**:
     ```
     Input(shape=[batch, height, width, channels])
            ↓
-    DepthwiseConv2D(3×3, stride) - Spatial filtering per channel
+    DepthwiseConv2D(K×K, stride) - Spatial filtering per channel
            ↓
-    BatchNormalization → ReLU
+    Normalization → Activation
            ↓
     Conv2D(1×1) - Pointwise/channel mixing
            ↓
-    BatchNormalization → ReLU
+    Normalization → Activation
            ↓
     Output(shape=[batch, new_height, new_width, filters])
     ```
 
     **Mathematical Operations**:
-    1. **Depthwise**: Each input channel convolved with its own 3×3 kernel
-       - Parameters: channels × 3 × 3
+    1. **Depthwise**: Each input channel convolved with its own K×K kernel
+       - Parameters: channels × K × K
     2. **Pointwise**: 1×1 convolution to mix channels
        - Parameters: channels × filters
 
-    Total parameters: channels × (3 × 3 + filters) vs standard: channels × filters × 3 × 3
+    Total parameters: channels × (K × K + filters) vs standard: channels × filters × K × K
 
     Args:
         filters: Integer, number of output filters (channels). Must be positive.
             This determines the output channel dimension.
+        depthwise_kernel_size: Integer or tuple, kernel size for the depthwise convolution.
+            Controls the spatial filtering window size. Defaults to 3 (3x3 convolution).
         stride: Integer, stride for the depthwise convolution. Controls spatial
             downsampling. Common values: 1 (no downsampling) or 2 (2x downsampling).
             Defaults to 1.
@@ -125,6 +126,16 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
         kernel_regularizer: Optional Regularizer instance for weight regularization.
             Applies to both depthwise and pointwise convolution kernels.
             Defaults to None.
+        normalization_type: String specifying the normalization layer type.
+            Supported types: 'batch_norm', 'layer_norm', 'rms_norm', 'zero_centered_rms_norm',
+            'band_rms', 'global_response_norm', etc. Defaults to 'batch_norm'.
+        activation_type: String specifying the activation function type.
+            Supported types: 'relu', 'gelu', 'mish', 'hard_swish', 'silu', etc.
+            Defaults to 'relu'.
+        normalization_kwargs: Optional dictionary of arguments to pass to the
+            normalization layer factory. Defaults to {}.
+        activation_kwargs: Optional dictionary of arguments to pass to the
+            activation layer factory. Defaults to {}.
         **kwargs: Additional arguments for Layer base class (name, trainable, etc.).
 
     Input shape:
@@ -137,31 +148,35 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
 
     Attributes:
         depthwise_conv: DepthwiseConv2D layer for spatial filtering.
-        depthwise_bn: BatchNormalization after depthwise convolution.
-        depthwise_relu: ReLU activation after depthwise batch norm.
+        depthwise_norm: Normalization layer after depthwise convolution.
+        depthwise_activation: Activation layer after depthwise normalization.
         pointwise_conv: Conv2D layer for channel mixing.
-        pointwise_bn: BatchNormalization after pointwise convolution.
-        pointwise_relu: ReLU activation after pointwise batch norm.
+        pointwise_norm: Normalization layer after pointwise convolution.
+        pointwise_activation: Activation layer after pointwise normalization.
 
     Example:
         ```python
-        # Basic depthwise separable block
+        # Basic depthwise separable block (backwards compatible)
         block = DepthwiseSeparableBlock(filters=64, stride=1, block_id=1)
         inputs = keras.Input(shape=(224, 224, 32))
         outputs = block(inputs)  # Shape: (batch, 224, 224, 64)
 
-        # Downsampling block (stride=2)
-        downsample_block = DepthwiseSeparableBlock(
+        # Configurable block with modern components
+        modern_block = DepthwiseSeparableBlock(
             filters=128,
+            depthwise_kernel_size=5,  # 5x5 depthwise filters
             stride=2,  # Spatial downsampling
+            normalization_type='layer_norm',
+            activation_type='gelu',
             block_id=2
         )
-        outputs = downsample_block(inputs)  # Shape: (batch, 112, 112, 128)
 
-        # With regularization
-        regularized_block = DepthwiseSeparableBlock(
+        # With custom layer parameters
+        advanced_block = DepthwiseSeparableBlock(
             filters=256,
-            stride=1,
+            normalization_type='rms_norm',
+            activation_type='mish',
+            normalization_kwargs={'epsilon': 1e-5, 'use_scale': True},
             kernel_regularizer=keras.regularizers.L2(1e-4),
             block_id=3
         )
@@ -171,15 +186,24 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
         This implementation follows the CRITICAL pattern from the Modern Keras 3 guide:
         sub-layers are created in __init__() but explicitly built in build() method
         for robust serialization. Without explicit building, model loading will fail.
+
+        The block is backwards compatible - existing code using the old interface
+        will continue to work exactly as before, while new code can take advantage
+        of the configurable normalization and activation layers.
     """
 
     def __init__(
             self,
             filters: int,
+            depthwise_kernel_size: Union[int, Tuple[int, int]] = 3,
             stride: int = 1,
             block_id: int = 0,
             kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            normalization_type: str = "batch_norm",
+            activation_type: str = "relu",
+            normalization_kwargs: Optional[Dict[str, Any]] = None,
+            activation_kwargs: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -194,27 +218,40 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
 
         # Store ALL configuration for get_config()
         self.filters = filters
+        self.depthwise_kernel_size = depthwise_kernel_size
         self.stride = stride
         self.block_id = block_id
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = kernel_regularizer
+        self.normalization_type = normalization_type
+        self.activation_type = activation_type
+        self.normalization_kwargs = normalization_kwargs or {}
+        self.activation_kwargs = activation_kwargs or {}
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
         # Depthwise convolution pathway
         self.depthwise_conv = keras.layers.DepthwiseConv2D(
-            kernel_size=3,
+            kernel_size=depthwise_kernel_size,
             strides=stride,
             padding='same',
-            use_bias=False,  # Batch norm makes bias redundant
+            use_bias=False,  # Normalization makes bias redundant
             depthwise_initializer=self.kernel_initializer,
             depthwise_regularizer=self.kernel_regularizer,
             name=f'conv_dw_{block_id}'
         )
-        self.depthwise_bn = keras.layers.BatchNormalization(
-            name=f'conv_dw_{block_id}_bn'
+
+        # Use factory for configurable normalization
+        self.depthwise_norm = create_normalization_layer(
+            normalization_type=self.normalization_type,
+            name=f'conv_dw_{block_id}_norm',
+            **self.normalization_kwargs
         )
-        self.depthwise_relu = keras.layers.ReLU(
-            name=f'conv_dw_{block_id}_relu'
+
+        # Use factory for configurable activation
+        self.depthwise_activation = create_activation_layer(
+            activation_type=self.activation_type,
+            name=f'conv_dw_{block_id}_act',
+            **self.activation_kwargs
         )
 
         # Pointwise convolution pathway
@@ -223,16 +260,24 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
             kernel_size=1,
             strides=1,
             padding='same',
-            use_bias=False,  # Batch norm makes bias redundant
+            use_bias=False,  # Normalization makes bias redundant
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name=f'conv_pw_{block_id}'
         )
-        self.pointwise_bn = keras.layers.BatchNormalization(
-            name=f'conv_pw_{block_id}_bn'
+
+        # Use factory for configurable normalization
+        self.pointwise_norm = create_normalization_layer(
+            normalization_type=self.normalization_type,
+            name=f'conv_pw_{block_id}_norm',
+            **self.normalization_kwargs
         )
-        self.pointwise_relu = keras.layers.ReLU(
-            name=f'conv_pw_{block_id}_relu'
+
+        # Use factory for configurable activation
+        self.pointwise_activation = create_activation_layer(
+            activation_type=self.activation_type,
+            name=f'conv_pw_{block_id}_act',
+            **self.activation_kwargs
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -261,26 +306,30 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
         # Compute shape after depthwise conv
         depthwise_output_shape = self.depthwise_conv.compute_output_shape(input_shape)
 
-        self.depthwise_bn.build(depthwise_output_shape)
-        # ReLU doesn't change shape, and doesn't need explicit building
-        # But we compute the shape for clarity
-        relu_output_shape = depthwise_output_shape  # ReLU preserves shape
+        self.depthwise_norm.build(depthwise_output_shape)
+        # Activation layers don't typically need explicit building, but for consistency
+        self.depthwise_activation.build(depthwise_output_shape)
+
+        # Activation preserves shape
+        activation_output_shape = depthwise_output_shape
 
         # 2. Pointwise convolution pathway
-        self.pointwise_conv.build(relu_output_shape)
+        self.pointwise_conv.build(activation_output_shape)
 
         # Compute shape after pointwise conv
-        pointwise_output_shape = self.pointwise_conv.compute_output_shape(relu_output_shape)
+        pointwise_output_shape = self.pointwise_conv.compute_output_shape(activation_output_shape)
 
-        self.pointwise_bn.build(pointwise_output_shape)
-        # Final ReLU doesn't need building
+        self.pointwise_norm.build(pointwise_output_shape)
+        self.pointwise_activation.build(pointwise_output_shape)
 
         # Always call parent build at the end
         super().build(input_shape)
 
         logger.debug(
             f"Built DepthwiseSeparableBlock_{self.block_id}: "
-            f"input_shape={input_shape} -> output_shape={pointwise_output_shape}"
+            f"input_shape={input_shape} -> output_shape={pointwise_output_shape}, "
+            f"kernel_size={self.depthwise_kernel_size}, norm={self.normalization_type}, "
+            f"act={self.activation_type}"
         )
 
     def call(
@@ -301,13 +350,13 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
         """
         # Depthwise convolution pathway
         x = self.depthwise_conv(inputs, training=training)
-        x = self.depthwise_bn(x, training=training)
-        x = self.depthwise_relu(x)
+        x = self.depthwise_norm(x, training=training)
+        x = self.depthwise_activation(x)
 
         # Pointwise convolution pathway
         x = self.pointwise_conv(x, training=training)
-        x = self.pointwise_bn(x, training=training)
-        x = self.pointwise_relu(x)
+        x = self.pointwise_norm(x, training=training)
+        x = self.pointwise_activation(x)
 
         return x
 
@@ -353,11 +402,16 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
         config = super().get_config()
         config.update({
             'filters': self.filters,
+            'depthwise_kernel_size': self.depthwise_kernel_size,
             'stride': self.stride,
             'block_id': self.block_id,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer)
             if self.kernel_regularizer else None,
+            'normalization_type': self.normalization_type,
+            'activation_type': self.activation_type,
+            'normalization_kwargs': self.normalization_kwargs,
+            'activation_kwargs': self.activation_kwargs,
         })
         return config
 
