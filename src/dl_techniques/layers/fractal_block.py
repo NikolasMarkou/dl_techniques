@@ -49,19 +49,17 @@ References:
 """
 
 import keras
-from typing import Tuple, Optional, Any, Dict, Literal
+from typing import Tuple, Optional, Any, Dict
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
 from ..utils.logger import logger
-from .convblock import ConvBlock
+from .standard_blocks import ConvBlock
 from .stochastic_depth import StochasticDepth
 
 # ---------------------------------------------------------------------
-
-BlockClass = Literal["ConvBlock"]
 
 @keras.saving.register_keras_serializable()
 class FractalBlock(keras.layers.Layer):
@@ -110,11 +108,11 @@ class FractalBlock(keras.layers.Layer):
     Args:
         block_config: Dictionary containing the configuration for the base block.
             This should be the output of `get_config()` from a Keras layer
-            (typically a ConvBlock). Must contain all parameters needed to
-            reconstruct the base block layer.
+            (typically a ConvBlock, DenseBlock, or ResidualDenseBlock). Must contain
+            all parameters needed to reconstruct the base block layer.
         block_class: String name of the block class to instantiate. Currently
-            supports "ConvBlock". Used with block_config to create base blocks.
-            Defaults to "ConvBlock".
+            supports "ConvBlock", "DenseBlock", "ResidualDenseBlock". Used with
+            block_config to create base blocks. Defaults to "ConvBlock".
         depth: Integer, depth of fractal expansion. Must be >= 1. Controls the
             number of recursive levels in the fractal structure:
             - 1: Single base block (no fractal expansion)
@@ -129,11 +127,12 @@ class FractalBlock(keras.layers.Layer):
             such as name, trainable, dtype.
 
     Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`.
+        4D tensor with shape: `(batch_size, height, width, channels)` for ConvBlock.
+        2D tensor with shape: `(batch_size, features)` for DenseBlock/ResidualDenseBlock.
         The specific input requirements depend on the base block configuration.
 
     Output shape:
-        4D tensor with shape determined by the base block's output transformation.
+        Tensor with shape determined by the base block's output transformation.
         The fractal structure preserves the shape transformations of the underlying
         base blocks while applying the fractal expansion rule.
 
@@ -152,8 +151,14 @@ class FractalBlock(keras.layers.Layer):
 
     Example:
         ```python
-        # Create base block configuration
-        base_block = ConvBlock(filters=64, kernel_size=3)
+        # Create base ConvBlock configuration
+        base_block = ConvBlock(
+            filters=64,
+            kernel_size=3,
+            normalization_type='batch_norm',
+            activation_type='relu',
+            dropout_rate=0.1
+        )
         block_config = base_block.get_config()
 
         # Simple fractal (depth=1, just the base block)
@@ -164,7 +169,6 @@ class FractalBlock(keras.layers.Layer):
 
         # Two-level fractal (depth=2, two parallel base blocks)
         fractal2 = FractalBlock(
-            block_config=block_config,
             depth=2,
             drop_path_rate=0.1
         )
@@ -184,6 +188,22 @@ class FractalBlock(keras.layers.Layer):
         # In a complete model
         model = keras.Model(inputs=inputs, outputs=outputs)
         model.compile(optimizer='adam', loss='mse')
+
+        # Example with DenseBlock for fully connected layers
+        dense_block = DenseBlock(
+            units=512,
+            normalization_type='layer_norm',
+            activation_type='gelu',
+            dropout_rate=0.1
+        )
+        dense_config = dense_block.get_config()
+
+        fractal_dense = FractalBlock(
+            block_config=dense_config,
+            block_class="DenseBlock",
+            depth=2,
+            drop_path_rate=0.1
+        )
         ```
 
     Note:
@@ -200,7 +220,6 @@ class FractalBlock(keras.layers.Layer):
     def __init__(
         self,
         block_config: Dict[str, Any],
-        block_class: BlockClass = "ConvBlock",
         depth: int = 1,
         drop_path_rate: float = 0.15,
         **kwargs: Any
@@ -217,12 +236,9 @@ class FractalBlock(keras.layers.Layer):
         if not isinstance(block_config, dict):
             raise ValueError(f"block_config must be a dictionary, got {type(block_config)}")
 
-        if block_class not in ["ConvBlock"]:
-            raise ValueError(f"Unsupported block_class: {block_class}")
 
         # Store configuration
         self.block_config = block_config
-        self.block_class = block_class
         self.depth = depth
         self.drop_path_rate = drop_path_rate
 
@@ -240,14 +256,12 @@ class FractalBlock(keras.layers.Layer):
             self.block = None
             self.branch1 = FractalBlock(
                 block_config=self.block_config,
-                block_class=self.block_class,
                 depth=self.depth - 1,
                 drop_path_rate=self.drop_path_rate,
                 name="branch1"
             )
             self.branch2 = FractalBlock(
                 block_config=self.block_config,
-                block_class=self.block_class,
                 depth=self.depth - 1,
                 drop_path_rate=self.drop_path_rate,
                 name="branch2"
@@ -274,10 +288,7 @@ class FractalBlock(keras.layers.Layer):
         Raises:
             ValueError: If block_class is not supported.
         """
-        if self.block_class == "ConvBlock":
-            return ConvBlock.from_config(self.block_config)
-        else:
-            raise ValueError(f"Unsupported block_class: {self.block_class}")
+        return ConvBlock.from_config(self.block_config)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
@@ -315,6 +326,7 @@ class FractalBlock(keras.layers.Layer):
 
         # Always call parent build at the end
         super().build(input_shape)
+        logger.debug(f"Built FractalBlock with input_shape={input_shape}, depth={self.depth}")
 
     def call(
         self,
@@ -329,7 +341,9 @@ class FractalBlock(keras.layers.Layer):
         combines two branches using mean join after applying stochastic depth.
 
         Args:
-            inputs: Input tensor of shape (batch_size, height, width, channels).
+            inputs: Input tensor. Shape depends on block type:
+                - For ConvBlock: (batch_size, height, width, channels)
+                - For DenseBlock/ResidualDenseBlock: (batch_size, features)
             training: Boolean indicating whether the layer should behave in
                 training mode (applying stochastic depth) or inference mode.
 
@@ -386,9 +400,8 @@ class FractalBlock(keras.layers.Layer):
         """
         config = super().get_config()
         config.update({
-            "block_config": self.block_config,
-            "block_class": self.block_class,
             "depth": self.depth,
+            "block_config": self.block_config,
             "drop_path_rate": self.drop_path_rate,
         })
         return config

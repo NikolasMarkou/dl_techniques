@@ -50,15 +50,15 @@ model = create_fractal_net("medium", num_classes=100, input_shape=(64, 64, 3))
 """
 
 import keras
-from typing import List, Optional, Union, Tuple, Dict, Any, Callable
+from typing import List, Optional, Union, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.convblock import ConvBlock
 from dl_techniques.layers.fractal_block import FractalBlock
+from dl_techniques.layers.standard_blocks import ConvBlock
 
 # ---------------------------------------------------------------------
 
@@ -84,14 +84,14 @@ class FractalNet(keras.Model):
             Default is 0.15.
         dropout_rate: Float, dropout rate in conv blocks.
             Default is 0.1.
-        use_batch_norm: Boolean, whether to use batch normalization.
-            Default is True.
+        normalization_type: String, type of normalization to use in conv blocks.
+            Default is "batch_norm".
+        activation_type: String, type of activation to use in conv blocks.
+            Default is "relu".
         kernel_initializer: String or initializer for conv layers.
             Default is "he_normal".
         kernel_regularizer: String or regularizer for conv layers.
             Default is None.
-        activation: String or callable, activation function.
-            Default is "relu".
         global_pool: String, global pooling type ("avg" or "max").
             Default is "avg".
         classifier_dropout: Float, dropout rate before final dense layer.
@@ -138,10 +138,10 @@ class FractalNet(keras.Model):
         strides: List[int] = [2, 2, 2],
         drop_path_rate: float = 0.15,
         dropout_rate: float = 0.1,
-        use_batch_norm: bool = True,
+        normalization_type: str = "batch_norm",
+        activation_type: str = "relu",
         kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-        activation: str = "relu",
         global_pool: str = "avg",
         classifier_dropout: float = 0.2,
         include_top: bool = True,
@@ -172,10 +172,10 @@ class FractalNet(keras.Model):
         self.strides = strides
         self.drop_path_rate = drop_path_rate
         self.dropout_rate = dropout_rate
-        self.use_batch_norm = use_batch_norm
+        self.normalization_type = normalization_type
+        self.activation_type = activation_type
         self.kernel_initializer = kernel_initializer
         self.kernel_regularizer = kernel_regularizer
-        self.activation = activation
         self.global_pool = global_pool
         self.classifier_dropout = classifier_dropout
         self.include_top = include_top
@@ -246,23 +246,26 @@ class FractalNet(keras.Model):
         num_filters = self.filters[stage_idx]
         stride = self.strides[stage_idx]
 
-        # Create block function for this stage
-        def create_conv_block() -> ConvBlock:
-            """Factory function to create conv blocks for fractal expansion."""
-            return ConvBlock(
-                filters=num_filters,
-                strides=stride,
-                use_batch_norm=self.use_batch_norm,
-                dropout_rate=self.dropout_rate,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                activation=self.activation,
-                name=f"stage_{stage_idx}_conv_block"
-            )
+        # Create a ConvBlock to get its configuration
+        conv_block = ConvBlock(
+            filters=num_filters,
+            kernel_size=self.DEFAULT_KERNEL_SIZE,
+            strides=stride,
+            padding="same",
+            normalization_type=self.normalization_type,
+            activation_type=self.activation_type,
+            dropout_rate=self.dropout_rate,
+            use_pooling=False,  # No pooling in fractal blocks
+            kernel_regularizer=self.kernel_regularizer,
+            kernel_initializer=self.kernel_initializer,
+        )
 
-        # Create and apply fractal block
+        # Get the configuration dictionary from the ConvBlock
+        block_config = conv_block.get_config()
+
+        # Create and apply fractal block using the block configuration
         fractal_block = FractalBlock(
-            block_fn=create_conv_block,
+            block_config=block_config,
             depth=depth,
             drop_path_rate=self.drop_path_rate,
             name=f"fractal_stage_{stage_idx}"
@@ -374,12 +377,12 @@ class FractalNet(keras.Model):
             "strides": self.strides,
             "drop_path_rate": self.drop_path_rate,
             "dropout_rate": self.dropout_rate,
-            "use_batch_norm": self.use_batch_norm,
+            "normalization_type": self.normalization_type,
+            "activation_type": self.activation_type,
             "kernel_initializer": keras.initializers.serialize(
                 keras.initializers.get(self.kernel_initializer)
             ),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
-            "activation": self.activation,
             "global_pool": self.global_pool,
             "classifier_dropout": self.classifier_dropout,
             "include_top": self.include_top,
@@ -422,6 +425,8 @@ class FractalNet(keras.Model):
         logger.info(f"  - Filters: {self.filters}")
         logger.info(f"  - Total fractal blocks: {total_blocks}")
         logger.info(f"  - Drop path rate: {self.drop_path_rate}")
+        logger.info(f"  - Normalization: {self.normalization_type}")
+        logger.info(f"  - Activation: {self.activation_type}")
         logger.info(f"  - Include top: {self.include_top}")
         if self.include_top:
             logger.info(f"  - Number of classes: {self.num_classes}")
