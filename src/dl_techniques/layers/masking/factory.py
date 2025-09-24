@@ -34,23 +34,19 @@ Examples:
 """
 
 import keras
-from keras import ops
-import numpy as np
-from typing import Optional, Union, Tuple, List, Literal, Dict, Any
-from dataclasses import dataclass, field
-from enum import Enum
 import warnings
+import numpy as np
+from keras import ops
+from enum import Enum
+import matplotlib.pyplot as plt
+from dataclasses import dataclass, field
+from typing import Optional, Union, Tuple,  Literal, Dict, Any
 
-try:
-    import matplotlib.pyplot as plt
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
-    HAS_MATPLOTLIB = True
-except ImportError:
-    HAS_MATPLOTLIB = False
-
-# Local imports
 from dl_techniques.utils.logger import logger
-
 
 # ---------------------------------------------------------------------
 # Type Definitions and Enums
@@ -877,9 +873,6 @@ def visualize_mask(
         >>> mask = create_mask("causal", seq_len=32)
         >>> visualize_mask(mask, title="Causal Attention Mask")
     """
-    if not HAS_MATPLOTLIB:
-        warnings.warn("matplotlib not available for visualization")
-        return None
 
     # Convert to numpy if necessary
     if hasattr(mask, 'numpy'):
