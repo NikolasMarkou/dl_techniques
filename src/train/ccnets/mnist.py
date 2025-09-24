@@ -2,25 +2,7 @@
 CCNet MNIST Experiment with Centralized Configuration - Refined Implementation.
 
 This module demonstrates a complete training and analysis workflow for a
-Causal Cooperative Network (CCNet) on the MNIST dataset, following modern
-Keras 3 best practices for custom layers and models.
-
-Examples:
-    Basic usage::
-
-        # Use default configuration
-        config = ExperimentConfig()
-        experiment = CCNetExperiment(config)
-        orchestrator, trainer = experiment.run()
-
-        # Or customize specific aspects
-        config = ExperimentConfig(
-            model=ModelConfig(explanation_dim=32),
-            training=TrainingConfig(epochs=100),
-            data=DataConfig(batch_size=256)
-        )
-        experiment = CCNetExperiment(config)
-        orchestrator, trainer = experiment.run()
+Causal Cooperative Network (CCNet) on the MNIST dataset
 """
 
 import keras
@@ -31,7 +13,7 @@ import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 from scipy.stats import gaussian_kde
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, Tuple, List, Union
+from typing import Dict, Any, Optional, Tuple, List
 
 # ---------------------------------------------------------------------
 # Local imports
@@ -54,6 +36,9 @@ from dl_techniques.layers.activations.golu import GoLU
 from dl_techniques.regularizers.soft_orthogonal import (
     SoftOrthonormalConstraintRegularizer
 )
+
+from dl_techniques.layers.film import FiLMLayer
+from dl_techniques.layers.standard_blocks import ConvBlock, DenseBlock
 
 # =====================================================================
 # CENTRALIZED CONFIGURATION
@@ -232,414 +217,6 @@ class ExperimentConfig:
     log_interval: int = 10  # Log progress every N batches
     verbose: bool = True
 
-
-# =====================================================================
-# MODERN KERAS 3 LAYERS
-# =====================================================================
-
-@keras.saving.register_keras_serializable()
-class FiLMLayer(keras.layers.Layer):
-    """
-    Feature-wise Linear Modulation (FiLM) Layer with optional orthonormal regularization.
-
-    Applies an affine transformation to a content tensor based on a
-    style vector. It learns a projection from the style vector to generate
-    per-channel scaling (gamma) and shifting (beta) parameters.
-
-    **Intent**: Enable conditional generation by modulating feature maps
-    based on style/condition vectors, commonly used in conditional GANs
-    and style transfer networks. Optional orthonormal regularization helps
-    maintain diverse and non-redundant style projections.
-
-    **Architecture**:
-    ```
-    Content Tensor(B, H, W, C) + Style Vector(B, S)
-                    ↓
-    Style → Dense(C) → Gamma(B, 1, 1, C)
-         ↘ Dense(C) → Beta(B, 1, 1, C)
-                    ↓
-    Output = Content * (1 + Gamma) + Beta
-    ```
-
-    Args:
-        kernel_regularizer: Optional regularizer for projection layers
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        List of two tensors:
-        - content_tensor: (batch_size, height, width, channels)
-        - style_vector: (batch_size, style_dim)
-
-    Output shape:
-        Same as content_tensor: (batch_size, height, width, channels)
-
-    Attributes:
-        gamma_projection: Dense layer for scaling parameters
-        beta_projection: Dense layer for shifting parameters
-        num_channels: Number of channels to modulate
-        kernel_regularizer: Regularizer applied to projection layers
-    """
-
-    def __init__(
-        self,
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-        **kwargs: Any
-    ) -> None:
-        """Initialize FiLM layer with projection layers."""
-        super().__init__(**kwargs)
-
-        self.kernel_regularizer = kernel_regularizer
-
-        # These will be created in build() when we know the shape
-        self.gamma_projection: Optional[keras.layers.Dense] = None
-        self.beta_projection: Optional[keras.layers.Dense] = None
-        self.num_channels: Optional[int] = None
-
-    def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
-        """
-        Build the layer's weights and sub-layers.
-
-        Args:
-            input_shape: List of two shapes: [content_shape, style_shape].
-        """
-        if not isinstance(input_shape, list) or len(input_shape) != 2:
-            raise ValueError(
-                f"FiLMLayer expects input_shape to be a list of 2 shapes, "
-                f"got {type(input_shape)} with length {len(input_shape) if isinstance(input_shape, list) else 'N/A'}"
-            )
-
-        content_shape, style_shape = input_shape
-        self.num_channels = content_shape[-1]
-
-        if self.num_channels is None:
-            raise ValueError("Content tensor must have a known number of channels")
-
-        # Create sub-layers in build() when we know the dimensions
-        # Use tanh activation on gamma to constrain scaling to stable range
-        # Apply orthonormal regularization to gamma projection for better disentanglement
-        self.gamma_projection = keras.layers.Dense(
-            self.num_channels,
-            activation='tanh',
-            kernel_regularizer=self.kernel_regularizer,
-            name=f"{self.name}_gamma_projection"
-        )
-        self.beta_projection = keras.layers.Dense(
-            self.num_channels,
-            activation='linear',
-            name=f"{self.name}_beta_projection"
-        )
-
-        # Build sub-layers explicitly for proper serialization
-        self.gamma_projection.build(style_shape)
-        self.beta_projection.build(style_shape)
-
-        super().build(input_shape)
-
-    def call(self, inputs: List[keras.KerasTensor]) -> keras.KerasTensor:
-        """
-        Apply the FiLM transformation.
-
-        Args:
-            inputs: List containing [content_tensor, style_vector].
-
-        Returns:
-            The modulated content tensor.
-        """
-        if len(inputs) != 2:
-            raise ValueError(f"FiLMLayer expects 2 inputs, got {len(inputs)}")
-
-        content_tensor, style_vector = inputs
-
-        # Project style vector to get gamma (scale) and beta (bias)
-        gamma = self.gamma_projection(style_vector)
-        beta = self.beta_projection(style_vector)
-
-        # Reshape for broadcasting: (batch, 1, 1, channels)
-        gamma = keras.ops.expand_dims(keras.ops.expand_dims(gamma, 1), 1)
-        beta = keras.ops.expand_dims(keras.ops.expand_dims(beta, 1), 1)
-
-        # Apply modulation: output = content * (1 + gamma) + beta
-        return content_tensor * (1.0 + gamma) + beta
-
-    def compute_output_shape(
-        self, input_shape: List[Tuple[Optional[int], ...]]
-    ) -> Tuple[Optional[int], ...]:
-        """Compute output shape (same as content tensor)."""
-        content_shape, _ = input_shape
-        return content_shape
-
-    def get_config(self) -> Dict[str, Any]:
-        """Get the configuration dictionary for layer serialization."""
-        config = super().get_config()
-        config.update({
-            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer) if self.kernel_regularizer else None,
-        })
-        return config
-
-
-@keras.saving.register_keras_serializable()
-class ConvBlock(keras.layers.Layer):
-    """
-    Convolutional block with BatchNorm, Activation, and optional Pooling.
-
-    This layer implements a standard convolutional building block consisting
-    of Conv2D → BatchNorm → Activation → Optional Pooling, providing a
-    reusable component for CNN architectures.
-
-    **Intent**: Provide a standardized, configurable convolutional block
-    that handles the common Conv-BN-Activation-Pool pattern with proper
-    regularization and initialization.
-
-    Args:
-        filters: Number of convolutional filters
-        kernel_size: Size of convolutional kernel
-        strides: Convolution strides
-        padding: Padding mode ('same' or 'valid')
-        activation: Activation function name or callable
-        use_pooling: Whether to apply pooling layer
-        pool_size: Size of pooling window
-        pool_type: Type of pooling ('max' or 'avg')
-        kernel_regularizer: Regularizer for convolution kernel
-        **kwargs: Additional arguments for Layer base class.
-    """
-
-    def __init__(
-        self,
-        filters: int,
-        kernel_size: Union[int, Tuple[int, int]] = 3,
-        strides: Union[int, Tuple[int, int]] = 1,
-        padding: str = "same",
-        activation: str = "relu",
-        use_pooling: bool = False,
-        pool_size: Union[int, Tuple[int, int]] = 2,
-        pool_type: str = "max",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-        **kwargs: Any
-    ) -> None:
-        """Initialize ConvBlock with specified parameters."""
-        super().__init__(**kwargs)
-
-        # Validate inputs
-        if filters <= 0:
-            raise ValueError(f"filters must be positive, got {filters}")
-        if pool_type not in ["max", "avg"]:
-            raise ValueError(f"pool_type must be 'max' or 'avg', got {pool_type}")
-
-        # Store configuration
-        self.filters = filters
-        self.kernel_size = kernel_size
-        self.strides = strides
-        self.padding = padding
-        self.activation = activation
-        self.use_pooling = use_pooling
-        self.pool_size = pool_size
-        self.pool_type = pool_type
-        self.kernel_regularizer = kernel_regularizer
-
-        # Create sub-layers in __init__
-        self.conv = keras.layers.Conv2D(
-            filters=filters,
-            kernel_size=kernel_size,
-            strides=strides,
-            padding=padding,
-            kernel_regularizer=kernel_regularizer,
-            name=f"{self.name}_conv"
-        )
-
-        self.bn = keras.layers.BatchNormalization(name=f"{self.name}_bn")
-
-        self.act = GoLU(name=f"{self.name}_activation")
-
-        if use_pooling:
-            if pool_type == "max":
-                self.pool = keras.layers.MaxPooling2D(
-                    pool_size=pool_size, name=f"{self.name}_pool"
-                )
-            else:  # avg
-                self.pool = keras.layers.AveragePooling2D(
-                    pool_size=pool_size, name=f"{self.name}_pool"
-                )
-        else:
-            self.pool = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build sub-layers explicitly for proper serialization."""
-        # Build sub-layers in computational order
-        self.conv.build(input_shape)
-
-        conv_output_shape = self.conv.compute_output_shape(input_shape)
-        self.bn.build(conv_output_shape)
-
-        self.act.build(conv_output_shape)
-
-        if self.pool is not None:
-            self.pool.build(conv_output_shape)
-
-        super().build(input_shape)
-
-    def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """Forward pass through the convolutional block."""
-        x = self.conv(inputs)
-        x = self.bn(x, training=training)
-        x = self.act(x)
-
-        if self.pool is not None:
-            x = self.pool(x)
-
-        return x
-
-    def compute_output_shape(
-        self, input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Optional[int], ...]:
-        """Compute output shape."""
-        shape = self.conv.compute_output_shape(input_shape)
-        if self.pool is not None:
-            shape = self.pool.compute_output_shape(shape)
-        return shape
-
-    def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            'filters': self.filters,
-            'kernel_size': self.kernel_size,
-            'strides': self.strides,
-            'padding': self.padding,
-            'activation': self.activation,
-            'use_pooling': self.use_pooling,
-            'pool_size': self.pool_size,
-            'pool_type': self.pool_type,
-            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer) if self.kernel_regularizer else None,
-        })
-        return config
-
-
-@keras.saving.register_keras_serializable()
-class DenseBlock(keras.layers.Layer):
-    """
-    Dense block with BatchNorm, Activation, and optional Dropout.
-
-    This layer implements a standard dense building block consisting
-    of Dense → BatchNorm → Activation → Optional Dropout, providing a
-    reusable component for MLP architectures.
-
-    **Intent**: Provide a standardized, configurable dense block
-    that handles the common Dense-BN-Activation-Dropout pattern with proper
-    regularization and initialization.
-
-    Args:
-        units: Number of dense units
-        activation: Activation function name or callable
-        dropout_rate: Dropout rate (0.0 to disable)
-        use_batch_norm: Whether to apply batch normalization
-        kernel_regularizer: Regularizer for dense kernel
-        **kwargs: Additional arguments for Layer base class.
-    """
-
-    def __init__(
-        self,
-        units: int,
-        activation: str = "relu",
-        dropout_rate: float = 0.0,
-        use_batch_norm: bool = True,
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-        **kwargs: Any
-    ) -> None:
-        """Initialize DenseBlock with specified parameters."""
-        super().__init__(**kwargs)
-
-        # Validate inputs
-        if units <= 0:
-            raise ValueError(f"units must be positive, got {units}")
-        if not (0.0 <= dropout_rate <= 1.0):
-            raise ValueError(f"dropout_rate must be in [0,1], got {dropout_rate}")
-
-        # Store configuration
-        self.units = units
-        self.activation = activation
-        self.dropout_rate = dropout_rate
-        self.use_batch_norm = use_batch_norm
-        self.kernel_regularizer = kernel_regularizer
-
-        # Create sub-layers in __init__
-        self.dense = keras.layers.Dense(
-            units=units,
-            kernel_regularizer=kernel_regularizer,
-            name=f"{self.name}_dense"
-        )
-
-        if use_batch_norm:
-            self.bn = keras.layers.BatchNormalization(name=f"{self.name}_bn")
-        else:
-            self.bn = None
-
-        self.act = GoLU(name=f"{self.name}_activation")
-
-        if dropout_rate > 0.0:
-            self.dropout = keras.layers.Dropout(
-                rate=dropout_rate, name=f"{self.name}_dropout"
-            )
-        else:
-            self.dropout = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build sub-layers explicitly for proper serialization."""
-        # Build sub-layers in computational order
-        self.dense.build(input_shape)
-
-        dense_output_shape = self.dense.compute_output_shape(input_shape)
-
-        if self.bn is not None:
-            self.bn.build(dense_output_shape)
-
-        self.act.build(dense_output_shape)
-
-        if self.dropout is not None:
-            self.dropout.build(dense_output_shape)
-
-        super().build(input_shape)
-
-    def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """Forward pass through the dense block."""
-        x = self.dense(inputs)
-
-        if self.bn is not None:
-            x = self.bn(x, training=training)
-
-        x = self.act(x)
-
-        if self.dropout is not None:
-            x = self.dropout(x, training=training)
-
-        return x
-
-    def compute_output_shape(
-        self, input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Optional[int], ...]:
-        """Compute output shape."""
-        return self.dense.compute_output_shape(input_shape)
-
-    def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            'units': self.units,
-            'activation': self.activation,
-            'dropout_rate': self.dropout_rate,
-            'use_batch_norm': self.use_batch_norm,
-            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer) if self.kernel_regularizer else None,
-        })
-        return config
-
-
 # =====================================================================
 # REFINED MODEL DEFINITIONS
 # =====================================================================
@@ -701,7 +278,7 @@ class MNISTExplainer(keras.Model):
             use_matrix_scaling=config.explainer_use_matrix_scaling
         ) if config.explainer_orthonormal_lambda > 0 else None
 
-        # Create convolutional blocks
+        # Create convolutional blocks using standard blocks
         self.conv_blocks: List[ConvBlock] = []
         for i, (filters, kernel) in enumerate(zip(
             config.explainer_conv_filters,
@@ -713,6 +290,8 @@ class MNISTExplainer(keras.Model):
             block = ConvBlock(
                 filters=filters,
                 kernel_size=kernel,
+                normalization_type='batch_norm',
+                activation_type='gelu',
                 use_pooling=use_pooling,
                 pool_size=2,
                 pool_type="max",
@@ -840,7 +419,7 @@ class MNISTReasoner(keras.Model):
         l2_reg = config.reasoner_l2_regularization
         self.l2_regularizer = keras.regularizers.L2(l2_reg) if l2_reg > 0 else None
 
-        # Create convolutional blocks for image processing
+        # Create convolutional blocks for image processing using standard blocks
         self.conv_blocks: List[ConvBlock] = []
         for i, (filters, kernel) in enumerate(zip(
             config.reasoner_conv_filters,
@@ -849,6 +428,8 @@ class MNISTReasoner(keras.Model):
             block = ConvBlock(
                 filters=filters,
                 kernel_size=kernel,
+                normalization_type='batch_norm',
+                activation_type='gelu',
                 use_pooling=True,
                 pool_size=2,
                 pool_type="max",
@@ -860,11 +441,13 @@ class MNISTReasoner(keras.Model):
         # Flatten for combining with explanations
         self.flatten = keras.layers.Flatten(name="flatten")
 
-        # Dense blocks for reasoning
+        # Dense blocks for reasoning using standard blocks
         self.dense_blocks: List[DenseBlock] = []
         for i, units in enumerate(config.reasoner_dense_units):
             block = DenseBlock(
                 units=units,
+                normalization_type='batch_norm',
+                activation_type='gelu',
                 dropout_rate=config.reasoner_dropout_rate,
                 kernel_regularizer=self.l2_regularizer,
                 name=f"dense_block_{i + 1}"
