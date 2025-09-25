@@ -80,138 +80,48 @@ from typing import Optional, Union, List, Dict, Any, Tuple, Literal
 # local imports
 # ---------------------------------------------------------------------
 
-from .ffn.factory import create_ffn_layer
-from .norms.factory import create_normalization_layer
+from .ffn.factory import create_ffn_layer, FFNType
 from .attention.factory import create_attention_layer
+from .norms.factory import create_normalization_layer, NormalizationType
 
 # ---------------------------------------------------------------------
 
-# Type definitions for enhanced type safety
 FusionStrategy = Literal[
-    'cross_attention',  # Bidirectional cross-attention between modalities
-    'concatenation',  # Concatenate and project
-    'addition',  # Element-wise addition with optional projection
-    'multiplication',  # Element-wise multiplication with optional projection
-    'gated',  # Learned gating mechanism
-    'attention_pooling',  # Attention-based pooling and fusion
-    'bilinear',  # Bilinear pooling
-    'tensor_fusion'  # Multi-dimensional tensor fusion
-]
-
-AttentionType = Literal[
-    'multi_head', 'shared_weights_cross', 'perceiver', 'differential',
-    'group_query', 'window', 'adaptive_multi_head'
-]
-
-FFNType = Literal[
-    'mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp'
-]
-
-NormType = Literal[
-    'layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'adaptive_band_rms',
-    'dynamic_tanh', 'logit_norm'
+    'cross_attention',   # Bidirectional cross-attention between modalities
+    'concatenation',     # Concatenate and project
+    'addition',          # Element-wise addition with optional projection
+    'multiplication',    # Element-wise multiplication with optional projection
+    'gated',             # Learned gating mechanism
+    'attention_pooling', # Attention-based pooling and fusion
+    'bilinear',          # Bilinear pooling
+    'tensor_fusion'      # Multi-dimensional tensor fusion
 ]
 
 # ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class MultiModalFusion(keras.layers.Layer):
     """
-    General-purpose configurable multi-modal fusion layer with multiple fusion strategies.
+    General-purpose configurable multi-modal fusion layer.
 
     This layer enables flexible fusion between multiple modalities using various strategies
     including cross-attention, concatenation, gating, and tensor fusion. It uses factory
-    patterns for creating configurable attention, FFN, and normalization sublayers.
-
-    **Intent**: Provide a unified, configurable interface for multi-modal fusion that can
-    adapt to different architectural requirements and fusion strategies while maintaining
-    proper serialization and following modern Keras 3 patterns.
-
-    **Supported Fusion Strategies**:
-    - `cross_attention`: Bidirectional cross-attention between modalities
-    - `concatenation`: Concatenate features and apply projection
-    - `addition`: Element-wise addition with optional alignment projection
-    - `multiplication`: Element-wise multiplication with optional alignment
-    - `gated`: Learned gating mechanism for selective fusion
-    - `attention_pooling`: Attention-based pooling and fusion
-    - `bilinear`: Bilinear pooling between modalities
-    - `tensor_fusion`: Multi-dimensional tensor fusion using multiple projection heads.
-
-    Args:
-        embed_dim: Integer, embedding dimension for all modalities.
-        fusion_strategy: FusionStrategy, the fusion method to use.
-        num_fusion_layers: Integer, number of fusion layers. Only applies to iterative
-            strategies like 'cross_attention'.
-        attention_type: AttentionType, type of attention mechanism for attention-based strategies.
-        attention_config: Optional dictionary of attention-specific parameters.
-        ffn_type: FFNType, type of feed-forward network.
-        ffn_config: Optional dictionary of FFN-specific parameters.
-        norm_type: NormType, type of normalization layer.
-        norm_config: Optional dictionary of normalization-specific parameters.
-        num_heads: Integer, number of attention heads for attention-based strategies.
-        num_tensor_projections: Integer, number of projection heads for the 'tensor_fusion' strategy.
-        intermediate_size: Integer, intermediate size for FFN layers.
-        dropout_rate: Float, dropout rate for regularization.
-        use_residual: Boolean, whether to use residual connections.
-        activation: String or callable, activation function.
-        kernel_initializer: String or initializer, kernel weight initializer.
-        bias_initializer: String or initializer, bias weight initializer.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional keyword arguments for the Layer base class.
-
-    Input shape:
-        Tuple of tensors: (modality1, modality2, [modality3, ...])
-        Each modality tensor has shape: `(batch_size, sequence_length, embed_dim)`
-
-    Output shape:
-        Tuple of tensors with same shapes as inputs (for most strategies)
-        or single tensor for pooling strategies.
-
-    Example:
-        ```python
-        # Cross-attention fusion
-        fusion = MultiModalFusion(
-            embed_dim=768,
-            fusion_strategy='cross_attention',
-            num_fusion_layers=3,
-            attention_type='multi_head',
-            num_heads=12
-        )
-
-        # Gated fusion with custom configurations
-        fusion = MultiModalFusion(
-            embed_dim=512,
-            fusion_strategy='gated',
-            ffn_type='swiglu',
-            ffn_config={'ffn_expansion_factor': 4},
-            norm_type='rms_norm',
-            norm_config={'epsilon': 1e-6}
-        )
-
-        # Multi-head projection fusion ('tensor_fusion')
-        fusion = MultiModalFusion(
-            embed_dim=768,
-            fusion_strategy='tensor_fusion',
-            num_tensor_projections=6
-        )
-        ```
+    patterns for creating configurable FFN and normalization sublayers, and is hardcoded to
+    use the 'multi_head_cross' attention layer for all attention-based strategies.
     """
 
     def __init__(
             self,
-            embed_dim: int = 768,
+            dim: int = 768,
             fusion_strategy: FusionStrategy = 'cross_attention',
             num_fusion_layers: int = 1,
-            attention_type: AttentionType = 'multi_head',
             attention_config: Optional[Dict[str, Any]] = None,
             ffn_type: FFNType = 'mlp',
             ffn_config: Optional[Dict[str, Any]] = None,
-            norm_type: NormType = 'layer_norm',
+            norm_type: NormalizationType = 'layer_norm',
             norm_config: Optional[Dict[str, Any]] = None,
-            num_heads: int = 12,
             num_tensor_projections: int = 8,
-            intermediate_size: Optional[int] = None,
             dropout_rate: float = 0.1,
             use_residual: bool = True,
             activation: Union[str, keras.KerasTensor] = 'gelu',
@@ -223,31 +133,25 @@ class MultiModalFusion(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
-        if embed_dim <= 0:
-            raise ValueError(f"embed_dim must be positive, got {embed_dim}")
+        # --- Store configuration ONLY in __init__ ---
+        if dim <= 0:
+            raise ValueError(f"dim must be positive, got {dim}")
         if num_fusion_layers <= 0:
             raise ValueError(f"num_fusion_layers must be positive, got {num_fusion_layers}")
-        if num_heads <= 0 or embed_dim % num_heads != 0:
-            raise ValueError(f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})")
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
         if fusion_strategy == 'tensor_fusion' and num_tensor_projections <= 0:
             raise ValueError("num_tensor_projections must be positive for tensor_fusion strategy.")
 
-        # Store configuration
-        self.embed_dim = embed_dim
+        self.dim = dim
         self.fusion_strategy = fusion_strategy
         self.num_fusion_layers = num_fusion_layers
-        self.attention_type = attention_type
         self.attention_config = attention_config or {}
         self.ffn_type = ffn_type
         self.ffn_config = ffn_config or {}
         self.norm_type = norm_type
         self.norm_config = norm_config or {}
-        self.num_heads = num_heads
         self.num_tensor_projections = num_tensor_projections
-        self.intermediate_size = intermediate_size or (embed_dim * 4)
         self.dropout_rate = dropout_rate
         self.use_residual = use_residual
         self.activation = activations.get(activation)
@@ -256,7 +160,6 @@ class MultiModalFusion(keras.layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
 
-        # Validate that num_fusion_layers is used correctly
         iterative_strategies = {'cross_attention'}
         if self.fusion_strategy not in iterative_strategies and self.num_fusion_layers > 1:
             raise ValueError(
@@ -264,7 +167,6 @@ class MultiModalFusion(keras.layers.Layer):
                 f"like {iterative_strategies}, but strategy is '{self.fusion_strategy}'."
             )
 
-        # Initialize sublayer containers
         self.fusion_layers = []
         self.projection_layers = []
         self.norm_layers = []
@@ -272,320 +174,169 @@ class MultiModalFusion(keras.layers.Layer):
         self.gate_layers = []
         self.dropout_layers = []
 
-        # Store build input shape for serialization
-        self._build_input_shape = None
-
     def build(self, input_shape: Union[Tuple, List]) -> None:
-        """Build the multi-modal fusion layers."""
+        """Create and explicitly build all sub-layers based on the input shape."""
         if self.built:
             return
 
-        self._build_input_shape = input_shape
-
-        # Validate input shapes
-        if not isinstance(input_shape, (tuple, list)):
-            raise ValueError(f"Expected tuple or list of shapes, got: {type(input_shape)}")
-
+        if not isinstance(input_shape, (list, tuple)) or not input_shape or not hasattr(input_shape[0], '__len__'):
+             raise ValueError("Expected list or tuple of input tensors")
         if len(input_shape) < 2:
             raise ValueError(f"Expected at least 2 modalities, got {len(input_shape)}")
-
-        # Validate all modalities have same embedding dimension
         for i, shape in enumerate(input_shape):
             if len(shape) != 3:
                 raise ValueError(f"Expected 3D shapes, got modality {i}: {shape}")
-            if shape[-1] != self.embed_dim:
-                raise ValueError(f"Modality {i} dimension {shape[-1]} != embed_dim {self.embed_dim}")
+            if shape[-1] != self.dim:
+                raise ValueError(f"Modality {i} dimension {shape[-1]} != dim {self.dim}")
 
         num_modalities = len(input_shape)
 
-        # Build strategy-specific layers
-        if self.fusion_strategy == 'cross_attention':
-            self._build_cross_attention_layers(input_shape, num_modalities)
-        elif self.fusion_strategy == 'concatenation':
-            self._build_concatenation_layers(input_shape, num_modalities)
-        elif self.fusion_strategy in ['addition', 'multiplication']:
-            self._build_elementwise_layers(input_shape, num_modalities)
-        elif self.fusion_strategy == 'gated':
-            self._build_gated_layers(input_shape, num_modalities)
-        elif self.fusion_strategy == 'attention_pooling':
-            self._build_attention_pooling_layers(input_shape, num_modalities)
-        elif self.fusion_strategy == 'bilinear':
-            self._build_bilinear_layers(input_shape, num_modalities)
-        elif self.fusion_strategy == 'tensor_fusion':
-            self._build_tensor_fusion_layers(input_shape, num_modalities)
+        # --- Create and Build sub-layers here ---
+        strategy = self.fusion_strategy
+        if strategy == 'cross_attention':
+            self._build_and_create_cross_attention(input_shape)
+        elif strategy == 'concatenation':
+            self._build_and_create_concatenation(input_shape)
+        elif strategy in ['addition', 'multiplication']:
+            self._build_and_create_elementwise(input_shape)
+        elif strategy == 'gated':
+            self._build_and_create_gated(input_shape)
+        elif strategy == 'attention_pooling':
+            self._build_and_create_attention_pooling(input_shape)
+        elif strategy == 'bilinear':
+            self._build_and_create_bilinear(input_shape)
+        elif strategy == 'tensor_fusion':
+            self._build_and_create_tensor_fusion(input_shape)
         else:
             raise ValueError(f"Unknown fusion strategy: {self.fusion_strategy}")
 
         super().build(input_shape)
 
-    def _build_cross_attention_layers(
-            self,
-            input_shape: Union[Tuple, List],
-            num_modalities: int
-    ) -> None:
-        """Build cross-attention fusion layers."""
+    def _build_and_create_cross_attention(self, input_shape):
+        num_modalities = len(input_shape)
         for layer_idx in range(self.num_fusion_layers):
-            layer_dict = {}
-
-            # Create attention layers between each pair of modalities
+            # Use a Layer as a container for better tracking during serialization
+            block_container = keras.layers.Layer(name=f'fusion_block_{layer_idx}')
             for i in range(num_modalities):
-                layer_dict[f'attention_{i}'] = []
-                layer_dict[f'norm_{i}'] = []
-                layer_dict[f'ffn_{i}'] = []
-
+                # Attention Layers
+                attn_layers_for_modality_i = []
                 for j in range(num_modalities):
-                    if i != j:  # Cross-attention between different modalities
+                    if i != j:
                         attn_config = self.attention_config.copy()
-                        attn_config.update({
-                            'embed_dim': self.embed_dim,
-                            'num_heads': self.num_heads,
-                            'dropout_rate': self.dropout_rate
-                        })
+                        attn_config.setdefault('dim', self.dim)
+                        attn_layer = create_attention_layer('multi_head_cross', name=f'cross_attention_{layer_idx}_{i}_{j}', **attn_config)
+                        attn_layer.build([input_shape[i], input_shape[j]])
+                        attn_layers_for_modality_i.append(attn_layer)
+                # Set the list of layers as an attribute on the container
+                setattr(block_container, f'attention_{i}', attn_layers_for_modality_i)
 
-                        attention_layer = create_attention_layer(
-                            self.attention_type,
-                            name=f'cross_attention_{layer_idx}_{i}_{j}',
-                            **attn_config
-                        )
-                        layer_dict[f'attention_{i}'].append(attention_layer)
-
-                        # Build attention layer using the unified helper
-                        self._build_attention_layer(
-                            attention_layer=attention_layer,
-                            query_shape=input_shape[i],
-                            context_shape=input_shape[j]
-                        )
-
-                # Create normalization layer
-                norm_config = self.norm_config.copy()
-                norm_layer = create_normalization_layer(
-                    self.norm_type,
-                    name=f'norm_{layer_idx}_{i}',
-                    **norm_config
-                )
-                layer_dict[f'norm_{i}'] = norm_layer
+                # Norm Layer
+                norm_layer = create_normalization_layer(self.norm_type, name=f'norm_{layer_idx}_{i}', **self.norm_config.copy())
                 norm_layer.build(input_shape[i])
+                setattr(block_container, f'norm_{i}', norm_layer)
 
-                # Create FFN layer
+                # FFN Layer
                 ffn_config = self.ffn_config.copy()
-                ffn_config.update({
-                    'hidden_dim': self.intermediate_size,
-                    'output_dim': self.embed_dim,
-                    'dropout_rate': self.dropout_rate
-                })
-
-                ffn_layer = create_ffn_layer(
-                    self.ffn_type,
-                    name=f'ffn_{layer_idx}_{i}',
-                    **ffn_config
-                )
-                layer_dict[f'ffn_{i}'] = ffn_layer
+                ffn_config.setdefault('hidden_dim', self.dim * 4)
+                ffn_config['output_dim'] = self.dim
+                ffn_layer = create_ffn_layer(self.ffn_type, name=f'ffn_{layer_idx}_{i}', **ffn_config)
                 ffn_layer.build(input_shape[i])
+                setattr(block_container, f'ffn_{i}', ffn_layer)
 
-            self.fusion_layers.append(layer_dict)
+            # Append the container, which now holds and tracks all sub-layers for this block
+            self.fusion_layers.append(block_container)
 
-    def _build_attention_layer(
-            self,
-            attention_layer: keras.layers.Layer,
-            query_shape: Tuple[Optional[int], ...],
-            context_shape: Tuple[Optional[int], ...]
-    ) -> None:
-        """
-        Unified interface for building attention layers with different signatures.
-
-        This method abstracts away the differences between attention layer build interfaces.
-        """
-        # This assumes the factory returns layers compatible with these build patterns.
-        # A more advanced factory could return a wrapper to unify interfaces.
-        if hasattr(attention_layer, 'build_from_signature'):  # Keras MHA
-            attention_layer.build(
-                query_shape=query_shape,
-                value_shape=context_shape
-            )
-        else:  # Assumes a common (query, context) build signature
-            attention_layer.build((query_shape, context_shape))
-
-    def _build_concatenation_layers(
-            self,
-            input_shape: Union[Tuple, List],
-            num_modalities: int
-    ) -> None:
-        """Build concatenation fusion layers."""
-        concat_dim = self.embed_dim * num_modalities
-
-        projection = layers.Dense(
-            self.embed_dim,
-            activation=self.activation,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name='concat_projection'
-        )
+    def _build_and_create_concatenation(self, input_shape):
+        num_modalities = len(input_shape)
+        proj_layer = layers.Dense(self.dim, activation=self.activation, name='concat_projection', kernel_initializer=self.kernel_initializer, bias_initializer=self.bias_initializer)
         concat_shape = list(input_shape[0])
-        concat_shape[-1] = concat_dim
-        projection.build(tuple(concat_shape))
-        self.projection_layers.append(projection)
+        concat_shape[-1] = self.dim * num_modalities
+        proj_layer.build(tuple(concat_shape))
+        self.projection_layers.append(proj_layer)
 
-        norm_layer = create_normalization_layer(
-            self.norm_type, name='concat_norm', **self.norm_config.copy()
-        )
-        output_shape = tuple(concat_shape[:-1] + [self.embed_dim])
-        norm_layer.build(output_shape)
+        norm_layer = create_normalization_layer(self.norm_type, name='concat_norm', **self.norm_config.copy())
+        norm_layer.build(proj_layer.compute_output_shape(tuple(concat_shape)))
         self.norm_layers.append(norm_layer)
 
         self.dropout_layers.append(layers.Dropout(self.dropout_rate, name='concat_dropout'))
 
-    def _build_elementwise_layers(
-            self,
-            input_shape: Union[Tuple, List],
-            num_modalities: int
-    ) -> None:
-        """Build element-wise operation (addition/multiplication) layers."""
+    def _build_and_create_elementwise(self, input_shape):
+        num_modalities = len(input_shape)
         if num_modalities > 2:
             for i in range(num_modalities):
-                proj = layers.Dense(
-                    self.embed_dim,
-                    kernel_initializer=self.kernel_initializer,
-                    bias_initializer=self.bias_initializer,
-                    name=f'align_projection_{i}'
-                )
+                proj = layers.Dense(self.dim, name=f'align_projection_{i}', kernel_initializer=self.kernel_initializer, bias_initializer=self.bias_initializer)
                 proj.build(input_shape[i])
                 self.projection_layers.append(proj)
 
-        norm_layer = create_normalization_layer(
-            self.norm_type, name='elementwise_norm', **self.norm_config.copy()
-        )
+        norm_layer = create_normalization_layer(self.norm_type, name='elementwise_norm', **self.norm_config.copy())
         norm_layer.build(input_shape[0])
         self.norm_layers.append(norm_layer)
 
         ffn_config = self.ffn_config.copy()
-        ffn_config.update({
-            'hidden_dim': self.intermediate_size,
-            'output_dim': self.embed_dim,
-            'dropout_rate': self.dropout_rate
-        })
-        ffn_layer = create_ffn_layer(
-            self.ffn_type, name='elementwise_ffn', **ffn_config
-        )
+        ffn_config.setdefault('hidden_dim', self.dim * 4)
+        ffn_config['output_dim'] = self.dim
+        ffn_layer = create_ffn_layer(self.ffn_type, name='elementwise_ffn', **ffn_config)
         ffn_layer.build(input_shape[0])
         self.ffn_layers.append(ffn_layer)
 
-    def _build_gated_layers(
-            self,
-            input_shape: Union[Tuple, List],
-            num_modalities: int
-    ) -> None:
-        """Build gated fusion layers."""
+    def _build_and_create_gated(self, input_shape):
+        num_modalities = len(input_shape)
         for i in range(num_modalities):
-            gate = layers.Dense(
-                self.embed_dim, activation='sigmoid', name=f'gate_{i}',
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer
-            )
+            gate = layers.Dense(self.dim, activation='sigmoid', name=f'gate_{i}', kernel_initializer=self.kernel_initializer, bias_initializer=self.bias_initializer)
             gate.build(input_shape[i])
             self.gate_layers.append(gate)
 
-        fusion_input_dim = self.embed_dim * num_modalities
-        projection = layers.Dense(
-            self.embed_dim, activation=self.activation, name='gated_projection',
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer
-        )
-        fusion_shape = list(input_shape[0])
-        fusion_shape[-1] = fusion_input_dim
-        projection.build(tuple(fusion_shape))
-        self.projection_layers.append(projection)
+        proj = layers.Dense(self.dim, activation=self.activation, name='gated_projection', kernel_initializer=self.kernel_initializer, bias_initializer=self.bias_initializer)
+        concat_shape = list(input_shape[0])
+        concat_shape[-1] = self.dim * num_modalities
+        proj.build(tuple(concat_shape))
+        self.projection_layers.append(proj)
 
-        norm_layer = create_normalization_layer(
-            self.norm_type, name='gated_norm', **self.norm_config.copy()
-        )
-        output_shape = tuple(fusion_shape[:-1] + [self.embed_dim])
-        norm_layer.build(output_shape)
-        self.norm_layers.append(norm_layer)
+        norm = create_normalization_layer(self.norm_type, name='gated_norm', **self.norm_config.copy())
+        norm.build(proj.compute_output_shape(tuple(concat_shape)))
+        self.norm_layers.append(norm)
 
-    def _build_attention_pooling_layers(
-            self,
-            input_shape: Union[Tuple, List],
-            num_modalities: int
-    ) -> None:
-        """Build attention pooling fusion layers."""
+    def _build_and_create_attention_pooling(self, input_shape):
+        num_modalities = len(input_shape)
         for i in range(num_modalities):
             attn_config = self.attention_config.copy()
-            attn_config.update({
-                'embed_dim': self.embed_dim,
-                'num_heads': self.num_heads,
-                'dropout_rate': self.dropout_rate
-            })
-            attention_layer = create_attention_layer(
-                self.attention_type, name=f'pool_attention_{i}', **attn_config
-            )
-            attention_layer.build(input_shape[i])
-            self.fusion_layers.append(attention_layer)
+            attn_config.setdefault('dim', self.dim)
+            attn_layer = create_attention_layer('multi_head_cross', name=f'pool_attention_{i}', **attn_config)
+            attn_layer.build([input_shape[i], input_shape[i]])
+            self.fusion_layers.append(attn_layer)
 
-        fusion_dim = self.embed_dim * num_modalities
-        projection = layers.Dense(
-            self.embed_dim, activation=self.activation, name='pool_projection',
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer
-        )
-        pool_shape = (input_shape[0][0], fusion_dim)
-        projection.build(pool_shape)
-        self.projection_layers.append(projection)
+        proj = layers.Dense(self.dim, activation=self.activation, name='pool_projection', kernel_initializer=self.kernel_initializer, bias_initializer=self.bias_initializer)
+        proj.build((input_shape[0][0], self.dim * num_modalities))
+        self.projection_layers.append(proj)
 
-    def _build_bilinear_layers(
-            self,
-            input_shape: Union[Tuple, List],
-            num_modalities: int
-    ) -> None:
-        """Build bilinear pooling layers."""
+    def _build_and_create_bilinear(self, input_shape):
+        num_modalities = len(input_shape)
         if num_modalities != 2:
             raise ValueError("Bilinear fusion currently supports only 2 modalities")
 
-        bilinear_dim = self.embed_dim * self.embed_dim
-        projection = layers.Dense(
-            self.embed_dim, activation=self.activation, name='bilinear_projection',
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer
-        )
-        bilinear_shape = (input_shape[0][0], input_shape[0][1], bilinear_dim)
-        projection.build(bilinear_shape)
-        self.projection_layers.append(projection)
+        proj = layers.Dense(self.dim, activation=self.activation, name='bilinear_projection', kernel_initializer=self.kernel_initializer, bias_initializer=self.bias_initializer)
+        bilinear_flat_shape = (input_shape[0][0], input_shape[0][1], self.dim * self.dim)
+        proj.build(bilinear_flat_shape)
+        self.projection_layers.append(proj)
 
-        norm_layer = create_normalization_layer(
-            self.norm_type, name='bilinear_norm', **self.norm_config.copy()
-        )
-        output_shape = (input_shape[0][0], input_shape[0][1], self.embed_dim)
-        norm_layer.build(output_shape)
-        self.norm_layers.append(norm_layer)
+        norm = create_normalization_layer(self.norm_type, name='bilinear_norm', **self.norm_config.copy())
+        norm.build(proj.compute_output_shape(bilinear_flat_shape))
+        self.norm_layers.append(norm)
 
-    def _build_tensor_fusion_layers(
-            self,
-            input_shape: Union[Tuple, List],
-            num_modalities: int
-    ) -> None:
-        """Build tensor fusion layers."""
-        total_dim = self.embed_dim * num_modalities
+    def _build_and_create_tensor_fusion(self, input_shape):
+        num_modalities = len(input_shape)
+        concat_shape = list(input_shape[0])
+        concat_shape[-1] = self.dim * num_modalities
 
         for i in range(self.num_tensor_projections):
-            proj = layers.Dense(
-                self.embed_dim, activation=self.activation, name=f'tensor_proj_{i}',
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer
-            )
-            concat_shape = list(input_shape[0])
-            concat_shape[-1] = total_dim
+            proj = layers.Dense(self.dim, activation=self.activation, name=f'tensor_proj_{i}', kernel_initializer=self.kernel_initializer, bias_initializer=self.bias_initializer)
             proj.build(tuple(concat_shape))
             self.projection_layers.append(proj)
 
-        final_proj = layers.Dense(
-            self.embed_dim, name='tensor_final_proj',
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer
-        )
-        fusion_shape = list(input_shape[0])
-        fusion_shape[-1] = self.embed_dim * self.num_tensor_projections
-        final_proj.build(tuple(fusion_shape))
+        final_proj = layers.Dense(self.dim, name='tensor_final_proj', kernel_initializer=self.kernel_initializer, bias_initializer=self.bias_initializer)
+        final_concat_shape = list(input_shape[0])
+        final_concat_shape[-1] = self.dim * self.num_tensor_projections
+        final_proj.build(tuple(final_concat_shape))
         self.projection_layers.append(final_proj)
 
     def call(
@@ -593,101 +344,90 @@ class MultiModalFusion(keras.layers.Layer):
             inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]],
             training: Optional[bool] = None
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]:
-        """Forward pass of the multi-modal fusion layer."""
         if not isinstance(inputs, (list, tuple)):
             raise ValueError("Expected list or tuple of input tensors")
         if len(inputs) < 2:
             raise ValueError("Expected at least 2 input modalities")
 
-        # Route to appropriate fusion method
-        handler = getattr(self, f'_call_{self.fusion_strategy}', None)
-        if handler is None:
+        strategy = self.fusion_strategy
+        if strategy == 'cross_attention':
+            return self._call_cross_attention(inputs, training)
+        elif strategy == 'concatenation':
+            return self._call_concatenation(inputs, training)
+        elif strategy in ['addition', 'multiplication']:
+            return self._call_elementwise(inputs, training)
+        elif strategy == 'gated':
+            return self._call_gated(inputs, training)
+        elif strategy == 'attention_pooling':
+            return self._call_attention_pooling(inputs, training)
+        elif strategy == 'bilinear':
+            return self._call_bilinear(inputs, training)
+        elif strategy == 'tensor_fusion':
+            return self._call_tensor_fusion(inputs, training)
+        else:
             raise ValueError(f"Unknown fusion strategy: {self.fusion_strategy}")
-        return handler(inputs, training)
 
     def _call_cross_attention(
             self,
             inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]],
             training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, ...]:
-        """Cross-attention fusion implementation."""
         outputs = list(inputs)
         num_modalities = len(inputs)
-
         for layer_idx in range(self.num_fusion_layers):
-            layer_dict = self.fusion_layers[layer_idx]
+            block_container = self.fusion_layers[layer_idx]
             new_outputs = []
-
             for i in range(num_modalities):
                 attended_features = []
+                attention_layers_for_i = getattr(block_container, f'attention_{i}')
                 attention_idx = 0
                 for j in range(num_modalities):
                     if i != j:
-                        attention_layer = layer_dict[f'attention_{i}'][attention_idx]
-                        attended = attention_layer(query=outputs[i], value=outputs[j], training=training)
+                        attention_layer = attention_layers_for_i[attention_idx]
+                        attended = attention_layer(
+                            query_input=outputs[i], kv_input=outputs[j], training=training
+                        )
                         attended_features.append(attended)
                         attention_idx += 1
-
-                if attended_features:
-                    combined = keras.ops.mean(keras.ops.stack(attended_features, axis=0), axis=0)
-                else:
-                    combined = outputs[i]
-
+                combined = keras.ops.mean(keras.ops.stack(attended_features, axis=0), axis=0)
                 if self.use_residual:
                     combined = outputs[i] + combined
 
-                norm_out = layer_dict[f'norm_{i}'](combined, training=training)
+                norm_layer = getattr(block_container, f'norm_{i}')
+                ffn_layer = getattr(block_container, f'ffn_{i}')
 
-                ffn_out = layer_dict[f'ffn_{i}'](norm_out, training=training)
+                norm_out = norm_layer(combined, training=training)
+                ffn_out = ffn_layer(norm_out, training=training)
                 if self.use_residual:
                     combined = norm_out + ffn_out
                 else:
                     combined = ffn_out
                 new_outputs.append(combined)
-
             outputs = new_outputs
-
         return tuple(outputs)
 
-    def _call_concatenation(
-            self,
-            inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]],
-            training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """Concatenation fusion implementation."""
+    def _call_concatenation(self, inputs, training=None):
         concatenated = keras.ops.concatenate(inputs, axis=-1)
         output = self.projection_layers[0](concatenated)
         output = self.norm_layers[0](output, training=training)
         output = self.dropout_layers[0](output, training=training)
         return output
 
-    def _call_elementwise(
-            self,
-            inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]],
-            training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """Element-wise operation fusion implementation."""
+    def _call_elementwise(self, inputs, training=None):
         aligned = [
             proj(inp) for proj, inp in zip(self.projection_layers, inputs)
         ] if self.projection_layers else list(inputs)
-
         if self.fusion_strategy == 'addition':
             output = keras.ops.sum(keras.ops.stack(aligned, axis=0), axis=0)
-        else:  # multiplication
+        else:
             output = aligned[0]
             for inp in aligned[1:]:
                 output = keras.ops.multiply(output, inp)
-
         output = self.norm_layers[0](output, training=training)
         output = self.ffn_layers[0](output, training=training)
         return output
 
-    def _call_gated(
-            self,
-            inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]],
-            training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """Gated fusion implementation."""
+    def _call_gated(self, inputs, training=None):
         gated_features = [
             keras.ops.multiply(inp, self.gate_layers[i](inp, training=training))
             for i, inp in enumerate(inputs)
@@ -697,95 +437,66 @@ class MultiModalFusion(keras.layers.Layer):
         output = self.norm_layers[0](output, training=training)
         return output
 
-    def _call_attention_pooling(
-            self,
-            inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]],
-            training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """Attention pooling fusion implementation."""
-        pooled_features = [
-            keras.ops.mean(self.fusion_layers[i](inp, training=training), axis=1)
-            for i, inp in enumerate(inputs)
-        ]
+    def _call_attention_pooling(self, inputs, training=None):
+        pooled_features = []
+        for i, inp in enumerate(inputs):
+            attended_output = self.fusion_layers[i](
+                query_input=inp, kv_input=inp, training=training
+            )
+            pooled = keras.ops.mean(attended_output, axis=1)
+            pooled_features.append(pooled)
         concatenated = keras.ops.concatenate(pooled_features, axis=-1)
         output = self.projection_layers[0](concatenated)
         return output
 
-    def _call_bilinear(
-            self,
-            inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]],
-            training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """Bilinear pooling fusion implementation."""
-        if len(inputs) != 2:
-            raise ValueError("Bilinear fusion requires exactly 2 inputs")
+    def _call_bilinear(self, inputs, training=None):
         x1, x2 = inputs
-
         x1_expanded = keras.ops.expand_dims(x1, axis=-1)
         x2_expanded = keras.ops.expand_dims(x2, axis=-2)
         bilinear = keras.ops.multiply(x1_expanded, x2_expanded)
-
         batch_size, seq_len = keras.ops.shape(bilinear)[:2]
         bilinear_flat = keras.ops.reshape(bilinear, [batch_size, seq_len, -1])
-
         output = self.projection_layers[0](bilinear_flat)
         output = self.norm_layers[0](output, training=training)
         return output
 
-    def _call_tensor_fusion(
-            self,
-            inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]],
-            training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """Tensor fusion implementation."""
+    def _call_tensor_fusion(self, inputs, training=None):
         concatenated = keras.ops.concatenate(inputs, axis=-1)
-
         projections = [
-            self.projection_layers[i](concatenated)
-            for i in range(self.num_tensor_projections)
+            layer(concatenated) for layer in self.projection_layers[:-1]
         ]
-
-        combined = keras.ops.concatenate(projections, axis=-1) if len(projections) > 1 else projections[0]
+        combined = keras.ops.concatenate(projections, axis=-1) if projections else concatenated
         output = self.projection_layers[-1](combined)
         return output
 
-    def compute_output_shape(
-            self,
-            input_shape: Union[Tuple, List]
-    ) -> Union[Tuple, List]:
-        """Compute output shape based on fusion strategy."""
+
+    def compute_output_shape(self, input_shape):
         if self.fusion_strategy == 'cross_attention':
             return input_shape
-        elif self.fusion_strategy == 'attention_pooling':
-            return (input_shape[0][0], self.embed_dim)
+        if self.fusion_strategy == 'attention_pooling':
+            # Output is (batch_size, dim)
+            return input_shape[0][0], self.dim
+        # All other strategies output (batch_size, sequence_length, dim)
+        return input_shape[0][0], input_shape[0][1], self.dim
 
-        # All other strategies return a single tensor with the same sequence shape
-        return input_shape[0]
-
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
+    def get_config(self):
         config = super().get_config()
         config.update({
-            'embed_dim': self.embed_dim,
+            'dim': self.dim,
             'fusion_strategy': self.fusion_strategy,
             'num_fusion_layers': self.num_fusion_layers,
-            'attention_type': self.attention_type,
             'attention_config': self.attention_config,
             'ffn_type': self.ffn_type,
             'ffn_config': self.ffn_config,
             'norm_type': self.norm_type,
             'norm_config': self.norm_config,
-            'num_heads': self.num_heads,
             'num_tensor_projections': self.num_tensor_projections,
-            'intermediate_size': self.intermediate_size,
             'dropout_rate': self.dropout_rate,
             'use_residual': self.use_residual,
-            'activation': keras.activations.serialize(self.activation),
-            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
-            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
+            'activation': activations.serialize(self.activation),
+            'kernel_initializer': initializers.serialize(self.kernel_initializer),
+            'bias_initializer': initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------
