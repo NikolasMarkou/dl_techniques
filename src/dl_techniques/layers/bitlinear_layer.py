@@ -1,387 +1,522 @@
-"""Implement a bit-quantized linear layer for efficient language models.
+"""Bit-quantized linear layer for efficient language models.
 
 This layer provides a Keras implementation of the linear layer proposed in the
 BitNet architecture, designed to enable 1-bit Large Language Models (LLMs). It
 replaces standard floating-point matrix multiplication with low-bit integer
-operations, drastically reducing memory footprint and computational cost. This is
-achieved through a quantization-aware training (QAT) process that simulates
-low-bit quantization during the forward pass while maintaining high-precision
-latent weights for stable gradient updates.
-
-Architectural and Mathematical Foundations:
-The core idea is to quantize both the input activations and the layer's weights
-to a very low bit-width (e.g., 1.58 bits, representing the set `{-1, 0, 1}`)
-before the linear transformation. The process for a given tensor (either
-weights `W` or activations `X`) involves two main steps:
-
-1.  **Scaling (Centering)**: Before quantization, the tensor is centered and
-    scaled. A scaling factor `gamma` is computed by taking a representative
-    measure of the tensor's magnitude (e.g., its absolute mean or absolute
-    maximum) across the feature dimension. The tensor is then scaled by this
-    factor.
-        `W_scaled = (W - mean(W)) / gamma`
-
-2.  **Quantization**: The scaled tensor is then quantized to the target low-bit
-    range. For 1.58-bit quantization, this is a simple rounding and clamping
-    operation:
-        `W_quant = clip(round(W_scaled), -1, 1)`
-
-The main linear operation is then performed using these quantized, low-bit
-tensors, which can be executed very efficiently on hardware:
-    `Output_quant = MatMul(X_quant, W_quant)`
-
-Finally, the output is de-quantized by the scaling factors to return it to a
-floating-point representation compatible with subsequent layers.
-
-**Gradient Propagation with Straight-Through Estimator (STE)**:
-A fundamental challenge is that the rounding and clamping operations in the
-quantization step have zero or undefined gradients, which prevents standard
-backpropagation. To overcome this, the layer employs the Straight-Through
-Estimator (STE).
-
-During the backward pass, the gradient is allowed to "pass through" the non-
-differentiable quantization function as if it were an identity function.
-The gradient of the loss `L` with respect to the original high-precision
-weights `W` is approximated as:
-    `dL/dW ≈ dL/dW_quant`
-
-This allows the high-precision latent weights to be updated using standard
-gradient descent, effectively learning to produce values that are robust to
-the subsequent quantization step. The model learns to minimize the post-
-quantization error, making it "quantization-aware."
+operations, drastically reducing memory footprint and computational cost.
 
 References:
     - Wang et al. "The Era of 1-bit LLMs: All Large Language Models are in
-      1.58 Bits". The foundational paper for this layer.
-      https://arxiv.org/abs/2402.17764
-
+      1.58 Bits". https://arxiv.org/abs/2402.17764
     - Bengio et al. "Estimating or Propagating Gradients Through Stochastic
-      Neurons for Conditional Computation". One of the key papers introducing
-      the Straight-Through Estimator.
-      https://arxiv.org/abs/1308.3432
+      Neurons for Conditional Computation". https://arxiv.org/abs/1308.3432
 """
 
-import copy
 import keras
-from keras import ops
-from typing import Optional, Dict, Any
-from dataclasses import dataclass, asdict
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from ..utils.scaling import *
+from typing import Optional, Dict, Any, Union, Tuple
 
 # ---------------------------------------------------------------------
 
-
-@dataclass
-class BitLinearConfig:
-    """Configuration for BitLinear layer parameters.
-
-    Args:
-        in_features: Size of each input sample. Must be positive.
-        out_features: Size of each output sample. Must be positive.
-        weight_range: Range of weight values (tuple (min, max) or number of bits).
-        weight_measure: Method for computing representative value for weights.
-            Options: "AbsMax", "AbsMean", "AbsMedian".
-        activation_range: Range of activation values (tuple (min, max) or number of bits).
-        activation_measure: Method for computing representative value for activations.
-            Options: "AbsMax", "AbsMean", "AbsMedian".
-        strategy: Quantization strategy. Options: "round_clamp", "sample".
-        use_bias: Whether to include a bias term.
-        eps: Small value to avoid division by zero. Must be positive.
-        kernel_initializer: Initializer for kernel weights.
-        kernel_regularizer: Optional regularization for kernel weights.
-        bias_initializer: Initializer for bias weights.
-        bias_regularizer: Optional regularization for bias weights.
-
-    Example:
-        ```python
-        config = BitLinearConfig(
-            in_features=768,
-            out_features=768,
-            weight_range=1.58,
-            weight_measure="AbsMedian"
-        )
-        ```
-    """
-    in_features: int
-    out_features: int
-    weight_range: Union[Tuple[int, int], float, int] = 1.58
-    weight_measure: str = "AbsMedian"
-    activation_range: Union[Tuple[int, int], float, int] = 8
-    activation_measure: str = "AbsMax"
-    strategy: str = "round_clamp"
-    use_bias: bool = True
-    eps: float = 1e-5
-    kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform"
-    kernel_regularizer: Optional[keras.regularizers.Regularizer] = None
-    bias_initializer: Union[str, keras.initializers.Initializer] = "zeros"
-    bias_regularizer: Optional[keras.regularizers.Regularizer] = None
-
-    def __post_init__(self) -> None:
-        """Validate configuration parameters."""
-        if not isinstance(self.in_features, int) or self.in_features <= 0:
-            raise ValueError(f"in_features must be positive integer, got {self.in_features}")
-
-        if not isinstance(self.out_features, int) or self.out_features <= 0:
-            raise ValueError(f"out_features must be positive integer, got {self.out_features}")
-
-        valid_measures = ["AbsMax", "AbsMean", "AbsMedian"]
-        if self.weight_measure not in valid_measures:
-            raise ValueError(f"weight_measure must be one of {valid_measures}")
-
-        if self.activation_measure not in valid_measures:
-            raise ValueError(f"activation_measure must be one of {valid_measures}")
-
-        valid_strategies = ["round_clamp", "sample"]
-        if self.strategy not in valid_strategies:
-            raise ValueError(f"strategy must be one of {valid_strategies}")
-
-        if self.eps <= 0:
-            raise ValueError(f"eps must be positive, got {self.eps}")
-
-# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class BitLinear(keras.layers.Layer):
     """Bit-aware linear layer for quantization-aware training.
 
-    Implements a quantization-aware dense layer that scales and quantizes both
-    weights and activations to low-bit representations during training, using
-    a straight-through estimator for gradient propagation.
+    This layer implements a quantization-aware dense transformation that scales
+    and quantizes both weights and activations to low-bit representations during
+    the forward pass, while maintaining full precision gradients through a
+    straight-through estimator.
 
-    The computation flow is:
-    input -> normalize (optional) -> scale_and_quantize ->
-    matrix_multiply(quantized_weights) -> rescale -> output
+    The layer automatically infers input dimensions from the first call, similar
+    to keras.layers.Dense, making it suitable for functional model construction.
 
     Args:
-        bit_config: Configuration object containing all layer parameters.
-        lambda_: Scaling factor for straight-through estimator. Must be positive.
-        use_norm: Whether to use layer normalization before quantization.
-        **kwargs: Additional keyword arguments for Layer base class.
+        units: Positive integer, dimensionality of the output space.
+        weight_bits: Number of bits for weight quantization or explicit range tuple.
+            Default is 1.58 bits (ternary weights: -1, 0, 1).
+        activation_bits: Number of bits for activation quantization or explicit range.
+            Default is 8 bits.
+        weight_scale_method: Method to compute weight scaling factor.
+            Options: "abs_max", "abs_mean", "abs_median". Default: "abs_median".
+        activation_scale_method: Method to compute activation scaling factor.
+            Options: "abs_max", "abs_mean", "abs_median". Default: "abs_max".
+        quantization_method: Quantization strategy to use.
+            Options: "round_clip", "stochastic". Default: "round_clip".
+        use_bias: Boolean, whether the layer uses a bias vector. Default: True.
+        use_input_norm: Boolean, whether to apply layer normalization to inputs
+            before quantization. Default: False.
+        ste_lambda: Float, scaling factor for straight-through estimator gradient.
+            Controls gradient flow through quantization. Default: 1.0.
+        epsilon: Float, small constant for numerical stability. Default: 1e-5.
+        kernel_initializer: Initializer for the kernel weights matrix.
+            Default: "glorot_uniform".
+        bias_initializer: Initializer for the bias vector. Default: "zeros".
+        kernel_regularizer: Regularizer function applied to kernel weights matrix.
+            Default: None.
+        bias_regularizer: Regularizer function applied to bias vector.
+            Default: None.
+        **kwargs: Additional keyword arguments passed to keras.layers.Layer.
 
     Input shape:
-        Tensor with shape `(..., in_features)`.
+        N-D tensor with shape: `(..., input_dim)`.
+        The most common situation would be a 2D input with shape `(batch_size, input_dim)`.
 
     Output shape:
-        Tensor with shape `(..., out_features)`.
+        N-D tensor with shape: `(..., units)`.
+        For instance, for a 2D input with shape `(batch_size, input_dim)`,
+        the output would have shape `(batch_size, units)`.
 
     Example:
         ```python
-        config = BitLinearConfig(in_features=768, out_features=256)
-        layer = BitLinear(config, lambda_=1.0, use_norm=True)
+        # Basic usage - input dimension inferred automatically
+        model = keras.Sequential([
+            keras.layers.Input(shape=(784,)),
+            BitLinear(units=256, weight_bits=1.58),
+            keras.layers.ReLU(),
+            BitLinear(units=128, weight_bits=2, activation_bits=4),
+            BitLinear(units=10)
+        ])
 
-        inputs = keras.random.normal([32, 768])
-        outputs = layer(inputs)  # Shape: (32, 256)
-
-        # Advanced configuration
-        config = BitLinearConfig(
-            in_features=1024,
-            out_features=4096,
-            weight_range=2,
-            weight_measure="AbsMean",
+        # Functional API with automatic dimension inference
+        inputs = keras.layers.Input(shape=(768,))
+        x = BitLinear(
+            units=512,
+            weight_bits=1.58,
+            weight_scale_method="abs_mean",
+            use_input_norm=True,
             kernel_regularizer=keras.regularizers.L2(1e-5)
-        )
-        layer = BitLinear(bit_config=config, lambda_=0.8)
-        ```
+        )(inputs)
+        x = keras.layers.ReLU()(x)
+        outputs = BitLinear(units=256)(x)
+        model = keras.Model(inputs=inputs, outputs=outputs)
 
-    Raises:
-        ValueError: If lambda_ is not positive.
-        ValueError: If input shape is incompatible with configured dimensions.
+        # Can also be used without specifying input shape initially
+        layer = BitLinear(units=128, weight_bits=2)
+        # Input dimension will be inferred on first call
+        output = layer(keras.random.normal((32, 64)))  # Infers input_dim=64
+        ```
     """
 
     def __init__(
         self,
-        bit_config: BitLinearConfig,
-        lambda_: float = 1.0,
-        use_norm: bool = False,
+        units: int,
+        weight_bits: Union[float, int, Tuple[float, float]] = 1.58,
+        activation_bits: Union[float, int, Tuple[float, float]] = 8,
+        weight_scale_method: str = "abs_median",
+        activation_scale_method: str = "abs_max",
+        quantization_method: str = "round_clip",
+        use_bias: bool = True,
+        use_input_norm: bool = False,
+        ste_lambda: float = 1.0,
+        epsilon: float = 1e-5,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+        bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
+        """Initialize the BitLinear layer.
+
+        Raises:
+            ValueError: If units is not a positive integer.
+            ValueError: If scale methods or quantization method are invalid.
+            ValueError: If ste_lambda or epsilon are not positive.
+        """
         super().__init__(**kwargs)
 
-        # Validate lambda parameter
-        if lambda_ <= 0:
-            raise ValueError(f"lambda_ must be positive, got {lambda_}")
+        # Validate units parameter
+        if not isinstance(units, int) or units <= 0:
+            raise ValueError(f"units must be a positive integer, got {units}")
 
-        # Store ALL configuration parameters
-        self.bit_config = bit_config
-        self.lambda_ = lambda_
-        self.use_norm = use_norm
-
-        # Process ranges from configuration
-        if isinstance(self.bit_config.weight_range, (int, float)):
-            self.weight_range = range_from_bits(self.bit_config.weight_range)
-        else:
-            self.weight_range = self.bit_config.weight_range
-
-        if isinstance(self.bit_config.activation_range, (int, float)):
-            self.activation_range = range_from_bits(self.bit_config.activation_range)
-        else:
-            self.activation_range = self.bit_config.activation_range
-
-        # Create optional sub-layer in __init__
-        if self.use_norm:
-            self.norm_layer = keras.layers.LayerNormalization(
-                epsilon=1e-6,
-                name=f"{self.name}_norm" if self.name else "bit_linear_norm"
+        # Validate scale methods
+        valid_scale_methods = ["abs_max", "abs_mean", "abs_median"]
+        if weight_scale_method not in valid_scale_methods:
+            raise ValueError(
+                f"weight_scale_method must be one of {valid_scale_methods}, "
+                f"got {weight_scale_method}"
             )
-        else:
-            self.norm_layer = None
+        if activation_scale_method not in valid_scale_methods:
+            raise ValueError(
+                f"activation_scale_method must be one of {valid_scale_methods}, "
+                f"got {activation_scale_method}"
+            )
 
-        # Initialize weight attributes - created in build()
+        # Validate quantization method
+        valid_quant_methods = ["round_clip", "stochastic"]
+        if quantization_method not in valid_quant_methods:
+            raise ValueError(
+                f"quantization_method must be one of {valid_quant_methods}, "
+                f"got {quantization_method}"
+            )
+
+        # Validate numerical parameters
+        if ste_lambda <= 0:
+            raise ValueError(f"ste_lambda must be positive, got {ste_lambda}")
+        if epsilon <= 0:
+            raise ValueError(f"epsilon must be positive, got {epsilon}")
+
+        # Store configuration
+        self.units = units
+        self.weight_bits = weight_bits
+        self.activation_bits = activation_bits
+        self.weight_scale_method = weight_scale_method
+        self.activation_scale_method = activation_scale_method
+        self.quantization_method = quantization_method
+        self.use_bias = use_bias
+        self.use_input_norm = use_input_norm
+        self.ste_lambda = ste_lambda
+        self.epsilon = epsilon
+
+        # Store initializers and regularizers
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = kernel_regularizer
+        self.bias_regularizer = bias_regularizer
+
+        # Convert bit specifications to ranges
+        self.weight_range = self._bits_to_range(weight_bits)
+        self.activation_range = self._bits_to_range(activation_bits)
+
+        # Layer weights (created in build)
         self.kernel = None
         self.bias = None
-        self.weight_measure_fn = None
-        self.activation_measure_fn = None
-        self.strategy_fn = None
+        self.input_norm = None
 
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Create layer weights and build sub-layers."""
-        # Validate input shape compatibility
-        if input_shape[-1] != self.bit_config.in_features:
-            raise ValueError(
-                f"Input shape last dimension ({input_shape[-1]}) must match "
-                f"in_features ({self.bit_config.in_features})"
+    def _bits_to_range(
+        self,
+        bits: Union[float, int, Tuple[float, float]]
+    ) -> Tuple[float, float]:
+        """Convert bit specification to quantization range.
+
+        Args:
+            bits: Number of bits or explicit range tuple.
+
+        Returns:
+            Tuple of (min_value, max_value) for quantization.
+        """
+        if isinstance(bits, tuple):
+            return bits
+
+        if isinstance(bits, (int, float)):
+            if bits <= 1:
+                # Binary quantization
+                return (-1.0, 1.0)
+            elif bits < 2:
+                # 1.58 bits = ternary {-1, 0, 1}
+                return (-1.0, 1.0)
+            elif bits == 2:
+                # 2-bit = {-1, 0, 1}
+                return (-1.0, 1.0)
+            else:
+                # n-bit quantization: [-(2^(n-1)-1), 2^(n-1)-1]
+                n = int(bits)
+                max_val = float(2 ** (n - 1) - 1)
+                return (-max_val, max_val)
+
+        raise ValueError(f"Invalid bit specification: {bits}")
+
+    def _compute_scale(
+        self,
+        tensor: keras.KerasTensor,
+        method: str,
+        per_channel: bool,
+        target_range: Tuple[float, float]
+    ) -> keras.KerasTensor:
+        """Compute scaling factor for quantization.
+
+        Args:
+            tensor: Tensor to compute scale for.
+            method: Scaling method ("abs_max", "abs_mean", or "abs_median").
+            per_channel: If True, compute per-channel scaling (last dimension).
+            target_range: Target quantization range.
+
+        Returns:
+            Scaling factor tensor.
+        """
+        min_val, max_val = target_range
+        abs_tensor = keras.ops.abs(tensor)
+
+        # Determine reduction axes
+        if per_channel:
+            # Reduce all dimensions except the last one
+            ndims = len(keras.ops.shape(tensor))
+            axes = list(range(ndims - 1))
+            keepdims = True
+        else:
+            # Reduce all dimensions
+            axes = None
+            keepdims = False
+
+        # Compute representative value based on method
+        if method == "abs_max":
+            if axes:
+                gamma = keras.ops.max(abs_tensor, axis=axes, keepdims=keepdims)
+            else:
+                gamma = keras.ops.max(abs_tensor)
+        elif method == "abs_mean":
+            if axes:
+                gamma = keras.ops.mean(abs_tensor, axis=axes, keepdims=keepdims)
+            else:
+                gamma = keras.ops.mean(abs_tensor)
+        elif method == "abs_median":
+            # Approximate median using 50th percentile
+            if per_channel:
+                # Compute per-channel median
+                shape = keras.ops.shape(tensor)
+                # Flatten all dimensions except last
+                flat_shape = (-1, shape[-1])
+                flat_tensor = keras.ops.reshape(abs_tensor, flat_shape)
+                gamma = keras.ops.quantile(flat_tensor, 0.5, axis=0, keepdims=True)
+                # Ensure proper broadcasting shape
+                new_shape = [1] * (len(shape) - 1) + [shape[-1]]
+                gamma = keras.ops.reshape(gamma, new_shape)
+            else:
+                flat_tensor = keras.ops.reshape(abs_tensor, (-1,))
+                gamma = keras.ops.quantile(flat_tensor, 0.5)
+        else:
+            raise ValueError(f"Unknown scaling method: {method}")
+
+        # Prevent division by zero
+        gamma = keras.ops.maximum(gamma, self.epsilon)
+
+        # Compute scale to map to target range
+        target_max = max(abs(min_val), abs(max_val))
+        scale = target_max / gamma
+
+        return scale
+
+    def _quantize_tensor(
+        self,
+        tensor: keras.KerasTensor,
+        target_range: Tuple[float, float]
+    ) -> keras.KerasTensor:
+        """Apply quantization with straight-through estimator.
+
+        Args:
+            tensor: Scaled tensor to quantize.
+            target_range: Target quantization range.
+
+        Returns:
+            Quantized tensor with straight-through gradient.
+        """
+        min_val, max_val = target_range
+
+        if self.quantization_method == "round_clip":
+            # Round to nearest integer and clip to range
+            rounded = keras.ops.round(tensor)
+            clipped = keras.ops.clip(rounded, min_val, max_val)
+
+            # Straight-through estimator: use quantized forward, original gradient
+            quantized = keras.ops.stop_gradient(clipped - tensor) + tensor * self.ste_lambda
+
+        elif self.quantization_method == "stochastic":
+            # Stochastic rounding for better gradient estimation
+            floor_val = keras.ops.floor(tensor)
+            ceil_val = keras.ops.ceil(tensor)
+
+            # Probability of rounding up
+            prob_ceil = tensor - floor_val
+
+            # Generate random values for stochastic rounding
+            random_uniform = keras.random.uniform(
+                keras.ops.shape(tensor),
+                minval=0.0,
+                maxval=1.0,
+                dtype=tensor.dtype
             )
 
-        # Create layer's own weights
+            # Stochastic rounding
+            rounded = keras.ops.where(
+                random_uniform < prob_ceil,
+                ceil_val,
+                floor_val
+            )
+            clipped = keras.ops.clip(rounded, min_val, max_val)
+
+            # Straight-through estimator
+            quantized = keras.ops.stop_gradient(clipped - tensor) + tensor * self.ste_lambda
+
+        else:
+            raise ValueError(f"Unknown quantization method: {self.quantization_method}")
+
+        return quantized
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the layer weights based on input shape.
+
+        Args:
+            input_shape: Shape tuple of the input.
+
+        Raises:
+            ValueError: If the last dimension of input_shape is None.
+        """
+        super().build(input_shape)
+
+        # Extract input dimension
+        input_dim = input_shape[-1]
+        if input_dim is None:
+            raise ValueError(
+                "The last dimension of the input shape must be defined. "
+                f"Received input_shape={input_shape}"
+            )
+
+        # Create kernel weights
         self.kernel = self.add_weight(
             name="kernel",
-            shape=(self.bit_config.in_features, self.bit_config.out_features),
-            initializer=keras.initializers.get(self.bit_config.kernel_initializer),
-            regularizer=self.bit_config.kernel_regularizer,
+            shape=(input_dim, self.units),
+            initializer=self.kernel_initializer,
+            regularizer=self.kernel_regularizer,
             trainable=True,
             dtype=self.dtype
         )
 
-        if self.bit_config.use_bias:
+        # Create bias weights if needed
+        if self.use_bias:
             self.bias = self.add_weight(
                 name="bias",
-                shape=(self.bit_config.out_features,),
-                initializer=keras.initializers.get(self.bit_config.bias_initializer),
-                regularizer=self.bit_config.bias_regularizer,
+                shape=(self.units,),
+                initializer=self.bias_initializer,
+                regularizer=self.bias_regularizer,
                 trainable=True,
                 dtype=self.dtype
             )
 
-        # Initialize function mappings
-        measure_functions = {
-            "AbsMax": abs_max,
-            "AbsMean": abs_mean,
-            "AbsMedian": abs_median
-        }
-
-        strategy_functions = {
-            "round_clamp": round_clamp,
-            "sample": sample
-        }
-
-        self.weight_measure_fn = measure_functions[self.bit_config.weight_measure]
-        self.activation_measure_fn = measure_functions[self.bit_config.activation_measure]
-        self.strategy_fn = strategy_functions[self.bit_config.strategy]
-
-        # Build sub-layer if it exists
-        if self.norm_layer is not None:
-            self.norm_layer.build(input_shape)
-
-        super().build(input_shape)
+        # Create input normalization layer if needed
+        if self.use_input_norm:
+            self.input_norm = keras.layers.LayerNormalization(
+                axis=-1,
+                epsilon=1e-6,
+                center=True,
+                scale=True,
+                name=f"{self.name}_input_norm" if self.name else "input_norm"
+            )
+            self.input_norm.build(input_shape)
 
     def call(
         self,
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass implementing quantization-aware linear transformation.
+        """Perform quantized linear transformation.
 
         Args:
-            inputs: Input tensor of shape (..., in_features).
-            training: Training mode flag.
+            inputs: Input tensor.
+            training: Boolean flag indicating training mode.
 
         Returns:
-            Output tensor of shape (..., out_features).
+            Transformed output tensor.
         """
-        # Apply optional normalization
-        if self.norm_layer is not None:
-            x_norm = self.norm_layer(inputs, training=training)
+        # Apply input normalization if configured
+        if self.use_input_norm and self.input_norm is not None:
+            x = self.input_norm(inputs, training=training)
         else:
-            x_norm = inputs
+            x = inputs
 
         # Scale and quantize activations
-        if self.activation_measure_fn is None:
-            x_scale = ops.cast(1.0, dtype=inputs.dtype)
-            x_quant = x_norm
-        else:
-            x_scale = scale(
-                x_norm,
-                self.activation_range,
-                self.activation_measure_fn,
-                True,
-                self.bit_config.eps
-            )
-            x_quant = self.strategy_fn(x_norm * x_scale, self.activation_range, self.lambda_)
+        activation_scale = self._compute_scale(
+            x,
+            method=self.activation_scale_method,
+            per_channel=True,  # Per-channel scaling for activations
+            target_range=self.activation_range
+        )
+        x_scaled = x * activation_scale
+        x_quantized = self._quantize_tensor(x_scaled, self.activation_range)
 
         # Scale and quantize weights
-        if self.weight_measure_fn is None:
-            w_scale = ops.cast(1.0, dtype=self.kernel.dtype)
-            w_quant = self.kernel
-        else:
-            w_scale = scale(
-                self.kernel,
-                self.weight_range,
-                self.weight_measure_fn,
-                False,
-                self.bit_config.eps
-            )
-            w_quant = self.strategy_fn(self.kernel * w_scale, self.weight_range, self.lambda_)
+        weight_scale = self._compute_scale(
+            self.kernel,
+            method=self.weight_scale_method,
+            per_channel=False,  # Global scaling for weights
+            target_range=self.weight_range
+        )
+        w_scaled = self.kernel * weight_scale
+        w_quantized = self._quantize_tensor(w_scaled, self.weight_range)
 
-        # Perform linear transformation
-        outputs = ops.matmul(x_quant, w_quant)
+        # Perform quantized matrix multiplication
+        output = keras.ops.matmul(x_quantized, w_quantized)
 
-        # Add bias if configured
-        if self.bias is not None:
-            outputs = outputs + self.bias
+        # Add bias if present
+        if self.use_bias and self.bias is not None:
+            output = output + self.bias
 
-        # Rescale outputs
-        return outputs / (w_scale * x_scale)
+        # Rescale output to original magnitude
+        output = output / (activation_scale * weight_scale)
+
+        return output
 
     def compute_output_shape(
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output tensor shape."""
+        """Compute the output shape of the layer.
+
+        Args:
+            input_shape: Shape tuple of input.
+
+        Returns:
+            Shape tuple of output.
+        """
         output_shape = list(input_shape)
-        output_shape[-1] = self.bit_config.out_features
+        output_shape[-1] = self.units
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Get layer configuration for serialization.
+
+        Returns:
+            Configuration dictionary.
+        """
         config = super().get_config()
         config.update({
-            'bit_config': asdict(self.bit_config),
-            'lambda_': self.lambda_,
-            'use_norm': self.use_norm,
+            "units": self.units,
+            "weight_bits": self.weight_bits,
+            "activation_bits": self.activation_bits,
+            "weight_scale_method": self.weight_scale_method,
+            "activation_scale_method": self.activation_scale_method,
+            "quantization_method": self.quantization_method,
+            "use_bias": self.use_bias,
+            "use_input_norm": self.use_input_norm,
+            "ste_lambda": self.ste_lambda,
+            "epsilon": self.epsilon,
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer)
+                                  if self.kernel_regularizer else None,
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer)
+                               if self.bias_regularizer else None,
         })
         return config
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> 'BitLinear':
-        """Create BitLinear layer from configuration.
+    def from_config(cls, config: Dict[str, Any]) -> "BitLinear":
+        """Create layer instance from configuration.
 
         Args:
-            config: Layer configuration dictionary.
+            config: Configuration dictionary.
 
         Returns:
-            BitLinear layer instance.
+            New BitLinear instance.
         """
-        # Extract bit_config and recreate dataclass
-        config_copy = copy.deepcopy(config)
-        bit_config_dict = config_copy.pop('bit_config', {})
-        bit_config = BitLinearConfig(**bit_config_dict)
+        # Deserialize initializers
+        if "kernel_initializer" in config:
+            config["kernel_initializer"] = keras.initializers.deserialize(
+                config["kernel_initializer"]
+            )
+        if "bias_initializer" in config:
+            config["bias_initializer"] = keras.initializers.deserialize(
+                config["bias_initializer"]
+            )
 
-        return cls(bit_config=bit_config, **config_copy)
+        # Deserialize regularizers
+        if "kernel_regularizer" in config and config["kernel_regularizer"]:
+            config["kernel_regularizer"] = keras.regularizers.deserialize(
+                config["kernel_regularizer"]
+            )
+        if "bias_regularizer" in config and config["bias_regularizer"]:
+            config["bias_regularizer"] = keras.regularizers.deserialize(
+                config["bias_regularizer"]
+            )
+
+        return cls(**config)
 
 # ---------------------------------------------------------------------
-
