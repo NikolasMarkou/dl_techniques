@@ -316,8 +316,15 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         CRITICAL: Explicitly build each sub-layer for robust serialization.
         This ensures weight variables exist before weight restoration during loading.
         """
-        # Handle input shapes for both single and dual input cases
-        if isinstance(input_shape, list):
+        # Robustly determine if input_shape is a list of shapes (cross-attention)
+        # or a single shape (self-attention). This works across backends.
+        is_list_of_shapes = (
+            isinstance(input_shape, (list, tuple))
+            and len(input_shape) > 0
+            and isinstance(input_shape[0], (list, tuple))
+        )
+
+        if is_list_of_shapes:
             if len(input_shape) != 2:
                 raise ValueError(f"Expected 2 inputs for cross-attention, got {len(input_shape)}")
             query_shape, kv_shape = input_shape
@@ -452,7 +459,12 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
     ) -> Tuple[Optional[int], ...]:
         """Compute output shape - returns query input shape."""
-        if isinstance(input_shape, list):
+        is_list_of_shapes = (
+            isinstance(input_shape, (list, tuple))
+            and len(input_shape) > 0
+            and isinstance(input_shape[0], (list, tuple))
+        )
+        if is_list_of_shapes:
             return input_shape[0]
         return input_shape
 

@@ -6,7 +6,7 @@ with unified interfaces, type safety, parameter validation, and detailed documen
 This factory enables seamless integration and experimentation with different attention
 types across vision_heads, NLP, and multi-modal architectures.
 
-The factory supports 15 different attention mechanisms, from standard multi-head attention
+The factory supports sixteen different attention mechanisms, from standard multi-head attention
 to specialized variants like differential attention, mobile-optimized MQA, and hierarchical
 anchor attention. Each layer is fully documented with use cases, parameter requirements,
 and architectural considerations.
@@ -49,6 +49,7 @@ from .group_query_attention import GroupedQueryAttention
 from .hopfield_attention import HopfieldAttention
 from .mobile_mqa import MobileMQA
 from .multi_head_attention import MultiHeadAttention
+from .multi_head_cross_attention import MultiHeadCrossAttention
 from .non_local_attention import NonLocalAttention
 from .perceiver_attention import PerceiverAttention
 from .shared_weights_cross_attention import SharedWeightsCrossAttention
@@ -70,6 +71,7 @@ AttentionType = Literal[
     'hopfield',
     'mobile_mqa',
     'multi_head',
+    'multi_head_cross',
     'non_local',
     'perceiver',
     'shared_weights_cross',
@@ -361,6 +363,38 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'paper': 'Attention Is All You Need'
     },
 
+    'multi_head_cross': {
+        'class': MultiHeadCrossAttention,
+        'description': (
+            'Unified, highly configurable multi-head attention layer supporting both self-attention '
+            'and cross-attention. Features optional adaptive temperature softmax for dynamic '
+            'attention sharpening and flexible projection strategies for diverse architectures.'
+        ),
+        'required_params': ['dim'],
+        'optional_params': {
+            'num_heads': 8,
+            'dropout_rate': 0.0,
+            'shared_qk_projections': False,
+            'use_bias': True,
+            'kernel_initializer': "glorot_uniform",
+            'bias_initializer': "zeros",
+            'kernel_regularizer': None,
+            'bias_regularizer': None,
+            'use_adaptive_softmax': False,
+            'min_temp': 0.1,
+            'max_temp': 1.0,
+            'entropy_threshold': 0.5,
+            'polynomial_coeffs': None,
+        },
+        'use_case': (
+            'Core component for encoder-decoder models, Perceiver-style architectures, and any '
+            'scenario requiring interaction between two distinct sequences. Can also be used '
+            'for self-attention with fine-grained control over projections.'
+        ),
+        'complexity': 'O(nm*d) where n is query length, m is key/value length',
+        'paper': 'Attention Is All You Need'
+    },
+
     'non_local': {
         'class': NonLocalAttention,
         'description': (
@@ -514,6 +548,7 @@ Each entry contains:
     - paper: Reference to the original research paper
 """
 
+
 # ---------------------------------------------------------------------
 # Public API Functions
 # ---------------------------------------------------------------------
@@ -549,7 +584,9 @@ def get_attention_info() -> Dict[str, Dict[str, Any]]:
         >>> gqa_info = info['group_query']
         >>> required = gqa_info['required_params']  # ['dim', 'num_heads', 'num_kv_heads']
     """
-    return {attn_type: info.copy() for attn_type, info in ATTENTION_REGISTRY.items()}
+    return {
+        attn_type: info.copy() for attn_type, info in ATTENTION_REGISTRY.items()
+    }
 
 
 def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
@@ -606,19 +643,35 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
         )
 
     # Validate positive integer parameters
-    positive_int_params = ['dim', 'channels', 'attention_channels', 'num_heads',
-                          'num_kv_heads', 'window_size', 'head_dim']
+    positive_int_params = [
+        'dim', 'channels', 'attention_channels', 'num_heads', 'num_kv_heads',
+        'window_size', 'head_dim'
+    ]
     for param in positive_int_params:
         if param in kwargs and kwargs[param] <= 0:
-            raise ValueError(f"Parameter '{param}' must be positive, got {kwargs[param]}")
+            raise ValueError(
+                f"Parameter '{param}' must be positive, got {kwargs[param]}"
+            )
+
+    # Validate positive float parameters
+    positive_float_params = ['min_temp', 'max_temp']
+    for param in positive_float_params:
+        if param in kwargs and kwargs[param] <= 0:
+            raise ValueError(
+                f"Parameter '{param}' must be positive, got {kwargs[param]}"
+            )
 
     # Validate probability/rate parameters (0.0 to 1.0)
-    rate_params = ['dropout_rate', 'attention_dropout_rate', 'attn_dropout_rate',
-                  'proj_dropout_rate', 'lambda_init', 'rope_percentage']
+    rate_params = [
+        'dropout_rate', 'attention_dropout_rate', 'attn_dropout_rate',
+        'proj_dropout_rate', 'lambda_init', 'rope_percentage',
+        'entropy_threshold'
+    ]
     for param in rate_params:
         if param in kwargs and not (0.0 <= kwargs[param] <= 1.0):
             raise ValueError(
-                f"Parameter '{param}' must be between 0.0 and 1.0, got {kwargs[param]}"
+                f"Parameter '{param}' must be between 0.0 and 1.0, "
+                f"got {kwargs[param]}"
             )
 
     # Validate ratio parameters (must be positive)
@@ -634,13 +687,15 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
     # Type-specific validations
     if attention_type == 'group_query':
         if ('num_heads' in kwargs and 'num_kv_heads' in kwargs and
-            kwargs['num_heads'] % kwargs['num_kv_heads'] != 0):
+                kwargs['num_heads'] % kwargs['num_kv_heads'] != 0):
             raise ValueError(
-                f"For group_query attention, num_heads ({kwargs['num_heads']}) must be "
-                f"divisible by num_kv_heads ({kwargs['num_kv_heads']})"
+                f"For group_query attention, num_heads ({kwargs['num_heads']}) "
+                f"must be divisible by num_kv_heads ({kwargs['num_kv_heads']})"
             )
 
-    logger.debug(f"Validation successful for '{attention_type}' with parameters: {kwargs}")
+    logger.debug(
+        f"Validation successful for '{attention_type}' with parameters: {kwargs}"
+    )
 
 
 def create_attention_layer(
@@ -729,8 +784,12 @@ def create_attention_layer(
         params.update(kwargs)
 
         # Filter parameters to match constructor signature
-        valid_param_names = set(info['required_params']) | set(info['optional_params'].keys())
-        final_params = {k: v for k, v in params.items() if k in valid_param_names}
+        valid_param_names = set(info['required_params']) | set(
+            info['optional_params'].keys()
+        )
+        final_params = {
+            k: v for k, v in params.items() if k in valid_param_names
+        }
 
         # Add name if provided
         if name:
@@ -750,15 +809,16 @@ def create_attention_layer(
         if info:
             class_name = info['class'].__name__
             error_msg = (
-                f"Failed to create '{attention_type}' attention layer ({class_name}). "
+                f"Failed to create '{attention_type}' attention layer "
+                f"({class_name}). "
                 f"Required parameters: {info['required_params']}. "
                 f"Provided parameters: {list(kwargs.keys())}. "
                 f"Please verify parameter compatibility. Original error: {e}"
             )
         else:
             error_msg = (
-                f"Failed to create attention layer. Unknown type '{attention_type}'. "
-                f"Error: {e}"
+                f"Failed to create attention layer. "
+                f"Unknown type '{attention_type}'. Error: {e}"
             )
 
         logger.error(error_msg)
@@ -816,7 +876,7 @@ def create_attention_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     if not isinstance(config, dict):
         raise ValueError(
             f"Configuration must be a dictionary, got {type(config).__name__}. "
-            f"Expected format: {{'type': 'attention_type', 'param1': value1, ...}}"
+            f"Expected format: {{'type': 'attention_type', ...}}"
         )
 
     if 'type' not in config:
