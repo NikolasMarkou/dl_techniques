@@ -5,12 +5,10 @@ import numpy as np
 import tensorflow as tf
 import tempfile
 import os
-from typing import Any, Dict, List
+from typing import List
 
-# Local import of the layer to be tested
 from dl_techniques.layers.multimodal_fusion import MultiModalFusion, FusionStrategy
 
-# List of strategies that produce a single tensor output
 SINGLE_OUTPUT_STRATEGIES: List[FusionStrategy] = [
     'concatenation',
     'addition',
@@ -219,7 +217,7 @@ class TestMultiModalFusion:
             MultiModalFusion(dim=dim, fusion_strategy='concatenation', num_fusion_layers=2)
 
         # Bilinear with != 2 inputs
-        with pytest.raises(ValueError, match="Bilinear fusion currently supports only 2 modalities"):
+        with pytest.raises(ValueError, match="Bilinear fusion requires exactly 2 modalities, got 3"):
             layer = MultiModalFusion(dim=dim, fusion_strategy='bilinear')
             three_inputs = sample_input + [keras.random.normal(shape=(4, 16, dim))]
             layer(three_inputs)
@@ -230,7 +228,7 @@ class TestMultiModalFusion:
             layer([sample_input[0]])
 
         # Dimension mismatch
-        with pytest.raises(ValueError, match=f"Modality 1 dimension {dim * 2} != dim {dim}"):
+        with pytest.raises(ValueError, match=f"Modality 1 dimension {dim * 2} doesn't match expected dim {dim}"):
             layer = MultiModalFusion(dim=dim)
             mismatched_input = [
                 sample_input[0],
