@@ -64,15 +64,14 @@ References:
 """
 
 import keras
-from keras import ops, initializers
+from keras import ops, layers, initializers
 from typing import Optional, Union, Tuple, Dict, Any, Literal
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class TverskyProjectionLayer(keras.layers.Layer):
-    """
-    Psychologically plausible projection layer based on Tversky's similarity model.
+class TverskyProjectionLayer(layers.Layer):
+    """A projection layer based on a differentiable Tversky similarity model.
 
     This layer replaces the standard geometric similarity (dot-product) of a
     fully-connected layer with a learnable, differentiable version of Tversky's
@@ -143,25 +142,25 @@ class TverskyProjectionLayer(keras.layers.Layer):
     """
 
     def __init__(
-            self,
-            units: int,
-            num_features: int,
-            intersection_reduction: Literal['product', 'min', 'mean'] = 'product',
-            difference_reduction: Literal['ignorematch', 'subtractmatch'] = 'subtractmatch',
-            prototype_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-            feature_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-            contrast_initializer: Union[str, initializers.Initializer] = 'ones',
-            **kwargs: Any
+        self,
+        units: int,
+        num_features: int,
+        intersection_reduction: Literal['product', 'min', 'mean'] = 'product',
+        difference_reduction: Literal['ignorematch', 'subtractmatch'] = 'subtractmatch',
+        prototype_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
+        feature_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
+        contrast_initializer: Union[str, initializers.Initializer] = 'ones',
+        **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
-        # 1. Validate inputs
+        # Validate inputs
         if units <= 0:
             raise ValueError(f"`units` must be positive, got {units}")
         if num_features <= 0:
             raise ValueError(f"`num_features` must be positive, got {num_features}")
 
-        # 2. Store ALL configuration
+        # Store ALL configuration for serialization
         self.units = units
         self.num_features = num_features
         self.intersection_reduction = intersection_reduction
@@ -170,7 +169,7 @@ class TverskyProjectionLayer(keras.layers.Layer):
         self.feature_initializer = initializers.get(feature_initializer)
         self.contrast_initializer = initializers.get(contrast_initializer)
 
-        # 3. Initialize weight attributes - they will be created in build()
+        # Initialize weight attributes - they will be created in build()
         self.prototypes = None
         self.feature_bank = None
         self.theta = None
@@ -178,13 +177,13 @@ class TverskyProjectionLayer(keras.layers.Layer):
         self.beta = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create the layer's own weights: prototypes, features, and contrast params.
-        """
+        """Create the layer's weights: prototypes, features, and contrast params."""
         input_dim = input_shape[-1]
         if input_dim is None:
-            raise ValueError("The last dimension of the input to `TverskyProjectionLayer` "
-                             "must be defined. Found `None`.")
+            raise ValueError(
+                "The last dimension of the input to `TverskyProjectionLayer` "
+                "must be defined. Found `None`."
+            )
 
         # Create the learnable prototype bank
         self.prototypes = self.add_weight(
@@ -204,23 +203,20 @@ class TverskyProjectionLayer(keras.layers.Layer):
 
         # Create the Tversky contrast model scalar parameters
         self.theta = self.add_weight(
-            name='theta', shape=(1,), initializer=self.contrast_initializer, trainable=True
+            name='theta', shape=(), initializer=self.contrast_initializer, trainable=True
         )
         self.alpha = self.add_weight(
-            name='alpha', shape=(1,), initializer=self.contrast_initializer, trainable=True
+            name='alpha', shape=(), initializer=self.contrast_initializer, trainable=True
         )
         self.beta = self.add_weight(
-            name='beta', shape=(1,), initializer=self.contrast_initializer, trainable=True
+            name='beta', shape=(), initializer=self.contrast_initializer, trainable=True
         )
 
-        # Always call the parent's build() method at the end
         super().build(input_shape)
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Forward pass computation of Tversky similarity.
-        """
-        # 1. Compute dot products to get feature presence scores
+        """Forward pass computation of Tversky similarity."""
+        # Compute dot products to get feature presence scores.
         # inputs shape: (batch_size, input_dim)
         # feature_bank shape: (num_features, input_dim)
         # -> input_dots shape: (batch_size, num_features)
@@ -230,87 +226,65 @@ class TverskyProjectionLayer(keras.layers.Layer):
         # -> proto_dots shape: (units, num_features)
         proto_dots = ops.matmul(self.prototypes, ops.transpose(self.feature_bank))
 
-        # 2. Create boolean masks for set operations (feature is present if dot > 0)
-        # These masks are central to the differentiable set logic
+        # Create boolean masks for set operations (feature is present if dot > 0).
         input_mask = input_dots > 0
         proto_mask = proto_dots > 0
 
-        # Use broadcasting to compare each input with each prototype.
         # Reshape for broadcasting:
-        #   (batch, 1, num_features) vs (1, units, num_features)
-        #   -> result shape: (batch, units, num_features)
+        # (batch, 1, num_features) vs (1, units, num_features)
+        # -> results will have shape: (batch, units, num_features)
         input_dots_b = ops.expand_dims(input_dots, axis=1)
         input_mask_b = ops.expand_dims(input_mask, axis=1)
-
         proto_dots_b = ops.expand_dims(proto_dots, axis=0)
         proto_mask_b = ops.expand_dims(proto_mask, axis=0)
 
-        # 3. Calculate f(A ∩ B): common features measure
+        # Calculate f(A ∩ B): common features measure.
         common_mask = ops.logical_and(input_mask_b, proto_mask_b)
 
         if self.intersection_reduction == 'product':
-            # Multiply scores and apply mask, then sum
             intersection_scores = input_dots_b * proto_dots_b
-            f_intersection = ops.sum(
-                ops.where(common_mask, intersection_scores, 0.0), axis=-1
-            )
         elif self.intersection_reduction == 'min':
-            # Take minimum of scores, apply mask, then sum
             intersection_scores = ops.minimum(input_dots_b, proto_dots_b)
-            f_intersection = ops.sum(
-                ops.where(common_mask, intersection_scores, 0.0), axis=-1
-            )
         elif self.intersection_reduction == 'mean':
-            # Take mean of scores, apply mask, then sum
             intersection_scores = (input_dots_b + proto_dots_b) / 2.0
-            f_intersection = ops.sum(
-                ops.where(common_mask, intersection_scores, 0.0), axis=-1
-            )
         else:
             raise NotImplementedError(
                 f"Intersection reduction '{self.intersection_reduction}' not implemented."
             )
+        f_intersection = ops.sum(
+            ops.where(common_mask, intersection_scores, 0.0), axis=-1
+        )
 
-        # 4. Calculate f(A - B) and f(B - A): distinctive features measures
+        # Calculate f(A - B) and f(B - A): distinctive features measures.
         if self.difference_reduction == 'ignorematch':
-            # f(A - B): features in input but not prototype
             input_distinct_mask = ops.logical_and(input_mask_b, ops.logical_not(proto_mask_b))
             f_input_distinctive = ops.sum(
                 ops.where(input_distinct_mask, input_dots_b, 0.0), axis=-1
             )
-
-            # f(B - A): features in prototype but not input
             proto_distinct_mask = ops.logical_and(proto_mask_b, ops.logical_not(input_mask_b))
             f_proto_distinctive = ops.sum(
                 ops.where(proto_distinct_mask, proto_dots_b, 0.0), axis=-1
             )
         elif self.difference_reduction == 'subtractmatch':
-            # Subtract scores only where both are present and one is greater
-            # f(A - B)
             subtract_mask_A = ops.logical_and(common_mask, input_dots_b > proto_dots_b)
-            differences_A = input_dots_b - proto_dots_b
             f_input_distinctive = ops.sum(
-                ops.where(subtract_mask_A, differences_A, 0.0), axis=-1
+                ops.where(subtract_mask_A, input_dots_b - proto_dots_b, 0.0), axis=-1
             )
-
-            # f(B - A)
             subtract_mask_B = ops.logical_and(common_mask, proto_dots_b > input_dots_b)
-            differences_B = proto_dots_b - input_dots_b
             f_proto_distinctive = ops.sum(
-                ops.where(subtract_mask_B, differences_B, 0.0), axis=-1
+                ops.where(subtract_mask_B, proto_dots_b - input_dots_b, 0.0), axis=-1
             )
         else:
             raise NotImplementedError(
                 f"Difference reduction '{self.difference_reduction}' not implemented."
             )
 
-        # 5. Apply Tversky's contrast model formula
+        # Apply Tversky's contrast model formula.
         similarity = (
-                self.theta * f_intersection
-                - self.alpha * f_input_distinctive
-                - self.beta * f_proto_distinctive
+            self.theta * f_intersection
+            - self.alpha * f_input_distinctive
+            - self.beta * f_proto_distinctive
         )
-
         return similarity
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
