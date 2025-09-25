@@ -4,7 +4,7 @@ The `dl_techniques.layers.attention` module provides a comprehensive collection 
 
 ## Overview
 
-This module includes nineteen different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
+This module includes twenty different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
 
 ## Available Attention Types
 
@@ -22,9 +22,10 @@ The following layers are supported by the factory system with automated paramete
 | `group_query` | `GroupedQueryAttention` | GQA with shared K/V heads for efficiency. | Large language models where K/V cache size is a bottleneck. | `(batch, seq_len, dim)` |
 | `hopfield` | `HopfieldAttention` | Modern Hopfield Network for pattern retrieval. | Associative memory tasks; mimics standard attention with `update_steps_max=0`. | `(batch, seq_len, dim)` or `[query, key, value]` |
 | `mobile_mqa` | `MobileMQA` | Mobile-optimized Multi-Query Attention for vision. | Efficient attention in vision models for mobile and edge devices. | `(batch, H, W, dim)` |
-| `multi_head` | `MultiHeadAttention` | Standard Multi-Head Self-Attention. | General-purpose self-attention in vision and sequence models. | `(batch, seq_len, dim)` |
+| `multi_head` | `MultiHeadAttention` | Standard Multi-Head Self-Attention (wrapper for cross-attention). | General-purpose self-attention in vision and sequence models. | `(batch, seq_len, dim)` |
+| `multi_head_cross` | `MultiHeadCrossAttention` | Unified layer for self- and cross-attention with adaptive softmax. | Core component for encoder-decoders or advanced custom attention. | `query: (batch, q_len, dim)`, `kv: (batch, kv_len, dim)` |
 | `non_local` | `NonLocalAttention` | Non-local attention for capturing long-range dependencies in CNNs. | Augmenting CNNs with global context reasoning. | `(batch, H, W, channels)` |
-| `perceiver` | `PerceiverAttention` | Cross-attention from the Perceiver architecture. | Cross-modal attention (e.g., text to image) and latent bottleneck models. | `query: (batch, q_len, dim)`, `kv: (batch, kv_len, dim)` |
+| `perceiver` | `PerceiverAttention` | Cross-attention from the Perceiver architecture (wrapper for cross-attention). | Cross-modal attention (e.g., text to image) and latent bottleneck models. | `query: (batch, q_len, dim)`, `kv: (batch, kv_len, dim)` |
 | `performer` | `PerformerAttention` | Approximates softmax attention with linear complexity via random features. | Models processing very long sequences (e.g., 65K+ tokens). | `(batch, seq_len, dim)` |
 | `ring` | `RingAttention` | Exact attention for long sequences via blockwise processing. | Models requiring near-infinite context length with exact attention. | `(batch, seq_len, dim)` |
 | `rpc` | `RPCAttention` | Robust attention via Principal Component Pursuit decomposition. | Models needing robustness to noise and adversarial attacks. | `(batch, seq_len, dim)` |
@@ -219,6 +220,20 @@ attn = create_attention_layer(
     dim=512,
     num_heads=8,
     dropout_rate=0.1
+)
+```
+
+### `multi_head_cross`
+**Note:** This is a powerful base layer not directly exposed via the factory. Instantiate it directly for advanced use cases like adaptive temperature softmax. `multi_head` and `perceiver` are simplified wrappers around this layer.  
+**Required:** `dim`  
+**Optional:** `num_heads` (default: 8), `dropout_rate` (default: 0.0), `shared_qk_projections` (default: False), `use_adaptive_softmax` (default: False)
+```python
+from dl_techniques.layers.attention import MultiHeadCrossAttention
+# Cross-attention with adaptive temperature
+attn = MultiHeadCrossAttention(
+    dim=512,
+    num_heads=8,
+    use_adaptive_softmax=True
 )
 ```
 
