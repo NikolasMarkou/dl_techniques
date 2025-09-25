@@ -4,30 +4,33 @@ The `dl_techniques.layers.attention` module provides a comprehensive collection 
 
 ## Overview
 
-This module includes seventeen different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
+This module includes nineteen different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
 
 ## Available Attention Types
 
 The following layers are supported by the factory system with automated parameter validation and defaults:
 
-| Type | Class | Description | Use Case |
-|------|-------|-------------|----------|
-| `adaptive_multi_head` | `AdaptiveMultiHeadAttention` | MHA with adaptive temperature softmax. | Transformers where attention sharpness needs to adapt to sequence length. |
-| `anchor` | `AnchorAttention` | Hierarchical attention with anchor tokens. | Long-sequence models where full self-attention is too costly. |
-| `capsule_routing` | `CapsuleRoutingSelfAttention` | Self-attention with capsule network dynamic routing. | Experimental models aiming for better contextualization. |
-| `channel` | `ChannelAttention` | Channel attention module from CBAM. | CNNs to recalibrate channel-wise feature responses. |
-| `cbam` | `CBAM` | Convolutional Block Attention Module (Channel + Spatial). | Plug-and-play attention module for any CNN to refine features. |
-| `perceiver` | `PerceiverAttention` | Cross-attention from the Perceiver architecture. | Cross-modal attention (e.g., text to image) and latent bottleneck models. |
-| `differential` | `DifferentialMultiHeadAttention` | Dual MHA to amplify signal and cancel noise. | Transformers requiring improved focus and reduced hallucination. |
-| `fnet` | `FNetFourierTransform` | Parameter-free token mixing with Fourier Transforms. | Efficient replacement for self-attention in sequence models. |
-| `group_query` | `GroupedQueryAttention` | GQA with shared K/V heads for efficiency. | Large language models where K/V cache size is a bottleneck. |
-| `hopfield` | `HopfieldAttention` | Modern Hopfield Network for pattern retrieval. | Associative memory tasks; mimics standard attention with `update_steps_max=0`. |
-| `mobile_mqa` | `MobileMQA` | Mobile-optimized Multi-Query Attention for vision. | Efficient attention in vision models for mobile and edge devices. |
-| `multi_head` | `MultiHeadAttention` | Standard Multi-Head Self-Attention. | General-purpose self-attention in vision and sequence models. |
-| `non_local` | `NonLocalAttention` | Non-local attention for capturing long-range dependencies in CNNs. | Augmenting CNNs with global context reasoning. |
-| `shared_weights_cross` | `SharedWeightsCrossAttention`| Cross-attention between modalities with shared weights. | Efficient multi-modal learning where different data types exchange information. |
-| `spatial` | `SpatialAttention` | Spatial attention module from CBAM. | CNNs to highlight spatially significant feature regions. |
-| `window` | `WindowAttention` | Windowed Multi-Head Attention from Swin Transformer. | Vision transformers (e.g., Swin) for efficient local attention. |
+| Type | Class | Description | Use Case | Input Shape |
+|------|-------|-------------|----------|-------------|
+| `anchor` | `AnchorAttention` | Hierarchical attention with anchor tokens. | Long-sequence models where full self-attention is too costly. | `(batch, seq_len, dim)` |
+| `capsule_routing` | `CapsuleRoutingSelfAttention` | Self-attention with capsule network dynamic routing. | Experimental models aiming for better contextualization. | `(batch, seq_len, dim)` |
+| `cbam` | `CBAM` | Convolutional Block Attention Module (Channel + Spatial). | Plug-and-play attention module for any CNN to refine features. | `(batch, H, W, channels)` |
+| `channel` | `ChannelAttention` | Channel attention module from CBAM. | CNNs to recalibrate channel-wise feature responses. | `(batch, H, W, channels)` |
+| `differential` | `DifferentialMultiHeadAttention` | Dual MHA to amplify signal and cancel noise. | Transformers requiring improved focus and reduced hallucination. | `(batch, seq_len, dim)` |
+| `fnet` | `FNetFourierTransform` | Parameter-free token mixing with Fourier Transforms. | Efficient replacement for self-attention in sequence models. | `(batch, seq_len, dim)` |
+| `gated` | `GatedAttention` | Attention with normalization, partial RoPE, and output gating. | High-performance transformers requiring stability and expressiveness. | `(batch, seq_len, dim)` |
+| `group_query` | `GroupedQueryAttention` | GQA with shared K/V heads for efficiency. | Large language models where K/V cache size is a bottleneck. | `(batch, seq_len, dim)` |
+| `hopfield` | `HopfieldAttention` | Modern Hopfield Network for pattern retrieval. | Associative memory tasks; mimics standard attention with `update_steps_max=0`. | `(batch, seq_len, dim)` or `[query, key, value]` |
+| `mobile_mqa` | `MobileMQA` | Mobile-optimized Multi-Query Attention for vision. | Efficient attention in vision models for mobile and edge devices. | `(batch, H, W, dim)` |
+| `multi_head` | `MultiHeadAttention` | Standard Multi-Head Self-Attention. | General-purpose self-attention in vision and sequence models. | `(batch, seq_len, dim)` |
+| `non_local` | `NonLocalAttention` | Non-local attention for capturing long-range dependencies in CNNs. | Augmenting CNNs with global context reasoning. | `(batch, H, W, channels)` |
+| `perceiver` | `PerceiverAttention` | Cross-attention from the Perceiver architecture. | Cross-modal attention (e.g., text to image) and latent bottleneck models. | `query: (batch, q_len, dim)`, `kv: (batch, kv_len, dim)` |
+| `performer` | `PerformerAttention` | Approximates softmax attention with linear complexity via random features. | Models processing very long sequences (e.g., 65K+ tokens). | `(batch, seq_len, dim)` |
+| `ring` | `RingAttention` | Exact attention for long sequences via blockwise processing. | Models requiring near-infinite context length with exact attention. | `(batch, seq_len, dim)` |
+| `rpc` | `RPCAttention` | Robust attention via Principal Component Pursuit decomposition. | Models needing robustness to noise and adversarial attacks. | `(batch, seq_len, dim)` |
+| `shared_weights_cross` | `SharedWeightsCrossAttention`| Cross-attention between modalities with shared weights. | Efficient multi-modal learning where different data types exchange information. | `(batch, total_seq_len, dim)` |
+| `spatial` | `SpatialAttention` | Spatial attention module from CBAM. | CNNs to highlight spatially significant feature regions. | `(batch, H, W, channels)` |
+| `window` | `WindowAttention` | Windowed Multi-Head Attention from Swin Transformer. | Vision transformers (e.g., Swin) for efficient local attention. | `(batch, window_size², dim)` |
 
 ## Factory Interface
 
@@ -37,7 +40,7 @@ The following layers are supported by the factory system with automated paramete
 from dl_techniques.layers.attention import create_attention_layer
 
 # Create a standard multi-head attention layer
-mha = create_attention_layer('multi_head', embed_dim=256, num_heads=8)
+mha = create_attention_layer('multi_head', dim=256, num_heads=8)
 
 # Create a CBAM block for a CNN
 cbam = create_attention_layer('cbam', channels=128, ratio=16)
@@ -50,9 +53,9 @@ from dl_techniques.layers.attention import create_attention_from_config
 
 config = {
     'type': 'group_query',
-    'd_model': 1024,
-    'n_head': 16,
-    'n_kv_head': 4,
+    'dim': 1024,
+    'num_heads': 16,
+    'num_kv_heads': 4,
     'name': 'gqa_block_1'
 }
 
@@ -88,22 +91,9 @@ except ValueError as e:
 
 ## Layer-Specific Parameters
 
-### `adaptive_multi_head`
-**Required:** `num_heads`, `key_dim`  
-**Optional:** `dropout` (default: 0.0), `min_temp` (default: 0.1), `max_temp` (default: 1.0)
-```python
-attn = create_attention_layer(
-    'adaptive_multi_head',
-    num_heads=8,
-    key_dim=64,
-    dropout_rate=0.1,
-    min_temp=0.05
-)
-```
-
 ### `anchor`
 **Required:** `dim`  
-**Optional:** `num_heads` (default: 8), `dropout` (default: 0.0)
+**Optional:** `num_heads` (default: 8), `dropout_rate` (default: 0.0)
 ```python
 attn = create_attention_layer(
     'anchor',
@@ -125,17 +115,6 @@ attn = create_attention_layer(
 )
 ```
 
-### `channel`
-**Required:** `channels`  
-**Optional:** `ratio` (default: 8), `use_bias` (default: False)
-```python
-attn = create_attention_layer(
-    'channel',
-    channels=256,
-    ratio=16
-)
-```
-
 ### `cbam`
 **Required:** `channels`  
 **Optional:** `ratio` (default: 8), `kernel_size` (default: 7)
@@ -148,15 +127,14 @@ attn = create_attention_layer(
 )
 ```
 
-### `perceiver`
-**Required:** `dim`  
-**Optional:** `num_heads` (default: 8), `dropout_rate` (default: 0.0)
+### `channel`
+**Required:** `channels`  
+**Optional:** `ratio` (default: 8), `use_bias` (default: False)
 ```python
 attn = create_attention_layer(
-    'perceiver',
-    dim=256,
-    num_heads=8,
-    dropout_rate=0.1
+    'channel',
+    channels=256,
+    ratio=16
 )
 ```
 
@@ -183,15 +161,28 @@ attn = create_attention_layer(
 )
 ```
 
+### `gated`
+**Required:** `dim`, `num_heads`  
+**Optional:** `head_dim` (default: None), `max_seq_len` (default: 4096), `rope_percentage` (default: 0.5)
+```python
+# This layer is not yet in the factory, instantiate directly
+from dl_techniques.layers.attention import GatedAttention
+attn = GatedAttention(
+    dim=768,
+    num_heads=12,
+    max_seq_len=2048
+)
+```
+
 ### `group_query`
-**Required:** `d_model`, `n_head`, `n_kv_head`  
+**Required:** `dim`, `num_heads`, `num_kv_heads`  
 **Optional:** `max_seq_len` (default: 2048), `dropout_rate` (default: 0.0)
 ```python
 attn = create_attention_layer(
     'group_query',
-    d_model=1024,
-    n_head=16,
-    n_kv_head=4
+    dim=1024,
+    num_heads=16,
+    num_kv_heads=4
 )
 ```
 
@@ -220,12 +211,12 @@ attn = create_attention_layer(
 ```
 
 ### `multi_head`
-**Required:** `embed_dim`  
+**Required:** `dim`  
 **Optional:** `num_heads` (default: 8), `dropout_rate` (default: 0.0)
 ```python
 attn = create_attention_layer(
     'multi_head',
-    embed_dim=512,
+    dim=512,
     num_heads=8,
     dropout_rate=0.1
 )
@@ -240,6 +231,57 @@ attn = create_attention_layer(
     attention_channels=128,
     normalization='layer',
     attention_mode='dot_product'
+)
+```
+
+### `perceiver`
+**Required:** `dim`  
+**Optional:** `num_heads` (default: 8), `dropout_rate` (default: 0.0)
+```python
+attn = create_attention_layer(
+    'perceiver',
+    dim=256,
+    num_heads=8,
+    dropout_rate=0.1
+)
+```
+
+### `performer`
+**Required:** `dim`
+**Optional:** `num_heads` (default: 8), `nb_features` (default: 256), `causal` (default: False)
+```python
+# This layer is not yet in the factory, instantiate directly
+from dl_techniques.layers.attention import PerformerAttention
+attn = PerformerAttention(
+    dim=512,
+    num_heads=8,
+    nb_features=256
+)
+```
+
+### `ring`
+**Required:** `dim`
+**Optional:** `num_heads` (default: 8), `block_size` (default: 512)
+```python
+# This layer is not yet in the factory, instantiate directly
+from dl_techniques.layers.attention import RingAttention
+attn = RingAttention(
+    dim=768,
+    num_heads=12,
+    block_size=1024
+)
+```
+
+### `rpc`
+**Required:** `dim`
+**Optional:** `num_heads` (default: 8), `lambda_sparse` (default: 0.1), `max_pcp_iter` (default: 10)
+```python
+# This layer is not yet in the factory, instantiate directly
+from dl_techniques.layers.attention import RPCAttention
+attn = RPCAttention(
+    dim=512,
+    num_heads=8,
+    lambda_sparse=0.15
 )
 ```
 
@@ -286,7 +328,7 @@ While the factory is recommended, direct instantiation is always available.
 from dl_techniques.layers.attention import MultiHeadAttention, CBAM, WindowAttention
 
 # Direct instantiation (bypasses factory validation and defaults)
-mha = MultiHeadAttention(embed_dim=512, num_heads=8)
+mha = MultiHeadAttention(dim=512, num_heads=8)
 cbam = CBAM(channels=256, ratio=16)
 window_attn = WindowAttention(dim=96, window_size=7, num_heads=4)
 ```
@@ -296,6 +338,9 @@ window_attn = WindowAttention(dim=96, window_size=7, num_heads=4)
 ### In a Custom Transformer Block
 
 ```python
+import keras
+from dl_techniques.layers.attention import create_attention_layer
+
 @keras.saving.register_keras_serializable()
 class TransformerBlock(keras.layers.Layer):
     def __init__(self, dim, num_heads, attention_type='multi_head', **kwargs):
@@ -304,15 +349,8 @@ class TransformerBlock(keras.layers.Layer):
         self.num_heads = num_heads
         self.attention_type = attention_type
         
-        from dl_techniques.layers.attention import create_attention_layer
-        
         # Create attention using the factory
-        # Map generic 'dim' to layer-specific parameter name
-        attn_params = {'num_heads': num_heads}
-        if attention_type in ['multi_head']:
-            attn_params['embed_dim'] = dim
-        else:
-            attn_params['dim'] = dim
+        attn_params = {'dim': dim, 'num_heads': num_heads}
 
         self.attn = create_attention_layer(attention_type, name='attention', **attn_params)
         # ... other layers like FFN, LayerNorm
@@ -343,17 +381,17 @@ The factory performs comprehensive validation on layer creation.
 
 **Missing Required Parameters:**
 ```python
-# Raises ValueError: "Required parameters for 'group_query' are missing: ['n_kv_head']"
-create_attention_layer('group_query', d_model=512, n_head=8)
+# Raises ValueError: "Required parameters for 'group_query' are missing: ['num_kv_heads']"
+create_attention_layer('group_query', dim=512, num_heads=8)
 ```
 
 **Invalid Value Ranges:**
 ```python
 # Raises ValueError: "Parameter 'num_heads' must be positive"
-create_attention_layer('multi_head', embed_dim=256, num_heads=-8)
+create_attention_layer('multi_head', dim=256, num_heads=-8)
 
 # Raises ValueError: "Parameter 'dropout_rate' must be between 0.0 and 1.0"
-create_attention_layer('multi_head', embed_dim=256, dropout_rate=1.5)
+create_attention_layer('multi_head', dim=256, dropout_rate=1.5)
 ```
 
 **Unknown Attention Type:**
@@ -368,12 +406,12 @@ The factory provides detailed logging to aid development.
 
 **INFO Level:** Shows parameters used for layer creation.
 ```
-INFO Creating 'group_query' layer with parameters: {'d_model': 1024, 'n_head': 16, 'n_kv_head': 4, 'name': 'gqa_block_1', ...}
+INFO Creating 'group_query' layer (GroupedQueryAttention) with parameters: {'dim': 1024, 'num_heads': 16, 'num_kv_heads': 4, 'name': 'gqa_block_1', ...}
 ```
 
 **ERROR Level:** Provides context for failed layer creation.
 ```
-ERROR Failed to create 'group_query' layer (GroupedQueryAttention). Required: ['d_model', 'n_head', 'n_kv_head']. Provided: ['d_model', 'n_head']. Please check parameter compatibility. Original error: ...
+ERROR Failed to create 'group_query' layer (GroupedQueryAttention). Required parameters: ['dim', 'num_heads', 'num_kv_heads']. Provided parameters: ['dim', 'num_heads']. Please verify parameter compatibility. Original error: ...
 ```
 
 ## API Reference
