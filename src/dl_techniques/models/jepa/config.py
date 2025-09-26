@@ -5,10 +5,8 @@ This module provides comprehensive configuration management for different JEPA v
 including I-JEPA (images), V-JEPA (video), A-JEPA (audio), and MC-JEPA (motion+content).
 """
 
-import keras
 from dataclasses import dataclass, field
-from typing import Optional, Union, List, Dict, Any, Literal
-import numpy as np
+from typing import Union, Dict, Any, Literal
 
 from dl_techniques.utils.logger import logger
 

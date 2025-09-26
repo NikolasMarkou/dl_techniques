@@ -50,8 +50,8 @@ model = create_squeezenodule_net_v2("v2", num_classes=1000)
 """
 
 import keras
-from keras import layers, ops, initializers, regularizers
-from typing import Optional, Tuple, Dict, Any, Union, List
+from keras import layers, initializers, regularizers
+from typing import Optional, Tuple, Dict, Any, Union
 
 from dl_techniques.utils.logger import logger
 

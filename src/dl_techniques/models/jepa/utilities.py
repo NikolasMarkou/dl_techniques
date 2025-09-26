@@ -9,7 +9,7 @@ curriculum learning for optimal representation learning.
 import keras
 from keras import ops
 import tensorflow as tf
-from typing import Tuple, List, Optional, Dict, Any
+from typing import Tuple, List, Optional, Dict
 import numpy as np
 
 from dl_techniques.utils.logger import logger

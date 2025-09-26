@@ -14,7 +14,7 @@ import numpy as np
 from dl_techniques.layers.transformer import TransformerLayer
 
 
-@keras.utils.register_keras_serializable(package="JEPA")
+@keras.utils.register_keras_serializable()
 class JEPAPatchEmbedding(layers.Layer):
     """
     Advanced patch embedding layer for JEPA with support for different modalities.
