@@ -245,7 +245,7 @@ class ConvNextV1Block(keras.layers.Layer):
             conv_params["kernel_regularizer"] = (
                 SoftOrthonormalConstraintRegularizer(
                     lambda_coefficient=1.0,
-                    l1_coefficient=1-5,
+                    l1_coefficient=1e-5,
                     l2_coefficient=0.0,
                     use_matrix_scaling=True
                 )
