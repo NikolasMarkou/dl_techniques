@@ -456,7 +456,7 @@ class DINOv1(keras.Model):
             attention_dropout_rate: float = 0.0,  # Renamed from attn_drop_rate
             stochastic_depth_rate: float = 0.0,  # Renamed from drop_path_rate
             norm_layer: str = "layer_norm",
-            attention_type: str = "multi_head_attention",
+            attention_type: str = "multi_head",
             ffn_type: str = "mlp",
             include_top: bool = True,  # New argument for standard classifier
             include_projection_head: bool = False,  # Renamed from include_head

@@ -94,7 +94,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal, Callable, List
 # ---------------------------------------------------------------------
 
 from .transformer import TransformerLayer
-from .norms import create_normalization_layer
+from .norms import create_normalization_layer, NormalizationType
 from .embedding import create_embedding_layer
 from ..utils.logger import logger
 
@@ -105,7 +105,6 @@ from ..utils.logger import logger
 EmbeddingType = Literal['learned', 'shared', 'factorized']
 PositionalType = Literal['learned', 'rope', 'dual_rope', 'sincos']
 AttentionType = Literal['multi_head_attention', 'window_attention', 'group_query_attention', 'differential_attention']
-NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'adaptive_band_rms', 'dynamic_tanh']
 NormalizationPosition = Literal['pre', 'post']
 FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp']
 PoolingMode = Literal['cls', 'mean', 'max', 'first', 'last', 'none']

@@ -35,7 +35,7 @@ by Pagnoni et al. (2024), arXiv:2412.09871v1 [cs.CL] 13 Dec 2024
 import keras
 from keras import ops
 import tensorflow as tf
-from typing import Optional, Union, Dict, Any, List, Tuple
+from typing import Optional, Union, Dict, Any, Tuple
 
 # ---------------------------------------------------------------------
 # local imports

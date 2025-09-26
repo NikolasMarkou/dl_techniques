@@ -74,21 +74,17 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal, Callable
 # local imports
 # ---------------------------------------------------------------------
 
-from .transformer import TransformerLayer
 from .embedding import create_embedding_layer
 from .norms import create_normalization_layer
+from .transformer import TransformerLayer, NormalizationType, AttentionType, FFNType
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
 # ---------------------------------------------------------------------
 
-PatchEmbedType = Literal['linear', 'siglip', 'conv', 'hybrid']
-AttentionType = Literal['multi_head_attention', 'window_attention', 'group_query_attention', 'differential_attention']
-NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'adaptive_band_rms', 'dynamic_tanh']
 NormalizationPosition = Literal['pre', 'post']
-FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp']
 PoolingMode = Literal['cls', 'mean', 'max', 'none']
-
+PatchEmbedType = Literal['linear', 'siglip', 'conv', 'hybrid']
 
 # ---------------------------------------------------------------------
 
@@ -156,11 +152,11 @@ class VisionEncoder(keras.layers.Layer):
             - 'hybrid': CNN backbone followed by patch embedding
             Defaults to 'linear'.
         attention_type: AttentionType, attention mechanism to use:
-            - 'multi_head_attention': Standard multi-head self-attention
-            - 'window_attention': Windowed attention for efficiency
+            - 'multi_head': Standard multi-head self-attention
+            - 'window': Windowed attention for efficiency
             - 'group_query_attention': Grouped query attention
             - 'differential_attention': Differential attention for noise reduction
-            Defaults to 'multi_head_attention'.
+            Defaults to 'multi_head'.
         normalization_type: NormalizationType, normalization layer type:
             - 'layer_norm': Standard layer normalization
             - 'rms_norm': Root mean square normalization
@@ -241,7 +237,7 @@ class VisionEncoder(keras.layers.Layer):
             depth=12,
             num_heads=12,
             patch_embed_type='linear',
-            attention_type='multi_head_attention'
+            attention_type='multi_head'
         )
 
         # SigLIP-style with modern components
@@ -252,7 +248,7 @@ class VisionEncoder(keras.layers.Layer):
             depth=12,
             num_heads=12,
             patch_embed_type='siglip',
-            attention_type='multi_head_attention',
+            attention_type='multi_head',
             normalization_type='layer_norm',
             ffn_type='mlp'
         )
@@ -264,7 +260,7 @@ class VisionEncoder(keras.layers.Layer):
             depth=12,
             num_heads=6,
             patch_embed_type='conv',
-            attention_type='window_attention',
+            attention_type='window',
             normalization_type='rms_norm',
             normalization_position='pre',
             ffn_type='swiglu',
@@ -303,7 +299,7 @@ class VisionEncoder(keras.layers.Layer):
             num_heads: int = 12,
             mlp_ratio: float = 4.0,
             patch_embed_type: PatchEmbedType = 'linear',
-            attention_type: AttentionType = 'multi_head_attention',
+            attention_type: AttentionType = 'multi_head',
             normalization_type: NormalizationType = 'layer_norm',
             normalization_position: NormalizationPosition = 'post',
             ffn_type: FFNType = 'mlp',
@@ -817,7 +813,7 @@ def create_vision_encoder(
         num_heads: int = 12,
         mlp_ratio: float = 4.0,
         patch_embed_type: PatchEmbedType = 'linear',
-        attention_type: AttentionType = 'multi_head_attention',
+        attention_type: AttentionType = 'multi_head',
         normalization_type: NormalizationType = 'layer_norm',
         normalization_position: NormalizationPosition = 'post',
         ffn_type: FFNType = 'mlp',
@@ -873,7 +869,7 @@ def create_vision_encoder(
             depth=8,
             num_heads=6,
             patch_embed_type='siglip',
-            attention_type='window_attention',
+            attention_type='window',
             normalization_type='rms_norm',
             ffn_type='swiglu'
         )
@@ -928,7 +924,7 @@ def create_vit_encoder(
         depth=depth,
         num_heads=num_heads,
         patch_embed_type='linear',
-        attention_type='multi_head_attention',
+        attention_type='multi_head',
         normalization_type='layer_norm',
         normalization_position='post',
         ffn_type='mlp',
@@ -953,7 +949,7 @@ def create_siglip_encoder(
         depth=depth,
         num_heads=num_heads,
         patch_embed_type='siglip',
-        attention_type='multi_head_attention',
+        attention_type='multi_head',
         normalization_type='layer_norm',
         normalization_position='post',
         ffn_type='mlp',
@@ -961,26 +957,3 @@ def create_siglip_encoder(
     )
 
 # ---------------------------------------------------------------------
-
-def create_efficient_encoder(
-        img_size: int = 224,
-        patch_size: int = 16,
-        embed_dim: int = 384,
-        depth: int = 8,
-        num_heads: int = 6,
-        **kwargs: Any
-) -> VisionEncoder:
-    """Create efficient encoder with modern components."""
-    return create_vision_encoder(
-        img_size=img_size,
-        patch_size=patch_size,
-        embed_dim=embed_dim,
-        depth=depth,
-        num_heads=num_heads,
-        patch_embed_type='conv',
-        attention_type='multi_head_attention',
-        normalization_type='rms_norm',
-        normalization_position='pre',
-        ffn_type='swiglu',
-        **kwargs
-    )

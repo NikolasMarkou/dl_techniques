@@ -323,7 +323,7 @@ class Qwen3(keras.Model):
                 hidden_size=self.hidden_size,
                 num_heads=self.num_attention_heads,
                 intermediate_size=self.hidden_size * 4,
-                attention_type='group_query_attention',
+                attention_type='group_query',
                 attention_args=attention_args,
                 normalization_type=self.normalization_type,
                 normalization_position='pre',

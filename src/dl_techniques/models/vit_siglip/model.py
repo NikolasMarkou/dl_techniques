@@ -355,7 +355,7 @@ class SigLIPVisionTransformer(keras.Model):
                 hidden_size=self.embed_dim,
                 num_heads=self.num_heads,
                 intermediate_size=self.intermediate_size,
-                attention_type="multi_head_attention",
+                attention_type="multi_head",
                 normalization_type=self.normalization_type,
                 normalization_position=self.normalization_position,
                 ffn_type=self.ffn_type,

@@ -77,14 +77,10 @@ from typing import Optional, Union, Any, Dict, Tuple, Literal, Callable
 
 
 from .stochastic_depth import StochasticDepth
-from .norms import create_normalization_layer
-from .ffn.factory import create_ffn_from_config
-from .attention.window_attention import WindowAttention
-from .attention.multi_head_attention import MultiHeadAttention
-from .attention.group_query_attention import GroupedQueryAttention
-from .attention.differential_attention import DifferentialMultiHeadAttention
+from .norms import create_normalization_layer, NormalizationType
+from .ffn.factory import create_ffn_from_config, FFNType
+from .attention.factory import create_attention_layer, AttentionType
 
-# MoE Integration
 from .moe import MixtureOfExperts, MoEConfig
 
 # ---------------------------------------------------------------------
@@ -92,9 +88,6 @@ from .moe import MixtureOfExperts, MoEConfig
 # ---------------------------------------------------------------------
 
 NormalizationPosition = Literal['post', 'pre']
-FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp']
-NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'adaptive_band_rms', 'dynamic_tanh']
-AttentionType = Literal['multi_head_attention', 'window_attention', 'group_query_attention', 'differential_attention']
 
 # ---------------------------------------------------------------------
 
@@ -255,7 +248,7 @@ class TransformerLayer(keras.layers.Layer):
             hidden_size: int,
             num_heads: int,
             intermediate_size: int,
-            attention_type: AttentionType = 'multi_head_attention',
+            attention_type: AttentionType = 'multi_head',
             attention_args: Optional[Dict[str, Any]] = None,
             normalization_type: NormalizationType = 'layer_norm',
             normalization_position: NormalizationPosition = 'post',
@@ -429,7 +422,7 @@ class TransformerLayer(keras.layers.Layer):
             Dictionary of parameters for attention layer creation.
         """
         # Define default parameters for each attention type
-        if self.attention_type == 'multi_head_attention':
+        if self.attention_type == 'multi_head':
             default_params = {
                 'dim': self.hidden_size,
                 'num_heads': self.num_heads,
@@ -438,14 +431,14 @@ class TransformerLayer(keras.layers.Layer):
                 'kernel_initializer': self.kernel_initializer,
                 'name': name
             }
-        elif self.attention_type == 'window_attention':
+        elif self.attention_type == 'window':
             default_params = {
                 'dim': self.hidden_size,
                 'window_size': self.window_size,
                 'num_heads': self.num_heads,
                 'name': name
             }
-        elif self.attention_type == 'group_query_attention':
+        elif self.attention_type == 'group_query':
             default_params = {
                 'dim': self.hidden_size,
                 'num_heads': self.num_heads,
@@ -454,7 +447,7 @@ class TransformerLayer(keras.layers.Layer):
                 'use_bias': self.use_bias,
                 'name': name
             }
-        elif self.attention_type == 'differential_attention':
+        elif self.attention_type == 'differential':
             default_params = {
                 'dim': self.hidden_size,
                 'num_heads': self.num_heads,
@@ -484,16 +477,10 @@ class TransformerLayer(keras.layers.Layer):
         """
         params = self._get_attention_params(name)
         try:
-            if self.attention_type == 'multi_head_attention':
-                return MultiHeadAttention(**params)
-            elif self.attention_type == 'window_attention':
-                return WindowAttention(**params)
-            elif self.attention_type == 'group_query_attention':
-                return GroupedQueryAttention(**params)
-            elif self.attention_type == 'differential_attention':
-                return DifferentialMultiHeadAttention(**params)
-            else:
-                raise ValueError(f"Unknown attention type: {self.attention_type}")
+            return create_attention_layer(
+                attention_type=self.attention_type,
+                **params
+            )
         except (TypeError, ValueError) as e:
             raise ValueError(
                 f"Failed to create {self.attention_type} layer. "

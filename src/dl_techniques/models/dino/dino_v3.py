@@ -277,7 +277,7 @@ class DINOv3(keras.Model):
                 hidden_size=self.embed_dim,
                 num_heads=self.num_heads,
                 intermediate_size=int(self.embed_dim * self.mlp_ratio),
-                attention_type="multi_head_attention",
+                attention_type="multi_head",
                 attention_args={"use_bias": self.qkv_bias},
                 normalization_type=self.normalization_type,
                 normalization_position='pre',  # DINO uses pre-norm

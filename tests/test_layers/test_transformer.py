@@ -79,7 +79,7 @@ class TestTransformerLayer:
         """Tests layer initialization with default parameters."""
         layer = TransformerLayer(**layer_config)
         assert not layer.built
-        assert layer.attention_type == 'multi_head_attention'
+        assert layer.attention_type == 'multi_head'
         assert layer.normalization_type == 'layer_norm'
         assert layer.ffn_type == 'mlp'
         assert layer.moe_config is None

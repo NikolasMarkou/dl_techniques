@@ -622,7 +622,7 @@ class TemporalContextEncoder(keras.layers.Layer):
                     hidden_size=self.temporal_dim,
                     num_heads=self.num_heads,
                     intermediate_size=self.temporal_dim * 4,
-                    attention_type='multi_head_attention',
+                    attention_type='multi_head',
                     normalization_type=self.normalization_type,
                     ffn_type=self.ffn_type,
                     dropout_rate=self.dropout_rate,

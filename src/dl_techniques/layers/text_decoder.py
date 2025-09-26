@@ -89,10 +89,10 @@ from typing import Optional, Dict, Any, Literal, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.embedding import create_embedding_layer
-from dl_techniques.layers.masking import create_mask, MaskConfig, combine_masks
-from dl_techniques.layers.norms import create_normalization_layer, NormalizationType
-from dl_techniques.layers.transformer import TransformerLayer, AttentionType, FFNType, NormalizationPosition
+from .embedding import create_embedding_layer
+from .masking import create_mask, MaskConfig, combine_masks
+from .norms import create_normalization_layer, NormalizationType
+from .transformer import TransformerLayer, AttentionType, FFNType, NormalizationPosition
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -235,7 +235,7 @@ class TextDecoder(keras.layers.Layer):
             max_seq_len: int = 512,
             embedding_type: EmbeddingType = 'learned',
             positional_type: PositionalType = 'learned',
-            attention_type: AttentionType = 'multi_head_attention',
+            attention_type: AttentionType = 'multi_head',
             normalization_type: NormalizationType = 'layer_norm',
             normalization_position: NormalizationPosition = 'post',
             ffn_type: FFNType = 'mlp',

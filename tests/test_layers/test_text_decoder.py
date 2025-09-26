@@ -121,7 +121,7 @@ class TestTextDecoder:
         assert decoder.positional_type == 'learned'
         assert decoder.normalization_position == 'post'
         assert decoder.ffn_type == 'mlp'
-        assert decoder.attention_type == 'multi_head_attention'
+        assert decoder.attention_type == 'multi_head'
         assert decoder.normalization_type == 'layer_norm'
 
         # Check layer is not built initially

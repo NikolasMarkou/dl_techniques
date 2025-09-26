@@ -1,18 +1,16 @@
 import keras
-from keras import layers
-from typing import Tuple, Optional, Dict, Any, Union
+from typing import  Optional, Dict, Any, Union
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
-
+from .universal_inverted_bottleneck import UniversalInvertedBottleneck
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class InvertedResidualBlock(keras.layers.Layer):
+class InvertedResidualBlock(UniversalInvertedBottleneck):
     """Inverted residual block, the core building block for MobileNetV2.
 
     This block implements the inverted residual structure with a linear bottleneck,
@@ -98,147 +96,89 @@ class InvertedResidualBlock(keras.layers.Layer):
             stride: int = 1,
             block_id: int = 0,
             skip_connection: bool = True,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+            kernel_initializer: Union[
+                str, keras.initializers.Initializer
+            ] = "he_normal",
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            **kwargs: Any
+            **kwargs: Any,
     ) -> None:
-        super().__init__(**kwargs)
+        # Store original arguments for get_config serialization.
+        # These are the public API parameters for this specialized class.
+        self._block_id = block_id
+        self._skip_connection_arg = skip_connection
+        self._kernel_initializer_arg = kernel_initializer
+        self._kernel_regularizer_arg = kernel_regularizer
 
-        # Store ALL configuration
-        self.filters = filters
-        self.expansion_factor = expansion_factor
-        self.stride = stride
-        self.block_id = block_id
-        self.skip_connection = skip_connection
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
-
-        # Initialize attributes for sub-layers (created in build)
-        self.in_channels = None
-        self.expanded_channels = None
-        self.use_residual = False
-
-        # --- CREATE shape-independent sub-layers in __init__ ---
-        # ReLU layers are shape-independent and can be created here.
-        self.expand_relu = layers.ReLU(max_value=6, name=f'expand_relu6_{self.block_id}')
-        self.depthwise_relu = layers.ReLU(max_value=6, name=f'depthwise_relu6_{self.block_id}')
-        self.add = layers.Add(name=f'add_{self.block_id}')
-
-        # Shape-dependent layers will be created and built in the build method.
-        self.expand_conv = None
-        self.expand_bn = None
-        self.depthwise_conv = None
-        self.depthwise_bn = None
-        self.project_conv = None
-        self.project_bn = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Create and build the block's weights and sub-layers."""
-        self.in_channels = input_shape[-1]
-        if self.in_channels is None:
-            raise ValueError("The channel dimension of the inputs must be defined. Found `None`.")
-        self.expanded_channels = self.in_channels * self.expansion_factor
-
-        # Determine if a residual connection should be used
-        self.use_residual = (self.skip_connection and self.stride == 1 and self.in_channels == self.filters)
-
-        # --- CREATE shape-dependent sub-layers in build ---
-        # Layer creation is deferred to `build` because parameters like the number of
-        # filters depend on the input shape.
-
-        # 1. Expansion phase (only if expansion factor > 1)
-        if self.expansion_factor != 1:
-            self.expand_conv = layers.Conv2D(
-                filters=self.expanded_channels,
-                kernel_size=1,
-                padding='same',
-                use_bias=False,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                name=f'expand_{self.block_id}'
-            )
-            self.expand_bn = layers.BatchNormalization(name=f'expand_bn_{self.block_id}')
-
-        # 2. Depthwise convolution phase
-        self.depthwise_conv = layers.DepthwiseConv2D(
+        # Call the parent UniversalInvertedBottleneck's __init__ with the
+        # specific configuration for a MobileNetV2 block.
+        super().__init__(
+            filters=filters,
+            expansion_factor=expansion_factor,
+            stride=stride,
             kernel_size=3,
-            strides=self.stride,
-            padding='same',
-            use_bias=False,
-            depthwise_initializer=self.kernel_initializer,
-            depthwise_regularizer=self.kernel_regularizer,
-            name=f'depthwise_{self.block_id}'
+            use_dw1=True,
+            use_dw2=False,
+            activation_type="relu",
+            activation_args={"max_value": 6},  # This creates ReLU6
+            normalization_type="batch_norm",
+            dropout_rate=0.0,
+            use_squeeze_excitation=False,
+            kernel_initializer=kernel_initializer,
+            depthwise_initializer=kernel_initializer,
+            kernel_regularizer=kernel_regularizer,
+            depthwise_regularizer=kernel_regularizer,
+            name=f"inverted_residual_block_{block_id}",
+            **kwargs,
         )
-        self.depthwise_bn = layers.BatchNormalization(name=f'depthwise_bn_{self.block_id}')
-
-        # 3. Projection phase (with linear bottleneck)
-        self.project_conv = layers.Conv2D(
-            filters=self.filters,
-            kernel_size=1,
-            padding='same',
-            use_bias=False,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name=f'project_{self.block_id}'
-        )
-        self.project_bn = layers.BatchNormalization(name=f'project_bn_{self.block_id}')
-
-        # --- BUILD all sub-layers explicitly for robust serialization ---
-        # This follows the guide's pattern for composite layers.
-        current_shape = input_shape
-        if self.expansion_factor != 1:
-            self.expand_conv.build(current_shape)
-            current_shape = self.expand_conv.compute_output_shape(current_shape)
-            self.expand_bn.build(current_shape)
-
-        self.depthwise_conv.build(current_shape)
-        current_shape = self.depthwise_conv.compute_output_shape(current_shape)
-        self.depthwise_bn.build(current_shape)
-
-        self.project_conv.build(current_shape)
-        current_shape = self.project_conv.compute_output_shape(current_shape)
-        self.project_bn.build(current_shape)
-
-        # Always call parent build last
-        super().build(input_shape)
-
-    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        """Forward pass through the inverted residual block."""
-        x = inputs
-
-        # 1. Expansion phase
-        if self.expansion_factor != 1:
-            x = self.expand_conv(x)
-            x = self.expand_bn(x, training=training)
-            x = self.expand_relu(x)
-
-        # 2. Depthwise convolution phase
-        x = self.depthwise_conv(x)
-        x = self.depthwise_bn(x, training=training)
-        x = self.depthwise_relu(x)
-
-        # 3. Projection phase (linear bottleneck)
-        x = self.project_conv(x)
-        x = self.project_bn(x, training=training)
-
-        # 4. Residual connection
-        if self.use_residual:
-            x = self.add([inputs, x])
-
-        return x
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return configuration for serialization.
+
+        This method ensures the layer is saved using its own simplified
+        constructor arguments, not the full UIB configuration.
+        """
+        # Start with the full configuration from the UIB parent.
         config = super().get_config()
-        config.update({
-            'filters': self.filters,
-            'expansion_factor': self.expansion_factor,
-            'stride': self.stride,
-            'block_id': self.block_id,
-            'skip_connection': self.skip_connection,
-            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
-            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
-        })
+
+        # Define the set of UIB-specific parameters that are hard-coded
+        # in this class and should not be part of the saved config.
+        params_to_remove = [
+            "expanded_channels",
+            "kernel_size",
+            "use_dw1",
+            "use_dw2",
+            "activation_type",
+            "activation_args",
+            "normalization_type",
+            "normalization_args",
+            "dropout_rate",
+            "use_squeeze_excitation",
+            "se_ratio",
+            "se_activation",
+            "use_bias",
+            "padding",
+            "block_type",
+            "depthwise_initializer",
+            "depthwise_regularizer",
+        ]
+        for param in params_to_remove:
+            config.pop(param, None)
+
+        # Update the config with the original arguments of this class,
+        # ensuring they are properly serialized.
+        config.update(
+            {
+                "block_id": self._block_id,
+                "skip_connection": self._skip_connection_arg,
+                "kernel_initializer": keras.initializers.serialize(
+                    self._kernel_initializer_arg
+                ),
+                "kernel_regularizer": keras.regularizers.serialize(
+                    self._kernel_regularizer_arg
+                ),
+            }
+        )
+
         return config
 
 # ---------------------------------------------------------------------

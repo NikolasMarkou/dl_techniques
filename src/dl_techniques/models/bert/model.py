@@ -363,7 +363,7 @@ class BERT(keras.Model):
         classifier_dropout: Optional[float] = None,
         normalization_type: str = "layer_norm",
         normalization_position: str = "post",
-        attention_type: str = "multi_head_attention",
+        attention_type: str = "multi_head",
         ffn_type: str = "mlp",
         use_stochastic_depth: bool = False,
         stochastic_depth_rate: float = 0.1,

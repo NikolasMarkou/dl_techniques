@@ -539,7 +539,7 @@ class RELGTTransformerBlock(layers.Layer):
             hidden_size=embedding_dim,
             num_heads=num_heads,
             intermediate_size=ffn_dim,
-            attention_type='multi_head_attention',
+            attention_type='multi_head',
             normalization_type=normalization_type,
             ffn_type=ffn_type,
             dropout_rate=dropout_rate,

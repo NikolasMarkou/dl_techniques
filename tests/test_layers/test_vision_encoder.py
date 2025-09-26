@@ -11,8 +11,7 @@ from dl_techniques.layers.vision_encoder import (
     VisionEncoder,
     create_vision_encoder,
     create_vit_encoder,
-    create_siglip_encoder,
-    create_efficient_encoder as create_efficient_vision_encoder  # Alias to avoid name clash
+    create_siglip_encoder
 )
 
 
@@ -65,7 +64,7 @@ class TestVisionEncoder:
             'depth': 4,
             'num_heads': 4,
             'patch_embed_type': 'siglip',
-            'attention_type': 'window_attention',
+            'attention_type': 'window',
             'normalization_type': 'rms_norm',
             'normalization_position': 'pre',
             'ffn_type': 'swiglu',
@@ -90,7 +89,7 @@ class TestVisionEncoder:
         encoder = VisionEncoder(**basic_config)
         assert not encoder.built
         assert encoder.patch_embed_type == 'linear'
-        assert encoder.attention_type == 'multi_head_attention'
+        assert encoder.attention_type == 'multi_head'
         assert encoder.normalization_type == 'layer_norm'
         assert encoder.ffn_type == 'mlp'
         assert encoder.output_mode == 'cls'
@@ -105,12 +104,12 @@ class TestVisionEncoder:
         assert hasattr(encoder, 'patch_embed')
 
     @pytest.mark.parametrize("attention_type", [
-        'multi_head_attention', 'window_attention', 'group_query_attention', 'differential_attention'
+        'multi_head', 'window', 'group_query', 'differential'
     ])
     def test_initialization_attention_types(self, basic_config, attention_type):
         """Tests initialization with different attention mechanisms."""
         config = {**basic_config, 'attention_type': attention_type}
-        if attention_type == 'window_attention':
+        if attention_type == 'window':
             # This makes num_patches match window_size^2
             config['img_size'] = 16
             config['patch_size'] = 8
@@ -307,7 +306,7 @@ class TestVisionEncoder:
         encoder = create_vit_encoder(img_size=32, patch_size=8, embed_dim=64, depth=2, num_heads=4)
         assert isinstance(encoder, VisionEncoder)
         assert encoder.patch_embed_type == 'linear'
-        assert encoder.attention_type == 'multi_head_attention'
+        assert encoder.attention_type == 'multi_head'
         assert encoder.use_cls_token
         assert encoder.output_mode == 'cls'
 
@@ -316,15 +315,6 @@ class TestVisionEncoder:
         encoder = create_siglip_encoder(img_size=32, patch_size=8, embed_dim=64, depth=2, num_heads=4)
         assert isinstance(encoder, VisionEncoder)
         assert encoder.patch_embed_type == 'siglip'
-
-    def test_create_efficient_vision_encoder_factory(self):
-        """Tests the aliased create_efficient_encoder factory function."""
-        encoder = create_efficient_vision_encoder(img_size=32, patch_size=8, embed_dim=64, depth=2, num_heads=4)
-        assert isinstance(encoder, VisionEncoder)
-        assert encoder.patch_embed_type == 'conv'
-        assert encoder.normalization_type == 'rms_norm'
-        assert encoder.normalization_position == 'pre'
-        assert encoder.ffn_type == 'swiglu'
 
     def test_factory_parameter_validation(self):
         """Tests that factory functions validate parameters properly."""
