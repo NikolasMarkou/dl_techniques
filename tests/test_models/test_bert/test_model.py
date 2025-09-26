@@ -392,7 +392,7 @@ class TestBERTModelSerialization:
             num_layers=4,
             num_heads=8,
             normalization_type="rms_norm",
-            attention_type="multi_head_attention"
+            attention_type="multi_head"
         )
         config = original_model.get_config()
         new_model = BERT.from_config(config)
@@ -710,7 +710,7 @@ class TestBERTAdvancedFeatures:
             "intermediate_size": 512
         }
 
-        for attention_type in ["multi_head_attention", "differential_attention"]:
+        for attention_type in ["multi_head", "differential"]:
             model = BERT(
                 **base_config,
                 attention_type=attention_type,
