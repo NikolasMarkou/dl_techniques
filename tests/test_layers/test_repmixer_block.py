@@ -9,7 +9,7 @@ import pytest
 import tempfile
 import os
 import numpy as np
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
 import keras
 import tensorflow as tf

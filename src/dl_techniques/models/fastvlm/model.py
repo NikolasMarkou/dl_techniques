@@ -15,6 +15,7 @@ from typing import Optional, Union, List, Dict, Any, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.attention.factory import AttentionType
 from dl_techniques.layers.repmixer_block import RepMixerBlock, ConvolutionalStem
 
 from .components import AttentionBlock
@@ -85,8 +86,8 @@ class FastVLM(keras.Model):
         use_se: Boolean, whether to use Squeeze-and-Excitation in MobileOne blocks.
             Defaults to False.
         attention_type: String, type of attention mechanism for attention blocks.
-            Options: 'multi_head_attention', 'window_attention', 'group_query_attention'.
-            Defaults to 'multi_head_attention'.
+            Options: 'multi_head', 'window', 'group_query'.
+            Defaults to 'multi_head'.
         use_layer_scale: Boolean, whether to use layer scaling in attention blocks.
             Defaults to True.
         activation: String or callable, activation function used throughout.
@@ -213,7 +214,7 @@ class FastVLM(keras.Model):
             dropout_rate: float = 0.0,
             drop_path_rate: float = 0.1,
             use_se: bool = False,
-            attention_type: str = 'multi_head_attention',
+            attention_type: AttentionType = 'multi_head',
             use_layer_scale: bool = True,
             activation: Union[str, callable] = 'gelu',
             kernel_initializer: Union[str, initializers.Initializer] = 'he_normal',

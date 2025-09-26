@@ -34,7 +34,7 @@ class TestFastVLM:
             'dropout_rate': 0.1,
             'drop_path_rate': 0.1,
             'use_se': False,
-            'attention_type': 'multi_head_attention',
+            'attention_type': 'multi_head',
             'use_layer_scale': True,
             'activation': 'gelu',
             'kernel_initializer': 'he_normal',
@@ -439,7 +439,7 @@ class TestFastVLM:
         assert model.dropout_rate == 0.0
         assert model.drop_path_rate == 0.1
         assert model.use_se is False
-        assert model.attention_type == 'multi_head_attention'
+        assert model.attention_type == 'multi_head'
         assert model.use_layer_scale is True
         assert model.activation == 'gelu'
         assert model.include_top is True
@@ -519,8 +519,8 @@ class TestFastVLM:
             pytest.fail(f"Model summary failed: {e}")
 
     @pytest.mark.parametrize("attention_type", [
-        'multi_head_attention',
-        'group_query_attention'
+        'multi_head',
+        'group_query'
         # Note: window_attention requires specific spatial dimensions that are complex to set up
     ])
     def test_different_attention_types(
