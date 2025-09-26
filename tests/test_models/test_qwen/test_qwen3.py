@@ -21,7 +21,7 @@ from typing import Dict, Any
 
 import keras
 
-from dl_techniques.models.qwen3.model import (
+from dl_techniques.models.qwen.qwen3 import (
     Qwen3,
     create_qwen3,
     create_qwen3_generation,

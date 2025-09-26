@@ -8,7 +8,7 @@ import pytest
 import tensorflow as tf
 from keras import layers, models, ops
 
-from dl_techniques.models.qwen3_next.components import Qwen3NextBlock
+from dl_techniques.models.qwen.components import Qwen3NextBlock
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 
 
