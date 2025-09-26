@@ -17,7 +17,6 @@ from typing import Optional, Union, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 
@@ -368,7 +367,7 @@ class Qwen3Next(keras.Model):
         if return_dict:
             return {"logits": logits}
         else:
-            return hidden_states
+            return logits
 
     @classmethod
     def from_variant(

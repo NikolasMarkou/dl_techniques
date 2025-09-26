@@ -19,7 +19,6 @@ from typing import Dict, Any
 
 import keras
 
-# Assuming the new code is in a structure like `dl_techniques/models/gemma/`
 from dl_techniques.models.gemma.gemma3 import (
     Gemma3,
     create_gemma3,
