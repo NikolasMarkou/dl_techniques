@@ -70,7 +70,11 @@ class BaseNLPHead(keras.layers.Layer):
             **kwargs: Any
     ) -> None:
         """Initialize the base NLP head."""
-        super().__init__(name=f"{task_config.name}_head", **kwargs)
+        # --- FIX: Set a default name ONLY if 'name' is not in kwargs. ---
+        # This prevents passing 'name' twice during deserialization, as the
+        # saved config will already contain it.
+        kwargs.setdefault('name', f"{task_config.name}_head")
+        super().__init__(**kwargs)
 
         # Store configuration
         self.task_config = task_config
@@ -91,11 +95,11 @@ class BaseNLPHead(keras.layers.Layer):
         # Set hidden size from config or use intermediate size
         self.hidden_size = task_config.hidden_size or self.intermediate_size
 
-        # Build common layers
-        self._build_common_layers()
+        # Create common layers (following Golden Rule: CREATE in __init__)
+        self._create_common_layers()
 
-    def _build_common_layers(self) -> None:
-        """Build common layers used across different heads."""
+    def _create_common_layers(self) -> None:
+        """Create common layers used across different heads."""
 
         # Dropout layer
         self.dropout = layers.Dropout(
@@ -110,29 +114,44 @@ class BaseNLPHead(keras.layers.Layer):
         )
 
         # Optional pooling for sequence-level tasks
-        if self.use_pooling:
-            if self.pooling_type == 'attention':
-                # Attention-based pooling
-                self.attention_pooling = layers.Dense(
-                    1,
-                    activation='tanh',
-                    kernel_initializer=keras.initializers.TruncatedNormal(
-                        stddev=self.initializer_range
-                    ),
-                    name=f"{self.name}_attention_pooling"
-                )
+        self.attention_pooling = None
+        if self.use_pooling and self.pooling_type == 'attention':
+            # Attention-based pooling
+            self.attention_pooling = layers.Dense(
+                1,
+                activation='tanh',
+                kernel_initializer=keras.initializers.TruncatedNormal(
+                    stddev=self.initializer_range
+                ),
+                name=f"{self.name}_attention_pooling"
+            )
 
         # Optional task-specific attention
+        self.task_attention = None
         if self.use_task_attention:
+            # Map attention parameters correctly
+            attn_params = {
+                'dropout_rate': self.task_config.dropout_rate,
+                'name': f"{self.name}_attention"
+            }
+
+            if self.attention_type == 'multi_head':
+                attn_params['embed_dim'] = self.hidden_size
+                attn_params['num_heads'] = 8
+            else:
+                attn_params['dim'] = self.hidden_size
+                if self.attention_type in ['window', 'sliding_window']:
+                    attn_params['window_size'] = 7
+                if self.attention_type in ['multi_head', 'window', 'sliding_window']:
+                    attn_params['num_heads'] = 8
+
             self.task_attention = create_attention_layer(
                 self.attention_type,
-                dim=self.hidden_size,
-                num_heads=8 if self.attention_type == 'multi_head' else None,
-                dropout_rate=self.task_config.dropout_rate,
-                name=f"{self.name}_attention"
+                **attn_params
             )
 
         # Optional intermediate layer
+        self.intermediate = None
         if self.use_intermediate:
             self.intermediate = DenseBlock(
                 units=self.hidden_size,
@@ -143,6 +162,7 @@ class BaseNLPHead(keras.layers.Layer):
             )
 
         # Optional FFN block
+        self.ffn = None
         if self.use_ffn:
             self.ffn = create_ffn_layer(
                 self.ffn_type,
@@ -206,8 +226,55 @@ class BaseNLPHead(keras.layers.Layer):
             raise ValueError(f"Unknown pooling type: {self.pooling_type}")
 
     def build(self, input_shape: Union[Tuple, Dict]) -> None:
-        """Build the layer."""
+        """Build the layer and its sub-layers."""
+        # Determine input shape
+        if isinstance(input_shape, dict):
+            hidden_shape = input_shape.get('hidden_states', (None, None, self.input_dim))
+        else:
+            hidden_shape = input_shape
+
+        # Build normalization layer
+        if len(hidden_shape) == 3:  # Sequence input
+            norm_input_shape = hidden_shape
+        else:  # Already pooled
+            norm_input_shape = (hidden_shape[0], self.input_dim)
+
+        self.norm.build(norm_input_shape)
+
+        # Build attention pooling if needed
+        if self.attention_pooling is not None:
+            self.attention_pooling.build(hidden_shape)
+
+        # Build task attention if needed
+        if self.task_attention is not None:
+            # Task attention operates on normalized features
+            self.task_attention.build((hidden_shape[0], hidden_shape[1], self.hidden_size))
+
+        # Build intermediate layer if needed
+        if self.intermediate is not None:
+            # Intermediate can receive pooled or sequence input
+            if self.use_pooling and len(hidden_shape) == 3:
+                intermediate_input = (hidden_shape[0], self.input_dim)
+            else:
+                intermediate_input = norm_input_shape
+            self.intermediate.build(intermediate_input)
+
+        # Build FFN if needed
+        if self.ffn is not None:
+            ffn_input = (hidden_shape[0], hidden_shape[1] if len(hidden_shape) == 3 else 1, self.hidden_size)
+            self.ffn.build(ffn_input)
+
         super().build(input_shape)
+
+    def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
+        """Compute the output shape of the layer."""
+        # Base implementation - subclasses override with specific shapes
+        if isinstance(input_shape, dict):
+            batch_size = input_shape.get('hidden_states', (None,))[0]
+        else:
+            batch_size = input_shape[0] if input_shape else None
+
+        return {'output': (batch_size, None)}
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration."""
@@ -223,6 +290,7 @@ class BaseNLPHead(keras.layers.Layer):
                 'label_smoothing': self.task_config.label_smoothing,
                 'use_crf': self.task_config.use_crf,
                 'use_attention_pooling': self.task_config.use_attention_pooling,
+                'vocabulary_size': getattr(self.task_config, 'vocabulary_size', None),
             },
             'input_dim': self.input_dim,
             'normalization_type': self.normalization_type,
@@ -239,6 +307,26 @@ class BaseNLPHead(keras.layers.Layer):
             'initializer_range': self.initializer_range,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "BaseNLPHead":
+        """Create layer from configuration."""
+        # Reconstruct task config
+        task_config_dict = config.pop('task_config')
+        task_config = NLPTaskConfig(
+            name=task_config_dict['name'],
+            task_type=NLPTaskType(task_config_dict['task_type']),
+            num_classes=task_config_dict.get('num_classes'),
+            dropout_rate=task_config_dict.get('dropout_rate', 0.1),
+            hidden_size=task_config_dict.get('hidden_size'),
+            loss_weight=task_config_dict.get('loss_weight', 1.0),
+            label_smoothing=task_config_dict.get('label_smoothing', 0.0),
+            use_crf=task_config_dict.get('use_crf', False),
+            use_attention_pooling=task_config_dict.get('use_attention_pooling', False),
+            vocabulary_size=task_config_dict.get('vocabulary_size'),
+        )
+        config['task_config'] = task_config
+        return cls(**config)
 
 
 # ---------------------------------------------------------------------
@@ -261,7 +349,7 @@ class TextClassificationHead(BaseNLPHead):
         if self.task_config.num_classes is None:
             raise ValueError("num_classes must be specified for classification tasks")
 
-        # Classification layer
+        # Classification layer (CREATE in __init__)
         self.classifier = layers.Dense(
             self.task_config.num_classes,
             kernel_initializer=keras.initializers.TruncatedNormal(
@@ -269,6 +357,29 @@ class TextClassificationHead(BaseNLPHead):
             ),
             name=f"{self.name}_classifier"
         )
+
+    def build(self, input_shape: Union[Tuple, Dict]) -> None:
+        """Build the layer and its sub-layers."""
+        # First build common layers
+        super().build(input_shape)
+
+        # Build classifier
+        # Classifier receives features after processing
+        classifier_input = (input_shape[0] if isinstance(input_shape, tuple) else
+                           input_shape.get('hidden_states', (None,))[0], self.hidden_size)
+        self.classifier.build(classifier_input)
+
+    def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
+        """Compute the output shape of the layer."""
+        if isinstance(input_shape, dict):
+            batch_size = input_shape.get('hidden_states', (None,))[0]
+        else:
+            batch_size = input_shape[0] if input_shape else None
+
+        return {
+            'logits': (batch_size, self.task_config.num_classes),
+            'probabilities': (batch_size, self.task_config.num_classes)
+        }
 
     def call(
             self,
@@ -342,7 +453,7 @@ class TokenClassificationHead(BaseNLPHead):
         if self.task_config.num_classes is None:
             raise ValueError("num_classes must be specified for token classification")
 
-        # Token classifier
+        # Token classifier (CREATE in __init__)
         self.token_classifier = layers.Dense(
             self.task_config.num_classes,
             kernel_initializer=keras.initializers.TruncatedNormal(
@@ -358,6 +469,39 @@ class TokenClassificationHead(BaseNLPHead):
             self.use_crf = True
         else:
             self.use_crf = False
+
+    def build(self, input_shape: Union[Tuple, Dict]) -> None:
+        """Build the layer and its sub-layers."""
+        # First build common layers
+        super().build(input_shape)
+
+        # Build token classifier
+        if isinstance(input_shape, dict):
+            seq_shape = input_shape.get('hidden_states', (None, None, self.input_dim))
+        else:
+            seq_shape = input_shape
+
+        # Classifier receives processed sequence
+        classifier_input = (seq_shape[0], seq_shape[1], self.hidden_size)
+        self.token_classifier.build(classifier_input)
+
+    def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
+        """Compute the output shape of the layer."""
+        if isinstance(input_shape, dict):
+            batch_size = input_shape.get('hidden_states', (None,))[0]
+            seq_length = input_shape.get('hidden_states', (None, None))[1]
+        else:
+            batch_size = input_shape[0] if input_shape else None
+            seq_length = input_shape[1] if len(input_shape) > 1 else None
+
+        output_shapes = {
+            'logits': (batch_size, seq_length, self.task_config.num_classes)
+        }
+
+        if not self.use_crf:
+            output_shapes['predictions'] = (batch_size, seq_length)
+
+        return output_shapes
 
     def call(
             self,
@@ -426,7 +570,7 @@ class QuestionAnsweringHead(BaseNLPHead):
         kwargs['use_pooling'] = False
         super().__init__(**kwargs)
 
-        # Start and end position predictors
+        # Start and end position predictors (CREATE in __init__)
         self.start_classifier = layers.Dense(
             1,
             kernel_initializer=keras.initializers.TruncatedNormal(
@@ -442,6 +586,36 @@ class QuestionAnsweringHead(BaseNLPHead):
             ),
             name=f"{self.name}_end"
         )
+
+    def build(self, input_shape: Union[Tuple, Dict]) -> None:
+        """Build the layer and its sub-layers."""
+        # First build common layers
+        super().build(input_shape)
+
+        # Build start and end classifiers
+        if isinstance(input_shape, dict):
+            seq_shape = input_shape.get('hidden_states', (None, None, self.input_dim))
+        else:
+            seq_shape = input_shape
+
+        # Classifiers receive processed sequence
+        classifier_input = (seq_shape[0], seq_shape[1], self.hidden_size)
+        self.start_classifier.build(classifier_input)
+        self.end_classifier.build(classifier_input)
+
+    def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
+        """Compute the output shape of the layer."""
+        if isinstance(input_shape, dict):
+            batch_size = input_shape.get('hidden_states', (None,))[0]
+            seq_length = input_shape.get('hidden_states', (None, None))[1]
+        else:
+            batch_size = input_shape[0] if input_shape else None
+            seq_length = input_shape[1] if len(input_shape) > 1 else None
+
+        return {
+            'start_logits': (batch_size, seq_length),
+            'end_logits': (batch_size, seq_length)
+        }
 
     def call(
             self,
@@ -514,7 +688,7 @@ class TextSimilarityHead(BaseNLPHead):
         self.output_embeddings = output_embeddings
         self.similarity_function = similarity_function
 
-        # Optional projection layer
+        # Optional projection layer (CREATE in __init__)
         self.projection = layers.Dense(
             self.hidden_size,
             kernel_initializer=keras.initializers.TruncatedNormal(
@@ -523,8 +697,9 @@ class TextSimilarityHead(BaseNLPHead):
             name=f"{self.name}_projection"
         )
 
+        # Learned similarity function layers
+        self.similarity_layers = []
         if similarity_function == 'learned':
-            # Learned similarity function
             self.similarity_layers = [
                 layers.Dense(
                     self.hidden_size,
@@ -533,6 +708,51 @@ class TextSimilarityHead(BaseNLPHead):
                 ),
                 layers.Dense(1, name=f"{self.name}_sim_output")
             ]
+
+    def build(self, input_shape: Union[Tuple, Dict, List]) -> None:
+        """Build the layer and its sub-layers."""
+        # Handle tuple input (pairwise) by using first element shape
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) == 2:
+            input_shape = input_shape[0]
+
+        # First build common layers
+        super().build(input_shape)
+
+        # Build projection
+        projection_input = (None, self.hidden_size)
+        self.projection.build(projection_input)
+
+        # Build similarity layers if needed
+        if self.similarity_function == 'learned':
+            # Combined features: emb1, emb2, emb1*emb2, abs(emb1-emb2)
+            combined_input = (None, self.hidden_size * 4)
+            for layer in self.similarity_layers:
+                layer.build(combined_input)
+                combined_input = (None, layer.units if hasattr(layer, 'units') else 1)
+
+    def compute_output_shape(self, input_shape: Union[Tuple, Dict, List]) -> Dict[str, Tuple]:
+        """Compute the output shape of the layer."""
+        # Handle different input formats
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) == 2:
+            # Pairwise input
+            if isinstance(input_shape[0], dict):
+                batch_size = input_shape[0].get('hidden_states', (None,))[0]
+            else:
+                batch_size = input_shape[0][0] if input_shape[0] else None
+
+            outputs = {'similarity_score': (batch_size,)}
+            if self.output_embeddings:
+                outputs['embeddings_1'] = (batch_size, self.hidden_size)
+                outputs['embeddings_2'] = (batch_size, self.hidden_size)
+            return outputs
+        else:
+            # Single input - return embeddings
+            if isinstance(input_shape, dict):
+                batch_size = input_shape.get('hidden_states', (None,))[0]
+            else:
+                batch_size = input_shape[0] if input_shape else None
+
+            return {'embeddings': (batch_size, self.hidden_size)}
 
     def call(
             self,
@@ -628,6 +848,15 @@ class TextSimilarityHead(BaseNLPHead):
 
         return embeddings
 
+    def get_config(self) -> Dict[str, Any]:
+        """Get layer configuration."""
+        config = super().get_config()
+        config.update({
+            'output_embeddings': self.output_embeddings,
+            'similarity_function': self.similarity_function,
+        })
+        return config
+
 
 # ---------------------------------------------------------------------
 # Text Generation Head
@@ -650,7 +879,7 @@ class TextGenerationHead(BaseNLPHead):
         if self.task_config.vocabulary_size is None:
             raise ValueError("vocabulary_size must be specified for generation tasks")
 
-        # Language modeling head
+        # Language modeling head (CREATE in __init__)
         self.lm_head = layers.Dense(
             self.task_config.vocabulary_size,
             kernel_initializer=keras.initializers.TruncatedNormal(
@@ -658,6 +887,32 @@ class TextGenerationHead(BaseNLPHead):
             ),
             name=f"{self.name}_lm_head"
         )
+
+    def build(self, input_shape: Union[Tuple, Dict]) -> None:
+        """Build the layer and its sub-layers."""
+        # First build common layers
+        super().build(input_shape)
+
+        # Build language modeling head
+        if isinstance(input_shape, dict):
+            seq_shape = input_shape.get('hidden_states', (None, None, self.input_dim))
+        else:
+            seq_shape = input_shape
+
+        # LM head receives processed sequence
+        lm_input = (seq_shape[0], seq_shape[1], self.hidden_size)
+        self.lm_head.build(lm_input)
+
+    def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
+        """Compute the output shape of the layer."""
+        if isinstance(input_shape, dict):
+            batch_size = input_shape.get('hidden_states', (None,))[0]
+            seq_length = input_shape.get('hidden_states', (None, None))[1]
+        else:
+            batch_size = input_shape[0] if input_shape else None
+            seq_length = input_shape[1] if len(input_shape) > 1 else None
+
+        return {'logits': (batch_size, seq_length, self.task_config.vocabulary_size)}
 
     def call(
             self,
@@ -711,7 +966,7 @@ class MultipleChoiceHead(BaseNLPHead):
         """Initialize multiple choice head."""
         super().__init__(**kwargs)
 
-        # Scorer for each choice
+        # Scorer for each choice (CREATE in __init__)
         self.scorer = layers.Dense(
             1,
             kernel_initializer=keras.initializers.TruncatedNormal(
@@ -719,6 +974,31 @@ class MultipleChoiceHead(BaseNLPHead):
             ),
             name=f"{self.name}_scorer"
         )
+
+    def build(self, input_shape: Union[Tuple, Dict]) -> None:
+        """Build the layer and its sub-layers."""
+        # First build common layers
+        super().build(input_shape)
+
+        # Build scorer
+        # Scorer receives pooled representations for each choice
+        scorer_input = (None, self.hidden_size)
+        self.scorer.build(scorer_input)
+
+    def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
+        """Compute the output shape of the layer."""
+        if isinstance(input_shape, dict):
+            hidden_shape = input_shape.get('hidden_states', (None, None))
+        else:
+            hidden_shape = input_shape
+
+        batch_size = hidden_shape[0] if hidden_shape else None
+        num_choices = hidden_shape[1] if len(hidden_shape) > 1 else None
+
+        return {
+            'logits': (batch_size, num_choices),
+            'probabilities': (batch_size, num_choices)
+        }
 
     def call(
             self,
@@ -806,7 +1086,7 @@ class MultiTaskNLPHead(keras.layers.Layer):
         self.shared_input_dim = shared_input_dim
         self.use_task_specific_projections = use_task_specific_projections
 
-        # Create task heads
+        # Create task heads and projections (CREATE in __init__)
         self.task_heads = {}
         self.task_projections = {}
 
@@ -830,6 +1110,62 @@ class MultiTaskNLPHead(keras.layers.Layer):
                 task_config=task_config,
                 input_dim=input_dim
             )
+
+    def build(self, input_shape: Union[Tuple, Dict]) -> None:
+        """Build the layer and its sub-layers."""
+        # Build task projections if needed
+        if self.use_task_specific_projections:
+            for task_name, projection in self.task_projections.items():
+                if isinstance(input_shape, dict):
+                    hidden_shape = input_shape.get('hidden_states', (None, None, self.shared_input_dim))
+                else:
+                    hidden_shape = input_shape
+
+                # Projections work on flattened features
+                if len(hidden_shape) == 3:
+                    projection_input = (None, self.shared_input_dim)
+                else:
+                    projection_input = hidden_shape
+                projection.build(projection_input)
+
+        # Build task heads
+        for task_name, head in self.task_heads.items():
+            if self.use_task_specific_projections:
+                # Head receives projected features
+                task_config = self.task_configs[task_name]
+                head_input_dim = task_config.hidden_size or self.shared_input_dim
+                if isinstance(input_shape, dict):
+                    head_input = {'hidden_states': (None, None, head_input_dim)}
+                else:
+                    head_input = (None, None, head_input_dim) if len(input_shape) == 3 else (None, head_input_dim)
+            else:
+                head_input = input_shape
+
+            head.build(head_input)
+
+        super().build(input_shape)
+
+    def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Dict[str, Tuple]]:
+        """Compute the output shape of the layer."""
+        output_shapes = {}
+
+        for task_name, head in self.task_heads.items():
+            # Get shape for each task head
+            if self.use_task_specific_projections:
+                task_config = self.task_configs[task_name]
+                head_input_dim = task_config.hidden_size or self.shared_input_dim
+                if isinstance(input_shape, dict):
+                    head_input = {'hidden_states': (input_shape.get('hidden_states')[0],
+                                                   input_shape.get('hidden_states')[1],
+                                                   head_input_dim)}
+                else:
+                    head_input = (input_shape[0], input_shape[1], head_input_dim) if len(input_shape) == 3 else (input_shape[0], head_input_dim)
+            else:
+                head_input = input_shape
+
+            output_shapes[task_name] = head.compute_output_shape(head_input)
+
+        return output_shapes
 
     def call(
             self,
@@ -895,7 +1231,7 @@ class MultiTaskNLPHead(keras.layers.Layer):
                     'num_classes': tc.num_classes,
                     'dropout_rate': tc.dropout_rate,
                     'hidden_size': tc.hidden_size,
-                    'vocabulary_size': tc.vocabulary_size,
+                    'vocabulary_size': getattr(tc, 'vocabulary_size', None),
                 }
                 for name, tc in self.task_configs.items()
             },
@@ -903,6 +1239,26 @@ class MultiTaskNLPHead(keras.layers.Layer):
             'use_task_specific_projections': self.use_task_specific_projections,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "MultiTaskNLPHead":
+        """Create layer from configuration."""
+        # Reconstruct task configs
+        task_configs_dict = config.pop('task_configs')
+        task_configs = {}
+
+        for name, tc_dict in task_configs_dict.items():
+            task_configs[name] = NLPTaskConfig(
+                name=tc_dict['name'],
+                task_type=NLPTaskType(tc_dict['task_type']),
+                num_classes=tc_dict.get('num_classes'),
+                dropout_rate=tc_dict.get('dropout_rate', 0.1),
+                hidden_size=tc_dict.get('hidden_size'),
+                vocabulary_size=tc_dict.get('vocabulary_size'),
+            )
+
+        config['task_configs'] = task_configs
+        return cls(**config)
 
 
 # ---------------------------------------------------------------------

@@ -1,4 +1,5 @@
-"""Implements a Perceiver-style Transformer block with decoupled cross-attention.
+"""
+Perceiver-style Transformer block with decoupled cross-attention.
 
 This layer is a fundamental component of the Perceiver architecture, designed to
 address the quadratic complexity bottleneck of standard Transformers when dealing

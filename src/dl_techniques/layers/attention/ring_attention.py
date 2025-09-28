@@ -1,61 +1,62 @@
-"""Computes exact attention for long sequences via blockwise processing.
+"""
+Computes exact attention for long sequences via blockwise processing.
 
-    This layer implements Ring Attention, a memory-efficient algorithm that
-    makes it possible to apply transformer attention to sequences of nearly
-    unlimited length. It overcomes the quadratic memory complexity of standard
-    attention by computing the attention matrix in smaller, fixed-size blocks.
+This layer implements Ring Attention, a memory-efficient algorithm that
+makes it possible to apply transformer attention to sequences of nearly
+unlimited length. It overcomes the quadratic memory complexity of standard
+attention by computing the attention matrix in smaller, fixed-size blocks.
 
-    Architecture:
-        The primary obstacle in scaling attention is the materialization of the
-        full attention matrix `A = Q @ K.T`, which has a memory footprint of
-        O(N^2) where N is the sequence length. Ring Attention avoids this by
-        never constructing the full matrix.
+Architecture:
+    The primary obstacle in scaling attention is the materialization of the
+    full attention matrix `A = Q @ K.T`, which has a memory footprint of
+    O(N^2) where N is the sequence length. Ring Attention avoids this by
+    never constructing the full matrix.
 
-        The core architectural change is to partition the sequence into blocks of a
-        fixed `block_size`. The computation is then restructured as a nested
-        loop: for each query block `Q_i`, the algorithm iterates through all
-        key-value blocks `(K_j, V_j)`. At each step, it computes a partial score
-        matrix of size `(block_size, block_size)`, uses it to update a running
-        tally of the attention output for `Q_i`, and then discards the partial
-        matrix. The memory usage is thus decoupled from the sequence length N
-        and instead depends on the `block_size`, reducing memory complexity
-        from O(N^2) to O(block_size^2).
+    The core architectural change is to partition the sequence into blocks of a
+    fixed `block_size`. The computation is then restructured as a nested
+    loop: for each query block `Q_i`, the algorithm iterates through all
+    key-value blocks `(K_j, V_j)`. At each step, it computes a partial score
+    matrix of size `(block_size, block_size)`, uses it to update a running
+    tally of the attention output for `Q_i`, and then discards the partial
+    matrix. The memory usage is thus decoupled from the sequence length N
+    and instead depends on the `block_size`, reducing memory complexity
+    from O(N^2) to O(block_size^2).
 
-    Foundational Mathematics:
-        The key challenge is ensuring that this blockwise computation is
-        mathematically identical to standard attention. This is achieved using
-        an "online softmax" algorithm. The standard softmax function requires a
-        normalization term (the sum of all exponentials) that can only be
-        computed after seeing all scores.
+Foundational Mathematics:
+    The key challenge is ensuring that this blockwise computation is
+    mathematically identical to standard attention. This is achieved using
+    an "online softmax" algorithm. The standard softmax function requires a
+    normalization term (the sum of all exponentials) that can only be
+    computed after seeing all scores.
 
-        The online softmax overcomes this by maintaining running statistics. For
-        each query block, as it iterates through key blocks, it tracks:
-        1.  `m_i`: The maximum score encountered so far.
-        2.  `O_i`: The accumulated, unnormalized attention output.
-        3.  `l_i`: The accumulated softmax denominator (sum of exponentials).
+    The online softmax overcomes this by maintaining running statistics. For
+    each query block, as it iterates through key blocks, it tracks:
+    1.  `m_i`: The maximum score encountered so far.
+    2.  `O_i`: The accumulated, unnormalized attention output.
+    3.  `l_i`: The accumulated softmax denominator (sum of exponentials).
 
-        When a new block of scores is computed, the new global maximum `m_{i+1}`
-        is found. The previous running statistics `O_i` and `l_i` are then
-        rescaled by a factor of `exp(m_i - m_{i+1})` to align them with the new
-        maximum. The contributions from the current block are then computed
-        using this new maximum and added to the rescaled running statistics.
-        This iterative update, particularly the rescaling step, is a numerically
-        stable way to compute the exact softmax value without needing all scores
-        simultaneously. The final, correctly normalized attention output for the
-        query block is obtained only after iterating through all key-value blocks.
+    When a new block of scores is computed, the new global maximum `m_{i+1}`
+    is found. The previous running statistics `O_i` and `l_i` are then
+    rescaled by a factor of `exp(m_i - m_{i+1})` to align them with the new
+    maximum. The contributions from the current block are then computed
+    using this new maximum and added to the rescaled running statistics.
+    This iterative update, particularly the rescaling step, is a numerically
+    stable way to compute the exact softmax value without needing all scores
+    simultaneously. The final, correctly normalized attention output for the
+    query block is obtained only after iterating through all key-value blocks.
 
-    References:
-        - The primary algorithm and its application in blockwise transformers:
-          Liu, H., et al. (2023). "Ring Attention with Blockwise Transformers for
-          Near-Infinite Context."
+References:
+    - The primary algorithm and its application in blockwise transformers:
+      Liu, H., et al. (2023). "Ring Attention with Blockwise Transformers for
+      Near-Infinite Context."
 
-        - The foundational online softmax algorithm:
-          Milakov, M. & Gimelshein, N. (2018). "Online normalizer calculation
-          for softmax."
+    - The foundational online softmax algorithm:
+      Milakov, M. & Gimelshein, N. (2018). "Online normalizer calculation
+      for softmax."
 
-        - A related work that popularized blockwise attention for hardware efficiency:
-          Dao, T., et al. (2022). "FlashAttention: Fast and Memory-Efficient Exact
-          Attention with IO-Awareness."
+    - A related work that popularized blockwise attention for hardware efficiency:
+      Dao, T., et al. (2022). "FlashAttention: Fast and Memory-Efficient Exact
+      Attention with IO-Awareness."
 """
 
 import math

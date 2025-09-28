@@ -2,186 +2,127 @@
 BERT Model Implementation
 ==================================================
 
-A complete implementation of the BERT (Bidirectional Encoder Representations from Transformers) architecture.
-This implementation provides a flexible, production-ready BERT model with modern dl-techniques features.
+A complete and refactored implementation of the BERT (Bidirectional Encoder
+Representations from Transformers) architecture. This version is designed as a pure
+foundation model, separating the core encoding logic from task-specific heads for
+maximum flexibility, especially in pre-training and multi-task fine-tuning scenarios.
 
 Based on: "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding"
 (Devlin et al., 2018) https://arxiv.org/abs/1810.04805
 
-Theory and Architecture Overview:
----------------------------------
+Refactored Architecture Philosophy:
+-----------------------------------
 
-BERT revolutionized natural language processing by introducing bidirectional context understanding
-through transformer architecture. Unlike previous models that processed text left-to-right or
-right-to-left, BERT reads the entire sequence simultaneously, enabling richer contextual representations.
+This implementation strictly adheres to the principle of separating the foundation model
+from the task-specific head. The `BERT` class acts as a pure feature extractor,
+transforming input tokens into a sequence of contextualized hidden states. All
+task-specific logic, such as pooling for classification or span prediction for QA,
+is delegated to downstream "head" models, as provided by the NLP Task Head Factory.
 
-**Key Innovations:**
-
-1. **Bidirectional Context**: Uses masked language modeling (MLM) to enable bidirectional encoding.
-   During pre-training, ~15% of input tokens are masked, and the model learns to predict them
-   using both left and right context.
-
-2. **Deep Transformer Architecture**: Stacks multiple transformer encoder layers, each containing:
-   - Multi-head self-attention mechanism
-   - Position-wise feed-forward networks
-   - Residual connections and layer normalization
-   - Dropout for regularization
-
-3. **Universal Sentence Representations**: Through the [CLS] token pooling mechanism, BERT
-   learns sentence-level representations suitable for classification tasks.
-
-4. **Pre-training + Fine-tuning Paradigm**: Pre-trained on large text corpora with MLM and
-   Next Sentence Prediction (NSP), then fine-tuned on downstream tasks.
-
-**Architecture Components:**
+**Architectural Contract:**
 
 ```
 Input Processing:
     TokenIDs + SegmentIDs + PositionIDs
                │
                ▼
-    Word Embeddings + Segment Embeddings + Position Embeddings
+    Embeddings Layer
                │
                ▼
-    LayerNorm + Dropout
+Transformer Stack (N layers)
                │
                ▼
-Transformer Stack (N layers):
-    MultiHeadAttention(bidirectional)
-               │
-    Add & Norm  │
-               ▼
-    FeedForward(GELU activation)
-               │
-    Add & Norm  │
-               ▼
-    Layer N Output
+Output Dictionary: {
+    "last_hidden_state": [batch_size, seq_len, hidden_size],
+    "attention_mask": [batch_size, seq_len]
+}
                │
                ▼
-Output Processing:
-    Sequence Output: [batch_size, seq_len, hidden_size]
+NLP Task Head (from factory.py)
+    (e.g., TextClassificationHead, TokenClassificationHead)
                │
-               └─→ [CLS] Token → Dense + Tanh → Pooled Output
+               ▼
+Task-Specific Outputs
+    (e.g., {"logits": ..., "probabilities": ...})
 ```
 
-**Mathematical Foundation:**
+**Key Changes in this Implementation:**
 
-Self-Attention Mechanism:
-- Query, Key, Value matrices: Q = XW_Q, K = XW_K, V = XW_V
-- Attention scores: Attention(Q,K,V) = softmax(QK^T/√d_k)V
-- Multi-head: Concat(head_1, ..., head_h)W_O where head_i = Attention(QW_Q^i, KW_K^i, VW_V^i)
+1.  **Pure Encoder:** The `BERT` model no longer contains a pooling layer (`add_pooling_layer` is removed). Its sole responsibility is to produce high-fidelity sequence representations.
+2.  **Consistent Output:** The `call` method now always returns a dictionary containing `last_hidden_state` and the forwarded `attention_mask`. This provides a stable, predictable interface for any downstream head.
+3.  **Decoupled Factories:** The original, task-specific factory functions (`create_bert_for_classification`, etc.) have been removed. They are replaced by a single, powerful integration function (`create_bert_with_head`) that demonstrates how to combine this foundational `BERT` model with the heads from the `dl_techniques.nlp.heads` factory.
+4.  **Simplified Interface:** The model's API is simplified, removing conditional logic and promoting a clear, composable design pattern.
 
-Position Embeddings:
-- Learned absolute position embeddings for each position up to max_position_embeddings
-- Added to word embeddings to provide positional information
-
-**Pre-training Objectives:**
-
-1. **Masked Language Model (MLM)**:
-   - Randomly mask 15% of input tokens
-   - 80% replaced with [MASK], 10% with random token, 10% unchanged
-   - Predict original token using bidirectional context
-   - Loss: Cross-entropy over vocabulary for masked positions
-
-2. **Next Sentence Prediction (NSP)**:
-   - Given sentence pairs, predict if second sentence follows first
-   - Binary classification using [CLS] token representation
-   - Helps learn sentence-level representations
-
-**Model Variants:**
-
-- **BERT-Base**: 12 layers, 768 hidden, 12 attention heads, 110M parameters
-- **BERT-Large**: 24 layers, 1024 hidden, 16 attention heads, 340M parameters
-
-**Modern Extensions in this Implementation:**
-
-- Configurable attention mechanisms (standard, window, differential)
-- Advanced normalization options (LayerNorm, RMSNorm, DynamicTanh)
-- Stochastic depth for improved training stability
-- Flexible feed-forward networks (MLP, SwiGLU, etc.)
-- Enhanced regularization techniques
-- Production-ready serialization and deployment features
+This refactoring enables:
+- **Easy Multi-Tasking:** A single shared BERT encoder can feed its output into multiple different task heads.
+- **Clean Fine-Tuning:** The weights of the foundational BERT can be frozen or trained with a different learning rate than the task-specific head.
+- **Model Reusability:** The same pre-trained BERT artifact can be used for classification, token labeling, question answering, etc., without modification.
 
 Key Features:
 -------------
-- Full BERT architecture with bidirectional transformer encoder
-- Support for all standard BERT variants (Base, Large)
-- Advanced dl-techniques integration (RMSNorm, SwiGLU, etc.)
-- Flexible attention mechanisms and normalization strategies
-- Configurable stochastic depth and regularization
-- Complete serialization support for production deployment
-- Comprehensive factory functions for common use cases
-- Memory-efficient implementation with gradient checkpointing support
-
-Training Strategies:
-------------------
-- **Pre-training**: Large-scale unsupervised learning on text corpora
-- **Fine-tuning**: Task-specific supervised learning with lower learning rates
-- **Feature Extraction**: Using pre-trained representations as fixed features
-- **Discriminative Fine-tuning**: Different learning rates for different layers
-
-Common Applications:
-------------------
-- **Text Classification**: Sentiment analysis, topic classification, spam detection
-- **Named Entity Recognition**: Identifying people, places, organizations in text
-- **Question Answering**: SQuAD-style reading comprehension tasks
-- **Sequence Labeling**: Part-of-speech tagging, linguistic analysis
-- **Sentence Similarity**: Computing semantic similarity between sentences
-- **Language Understanding**: GLUE/SuperGLUE benchmark tasks
+- Pure BERT foundation model with bidirectional transformer encoder.
+- Support for all standard BERT variants (Base, Large, etc.).
+- Designed for seamless integration with `dl_techniques.nlp.heads` factory.
+- Consistent dictionary output for a stable API contract.
+- Memory-efficient implementation with gradient checkpointing support.
+- Full serialization support for production deployment.
 
 Usage Examples:
 --------------
 ```python
-# Create BERT-Base model for binary classification
-config = create_bert_base_uncased()
-model = create_bert_for_classification(config, num_labels=2)
+import keras
+from dl_techniques.nlp.heads.factory import create_nlp_head
+from dl_techniques.nlp.heads.task_types import NLPTaskConfig, NLPTaskType
 
-# Create advanced BERT with modern features
-config = create_bert_with_advanced_features(
-    size="base",
-    normalization_type="rms_norm",
-    attention_type="differential_attention",
-    ffn_type="swiglu"
+# 1. Create the foundational BERT model
+bert_encoder = BERT.from_variant("base")
+
+# 2. Define a task and create a corresponding head
+sentiment_config = NLPTaskConfig(
+    name="sentiment",
+    task_type=NLPTaskType.SENTIMENT_ANALYSIS,
+    num_classes=3
 )
-model = BERT.from_variant("base_advanced", **config)
+sentiment_head = create_nlp_head(
+    task_config=sentiment_config,
+    input_dim=bert_encoder.hidden_size
+)
 
-# Fine-tuning for custom task
-bert_model = BERT.from_variant("base", add_pooling_layer=True)
-inputs = keras.Input(shape=(512,), dtype="int32", name="input_ids")
-outputs = bert_model(inputs)
-classifier = keras.layers.Dense(num_classes)(outputs[1])  # Use pooled output
-model = keras.Model(inputs, classifier)
-
-# Multi-input format
+# 3. Combine them into a final Keras model
 inputs = {
-    "input_ids": keras.random.uniform((2, 128), 0, 30522, dtype="int32"),
-    "attention_mask": keras.ops.ones((2, 128), dtype="int32"),
-    "token_type_ids": keras.ops.zeros((2, 128), dtype="int32")
+    "input_ids": keras.Input(shape=(None,), dtype="int32", name="input_ids"),
+    "attention_mask": keras.Input(shape=(None,), dtype="int32", name="attention_mask"),
+    "token_type_ids": keras.Input(shape=(None,), dtype="int32", name="token_type_ids")
 }
-sequence_output, pooled_output = model(inputs)
-```
+bert_outputs = bert_encoder(inputs)
+task_outputs = sentiment_head(bert_outputs)
 
-Implementation Notes:
--------------------
-- Follows Keras 3.8+ best practices with full type hints
-- Memory-efficient with optional gradient checkpointing
-- Supports mixed precision training out of the box
-- Compatible with TensorFlow 2.18+ backend
-- Thread-safe for inference in production environments
-- Comprehensive error handling and validation
-- Extensive logging for debugging and monitoring
+sentiment_model = keras.Model(inputs, task_outputs)
+
+# 4. Use the model
+# input_data = ...
+# results = sentiment_model(input_data)
+# print(results['logits'].shape) # (batch_size, 3)
+```
 """
 
 import keras
-from typing import Optional, Union, Any, Dict, Tuple, List
+from typing import Optional, Union, Any, Dict, List
 
 # ---------------------------------------------------------------------
 # Local Imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.transformer import TransformerLayer
+from dl_techniques.layers.transformer import (
+    FFNType,
+    AttentionType,
+    TransformerLayer,
+    NormalizationType,
+    NormalizationPosition,
+)
 from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
+from dl_techniques.layers.nlp_heads import create_nlp_head, NLPTaskConfig
 
 # ---------------------------------------------------------------------
 
@@ -189,11 +130,12 @@ from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 @keras.saving.register_keras_serializable()
 class BERT(keras.Model):
     """
-    BERT (Bidirectional Encoder Representations from Transformers) model.
+    BERT (Bidirectional Encoder Representations from Transformers) foundation model.
 
-    A modern, flexible implementation of the BERT architecture with support for various
-    advanced features from dl-techniques library including different attention mechanisms,
-    normalization strategies, and regularization techniques.
+    This is a pure encoder implementation, designed to produce contextual token
+    representations. It separates the core transformer architecture from any
+    task-specific layers (like pooling or classification heads), making it highly
+    flexible for pre-training, fine-tuning, and multi-task learning.
 
     **Architecture Overview:**
     ```
@@ -212,18 +154,15 @@ class BERT(keras.Model):
     TransformerLayerₙ (Self-Attention -> FFN)
            │
            ▼
-    Sequence Output (shape=[batch, seq_len, hidden_size])
-           │
-           └─> (Optional) Pooler(Dense + Tanh on [CLS] token)
-                               │
-                               ▼
-                         Pooled Output (shape=[batch, hidden_size])
+    Output Dictionary {
+        "last_hidden_state": [batch, seq_len, hidden_size],
+        "attention_mask": [batch, seq_len]
+    }
     ```
 
     Args:
         vocab_size: Integer, size of the vocabulary. Defaults to 30522.
-        hidden_size: Integer, dimensionality of encoder layers and pooler.
-            Defaults to 768.
+        hidden_size: Integer, dimensionality of encoder layers. Defaults to 768.
         num_layers: Integer, number of hidden transformer layers. Defaults to 12.
         num_heads: Integer, number of attention heads for each attention layer.
             Defaults to 12.
@@ -232,7 +171,7 @@ class BERT(keras.Model):
         hidden_act: String, the non-linear activation function in the encoder.
             Defaults to "gelu".
         hidden_dropout_prob: Float, dropout probability for all fully connected
-            layers in embeddings, encoder, and pooler. Defaults to 0.1.
+            layers in embeddings and encoder. Defaults to 0.1.
         attention_probs_dropout_prob: Float, dropout ratio for attention
             probabilities. Defaults to 0.1.
         max_position_embeddings: Integer, maximum sequence length for positional
@@ -247,21 +186,17 @@ class BERT(keras.Model):
             Defaults to "absolute".
         use_cache: Boolean, whether to use caching in attention layers.
             Defaults to True.
-        classifier_dropout: Optional float, dropout for final classifier head.
-            Defaults to None.
         normalization_type: String, type of normalization layer.
             Defaults to "layer_norm".
         normalization_position: String, position of normalization ('pre' or 'post').
             Defaults to "post".
         attention_type: String, type of attention mechanism.
-            Defaults to "multi_head_attention".
+            Defaults to "multi_head".
         ffn_type: String, type of feed-forward network. Defaults to "mlp".
         use_stochastic_depth: Boolean, whether to enable stochastic depth.
             Defaults to False.
         stochastic_depth_rate: Float, drop path rate for stochastic depth.
             Defaults to 0.1.
-        add_pooling_layer: Boolean, whether to add a pooling layer.
-            Defaults to True.
         **kwargs: Additional keyword arguments for the `keras.Model` base class.
 
     Input shape:
@@ -272,37 +207,37 @@ class BERT(keras.Model):
         - `position_ids`: (Optional) 2D tensor, shape `(batch_size, sequence_length)`.
 
     Output shape:
-        - If `add_pooling_layer=False`: A single tensor of shape
-          `(batch_size, sequence_length, hidden_size)`.
-        - If `add_pooling_layer=True`: A tuple `(sequence_output, pooled_output)`.
-        - If `return_dict=True`: A dictionary with keys `last_hidden_state`
-          and optionally `pooler_output`.
+        A dictionary containing:
+        - `last_hidden_state`: Tensor of shape `(batch_size, sequence_length, hidden_size)`.
+        - `attention_mask`: The input `attention_mask` passed through, for downstream convenience.
 
     Attributes:
         embeddings: The embedding layer instance.
         encoder_layers: A list of `TransformerLayer` instances.
-        pooler: The pooling layer instance (if `add_pooling_layer` is True).
 
     Raises:
         ValueError: If invalid configuration parameters are provided.
 
     Example:
         >>> # Create standard BERT-base model
-        >>> model = BERT.from_variant("base", add_pooling_layer=True)
+        >>> model = BERT.from_variant("base")
         >>>
         >>> # Create BERT with advanced features
-        >>> config = create_bert_with_advanced_features("base", normalization_type="rms_norm")
-        >>> model = BERT(**config)
+        >>> model = BERT.from_variant("large", normalization_type="rms_norm")
         >>>
         >>> # Use the model
-        >>> input_ids = keras.random.uniform((2, 128), 0, 30522, dtype="int32")
-        >>> sequence_output, pooled_output = model(input_ids)
+        >>> inputs = {
+        ...     "input_ids": keras.random.uniform((2, 128), 0, 30522, dtype="int32"),
+        ...     "attention_mask": keras.ops.ones((2, 128), dtype="int32")
+        ... }
+        >>> outputs = model(inputs)
+        >>> print(outputs["last_hidden_state"].shape)
+        (2, 128, 1024)
     """
 
     # Model variant configurations following BERT paper specifications
     MODEL_VARIANTS = {
         "base": {
-            "vocab_size": 30522,
             "hidden_size": 768,
             "num_layers": 12,
             "num_heads": 12,
@@ -310,7 +245,6 @@ class BERT(keras.Model):
             "description": "BERT-Base: 110M parameters, suitable for most applications"
         },
         "large": {
-            "vocab_size": 30522,
             "hidden_size": 1024,
             "num_layers": 24,
             "num_heads": 16,
@@ -318,7 +252,6 @@ class BERT(keras.Model):
             "description": "BERT-Large: 340M parameters, maximum performance"
         },
         "small": {
-            "vocab_size": 30522,
             "hidden_size": 512,
             "num_layers": 6,
             "num_heads": 8,
@@ -326,7 +259,6 @@ class BERT(keras.Model):
             "description": "BERT-Small: Lightweight variant for resource-constrained environments"
         },
         "tiny": {
-            "vocab_size": 30522,
             "hidden_size": 256,
             "num_layers": 4,
             "num_heads": 4,
@@ -335,7 +267,8 @@ class BERT(keras.Model):
         },
     }
 
-    # Architecture constants following BERT specifications
+    # Default architecture constants
+    DEFAULT_VOCAB_SIZE = 30522
     DEFAULT_MAX_POSITION_EMBEDDINGS = 512
     DEFAULT_TYPE_VOCAB_SIZE = 2
     DEFAULT_INITIALIZER_RANGE = 0.02
@@ -345,31 +278,30 @@ class BERT(keras.Model):
 
     def __init__(
         self,
-        vocab_size: int = 30522,
+        vocab_size: int = DEFAULT_VOCAB_SIZE,
         hidden_size: int = 768,
         num_layers: int = 12,
         num_heads: int = 12,
         intermediate_size: int = 3072,
-        hidden_act: str = "gelu",
+        hidden_act: str = DEFAULT_HIDDEN_ACT,
         hidden_dropout_prob: float = 0.1,
         attention_probs_dropout_prob: float = 0.1,
-        max_position_embeddings: int = 512,
-        type_vocab_size: int = 2,
-        initializer_range: float = 0.02,
-        layer_norm_eps: float = 1e-12,
-        pad_token_id: int = 0,
+        max_position_embeddings: int = DEFAULT_MAX_POSITION_EMBEDDINGS,
+        type_vocab_size: int = DEFAULT_TYPE_VOCAB_SIZE,
+        initializer_range: float = DEFAULT_INITIALIZER_RANGE,
+        layer_norm_eps: float = DEFAULT_LAYER_NORM_EPSILON,
+        pad_token_id: int = DEFAULT_PAD_TOKEN_ID,
         position_embedding_type: str = "absolute",
         use_cache: bool = True,
-        classifier_dropout: Optional[float] = None,
-        normalization_type: str = "layer_norm",
-        normalization_position: str = "post",
-        attention_type: str = "multi_head",
-        ffn_type: str = "mlp",
+        normalization_type: NormalizationType = "layer_norm",
+        normalization_position: NormalizationPosition = "post",
+        attention_type: AttentionType = "multi_head",
+        ffn_type: FFNType = "mlp",
         use_stochastic_depth: bool = False,
         stochastic_depth_rate: float = 0.1,
-        add_pooling_layer: bool = True,
         **kwargs: Any
     ) -> None:
+        super().__init__(**kwargs)
 
         # Validate configuration parameters
         self._validate_config(
@@ -393,30 +325,19 @@ class BERT(keras.Model):
         self.pad_token_id = pad_token_id
         self.position_embedding_type = position_embedding_type
         self.use_cache = use_cache
-        self.classifier_dropout = classifier_dropout
         self.normalization_type = normalization_type
         self.normalization_position = normalization_position
         self.attention_type = attention_type
         self.ffn_type = ffn_type
         self.use_stochastic_depth = use_stochastic_depth
         self.stochastic_depth_rate = stochastic_depth_rate
-        self.add_pooling_layer = add_pooling_layer
-
-        # Initialize layer containers
-        self.encoder_layers: List[TransformerLayer] = []
-        self.embeddings: Optional[BertEmbeddings] = None
-        self.pooler: Optional[keras.layers.Dense] = None
 
         # Build the model architecture
         self._build_architecture()
 
-        # Initialize the Model base class
-        super().__init__(**kwargs)
-
         logger.info(
-            f"Created BERT model: {self.num_layers} layers, "
-            f"hidden_size={self.hidden_size}, heads={self.num_heads}, "
-            f"pooling={self.add_pooling_layer}"
+            f"Created BERT foundation model: {self.num_layers} layers, "
+            f"hidden_size={self.hidden_size}, heads={self.num_heads}"
         )
 
     def _validate_config(
@@ -428,19 +349,7 @@ class BERT(keras.Model):
         hidden_dropout_prob: float,
         attention_probs_dropout_prob: float
     ) -> None:
-        """Validate model configuration parameters.
-
-        Args:
-            vocab_size: Vocabulary size to validate
-            hidden_size: Hidden dimension size to validate
-            num_layers: Number of layers to validate
-            num_heads: Number of attention heads to validate
-            hidden_dropout_prob: Hidden dropout rate to validate
-            attention_probs_dropout_prob: Attention dropout rate to validate
-
-        Raises:
-            ValueError: If any configuration parameter is invalid
-        """
+        """Validate model configuration parameters."""
         if vocab_size <= 0:
             raise ValueError(f"vocab_size must be positive, got {vocab_size}")
         if hidden_size <= 0:
@@ -465,9 +374,7 @@ class BERT(keras.Model):
             )
 
     def _build_architecture(self) -> None:
-        """Build all model components following modern Keras 3 patterns."""
-
-        # Create embeddings layer
+        """Build all model components."""
         self.embeddings = BertEmbeddings(
             vocab_size=self.vocab_size,
             hidden_size=self.hidden_size,
@@ -480,8 +387,7 @@ class BERT(keras.Model):
             name="embeddings"
         )
 
-        # Create transformer encoder layers
-        self.encoder_layers = []
+        self.encoder_layers: List[TransformerLayer] = []
         for i in range(self.num_layers):
             transformer_layer = TransformerLayer(
                 hidden_size=self.hidden_size,
@@ -505,17 +411,6 @@ class BERT(keras.Model):
             )
             self.encoder_layers.append(transformer_layer)
 
-        # Create pooler if needed
-        if self.add_pooling_layer:
-            self.pooler = keras.layers.Dense(
-                units=self.hidden_size,
-                activation="tanh",
-                kernel_initializer=keras.initializers.TruncatedNormal(
-                    stddev=self.initializer_range
-                ),
-                name="pooler"
-            )
-
     def call(
         self,
         inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
@@ -523,14 +418,9 @@ class BERT(keras.Model):
         token_type_ids: Optional[keras.KerasTensor] = None,
         position_ids: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None,
-        return_dict: bool = False
-    ) -> Union[
-        keras.KerasTensor,
-        Tuple[keras.KerasTensor, keras.KerasTensor],
-        Dict[str, keras.KerasTensor]
-    ]:
+    ) -> Dict[str, keras.KerasTensor]:
         """
-        Forward pass of the BERT model.
+        Forward pass of the BERT foundation model.
 
         Args:
             inputs: Input token IDs or dictionary containing multiple inputs.
@@ -538,19 +428,17 @@ class BERT(keras.Model):
             token_type_ids: Token type IDs for distinguishing sequences.
             position_ids: Position IDs for positional embeddings.
             training: Boolean, whether the model is in training mode.
-            return_dict: Boolean, whether to return outputs as a dictionary.
 
         Returns:
-            Model outputs. The format depends on `return_dict` and `add_pooling_layer`:
-            - `return_dict=False`, no pooling: `sequence_output` tensor.
-            - `return_dict=False`, with pooling: `(sequence_output, pooled_output)` tuple.
-            - `return_dict=True`: Dictionary with keys `last_hidden_state` and
-              (if pooling) `pooler_output`.
+            A dictionary with the following keys:
+            - `last_hidden_state`: The sequence of hidden states at the output
+              of the final layer. Shape: `(batch, seq_len, hidden_size)`.
+            - `attention_mask`: The original attention mask, passed through for
+              convenience in downstream models.
 
         Raises:
             ValueError: If inputs are not properly formatted.
         """
-        # Parse inputs
         if isinstance(inputs, dict):
             input_ids = inputs.get("input_ids")
             if input_ids is None:
@@ -561,7 +449,6 @@ class BERT(keras.Model):
         else:
             input_ids = inputs
 
-        # Get embeddings
         embedding_output = self.embeddings(
             input_ids=input_ids,
             token_type_ids=token_type_ids,
@@ -569,64 +456,34 @@ class BERT(keras.Model):
             training=training
         )
 
-        # Pass through encoder layers
         hidden_states = embedding_output
         for i, encoder_layer in enumerate(self.encoder_layers):
             hidden_states = encoder_layer(
                 hidden_states,
                 attention_mask=attention_mask,
-                layer_idx=i,  # For differential attention compatibility
+                layer_idx=i,
                 training=training
             )
 
-        sequence_output = hidden_states
-
-        # Apply pooling if available
-        pooled_output = None
-        if self.pooler is not None:
-            # Pool the representation of the first token (CLS token)
-            first_token_tensor = sequence_output[:, 0]
-            pooled_output = self.pooler(first_token_tensor)
-
-        # Return in requested format
-        if return_dict:
-            outputs = {"last_hidden_state": sequence_output}
-            if pooled_output is not None:
-                outputs["pooler_output"] = pooled_output
-            return outputs
-        else:
-            if pooled_output is not None:
-                return sequence_output, pooled_output
-            else:
-                return sequence_output
+        return {
+            "last_hidden_state": hidden_states,
+            "attention_mask": attention_mask
+        }
 
     @classmethod
-    def from_variant(
-        cls,
-        variant: str,
-        add_pooling_layer: bool = True,
-        **kwargs: Any
-    ) -> "BERT":
+    def from_variant(cls, variant: str, **kwargs: Any) -> "BERT":
         """
         Create a BERT model from a predefined variant.
 
         Args:
-            variant: String, one of "base", "large", "small", "tiny"
-            add_pooling_layer: Boolean, whether to add pooling layer
-            **kwargs: Additional arguments passed to the constructor
+            variant: String, one of "base", "large", "small", "tiny".
+            **kwargs: Additional arguments to override the variant's defaults.
 
         Returns:
-            BERT model instance
+            A BERT model instance.
 
         Raises:
-            ValueError: If variant is not recognized
-
-        Example:
-            >>> # Create BERT-Base model
-            >>> model = BERT.from_variant("base", add_pooling_layer=True)
-            >>>
-            >>> # Create BERT-Large with advanced features
-            >>> model = BERT.from_variant("large", normalization_type="rms_norm")
+            ValueError: If variant is not recognized.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -635,16 +492,15 @@ class BERT(keras.Model):
             )
 
         config = cls.MODEL_VARIANTS[variant].copy()
-        config.pop("description", None)  # Remove description field
+        description = config.pop("description", "")
 
         logger.info(f"Creating BERT-{variant.upper()} model")
-        logger.info(f"Configuration: {cls.MODEL_VARIANTS[variant]['description']}")
+        logger.info(f"Configuration: {description}")
 
-        return cls(
-            add_pooling_layer=add_pooling_layer,
-            **config,
-            **kwargs
-        )
+        # Override defaults with kwargs
+        config.update(kwargs)
+
+        return cls(**config)
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""
@@ -665,250 +521,122 @@ class BERT(keras.Model):
             "pad_token_id": self.pad_token_id,
             "position_embedding_type": self.position_embedding_type,
             "use_cache": self.use_cache,
-            "classifier_dropout": self.classifier_dropout,
             "normalization_type": self.normalization_type,
             "normalization_position": self.normalization_position,
             "attention_type": self.attention_type,
             "ffn_type": self.ffn_type,
             "use_stochastic_depth": self.use_stochastic_depth,
             "stochastic_depth_rate": self.stochastic_depth_rate,
-            "add_pooling_layer": self.add_pooling_layer,
         })
         return config
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "BERT":
-        """Create model from configuration.
-
-        Args:
-            config: Configuration dictionary
-
-        Returns:
-            BERT model instance
-        """
+        """Create model from configuration."""
         return cls(**config)
 
     def summary(self, **kwargs) -> None:
         """Print model summary with additional BERT-specific information."""
         super().summary(**kwargs)
-
-        # Print additional model information
-        total_blocks = self.num_layers
-        hidden_params = self.hidden_size * self.num_heads
-
-        logger.info("BERT Model Configuration:")
+        logger.info("BERT Foundation Model Configuration:")
         logger.info(f"  - Architecture: {self.num_layers} layers, {self.hidden_size} hidden size")
         logger.info(f"  - Attention: {self.num_heads} heads, {self.attention_type}")
         logger.info(f"  - Vocabulary: {self.vocab_size} tokens")
         logger.info(f"  - Max sequence length: {self.max_position_embeddings}")
         logger.info(f"  - Normalization: {self.normalization_type} ({self.normalization_position})")
         logger.info(f"  - Feed-forward: {self.ffn_type}, {self.intermediate_size} intermediate size")
-        logger.info(f"  - Regularization: dropout={self.hidden_dropout_prob}")
         if self.use_stochastic_depth:
-            logger.info(f"  - Stochastic depth: {self.stochastic_depth_rate}")
-        logger.info(f"  - Pooling layer: {self.add_pooling_layer}")
-        logger.info(f"  - Total transformer blocks: {total_blocks}")
+            logger.info(f"  - Stochastic depth enabled: rate={self.stochastic_depth_rate}")
+
 
 # ---------------------------------------------------------------------
-# Factory Functions
+# Integration with NLP Task Heads
 # ---------------------------------------------------------------------
 
 
-def create_bert_for_classification(
-    config: Dict[str, Any],
-    num_labels: int,
-    classifier_dropout: Optional[float] = None
+def create_bert_with_head(
+    bert_variant: str,
+    task_config: NLPTaskConfig,
+    bert_config_overrides: Optional[Dict[str, Any]] = None,
+    head_config_overrides: Optional[Dict[str, Any]] = None,
 ) -> keras.Model:
     """
-    Create a BERT model for sequence classification tasks.
+    Factory function to create a complete BERT model with a task-specific head.
 
-    This function builds a complete model by adding a classification head on top
-    of the pooled output of a BERT model.
+    This function demonstrates the intended integration pattern:
+    1. Instantiate a foundational `BERT` model.
+    2. Instantiate a task-specific head from the `dl_techniques.nlp.heads` factory.
+    3. Combine them into a single, end-to-end `keras.Model`.
 
     Args:
-        config: Dictionary containing BERT model hyperparameters.
-        num_labels: Integer, the number of classification labels.
-        classifier_dropout: Optional float, dropout rate for the classifier head.
-            If None, uses the dropout rate from the config dictionary.
+        bert_variant: String, the BERT variant to use (e.g., "base", "large").
+        task_config: An `NLPTaskConfig` object defining the downstream task.
+        bert_config_overrides: Optional dictionary to override default BERT
+            configuration for the chosen variant.
+        head_config_overrides: Optional dictionary to override default head
+            configuration.
 
     Returns:
-        A complete `keras.Model` for sequence classification.
-
-    Raises:
-        ValueError: If num_labels is not positive or config is invalid.
+        A complete `keras.Model` ready for training or inference on a specific task.
 
     Example:
-        >>> config = create_bert_base_uncased()
-        >>> model = create_bert_for_classification(config, num_labels=2)
-        >>> model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
+        >>> from dl_techniques.layers.nlp_heads import NLPTaskType
+        >>> # Define a task
+        >>> ner_task = NLPTaskConfig(
+        ...     name="ner",
+        ...     task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
+        ...     num_classes=9
+        ... )
+        >>> # Create the full model
+        >>> ner_model = create_bert_with_head(
+        ...     bert_variant="base",
+        ...     task_config=ner_task,
+        ...     head_config_overrides={"use_task_attention": True}
+        ... )
+        >>> ner_model.summary()
     """
-    if num_labels <= 0:
-        raise ValueError(f"num_labels must be positive, got {num_labels}")
+    bert_config_overrides = bert_config_overrides or {}
+    head_config_overrides = head_config_overrides or {}
 
-    logger.info(f"Creating BERT classification model with {num_labels} labels")
+    logger.info(f"Creating BERT-{bert_variant} with a '{task_config.name}' head.")
 
-    # Create base BERT model with pooling
-    bert = BERT(**config, add_pooling_layer=True, name="bert")
+    # 1. Create the foundational BERT model
+    bert_encoder = BERT.from_variant(bert_variant, **bert_config_overrides)
 
-    # Define inputs using Keras Functional API
-    input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
-    attention_mask = keras.Input(shape=(None,), dtype="int32", name="attention_mask")
-    token_type_ids = keras.Input(shape=(None,), dtype="int32", name="token_type_ids")
-
-    # Get BERT outputs
-    bert_outputs = bert(
-        inputs={
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "token_type_ids": token_type_ids,
-        },
-        return_dict=True
+    # 2. Create the task head
+    task_head = create_nlp_head(
+        task_config=task_config,
+        input_dim=bert_encoder.hidden_size,
+        **head_config_overrides,
     )
 
-    # Classification head
-    pooled_output = bert_outputs["pooler_output"]
+    # 3. Define inputs and build the end-to-end model
+    inputs = {
+        "input_ids": keras.Input(shape=(None,), dtype="int32", name="input_ids"),
+        "attention_mask": keras.Input(shape=(None,), dtype="int32", name="attention_mask"),
+        "token_type_ids": keras.Input(shape=(None,), dtype="int32", name="token_type_ids"),
+    }
 
-    # Apply classifier dropout
-    final_dropout_rate = classifier_dropout
-    if final_dropout_rate is None:
-        final_dropout_rate = (
-            config.get("classifier_dropout") or config.get("hidden_dropout_prob", 0.1)
-        )
+    # Get hidden states from the encoder
+    encoder_outputs = bert_encoder(inputs)
 
-    if final_dropout_rate > 0.0:
-        pooled_output = keras.layers.Dropout(
-            final_dropout_rate,
-            name="classifier_dropout"
-        )(pooled_output)
-
-    # Final classification layer
-    logits = keras.layers.Dense(
-        units=num_labels,
-        kernel_initializer=keras.initializers.TruncatedNormal(
-            stddev=config.get("initializer_range", 0.02)
-        ),
-        name="classifier"
-    )(pooled_output)
+    # Pass encoder outputs to the task head
+    # The head expects a dictionary with 'hidden_states' (and optionally 'attention_mask')
+    head_inputs = {
+        "hidden_states": encoder_outputs["last_hidden_state"],
+        "attention_mask": encoder_outputs["attention_mask"],
+    }
+    task_outputs = task_head(head_inputs)
 
     # Create the final model
     model = keras.Model(
-        inputs=[input_ids, attention_mask, token_type_ids],
-        outputs=logits,
-        name="bert_for_classification"
+        inputs=inputs,
+        outputs=task_outputs,
+        name=f"bert_{bert_variant}_with_{task_config.name}_head"
     )
 
-    logger.info(
-        f"Created BERT classification model with {model.count_params()} parameters"
-    )
-    return model
-
-# ---------------------------------------------------------------------
-# Factory functions
-# ---------------------------------------------------------------------
-
-def create_bert_for_sequence_output(
-    config: Dict[str, Any]
-) -> keras.Model:
-    """
-    Create a BERT model for sequence-level output tasks.
-
-    This function builds a BERT model that outputs sequence representations,
-    suitable for tasks like token classification or question answering.
-
-    Args:
-        config: Dictionary containing BERT model hyperparameters.
-
-    Returns:
-        A `keras.Model` that returns sequence-level representations.
-
-    Example:
-        >>> config = create_bert_base_uncased()
-        >>> model = create_bert_for_sequence_output(config)
-        >>>
-        >>> # For token classification, add a classification head
-        >>> num_tags = 9  # e.g., for NER
-        >>> sequence_output = model.output
-        >>> logits = keras.layers.Dense(num_tags)(sequence_output)
-        >>> token_classifier = keras.Model(model.input, logits)
-    """
-    logger.info("Creating BERT model for sequence output tasks")
-
-    # Create base BERT model without pooling
-    bert = BERT(**config, add_pooling_layer=False, name="bert")
-
-    # Define inputs
-    input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
-    attention_mask = keras.Input(shape=(None,), dtype="int32", name="attention_mask")
-    token_type_ids = keras.Input(shape=(None,), dtype="int32", name="token_type_ids")
-
-    # Get BERT sequence output
-    sequence_output = bert(
-        inputs={
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "token_type_ids": token_type_ids,
-        }
-    )
-
-    # Create the final model
-    model = keras.Model(
-        inputs=[input_ids, attention_mask, token_type_ids],
-        outputs=sequence_output,
-        name="bert_for_sequence_output"
-    )
-
-    logger.info(
-        f"Created BERT sequence model with {model.count_params()} parameters"
-    )
+    logger.info(f"Successfully created model with {model.count_params():,} parameters.")
     return model
 
 # ---------------------------------------------------------------------
 
-def create_bert(
-    variant: str = "base",
-    num_classes: Optional[int] = None,
-    task_type: str = "classification",
-    **kwargs: Any
-) -> keras.Model:
-    """
-    Convenience function to create BERT models for common tasks.
-
-    Args:
-        variant: String, model variant ("base", "large", "small", "tiny")
-        num_classes: Optional integer, number of classes for classification tasks
-        task_type: String, type of task ("classification", "sequence_output")
-        **kwargs: Additional arguments passed to the model constructor
-
-    Returns:
-        BERT model instance configured for the specified task
-
-    Raises:
-        ValueError: If invalid task_type or missing num_classes for classification
-
-    Example:
-        >>> # Create classification model
-        >>> model = create_bert("base", num_classes=2, task_type="classification")
-        >>>
-        >>> # Create sequence output model
-        >>> model = create_bert("base", task_type="sequence_output")
-    """
-    # Get base configuration
-    if variant in BERT.MODEL_VARIANTS:
-        config = BERT.MODEL_VARIANTS[variant].copy()
-        config.pop("description", None)
-    else:
-        raise ValueError(f"Unknown variant: {variant}")
-
-    # Update with any additional kwargs
-    config.update(kwargs)
-
-    if task_type == "classification":
-        if num_classes is None:
-            raise ValueError("num_classes must be provided for classification task")
-        return create_bert_for_classification(config, num_classes)
-    elif task_type == "sequence_output":
-        return create_bert_for_sequence_output(config)
-    else:
-        raise ValueError(f"Unknown task_type: {task_type}")
-
-# ---------------------------------------------------------------------

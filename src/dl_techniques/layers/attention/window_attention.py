@@ -8,7 +8,7 @@ within each window, reducing computational complexity while maintaining effectiv
 ## Conceptual Overview
 
 Standard transformer attention computes relationships between all pairs of tokens in a sequence,
-leading to quadratic complexity O(N²) where N is the sequence length. For vision_heads tasks with
+leading to quadratic complexity O(N²) where N is the sequence length. For vision tasks with
 high-resolution images, this becomes computationally prohibitive as the number of patches grows.
 
 WindowAttention addresses this by:
@@ -152,7 +152,7 @@ class WindowAttention(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validation
+        # --- Validation ---
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
         if window_size <= 0:
@@ -166,129 +166,79 @@ class WindowAttention(keras.layers.Layer):
         if not (0.0 <= proj_dropout_rate <= 1.0):
             raise ValueError(f"proj_dropout_rate must be between 0.0 and 1.0, got {proj_dropout_rate}")
 
-        # Store ALL configuration parameters
+        # --- Store ALL configuration parameters ---
         self.dim = dim
         self.window_size = window_size
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        self.qk_scale = qk_scale  # Store original parameter
+        self.qk_scale = qk_scale
         self.scale = qk_scale if qk_scale is not None else self.head_dim ** -0.5
         self.qkv_bias = qkv_bias
         self.proj_bias = proj_bias
         self.attn_dropout_rate = attn_dropout_rate
         self.proj_dropout_rate = proj_dropout_rate
-
-        # Store initializers and regularizers
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
+        # --- CREATE all sub-layers in __init__ (unbuilt) ---
         self.qkv = keras.layers.Dense(
-            self.dim * 3,
-            use_bias=self.qkv_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
+            self.dim * 3, use_bias=self.qkv_bias,
+            kernel_initializer=self.kernel_initializer, bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer, bias_regularizer=self.bias_regularizer,
             name="qkv"
         )
-
         self.proj = keras.layers.Dense(
-            self.dim,
-            use_bias=self.proj_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
+            self.dim, use_bias=self.proj_bias,
+            kernel_initializer=self.kernel_initializer, bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer, bias_regularizer=self.bias_regularizer,
             name="proj"
         )
+        self.attn_dropout = (
+            keras.layers.Dropout(self.attn_dropout_rate, name="attn_dropout")
+            if self.attn_dropout_rate > 0.0 else None
+        )
+        self.proj_dropout = (
+            keras.layers.Dropout(self.proj_dropout_rate, name="proj_dropout")
+            if self.proj_dropout_rate > 0.0 else None
+        )
 
-        # Create dropout layers if needed
-        self.attn_dropout = None
-        if self.attn_dropout_rate > 0.0:
-            self.attn_dropout = keras.layers.Dropout(
-                self.attn_dropout_rate,
-                name="attn_dropout"
-            )
-
-        self.proj_dropout = None
-        if self.proj_dropout_rate > 0.0:
-            self.proj_dropout = keras.layers.Dropout(
-                self.proj_dropout_rate,
-                name="proj_dropout"
-            )
-
-        # Initialize weight attributes - created in build()
-        self.relative_position_bias_table = None
-        self.relative_position_index = None
-
-    def _create_relative_position_index(self) -> None:
-        """Create relative position index for relative position bias.
-
-        This creates a lookup table that maps each pair of positions within
-        a window to their relative position bias index.
-        """
-        # Get pair-wise relative position index
-        coords_h = ops.arange(0, self.window_size, dtype="int32")
-        coords_w = ops.arange(0, self.window_size, dtype="int32")
-        coords = ops.stack(ops.meshgrid(coords_h, coords_w, indexing="ij"))  # 2, Wh, Ww
-        coords_flatten = ops.reshape(coords, (2, -1))  # 2, Wh*Ww
-
-        # Compute relative coordinates
-        relative_coords = (
-            ops.expand_dims(coords_flatten, 2) -
-            ops.expand_dims(coords_flatten, 1)
-        )  # 2, Wh*Ww, Wh*Ww
-        relative_coords = ops.transpose(relative_coords, (1, 2, 0))  # Wh*Ww, Wh*Ww, 2
-
-        # Shift relative coordinates to make them positive
+        # --- Pre-compute constant state in __init__ ---
+        coords_h = ops.arange(self.window_size, dtype="int32")
+        coords_w = ops.arange(self.window_size, dtype="int32")
+        coords = ops.stack(ops.meshgrid(coords_h, coords_w, indexing="ij"))
+        coords_flatten = ops.reshape(coords, (2, -1))
+        relative_coords = ops.expand_dims(coords_flatten, 2) - ops.expand_dims(coords_flatten, 1)
+        relative_coords = ops.transpose(relative_coords, (1, 2, 0))
         relative_coords_h = relative_coords[:, :, 0] + self.window_size - 1
         relative_coords_w = relative_coords[:, :, 1] + self.window_size - 1
-        relative_coords_h = relative_coords_h * (2 * self.window_size - 1)
-        relative_position_index = relative_coords_h + relative_coords_w
-
-        self.relative_position_index = relative_position_index
+        relative_coords_h *= (2 * self.window_size - 1)
+        self._relative_position_index_content = relative_coords_h + relative_coords_w
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer and all its sub-layers.
-
-        This method creates the layer's own weights (relative position bias table)
-        and explicitly builds all sub-layers for robust serialization.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
-        """
-        # Build sub-layers explicitly (critical for serialization)
-        self.qkv.build(input_shape)
-
-        # Compute qkv output shape for proj layer building
-        qkv_output_shape = self.qkv.compute_output_shape(input_shape)
-        # proj takes the same input shape as original input (after attention computation)
-        self.proj.build(input_shape)
-
-        # Build dropout layers if they exist
-        if self.attn_dropout is not None:
-            # Attention dropout operates on attention weights: (B, num_heads, N, N)
-            attn_shape = (input_shape[0], self.num_heads, input_shape[1], input_shape[1])
-            self.attn_dropout.build(attn_shape)
-
-        if self.proj_dropout is not None:
-            # Projection dropout operates on the same shape as input
-            self.proj_dropout.build(input_shape)
-
-        # Create the layer's own weights (relative position bias table)
-        num_relative_distance = (2 * self.window_size - 1) * (2 * self.window_size - 1)
+        """Build the layer, its weights, and all its sub-layers."""
+        # --- CREATE the layer's own weights ---
+        num_relative_positions = (2 * self.window_size - 1) ** 2
         self.relative_position_bias_table = self.add_weight(
             name="relative_position_bias_table",
-            shape=(num_relative_distance, self.num_heads),
+            shape=(num_relative_positions, self.num_heads),
             initializer=keras.initializers.TruncatedNormal(stddev=0.02),
             trainable=True
         )
+        # --- CREATE non-trainable state (buffer) initialized with pre-computed content ---
+        self.relative_position_index = self.add_weight(
+            name="relative_position_index",
+            shape=self._relative_position_index_content.shape,
+            dtype="int32",
+            initializer=keras.initializers.Constant(self._relative_position_index_content),
+            trainable=False
+        )
 
-        # Create relative position index (non-trainable)
-        self._create_relative_position_index()
+        # --- Explicitly BUILD all sub-layers ---
+        self.qkv.build(input_shape)
+        self.proj.build(input_shape)
+        # Dropout layers are built automatically on first call, but explicit build is fine too.
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -299,35 +249,15 @@ class WindowAttention(keras.layers.Layer):
             attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass of the WindowAttention layer.
-
-        Args:
-            inputs: Input tensor of shape (B, N, C) where N = window_size * window_size.
-            attention_mask: Optional attention mask of shape (B, N) to hide padded tokens.
-                  Values should be 1 for tokens to attend to and 0 for padded tokens.
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
-
-        Returns:
-            Output tensor of shape (B, N, C).
-        """
-        B = ops.shape(inputs)[0]
-        N = ops.shape(inputs)[1]
-        C = ops.shape(inputs)[2]
-
-        expected_n = self.window_size * self.window_size
-        if N != expected_n:
-            raise ValueError(
-                f"Input sequence length ({N}) does not match the square of the window_size "
-                f"({self.window_size}^2 = {expected_n})."
-            )
+        """Forward pass of the WindowAttention layer."""
+        B, N, C = ops.shape(inputs)
 
         qkv = self.qkv(inputs, training=training)
         qkv = ops.reshape(qkv, (B, N, 3, self.num_heads, self.head_dim))
         qkv = ops.transpose(qkv, (2, 0, 3, 1, 4))
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        q = q * self.scale
+        q *= self.scale
         attn = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2)))
 
         relative_position_bias = ops.take(
@@ -336,69 +266,43 @@ class WindowAttention(keras.layers.Layer):
             axis=0
         )
         relative_position_bias = ops.reshape(
-            relative_position_bias,
-            (expected_n, expected_n, -1)
+            relative_position_bias, (N, N, -1)
         )
         relative_position_bias = ops.transpose(relative_position_bias, (2, 0, 1))
-        attn = attn + ops.expand_dims(relative_position_bias, 0)
+        attn += ops.expand_dims(relative_position_bias, 0)
 
-        # >>> START OF MASKING LOGIC
         if attention_mask is not None:
-            # Reshape mask for broadcasting: (B, N) -> (B, 1, 1, N)
-            # This will be broadcast across heads and query positions
             broadcast_mask = ops.reshape(attention_mask, (B, 1, 1, N))
-
-            # Create the additive mask: 0 for valid tokens, a large negative number for masked ones
-            # Keras ops doesn't have a direct equivalent of -np.inf, so we use a large negative value
-            # from the dtype of the attention scores.
             inf = ops.convert_to_tensor(-1e9, dtype=attn.dtype)
-            additive_mask = (1.0 - broadcast_mask) * inf
-
-            # Add the mask to the attention scores
-            attn = attn + additive_mask
-        # <<< END OF MASKING LOGIC
+            additive_mask = (1.0 - ops.cast(broadcast_mask, dtype=attn.dtype)) * inf
+            attn += additive_mask
 
         attn = ops.softmax(attn, axis=-1)
         if self.attn_dropout is not None:
             attn = self.attn_dropout(attn, training=training)
 
-        inputs = ops.matmul(attn, v)
-        inputs = ops.transpose(inputs, (0, 2, 1, 3))
-        inputs = ops.reshape(inputs, (B, N, C))
+        x = ops.matmul(attn, v)
+        x = ops.transpose(x, (0, 2, 1, 3))
+        x = ops.reshape(x, (B, N, C))
 
-        inputs = self.proj(inputs, training=training)
+        x = self.proj(x, training=training)
         if self.proj_dropout is not None:
-            inputs = self.proj_dropout(inputs, training=training)
+            x = self.proj_dropout(x, training=training)
 
-        return inputs
+        return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Output shape tuple. Same as input shape for attention layers.
-        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Returns the layer configuration for serialization.
-
-        This method returns ALL configuration parameters needed to recreate
-        the layer, following modern Keras 3 serialization practices.
-
-        Returns:
-            Dictionary containing the layer configuration.
-        """
+        """Returns the layer configuration for serialization."""
         config = super().get_config()
         config.update({
             "dim": self.dim,
             "window_size": self.window_size,
             "num_heads": self.num_heads,
             "qkv_bias": self.qkv_bias,
-            "qk_scale": self.qk_scale,  # Store original parameter, not computed scale
+            "qk_scale": self.qk_scale,
             "attn_dropout_rate": self.attn_dropout_rate,
             "proj_dropout_rate": self.proj_dropout_rate,
             "proj_bias": self.proj_bias,
