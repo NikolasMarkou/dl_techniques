@@ -766,7 +766,7 @@ def main():
     parser.add_argument('--variant', type=str, default='cifar10',
                         choices=['cifar10', 'tiny', 'small', 'base', 'large', 'xlarge'], help='Model variant')
     parser.add_argument('--kernel-size', type=int, default=7, help='Depthwise kernel size')
-    parser.add_argument('--strides', type=int, default=2, help='Downsampling strides')
+    parser.add_argument('--strides', type=int, default=4, help='Downsampling strides')
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
