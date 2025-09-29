@@ -6,21 +6,19 @@ This document provides a comprehensive guide to using the `visualization` framew
 
 1.  [Core Concepts](#core-concepts)
 2.  [Quick Start](#quick-start)
-3.  [Visualization Cookbook](#visualization-cookbook)
-    *   [Visualizing Training and Performance](#visualizing-training-and-performance)
+3.  [Available Visualizations and Options](#available-visualizations-and-options)
+    *   [Training and Performance](#training-and-performance)
+    *   [Classification Analysis](#classification-analysis)
+    *   [Data and Neural Network Inspection](#data-and-neural-network-inspection)
+4.  [Visualization Cookbook](#visualization-cookbook)
+    *   [Visualizing Training and Performance](#visualizing-training-and-performance-1)
     *   [Comparing Multiple Models](#comparing-multiple-models)
     *   [Analyzing Classification Results](#analyzing-classification-results)
     *   [Inspecting Neural Networks](#inspecting-neural-networks)
-4.  [Specialized Visualizations](#specialized-visualizations)
-    *   [Experiment Comparison Dashboard](#experiment-comparison-dashboard)
-    *   [Loss Landscape Visualization](#loss-landscape-visualization)
-    *   [Attention Head Visualization](#attention-head-visualization)
-    *   [Embedding Space Visualization](#embedding-space-visualization)
 5.  [Advanced Usage](#advanced-usage)
     *   [Customizing Plot Appearance](#customizing-plot-appearance)
     *   [Creating Multi-Plot Dashboards](#creating-multi-plot-dashboards)
-6.  [End-to-End Workflow Example](#end-to-end-workflow-example)
-7.  [Extending the Framework: Creating a Custom Plugin](#extending-the-framework-creating-a-custom-plugin)
+6.  [Extending the Framework: Creating a Custom Plugin](#extending-the-framework-creating-a-custom-plugin)
 
 ## Core Concepts
 
@@ -70,7 +68,168 @@ viz_manager.visualize(
 print("Visualization created successfully!")
 ```
 
-This script produces a detailed plot showing training/validation loss and accuracy curves, saved within a versioned experiment directory.
+## Available Visualizations and Options
+
+This section provides a detailed reference for all built-in visualization plugins available in the framework.
+
+### Training and Performance
+*From `training_performance.py`*
+
+---
+**`TrainingCurvesVisualization`** (`plugin_name="training_curves"`)
+- **Description**: Visualize training and validation curves for loss and multiple metrics. Can also compare curves for multiple models.
+- **Required Data**: `TrainingHistory` or `Dict[str, TrainingHistory]`.
+- **Key Options**:
+  - `metrics_to_plot: Optional[List[str]]`: List of metric names to plot (e.g., `['accuracy', 'f1_score']`). Defaults to all available metrics.
+  - `smooth_factor: float`: Exponential smoothing factor (0 to 1). `0` means no smoothing.
+  - `show_best_epoch: bool`: If `True`, marks the epoch with the best validation loss with a star.
+
+---
+**`LearningRateScheduleVisualization`** (`plugin_name="lr_schedule"`)
+- **Description**: Visualize a learning rate schedule over training epochs.
+- **Required Data**: `List[float]` or `Dict[str, List[float]]`.
+- **Key Options**:
+  - `show_phases: bool`: If `True`, shows vertical lines for phase changes.
+  - `phase_boundaries: Optional[List[int]]`: A list of epoch indices where phase boundaries should be drawn.
+
+---
+**`ModelComparisonBarChart`** (`plugin_name="model_comparison_bars"`)
+- **Description**: Compare final performance metrics of multiple models using grouped bar charts.
+- **Required Data**: `ModelComparison`.
+- **Key Options**:
+  - `metrics_to_show: Optional[List[str]]`: List of metrics to include in the chart. Defaults to all.
+  - `sort_by: Optional[str]`: Metric name to sort the models by (descending).
+  - `show_values: bool`: If `True`, displays the numeric value on top of each bar.
+
+---
+**`PerformanceRadarChart`** (`plugin_name="performance_radar"`)
+- **Description**: Compare models across multiple metrics using a radar chart to visualize trade-offs.
+- **Required Data**: `ModelComparison`.
+- **Key Options**:
+  - `metrics_to_show: Optional[List[str]]`: List of metrics to use as axes on the chart.
+  - `normalize: bool`: If `True`, normalizes each metric axis from 0 to 1 based on the best-performing model for that metric.
+
+---
+**`ConvergenceAnalysis`** (`plugin_name="convergence_analysis"`)
+- **Description**: A composite dashboard for analyzing training convergence patterns.
+- **Required Data**: `TrainingHistory` or `Dict[str, TrainingHistory]`.
+- **Subplots**: Loss Convergence, Gradient Flow, Validation Gap, Convergence Rate.
+- **Note**: For "Gradient Flow", the `TrainingHistory` object must contain a `grad_norms` dictionary with the key `"global_grad_norm"`.
+
+---
+**`OverfittingAnalysis`** (`plugin_name="overfitting_analysis"`)
+- **Description**: A dashboard for detecting and visualizing overfitting through loss curves and generalization gaps.
+- **Required Data**: `TrainingHistory` or `Dict[str, TrainingHistory]`.
+- **Key Options**:
+  - `patience: int`: Number of epochs with no improvement in validation loss before marking an epoch as the start of overfitting.
+
+---
+**`PerformanceDashboard`** (`plugin_name="performance_dashboard"`)
+- **Description**: A comprehensive dashboard summarizing the performance of multiple models.
+- **Required Data**: `ModelComparison`.
+- **Subplots**: Training Curves, Metric Comparison, Performance Heatmap, Ranking Table, Statistical Comparison.
+- **Key Options**:
+  - `metric_to_display: Optional[str]`: The specific metric to show in the "Metric Comparison" bar chart. If `None`, shows a grouped bar chart of all metrics.
+
+### Classification Analysis
+*From `classification.py`*
+
+---
+**`ConfusionMatrixVisualization`** (`plugin_name="confusion_matrix"`)
+- **Description**: Visualize a confusion matrix with detailed annotations and normalization options.
+- **Required Data**: `ClassificationResults` or `MultiModelClassification`.
+- **Key Options**:
+  - `normalize: str`: Normalization mode. Can be `'true'` (rows), `'pred'` (columns), `'all'`, or `None`.
+  - `show_percentages: bool`: If `True`, shows both the count and percentage in each cell.
+  - `cmap: str`: The matplotlib colormap to use (e.g., `'Blues'`, `'Greens'`).
+
+---
+**`ROCPRCurves`** (`plugin_name="roc_pr_curves"`)
+- **Description**: Visualize Receiver Operating Characteristic (ROC) and Precision-Recall (PR) curves.
+- **Required Data**: `ClassificationResults` or `MultiModelClassification` (data must include `y_prob`).
+- **Key Options**:
+  - `plot_type: str`: Which curves to plot. Can be `'roc'`, `'pr'`, or `'both'`.
+  - `show_thresholds: bool`: If `True`, annotates a few points on the curves with their decision thresholds.
+
+---
+**`ClassificationReportVisualization`** (`plugin_name="classification_report"`)
+- **Description**: Display a `sklearn.metrics.classification_report` as a color-coded heatmap.
+- **Required Data**: `ClassificationResults` or `MultiModelClassification`.
+- **Key Options**:
+  - `metrics: List[str]`: A list of metrics from the report to display. Defaults to `['precision', 'recall', 'f1-score']`.
+
+---
+**`PerClassAnalysis`** (`plugin_name="per_class_analysis"`)
+- **Description**: A composite dashboard for detailed per-class performance analysis.
+- **Required Data**: `ClassificationResults` or `MultiModelClassification`.
+- **Subplots**: Class Distribution, Per-Class Accuracy, Class Confusion, Hardest Examples (confidence of errors).
+
+---
+**`ErrorAnalysisDashboard`** (`plugin_name="error_analysis"`)
+- **Description**: A comprehensive dashboard for analyzing model prediction errors.
+- **Required Data**: `ClassificationResults`.
+- **Key Options**:
+  - `show_examples: bool`: If `True`, attempts to plot examples of misclassified data.
+  - `x_data: Optional[np.ndarray]`: The raw input data (e.g., images) needed for `show_examples`.
+
+### Data and Neural Network Inspection
+*From `data_nn.py`*
+
+---
+**`DataDistributionAnalysis`** (`plugin_name="data_distribution"`)
+- **Description**: Analyze and visualize the distribution of features in a dataset.
+- **Required Data**: `DatasetInfo`, `np.ndarray`, or `pd.DataFrame`.
+- **Key Options**:
+  - `features_to_plot: Optional[List[int]]`: List of feature indices to plot. Defaults to the first 12.
+  - `plot_type: str`: Type of plot. Can be `'hist'`, `'kde'`, `'box'`, `'violin'`, or `'auto'`.
+
+---
+**`ClassBalanceVisualization`** (`plugin_name="class_balance"`)
+- **Description**: Visualize class distribution and imbalance in a dataset.
+- **Required Data**: `DatasetInfo` or `Tuple[np.ndarray, np.ndarray]` (for train/test labels).
+- **Key Options**:
+  - `show_percentages: bool`: If `True`, shows percentages on the pie chart.
+
+---
+**`NetworkArchitectureVisualization`** (`plugin_name="network_architecture"`)
+- **Description**: Generate a high-level visual summary of a Keras model's layers, shapes, and parameters.
+- **Required Data**: `keras.Model`.
+- **Key Options**:
+  - `show_params: bool`: If `True`, displays the parameter count for each layer.
+  - `show_shapes: bool`: If `True`, displays the output shape for each layer.
+  - `orientation: str`: Layout of the diagram. Can be `'vertical'` or `'horizontal'`.
+
+---
+**`ActivationVisualization`** (`plugin_name="activations"`)
+- **Description**: Visualize the distribution or heatmap of activations from model layers.
+- **Required Data**: `ActivationData`.
+- **Key Options**:
+  - `layers_to_show: Optional[List[str]]`: List of layer names to visualize. Defaults to the first 6.
+  - `plot_type: str`: Type of plot. Can be `'distribution'`, `'heatmap'`, or `'stats'`.
+
+---
+**`WeightVisualization`** (`plugin_name="weights"`)
+- **Description**: Visualize the distributions, matrices, or filters of model weights.
+- **Required Data**: `WeightData` or `keras.Model`.
+- **Key Options**:
+  - `layers_to_show: Optional[List[str]]`: List of layer names to visualize.
+  - `plot_type: str`: Type of plot. Can be `'distribution'`, `'matrix'`, or `'filters'` (for Conv2D layers).
+
+---
+**`FeatureMapVisualization`** (`plugin_name="feature_maps"`)
+- **Description**: Visualize the feature maps (activations) produced by convolutional layers for a specific input sample.
+- **Required Data**: `ActivationData`.
+- **Key Options**:
+  - `sample_idx: int`: The index of the sample in the batch to visualize.
+  - `layers_to_show: Optional[List[str]]`: List of convolutional layers to show.
+  - `max_features: int`: The maximum number of feature maps to display per layer.
+
+---
+**`GradientVisualization`** (`plugin_name="gradients"`)
+- **Description**: Visualize gradient flow, distribution, and potential vanishing/exploding issues.
+- **Required Data**: `GradientData`.
+- **Key Options**:
+  - `plot_type: str`: Type of analysis. Can be `'flow'` (norm vs. layer), `'distribution'`, or `'vanishing'` (% of near-zero gradients).
 
 ## Visualization Cookbook
 
@@ -215,90 +374,6 @@ viz_manager.register_template("network_architecture", NetworkArchitectureVisuali
 viz_manager.visualize(model, plugin_name="network_architecture", show=True)
 ```
 
-## Specialized Visualizations
-
-The framework includes several advanced, specialized templates for deeper analysis.
-
-### Experiment Comparison Dashboard
-
-Compare results from multiple experimental runs, including training curves, final metrics, and hyperparameter impact.
-
-**Data Format**: A dictionary containing an `experiments` key. This key holds another dictionary where each key is an experiment name and the value contains its `history`, `final_metrics`, and `hyperparameters`.
-
-```python
-from dl_techniques.visualization import ExperimentComparisonDashboard
-# Assume `history1`, `history2` are TrainingHistory objects
-exp_data = {
-    'experiments': {
-        'exp_lr_0.01': {
-            'history': {'loss': history1.val_loss, 'val_accuracy': history1.val_metrics['accuracy']},
-            'final_metrics': {'accuracy': 0.92, 'loss': 0.15},
-            'hyperparameters': {'learning_rate': 0.01, 'batch_size': 32}
-        },
-        'exp_lr_0.001': {
-            'history': {'loss': history2.val_loss, 'val_accuracy': history2.val_metrics['accuracy']},
-            'final_metrics': {'accuracy': 0.95, 'loss': 0.11},
-            'hyperparameters': {'learning_rate': 0.001, 'batch_size': 32}
-        }
-    }
-}
-viz_manager.register_template("experiment_comparison", ExperimentComparisonDashboard)
-viz_manager.visualize(exp_data, plugin_name="experiment_comparison", show=True)
-```
-
-### Loss Landscape Visualization
-
-Visualize the loss surface around a trained model to understand properties like sharpness and flatness.
-
-**Data Format**: A dictionary containing a `landscape` key, which holds grid coordinates (`X`, `Y`) and loss values (`Z`).
-
-```python
-from dl_techniques.visualization import LossLandscapeVisualization
-# Data is typically generated by sampling the loss function around model weights.
-landscape_data = {
-    'landscape': True, # Required key for can_handle
-    'X': np.linspace(-1, 1, 50),
-    'Y': np.linspace(-1, 1, 50),
-    'Z': np.random.rand(50, 50), # Dummy loss values
-    'model_pos': (0, 0)
-}
-viz_manager.register_template("loss_landscape", LossLandscapeVisualization)
-viz_manager.visualize(landscape_data, plugin_name="loss_landscape", plot_type='2d', show=True)
-```
-
-### Attention Head Visualization
-
-Inspect attention patterns in Transformer models by visualizing the attention weight matrix.
-
-**Data Format**: A dictionary with an `attention_weights` key holding a NumPy array of shape `(batch, heads, seq_len, seq_len)`.
-
-```python
-from dl_techniques.visualization import AttentionVisualization
-attention_data = {
-    'attention_weights': np.random.rand(1, 8, 10, 10), # B, H, L, L
-    'tokens': [f'token_{i}' for i in range(10)]
-}
-viz_manager.register_template("attention", AttentionVisualization)
-viz_manager.visualize(attention_data, plugin_name="attention", layer_idx=0, head_idx=1, show=True)
-```
-
-### Embedding Space Visualization
-
-Visualize high-dimensional word or item embeddings in 2D using dimensionality reduction techniques.
-
-**Data Format**: A dictionary with an `embeddings` key holding a NumPy array of shape `(num_items, embedding_dim)`.
-
-```python
-from dl_techniques.visualization import EmbeddingVisualization
-embedding_data = {
-    'embeddings': np.random.rand(100, 64),
-    'labels': np.random.randint(0, 5, 100),
-    'words': [f'word_{i}' for i in range(100)]
-}
-viz_manager.register_template("embeddings", EmbeddingVisualization)
-viz_manager.visualize(embedding_data, plugin_name="embeddings", method='tsne', show=True)
-```
-
 ## Advanced Usage
 
 ### Customizing Plot Appearance
@@ -328,7 +403,12 @@ custom_viz_manager = VisualizationManager(
 Combine multiple visualizations into a single figure using the `create_dashboard` method. The manager automatically handles the subplot layout.
 
 ```python
+from dl_techniques.visualization import ClassificationReportVisualization
+
 # Assumes `history` and `eval_data` from previous examples exist.
+# Register any needed templates
+viz_manager.register_template("classification_report", ClassificationReportVisualization)
+
 dashboard_data = {
     # Plugin Name -> Data for that plugin
     "training_curves": history,
@@ -339,47 +419,6 @@ dashboard_data = {
 viz_manager.create_dashboard(data=dashboard_data, show=True)
 ```
 
-## End-to-End Workflow Example
-
-For complex projects, it is useful to encapsulate the visualization logic in a workflow class. This promotes reusability and standardization across experiments.
-
-```python
-from dl_techniques.visualization import MLExperimentWorkflow # Assuming examples.py is accessible
-
-# Initialize the workflow for a new experiment.
-workflow = MLExperimentWorkflow("complete_example_run")
-
-# --- Generate example data (replace with your actual data) ---
-np.random.seed(42)
-n_epochs = 100
-history = TrainingHistory(
-    epochs=list(range(n_epochs)),
-    train_loss=np.exp(-np.linspace(0, 2, n_epochs)),
-    val_loss=np.exp(-np.linspace(0, 1.8, n_epochs)),
-    train_metrics={'accuracy': 1 - np.exp(-np.linspace(0, 3, n_epochs))},
-    val_metrics={'accuracy': 1 - np.exp(-np.linspace(0, 2.5, n_epochs))}
-)
-y_true = np.random.randint(0, 10, 1000)
-y_pred = y_true.copy()
-error_mask = np.random.random(1000) < 0.15
-y_pred[error_mask] = np.random.randint(0, 10, error_mask.sum())
-# --- End of data generation ---
-
-# Package all data into a dictionary.
-all_data = {
-    'training_history': history,
-    'predictions': {
-        'y_true': y_true,
-        'y_pred': y_pred,
-        'y_prob': None, # No probability data in this example
-        'class_names': [f'Class_{i}' for i in range(10)]
-    }
-}
-
-# Generate a complete report with multiple visualizations.
-workflow.create_full_report(all_data)
-```
-
 ## Extending the Framework: Creating a Custom Plugin
 
 New visualizations can be added by creating a plugin. This involves inheriting from `VisualizationPlugin` and implementing three required properties/methods.
@@ -387,6 +426,7 @@ New visualizations can be added by creating a plugin. This involves inheriting f
 ```python
 import matplotlib.pyplot as plt
 from typing import Any, Optional
+from dl_techniques.visualization import VisualizationPlugin
 
 class SimpleScatterPlugin(VisualizationPlugin):
     """A custom plugin to create a 2D scatter plot."""
