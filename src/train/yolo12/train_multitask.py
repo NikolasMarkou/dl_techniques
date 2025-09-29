@@ -1,15 +1,8 @@
 """
-Comprehensive Training Script for YOLOv12 Multi-Task Model - FIXED VERSION WITH VISUALIZATIONS
+Comprehensive Training Script for YOLOv12 Multi-Task Model
 
 This script provides complete training pipeline for simultaneous object detection,
 segmentation, and classification on crack detection datasets using patch-based learning.
-
-CRITICAL FIXES APPLIED:
-    - Fixed dictionary key access in visualization callback ('detection' not 'detection_output')
-    - Corrected YOLOv12 detection output decoding with proper distance/classification handling
-    - Fixed validation dataset to use repeat=False for safety
-    - Enhanced error handling and logging throughout visualization pipeline
-    - Added proper IoU calculation for segmentation and accuracy for classification
 
 Features:
     - Multi-task model training with shared backbone using Named Outputs (Functional API)
@@ -20,12 +13,6 @@ Features:
     - Comprehensive evaluation and visualization
     - Model checkpointing and saving with proper serialization
     - Progress tracking and logging
-
-Usage:
-    python train.py --data-dir /path/to/dataset \
-                    --tasks detection segmentation classification \
-                    --scale n --epochs 100 --batch-size 16 \
-                    --visualization-freq 5  # Recommended for long training runs
 """
 
 import os

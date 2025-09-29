@@ -35,8 +35,6 @@ Requirements:
     - tensorflow-datasets: pip install tensorflow-datasets
     - Sufficient disk space for COCO dataset (~37GB)
     - GPU with adequate memory for chosen batch size and image size
-
-File: train.py
 """
 
 import os

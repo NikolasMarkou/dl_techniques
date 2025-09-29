@@ -7,7 +7,7 @@ from typing import List, Tuple, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.mobilenet.mobilenet_v4 import ModelConfig, MobileNetV4
+from dl_techniques.models.mobilenet.mobilenet_v4 import MobileNetV4
 
 # ---------------------------------------------------------------------
 

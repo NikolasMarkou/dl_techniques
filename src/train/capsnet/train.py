@@ -6,8 +6,6 @@ workflows with model.compile() and model.fit(). The script handles data loading,
 model creation, training, evaluation, and generates comprehensive visualizations
 including per-epoch reconstructions and training plots.
 
-Usage:
-    python train.py [--dataset mnist] [--epochs 50] [--batch-size 32]
 """
 
 

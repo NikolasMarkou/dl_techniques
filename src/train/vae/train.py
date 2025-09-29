@@ -5,9 +5,6 @@ This script demonstrates how to train the VAE model using standard Keras
 workflows with model.compile() and model.fit(). The script handles data loading,
 model creation, training, evaluation, and generates comprehensive visualizations
 including per-epoch reconstructions and latent space distributions.
-
-Usage:
-    python vae/train.py [--dataset mnist] [--epochs 50] [--batch-size 128] [--latent-dim 2]
 """
 
 
