@@ -4,10 +4,15 @@ Calibration Analysis Module
 Analyzes model calibration and confidence metrics.
 """
 
+import keras
 import numpy as np
 from typing import Dict, Any, Optional
-from .base import BaseAnalyzer
-from ..data_types import AnalysisResults, DataInput
+
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.calibration_metrics import (
     compute_ece,
@@ -15,6 +20,10 @@ from dl_techniques.utils.calibration_metrics import (
     compute_reliability_data,
     compute_prediction_entropy_stats
 )
+from .base import BaseAnalyzer
+from ..data_types import AnalysisResults, DataInput
+
+# ---------------------------------------------------------------------
 
 
 class CalibrationAnalyzer(BaseAnalyzer):
@@ -43,11 +52,14 @@ class CalibrationAnalyzer(BaseAnalyzer):
                 continue
 
             model_cache = cache[model_name]
-            y_pred_proba = model_cache.get('predictions')
+            y_pred_logits = model_cache.get('predictions')
 
-            if y_pred_proba is None:
+            if y_pred_logits is None:
                 logger.warning(f"Skipping calibration analysis for {model_name}: No predictions available.")
                 continue
+
+            # Convert model outputs (logits) to probabilities, as calibration metrics require them.
+            y_pred_proba = keras.ops.softmax(y_pred_logits, axis=1)
 
             y_true = model_cache['y_data']
 
@@ -65,7 +77,14 @@ class CalibrationAnalyzer(BaseAnalyzer):
             # Compute calibration-specific metrics
             ece = compute_ece(y_true_idx, y_pred_proba, self.config.calibration_bins)
             reliability_data = compute_reliability_data(y_true_idx, y_pred_proba, self.config.calibration_bins)
-            brier_score = compute_brier_score(model_cache['y_data'], y_pred_proba)
+
+            # Brier score requires one-hot encoded true labels. Convert if necessary.
+            y_true_one_hot = y_true
+            num_classes = y_pred_proba.shape[1]
+            if len(y_true.shape) == 1 or y_true.shape[1] == 1:
+                 y_true_one_hot = np.zeros((y_true_idx.size, num_classes))
+                 y_true_one_hot[np.arange(y_true_idx.size), y_true_idx] = 1
+            brier_score = compute_brier_score(y_true_one_hot, y_pred_proba)
 
             # Compute per-class ECE
             n_classes = y_pred_proba.shape[1]

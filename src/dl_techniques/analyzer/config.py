@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
 
+# ---------------------------------------------------------------------
 
 @dataclass
 class AnalysisConfig:
@@ -136,3 +137,5 @@ class AnalysisConfig:
         })
 
         sns.set_theme(style='whitegrid', palette=self.color_palette)
+
+# ---------------------------------------------------------------------

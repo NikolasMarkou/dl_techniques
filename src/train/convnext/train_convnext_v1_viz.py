@@ -6,8 +6,6 @@ import tensorflow as tf
 from datetime import datetime
 from typing import Tuple, Dict, Any, List
 
-from pandas.core.dtypes.common import classes
-
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
@@ -416,9 +414,11 @@ def run_model_analysis(
 
         # Run analysis
         x_test, y_test = test_data
-        # CRITICAL FIX: Convert integer labels to one-hot for calibration analysis
-        logger.info(f"Converting labels to one-hot format for calibration analysis")
-        analysis_results = analyzer.analyze(data=(x_test, keras.utils.to_categorical(y_test)))
+        # The model was compiled with SparseCategoricalCrossentropy, which expects integer labels for evaluation.
+        # Converting labels to one-hot here causes model.evaluate() to fail inside the analyzer.
+        # The analyzer framework is responsible for handling label format conversions internally.
+        logger.info(f"Using original integer labels for model analysis.")
+        analysis_results = analyzer.analyze(data=(x_test, y_test))
 
         # Generate Pareto front if applicable
         try:
