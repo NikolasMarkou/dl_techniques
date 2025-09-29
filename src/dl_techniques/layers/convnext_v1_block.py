@@ -45,6 +45,7 @@ from typing import Optional, Dict, Union, Tuple, Any
 from .layer_scale import LearnableMultiplier
 from ..constraints.value_range_constraint import ValueRangeConstraint
 from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
+from ..initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
 
 # ---------------------------------------------------------------------
 
@@ -250,6 +251,8 @@ class ConvNextV1Block(keras.layers.Layer):
                     use_matrix_scaling=True
                 )
             )
+
+            conv_params["kernel_initializer"] = OrthogonalHypersphereInitializer()
 
         # First pointwise convolution (expansion)
         self.conv_2 = keras.layers.Conv2D(

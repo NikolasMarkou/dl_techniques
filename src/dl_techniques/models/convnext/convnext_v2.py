@@ -86,6 +86,7 @@ class ConvNeXtV2(keras.Model):
         kernel_regularizer: Regularizer function applied to kernels.
         dropout_rate: Float, dropout rate applied within blocks.
         spatial_dropout_rate: Float, spatial dropout rate for blocks.
+        strides: int, Strides for downsampling.
         use_gamma: Boolean, whether to use learnable scaling in blocks.
         use_softorthonormal_regularizer: Boolean, whether to use soft
             orthonormal regularization in blocks.
@@ -139,6 +140,7 @@ class ConvNeXtV2(keras.Model):
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         dropout_rate: float = 0.0,
         spatial_dropout_rate: float = 0.0,
+        strides: int = 4,
         use_gamma: bool = True,
         use_softorthonormal_regularizer: bool = False,
         include_top: bool = True,
@@ -169,6 +171,7 @@ class ConvNeXtV2(keras.Model):
         self.kernel_regularizer = kernel_regularizer
         self.dropout_rate = dropout_rate
         self.spatial_dropout_rate = spatial_dropout_rate
+        self.strides = strides
         self.use_gamma = use_gamma
         self.use_softorthonormal_regularizer = use_softorthonormal_regularizer
         self.include_top = include_top
@@ -246,8 +249,8 @@ class ConvNeXtV2(keras.Model):
         Returns:
             Processed tensor after stem
         """
-        stem_kernel_size = 4
-        stem_stride = 4
+        stem_kernel_size = self.strides
+        stem_stride = self.strides
 
         stem_conv = keras.layers.Conv2D(
             filters=self.dims[0],
@@ -290,7 +293,7 @@ class ConvNeXtV2(keras.Model):
         Returns:
             Downsampled tensor
         """
-        downsample_kernel_size, downsample_stride = 4, 4
+        downsample_kernel_size, downsample_stride = self.strides, self.strides
 
         # LayerNorm before downsampling
         downsample_norm = keras.layers.LayerNormalization(

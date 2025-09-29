@@ -1,53 +1,50 @@
 """
-ConvNeXt V1 Model Implementation
-==================================================
+ConvNeXt V1 Model with KAN Linear Head Implementation
+=====================================================
 
-A complete implementation of the ConvNeXt V1 architecture .
-This version can natively handle different input sizes without requiring preprocessing.
+A ConvNeXt V1 architecture enhanced with a Kolmogorov-Arnold Network (KAN) linear
+layer as the classification head. This combines the excellent spatial feature
+extraction capabilities of ConvNeXt with the learnable activation functions of KAN.
 
-Based on: "A ConvNet for the 2020s" (Liu et al., 2022)
-https://arxiv.org/abs/2201.03545
+The model replaces the traditional Dense classification layer with a KANLinear layer,
+allowing the network to learn more flexible and expressive decision boundaries through
+adaptive B-spline-based activation functions.
 
-Key Features:
+Key Benefits:
 ------------
-- Modular design using ConvNextV1Block as building blocks
-- Support for all standard ConvNeXt variants
-- Smart stem and downsampling strategies
-- Configurable stochastic depth (drop path)
-- Proper normalization and initialization strategies
-- Flexible head design (classification, feature extraction)
-- Complete serialization support
-- Production-ready implementation
+- Improved expressiveness in the classification head
+- Learnable activation functions adapt to data distribution
+- Potential for better performance on complex classification tasks
+- Maintains all ConvNeXt architectural benefits (efficiency, scalability)
 
-Architecture Adaptations:
-------------------------
-- Small inputs (< 64x64): Uses 3x3 stem with stride 1, gentle downsampling
-- Medium inputs (64-128): Uses 4x4 stem with stride 2, moderate downsampling
-- Large inputs (>= 128): Uses original 4x4 stem with stride 4, standard downsampling
-- Smart downsampling layer configuration that prevents over-downsampling
+Architecture:
+------------
+ConvNeXt Feature Extractor → Global Average Pooling → Layer Normalization → KAN Linear → Output
 
-Model Variants:
---------------
-- ConvNeXt-T: [3, 3, 9, 3] blocks, [96, 192, 384, 768] dims
-- ConvNeXt-S: [3, 3, 27, 3] blocks, [96, 192, 384, 768] dims
-- ConvNeXt-B: [3, 3, 27, 3] blocks, [128, 256, 512, 1024] dims
-- ConvNeXt-L: [3, 3, 27, 3] blocks, [192, 384, 768, 1536] dims
-- ConvNeXt-XL: [3, 3, 27, 3] blocks, [256, 512, 1024, 2048] dims
+Based on:
+- "A ConvNet for the 2020s" (Liu et al., 2022) - ConvNeXt architecture
+- "KAN: Kolmogorov-Arnold Networks" (Liu et al., 2024) - KAN linear layers
 
 Usage Examples:
--------------
+--------------
 ```python
-# CIFAR-10 model (32x32 input)
-model = ConvNeXtV1.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
+# CIFAR-10 model with KAN head
+model = ConvNeXtKAN.from_variant(
+    "tiny",
+    num_classes=10,
+    input_shape=(32, 32, 3),
+    kan_grid_size=8,
+    kan_spline_order=3
+)
 
-# MNIST model (28x28 input)
-model = ConvNeXtV1.from_variant("small", num_classes=10, input_shape=(28, 28, 3))
-
-# ImageNet model (224x224 input)
-model = ConvNeXtV1.from_variant("base", num_classes=1000)
-
-# Custom dataset model (64x64 input)
-model = create_convnext_v1("large", num_classes=100, input_shape=(64, 64, 3))
+# ImageNet model with custom KAN configuration
+model = ConvNeXtKAN.from_variant(
+    "base",
+    num_classes=1000,
+    kan_grid_size=12,
+    kan_activation='gelu',
+    kan_regularization_factor=0.001
+)
 ```
 """
 
@@ -59,18 +56,24 @@ from typing import List, Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.kan_linear import KANLinear
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 
 # ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
-class ConvNeXtV1(keras.Model):
-    """ConvNeXt V1 model implementation
+class ConvNeXtKAN(keras.Model):
+    """ConvNeXt V1 model with KAN Linear classification head.
 
-    A modern ConvNet architecture that achieves competitive performance
-    with Vision Transformers while maintaining the simplicity and efficiency
-    of convolutional networks. This version adapts to different input sizes.
+    This model enhances the standard ConvNeXt architecture by replacing the final
+    Dense classification layer with a KANLinear layer. This allows the model to
+    learn more flexible and expressive activation functions in the classification
+    head through B-spline basis functions.
+
+    The feature extraction backbone remains unchanged from ConvNeXt V1, ensuring
+    all the proven benefits of the architecture while adding the expressiveness
+    of learnable activation functions in the final layer.
 
     Args:
         num_classes: Integer, number of output classes for classification.
@@ -89,31 +92,58 @@ class ConvNeXtV1(keras.Model):
         kernel_regularizer: Regularizer function applied to kernels.
         dropout_rate: Float, dropout rate applied within blocks.
         spatial_dropout_rate: Float, spatial dropout rate for blocks.
-        strides: int, Strides for downsampling.
         use_gamma: Boolean, whether to use learnable scaling in blocks.
         use_softorthonormal_regularizer: Boolean, whether to use soft
             orthonormal regularization in blocks.
         include_top: Boolean, whether to include the classification head.
         input_shape: Tuple, input shape. If None and include_top=True,
-            uses (224, 224, 3) for ImageNet. Must be provided for non-ImageNet inputs.
+            uses (224, 224, 3) for ImageNet.
+        kan_grid_size: Integer, size of the grid for B-splines in KAN layer.
+            Must be >= kan_spline_order. Defaults to 8.
+        kan_spline_order: Integer, order of B-splines in KAN layer.
+            Must be positive. Defaults to 3.
+        kan_activation: String or callable, activation function for KAN layer.
+            Defaults to 'swish'.
+        kan_regularization_factor: Float, L2 regularization factor for KAN layer.
+            Must be non-negative. Defaults to 0.01.
+        kan_grid_range: Tuple of two floats, range for the KAN grid as (min, max).
+            Defaults to (-2, 2) for better coverage of feature distributions.
+        kan_use_residual: Boolean, whether to use residual connections in KAN layer.
+            Defaults to True.
+        kan_kernel_initializer: String or Initializer, initializer for KAN base weights.
+            Defaults to 'orthogonal'.
+        kan_spline_initializer: String or Initializer, initializer for KAN spline weights.
+            Defaults to 'glorot_uniform'.
+        kan_kernel_regularizer: Optional regularizer for KAN base weights.
+        kan_spline_regularizer: Optional regularizer for KAN spline weights.
         **kwargs: Additional keyword arguments for the Model base class.
 
     Raises:
         ValueError: If depths and dims have different lengths.
         ValueError: If invalid model configuration is provided.
+        ValueError: If KAN parameters are invalid.
 
     Example:
-        >>> # Create ConvNeXt-Tiny model for CIFAR-10
-        >>> model = ConvNeXtV1.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
+        >>> # Create ConvNeXt-KAN for CIFAR-10 with moderate KAN complexity
+        >>> model = ConvNeXtKAN.from_variant(
+        ...     "tiny",
+        ...     num_classes=10,
+        ...     input_shape=(32, 32, 3),
+        ...     kan_grid_size=6,
+        ...     kan_activation='gelu'
+        ... )
         >>>
-        >>> # Create ConvNeXt-Small for MNIST
-        >>> model = ConvNeXtV1.from_variant("small", num_classes=10, input_shape=(28, 28, 3))
-        >>>
-        >>> # Create standard ImageNet model
-        >>> model = ConvNeXtV1.from_variant("base", num_classes=1000)
+        >>> # Create ConvNeXt-KAN for ImageNet with high KAN expressiveness
+        >>> model = ConvNeXtKAN.from_variant(
+        ...     "base",
+        ...     num_classes=1000,
+        ...     kan_grid_size=12,
+        ...     kan_spline_order=4,
+        ...     kan_regularization_factor=0.005
+        ... )
     """
 
-    # Model variant configurations
+    # Model variant configurations (inherited from ConvNeXt V1)
     MODEL_VARIANTS = {
         "cifar10": {"depths": [5, 5], "dims": [96, 192]},
         "tiny": {"depths": [3, 3, 9, 3], "dims": [96, 192, 384, 768]},
@@ -140,14 +170,24 @@ class ConvNeXtV1(keras.Model):
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         dropout_rate: float = 0.0,
         spatial_dropout_rate: float = 0.0,
-        strides: int = 4,
         use_gamma: bool = True,
         use_softorthonormal_regularizer: bool = True,
         include_top: bool = True,
         input_shape: Tuple[int, ...] = (None, None, 3),
+        # KAN-specific parameters
+        kan_grid_size: int = 8,
+        kan_spline_order: int = 3,
+        kan_activation: str = 'swish',
+        kan_regularization_factor: float = 0.01,
+        kan_grid_range: Tuple[float, float] = (-2.0, 2.0),
+        kan_use_residual: bool = True,
+        kan_kernel_initializer: Union[str, keras.initializers.Initializer] = 'orthogonal',
+        kan_spline_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+        kan_kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        kan_spline_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         **kwargs
     ):
-        # Validate configuration
+        # Validate ConvNeXt configuration
         if len(depths) != len(dims):
             raise ValueError(
                 f"Length of depths ({len(depths)}) must equal length of dims ({len(dims)})"
@@ -157,10 +197,20 @@ class ConvNeXtV1(keras.Model):
             logger.warning(
                 f"ConvNeXt typically uses 4 stages, got {len(depths)} stages"
             )
+
+        # Validate KAN configuration
+        if kan_grid_size < kan_spline_order:
+            raise ValueError(
+                f"KAN grid_size ({kan_grid_size}) must be >= spline_order ({kan_spline_order})"
+            )
+
+        if kan_grid_range[0] >= kan_grid_range[1]:
+            raise ValueError(f"Invalid KAN grid range: {kan_grid_range}")
+
         if input_shape is None:
             input_shape = (None, None, 3)
 
-        # Store configuration
+        # Store ConvNeXt configuration
         self.num_classes = num_classes
         self.depths = depths
         self.dims = dims
@@ -174,8 +224,19 @@ class ConvNeXtV1(keras.Model):
         self.use_gamma = use_gamma
         self.use_softorthonormal_regularizer = use_softorthonormal_regularizer
         self.include_top = include_top
-        self.strides = strides
         self._input_shape = input_shape
+
+        # Store KAN configuration
+        self.kan_grid_size = kan_grid_size
+        self.kan_spline_order = kan_spline_order
+        self.kan_activation = kan_activation
+        self.kan_regularization_factor = kan_regularization_factor
+        self.kan_grid_range = kan_grid_range
+        self.kan_use_residual = kan_use_residual
+        self.kan_kernel_initializer = kan_kernel_initializer
+        self.kan_spline_initializer = kan_spline_initializer
+        self.kan_kernel_regularizer = kan_kernel_regularizer
+        self.kan_spline_regularizer = kan_spline_regularizer
 
         # Initialize layer lists
         self.stem_layers = []
@@ -207,12 +268,12 @@ class ConvNeXtV1(keras.Model):
         super().__init__(inputs=inputs, outputs=outputs, **kwargs)
 
         logger.info(
-            f"Created ConvNeXt V2 model for input {input_shape} "
-            f"with {sum(depths)} blocks"
+            f"Created ConvNeXt-KAN model for input {input_shape} "
+            f"with {sum(depths)} blocks and KAN head (grid_size={kan_grid_size})"
         )
 
     def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the complete ConvNeXt model architecture.
+        """Build the complete ConvNeXt-KAN model architecture.
 
         Args:
             inputs: Input tensor
@@ -234,9 +295,9 @@ class ConvNeXtV1(keras.Model):
             # Build stage
             x = self._build_stage(x, stage_idx)
 
-        # Build classification head if requested
+        # Build KAN classification head if requested
         if self.include_top:
-            x = self._build_head(x)
+            x = self._build_kan_head(x)
 
         return x
 
@@ -249,8 +310,8 @@ class ConvNeXtV1(keras.Model):
         Returns:
             Processed tensor after stem
         """
-        stem_kernel_size = self.strides
-        stem_stride = self.strides
+        stem_kernel_size = 4
+        stem_stride = 4
 
         stem_conv = keras.layers.Conv2D(
             filters=self.dims[0],
@@ -293,7 +354,7 @@ class ConvNeXtV1(keras.Model):
         Returns:
             Downsampled tensor
         """
-        downsample_kernel_size, downsample_stride = self.strides, self.strides
+        downsample_kernel_size, downsample_stride = 4, 4
 
         # LayerNorm before downsampling
         downsample_norm = keras.layers.LayerNormalization(
@@ -304,7 +365,7 @@ class ConvNeXtV1(keras.Model):
         )
         x = downsample_norm(x)
 
-        # downsampling convolution
+        # Downsampling convolution
         if downsample_stride > 1:
             downsample_conv = keras.layers.Conv2D(
                 filters=output_dim,
@@ -405,8 +466,11 @@ class ConvNeXtV1(keras.Model):
 
         return x
 
-    def _build_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the classification head.
+    def _build_kan_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
+        """Build the KAN-based classification head.
+
+        This replaces the traditional Dense layer with a KANLinear layer,
+        providing learnable activation functions in the classification head.
 
         Args:
             x: Input feature tensor
@@ -418,7 +482,7 @@ class ConvNeXtV1(keras.Model):
         gap = keras.layers.GlobalAveragePooling2D(name="global_avg_pool")
         x = gap(x)
 
-        # Layer normalization before classifier
+        # Layer normalization before KAN classifier
         head_norm = keras.layers.LayerNormalization(
             epsilon=self.LAYERNORM_EPSILON,
             center=self.use_bias,
@@ -427,18 +491,25 @@ class ConvNeXtV1(keras.Model):
         )
         x = head_norm(x)
 
-        # Classification layer
+        # KAN Linear classification layer
         if self.num_classes > 0:
-            classifier = keras.layers.Dense(
-                units=self.num_classes,
-                use_bias=self.use_bias,
-                kernel_initializer=self.HEAD_INITIALIZER,
-                kernel_regularizer=self.kernel_regularizer,
-                name="classifier"
+            kan_classifier = KANLinear(
+                features=self.num_classes,
+                grid_size=self.kan_grid_size,
+                spline_order=self.kan_spline_order,
+                activation=self.kan_activation,
+                regularization_factor=self.kan_regularization_factor,
+                grid_range=self.kan_grid_range,
+                use_residual=self.kan_use_residual,
+                kernel_initializer=self.kan_kernel_initializer,
+                spline_initializer=self.kan_spline_initializer,
+                kernel_regularizer=self.kan_kernel_regularizer,
+                spline_regularizer=self.kan_spline_regularizer,
+                name="kan_classifier"
             )
-            x = classifier(x)
+            x = kan_classifier(x)
 
-            self.head_layers = [gap, head_norm, classifier]
+            self.head_layers = [gap, head_norm, kan_classifier]
         else:
             self.head_layers = [gap, head_norm]
 
@@ -451,28 +522,38 @@ class ConvNeXtV1(keras.Model):
         num_classes: int = 1000,
         input_shape: Optional[Tuple[int, ...]] = None,
         **kwargs
-    ) -> "ConvNeXtV1":
-        """Create a ConvNeXt model from a predefined variant.
+    ) -> "ConvNeXtKAN":
+        """Create a ConvNeXt-KAN model from a predefined variant.
 
         Args:
             variant: String, one of "tiny", "small", "base", "large", "xlarge"
             num_classes: Integer, number of output classes
             input_shape: Tuple, input shape. If None and include_top=True, uses (224, 224, 3)
-            **kwargs: Additional arguments passed to the constructor
+            **kwargs: Additional arguments passed to the constructor, including KAN parameters
 
         Returns:
-            ConvNeXtV1 model instance
+            ConvNeXtKAN model instance
 
         Raises:
             ValueError: If variant is not recognized
 
         Example:
-            >>> # CIFAR-10 model
-            >>> model = ConvNeXtV1.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
-            >>> # MNIST model
-            >>> model = ConvNeXtV1.from_variant("small", num_classes=10, input_shape=(28, 28, 3))
-            >>> # ImageNet model
-            >>> model = ConvNeXtV1.from_variant("base", num_classes=1000)
+            >>> # CIFAR-10 model with moderate KAN complexity
+            >>> model = ConvNeXtKAN.from_variant(
+            ...     "tiny",
+            ...     num_classes=10,
+            ...     input_shape=(32, 32, 3),
+            ...     kan_grid_size=6,
+            ...     kan_activation='gelu'
+            ... )
+            >>>
+            >>> # ImageNet model with high expressiveness
+            >>> model = ConvNeXtKAN.from_variant(
+            ...     "base",
+            ...     num_classes=1000,
+            ...     kan_grid_size=12,
+            ...     kan_spline_order=4
+            ... )
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -482,7 +563,7 @@ class ConvNeXtV1(keras.Model):
 
         config = cls.MODEL_VARIANTS[variant]
 
-        logger.info(f"Creating ConvNeXt-{variant.upper()} model")
+        logger.info(f"Creating ConvNeXt-KAN-{variant.upper()} model")
         logger.info(f"from_variant received input_shape: {input_shape}")
 
         return cls(
@@ -500,6 +581,7 @@ class ConvNeXtV1(keras.Model):
             Configuration dictionary
         """
         config = {
+            # ConvNeXt configuration
             "num_classes": self.num_classes,
             "depths": self.depths,
             "dims": self.dims,
@@ -514,23 +596,56 @@ class ConvNeXtV1(keras.Model):
             "use_softorthonormal_regularizer": self.use_softorthonormal_regularizer,
             "include_top": self.include_top,
             "input_shape": self._input_shape,
+            # KAN configuration
+            "kan_grid_size": self.kan_grid_size,
+            "kan_spline_order": self.kan_spline_order,
+            "kan_activation": self.kan_activation,
+            "kan_regularization_factor": self.kan_regularization_factor,
+            "kan_grid_range": self.kan_grid_range,
+            "kan_use_residual": self.kan_use_residual,
+            "kan_kernel_initializer": keras.initializers.serialize(
+                keras.initializers.get(self.kan_kernel_initializer)
+            ),
+            "kan_spline_initializer": keras.initializers.serialize(
+                keras.initializers.get(self.kan_spline_initializer)
+            ),
+            "kan_kernel_regularizer": keras.regularizers.serialize(self.kan_kernel_regularizer),
+            "kan_spline_regularizer": keras.regularizers.serialize(self.kan_spline_regularizer),
         }
         return config
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "ConvNeXtV1":
+    def from_config(cls, config: Dict[str, Any]) -> "ConvNeXtKAN":
         """Create model from configuration.
 
         Args:
             config: Configuration dictionary
 
         Returns:
-            ConvNeXtV1 model instance
+            ConvNeXtKAN model instance
         """
-        # Deserialize regularizer if present
+        # Deserialize regularizers if present
         if config.get("kernel_regularizer"):
             config["kernel_regularizer"] = keras.regularizers.deserialize(
                 config["kernel_regularizer"]
+            )
+        if config.get("kan_kernel_regularizer"):
+            config["kan_kernel_regularizer"] = keras.regularizers.deserialize(
+                config["kan_kernel_regularizer"]
+            )
+        if config.get("kan_spline_regularizer"):
+            config["kan_spline_regularizer"] = keras.regularizers.deserialize(
+                config["kan_spline_regularizer"]
+            )
+
+        # Deserialize initializers if present
+        if config.get("kan_kernel_initializer"):
+            config["kan_kernel_initializer"] = keras.initializers.deserialize(
+                config["kan_kernel_initializer"]
+            )
+        if config.get("kan_spline_initializer"):
+            config["kan_spline_initializer"] = keras.initializers.deserialize(
+                config["kan_spline_initializer"]
             )
 
         return cls(**config)
@@ -541,53 +656,66 @@ class ConvNeXtV1(keras.Model):
 
         # Print additional model information
         total_blocks = sum(self.depths)
-        logger.info(f"ConvNeXt V1 configuration:")
+        logger.info(f"ConvNeXt-KAN configuration:")
         logger.info(f"  - Input shape: ({self.input_height}, {self.input_width}, {self.input_channels})")
         logger.info(f"  - Stages: {len(self.depths)}")
         logger.info(f"  - Depths: {self.depths}")
-        logger.info(f"  - Original dimensions: {self.dims}")
+        logger.info(f"  - Dimensions: {self.dims}")
         logger.info(f"  - Total blocks: {total_blocks}")
         logger.info(f"  - Drop path rate: {self.drop_path_rate}")
         logger.info(f"  - Kernel size: {self.kernel_size}")
         logger.info(f"  - Include top: {self.include_top}")
         if self.include_top:
             logger.info(f"  - Number of classes: {self.num_classes}")
+            logger.info(f"  - KAN grid size: {self.kan_grid_size}")
+            logger.info(f"  - KAN spline order: {self.kan_spline_order}")
+            logger.info(f"  - KAN activation: {self.kan_activation}")
+            logger.info(f"  - KAN grid range: {self.kan_grid_range}")
 
 # ---------------------------------------------------------------------
 
-def create_convnext_v1(
+def create_convnext_kan(
     variant: str = "tiny",
     num_classes: int = 1000,
     input_shape: Optional[Tuple[int, ...]] = (None, None, 3),
     pretrained: bool = False,
     **kwargs
-) -> ConvNeXtV1:
-    """Convenience function to create ConvNeXt V1 models.
+) -> ConvNeXtKAN:
+    """Convenience function to create ConvNeXt-KAN models.
 
     Args:
         variant: String, model variant ("tiny", "small", "base", "large", "xlarge")
         num_classes: Integer, number of output classes
         input_shape: Tuple, input shape.
         pretrained: Boolean, whether to load pretrained weights (not implemented)
-        **kwargs: Additional arguments passed to the model constructor
+        **kwargs: Additional arguments passed to the model constructor, including KAN parameters
 
     Returns:
-        ConvNeXtV1 model instance
+        ConvNeXtKAN model instance
 
     Example:
-        >>> # Create ConvNeXt-Tiny for CIFAR-10
-        >>> model = create_convnext_v1("tiny", num_classes=10, input_shape=(32, 32, 3))
+        >>> # Create ConvNeXt-KAN-Tiny for CIFAR-10
+        >>> model = create_convnext_kan(
+        ...     "tiny",
+        ...     num_classes=10,
+        ...     input_shape=(32, 32, 3),
+        ...     kan_grid_size=8,
+        ...     kan_activation='gelu'
+        ... )
         >>>
-        >>> # Create ConvNeXt-Small for MNIST
-        >>> model = create_convnext_v1("small", num_classes=10, input_shape=(28, 28, 3))
-        >>>
-        >>> # Create ConvNeXt-Base for ImageNet
-        >>> model = create_convnext_v1("base", num_classes=1000)
+        >>> # Create ConvNeXt-KAN-Base for ImageNet with custom KAN settings
+        >>> model = create_convnext_kan(
+        ...     "base",
+        ...     num_classes=1000,
+        ...     kan_grid_size=12,
+        ...     kan_spline_order=4,
+        ...     kan_regularization_factor=0.005
+        ... )
     """
     if pretrained:
-        logger.warning("Pretrained weights are not yet implemented")
+        logger.warning("Pretrained weights are not yet implemented for ConvNeXt-KAN models")
 
-    model = ConvNeXtV1.from_variant(
+    model = ConvNeXtKAN.from_variant(
         variant,
         num_classes=num_classes,
         input_shape=input_shape,

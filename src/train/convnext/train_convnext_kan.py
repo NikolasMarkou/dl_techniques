@@ -12,7 +12,7 @@ from typing import Tuple, Dict, Any, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
-from dl_techniques.models.convnext.convnext_v1 import ConvNeXtV1, create_convnext_v1
+from dl_techniques.models.convnext.convnext_kan import ConvNeXtKAN, create_convnext_kan
 
 
 # ---------------------------------------------------------------------
@@ -195,7 +195,7 @@ def validate_model_loading(model_path: str, test_input: tf.Tensor, original_outp
     try:
         # Define custom objects for loading
         custom_objects = {
-            "ConvNeXtV1": ConvNeXtV1,
+            "ConvNextKan": ConvNeXtKAN,
             "ConvNextV1Block": ConvNextV1Block
         }
 
@@ -254,7 +254,7 @@ def train_model(args: argparse.Namespace):
     logger.info(f"Model will be created with input_shape: {input_shape}")
 
     # FIXED: Pass the input_shape parameter to the model creation
-    model = create_convnext_v1(
+    model = create_convnext_kan(
         variant=args.variant,
         num_classes=num_classes,
         input_shape=input_shape,  # This was missing!
@@ -369,7 +369,7 @@ def train_model(args: argparse.Namespace):
             is_loading_valid = validate_model_loading(best_model_path, test_sample, pre_save_output)
 
             if is_loading_valid:
-                custom_objects = {"ConvNeXtV1": ConvNeXtV1, "ConvNextV1Block": ConvNextV1Block}
+                custom_objects = {"ConvNeXtKAN": ConvNeXtKAN, "ConvNextV1Block": ConvNextV1Block}
                 best_model = keras.models.load_model(best_model_path, custom_objects=custom_objects)
                 logger.info("Successfully loaded best model from checkpoint")
             else:
@@ -471,7 +471,7 @@ def main():
     try:
         train_model(args)
     except KeyboardInterrupt:
-        logger.info("\nTraining interrupted by user.")
+        logger.info("Training interrupted by user.")
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}", exc_info=True)
         raise
