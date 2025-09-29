@@ -4,13 +4,18 @@ import keras
 from keras import ops
 from typing import Dict, List, Tuple, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
 from dl_techniques.losses.nano_vlm_loss import NanoVLMLoss
-from dl_techniques.models.nano_vlm import create_nanovlm_222m
+from dl_techniques.models.nano_vlm.model import create_nanovlm
 from dl_techniques.utils.datasets.vqa_dataset import VQADataProcessor, load_cauldron_sample
 from dl_techniques.optimization import optimizer_builder, learning_rate_schedule_builder
-from dl_techniques.utils.logger import logger
 
+
+# ---------------------------------------------------------------------
 
 def create_training_setup() -> Dict[str, Any]:
     """Create training configuration for nanoVLM.
@@ -46,6 +51,7 @@ def create_training_setup() -> Dict[str, Any]:
         "loss_fn": NanoVLMLoss(ignore_index=0, label_smoothing=0.1)
     }
 
+# ---------------------------------------------------------------------
 
 def setup_different_learning_rates(model: keras.Model) -> Dict[str, Any]:
     """Setup different learning rates for different model components.
@@ -137,6 +143,7 @@ def setup_different_learning_rates(model: keras.Model) -> Dict[str, Any]:
         "projection_params": projection_params
     }
 
+# ---------------------------------------------------------------------
 
 class NanoVLMTrainer:
     """Custom trainer for nanoVLM with multi-optimizer support.
@@ -270,6 +277,7 @@ class NanoVLMTrainer:
         self.train_loss.reset_states()
         self.train_accuracy.reset_states()
 
+# ---------------------------------------------------------------------
 
 def configure_mixed_precision() -> None:
     """Configure mixed precision training for better performance."""
@@ -284,6 +292,7 @@ def configure_mixed_precision() -> None:
         policy = keras.mixed_precision.Policy('float32')
         keras.mixed_precision.set_global_policy(policy)
 
+# ---------------------------------------------------------------------
 
 def train_nanovlm(
         epochs: int = 10,
@@ -308,7 +317,7 @@ def train_nanovlm(
 
     # Create model
     try:
-        model = create_nanovlm_222m()
+        model = create_nanovlm()
         logger.info("Created nanoVLM-222M model")
         logger.info(f"Model has {model.count_params():,} parameters")
     except Exception as e:
@@ -421,6 +430,7 @@ def train_nanovlm(
         logger.error(f"Training failed: {e}")
         raise
 
+# ---------------------------------------------------------------------
 
 if __name__ == "__main__":
     # Configure training parameters
@@ -433,3 +443,5 @@ if __name__ == "__main__":
     }
 
     train_nanovlm(**training_config)
+
+# ---------------------------------------------------------------------
