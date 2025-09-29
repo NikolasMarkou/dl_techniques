@@ -176,7 +176,7 @@ class ConvNeXtV1(keras.Model):
         self.use_softorthonormal_regularizer = use_softorthonormal_regularizer
         self.include_top = include_top
         self.strides = strides
-        self._input_shape = input_shape
+        self.input_shape = input_shape
 
         # Validate and store input shape details
         if input_shape is None:
@@ -406,7 +406,7 @@ class ConvNeXtV1(keras.Model):
             "use_gamma": self.use_gamma,
             "use_softorthonormal_regularizer": self.use_softorthonormal_regularizer,
             "include_top": self.include_top,
-            "input_shape": self._input_shape,
+            "input_shape": self.input_shape,
             "strides": self.strides
         }
         base_config = super().get_config()
@@ -434,7 +434,7 @@ class ConvNeXtV1(keras.Model):
         """Print model summary with additional information."""
         # Build the model first if it hasn't been built
         if not self.built:
-            dummy_input = keras.KerasTensor(self._input_shape)
+            dummy_input = keras.KerasTensor(self.input_shape)
             self.build(dummy_input.shape)
 
         super().summary(**kwargs)
