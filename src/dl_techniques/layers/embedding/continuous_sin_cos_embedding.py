@@ -324,3 +324,5 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
             "assert_positive": self.assert_positive,
         })
         return config
+
+# ---------------------------------------------------------------------

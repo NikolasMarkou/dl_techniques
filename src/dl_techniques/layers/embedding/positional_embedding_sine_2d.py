@@ -53,16 +53,15 @@ References:
 
 """
 
-import keras
 import math
-from keras import layers
+import keras
 from keras import ops
 from typing import Optional, Dict, Any, Tuple
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class PositionEmbeddingSine2D(layers.Layer):
+class PositionEmbeddingSine2D(keras.layers.Layer):
     """
     Generates 2D sinusoidal positional encodings for image-like feature maps.
 
