@@ -375,7 +375,7 @@ class TestBERTIntegration:
         labels = keras.ops.cast(keras.random.uniform((batch_size,), maxval=3), 'int32')
 
         initial_loss = None
-        for step in range(10):
+        for step in range(100):
             with tf.GradientTape() as tape:
                 outputs = classification_model(inputs, training=True)
                 loss = keras.ops.mean(
@@ -387,7 +387,7 @@ class TestBERTIntegration:
             optimizer.apply_gradients(zip(gradients, classification_model.trainable_weights))
 
         # Loss should decrease (at least not increase significantly)
-        assert loss <= initial_loss + 0.1
+        assert loss <= (initial_loss + 0.1)
 
 
 class TestBERTAdvancedFeatures:
