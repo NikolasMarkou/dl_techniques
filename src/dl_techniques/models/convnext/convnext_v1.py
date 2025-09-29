@@ -9,19 +9,6 @@ sizes without requiring preprocessing.
 Based on: "A ConvNet for the 2020s" (Liu et al., 2022)
 https://arxiv.org/abs/2201.03545
 
-Key Features:
-------------
-- Modular design using ConvNextV1Block as building blocks
-- Support for all standard ConvNeXt variants
-- Pretrained weight loading from URLs or local paths
-- Smart handling of classifier layer mismatches
-- Smart stem and downsampling strategies
-- Configurable stochastic depth (drop path)
-- Proper normalization and initialization strategies
-- Flexible head design (classification, feature extraction)
-- Complete serialization support
-- Production-ready implementation
-
 Model Variants:
 --------------
 - ConvNeXt-T: [3, 3, 9, 3] blocks, [96, 192, 384, 768] dims
@@ -48,8 +35,8 @@ model = ConvNeXtV1.from_variant("large", pretrained="path/to/weights.keras")
 ```
 """
 
-import keras
 import os
+import keras
 from typing import List, Optional, Union, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
