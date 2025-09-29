@@ -1,4 +1,5 @@
-"""Implements the foundational building block of a Transformer network.
+"""
+Foundational building block of a Transformer network.
 
 This layer encapsulates the two primary sub-components of a standard Transformer
 architecture: a multi-head self-attention mechanism and a position-wise
@@ -110,10 +111,10 @@ class TransformerLayer(keras.layers.Layer):
             Ignored if `moe_config` is provided.
         attention_type: AttentionType, type of attention mechanism to use.
             Available options:
-            - 'multi_head_attention': Standard multi-head self-attention (default)
-            - 'window_attention': Windowed attention for efficient processing
-            - 'group_query_attention': Grouped query attention for reduced parameters
-            - 'differential_attention': Differential attention for noise cancellation
+            - 'multi_head': Standard multi-head self-attention (default)
+            - 'window': Windowed attention for efficient processing
+            - 'group_query': Grouped query attention for reduced parameters
+            - 'differential': Differential attention for noise cancellation
         attention_args: Optional dictionary of custom arguments for attention layer.
             These will override default parameters for the specific attention type.
         normalization_type: NormalizationType, type of normalization to use.

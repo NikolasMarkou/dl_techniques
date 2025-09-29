@@ -12,7 +12,7 @@ from typing import Tuple, Dict, Any, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.transformer import TransformerLayer
-from dl_techniques.models.vit import ViT, create_vision_transformer
+from dl_techniques.models.vit.model import ViT, create_vision_transformer
 
 # ---------------------------------------------------------------------
 
@@ -92,7 +92,7 @@ def create_model_config(dataset: str, scale: str, input_shape: Tuple[int, int, i
         'dropout_rate': dropout_rate,
         'attention_dropout_rate': dropout_rate,
         'kernel_initializer': 'he_normal',
-        'norm_type': 'layer',
+        'normalization_type': 'layer_norm',
     }
 
 # ---------------------------------------------------------------------

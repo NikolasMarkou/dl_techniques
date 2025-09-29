@@ -1,4 +1,5 @@
-"""Implement a projection layer based on Tversky's contrast model of similarity.
+"""
+A projection layer based on Tversky's contrast model of similarity.
 
 This layer serves as a psychologically plausible alternative to the standard
 fully-connected (Dense) layer. Whereas a Dense layer computes similarity
