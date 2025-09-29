@@ -1,4 +1,5 @@
-"""Projects visual features into a language model's embedding space.
+"""
+Projects visual features into a language model's embedding space.
 
 This layer serves as a critical bridge in Vision-Language Models (VLMs),
 transforming visual representations from an image encoder into a format

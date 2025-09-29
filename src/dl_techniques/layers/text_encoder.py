@@ -1,4 +1,5 @@
-"""Implement a highly configurable, Transformer-based text encoder.
+"""
+A highly configurable, Transformer-based text encoder.
 
 This layer provides a versatile and modular framework for constructing a wide
 range of Transformer encoder architectures. It is designed to create deep,
@@ -93,10 +94,11 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal, Callable, List
 # local imports
 # ---------------------------------------------------------------------
 
-from .transformer import TransformerLayer
-from .norms import create_normalization_layer, NormalizationType
-from .embedding import create_embedding_layer
 from ..utils.logger import logger
+from .embedding import create_embedding_layer
+from .sequence_pooling import SequencePooling
+from .norms import create_normalization_layer, NormalizationType
+from .transformer import TransformerLayer, AttentionType, NormalizationPosition, FFNType
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -104,9 +106,6 @@ from ..utils.logger import logger
 
 EmbeddingType = Literal['learned', 'shared', 'factorized']
 PositionalType = Literal['learned', 'rope', 'dual_rope', 'sincos']
-AttentionType = Literal['multi_head_attention', 'window_attention', 'group_query_attention', 'differential_attention']
-NormalizationPosition = Literal['pre', 'post']
-FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp']
 PoolingMode = Literal['cls', 'mean', 'max', 'first', 'last', 'none']
 
 
@@ -151,7 +150,7 @@ class TextEncoder(keras.layers.Layer):
            ↓
     Optional Final Normalization
            ↓
-    Output Features (configurable pooling)
+    Output Features (configurable pooling via SequencePooling layer)
     ```
 
     **Key Features**:
@@ -160,7 +159,7 @@ class TextEncoder(keras.layers.Layer):
     - Configurable attention mechanisms (MHA, Window, GQA, etc.)
     - Multiple normalization options (LayerNorm, RMSNorm, etc.)
     - Various FFN architectures (MLP, SwiGLU, etc.)
-    - Flexible output modes for different downstream tasks
+    - Flexible output modes using SequencePooling layer
     - Support for token type embeddings for multi-segment inputs
 
     Args:
@@ -283,6 +282,7 @@ class TextEncoder(keras.layers.Layer):
         transformer_layers: List of TransformerLayer instances.
         final_norm: Optional final normalization layer.
         cls_token: Optional learnable CLS token weight.
+        pooling_layer: SequencePooling layer for output pooling.
 
     Example:
         ```python
@@ -360,7 +360,7 @@ class TextEncoder(keras.layers.Layer):
             max_seq_len: int = 512,
             embedding_type: EmbeddingType = 'learned',
             positional_type: PositionalType = 'learned',
-            attention_type: AttentionType = 'multi_head_attention',
+            attention_type: AttentionType = 'multi_head',
             normalization_type: NormalizationType = 'layer_norm',
             normalization_position: NormalizationPosition = 'post',
             ffn_type: FFNType = 'mlp',
@@ -540,11 +540,17 @@ class TextEncoder(keras.layers.Layer):
                 **norm_config
             )
 
+        # Create pooling layer using SequencePooling
+        self.pooling_layer = SequencePooling(
+            strategy=output_mode,
+            name='output_pooling'
+        )
+
         # CLS token will be created in build()
         self.cls_token = None
 
         logger.info(f"Created TextEncoder with vocab_size={vocab_size}, embed_dim={embed_dim}, "
-                    f"depth={depth}, max_seq_len={max_seq_len}")
+                    f"depth={depth}, max_seq_len={max_seq_len}, output_mode={output_mode}")
 
     def _create_word_embeddings(self) -> None:
         """
@@ -712,6 +718,9 @@ class TextEncoder(keras.layers.Layer):
         if self.final_norm is not None:
             self.final_norm.build(embedding_output_shape)
 
+        # Build pooling layer
+        self.pooling_layer.build(embedding_output_shape)
+
         # Always call parent build at the end
         super().build(input_shape)
 
@@ -749,7 +758,6 @@ class TextEncoder(keras.layers.Layer):
             input_ids = inputs
 
         batch_size = ops.shape(input_ids)[0]
-        # seq_len = ops.shape(input_ids)[1]
 
         # Word embeddings
         if self.embedding_type == 'factorized':
@@ -803,42 +811,22 @@ class TextEncoder(keras.layers.Layer):
         if self.final_norm is not None:
             x = self.final_norm(x, training=training)
 
-        # Apply output mode
-        if self.output_mode == 'cls':
-            # Return CLS token (first position)
-            return x[:, 0, :]  # (batch_size, embed_dim)
-        elif self.output_mode == 'first':
-            # Return first token
-            return x[:, 0, :]  # (batch_size, embed_dim)
-        elif self.output_mode == 'last':
-            # Return last token (accounting for padding)
-            if attention_mask is not None:
-                # Find last non-padded position for each sequence
-                seq_lens = ops.sum(ops.cast(attention_mask, 'int32'), axis=1) - 1
-                batch_indices = ops.arange(batch_size)
-                # This is a bit complex; gathering last token is simpler
-                return ops.take_along_axis(x, ops.expand_dims(ops.expand_dims(seq_lens, -1), -1), axis=1)[:, 0, :]
-            else:
-                return x[:, -1, :]  # (batch_size, embed_dim)
-        elif self.output_mode == 'mean':
-            # Global average pooling with masking
-            if attention_mask is not None:
-                mask = ops.expand_dims(ops.cast(attention_mask, x.dtype), -1)
-                x_masked = x * mask
-                return ops.sum(x_masked, axis=1) / ops.sum(mask, axis=1)
-            else:
-                return ops.mean(x, axis=1)  # (batch_size, embed_dim)
-        elif self.output_mode == 'max':
-            # Global max pooling
-            if attention_mask is not None:
-                mask = ops.expand_dims(ops.cast(attention_mask, x.dtype), -1)
-                x_masked = x + (1.0 - mask) * (-1e9)  # Large negative for padded positions
-                return ops.max(x_masked, axis=1)
-            else:
-                return ops.max(x, axis=1)  # (batch_size, embed_dim)
-        else:  # 'none'
-            # Return full sequence
-            return x  # (batch_size, seq_len, embed_dim)
+        # Apply pooling using SequencePooling layer
+        # Convert attention mask to format expected by SequencePooling (batch, seq_len)
+        pooling_mask = None
+        if attention_mask is not None:
+            # If attention_mask is 2D (batch, seq_len), use as is
+            # If attention_mask is 3D (batch, seq_len, seq_len), take diagonal or first row
+            if len(ops.shape(attention_mask)) == 2:
+                pooling_mask = attention_mask
+            elif len(ops.shape(attention_mask)) == 3:
+                # Use the first row which indicates which positions are valid
+                pooling_mask = attention_mask[:, 0, :]
+
+        # Apply pooling
+        output = self.pooling_layer(x, mask=pooling_mask, training=training)
+
+        return output
 
     def get_sequence_features(
             self,
@@ -859,9 +847,9 @@ class TextEncoder(keras.layers.Layer):
         Returns:
             Full sequence features tensor of shape [batch_size, seq_len, embed_dim].
         """
-        # Temporarily change output mode to get full sequence
-        original_output_mode = self.output_mode
-        self.output_mode = 'none'
+        # Temporarily save original pooling strategy and set to 'none'
+        original_strategy = self.pooling_layer.strategy
+        self.pooling_layer.strategy = ['none']
 
         try:
             features = self(
@@ -872,8 +860,8 @@ class TextEncoder(keras.layers.Layer):
             )
             return features
         finally:
-            # Restore original output mode
-            self.output_mode = original_output_mode
+            # Restore original pooling strategy
+            self.pooling_layer.strategy = original_strategy
 
     def get_pooled_features(
             self,
@@ -896,9 +884,9 @@ class TextEncoder(keras.layers.Layer):
         Returns:
             Pooled features tensor of shape [batch_size, embed_dim].
         """
-        # Temporarily change output mode to get pooled features
-        original_output_mode = self.output_mode
-        self.output_mode = pooling_mode
+        # Temporarily save original pooling strategy and set to requested mode
+        original_strategy = self.pooling_layer.strategy
+        self.pooling_layer.strategy = [pooling_mode]
 
         try:
             features = self(
@@ -909,8 +897,8 @@ class TextEncoder(keras.layers.Layer):
             )
             return features
         finally:
-            # Restore original output mode
-            self.output_mode = original_output_mode
+            # Restore original pooling strategy
+            self.pooling_layer.strategy = original_strategy
 
     def compute_output_shape(self, input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]], Dict[str, Any]]) -> \
     Tuple[Optional[int], ...]:
@@ -931,14 +919,13 @@ class TextEncoder(keras.layers.Layer):
             main_input_shape = input_shape
 
         batch_size = main_input_shape[0]
+        seq_len = main_input_shape[1]
+        if self.use_cls_token and seq_len is not None:
+            seq_len += 1
 
-        if self.output_mode in ['cls', 'mean', 'max', 'first', 'last']:
-            return (batch_size, self.embed_dim)
-        else:  # 'none'
-            seq_len = main_input_shape[1]
-            if self.use_cls_token:
-                seq_len += 1
-            return (batch_size, seq_len, self.embed_dim)
+        # Create dummy input shape for pooling layer
+        transformer_output_shape = (batch_size, seq_len, self.embed_dim)
+        return self.pooling_layer.compute_output_shape(transformer_output_shape)
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -1002,7 +989,7 @@ def create_text_encoder(
         max_seq_len: int = 512,
         embedding_type: EmbeddingType = 'learned',
         positional_type: PositionalType = 'learned',
-        attention_type: AttentionType = 'multi_head_attention',
+        attention_type: AttentionType = 'multi_head',
         normalization_type: NormalizationType = 'layer_norm',
         normalization_position: NormalizationPosition = 'post',
         ffn_type: FFNType = 'mlp',
@@ -1111,7 +1098,7 @@ def create_bert_encoder(
         max_seq_len=max_seq_len,
         embedding_type='learned',
         positional_type='learned',
-        attention_type='multi_head_attention',
+        attention_type='multi_head',
         normalization_type='layer_norm',
         normalization_position='post',
         ffn_type='mlp',
@@ -1140,7 +1127,7 @@ def create_roberta_encoder(
         max_seq_len=max_seq_len,
         embedding_type='learned',
         positional_type='learned',
-        attention_type='multi_head_attention',
+        attention_type='multi_head',
         normalization_type='layer_norm',
         normalization_position='post',
         ffn_type='mlp',
@@ -1169,7 +1156,7 @@ def create_modern_encoder(
         max_seq_len=max_seq_len,
         embedding_type='factorized',
         positional_type='rope',
-        attention_type='differential_attention',
+        attention_type='differential',
         normalization_type='rms_norm',
         normalization_position='pre',
         ffn_type='swiglu',
@@ -1198,7 +1185,7 @@ def create_efficient_encoder(
         max_seq_len=max_seq_len,
         embedding_type='factorized',
         positional_type='rope',
-        attention_type='multi_head_attention',
+        attention_type='multi_head',
         normalization_type='rms_norm',
         normalization_position='pre',
         ffn_type='swiglu',

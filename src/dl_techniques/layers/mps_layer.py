@@ -1,4 +1,5 @@
-"""Implement a layer based on the Matrix Product State tensor network.
+"""
+A layer based on the Matrix Product State tensor network.
 
 This layer provides a highly efficient parameterization for linear
 transformations, inspired by the Matrix Product State (MPS) formalism from

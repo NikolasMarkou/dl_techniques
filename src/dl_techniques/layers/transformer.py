@@ -631,7 +631,7 @@ class TransformerLayer(keras.layers.Layer):
             x = self.attention_norm(inputs, training=training)
 
             # Apply attention based on type
-            if self.attention_type == 'differential_attention':
+            if self.attention_type == 'differential':
                 x = self.attention(x, attention_mask=attention_mask, layer_idx=layer_idx, training=training)
             else:
                 # Assume custom layers handle masks internally if needed
@@ -667,7 +667,7 @@ class TransformerLayer(keras.layers.Layer):
 
             # 1. Attention block
             # Apply attention based on type
-            if self.attention_type == 'differential_attention':
+            if self.attention_type == 'differential':
                 x = self.attention(
                     inputs,
                     attention_mask=attention_mask,

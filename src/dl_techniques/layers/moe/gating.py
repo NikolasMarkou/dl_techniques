@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from keras import ops, layers, initializers
 from typing import Optional, Union, Tuple, Any, Dict
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class BaseGating(layers.Layer, ABC):
@@ -258,6 +259,7 @@ class LinearGating(BaseGating):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class CosineGating(BaseGating):
@@ -443,6 +445,7 @@ class CosineGating(BaseGating):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class SoftMoEGating(BaseGating):
@@ -583,6 +586,7 @@ class SoftMoEGating(BaseGating):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 def compute_auxiliary_loss(
         expert_weights: keras.KerasTensor,
@@ -621,6 +625,7 @@ def compute_auxiliary_loss(
 
     return aux_loss_weight * aux_loss
 
+# ---------------------------------------------------------------------
 
 def compute_z_loss(
         gate_logits: keras.KerasTensor,
@@ -647,6 +652,7 @@ def compute_z_loss(
 
     return z_loss_weight * z_loss
 
+# ---------------------------------------------------------------------
 
 def create_gating(gating_type: str, num_experts: int, **kwargs) -> BaseGating:
     """
@@ -694,3 +700,5 @@ def create_gating(gating_type: str, num_experts: int, **kwargs) -> BaseGating:
             f"Unsupported gating type: {gating_type}. "
             f"Supported types: ['linear', 'cosine', 'softmoe']"
         )
+
+# ---------------------------------------------------------------------

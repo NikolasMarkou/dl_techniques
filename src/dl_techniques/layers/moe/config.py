@@ -9,6 +9,7 @@ import keras
 from dataclasses import dataclass, field
 from typing import Optional, Union, Dict, Any, Literal
 
+# ---------------------------------------------------------------------
 
 @dataclass
 class ExpertConfig:
@@ -92,6 +93,7 @@ class ExpertConfig:
         elif 'type' not in self.ffn_config:
             raise ValueError("ffn_config must contain 'type' field specifying FFN type")
 
+# ---------------------------------------------------------------------
 
 @dataclass
 class GatingConfig:
@@ -163,6 +165,7 @@ class GatingConfig:
     aux_loss_weight: float = 0.01
     z_loss_weight: float = 1e-3
 
+# ---------------------------------------------------------------------
 
 @dataclass
 class MoEConfig:
@@ -267,3 +270,5 @@ class MoEConfig:
             gating_config=gating_config,
             **config_dict
         )
+
+# ---------------------------------------------------------------------

@@ -16,11 +16,11 @@ from typing import Optional, Tuple, Any, Dict, List
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
+
 from .experts import FFNExpert
 from .config import ExpertConfig, GatingConfig, MoEConfig
 from .gating import create_gating, compute_auxiliary_loss, compute_z_loss
-
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

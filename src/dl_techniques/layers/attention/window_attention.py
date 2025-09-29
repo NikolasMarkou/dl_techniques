@@ -123,7 +123,7 @@ class WindowAttention(keras.layers.Layer):
         attn_dropout: Dropout layer for attention weights (if dropout_rate > 0).
         proj_dropout: Dropout layer for output projection (if dropout_rate > 0).
         relative_position_bias_table: Learnable relative position bias parameters.
-        relative_position_index: Non-trainable relative position indices.
+        relative_position_index: Non-trainable, constant relative position indices.
 
     Example:
         ```python
@@ -248,8 +248,8 @@ class WindowAttention(keras.layers.Layer):
         relative_coords_w = relative_coords[:, :, 1] + self.window_size - 1  # 0 to 2*Ww-2
         relative_coords_h *= (2 * self.window_size - 1)
 
-        # Store the computed indices for use in build()
-        self._relative_position_index_content = relative_coords_h + relative_coords_w
+        # Store the computed indices as a constant tensor attribute
+        self.relative_position_index = relative_coords_h + relative_coords_w
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer weights and sub-layers following modern Keras 3 patterns.
@@ -266,15 +266,6 @@ class WindowAttention(keras.layers.Layer):
             initializer=keras.initializers.TruncatedNormal(stddev=0.02),
             trainable=True,
             dtype=self.dtype
-        )
-
-        # --- CREATE non-trainable state (buffer) initialized with pre-computed content ---
-        self.relative_position_index = self.add_weight(
-            name="relative_position_index",
-            shape=self._relative_position_index_content.shape,
-            dtype="int32",
-            initializer=keras.initializers.Constant(self._relative_position_index_content),
-            trainable=False
         )
 
         # --- Explicitly BUILD all sub-layers in computational order ---

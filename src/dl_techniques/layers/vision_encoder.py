@@ -1,4 +1,5 @@
-"""Encapsulates a configurable, general-purpose Vision Transformer encoder.
+"""
+Encapsulates a configurable, general-purpose Vision Transformer encoder.
 
 This layer implements the core architecture of a Vision Transformer (ViT),
 which processes images by treating them as a sequence of flattened patches. It
@@ -76,13 +77,19 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal, Callable
 
 from .embedding import create_embedding_layer
 from .norms import create_normalization_layer
-from .transformer import TransformerLayer, NormalizationType, AttentionType, FFNType
+from .transformer import (
+    TransformerLayer,
+    NormalizationType,
+    NormalizationPosition,
+    AttentionType,
+    FFNType
+)
+from .sequence_pooling import SequencePooling
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
 # ---------------------------------------------------------------------
 
-NormalizationPosition = Literal['pre', 'post']
 PoolingMode = Literal['cls', 'mean', 'max', 'none']
 PatchEmbedType = Literal['linear', 'siglip', 'conv', 'hybrid']
 
@@ -124,7 +131,7 @@ class VisionEncoder(keras.layers.Layer):
            ↓
     Optional Final Normalization
            ↓
-    Output Features (configurable pooling)
+    Output Features (configurable pooling via SequencePooling)
     ```
 
     **Key Features**:
@@ -133,7 +140,7 @@ class VisionEncoder(keras.layers.Layer):
     - Configurable attention mechanisms (MHA, Window, GQA, etc.)
     - Multiple normalization options (LayerNorm, RMSNorm, etc.)
     - Various FFN architectures (MLP, SwiGLU, etc.)
-    - Flexible output modes for different downstream tasks
+    - Flexible output modes using SequencePooling layer
 
     Args:
         img_size: Integer, input image size. Must be positive and divisible by patch_size.
@@ -154,8 +161,8 @@ class VisionEncoder(keras.layers.Layer):
         attention_type: AttentionType, attention mechanism to use:
             - 'multi_head': Standard multi-head self-attention
             - 'window': Windowed attention for efficiency
-            - 'group_query_attention': Grouped query attention
-            - 'differential_attention': Differential attention for noise reduction
+            - 'group_query': Grouped query attention
+            - 'differential': Differential attention for noise reduction
             Defaults to 'multi_head'.
         normalization_type: NormalizationType, normalization layer type:
             - 'layer_norm': Standard layer normalization
@@ -226,6 +233,7 @@ class VisionEncoder(keras.layers.Layer):
         transformer_layers: List of TransformerLayer instances.
         norm: Optional final normalization layer.
         cls_token: Optional learnable CLS token weight.
+        pooling_layer: SequencePooling layer for output pooling.
 
     Example:
         ```python
@@ -442,6 +450,16 @@ class VisionEncoder(keras.layers.Layer):
                 **self.norm_args
             )
 
+        # Create pooling layer using SequencePooling
+        # For mean and max pooling with CLS token, we exclude position 0
+        exclude_positions = [0] if (use_cls_token and output_mode in ['mean', 'max']) else []
+
+        self.pooling_layer = SequencePooling(
+            strategy=output_mode,
+            exclude_positions=exclude_positions,
+            name='output_pooling'
+        )
+
         # Create CLS token weight if needed (shape is independent of input)
         self.cls_token = None
         if self.use_cls_token:
@@ -608,6 +626,9 @@ class VisionEncoder(keras.layers.Layer):
         if self.norm is not None:
             self.norm.build(pos_input_shape)
 
+        # Build pooling layer
+        self.pooling_layer.build(pos_input_shape)
+
         # Always call parent build at the end
         super().build(input_shape)
 
@@ -642,6 +663,7 @@ class VisionEncoder(keras.layers.Layer):
     def call(
             self,
             inputs: keras.KerasTensor,
+            attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
@@ -649,6 +671,7 @@ class VisionEncoder(keras.layers.Layer):
 
         Args:
             inputs: Input images tensor of shape [batch_size, height, width, channels]
+            attention_mask: Optional boolean mask of shape (batch, seq_len)
             training: Optional boolean indicating training mode.
 
         Returns:
@@ -656,19 +679,9 @@ class VisionEncoder(keras.layers.Layer):
         """
         x = self._get_full_sequence_features(inputs, training=training)
 
-        # Apply output mode
-        if self.output_mode == 'cls':
-            return x[:, 0, :]
-        elif self.output_mode == 'mean':
-            # Exclude CLS token from mean pooling if it exists
-            tokens_to_pool = x[:, 1:, :] if self.use_cls_token else x
-            return ops.mean(tokens_to_pool, axis=1)
-        elif self.output_mode == 'max':
-            # Exclude CLS token from max pooling if it exists
-            tokens_to_pool = x[:, 1:, :] if self.use_cls_token else x
-            return ops.max(tokens_to_pool, axis=1)
-        else:  # 'none'
-            return x
+        output = self.pooling_layer(x, mask=attention_mask, training=training)
+
+        return output
 
     def get_cls_features(
             self,
@@ -753,10 +766,9 @@ class VisionEncoder(keras.layers.Layer):
         """
         batch_size = input_shape[0]
 
-        if self.output_mode in ['cls', 'mean', 'max']:
-            return (batch_size, self.embed_dim)
-        else:  # 'none'
-            return (batch_size, self.seq_len, self.embed_dim)
+        # Create dummy sequence shape for pooling layer
+        sequence_shape = (batch_size, self.seq_len, self.embed_dim)
+        return self.pooling_layer.compute_output_shape(sequence_shape)
 
     def get_config(self) -> Dict[str, Any]:
         """

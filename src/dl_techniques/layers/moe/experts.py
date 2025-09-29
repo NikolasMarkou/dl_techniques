@@ -10,9 +10,14 @@ import keras
 from abc import ABC, abstractmethod
 from typing import Optional, Tuple, Any, Dict
 
-from dl_techniques.layers.ffn import create_ffn_from_config, validate_ffn_config
-from dl_techniques.utils.logger import logger
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
+from ..ffn import create_ffn_from_config, validate_ffn_config
+
+# ---------------------------------------------------------------------
 
 class BaseExpert(keras.layers.Layer, ABC):
     """

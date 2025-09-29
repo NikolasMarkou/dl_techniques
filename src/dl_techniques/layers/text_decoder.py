@@ -1,4 +1,5 @@
-"""Implement a configurable, Transformer-based text decoder stack.
+"""
+A configurable, Transformer-based text decoder stack.
 
 This layer serves as a high-level component for building decoder-only
 autoregressive language models, encapsulating the core logic of token
@@ -98,9 +99,8 @@ from .transformer import TransformerLayer, AttentionType, FFNType, Normalization
 # Type definitions
 # ---------------------------------------------------------------------
 
-EmbeddingType = Literal['learned', 'shared', 'factorized']
 PositionalType = Literal['learned', 'sincos']
-
+EmbeddingType = Literal['learned', 'shared', 'factorized']
 
 # ---------------------------------------------------------------------
 
@@ -123,7 +123,7 @@ class TextDecoder(keras.layers.Layer):
     Input IDs (batch_size, seq_len)
            ↓
     Word Embeddings → Positional Embeddings
-           ↓                    ↓
+           ↓                     ↓
            └────── ADD ──────────┘
                    ↓
            Embedding Normalization

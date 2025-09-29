@@ -64,7 +64,7 @@ class TestTextEncoder:
             'max_seq_len': 1024,
             'embedding_type': 'factorized',
             'positional_type': 'rope',
-            'attention_type': 'differential_attention',
+            'attention_type': 'differential',
             'normalization_type': 'rms_norm',
             'normalization_position': 'pre',
             'ffn_type': 'swiglu',
@@ -105,7 +105,7 @@ class TestTextEncoder:
         assert not encoder.built
         assert encoder.embedding_type == 'learned'
         assert encoder.positional_type == 'learned'
-        assert encoder.attention_type == 'multi_head_attention'
+        assert encoder.attention_type == 'multi_head'
         assert encoder.normalization_type == 'layer_norm'
         assert encoder.ffn_type == 'mlp'
         assert encoder.output_mode == 'none'
@@ -127,7 +127,7 @@ class TestTextEncoder:
         assert encoder.positional_type == positional_type
 
     @pytest.mark.parametrize("attention_type", [
-        'multi_head_attention', 'window_attention', 'group_query_attention', 'differential_attention'
+        'multi_head', 'window', 'group_query', 'differential'
     ])
     def test_initialization_attention_types(self, basic_config, attention_type):
         """Tests initialization with different attention mechanisms."""
@@ -486,7 +486,7 @@ class TestTextEncoder:
         assert isinstance(encoder, TextEncoder)
         assert encoder.embedding_type == 'factorized'
         assert encoder.positional_type == 'rope'
-        assert encoder.attention_type == 'differential_attention'
+        assert encoder.attention_type == 'differential'
         assert encoder.normalization_type == 'rms_norm'
         assert encoder.ffn_type == 'swiglu'
 

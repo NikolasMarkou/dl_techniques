@@ -10,12 +10,18 @@ expert system.
 import keras
 from dataclasses import dataclass
 
-from .layer import MixtureOfExperts
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder, learning_rate_schedule_builder
 )
+
+from .layer import MixtureOfExperts
+
+# ---------------------------------------------------------------------
 
 @dataclass
 class MoETrainingConfig:
@@ -63,6 +69,7 @@ class MoETrainingConfig:
     dropout_rate: float = 0.1
     use_mixed_precision: bool = False
 
+# ---------------------------------------------------------------------
 
 class MoEOptimizerBuilder:
     """
@@ -162,3 +169,5 @@ class MoEOptimizerBuilder:
             logger.info(f"Applied learning rate multipliers to {len(multipliers)} MoE parameters")
         else:
             logger.warning("No MoE parameters found for learning rate multipliers")
+
+# ---------------------------------------------------------------------
