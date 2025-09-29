@@ -75,13 +75,11 @@ from typing import Optional, Union, Any, Dict, Tuple, Literal, Callable
 # local imports
 # ---------------------------------------------------------------------
 
-
-from .stochastic_depth import StochasticDepth
-from .norms import create_normalization_layer, NormalizationType
-from .ffn.factory import create_ffn_from_config, FFNType
-from .attention.factory import create_attention_layer, AttentionType
-
 from .moe import MixtureOfExperts, MoEConfig
+from .stochastic_depth import StochasticDepth
+from .ffn.factory import create_ffn_from_config, FFNType
+from .norms import create_normalization_layer, NormalizationType
+from .attention.factory import create_attention_layer, AttentionType
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
