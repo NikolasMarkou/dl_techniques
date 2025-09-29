@@ -161,6 +161,10 @@ class ConvNeXtV1(keras.Model):
                 f"ConvNeXt typically uses 4 stages, got {len(depths)} stages"
             )
 
+        if strides <= 0:
+            raise ValueError(
+                f"Strides {strides} must be positive."
+            )
         # Store configuration
         self.num_classes = num_classes
         self.depths = depths
@@ -285,7 +289,8 @@ class ConvNeXtV1(keras.Model):
                 name=f"stage_{stage_idx}_block_{block_idx}"
             )
             drop_path = keras.layers.Dropout(
-                rate=drop_rate, noise_shape=(None, 1, 1, 1),
+                rate=drop_rate,
+                noise_shape=(None, 1, 1, 1),
                 name=f"stage_{stage_idx}_block_{block_idx}_drop_path"
             ) if drop_rate > 0 else None
             stage_blocks.append({"block": block, "drop_path": drop_path})
