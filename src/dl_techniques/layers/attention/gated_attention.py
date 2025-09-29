@@ -1,9 +1,68 @@
 """
-Gated Attention Layer Implementation
+Implement a gated multi-head attention with rotary position embeddings.
 
-This module implements a Gated Attention layer as shown in the LLM architecture diagram.
-The layer features input linear projection, Q/K/V projections with Zero-Centered RMSNorm,
-Partial RoPE on queries and keys, scaled dot-product attention, and output gating.
+This layer provides a sophisticated and high-performance implementation of
+multi-head attention, integrating several modern architectural enhancements
+commonly found in state-of-the-art large language models. It is designed
+for improved training stability, expressiveness, and the effective encoding of
+sequential information.
+
+Architecture and Foundational Mathematics:
+The layer's architecture augments the standard scaled dot-product attention
+with three key concepts: Rotary Position Embedding (RoPE) for relative
+positional awareness, RMSNorm for efficient normalization, and an output
+gating mechanism for dynamic information flow control.
+
+1.  **QKV Projection and Normalization:** Input tokens are first projected
+    into Query (Q), Key (K), and Value (V) representations. Unlike standard
+    Transformer architectures that apply Layer Normalization pre-attention,
+    this layer normalizes Q, K, and V vectors independently using Root Mean
+    Square Normalization (RMSNorm). RMSNorm is a simpler, computationally
+    cheaper alternative that stabilizes training by re-scaling activations
+    based on their root mean square magnitude, without re-centering them.
+
+2.  **Rotary Position Embedding (RoPE):** To inject relative positional
+    information, RoPE is applied to the normalized Q and K vectors. Instead
+    of adding a positional encoding, RoPE rotates the embedding vectors in a
+    high-dimensional space. The angle of rotation for a token at position `m`
+    is determined by `m * θ`, where `θ` is a predefined frequency.
+
+    The key insight is that the dot product of two rotated vectors, one at
+    position `m` and another at `n`, depends only on their content and their
+    relative distance `m-n`. This is because the rotational matrices are
+    orthogonal, preserving vector norms, and the dot product `q_m^T k_n`
+    becomes a function of the relative position `m-n`, allowing the
+    self-attention mechanism to naturally capture relative spatial context.
+    This implementation uses "partial RoPE," applying rotation only to a
+    subset of the head dimensions, which may help disentangle positional
+    information from content representation.
+
+3.  **Scaled Dot-Product Attention:** After RoPE is applied, the standard
+    attention mechanism is computed:
+
+        Attention(Q, K, V) = softmax( (Q_rope * K_rope^T) / sqrt(d_k) ) * V
+
+    The output is a weighted sum of the Value vectors, where the weights are
+    determined by the similarity of the positionally-aware Query and Key
+    vectors.
+
+4.  **Output Gating:** The final attention output is modulated by a gating
+    mechanism inspired by Gated Linear Units (GLU). The attention output `A`
+    is used to compute a gate `g = sigmoid(Linear(A))`. The final layer
+    output is the element-wise product `g ⊗ A`. This allows the model to
+    learn to dynamically control the flow of information through the layer,
+    selectively amplifying or attenuating features from the attention output.
+
+References:
+  - "Attention Is All You Need" (Vaswani et al., 2017)
+    https://arxiv.org/abs/1706.03762
+  - "RoFormer: Enhanced Transformer with Rotary Position Embedding"
+    (Su et al., 2021) https://arxiv.org/abs/2104.09864
+  - "Root Mean Square Layer Normalization" (Zhang and Sennrich, 2019)
+    https://arxiv.org/abs/1910.07467
+  - "LLaMA: Open and Efficient Foundation Language Models"
+    (Touvron et al., 2023) https://arxiv.org/abs/2302.13971
+
 """
 
 import keras

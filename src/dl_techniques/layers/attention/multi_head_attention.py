@@ -1,4 +1,5 @@
-"""Multi-Head Attention Layer with Mask Support.
+"""
+Multi-Head Attention Layer with Mask Support.
 
 This module implements a Multi-Head Self-Attention mechanism optimized for vision_heads
 and sequence modeling tasks. The implementation follows Keras 3.x best practices 

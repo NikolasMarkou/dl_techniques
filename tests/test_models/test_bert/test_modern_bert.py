@@ -7,7 +7,7 @@ import numpy as np
 import keras
 import tensorflow as tf
 
-from dl_techniques.models.modern_bert.model import (
+from dl_techniques.models.bert.modern_bert import (
     ModernBERT,
     create_modern_bert_with_head,
 )

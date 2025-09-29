@@ -1,69 +1,70 @@
-"""Approximates softmax attention with linear complexity using random features.
+"""
+Approximates softmax attention with linear complexity using random features.
 
-    This layer implements the Performer, a transformer architecture that can
-    process long sequences with a memory and time complexity that scales
-    linearly with sequence length, as opposed to the quadratic complexity of
-    standard dot-product attention. This is achieved by approximating the
-    softmax kernel using the FAVOR+ (Fast Attention Via positive Orthogonal
-    Random features) algorithm.
+This layer implements the Performer, a transformer architecture that can
+process long sequences with a memory and time complexity that scales
+linearly with sequence length, as opposed to the quadratic complexity of
+standard dot-product attention. This is achieved by approximating the
+softmax kernel using the FAVOR+ (Fast Attention Via positive Orthogonal
+Random features) algorithm.
 
-    Architecture:
-        The quadratic bottleneck in standard attention arises from the explicit
-        computation of the `N x N` attention matrix `A = Q @ K.T`, where `N` is
-        the sequence length. The Performer architecture circumvents this by
-        leveraging the associativity of matrix multiplication.
+Architecture:
+    The quadratic bottleneck in standard attention arises from the explicit
+    computation of the `N x N` attention matrix `A = Q @ K.T`, where `N` is
+    the sequence length. The Performer architecture circumvents this by
+    leveraging the associativity of matrix multiplication.
 
-        Instead of computing `(Q @ K.T) @ V`, the Performer approximates `Q` and `K`
-        with random feature maps `φ(Q)` and `φ(K)` and reorders the computation
-        to `φ(Q) @ (φ(K).T @ V)`. The key steps are:
-        1.  Project the standard query and key matrices (`Q`, `K`) into a lower-
-            dimensional random feature space to get `φ(Q)` and `φ(K)`. The
-            dimension of this space (`nb_features`) is much smaller than the
-            sequence length `N`.
-        2.  First, compute the matrix `φ(K).T @ V`. This intermediate result has a
-            shape of `(nb_features, head_dim)`, avoiding any `N x N` computation.
-        3.  Multiply `φ(Q)` with this intermediate matrix.
-        4.  A similar re-associated computation is performed for the softmax
-            denominator to produce the final normalized output.
+    Instead of computing `(Q @ K.T) @ V`, the Performer approximates `Q` and `K`
+    with random feature maps `φ(Q)` and `φ(K)` and reorders the computation
+    to `φ(Q) @ (φ(K).T @ V)`. The key steps are:
+    1.  Project the standard query and key matrices (`Q`, `K`) into a lower-
+        dimensional random feature space to get `φ(Q)` and `φ(K)`. The
+        dimension of this space (`nb_features`) is much smaller than the
+        sequence length `N`.
+    2.  First, compute the matrix `φ(K).T @ V`. This intermediate result has a
+        shape of `(nb_features, head_dim)`, avoiding any `N x N` computation.
+    3.  Multiply `φ(Q)` with this intermediate matrix.
+    4.  A similar re-associated computation is performed for the softmax
+        denominator to produce the final normalized output.
 
-        This reordering reduces the complexity from O(N² * d) to
-        O(N * r * d), where `r` is the number of random features.
+    This reordering reduces the complexity from O(N² * d) to
+    O(N * r * d), where `r` is the number of random features.
 
-    Foundational Mathematics:
-        The core of the Performer is the approximation of the softmax kernel.
-        The attention mechanism `softmax( (Q @ K.T) / sqrt(d) )` can be viewed as
-        a kernel function `K(q, k) = exp(q.k)`. This exponential kernel can be
-        approximated by the dot product of two high-dimensional random feature
-        maps, `φ(q)` and `φ(k)`:
+Foundational Mathematics:
+    The core of the Performer is the approximation of the softmax kernel.
+    The attention mechanism `softmax( (Q @ K.T) / sqrt(d) )` can be viewed as
+    a kernel function `K(q, k) = exp(q.k)`. This exponential kernel can be
+    approximated by the dot product of two high-dimensional random feature
+    maps, `φ(q)` and `φ(k)`:
 
-            exp(q.k) ≈ <φ(q), φ(k)>
+        exp(q.k) ≈ <φ(q), φ(k)>
 
-        The FAVOR+ method constructs a specific positive feature map `φ` using
-        trigonometric functions and a random Gaussian projection matrix `ω`:
+    The FAVOR+ method constructs a specific positive feature map `φ` using
+    trigonometric functions and a random Gaussian projection matrix `ω`:
 
-            φ(x) = (1/sqrt(r)) * [f_1(x), ..., f_r(x)]
-            where f_i(x) = exp(-||x||²/2) * h_i(x)
-            and h_i(x) are random features like cos(ω_i.x) and sin(ω_i.x).
+        φ(x) = (1/sqrt(r)) * [f_1(x), ..., f_r(x)]
+        where f_i(x) = exp(-||x||²/2) * h_i(x)
+        and h_i(x) are random features like cos(ω_i.x) and sin(ω_i.x).
 
-        By replacing the exact kernel with this approximation, the attention
-        matrix `A` can be written as `A ≈ φ(Q) @ φ(K).T`. The final output is
-        then computed as:
+    By replacing the exact kernel with this approximation, the attention
+    matrix `A` can be written as `A ≈ φ(Q) @ φ(K).T`. The final output is
+    then computed as:
 
-            Output ≈ (φ(Q) @ φ(K).T) @ V = φ(Q) @ (φ(K).T @ V)
+        Output ≈ (φ(Q) @ φ(K).T) @ V = φ(Q) @ (φ(K).T @ V)
 
-        The normalization term (the softmax denominator) is also approximated in
-        a linear fashion:
+    The normalization term (the softmax denominator) is also approximated in
+    a linear fashion:
 
-            Denominator ≈ diag( φ(Q) @ (φ(K).T @ 1_N) )
+        Denominator ≈ diag( φ(Q) @ (φ(K).T @ 1_N) )
 
-        This mathematical reformulation allows for an unbiased, low-variance
-        estimation of the attention matrix without ever explicitly constructing it,
-        leading to the significant gains in efficiency.
+    This mathematical reformulation allows for an unbiased, low-variance
+    estimation of the attention matrix without ever explicitly constructing it,
+    leading to the significant gains in efficiency.
 
-    References:
-        - The foundational paper for this mechanism:
-          Choromanski, K., Likhosherstov, V., Dohan, D., et al. (2020).
-          "Rethinking Attention with Performers".
+References:
+    - The foundational paper for this mechanism:
+      Choromanski, K., Likhosherstov, V., Dohan, D., et al. (2020).
+      "Rethinking Attention with Performers".
 """
 
 import keras

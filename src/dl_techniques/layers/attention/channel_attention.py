@@ -1,61 +1,62 @@
-"""Generates channel-wise attention weights for convolutional feature maps.
+"""
+Generates channel-wise attention weights for convolutional feature maps.
 
-    This module implements the channel attention mechanism from the Convolutional
-    Block Attention Module (CBAM). Its purpose is to learn the importance of
-    each feature channel in a convolutional network, allowing the model to
-    dynamically re-weight channels to focus on the most informative features.
-    It answers the question of "what" is important in the input features.
+This module implements the channel attention mechanism from the Convolutional
+Block Attention Module (CBAM). Its purpose is to learn the importance of
+each feature channel in a convolutional network, allowing the model to
+dynamically re-weight channels to focus on the most informative features.
+It answers the question of "what" is important in the input features.
 
-    Architecture:
-        The core principle is to aggregate spatial information from each
-        channel into a compact channel descriptor and then use these descriptors
-        to learn the non-linear, cross-channel relationships. This is achieved
-        through a dual-path architecture:
+Architecture:
+    The core principle is to aggregate spatial information from each
+    channel into a compact channel descriptor and then use these descriptors
+    to learn the non-linear, cross-channel relationships. This is achieved
+    through a dual-path architecture:
 
-        1.  **Spatial Information Aggregation:** The module processes the input
-            feature map through two parallel global pooling operations to create
-            two distinct channel descriptors:
-            -   **Global Average Pooling:** Captures the overall statistical
-                distribution and global context of each feature channel.
-            -   **Global Max Pooling:** Captures the most salient, high-activation
-                part of each feature channel, representing its most distinctive
-                local feature.
+    1.  **Spatial Information Aggregation:** The module processes the input
+        feature map through two parallel global pooling operations to create
+        two distinct channel descriptors:
+        -   **Global Average Pooling:** Captures the overall statistical
+            distribution and global context of each feature channel.
+        -   **Global Max Pooling:** Captures the most salient, high-activation
+            part of each feature channel, representing its most distinctive
+            local feature.
 
-        2.  **Shared Multi-Layer Perceptron (MLP):** Both channel descriptors are
-            then fed through the *same* lightweight MLP. This MLP, which
-            consists of a bottleneck structure (a reduction layer followed by an
-            expansion layer), learns to model the complex interdependencies
-            between channels. Sharing the MLP for both descriptors reduces
-            parameters and encourages the learning of a more general relationship
-            model.
+    2.  **Shared Multi-Layer Perceptron (MLP):** Both channel descriptors are
+        then fed through the *same* lightweight MLP. This MLP, which
+        consists of a bottleneck structure (a reduction layer followed by an
+        expansion layer), learns to model the complex interdependencies
+        between channels. Sharing the MLP for both descriptors reduces
+        parameters and encourages the learning of a more general relationship
+        model.
 
-        3.  **Merging and Activation:** The output feature vectors from the
-            shared MLP are merged via element-wise summation. This combined
-            vector is then passed through a sigmoid activation function to
-            produce the final channel attention weights, scaled between 0 and 1.
+    3.  **Merging and Activation:** The output feature vectors from the
+        shared MLP are merged via element-wise summation. This combined
+        vector is then passed through a sigmoid activation function to
+        produce the final channel attention weights, scaled between 0 and 1.
 
-    Foundational Mathematics:
-        The channel attention map `M_c` for an input feature map `F` is computed
-        as follows:
+Foundational Mathematics:
+    The channel attention map `M_c` for an input feature map `F` is computed
+    as follows:
 
-            M_c(F) = σ( MLP(AvgPool(F)) + MLP(MaxPool(F)) )
+        M_c(F) = σ( MLP(AvgPool(F)) + MLP(MaxPool(F)) )
 
-        where `σ` is the sigmoid function. The MLP consists of two weight
-        matrices, `W_0` (for dimensionality reduction) and `W_1` (for
-        expansion), shared across both paths:
+    where `σ` is the sigmoid function. The MLP consists of two weight
+    matrices, `W_0` (for dimensionality reduction) and `W_1` (for
+    expansion), shared across both paths:
 
-            M_c(F) = σ( W_1(ReLU(W_0(F_avg))) + W_1(ReLU(W_0(F_max))) )
+        M_c(F) = σ( W_1(ReLU(W_0(F_avg))) + W_1(ReLU(W_0(F_max))) )
 
-        Here, `F_avg` and `F_max` are the channel descriptors produced by
-        average and max pooling, respectively. This formulation allows the
-        model to learn which channels to emphasize or suppress based on a
-        combination of their global context and most salient features.
+    Here, `F_avg` and `F_max` are the channel descriptors produced by
+    average and max pooling, respectively. This formulation allows the
+    model to learn which channels to emphasize or suppress based on a
+    combination of their global context and most salient features.
 
-    References:
-        - The foundational paper for this module:
-          Woo, S., Park, J., Lee, J. Y., & Kweon, I. S. (2018). "CBAM:
-          Convolutional Block Attention Module". European Conference on
-          Computer Vision (ECCV).
+References:
+    - The foundational paper for this module:
+      Woo, S., Park, J., Lee, J. Y., & Kweon, I. S. (2018). "CBAM:
+      Convolutional Block Attention Module". European Conference on
+      Computer Vision (ECCV).
 """
 
 import keras

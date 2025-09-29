@@ -1,65 +1,66 @@
-"""Implements the asymmetric cross-attention from the Perceiver architecture.
+"""
+Implements the asymmetric cross-attention from the Perceiver architecture.
 
-    This layer is a specialized form of cross-attention that serves as the
-    core building block of the Perceiver and Perceiver IO models. Its primary
-    function is to create a scalable information bottleneck, enabling a deep
-    transformer model to process very large and high-dimensional inputs (like
-    images or audio) without incurring quadratic computational complexity.
+This layer is a specialized form of cross-attention that serves as the
+core building block of the Perceiver and Perceiver IO models. Its primary
+function is to create a scalable information bottleneck, enabling a deep
+transformer model to process very large and high-dimensional inputs (like
+images or audio) without incurring quadratic computational complexity.
 
-    Architecture:
-        The key architectural innovation is the decoupling of the main processing
-        network's depth from the input data's size. This is achieved by
-        introducing an asymmetric attention mechanism that operates between two
-        distinct arrays:
+Architecture:
+    The key architectural innovation is the decoupling of the main processing
+    network's depth from the input data's size. This is achieved by
+    introducing an asymmetric attention mechanism that operates between two
+    distinct arrays:
 
-        1.  **A small, fixed-size latent array (Queries):** This is typically a
-            learnable embedding that acts as the network's internal state or
-            "working memory." Its size is a hyperparameter that remains constant
-            regardless of the input data size.
+    1.  **A small, fixed-size latent array (Queries):** This is typically a
+        learnable embedding that acts as the network's internal state or
+        "working memory." Its size is a hyperparameter that remains constant
+        regardless of the input data size.
 
-        2.  **A large, variable-size data array (Keys and Values):** This is
-            derived directly from the high-dimensional input data (e.g., image
-            patches, text tokens, audio samples).
+    2.  **A large, variable-size data array (Keys and Values):** This is
+        derived directly from the high-dimensional input data (e.g., image
+        patches, text tokens, audio samples).
 
-        In each layer, the latent array forms the queries (`Q`) and "attends to"
-        the data array, which provides the keys (`K`) and values (`V`). This
-        forces the model to distill or "perceive" the most relevant information
-        from the large input data and summarize it into the compact latent
-        representation. Because the subsequent self-attention layers in a
-        Perceiver model only operate on this small latent array, the overall
-        computational cost becomes manageable and independent of the input size.
+    In each layer, the latent array forms the queries (`Q`) and "attends to"
+    the data array, which provides the keys (`K`) and values (`V`). This
+    forces the model to distill or "perceive" the most relevant information
+    from the large input data and summarize it into the compact latent
+    representation. Because the subsequent self-attention layers in a
+    Perceiver model only operate on this small latent array, the overall
+    computational cost becomes manageable and independent of the input size.
 
-    Foundational Mathematics:
-        While the underlying mechanism is the standard scaled dot-product
-        attention, its application is asymmetric. Given a latent array `X_lat`
-        (of size `N x D`) and a data array `X_data` (of size `M x C`), the
-        computation is as follows:
+Foundational Mathematics:
+    While the underlying mechanism is the standard scaled dot-product
+    attention, its application is asymmetric. Given a latent array `X_lat`
+    (of size `N x D`) and a data array `X_data` (of size `M x C`), the
+    computation is as follows:
 
-            Q = X_lat @ W_q
-            K = X_data @ W_k
-            V = X_data @ W_v
+        Q = X_lat @ W_q
+        K = X_data @ W_k
+        V = X_data @ W_v
 
-            Attention(Q, K, V) = softmax( (Q @ K.T) / sqrt(d_k) ) @ V
+        Attention(Q, K, V) = softmax( (Q @ K.T) / sqrt(d_k) ) @ V
 
-        The resulting attention matrix has a shape of `(N, M)`, where `N` is the
-        latent array size and `M` is the input data size. The computational
-        complexity is O(N * M), which is a significant improvement over the
-        O(M^2) complexity of applying self-attention directly to the large data
-        array, especially when `N << M`. This mechanism effectively performs a
-        set-to-set transformation, mapping a large, variable-sized input set to
-        a small, fixed-sized latent set.
+    The resulting attention matrix has a shape of `(N, M)`, where `N` is the
+    latent array size and `M` is the input data size. The computational
+    complexity is O(N * M), which is a significant improvement over the
+    O(M^2) complexity of applying self-attention directly to the large data
+    array, especially when `N << M`. This mechanism effectively performs a
+    set-to-set transformation, mapping a large, variable-sized input set to
+    a small, fixed-sized latent set.
 
-    References:
-        - The primary architecture was introduced in:
-          Jaegle, A., et al. (2021). "Perceiver: General Perception with
-          Iterative Attention".
+References:
+    - The primary architecture was introduced in:
+      Jaegle, A., et al. (2021). "Perceiver: General Perception with
+      Iterative Attention".
 
-        - The concept was extended for structured outputs in:
-          Jaegle, A., et al. (2021). "Perceiver IO: A General Architecture for
-          Structured Inputs & Outputs".
+    - The concept was extended for structured outputs in:
+      Jaegle, A., et al. (2021). "Perceiver IO: A General Architecture for
+      Structured Inputs & Outputs".
 
-        - The underlying attention mechanism is from:
-          Vaswani, A., et al. (2017). "Attention Is All You Need".
+    - The underlying attention mechanism is from:
+      Vaswani, A., et al. (2017). "Attention Is All You Need".
 """
 
 import keras

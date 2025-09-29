@@ -1,9 +1,42 @@
 """
-FNet: Fourier Transform-based Attention Replacement
+Mix tokens using a parameter-free 2D Discrete Fourier Transform.
 
-This module implements the FNet architecture from "FNet: Mixing Tokens with Fourier Transforms"
-(Lee-Thorp et al., 2021), which replaces self-attention with parameter-free Fourier transforms
-for efficient token mixing in transformer-style architectures.
+This layer implements the core token-mixing mechanism from the FNet
+architecture, which proposes replacing the self-attention sublayer in a
+Transformer with a standard, non-parameterized Fourier Transform. This
+approach provides a computationally efficient alternative for mixing
+information across a sequence, avoiding the quadratic complexity of
+self-attention.
+
+Architecture and Foundational Mathematics:
+The FNet block operates on the principle that the primary role of the
+self-attention layer is to mix tokens, enabling each position in the
+sequence to gather information from all other positions. The authors of FNet
+demonstrate that this mixing can be effectively and efficiently approximated
+by a much simpler linear transformation: the Discrete Fourier Transform (DFT).
+
+The architecture treats the input tensor of shape `(sequence_length,
+hidden_dim)` as a 2D signal. It then applies a 2D DFT by performing two
+sequential 1D DFTs:
+1.  A 1D DFT is applied along the sequence dimension.
+2.  A 1D DFT is applied along the hidden (feature) dimension.
+
+Mathematically, the DFT decomposes a signal into its constituent frequencies.
+By applying it across both sequence and hidden dimensions, the layer
+transforms the entire input into the frequency domain and back (implicitly,
+by taking the real part of the output). This process ensures that every
+element in the output tensor is a linear combination of every element in the
+input tensor, thus achieving a global receptive field analogous to
+self-attention.
+
+The key insight is that this simple, parameter-free linear mixing is
+sufficient to achieve strong performance on a variety of NLP tasks, while
+being significantly more memory and computationally efficient, with a
+complexity of O(N log N) compared to O(N^2) for self-attention.
+
+References:
+  - "FNet: Mixing Tokens with Fourier Transforms" (Lee-Thorp et al., 2021)
+    https://arxiv.org/abs/2105.03824
 
 """
 

@@ -46,26 +46,6 @@ terminates based on one of the following conditions:
     iteration stops. This indicates that the system has settled into a
     stable fixed-point attractor.
 
-Example:
-    >>> # Self-attention with iterative updates
-    >>> x = keras.random.normal((4, 32, 128))
-    >>> hopfield_layer = HopfieldAttention(
-    ...     num_heads=8, key_dim=16, update_steps_max=3
-    ... )
-    >>> output = hopfield_layer(x)
-    >>> print(output.shape)
-    (4, 32, 128)
-
-    >>> # Cross-attention (single step, like standard attention)
-    >>> query = keras.random.normal((4, 32, 128))
-    >>> key_value = keras.random.normal((4, 64, 128))
-    >>> hopfield_layer = HopfieldAttention(
-    ...     num_heads=8, key_dim=16, update_steps_max=0
-    ... )
-    >>> output = hopfield_layer([query, key_value])
-    >>> print(output.shape)
-    (4, 32, 128)
-
 References:
     [1] Ramsauer, H., et al. (2020). "Hopfield Networks is All You Need".
         arXiv:2008.02217.

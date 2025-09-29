@@ -20,7 +20,7 @@ import tempfile
 import os
 from typing import Dict, Any
 
-from dl_techniques.models.bert.foundation_model import BERT, create_bert_with_head
+from dl_techniques.models.bert.bert import BERT, create_bert_with_head
 from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType
 
 

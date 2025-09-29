@@ -1,17 +1,18 @@
-import pytest
+import os
 import keras
+import pytest
+import tempfile
 import numpy as np
 import tensorflow as tf
-import tempfile
-import os
 from keras import ops
 from typing import Dict, Any
 
 # ---------------------------------------------------------------------
 
-from dl_techniques.models.modern_bert.components import (
+from dl_techniques.layers.embedding.modern_bert_embeddings import (
     ModernBertEmbeddings,
 )
+
 # ---------------------------------------------------------------------
 
 class TestModernBertEmbeddings:

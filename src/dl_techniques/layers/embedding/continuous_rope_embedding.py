@@ -1,61 +1,62 @@
-"""Generates continuous, multi-dimensional rotary position embeddings (RoPE).
+"""
+Generates continuous, multi-dimensional rotary position embeddings (RoPE).
 
-    This layer extends the concept of Rotary Position Embedding (RoPE),
-    originally designed for 1D discrete sequences, to handle continuous,
-    multi-dimensional coordinates. It is designed to inject absolute positional
-    information into a transformer's attention mechanism in a way that allows
-    the model to naturally reason about relative positions, which is crucial
-    for tasks involving spatial data like images, videos, or 3D point clouds.
+This layer extends the concept of Rotary Position Embedding (RoPE),
+originally designed for 1D discrete sequences, to handle continuous,
+multi-dimensional coordinates. It is designed to inject absolute positional
+information into a transformer's attention mechanism in a way that allows
+the model to naturally reason about relative positions, which is crucial
+for tasks involving spatial data like images, videos, or 3D point clouds.
 
-    Architecture:
-        Unlike traditional positional embeddings that are added to token
-        embeddings, RoPE modifies the query and key vectors directly within the
-        attention mechanism by applying a rotation. This layer's role is not to
-        produce a final embedding, but to compute the *phase angles* for these
-        rotations based on the input coordinates.
+Architecture:
+    Unlike traditional positional embeddings that are added to token
+    embeddings, RoPE modifies the query and key vectors directly within the
+    attention mechanism by applying a rotation. This layer's role is not to
+    produce a final embedding, but to compute the *phase angles* for these
+    rotations based on the input coordinates.
 
-        The core architectural idea is to partition the feature dimension (`dim`)
-        among the number of spatial dimensions (`ndim`). For each coordinate
-        dimension (e.g., x, y, z), the layer computes a corresponding set of
-        phase angles by multiplying the coordinate value with a predefined set
-        of fixed, non-learnable frequencies. The final output is a single
-        vector formed by concatenating the phase angles from all spatial
-        dimensions. This vector can then be used in an attention layer to apply
-        the N-dimensional rotation to the query and key vectors.
+    The core architectural idea is to partition the feature dimension (`dim`)
+    among the number of spatial dimensions (`ndim`). For each coordinate
+    dimension (e.g., x, y, z), the layer computes a corresponding set of
+    phase angles by multiplying the coordinate value with a predefined set
+    of fixed, non-learnable frequencies. The final output is a single
+    vector formed by concatenating the phase angles from all spatial
+    dimensions. This vector can then be used in an attention layer to apply
+    the N-dimensional rotation to the query and key vectors.
 
-    Foundational Mathematics:
-        The fundamental principle of RoPE is to encode absolute position `p`
-        by applying a rotation matrix `R_p` to a feature vector `x`. The key
-        property is that the inner product between two rotated vectors,
-        `<R_p * q, R_k * k>`, depends only on their relative displacement, `p - k`.
+Foundational Mathematics:
+    The fundamental principle of RoPE is to encode absolute position `p`
+    by applying a rotation matrix `R_p` to a feature vector `x`. The key
+    property is that the inner product between two rotated vectors,
+    `<R_p * q, R_k * k>`, depends only on their relative displacement, `p - k`.
 
-        In the 1D case, this rotation is equivalent to multiplying a complex
-        number representation of the vector by `e^(j * p * theta)`, where `p` is
-        the position and `theta` is a frequency. The embedding dimension `d` is
-        treated as `d/2` complex numbers, each rotated with a different
-        frequency `theta_i` from a geometric progression:
+    In the 1D case, this rotation is equivalent to multiplying a complex
+    number representation of the vector by `e^(j * p * theta)`, where `p` is
+    the position and `theta` is a frequency. The embedding dimension `d` is
+    treated as `d/2` complex numbers, each rotated with a different
+    frequency `theta_i` from a geometric progression:
 
-            theta_i = base_freq^(-2i / d)
+        theta_i = base_freq^(-2i / d)
 
-        This layer generalizes this concept to a continuous N-dimensional
-        coordinate vector `P = (p_1, p_2, ..., p_ndim)`. The total embedding
-        dimension `d` is split into `ndim` sub-vectors, each of dimension `d'`.
-        For each coordinate component `p_k`, a vector of phase angles `phi_k`
-        is computed by multiplying the coordinate value with its corresponding
-        set of frequencies:
+    This layer generalizes this concept to a continuous N-dimensional
+    coordinate vector `P = (p_1, p_2, ..., p_ndim)`. The total embedding
+    dimension `d` is split into `ndim` sub-vectors, each of dimension `d'`.
+    For each coordinate component `p_k`, a vector of phase angles `phi_k`
+    is computed by multiplying the coordinate value with its corresponding
+    set of frequencies:
 
-            phi_k = p_k * {theta_0, theta_1, ..., theta_{d'/2 - 1}}
+        phi_k = p_k * {theta_0, theta_1, ..., theta_{d'/2 - 1}}
 
-        The final output of this layer is the concatenation of these phase angle
-        vectors, `[phi_1, phi_2, ..., phi_ndim]`, which contains all the
-        information needed to apply the full N-dimensional rotation to query
-        and key vectors in an attention mechanism.
+    The final output of this layer is the concatenation of these phase angle
+    vectors, `[phi_1, phi_2, ..., phi_ndim]`, which contains all the
+    information needed to apply the full N-dimensional rotation to query
+    and key vectors in an attention mechanism.
 
-    References:
-        - The original concept for 1D sequences was introduced in:
-          Su, J., Lu, Y., Pan, S., Murtadha, A., Wen, B., & Liu, Y. (2021).
-          "RoFormer: Enhanced Transformer with Rotary Position Embedding".
-    """
+References:
+    - The original concept for 1D sequences was introduced in:
+      Su, J., Lu, Y., Pan, S., Murtadha, A., Wen, B., & Liu, Y. (2021).
+      "RoFormer: Enhanced Transformer with Rotary Position Embedding".
+"""
 
 import keras
 import numpy as np

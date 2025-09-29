@@ -1,59 +1,60 @@
-"""Generates a spatial attention map for convolutional feature maps.
+"""
+Generates a spatial attention map for convolutional feature maps.
 
-    This module implements the spatial attention mechanism from the Convolutional
-    Block Attention Module (CBAM). It is designed to identify the most
-    information-rich spatial regions within a feature map. By learning "where"
-    to focus, it complements channel attention, which learns "what" to focus on.
+This module implements the spatial attention mechanism from the Convolutional
+Block Attention Module (CBAM). It is designed to identify the most
+information-rich spatial regions within a feature map. By learning "where"
+to focus, it complements channel attention, which learns "what" to focus on.
 
-    Architecture:
-        The core idea is to first aggregate the rich information spread across
-        all channels into a compact and effective spatial descriptor, and then
-        use this descriptor to generate a 2D attention map. The architecture
-        achieves this in two main steps:
+Architecture:
+    The core idea is to first aggregate the rich information spread across
+    all channels into a compact and effective spatial descriptor, and then
+    use this descriptor to generate a 2D attention map. The architecture
+    achieves this in two main steps:
 
-        1.  **Channel Information Aggregation:** The module compresses the
-            channel-wise information for each spatial position into two distinct
-            2D feature maps. This is done by applying two pooling operations
-            along the channel axis:
-            -   **Average Pooling:** Creates a map summarizing the average
-                features for each spatial location across all channels,
-                capturing global context.
-            -   **Max Pooling:** Creates a map highlighting the most salient
-                feature response for each spatial location, capturing peak
-                activation information.
+    1.  **Channel Information Aggregation:** The module compresses the
+        channel-wise information for each spatial position into two distinct
+        2D feature maps. This is done by applying two pooling operations
+        along the channel axis:
+        -   **Average Pooling:** Creates a map summarizing the average
+            features for each spatial location across all channels,
+            capturing global context.
+        -   **Max Pooling:** Creates a map highlighting the most salient
+            feature response for each spatial location, capturing peak
+            activation information.
 
-        2.  **Spatial Map Generation:** The two resulting 2D feature maps are
-            concatenated along their channel dimension, forming a refined
-            spatial descriptor of shape `(H, W, 2)`. A single convolutional
-            layer (typically with a large 7x7 kernel) is then applied to this
-            concatenated map. This convolution learns to identify important
-            spatial regions based on the aggregated channel information. The
-            final output is passed through a sigmoid function to produce a
-            normalized attention map.
+    2.  **Spatial Map Generation:** The two resulting 2D feature maps are
+        concatenated along their channel dimension, forming a refined
+        spatial descriptor of shape `(H, W, 2)`. A single convolutional
+        layer (typically with a large 7x7 kernel) is then applied to this
+        concatenated map. This convolution learns to identify important
+        spatial regions based on the aggregated channel information. The
+        final output is passed through a sigmoid function to produce a
+        normalized attention map.
 
-    Foundational Mathematics:
-        The spatial attention map `M_s` for an input feature map `F` is computed
-        using the following formula:
+Foundational Mathematics:
+    The spatial attention map `M_s` for an input feature map `F` is computed
+    using the following formula:
 
-            M_s(F) = σ( f^k ([AvgPool(F); MaxPool(F)]) )
+        M_s(F) = σ( f^k ([AvgPool(F); MaxPool(F)]) )
 
-        -   `AvgPool(F)` and `MaxPool(F)` represent average and max pooling
-            operations performed along the channel axis, reducing a tensor of
-            shape `(H, W, C)` to `(H, W, 1)`.
-        -   `[;]` denotes the concatenation of these two maps along the channel
-            axis, resulting in a tensor of shape `(H, W, 2)`.
-        -   `f^k` represents a 2D convolution with a single filter of kernel
-            size `k x k` (e.g., 7x7). This operation effectively acts as a
-            spatial feature detector.
-        -   `σ` is the sigmoid activation function, which scales the output to
-            the range `[0, 1]`, making it suitable for use as a multiplicative
-            attention mask.
+    -   `AvgPool(F)` and `MaxPool(F)` represent average and max pooling
+        operations performed along the channel axis, reducing a tensor of
+        shape `(H, W, C)` to `(H, W, 1)`.
+    -   `[;]` denotes the concatenation of these two maps along the channel
+        axis, resulting in a tensor of shape `(H, W, 2)`.
+    -   `f^k` represents a 2D convolution with a single filter of kernel
+        size `k x k` (e.g., 7x7). This operation effectively acts as a
+        spatial feature detector.
+    -   `σ` is the sigmoid activation function, which scales the output to
+        the range `[0, 1]`, making it suitable for use as a multiplicative
+        attention mask.
 
-    References:
-        - The foundational paper for this module:
-          Woo, S., Park, J., Lee, J. Y., & Kweon, I. S. (2018). "CBAM:
-          Convolutional Block Attention Module". European Conference on
-          Computer Vision (ECCV).
+References:
+    - The foundational paper for this module:
+      Woo, S., Park, J., Lee, J. Y., & Kweon, I. S. (2018). "CBAM:
+      Convolutional Block Attention Module". European Conference on
+      Computer Vision (ECCV).
 """
 
 import keras

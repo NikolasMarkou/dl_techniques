@@ -33,7 +33,6 @@ The operational flow of the layer is as follows:
 
 import keras
 from keras import ops
-from keras import layers
 from typing import Optional, Dict, Any, Union, Tuple
 
 # ---------------------------------------------------------------------
@@ -142,7 +141,7 @@ class PositionalEmbedding(keras.layers.Layer):
             self.pos_initializer = keras.initializers.TruncatedNormal(stddev=self.scale)
 
         # CREATE sub-layer in __init__ (modern Keras 3 pattern)
-        self.dropout = layers.Dropout(self.dropout_rate, name="pos_dropout")
+        self.dropout = keras.layers.Dropout(self.dropout_rate, name="pos_dropout")
 
         # Weight will be initialized in build()
         self.pos_embedding = None

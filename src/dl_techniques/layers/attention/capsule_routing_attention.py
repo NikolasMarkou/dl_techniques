@@ -1,78 +1,79 @@
-"""Implements self-attention enhanced by capsule network routing principles.
+"""
+Implements self-attention enhanced by capsule network routing principles.
 
-    This layer replaces the standard softmax calculation in multi-head attention
-    with a more structured, iterative agreement mechanism inspired by Capsule
-    Networks. Instead of each query token independently calculating its
-    attention weights, this layer introduces a "routing-by-agreement" process
-    that refines the attention scores by modeling relationships between different
-    attention components (either across heads or across token positions).
+This layer replaces the standard softmax calculation in multi-head attention
+with a more structured, iterative agreement mechanism inspired by Capsule
+Networks. Instead of each query token independently calculating its
+attention weights, this layer introduces a "routing-by-agreement" process
+that refines the attention scores by modeling relationships between different
+attention components (either across heads or across token positions).
 
-    Architecture:
-        The layer first computes the standard scaled dot-product attention
-        scores `A = Q @ K.T`. These scores then serve as the initial "votes" for
-        a dynamic routing process. The architecture supports two distinct,
-        concurrent routing mechanisms that refine these initial scores:
+Architecture:
+    The layer first computes the standard scaled dot-product attention
+    scores `A = Q @ K.T`. These scores then serve as the initial "votes" for
+    a dynamic routing process. The architecture supports two distinct,
+    concurrent routing mechanisms that refine these initial scores:
 
-        1.  **Vertical Routing (Head-wise):** For a given query token, the
-            attention distributions from all `H` heads are treated as `H`
-            low-level capsules. Dynamic routing is then applied to compute a
-            set of `H` high-level capsules, where each output is a consensus
-            formed by routing information between the heads. This allows the
-            model to learn a sophisticated, weighted combination of the
-            different perspectives (e.g., syntactic, positional) captured by
-            each head, rather than simply concatenating their outputs.
+    1.  **Vertical Routing (Head-wise):** For a given query token, the
+        attention distributions from all `H` heads are treated as `H`
+        low-level capsules. Dynamic routing is then applied to compute a
+        set of `H` high-level capsules, where each output is a consensus
+        formed by routing information between the heads. This allows the
+        model to learn a sophisticated, weighted combination of the
+        different perspectives (e.g., syntactic, positional) captured by
+        each head, rather than simply concatenating their outputs.
 
-        2.  **Horizontal Routing (Token-wise):** For a given query token, the
-            attention scores it receives from all source tokens are treated as
-            input capsules. The routing mechanism allows these source token
-            "perspectives" to agree on a final attention distribution for the
-            query token. With the optional positional constraint, this process
-            becomes causal, ensuring a token only routes information from
-            previous tokens, thereby respecting sequence order for
-            autoregressive tasks.
+    2.  **Horizontal Routing (Token-wise):** For a given query token, the
+        attention scores it receives from all source tokens are treated as
+        input capsules. The routing mechanism allows these source token
+        "perspectives" to agree on a final attention distribution for the
+        query token. With the optional positional constraint, this process
+        becomes causal, ensuring a token only routes information from
+        previous tokens, thereby respecting sequence order for
+        autoregressive tasks.
 
-        The outputs of these routing mechanisms are combined with the original
-        scores, and the final attention weights are computed via softmax.
+    The outputs of these routing mechanisms are combined with the original
+    scores, and the final attention weights are computed via softmax.
 
-    Foundational Mathematics:
-        The core of this layer is the **Dynamic Routing** algorithm. It is an
-        iterative process that refines the connection strengths between
-        low-level capsules (the initial attention scores) and high-level
-        capsules (the refined scores). For a set of input capsules (votes) `u_i`
-        and output capsules `v_j`:
+Foundational Mathematics:
+    The core of this layer is the **Dynamic Routing** algorithm. It is an
+    iterative process that refines the connection strengths between
+    low-level capsules (the initial attention scores) and high-level
+    capsules (the refined scores). For a set of input capsules (votes) `u_i`
+    and output capsules `v_j`:
 
-        1.  **Log-Priors (`b_ij`):** The initial routing logits `b_ij` are
-            initialized to zero.
-        2.  **Coupling Coefficients (`c_ij`):** In each iteration, these are
-            computed by applying softmax to the logits: `c_ij = softmax(b_ij)`.
-            They represent the probability that capsule `i` should be routed
-            to capsule `j`.
-        3.  **Weighted Sum (`s_j`):** The input to a high-level capsule `j` is
-            the weighted sum of all votes from the lower layer:
-            `s_j = sum_i(c_ij * u_i)`.
-        4.  **Squashing (`v_j`):** The output `v_j` is obtained by applying a
-            non-linear "squashing" function to `s_j`:
-            `v_j = squash(s_j) = (||s_j||^2 / (1 + ||s_j||^2)) * (s_j / ||s_j||)`.
-            This function shrinks small vectors towards zero and normalizes
-            large vectors to a length just below 1, acting as a filter for
-            strong agreements.
-        5.  **Agreement Update:** The log-priors `b_ij` are updated by adding
-            the agreement, which is the dot product of the output `v_j` and
-            the input vote `u_i`. This reinforces routes where the input and
-            output capsules show high similarity.
+    1.  **Log-Priors (`b_ij`):** The initial routing logits `b_ij` are
+        initialized to zero.
+    2.  **Coupling Coefficients (`c_ij`):** In each iteration, these are
+        computed by applying softmax to the logits: `c_ij = softmax(b_ij)`.
+        They represent the probability that capsule `i` should be routed
+        to capsule `j`.
+    3.  **Weighted Sum (`s_j`):** The input to a high-level capsule `j` is
+        the weighted sum of all votes from the lower layer:
+        `s_j = sum_i(c_ij * u_i)`.
+    4.  **Squashing (`v_j`):** The output `v_j` is obtained by applying a
+        non-linear "squashing" function to `s_j`:
+        `v_j = squash(s_j) = (||s_j||^2 / (1 + ||s_j||^2)) * (s_j / ||s_j||)`.
+        This function shrinks small vectors towards zero and normalizes
+        large vectors to a length just below 1, acting as a filter for
+        strong agreements.
+    5.  **Agreement Update:** The log-priors `b_ij` are updated by adding
+        the agreement, which is the dot product of the output `v_j` and
+        the input vote `u_i`. This reinforces routes where the input and
+        output capsules show high similarity.
 
-        This iterative process allows the model to dynamically strengthen or
-        weaken connections based on the emerging consensus, leading to more
-        robust and contextually aware attention weights.
+    This iterative process allows the model to dynamically strengthen or
+    weaken connections based on the emerging consensus, leading to more
+    robust and contextually aware attention weights.
 
-    References:
-        - The primary algorithm and its application in transformers:
-          Duan, Y., et al. (2019). "Capsule-Transformer for Neural Machine
-          Translation".
+References:
+    - The primary algorithm and its application in transformers:
+      Duan, Y., et al. (2019). "Capsule-Transformer for Neural Machine
+      Translation".
 
-        - The foundational concept of capsule networks and dynamic routing:
-          Sabour, S., Frosst, N., & Hinton, G. E. (2017). "Dynamic Routing
-          Between Capsules".
+    - The foundational concept of capsule networks and dynamic routing:
+      Sabour, S., Frosst, N., & Hinton, G. E. (2017). "Dynamic Routing
+      Between Capsules".
 """
 
 import keras

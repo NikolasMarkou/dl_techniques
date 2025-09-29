@@ -1,67 +1,68 @@
-"""Implements a dual-configuration Rotary Position Embedding (RoPE).
+"""
+Implements a dual-configuration Rotary Position Embedding (RoPE).
 
-    This layer provides two distinct, pre-computed Rotary Position Embedding
-    (RoPE) configurations within a single module. It is specifically designed
-    for transformer architectures like Gemma3 that employ hybrid attention
-    strategies, such as combining standard full attention with local or sliding
-    window attention.
+This layer provides two distinct, pre-computed Rotary Position Embedding
+(RoPE) configurations within a single module. It is specifically designed
+for transformer architectures like Gemma3 that employ hybrid attention
+strategies, such as combining standard full attention with local or sliding
+window attention.
 
-    Architecture:
-        The core of this layer is not one, but two separate, non-trainable RoPE
-        lookup tables (cosine and sine pairs). Each table is generated using a
-        different frequency base (`theta_base`), resulting in two distinct sets
-        of positional signals optimized for different contextual scales:
+Architecture:
+    The core of this layer is not one, but two separate, non-trainable RoPE
+    lookup tables (cosine and sine pairs). Each table is generated using a
+    different frequency base (`theta_base`), resulting in two distinct sets
+    of positional signals optimized for different contextual scales:
 
-        1.  **Global RoPE:** Generated with a large `theta_base` (e.g.,
-            1,000,000), this configuration produces low-frequency, long-
-            wavelength positional signals. These signals change slowly across
-            the sequence, making them ideal for encoding positions in a full,
-            all-to-all attention mechanism where capturing long-range
-            dependencies is critical.
+    1.  **Global RoPE:** Generated with a large `theta_base` (e.g.,
+        1,000,000), this configuration produces low-frequency, long-
+        wavelength positional signals. These signals change slowly across
+        the sequence, making them ideal for encoding positions in a full,
+        all-to-all attention mechanism where capturing long-range
+        dependencies is critical.
 
-        2.  **Local RoPE:** Generated with a smaller `theta_base` (e.g.,
-            10,000), this configuration produces higher-frequency, shorter-
-            wavelength signals. This provides more fine-grained positional
-            discrimination for nearby tokens, making it better suited for
-            local or sliding window attention where relative positions within a
-            small context are most important.
+    2.  **Local RoPE:** Generated with a smaller `theta_base` (e.g.,
+        10,000), this configuration produces higher-frequency, shorter-
+        wavelength signals. This provides more fine-grained positional
+        discrimination for nearby tokens, making it better suited for
+        local or sliding window attention where relative positions within a
+        small context are most important.
 
-        During the forward pass, the user selects either the 'global' or 'local'
-        configuration at runtime. The appropriate pre-computed cosine and sine
-        tables are then used to apply the rotational transformation to the input
-        query or key vectors.
+    During the forward pass, the user selects either the 'global' or 'local'
+    configuration at runtime. The appropriate pre-computed cosine and sine
+    tables are then used to apply the rotational transformation to the input
+    query or key vectors.
 
-    Foundational Mathematics:
-        Rotary Position Embedding encodes the absolute position `m` by applying a
-        rotation to a feature vector, with the crucial property that the inner
-        product between two rotated vectors depends only on their relative
-        position `m - k`. The rotation angle for each feature pair is `m * θ_i`,
-        where the frequencies `θ_i` are defined by a geometric progression:
+Foundational Mathematics:
+    Rotary Position Embedding encodes the absolute position `m` by applying a
+    rotation to a feature vector, with the crucial property that the inner
+    product between two rotated vectors depends only on their relative
+    position `m - k`. The rotation angle for each feature pair is `m * θ_i`,
+    where the frequencies `θ_i` are defined by a geometric progression:
 
-            θ_i = 1 / (theta_base^(2i / d))
+        θ_i = 1 / (theta_base^(2i / d))
 
-        The `theta_base` parameter directly controls the wavelength of the
-        positional signal. A larger `theta_base` leads to smaller `θ_i` values
-        (lower frequencies), which means the positional signal varies more
-        slowly across the sequence. A smaller `theta_base` results in larger
-        `θ_i` values (higher frequencies), causing the signal to change more
-        rapidly.
+    The `theta_base` parameter directly controls the wavelength of the
+    positional signal. A larger `theta_base` leads to smaller `θ_i` values
+    (lower frequencies), which means the positional signal varies more
+    slowly across the sequence. A smaller `theta_base` results in larger
+    `θ_i` values (higher frequencies), causing the signal to change more
+    rapidly.
 
-        This dual-RoPE layer leverages this principle by maintaining two sets of
-        frequencies, `{θ_i}_global` and `{θ_i}_local`, derived from
-        `global_theta_base` and `local_theta_base` respectively. This allows
-        the model to switch between a positional encoding optimized for stable,
-        long-distance relationships and one optimized for precise, local-context
-        relationships, aligning the nature of the positional signal with the
-        scope of the attention mechanism being used.
+    This dual-RoPE layer leverages this principle by maintaining two sets of
+    frequencies, `{θ_i}_global` and `{θ_i}_local`, derived from
+    `global_theta_base` and `local_theta_base` respectively. This allows
+    the model to switch between a positional encoding optimized for stable,
+    long-distance relationships and one optimized for precise, local-context
+    relationships, aligning the nature of the positional signal with the
+    scope of the attention mechanism being used.
 
-    References:
-        - The dual RoPE mechanism is a key component of the Gemma3 architecture.
-          Google (2024). "Gemma 3 Technical Report".
+References:
+    - The dual RoPE mechanism is a key component of the Gemma3 architecture.
+      Google (2024). "Gemma 3 Technical Report".
 
-        - The original concept for Rotary Position Embedding:
-          Su, J., et al. (2021). "RoFormer: Enhanced Transformer with Rotary
-          Position Embedding".
+    - The original concept for Rotary Position Embedding:
+      Su, J., et al. (2021). "RoFormer: Enhanced Transformer with Rotary
+      Position Embedding".
 """
 
 import keras

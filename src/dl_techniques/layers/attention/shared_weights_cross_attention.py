@@ -1,74 +1,75 @@
-"""Implements a parameter-efficient, bidirectional cross-attention mechanism.
+"""
+Implements a parameter-efficient, bidirectional cross-attention mechanism.
 
-    This layer facilitates information exchange between two distinct sets of
-    tokens (modalities) through a cross-attention pattern where the projection
-    weights for queries, keys, and values are shared. This design is highly
-    parameter-efficient and encourages the model to learn a common, modality-
-    invariant representation space for interaction.
+This layer facilitates information exchange between two distinct sets of
+tokens (modalities) through a cross-attention pattern where the projection
+weights for queries, keys, and values are shared. This design is highly
+parameter-efficient and encourages the model to learn a common, modality-
+invariant representation space for interaction.
 
-    Architecture:
-        The core architectural principle is to force two different input
-        modalities (e.g., surface features and volume features) to communicate
-        using a single, shared set of transformation rules. The process is as
-        follows:
+Architecture:
+    The core architectural principle is to force two different input
+    modalities (e.g., surface features and volume features) to communicate
+    using a single, shared set of transformation rules. The process is as
+    follows:
 
-        1.  **Shared Projection:** The input, a concatenation of tokens from
-            modality A and modality B, is passed through a single, shared projection
-            layer to generate queries (Q), keys (K), and values (V) for all
-            tokens simultaneously.
+    1.  **Shared Projection:** The input, a concatenation of tokens from
+        modality A and modality B, is passed through a single, shared projection
+        layer to generate queries (Q), keys (K), and values (V) for all
+        tokens simultaneously.
 
-        2.  **Bidirectional Cross-Attention:** The resulting Q, K, and V tensors
-            are split according to the original modalities. A bidirectional
-            attention is then computed:
-            -   The queries of modality A attend to the keys and values of
-                modality B.
-            -   Simultaneously, the queries of modality B attend to the keys
-                and values of modality A.
+    2.  **Bidirectional Cross-Attention:** The resulting Q, K, and V tensors
+        are split according to the original modalities. A bidirectional
+        attention is then computed:
+        -   The queries of modality A attend to the keys and values of
+            modality B.
+        -   Simultaneously, the queries of modality B attend to the keys
+            and values of modality A.
 
-        3.  **Optional Anchor-Query Hierarchy:** The layer also supports a more
-            complex, sparse attention pattern. In this mode, each modality is
-            further divided into "anchors" and "queries." The anchors are
-            intended to act as compressed summaries of their respective
-            modalities. The attention flow is then modified such that all tokens
-            from one modality (both its anchors and queries) attend *only* to the
-            anchors of the opposing modality. This creates an efficient, two-
-            tiered information exchange through a compact bottleneck.
+    3.  **Optional Anchor-Query Hierarchy:** The layer also supports a more
+        complex, sparse attention pattern. In this mode, each modality is
+        further divided into "anchors" and "queries." The anchors are
+        intended to act as compressed summaries of their respective
+        modalities. The attention flow is then modified such that all tokens
+        from one modality (both its anchors and queries) attend *only* to the
+        anchors of the opposing modality. This creates an efficient, two-
+        tiered information exchange through a compact bottleneck.
 
-    Foundational Mathematics:
-        The defining characteristic of this layer is its weight sharing. Let
-        `f_q`, `f_k`, and `f_v` be the shared linear projection functions. For
-        input sequences `X_A` and `X_B` from two modalities, the Q, K, and V
-        vectors are computed using these same functions:
+Foundational Mathematics:
+    The defining characteristic of this layer is its weight sharing. Let
+    `f_q`, `f_k`, and `f_v` be the shared linear projection functions. For
+    input sequences `X_A` and `X_B` from two modalities, the Q, K, and V
+    vectors are computed using these same functions:
 
-            Q_A, K_A, V_A = f_q(X_A), f_k(X_A), f_v(X_A)
-            Q_B, K_B, V_B = f_q(X_B), f_k(X_B), f_v(X_B)
+        Q_A, K_A, V_A = f_q(X_A), f_k(X_A), f_v(X_A)
+        Q_B, K_B, V_B = f_q(X_B), f_k(X_B), f_v(X_B)
 
-        The cross-attention outputs are then calculated as:
+    The cross-attention outputs are then calculated as:
 
-            Output_A = Attention(Q_A, K_B, V_B)
-            Output_B = Attention(Q_B, K_A, V_A)
+        Output_A = Attention(Q_A, K_B, V_B)
+        Output_B = Attention(Q_B, K_A, V_A)
 
-        This shared projection acts as a strong inductive bias, forcing the model
-        to map both modalities into a common semantic space where their features
-        can be meaningfully compared and combined. This is a form of parameter
-        tying reminiscent of Siamese networks, which promotes generalization and
-        is highly efficient when the modalities share underlying structural or
-        semantic properties.
+    This shared projection acts as a strong inductive bias, forcing the model
+    to map both modalities into a common semantic space where their features
+    can be meaningfully compared and combined. This is a form of parameter
+    tying reminiscent of Siamese networks, which promotes generalization and
+    is highly efficient when the modalities share underlying structural or
+    semantic properties.
 
-    References:
-        - The cross-attention mechanism is a cornerstone of encoder-decoder
-          architectures:
-          Vaswani, A., et al. (2017). "Attention Is All You Need".
+References:
+    - The cross-attention mechanism is a cornerstone of encoder-decoder
+      architectures:
+      Vaswani, A., et al. (2017). "Attention Is All You Need".
 
-        - The concept of weight sharing across different inputs to learn a
-          common feature space is fundamental to Siamese Networks:
-          Bromley, J., et al. (1994). "Signature verification using a Siamese
-          time delay neural network".
+    - The concept of weight sharing across different inputs to learn a
+      common feature space is fundamental to Siamese Networks:
+      Bromley, J., et al. (1994). "Signature verification using a Siamese
+      time delay neural network".
 
-        - The anchor-query structure is a form of sparse attention, related to
-          models that use global tokens as information hubs:
-          Beltagy, I., Peters, M. E., & Cohan, A. (2020). "Longformer: The
-          Long-Document Transformer".
+    - The anchor-query structure is a form of sparse attention, related to
+      models that use global tokens as information hubs:
+      Beltagy, I., Peters, M. E., & Cohan, A. (2020). "Longformer: The
+      Long-Document Transformer".
 """
 
 import keras
