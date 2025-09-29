@@ -95,24 +95,20 @@ from keras import ops, layers, initializers, regularizers
 from typing import Dict, Optional, Tuple, Union, Any, Literal
 
 # ---------------------------------------------------------------------
-# Local imports - leveraging existing dl-techniques components
+# local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.text_decoder import TextDecoder
 from dl_techniques.layers.text_encoder import TextEncoder
-from dl_techniques.layers.multimodal_fusion import MultiModalFusion
 from dl_techniques.layers.vision_encoder import VisionEncoder, create_vision_encoder
+from dl_techniques.layers.fusion.multimodal_fusion import MultiModalFusion, FusionStrategy
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
 # ---------------------------------------------------------------------
 
 TextComponentType = Literal['decoder', 'encoder']
-FusionStrategy = Literal[
-    'cross_attention', 'concatenation', 'addition', 'multiplication',
-    'gated', 'attention_pooling', 'bilinear', 'tensor_fusion'
-]
 
 # ---------------------------------------------------------------------
 

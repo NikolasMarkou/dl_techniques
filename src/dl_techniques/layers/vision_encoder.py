@@ -84,13 +84,12 @@ from .transformer import (
     AttentionType,
     FFNType
 )
-from .sequence_pooling import SequencePooling
+from .sequence_pooling import SequencePooling, PoolingStrategy
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
 # ---------------------------------------------------------------------
 
-PoolingMode = Literal['cls', 'mean', 'max', 'none']
 PatchEmbedType = Literal['linear', 'siglip', 'conv', 'hybrid']
 
 # ---------------------------------------------------------------------
@@ -312,7 +311,7 @@ class VisionEncoder(keras.layers.Layer):
             normalization_position: NormalizationPosition = 'post',
             ffn_type: FFNType = 'mlp',
             use_cls_token: bool = True,
-            output_mode: PoolingMode = 'cls',
+            output_mode: PoolingStrategy = 'cls',
             dropout: float = 0.0,
             attention_dropout: float = 0.0,
             pos_dropout: float = 0.0,
@@ -830,7 +829,7 @@ def create_vision_encoder(
         normalization_position: NormalizationPosition = 'post',
         ffn_type: FFNType = 'mlp',
         use_cls_token: bool = True,
-        output_mode: PoolingMode = 'cls',
+        output_mode: PoolingStrategy = 'cls',
         dropout: float = 0.0,
         **kwargs: Any
 ) -> VisionEncoder:

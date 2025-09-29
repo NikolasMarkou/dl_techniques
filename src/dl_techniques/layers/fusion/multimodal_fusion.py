@@ -29,9 +29,9 @@ from typing import Optional, Union, List, Dict, Any, Tuple, Literal, Callable
 # Local imports - Assumed to exist in the project structure
 # ---------------------------------------------------------------------
 
-from .ffn.factory import create_ffn_layer, FFNType
-from .attention.factory import create_attention_layer
-from .norms.factory import create_normalization_layer, NormalizationType
+from dl_techniques.layers.ffn.factory import create_ffn_layer, FFNType
+from dl_techniques.layers.attention.factory import create_attention_layer
+from dl_techniques.layers.norms.factory import create_normalization_layer, NormalizationType
 
 # ---------------------------------------------------------------------
 # Type definitions for fusion strategies

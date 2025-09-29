@@ -96,7 +96,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal, Callable, List
 
 from ..utils.logger import logger
 from .embedding import create_embedding_layer
-from .sequence_pooling import SequencePooling
+from .sequence_pooling import SequencePooling, PoolingStrategy
 from .norms import create_normalization_layer, NormalizationType
 from .transformer import TransformerLayer, AttentionType, NormalizationPosition, FFNType
 
@@ -106,8 +106,6 @@ from .transformer import TransformerLayer, AttentionType, NormalizationPosition,
 
 EmbeddingType = Literal['learned', 'shared', 'factorized']
 PositionalType = Literal['learned', 'rope', 'dual_rope', 'sincos']
-PoolingMode = Literal['cls', 'mean', 'max', 'first', 'last', 'none']
-
 
 # ---------------------------------------------------------------------
 
@@ -367,7 +365,7 @@ class TextEncoder(keras.layers.Layer):
             use_token_type_embedding: bool = False,
             type_vocab_size: int = 2,
             use_cls_token: bool = False,
-            output_mode: PoolingMode = 'none',
+            output_mode: PoolingStrategy = 'none',
             dropout: float = 0.1,
             attention_dropout: float = 0.1,
             embed_dropout: float = 0.1,
@@ -866,7 +864,7 @@ class TextEncoder(keras.layers.Layer):
     def get_pooled_features(
             self,
             inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
-            pooling_mode: PoolingMode = 'mean',
+            pooling_mode: PoolingStrategy = 'mean',
             token_type_ids: Optional[keras.KerasTensor] = None,
             attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None

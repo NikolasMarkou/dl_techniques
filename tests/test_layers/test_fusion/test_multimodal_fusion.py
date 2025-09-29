@@ -7,7 +7,7 @@ import tempfile
 import os
 from typing import List
 
-from dl_techniques.layers.multimodal_fusion import MultiModalFusion, FusionStrategy
+from dl_techniques.layers.fusion.multimodal_fusion import MultiModalFusion, FusionStrategy
 
 SINGLE_OUTPUT_STRATEGIES: List[FusionStrategy] = [
     'concatenation',
