@@ -18,7 +18,7 @@ from typing import Tuple, List, Optional, Dict, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.filesystem import count_available_files
 from dl_techniques.optimization import optimizer_builder, learning_rate_schedule_builder
-from dl_techniques.models.bias_free_denoisers.bfcnn_denoiser import (
+from dl_techniques.models.bias_free_denoisers.bfcnn import (
     create_bfcnn_denoiser, BFCNN_CONFIGS, create_bfcnn_variant
 )
 

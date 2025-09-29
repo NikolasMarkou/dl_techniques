@@ -76,7 +76,7 @@ outputs = {
 ```python
 import keras
 from dl_techniques.models.vit import ViT
-from dl_techniques.vision.heads import create_vision_head, TaskType
+from dl_techniques.layers.vision_heads import create_vision_head, TaskType
 
 # Step 1: Create foundation model
 vit = ViT(
@@ -128,7 +128,7 @@ outputs = model(images)
 
 ```python
 from dl_techniques.models.resnet import ResNet50
-from dl_techniques.vision.heads import DetectionHead
+from dl_techniques.layers.vision_heads import DetectionHead
 
 # Step 1: Create ResNet backbone with FPN
 backbone = ResNet50(
@@ -188,7 +188,7 @@ outputs = detector(images)
 
 ```python
 from dl_techniques.models.dino import DINOv2Model
-from dl_techniques.vision.heads import SegmentationHead
+from dl_techniques.layers.vision_heads import SegmentationHead
 
 # Step 1: Create DINOv2 backbone
 dinov2 = DINOv2Model(
@@ -245,7 +245,7 @@ seg_output = segmenter(images)
 
 ```python
 from dl_techniques.models.efficientnet import EfficientNetB4
-from dl_techniques.vision.heads import DepthEstimationHead
+from dl_techniques.layers.vision_heads import DepthEstimationHead
 
 # Step 1: Create EfficientNet backbone
 efficientnet = EfficientNetB4(
@@ -288,7 +288,7 @@ outputs = depth_model(images)
 ### Example 5: Multi-Task Learning with YOLO
 
 ```python
-from dl_techniques.vision.heads import create_multi_task_head, TaskType
+from dl_techniques.layers.vision_heads import create_multi_task_head, TaskType
 from dl_techniques.models.yolo12 import YOLOv12FeatureExtractor
 
 # Step 1: Create YOLO backbone
@@ -356,7 +356,7 @@ all_outputs = multi_model(images)
 ### Example 6: Instance Segmentation
 
 ```python
-from dl_techniques.vision.heads import InstanceSegmentationHead
+from dl_techniques.layers.vision_heads import InstanceSegmentationHead
 
 # Create instance segmentation head
 instance_head = InstanceSegmentationHead(

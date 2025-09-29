@@ -685,7 +685,7 @@ def train_model(args: argparse.Namespace):
         model=best_model,
         test_data=(x_test, y_test),
         training_history=history,
-        model_name=f"{args.variant}_{args.dataset}",
+        model_name=f"convnext_v1_{args.variant}_{args.dataset}",
         results_dir=results_dir
     )
 
