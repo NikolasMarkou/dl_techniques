@@ -390,8 +390,8 @@ class NetworkArchitectureVisualization(VisualizationPlugin):
                 'name': layer.name,
                 'type': layer.__class__.__name__,
                 'params': layer.count_params(),
-                'output_shape': layer.output_shape,
-                'input_shape': layer.input_shape if hasattr(layer, 'input_shape') else None
+                'output_shape': getattr(layer, 'output_shape', None),
+                'input_shape': getattr(layer, 'input_shape', None)
             }
             layers_info.append(info)
 

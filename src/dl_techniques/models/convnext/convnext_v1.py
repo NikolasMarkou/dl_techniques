@@ -61,6 +61,7 @@ from typing import List, Optional, Union, Tuple, Dict, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 
+
 # ---------------------------------------------------------------------
 
 
@@ -129,24 +130,26 @@ class ConvNeXtV1(keras.Model):
     HEAD_INITIALIZER = "truncated_normal"
 
     def __init__(
-        self,
-        num_classes: int = 1000,
-        depths: List[int] = [3, 3, 9, 3],
-        dims: List[int] = [96, 192, 384, 768],
-        drop_path_rate: float = 0.0,
-        kernel_size: Union[int, Tuple[int, int]] = 7,
-        activation: str = "gelu",
-        use_bias: bool = True,
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-        dropout_rate: float = 0.0,
-        spatial_dropout_rate: float = 0.0,
-        strides: int = 4,
-        use_gamma: bool = True,
-        use_softorthonormal_regularizer: bool = True,
-        include_top: bool = True,
-        input_shape: Tuple[int, ...] = (None, None, 3),
-        **kwargs
+            self,
+            num_classes: int = 1000,
+            depths: List[int] = [3, 3, 9, 3],
+            dims: List[int] = [96, 192, 384, 768],
+            drop_path_rate: float = 0.0,
+            kernel_size: Union[int, Tuple[int, int]] = 7,
+            activation: str = "gelu",
+            use_bias: bool = True,
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            dropout_rate: float = 0.0,
+            spatial_dropout_rate: float = 0.0,
+            strides: int = 4,
+            use_gamma: bool = True,
+            use_softorthonormal_regularizer: bool = True,
+            include_top: bool = True,
+            input_shape: Tuple[int, ...] = (None, None, 3),
+            **kwargs
     ):
+        super().__init__(**kwargs)
+
         # Validate configuration
         if len(depths) != len(dims):
             raise ValueError(
@@ -157,8 +160,6 @@ class ConvNeXtV1(keras.Model):
             logger.warning(
                 f"ConvNeXt typically uses 4 stages, got {len(depths)} stages"
             )
-        if input_shape is None:
-            input_shape = (None, None, 3)
 
         # Store configuration
         self.num_classes = num_classes
@@ -177,82 +178,48 @@ class ConvNeXtV1(keras.Model):
         self.strides = strides
         self._input_shape = input_shape
 
-        # Initialize layer lists
-        self.stem_layers = []
-        self.stages = []
-        self.downsample_layers = []
-        self.head_layers = []
-
-        # Validate input shape
+        # Validate and store input shape details
+        if input_shape is None:
+            input_shape = (None, None, 3)
         if len(input_shape) != 3:
             raise ValueError(f"input_shape must be 3D, got {input_shape}")
 
-        height, width, channels = input_shape
+        self.input_height, self.input_width, self.input_channels = input_shape
+        if self.input_channels not in [1, 3]:
+            logger.warning(
+                f"Unusual number of channels: {self.input_channels}. ConvNeXt typically uses 3 channels")
 
-        if channels not in [1, 3]:
-            logger.warning(f"Unusual number of channels: {channels}. ConvNeXt typically uses 3 channels")
+        # --- Build layers ---
+        # This follows the Keras subclassing model best practice.
+        # Layers are created in __init__ and used in call().
 
-        # Store the actual input shape
-        self.input_height = height
-        self.input_width = width
-        self.input_channels = channels
+        # 1. Stem
+        self._build_stem()
 
-        # Set input shape for the model
-        inputs = keras.Input(shape=input_shape)
+        # 2. Downsample layers and Stages
+        self.downsample_layers_list = []
+        self.stages_list = []
+        for i in range(len(self.depths)):
+            # Downsample layer (except for the first stage)
+            if i > 0:
+                self._build_downsample_layer(i)
+            # Stage of ConvNeXt blocks
+            self._build_stage(i)
 
-        # Build the model
-        outputs = self._build_model(inputs)
-
-        # Initialize the Model
-        super().__init__(inputs=inputs, outputs=outputs, **kwargs)
+        # 3. Head
+        if self.include_top:
+            self._build_head()
 
         logger.info(
-            f"Created ConvNeXt V2 model for input {input_shape} "
+            f"Created ConvNeXt V1 model for input {input_shape} "
             f"with {sum(depths)} blocks"
         )
 
-    def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the complete ConvNeXt model architecture.
-
-        Args:
-            inputs: Input tensor
-
-        Returns:
-            Output tensor
-        """
-        x = inputs
-
-        # Build stem
-        x = self._build_stem(x)
-
-        # Build stages with downsampling
-        for stage_idx in range(len(self.depths)):
-            # Add downsampling layer (except for first stage)
-            if stage_idx > 0:
-                x = self._build_downsample_layer(x, self.dims[stage_idx], stage_idx)
-
-            # Build stage
-            x = self._build_stage(x, stage_idx)
-
-        # Build classification head if requested
-        if self.include_top:
-            x = self._build_head(x)
-
-        return x
-
-    def _build_stem(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the stem (patchify) layer.
-
-        Args:
-            x: Input tensor
-
-        Returns:
-            Processed tensor after stem
-        """
+    def _build_stem(self):
+        """Build and assign stem layers."""
         stem_kernel_size = self.strides
         stem_stride = self.strides
-
-        stem_conv = keras.layers.Conv2D(
+        self.stem_conv = keras.layers.Conv2D(
             filters=self.dims[0],
             kernel_size=stem_kernel_size,
             strides=stem_stride,
@@ -262,114 +229,49 @@ class ConvNeXtV1(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             name="stem_conv"
         )
-        x = stem_conv(x)
-
-        # Layer normalization after stem
-        stem_norm = keras.layers.LayerNormalization(
+        self.stem_norm = keras.layers.LayerNormalization(
             epsilon=self.LAYERNORM_EPSILON,
             center=self.use_bias,
             scale=True,
             name="stem_norm"
         )
-        x = stem_norm(x)
 
-        self.stem_layers = [stem_conv, stem_norm]
-
-        return x
-
-    def _build_downsample_layer(
-        self,
-        x: keras.KerasTensor,
-        output_dim: int,
-        stage_idx: int
-    ) -> keras.KerasTensor:
-        """Build downsampling layer between stages.
-
-        Args:
-            x: Input tensor
-            output_dim: Output channel dimension
-            stage_idx: Current stage index
-
-        Returns:
-            Downsampled tensor
-        """
+    def _build_downsample_layer(self, stage_idx: int):
+        """Build and assign a downsample layer."""
         downsample_kernel_size, downsample_stride = self.strides, self.strides
-
-        # LayerNorm before downsampling
         downsample_norm = keras.layers.LayerNormalization(
             epsilon=self.LAYERNORM_EPSILON,
             center=self.use_bias,
             scale=True,
-            name=f"downsample_norm_{len(self.downsample_layers)}"
+            name=f"downsample_norm_{stage_idx - 1}"
         )
-        x = downsample_norm(x)
+        downsample_conv = keras.layers.Conv2D(
+            filters=self.dims[stage_idx],
+            kernel_size=downsample_kernel_size,
+            strides=downsample_stride,
+            padding="valid",
+            use_bias=self.use_bias,
+            kernel_initializer=self.STEM_INITIALIZER,
+            kernel_regularizer=self.kernel_regularizer,
+            name=f"downsample_conv_{stage_idx - 1}"
+        )
+        self.downsample_layers_list.append([downsample_norm, downsample_conv])
 
-        # downsampling convolution
-        if downsample_stride > 1:
-            downsample_conv = keras.layers.Conv2D(
-                filters=output_dim,
-                kernel_size=downsample_kernel_size,
-                strides=downsample_stride,
-                padding="valid",
-                use_bias=self.use_bias,
-                kernel_initializer=self.STEM_INITIALIZER,
-                kernel_regularizer=self.kernel_regularizer,
-                name=f"downsample_conv_{len(self.downsample_layers)}"
-            )
-            x = downsample_conv(x)
-        else:
-            # If no spatial downsampling, just adjust channels if needed
-            if x.shape[-1] != output_dim:
-                downsample_conv = keras.layers.Conv2D(
-                    filters=output_dim,
-                    kernel_size=1,
-                    strides=1,
-                    padding="valid",
-                    use_bias=self.use_bias,
-                    kernel_initializer=self.STEM_INITIALIZER,
-                    kernel_regularizer=self.kernel_regularizer,
-                    name=f"downsample_conv_{len(self.downsample_layers)}"
-                )
-                x = downsample_conv(x)
-            else:
-                downsample_conv = None
-
-        if downsample_conv is not None:
-            self.downsample_layers.append([downsample_norm, downsample_conv])
-        else:
-            self.downsample_layers.append([downsample_norm])
-
-        return x
-
-    def _build_stage(self, x: keras.KerasTensor, stage_idx: int) -> keras.KerasTensor:
-        """Build a stage consisting of multiple ConvNext blocks.
-
-        Args:
-            x: Input tensor
-            stage_idx: Index of the current stage
-
-        Returns:
-            Processed tensor after the stage
-        """
+    def _build_stage(self, stage_idx: int):
+        """Build and assign a stage of ConvNeXt blocks."""
         stage_blocks = []
         depth = self.depths[stage_idx]
         dim = self.dims[stage_idx]
-
-        # Calculate drop path rates for this stage
         total_blocks = sum(self.depths)
         block_start_idx = sum(self.depths[:stage_idx])
 
         for block_idx in range(depth):
-            # Calculate current drop path rate (linearly increasing)
             current_block_idx = block_start_idx + block_idx
             if total_blocks > 1:
-                current_drop_path_rate = (
-                    self.drop_path_rate * current_block_idx / (total_blocks - 1)
-                )
+                drop_rate = self.drop_path_rate * current_block_idx / (total_blocks - 1)
             else:
-                current_drop_path_rate = 0.0
+                drop_rate = 0.0
 
-            # Create ConvNext block
             block = ConvNextV1Block(
                 kernel_size=self.kernel_size,
                 filters=dim,
@@ -382,75 +284,66 @@ class ConvNeXtV1(keras.Model):
                 use_softorthonormal_regularizer=self.use_softorthonormal_regularizer,
                 name=f"stage_{stage_idx}_block_{block_idx}"
             )
+            drop_path = keras.layers.Dropout(
+                rate=drop_rate, noise_shape=(None, 1, 1, 1),
+                name=f"stage_{stage_idx}_block_{block_idx}_drop_path"
+            ) if drop_rate > 0 else None
+            stage_blocks.append({"block": block, "drop_path": drop_path})
+        self.stages_list.append(stage_blocks)
 
-            # Apply block with residual connection
-            residual = x
-            x = block(x)
-
-            # Add stochastic depth if specified
-            if current_drop_path_rate > 0:
-                stochastic_depth = keras.layers.Dropout(
-                    rate=current_drop_path_rate,
-                    noise_shape=(None, 1, 1, 1),  # Drop entire samples
-                    name=f"stage_{stage_idx}_block_{block_idx}_drop_path"
-                )
-                x = stochastic_depth(x, training=True)
-
-            # Residual connection
-            x = keras.layers.Add(name=f"stage_{stage_idx}_block_{block_idx}_add")([residual, x])
-
-            stage_blocks.append(block)
-
-        self.stages.append(stage_blocks)
-
-        return x
-
-    def _build_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the classification head.
-
-        Args:
-            x: Input feature tensor
-
-        Returns:
-            Classification logits
-        """
-        # Global average pooling
-        gap = keras.layers.GlobalAveragePooling2D(name="global_avg_pool")
-        x = gap(x)
-
-        # Layer normalization before classifier
-        head_norm = keras.layers.LayerNormalization(
+    def _build_head(self):
+        """Build and assign head layers."""
+        self.gap = keras.layers.GlobalAveragePooling2D(name="global_avg_pool")
+        self.head_norm = keras.layers.LayerNormalization(
             epsilon=self.LAYERNORM_EPSILON,
             center=self.use_bias,
             scale=True,
             name="head_norm"
         )
-        x = head_norm(x)
-
-        # Classification layer
         if self.num_classes > 0:
-            classifier = keras.layers.Dense(
+            self.classifier = keras.layers.Dense(
                 units=self.num_classes,
                 use_bias=self.use_bias,
                 kernel_initializer=self.HEAD_INITIALIZER,
                 kernel_regularizer=self.kernel_regularizer,
                 name="classifier"
             )
-            x = classifier(x)
-
-            self.head_layers = [gap, head_norm, classifier]
         else:
-            self.head_layers = [gap, head_norm]
+            self.classifier = None
+
+    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+        """Defines the forward pass of the model."""
+        x = self.stem_conv(inputs)
+        x = self.stem_norm(x)
+
+        for stage_idx, stage_blocks in enumerate(self.stages_list):
+            if stage_idx > 0:
+                norm_layer, conv_layer = self.downsample_layers_list[stage_idx - 1]
+                x = norm_layer(x)
+                x = conv_layer(x)
+
+            for block_info in stage_blocks:
+                residual = x
+                x = block_info["block"](x, training=training)
+                if block_info["drop_path"]:
+                    x = block_info["drop_path"](x, training=training)
+                x = keras.layers.add([residual, x])
+
+        if self.include_top:
+            x = self.gap(x)
+            x = self.head_norm(x)
+            if self.classifier:
+                x = self.classifier(x)
 
         return x
 
     @classmethod
     def from_variant(
-        cls,
-        variant: str,
-        num_classes: int = 1000,
-        input_shape: Optional[Tuple[int, ...]] = None,
-        **kwargs
+            cls,
+            variant: str,
+            num_classes: int = 1000,
+            input_shape: Optional[Tuple[int, ...]] = None,
+            **kwargs
     ) -> "ConvNeXtV1":
         """Create a ConvNeXt model from a predefined variant.
 
@@ -514,8 +407,10 @@ class ConvNeXtV1(keras.Model):
             "use_softorthonormal_regularizer": self.use_softorthonormal_regularizer,
             "include_top": self.include_top,
             "input_shape": self._input_shape,
+            "strides": self.strides
         }
-        return config
+        base_config = super().get_config()
+        return {**base_config, **config}
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "ConvNeXtV1":
@@ -537,6 +432,11 @@ class ConvNeXtV1(keras.Model):
 
     def summary(self, **kwargs):
         """Print model summary with additional information."""
+        # Build the model first if it hasn't been built
+        if not self.built:
+            dummy_input = keras.KerasTensor(self._input_shape)
+            self.build(dummy_input.shape)
+
         super().summary(**kwargs)
 
         # Print additional model information
@@ -553,14 +453,15 @@ class ConvNeXtV1(keras.Model):
         if self.include_top:
             logger.info(f"  - Number of classes: {self.num_classes}")
 
+
 # ---------------------------------------------------------------------
 
 def create_convnext_v1(
-    variant: str = "tiny",
-    num_classes: int = 1000,
-    input_shape: Optional[Tuple[int, ...]] = (None, None, 3),
-    pretrained: bool = False,
-    **kwargs
+        variant: str = "tiny",
+        num_classes: int = 1000,
+        input_shape: Optional[Tuple[int, ...]] = (None, None, 3),
+        pretrained: bool = False,
+        **kwargs
 ) -> ConvNeXtV1:
     """Convenience function to create ConvNeXt V1 models.
 

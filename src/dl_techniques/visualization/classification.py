@@ -221,7 +221,9 @@ class ROCPRCurves(VisualizationPlugin):
     ) -> plt.Figure:
         """Create ROC and/or PR curves."""
         if ax is not None and plot_type == 'both':
-            raise ValueError("Cannot plot 'both' ROC and PR curves on a single provided axis.")
+            # In a dashboard context, cannot plot both on one axis.
+            # Default to showing the ROC curve, which is more common.
+            plot_type = 'roc'
 
         if plot_type == 'both':
             fig, axes = plt.subplots(1, 2, figsize=(12, 5))

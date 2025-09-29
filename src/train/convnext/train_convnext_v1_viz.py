@@ -392,7 +392,6 @@ def run_model_analysis(
         # Setup analysis configuration
         analysis_config = AnalysisConfig(
             analyze_weights=True,
-            analyze_activations=True,
             analyze_gradients=False,  # Skip gradients for efficiency
             calibration_analysis=True,
             confidence_analysis=True,
