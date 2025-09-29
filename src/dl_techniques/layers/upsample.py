@@ -1,24 +1,72 @@
 """
-Enhanced upsampling module for neural networks.
+Construct a neural network upsampling block using various strategies.
 
-This module provides various upsampling strategies for convolutional neural networks
-implemented in Keras/TensorFlow. It supports multiple upsampling methods including
-transposed convolution, bilinear interpolation, and nearest neighbor approaches.
+This function serves as a factory for creating upsampling blocks, a critical
+component in decoder-style architectures such as Generative Adversarial
+Networks (GANs), U-Nets, and autoencoders. Its primary purpose is to
+increase the spatial resolution of feature maps (height and width) while
+transforming their feature representations (channels). The design provides a
+unified interface to several distinct upsampling philosophies, enabling
+researchers to easily experiment with the trade-offs between them.
 
-Key Features:
-    - Multiple upsampling strategies (Conv2DTranspose, Bilinear, Nearest Neighbor)
-    - Support for batch normalization and layer normalization
-    - Orthonormal initialization options
-    - Configurable convolution parameters
+Architecture:
+    The available upsampling methods can be broadly categorized into two distinct
+    architectural approaches:
 
-Note:
-    All convolution operations use 'same' padding by default to maintain
-    spatial dimensions consistency except for explicit strided operations.
+    1.  **Integrated Learnable Upsampling (`conv2d_transpose`):** This approach
+        uses a single, learnable layer known as a transposed convolution. It
+        simultaneously increases spatial resolution and performs a feature
+        transformation. The network learns the optimal kernel weights to
+        "un-do" a downsampling convolution, allowing it to generate fine-
+        grained details from coarse feature maps.
 
-Example:
-    >>> input_layer = keras.layers.Input(shape=(32, 32, 64))
-    >>> conv_params = {"filters": 32, "activation": "relu"}
-    >>> upsampled = upsample(input_layer, "conv2d_transpose", conv_params)
+    2.  **Separated Upsampling and Refinement (Interpolation-based):** This
+        approach decouples the spatial and feature transformations into two
+        sequential steps. First, a deterministic, non-learnable interpolation
+        algorithm (`nearest` or `bilinear`) increases the feature map's size.
+        Second, a standard 2D convolution is applied to the enlarged map to
+        refine features, reduce aliasing artifacts, and adjust the channel
+        depth. This separation often leads to more stable training and can
+        avoid certain artifacts associated with transposed convolutions.
+
+Foundational Mathematics and Concepts:
+    -   **Transposed Convolution:** Often misnamed "deconvolution," this is not a
+        true inverse of a convolution. Rather, it is a convolution operation
+        whose forward pass can be mapped to the backward pass of a standard
+        convolution, effectively swapping the roles of input and output shapes.
+        While powerful due to its learnability, it can suffer from "checkerboard
+        artifacts" caused by uneven overlap of the convolutional kernel,
+        leading to a grid-like pattern in the output.
+
+    -   **Interpolation Methods:**
+        -   **Nearest Neighbor:** A simple method that replicates the value of
+          the nearest input pixel. It is computationally efficient and
+          preserves sharp edges but can result in a blocky, aliased appearance.
+        -   **Bilinear Interpolation:** Calculates each new output pixel as a
+          weighted average of the four nearest pixels in the input map. This
+          produces a much smoother output than nearest neighbor but can
+          introduce blurring, softening sharp details.
+
+    -   **Soft Orthonormal Regularization:** Some variants in this function
+        employ a regularizer that encourages the convolutional kernel weights
+        to be (nearly) orthonormal. An orthonormal linear transformation
+        preserves the vector norm, which helps stabilize deep networks by
+        preventing the explosion or vanishing of gradients during backpropagation.
+        This is particularly beneficial in GANs, where training stability is
+        paramount. It effectively controls the Lipschitz constant of the layer.
+
+References:
+    1.  Odena, A., Dumoulin, V., & Olah, C. (2016). "Deconvolution and
+        Checkerboard Artifacts." Distill. This paper provides an excellent
+        visual explanation of the artifacts common to transposed convolutions.
+    2.  Dumoulin, V., & Visin, F. (2016). "A guide to convolution arithmetic
+        for deep learning." arXiv. Offers a foundational understanding of the
+        relationship between convolution and transposed convolution.
+    3.  Miyato, T. et al. (2018). "Spectral Normalization for Generative
+        Adversarial Networks." ICLR. While not a direct implementation, this
+        paper popularizes the concept of constraining weight matrices to
+        stabilize GAN training, a principle related to orthonormal
+        regularization.
 """
 
 import copy

@@ -1,4 +1,5 @@
-"""Implement the recursive fractal block from the FractalNet architecture.
+"""
+A recursive fractal block from the FractalNet architecture.
 
 This layer constructs a deep, self-similar network structure by recursively
 applying a simple expansion rule, providing an alternative to residual

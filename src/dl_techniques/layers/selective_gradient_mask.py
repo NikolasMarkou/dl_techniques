@@ -1,8 +1,62 @@
-"""
-Selective Gradient Masking Layer for Keras 3.
+"""Selectively mask gradients during backpropagation without altering the forward pass.
 
-This module provides a custom Keras layer that enables selective gradient masking
-during backpropagation while preserving the forward pass signal.
+This layer provides a mechanism to decouple the forward computation from the
+gradient computation, a powerful technique for implementing advanced machine
+learning models. While the input signal passes through this layer unchanged
+during the forward pass (i.e., it functions as an identity operation), its
+true utility lies in its behavior during backpropagation. It uses a binary
+mask to selectively block, or "stop," gradients from flowing backward through
+specific elements of the signal tensor.
+
+Architecture:
+    The layer operates on two input tensors of identical shape: a `signal`
+    tensor and a binary `mask` tensor. The core of its design is a dual-path
+    computation that ensures the forward pass is an identity function while
+    the backward pass is selectively masked:
+
+    `output = stop_gradient(signal) * mask + signal * (1 - mask)`
+
+    During the forward pass, this equation simplifies to `signal`, as the two
+    terms are mutually exclusive and their sum reconstructs the original
+    tensor. However, during backpropagation, the `stop_gradient` operator
+    ensures that no gradients flow through the first term. Consequently, the
+    gradient of the output with respect to the signal is simply `(1 - mask)`,
+    effectively applying the inverse of the mask to the upstream gradients.
+
+Foundational Mathematics:
+    The mathematical foundation of this layer is the concept of defining a
+    custom gradient for an operation. The `stop_gradient` function is a crucial
+    component, acting as an identity function in the forward direction but
+    having a derivative of zero in the backward direction.
+
+    Let `x` be the signal and `m` be the mask. The output `y` is:
+    `y = stop_gradient(x) * m + x * (1 - m)`
+
+    The forward computation is `y = x * m + x * (1 - m) = x * (m + 1 - m) = x`.
+
+    For the backward pass, consider the gradient of a loss `L` with respect
+    to `x`. Using the chain rule, `dL/dx = dL/dy * dy/dx`.
+    The derivative of the output `y` with respect to the input `x` is:
+    `dy/dx = (d/dx stop_gradient(x)) * m + (d/dx x) * (1 - m)`
+          `= 0 * m + 1 * (1 - m)`
+          `= 1 - m`
+    Therefore, the incoming gradient `dL/dy` is multiplied element-wise by
+    `(1 - m)`, blocking gradients where `m=1` and allowing them to pass where
+    `m=0`.
+
+References:
+    This technique is a fundamental building block related to the Straight-Through
+    Estimator (STE), used for training neural networks with discrete stochastic
+    neurons. While this layer is more general, it shares the core principle
+    of creating a "fake" or custom gradient to enable end-to-end training
+    through otherwise non-differentiable or selectively controlled paths.
+
+    1.  Bengio, Y., Léonard, N., & Courville, A. (2013). Estimating or
+        Propagating Gradients Through Stochastic Neurons for Conditional
+        Computation.
+    2.  Van Den Oord, A., & Vinyals, O. (2017). Neural Discrete Representation
+        Learning. (Uses `stop_gradient` to pass gradients through a discrete
+        bottleneck in VQ-VAE).
 """
 
 import keras

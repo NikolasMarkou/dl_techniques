@@ -1,16 +1,77 @@
 """
-Configurable Sequence Pooling Layer for Transformer Models
+A unified and configurable pooling layer for sequence data.
 
-This module provides a highly configurable pooling layer that can be used with
-any sequence-based model (text encoders, vision encoders, time series models, etc.).
-It supports a wide variety of pooling strategies including simple operations like
-mean/max pooling, positional selections, and advanced learnable methods like
-attention-based pooling.
+This layer serves as a bridge between sequence encoders (like Transformers or
+LSTMs) and downstream tasks that require a fixed-size vector representation.
+It transforms a sequence of vectors `(batch, seq_len, hidden_dim)` into a
+single summary vector `(batch, output_dim)`. Its core design philosophy is
+modularity, offering a wide array of pooling strategies that can be selected,
+combined, and experimented with through a single, consistent interface.
+
+Architecture:
+    The layer operates on a two-stage principle: strategy execution followed by
+    aggregation. First, it applies one or more user-defined pooling
+    strategies to the input sequence. These strategies fall into several
+    categories:
+    -   **Positional:** Selects a vector from a specific position (e.g., the
+        first `[CLS]` token).
+    -   **Statistical:** Computes a summary statistic over the sequence
+        dimension (e.g., mean, max).
+    -   **Learnable:** Computes a weighted average of the sequence vectors,
+        where the weights are learned during training.
+
+    If multiple strategies are specified, their resulting vectors are combined
+    in the second stage using an aggregation method, such as concatenation
+    or a weighted sum, to produce the final output vector.
+
+Foundational Mathematics and Concepts:
+    The layer implements several key pooling concepts, each with a distinct
+    theoretical motivation.
+
+    1.  **Statistical and Positional Pooling:** These are simple, computationally
+        efficient methods. Mean pooling (`mean`) averages all token vectors,
+        capturing the overall semantic content. Max pooling (`max`) identifies
+        the most salient features across the sequence, a technique popularized
+        by early CNNs for NLP. Positional pooling (`cls`, `first`) relies on
+        the model architecture (e.g., BERT) having learned to embed the
+        summary of the entire sequence into a specific token's representation.
+
+    2.  **Attention Pooling (`attention`):** This is a learnable, content-aware
+        strategy based on the self-attention mechanism. It learns to assign
+        an "importance" score to each element in the sequence and computes a
+        weighted average. The process is as follows:
+        -   First, each input vector `x_i` is passed through a non-linear
+            transformation: `h_i = tanh(W*x_i + b)`.
+        -   An unnormalized importance score `e_i` is computed by taking the
+            dot product of `h_i` with a learnable context vector `u`:
+            `e_i = h_i^T * u`. This context vector `u` can be interpreted as a
+            learned query that represents "what is important".
+        -   The scores are normalized into weights `a_i` using the softmax
+            function: `a_i = softmax(e_i)`.
+        -   The final representation is the weighted sum of the original input
+            vectors: `v = sum(a_i * x_i)`.
+        This allows the model to dynamically focus on the most relevant parts
+        of the sequence for a given task.
+
+    3.  **Weighted Pooling (`weighted`):** This provides a simpler, content-
+        agnostic learnable pooling. It assigns a learnable scalar weight `p_i`
+        to each *position* `i` in the sequence, up to a maximum length. These
+        weights are normalized via softmax and used to compute a weighted
+        average. Unlike attention, these weights are fixed after training and
+        do not depend on the input content, making this method a middle ground
+        between simple mean pooling and complex attention pooling.
 
 References:
-    - Lin et al. (2017): "A Structured Self-attentive Sentence Embedding"
-    - Conneau et al. (2017): "Supervised Learning of Universal Sentence Representations"
-    - Zhang et al. (2020): "Pooling Revisited: Your Receptive Field is Suboptimal"
+    -   Lin, Z. et al. (2017). "A Structured Self-attentive Sentence Embedding."
+        This paper introduces the self-attentive pooling mechanism that forms
+        the basis for the 'attention' strategy.
+    -   Conneau, A. et al. (2017). "Supervised Learning of Universal Sentence
+        Representations." This work demonstrated the effectiveness of simple
+        pooling strategies like max-pooling over BiLSTM outputs for creating
+        high-quality sentence embeddings.
+    -   Zhang, T. et al. (2020). "Pooling Revisited: Your Receptive Field is
+        Suboptimal." Provides a modern analysis comparing various pooling
+        methods, highlighting that the optimal strategy is task-dependent.
 """
 
 import keras

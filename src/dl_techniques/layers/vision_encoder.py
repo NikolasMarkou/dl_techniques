@@ -1,5 +1,5 @@
 """
-Encapsulates a configurable, general-purpose Vision Transformer encoder.
+A configurable, general-purpose Vision Transformer encoder.
 
 This layer implements the core architecture of a Vision Transformer (ViT),
 which processes images by treating them as a sequence of flattened patches. It

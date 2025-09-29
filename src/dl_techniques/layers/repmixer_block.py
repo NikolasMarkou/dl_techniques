@@ -1,4 +1,5 @@
-"""Implement the RepMixer block, an efficient feature-mixing architecture.
+"""
+A RepMixer block, an efficient feature-mixing architecture.
 
 This layer serves as a highly efficient, convolution-based alternative to the
 self-attention mechanism found in Vision Transformers. It is designed to model

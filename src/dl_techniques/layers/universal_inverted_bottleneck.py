@@ -1,5 +1,5 @@
 """
-This module provides the `Universal Inverted Bottleneck` (UIB), a highly flexible
+A `Universal Inverted Bottleneck` (UIB), a highly flexible
 and configurable Keras layer that serves as a unified building block for a variety
 of modern, efficient convolutional neural network architectures.
 

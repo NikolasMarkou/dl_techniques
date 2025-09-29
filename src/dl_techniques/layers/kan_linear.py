@@ -1,59 +1,78 @@
 """
-Kolmogorov-Arnold Network (KAN) Implementation
-============================================
+A linear layer based on the Kolmogorov-Arnold Network (KAN) architecture.
 
-This implementation is based on the paper:
-"KAN: Kolmogorov-Arnold Networks" by Liu et al. (2024)
+This layer replaces the standard linear transformation followed by a fixed
+activation function (e.g., `Wx + b` -> `ReLU`) with a more expressive structure
+where the activation functions themselves are learnable. It operationalizes
+the Kolmogorov-Arnold representation theorem, which posits that any multivariate
+continuous function can be expressed as a composition of univariate functions.
 
-Theoretical Background:
-    The Kolmogorov-Arnold representation theorem states that any multivariate continuous
-    function can be represented as a composition of univariate functions. KAN leverages
-    this by creating a deep neural network architecture where activation functions are
-    learned using B-splines, rather than using fixed activation functions.
+Architecture:
+    Unlike traditional Multi-Layer Perceptrons (MLPs) that learn linear
+    transformations (weights) between fixed non-linearities, a KAN layer
+    learns the non-linear transformations directly. This is achieved by
+    parameterizing each activation function as a linear combination of B-spline
+    basis functions. The layer's output is formed by two components:
 
-Key Components:
-    1. B-spline Activation Functions:
-       - Uses B-splines of order k (typically 3) as basis functions
-       - Grid points are learnable parameters
-       - Combines multiple B-splines to create flexible activation functions
+    1.  A standard linear transformation (`base_weight`), which acts as a
+        residual connection and provides a stable foundation for learning.
+    2.  A spline-based transformation (`spline_weight`), which constitutes the
+        learnable activation. For each pair of input and output neurons, a
+        unique univariate function is learned.
 
-    2. Network Structure:
-       - Input layer: Maps input features to B-spline space
-       - Hidden layers: Combine B-spline activations with linear transformations
-       - Output layer: Maps combined features to output space
+    The final output is a combination of these two paths, allowing the model
+    to learn both the linear dependencies and the intricate non-linear
+    relationships within the data.
 
-    3. Learning Components:
-       - Base weights: Standard linear transformation matrices
-       - Spline weights: Coefficients for B-spline combinations
-       - Grid points: Learnable points for B-spline evaluation
-       - Scaling factors: Control contribution of spline vs. linear components
+Foundational Mathematics:
+    The core of KANs is the Kolmogorov-Arnold representation theorem. The theorem
+    states that any multivariate continuous function `f(x_1, ..., x_n)` can be
+    written as a finite sum of compositions of univariate functions:
+    `f(x) = Σ_q Φ_q( Σ_p ψ_{q,p}(x_p) )`
+
+    A KAN is a neural network realization of this theorem. Each `KANLinear`
+    layer can be seen as learning the inner functions `ψ_{q,p}`. The network
+    learns these functions by representing them as B-splines.
+
+    A B-spline is a piecewise polynomial function defined over a set of intervals
+    (determined by a `grid`). It is constructed from a linear combination of
+    basis spline functions (`_compute_spline_basis`). The coefficients of this
+    combination (the `spline_weight`) are learnable parameters. By adjusting
+    these coefficients, the layer can approximate any continuous univariate
+    function on the defined grid, effectively learning the optimal "activation
+    function" for each connection in a data-driven manner.
 
 Usage Recommendations:
-    1. Grid Size Selection:
-       - Start with small grid (5-10 points)
-       - Increase if underfitting observed
-       - Monitor memory usage with large grids
+    -   **Grid Size:** The `grid_size` parameter controls the granularity of the
+        learned splines. It is advisable to start with a modest grid size
+        (e.g., 5-10) to encourage smoother, more general functions and avoid
+        overfitting. If the model underfits, gradually increase the grid size
+        to allow for more complex function shapes, but be mindful that this
+        significantly increases parameter count and memory consumption.
 
-    2. Spline Order:
-       - Order 3 (cubic) recommended for most applications
-       - Higher orders may help with very smooth functions
-       - Lower orders for simpler relationships
+    -   **Spline Order:** The `spline_order` (typically 3 for cubic splines)
+        determines the smoothness of the learned functions. Cubic splines offer
+        a good balance of flexibility and smoothness for most tasks. Higher
+        orders can capture exceptionally smooth functions, while lower orders
+        (e.g., linear) may be sufficient for simpler relationships.
 
-    3. Architecture:
-       - Use fewer neurons than equivalent MLP
-       - Add layers gradually if needed
-       - Consider residual connections for deep networks
+    -   **Network Architecture:** KANs are often more parameter-efficient than
+        MLPs. It is recommended to start with a narrower and shallower
+        architecture than an equivalent MLP. For deeper KANs, incorporating
+        residual connections (enabled by default when dimensions match) is
+        crucial for stable training and effective gradient flow.
 
 References:
-    1. Liu et al. (2024) "KAN: Kolmogorov-Arnold Networks"
-    2. Kolmogorov, A. N. (1957) "On the representation of continuous functions"
-    3. Arnold, V. I. (1963) "On functions of three variables"
-    4. De Boor, C. (1978) "A Practical Guide to Splines"
+    1.  Liu, Z., Wang, Y., et al. (2024). "KAN: Kolmogorov-Arnold Networks."
+        arXiv preprint arXiv:2404.19756.
+    2.  Kolmogorov, A. N. (1957). "On the representation of continuous
+        functions of many variables by superpositions of continuous
+        functions of one variable and addition." Doklady Akademii Nauk SSSR.
+    3.  De Boor, C. (1978). "A Practical Guide to Splines." Springer-Verlag.
 """
 
 import keras
 import numpy as np
-from keras import ops
 from typing import Tuple, Optional, Dict, Any, Union
 
 # ---------------------------------------------------------------------

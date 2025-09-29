@@ -1,4 +1,5 @@
-"""Implements a differentiable, n-dimensional memory with probabilistic addressing.
+"""
+Implements a differentiable, n-dimensional memory with probabilistic addressing.
 
 This layer provides a structured, spatially organized memory system that is fully
 differentiable, enabling end-to-end training within modern deep learning

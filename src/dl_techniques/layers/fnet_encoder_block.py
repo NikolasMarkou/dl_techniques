@@ -1,4 +1,5 @@
-"""Implement an FNet block using Fourier Transforms for token mixing.
+"""
+An FNet block using Fourier Transforms for token mixing.
 
 This layer constitutes a complete encoder block from the FNet architecture,
 serving as a highly efficient drop-in replacement for a standard Transformer
@@ -52,30 +53,16 @@ References:
 """
 
 import keras
-from typing import Optional, Tuple, Dict, Any, Literal
+from typing import Optional, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
 from ..utils.logger import logger
-from .ffn import create_ffn_layer
-from .norms import create_normalization_layer
+from .ffn import create_ffn_layer, FFNType
+from .norms import create_normalization_layer, NormalizationType
 from .attention.fnet_fourier_transform import FNetFourierTransform
-
-# ---------------------------------------------------------------------
-# Type definitions
-# ---------------------------------------------------------------------
-
-NormalizationType = Literal[
-    'layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'adaptive_band_rms',
-    'global_response_norm', 'logit_norm', 'max_logit_norm', 'decoupled_max_logit',
-    'dml_plus_focal', 'dml_plus_center', 'dynamic_tanh'
-]
-
-FFNType = Literal[
-    'mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp'
-]
 
 # ---------------------------------------------------------------------
 

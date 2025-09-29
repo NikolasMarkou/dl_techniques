@@ -1,4 +1,5 @@
-"""Implement a differentiable K-means clustering layer for deep networks.
+"""
+A differentiable K-means clustering layer for deep networks.
 
 This layer embeds a clustering mechanism directly into a neural network,
 enabling end-to-end training of cluster centroids. It provides a
@@ -45,32 +46,32 @@ Key mechanisms include:
 
 Mathematical Foundation:
 
-The soft assignment probability `a_ij` of an input vector `x_i` to a
-centroid `c_j` is calculated as:
-`a_ij = softmax(-||x_i - c_j||² / τ)_j`
-where `τ` is the temperature.
+    The soft assignment probability `a_ij` of an input vector `x_i` to a
+    centroid `c_j` is calculated as:
+    `a_ij = softmax(-||x_i - c_j||² / τ)_j`
+    where `τ` is the temperature.
 
-The update to a centroid `c_j` is conceptually a combination of a data-driven
-pull, a repulsive push from other centroids, and momentum:
-`Δc_j ∝ ( (Σ_i a_ij * x_i) / (Σ_i a_ij) - c_j ) + Σ_{k≠j} Repel(c_j, c_k)`
-This update is then smoothed using a momentum buffer before being applied,
-ensuring stable convergence.
+    The update to a centroid `c_j` is conceptually a combination of a data-driven
+    pull, a repulsive push from other centroids, and momentum:
+    `Δc_j ∝ ( (Σ_i a_ij * x_i) / (Σ_i a_ij) - c_j ) + Σ_{k≠j} Repel(c_j, c_k)`
+    This update is then smoothed using a momentum buffer before being applied,
+    ensuring stable convergence.
 
 References:
 
-This layer's design synthesizes ideas from the broader field of deep
-clustering and representation learning. While K-means is a classical
-algorithm, its integration into neural networks in a differentiable manner is
-a more recent development.
+    This layer's design synthesizes ideas from the broader field of deep
+    clustering and representation learning. While K-means is a classical
+    algorithm, its integration into neural networks in a differentiable manner is
+    a more recent development.
 
--   The concept of soft assignments is related to fuzzy c-means clustering
-    and is a common technique in differentiable clustering.
--   The end-to-end learning of a "codebook" or dictionary of centroids is a
-    central idea in methods like Vector-Quantized Variational Autoencoders
-    (VQ-VAE), as introduced by van den Oord, A., et al. (2017).
--   The use of repulsion or other diversity-promoting regularizers on the
-    centroids is a technique employed to prevent codebook collapse in such
-    models.
+    -   The concept of soft assignments is related to fuzzy c-means clustering
+        and is a common technique in differentiable clustering.
+    -   The end-to-end learning of a "codebook" or dictionary of centroids is a
+        central idea in methods like Vector-Quantized Variational Autoencoders
+        (VQ-VAE), as introduced by van den Oord, A., et al. (2017).
+    -   The use of repulsion or other diversity-promoting regularizers on the
+        centroids is a technique employed to prevent codebook collapse in such
+        models.
 
 """
 
