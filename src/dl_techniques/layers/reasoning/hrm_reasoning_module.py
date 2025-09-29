@@ -178,16 +178,16 @@ class HierarchicalReasoningModule(keras.layers.Layer):
     def call(
         self,
         inputs: List[keras.KerasTensor],
-        training: Optional[bool] = None,
-        mask: Optional[keras.KerasTensor] = None
+        mask: Optional[keras.KerasTensor] = None,
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
         Forward pass with input injection and sequential refinement.
 
         Args:
             inputs: A list of two tensors: `[hidden_states, input_injection]`.
-            training: Boolean indicating training mode.
             mask: Optional attention mask to apply to all layers.
+            training: Boolean indicating training mode.
 
         Returns:
             Refined hidden states tensor.
@@ -199,7 +199,7 @@ class HierarchicalReasoningModule(keras.layers.Layer):
         x = hidden_states + input_injection
 
         for block in self.blocks:
-            x = block(x, training=training, attention_mask=mask)
+            x = block(x, attention_mask=mask, training=training)
 
         return x
 
