@@ -14,7 +14,6 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 from dl_techniques.models.convnext.convnext_v1 import ConvNeXtV1, create_convnext_v1
 
-# Visualization imports
 from dl_techniques.visualization import (
     VisualizationManager,
     TrainingHistory,
@@ -392,9 +391,9 @@ def run_model_analysis(
         # Setup analysis configuration
         analysis_config = AnalysisConfig(
             analyze_weights=True,
-            analyze_gradients=False,  # Skip gradients for efficiency
-            calibration_analysis=True,
-            confidence_analysis=True,
+            analyze_calibration=True,
+            analyze_information_flow=True,
+            analyze_training_dynamics=True,
             save_plots=True,
             save_format='png',
             dpi=300,
