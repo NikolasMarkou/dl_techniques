@@ -2,7 +2,6 @@ import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple, List
 
-
 # ---------------------------------------------------------------------
 # Component 1: Byte-Level Tokenizer
 # ---------------------------------------------------------------------
@@ -49,7 +48,7 @@ class ByteTokenizer(keras.layers.Layer):
         self.bos_token_id = 1
         self.eos_token_id = 2
         self.unk_token_id = 3
-        # FIX: This layer has no weights and should not be trainable.
+        ## FIX: This layer has no weights and should not be trainable.
         self.trainable = False
 
     def text_to_bytes(
@@ -60,7 +59,7 @@ class ByteTokenizer(keras.layers.Layer):
         if add_bos:
             tokens = [self.bos_token_id] + tokens
         if add_eos:
-            # FIX: Use append to add the token to the end, not the beginning.
+            ## FIX: Use append to add the token to the end, not the beginning.
             tokens.append(self.eos_token_id)
         return tokens
 
@@ -419,3 +418,5 @@ class ModernBertBltEmbeddings(keras.layers.Layer):
             "hash_embedding_dim": self.hash_embedding_dim,
         })
         return config
+
+# ---------------------------------------------------------------------

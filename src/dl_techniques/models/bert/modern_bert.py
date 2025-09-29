@@ -9,7 +9,6 @@ from typing import Any, Dict, Optional
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.transformer import TransformerLayer
 from dl_techniques.layers.nlp_heads import create_nlp_head, NLPTaskConfig
-
 from dl_techniques.layers.embedding.modern_bert_embeddings import ModernBertEmbeddings
 
 # ---------------------------------------------------------------------
@@ -171,6 +170,10 @@ class ModernBERT(keras.Model):
             epsilon=self.layer_norm_eps,
             center=self.use_bias,
             name="final_layer_norm"
+        )
+
+        logger.info(
+            f"Initialized ModernBert model with {self.num_layers} layers."
         )
 
     def call(

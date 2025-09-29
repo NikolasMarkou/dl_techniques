@@ -7,8 +7,7 @@ import os
 from keras import ops
 from typing import Dict, Any
 
-# Assuming the file is named `code.py` for this example
-from dl_techniques.models.modern_bert_blt.components import (
+from dl_techniques.models.bert.components import (
     ByteTokenizer,
     HashNGramEmbedding,
     ModernBertBltEmbeddings,
