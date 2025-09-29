@@ -1,4 +1,5 @@
-"""Implement a hierarchical, non-overlapping convolutional stem for ViTs.
+"""
+A hierarchical, non-overlapping convolutional stem for ViTs.
 
 This layer serves as a patch embedding module for Vision Transformers (ViTs),
 converting an input image into a sequence of patch tokens. It replaces the

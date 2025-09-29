@@ -158,7 +158,7 @@ from typing import Optional, Union, Dict, Any, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.hrm_reasoning_core import HierarchicalReasoningCore
+from dl_techniques.layers.reasoning.hrm_reasoning_core import HierarchicalReasoningCore
 
 # ---------------------------------------------------------------------
 

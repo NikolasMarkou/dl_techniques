@@ -1,15 +1,65 @@
 """
-This module defines the HierarchicalReasoningCore, a stateful, recurrent Keras layer
-that represents the central engine of the Hierarchical Reasoning Model (HRM) architecture.
+A stateful, recurrent engine for the Hierarchical Reasoning Model (HRM).
 
-The HierarchicalReasoningCore implements a sophisticated recurrent reasoning system that
-uses Transformer-like blocks to perform iterative, multi-level reasoning with adaptive
-computation capabilities. Unlike standard Transformers, this core maintains persistent
-state across reasoning cycles and can dynamically allocate computational resources.
+This layer serves as the "brain" of the HRM, designed to tackle complex tasks requiring
+multi-step, iterative reasoning. It operates as a sophisticated Recurrent Neural
+Network (RNN) cell that maintains persistent state across time steps, but internally
+uses Transformer-based blocks to perform deep computation. Its key innovation lies
+in its dual-state memory, adaptive computation mechanism, and efficient gradient
+management for "thinking" cycles.
 
-The architecture combines hierarchical reasoning modules, specialized embeddings, and
-adaptive computation mechanisms to enable complex reasoning tasks that require variable
-computational effort and multi-step "thinking" processes.
+Architecture:
+    The core maintains two distinct, persistent memory states that evolve over time:
+    1.  `z_h` (High-level): Represents abstract plans, global context, or "System 2"
+        slow thinking.
+    2.  `z_l` (Low-level): Represents detailed execution, local features, or "System 1"
+        fast processing.
+
+    In each forward pass, the core accepts new inputs (token embeddings and optional
+    task-specific puzzle embeddings) and the previous states (`carry`). It then
+    engages in multiple internal "reasoning cycles." In these cycles, two
+    specialized Transformer modules interact:
+    -   The Low-Level module (`l_reasoning`) updates `z_l` by attending to the
+        current `z_h` and the new input.
+    -   The High-Level module (`h_reasoning`) updates `z_h` by attending to the
+        newly updated `z_l`.
+
+    This ping-pong structure allows the high-level state to guide the low-level
+    processing, and the low-level results to inform and refine the high-level plan.
+
+Foundational Mathematics and Concepts:
+    -   **Hierarchical/Dual-Process Reasoning:** The architecture is inspired by
+        cognitive theories positing two systems of thought. `z_h` acts as a
+        Global Workspace, broadcasting high-level directives, while `z_l` performs
+        specialized processing grounded in the input.
+        `z_l_new = L_Module(z_l, condition=z_h + input)`
+        `z_h_new = H_Module(z_h, condition=z_l_new)`
+
+    -   **Adaptive Computation Time (ACT):** The layer includes a `q_head` which
+        projects the high-level state `z_h` to a halting probability (logits for
+        `halt` vs. `continue`). This allows an external control loop to dynamically
+        decide how many times to invoke this core (how long to "think") for a
+        given problem, allocating more computation to harder tasks.
+
+    -   **Gradient Detachment and Truncated Backpropagation:** To enable deep
+        reasoning (many cycles) without the prohibitive memory cost and instability
+        of full Backpropagation Through Time (BPTT), this layer employs a crucial
+        optimization. It runs multiple inner reasoning cycles (`h_cycles` * `l_cycles`)
+        where the intermediate states are explicitly detached from the computation
+        graph using `stop_gradient`. Only the operations in the very final cycle
+        are recorded for backpropagation. This allows the model to leverage the
+        informational benefit of many thinking steps while only training on the
+        final output, similar to Truncated BPTT but applied to "thinking depth."
+
+References:
+    1.  Graves, A. (2016). "Adaptive Computation Time for Recurrent Neural Networks."
+        Provides the theoretical basis for the `q_head` and dynamic halting.
+    2.  Baars, B. J. (1988). "A Cognitive Theory of Consciousness." (Global Workspace
+        Theory). The interaction between the global `z_h` and the specialized `z_l`
+        shares conceptual similarities with GWT.
+    3.  Su, J., et al. (2021). "RoFormer: Enhanced Transformer with Rotary Position
+        Embedding." The layer supports RoPE (`rope_theta`) as a modern positional
+        encoding strategy.
 """
 
 import math
@@ -22,8 +72,8 @@ from typing import Optional, Union, Dict, Any, Tuple, Literal
 
 from .hrm_reasoning_module import HierarchicalReasoningModule
 from .hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
-from .embedding.positional_embedding import PositionalEmbedding
-from .embedding.rotary_position_embedding import RotaryPositionEmbedding
+from ..embedding.positional_embedding import PositionalEmbedding
+from ..embedding.rotary_position_embedding import RotaryPositionEmbedding
 
 # ---------------------------------------------------------------------
 

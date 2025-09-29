@@ -51,8 +51,8 @@ from dl_techniques.layers.blt_blocks import (
     ByteTokenizer, EntropyModel, DynamicPatcher,
     LocalEncoder, PatchPooling
 )
-from dl_techniques.layers.hrm_reasoning_module import HierarchicalReasoningModule
-from dl_techniques.layers.hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
+from dl_techniques.layers.reasoning.hrm_reasoning_module import HierarchicalReasoningModule
+from dl_techniques.layers.reasoning.hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
 from dl_techniques.layers.embedding.rotary_position_embedding import RotaryPositionEmbedding
 

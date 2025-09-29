@@ -128,9 +128,9 @@ from typing import Dict, List, Optional, Union, Tuple
 from enum import Enum
 
 # Import HRM base components
-from dl_techniques.layers.hrm_reasoning_core import HierarchicalReasoningCore
-from dl_techniques.layers.hrm_reasoning_module import HierarchicalReasoningModule
-from dl_techniques.layers.hrm_block import HierarchicalReasoningBlock
+from dl_techniques.layers.reasoning.hrm_reasoning_core import HierarchicalReasoningCore
+from dl_techniques.layers.reasoning.hrm_reasoning_module import HierarchicalReasoningModule
+from dl_techniques.layers.reasoning.hrm_block import HierarchicalReasoningBlock
 from dl_techniques.layers.vision_transformer_siglip import SigLIPVisionTransformer
 from dl_techniques.layers.modality_projection import ModalityProjection
 from dl_techniques.layers.positional_embedding import PositionalEmbedding

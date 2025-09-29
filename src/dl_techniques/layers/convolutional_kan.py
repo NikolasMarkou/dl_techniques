@@ -42,8 +42,13 @@ import keras
 from keras import ops
 from typing import Tuple, Optional, Union, Any, Dict, Callable
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class KANvolution(keras.layers.Layer):
@@ -484,3 +489,5 @@ class KANvolution(keras.layers.Layer):
             'activity_regularizer': keras.regularizers.serialize(self.activity_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

@@ -1,19 +1,68 @@
 """
-This module provides a specialized Transformer block, `HierarchicalReasoningBlock`,
-which serves as a core component for a Hierarchical Reasoning Model (HRM) architecture.
+A post-normalization Transformer block with SwiGLU and RMSNorm.
 
-The block implements a post-normalization transformer architecture with SwiGLU activation
-and RMS normalization, specifically designed for hierarchical reasoning tasks. Unlike
-standard transformer blocks that use pre-normalization, this implementation applies
-normalization after the residual connections for improved training dynamics in the HRM context.
+This layer constitutes a single block within a Transformer-based model,
+encapsulating self-attention and feed-forward network (FFN) sub-layers.
+Its architecture is specifically tailored for tasks requiring deep hierarchical
+reasoning, employing a "post-normalization" scheme that can offer performance
+benefits at the cost of requiring more careful training stabilization.
 
-The block consists of:
-1. Multi-head self-attention with post-normalization using RMSNorm
-2. SwiGLU Feed-Forward Network with post-normalization using RMSNorm
-3. Residual connections around both sub-components
+Architecture:
+    The block adheres to the standard two-stage Transformer architecture, but
+    with specific modern components and an important structural choice regarding
+    normalization. The data flows through two main sub-layers:
 
-This implementation follows modern Keras 3 patterns for robust serialization and
-proper sub-layer management.
+    1.  **Multi-Head Self-Attention:** Computes context-aware representations by
+        allowing each token in the sequence to attend to all other tokens.
+    2.  **SwiGLU Feed-Forward Network:** A position-wise FFN that provides
+        additional non-linear transformation capacity. It uses a Swish-Gated
+        Linear Unit (SwiGLU) for enhanced expressiveness over standard ReLU.
+
+    A key architectural decision is the use of **post-normalization**. Unlike
+    the more common pre-normalization (`x + SubLayer(Norm(x))`), this block
+    applies normalization *after* the residual connection: `Norm(x + SubLayer(x))`.
+    This places the normalization layers on the main signal path, which can
+    sometimes lead to better representational power, but often necessitates
+    careful learning rate scheduling (e.g., warmup) to ensure stable training
+    in deep networks. Root Mean Square Normalization (RMSNorm) is used as a
+    computationally efficient alternative to standard Layer Normalization.
+
+Foundational Mathematics and Concepts:
+    -   **Scaled Dot-Product Attention:** The core mechanism within the multi-head
+        attention layer. It computes attention scores as:
+        `Attention(Q, K, V) = softmax( (QK^T) / sqrt(d_k) ) * V`
+        This allows the model to learn a weighted sum of value vectors (`V`), where
+        the weights are determined by the compatibility of query (`Q`) and key
+        (`K`) vectors. The scaling factor `sqrt(d_k)` prevents the dot products
+        from growing too large and saturating the softmax function.
+
+    -   **Root Mean Square Normalization (RMSNorm):** A variant of Layer
+        Normalization that simplifies the computation by only re-scaling
+        activations by their root mean square, omitting the mean-centering step.
+        Given an input vector `x`, it is calculated as:
+        `RMSNorm(x) = (x / sqrt(mean(x^2) + ε)) * g`
+        where `g` is a learnable gain parameter. This is often faster than
+        standard LayerNorm with minimal performance difference.
+
+    -   **Swish-Gated Linear Unit (SwiGLU):** An advanced feed-forward network
+        variant that introduces a gating mechanism. The input `x` is projected
+        by two separate linear layers. One projection is passed through a Swish
+        activation function, and the result is element-wise multiplied by the
+        other projection: `SwiGLU(x) = Swish(xW + b) ⊙ (xV + c)`. This gating
+        allows the network to dynamically control the flow of information through
+        the FFN, often leading to improved performance.
+
+References:
+    1.  Vaswani, A. et al. (2017). "Attention Is All You Need." The foundational
+        paper introducing the Transformer architecture, which used the
+        post-normalization scheme implemented here.
+    2.  Xiong, R. et al. (2020). "On Layer Normalization in the Transformer
+        Architecture." Provides a detailed analysis of pre-normalization vs.
+        post-normalization, highlighting the training stability trade-offs.
+    3.  Zhang, B., & Sennrich, R. (2019). "Root Mean Square Layer
+        Normalization." Introduces the RMSNorm algorithm.
+    4.  Shazeer, N. (2020). "GLU Variants Improve Transformer." Proposes the
+        SwiGLU activation function and demonstrates its benefits.
 """
 
 import keras
@@ -23,8 +72,8 @@ from typing import Optional, Union, Dict, Any, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from .norms.rms_norm import RMSNorm
-from .ffn.swiglu_ffn import SwiGLUFFN
+from ..norms.rms_norm import RMSNorm
+from ..ffn.swiglu_ffn import SwiGLUFFN
 
 # ---------------------------------------------------------------------
 

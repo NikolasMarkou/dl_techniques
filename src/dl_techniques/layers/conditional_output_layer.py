@@ -1,3 +1,69 @@
+"""
+Selectively route tensors for conditional training or data imputation.
+
+This layer acts as a data-driven multiplexer, choosing between two input
+tensors (`ground_truth` and `inference`) on a sample-by-sample basis within
+a batch. Its primary function is to enable sophisticated training schemes,
+particularly in semi-supervised or generative modeling contexts, where
+different samples in a batch require different computational paths or loss
+treatments.
+
+Architecture:
+    The layer's design is a conditional switch. It takes two tensors of
+    identical shape as input. For each sample in the batch, it inspects the
+    `ground_truth` tensor. If every element of that sample is zero, it routes
+    the corresponding sample from the `inference` tensor to the output.
+    Otherwise, if the `ground_truth` sample contains at least one non-zero
+    element, it routes the `ground_truth` sample itself to the output.
+
+    This mechanism is a powerful tool for masking the loss function for
+    certain samples. When this layer's output is fed into a loss function,
+    the behavior is bifurcated:
+    1.  **"Unlabeled" samples (all-zero ground truth):** The output is the
+        model's inference. The loss is computed on the model's prediction,
+        allowing gradients to flow back and train the upstream network.
+    2.  **"Labeled" samples (non-zero ground truth):** The output is the
+        ground truth itself. If the loss function's target is also the ground
+        truth, the resulting loss will be zero (`L(gt, gt) = 0`), effectively
+        preventing any gradients from these samples from affecting the
+        upstream inference network.
+
+Foundational Mathematics and Algorithm:
+    The core of the layer is a conditional selection operation, typically
+    implemented with a `where` clause:
+    `output = where(condition, inference, ground_truth)`
+
+    The `condition` is a boolean tensor derived from the `ground_truth` input.
+    The derivation process for each sample in the batch is as follows:
+    1.  An element-wise comparison `is_zero = (ground_truth == 0.0)` is performed.
+    2.  A reduction using the logical `all` operator is applied across all
+        non-batch dimensions (e.g., height, width, channels) of `is_zero`.
+        This yields a boolean vector of shape `(batch_size,)`, where each
+        element is `True` if the corresponding sample was all zeros.
+    3.  This boolean vector is then broadcast back to the rank of the input
+        tensors by adding singleton dimensions. This allows the `where`
+        operation to perform the element-wise selection correctly across
+        the entire sample.
+
+References:
+    This layer implements a common design pattern rather than a specific, citable
+    algorithm. The underlying principle is fundamental to various advanced machine
+    learning techniques, including:
+
+    1.  **Semi-Supervised Learning:** Where a model is trained on a dataset
+        containing both labeled and unlabeled examples. This layer provides a
+        mechanism to apply a supervised loss to labeled data and an
+        unsupervised or consistency loss to unlabeled data within a single
+        training step.
+    2.  **Generative Modeling and Inpainting:** In tasks like image completion,
+        this pattern can be used to ensure the loss is only calculated on the
+        missing or "generated" regions of an image, while known regions (the
+        "ground truth") contribute zero loss.
+    3.  **Masked Modeling:** Conceptually related to techniques in self-supervised
+        learning (e.g., Masked Autoencoders), where parts of the input are
+        selectively processed or ignored by the loss function.
+"""
+
 import keras
 from typing import List, Tuple, Optional, Any
 
