@@ -1,13 +1,15 @@
 """
-ConvNeXt V2 Training with MAE Pretraining
-==========================================
+ConvNeXt V2 Training with MAE Pretraining and Comprehensive Analysis
+====================================================================
 
-Two-stage training approach:
+Two-stage training approach with deep model analysis:
 1. Self-supervised MAE pretraining on unlabeled images (using ConvNeXtV2 encoder)
 2. Supervised fine-tuning on labeled classification task
+3. Comprehensive model analysis using ModelAnalyzer
 
 This script demonstrates the power of self-supervised learning for improving
-model performance, especially with limited labeled data.
+model performance, especially with limited labeled data, followed by deep
+analysis of the trained models.
 """
 
 import os
@@ -17,7 +19,7 @@ import argparse
 import numpy as np
 import tensorflow as tf
 from datetime import datetime
-from typing import Tuple, List
+from typing import Tuple, List, Dict
 
 # ---------------------------------------------------------------------
 # Local imports
@@ -30,19 +32,11 @@ from dl_techniques.layers.masked_autoencoder import (
     visualize_reconstruction,
 )
 
-from dl_techniques.visualization import (
-    VisualizationManager,
-    TrainingHistory,
-    ClassificationResults,
-    PlotConfig,
-    PlotStyle,
-    ColorScheme,
-    TrainingCurvesVisualization,
-    ConfusionMatrixVisualization,
-    NetworkArchitectureVisualization,
-    ROCPRCurves
+from dl_techniques.analyzer import (
+    ModelAnalyzer,
+    AnalysisConfig,
+    DataInput,
 )
-
 
 # ---------------------------------------------------------------------
 
@@ -191,7 +185,6 @@ def create_mae_with_convnext(
         final_decoder_depth = decoder_depth
         logger.info(f"Using user-specified decoder depth: {final_decoder_depth}")
 
-
     # Create MAE model by passing the encoder instance directly
     mae = MaskedAutoencoder(
         encoder=encoder,
@@ -214,6 +207,7 @@ def create_mae_with_convnext(
     logger.info(f"  Mask ratio: {mask_ratio}")
 
     return mae
+
 
 # ---------------------------------------------------------------------
 
@@ -346,7 +340,7 @@ def pretrain_mae(
         x_train,  # No labels - self-supervised!
         batch_size=batch_size,
         epochs=epochs,
-        validation_data=(x_test, x_test),  # Provide both x and y for validation
+        validation_data=(x_test, x_test),
         callbacks=callbacks,
         verbose=1
     )
@@ -502,8 +496,7 @@ def finetune_classifier(
     )
 
     trainable_params_stage1 = np.sum([np.prod(w.shape) for w in classifier.trainable_weights])
-    logger.info(
-        f"  Trainable parameters: {trainable_params_stage1:,}")
+    logger.info(f"  Trainable parameters: {trainable_params_stage1:,}")
 
     callbacks_stage1 = create_finetune_callbacks(results_dir, 'stage1_frozen', patience=patience)
 
@@ -528,7 +521,7 @@ def finetune_classifier(
         encoder.trainable = True
 
     classifier.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=lr_stage2),  # Much lower LR
+        optimizer=keras.optimizers.Adam(learning_rate=lr_stage2),
         loss='sparse_categorical_crossentropy',
         metrics=metrics
     )
@@ -564,125 +557,79 @@ def finetune_classifier(
 
 # ---------------------------------------------------------------------
 
-def setup_visualization_manager(
-        experiment_name: str,
-        results_dir: str
-) -> VisualizationManager:
-    """Setup and configure the visualization manager."""
-    viz_dir = os.path.join(results_dir, "visualizations")
-    os.makedirs(viz_dir, exist_ok=True)
-
-    config = PlotConfig(
-        style=PlotStyle.PUBLICATION,
-        color_scheme=ColorScheme(
-            primary="#2E86AB",
-            secondary="#A23B72",
-            success="#06D6A0",
-            warning="#FFD166"
-        ),
-        title_fontsize=14,
-        label_fontsize=12,
-        save_format="png",
-        dpi=300,
-        fig_size=(12, 8)
-    )
-
-    viz_manager = VisualizationManager(
-        experiment_name=experiment_name,
-        output_dir=viz_dir,
-        config=config
-    )
-
-    viz_manager.register_template("training_curves", TrainingCurvesVisualization)
-    viz_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
-    viz_manager.register_template("network_architecture", NetworkArchitectureVisualization)
-    viz_manager.register_template("roc_pr_curves", ROCPRCurves)
-
-    logger.info(f"Visualization manager setup complete. Plots will be saved to: {viz_dir}")
-    return viz_manager
-
-
-# ---------------------------------------------------------------------
-
-def convert_keras_history_to_training_history(
-        keras_history: keras.callbacks.History
-) -> TrainingHistory:
-    """Convert Keras training history to visualization framework TrainingHistory."""
-    history_dict = keras_history.history
-    epochs = list(range(len(history_dict['loss'])))
-
-    train_metrics = {}
-    val_metrics = {}
-
-    for key, values in history_dict.items():
-        if key.startswith('val_') and key != 'val_loss':
-            val_metrics[key.replace('val_', '')] = values
-        elif not key.startswith('val_') and key != 'loss':
-            train_metrics[key] = values
-
-    return TrainingHistory(
-        epochs=epochs,
-        train_loss=history_dict['loss'],
-        val_loss=history_dict['val_loss'],
-        train_metrics=train_metrics,
-        val_metrics=val_metrics
-    )
-
-
-# ---------------------------------------------------------------------
-
-def generate_visualizations(
-        viz_manager: VisualizationManager,
-        training_history: TrainingHistory,
-        model: keras.Model,
+def run_comprehensive_analysis(
+        classifier: keras.Model,
+        training_history: keras.callbacks.History,
         x_test: np.ndarray,
         y_test: np.ndarray,
-        class_names: List[str],
         model_name: str,
-        show_plots: bool = False
-):
-    """Generate comprehensive visualizations."""
-    logger.info("Generating visualizations...")
+        results_dir: str,
+        config: AnalysisConfig
+) -> None:
+    """
+    Run comprehensive model analysis using ModelAnalyzer.
 
-    # Training curves
-    viz_manager.visualize(
-        data=training_history,
-        plugin_name="training_curves",
-        smooth_factor=0.1,
-        show=show_plots
+    Parameters
+    ----------
+    classifier : keras.Model
+        The trained classifier model.
+    training_history : keras.callbacks.History
+        The training history from fine-tuning.
+    x_test : np.ndarray
+        Test images.
+    y_test : np.ndarray
+        Test labels.
+    model_name : str
+        Name identifier for the model.
+    results_dir : str
+        Directory to save analysis results.
+    config : AnalysisConfig
+        Configuration for the analysis.
+    """
+    logger.info("=" * 70)
+    logger.info("COMPREHENSIVE MODEL ANALYSIS")
+    logger.info("=" * 70)
+
+    # Create analyzer output directory
+    analysis_dir = os.path.join(results_dir, "model_analysis")
+    os.makedirs(analysis_dir, exist_ok=True)
+
+    # Prepare data for analyzer
+    test_data = DataInput(x_data=x_test, y_data=y_test)
+
+    # Create model dictionary (can be extended for multi-model comparison)
+    models = {model_name: classifier}
+
+    # Create training history dictionary
+    training_histories = {model_name: training_history}
+
+    # Initialize ModelAnalyzer
+    logger.info(f"Initializing ModelAnalyzer for model: {model_name}")
+    analyzer = ModelAnalyzer(
+        models=models,
+        training_history=training_histories,
+        config=config,
+        output_dir=analysis_dir
     )
 
-    # Generate predictions
-    predictions = model.predict(x_test, verbose=0)
-    predicted_classes = np.argmax(predictions, axis=1)
+    # Run comprehensive analysis
+    logger.info("Running comprehensive analysis...")
+    logger.info("  - Weight distribution and health")
+    logger.info("  - Calibration and confidence metrics")
+    logger.info("  - Information flow through layers")
+    logger.info("  - Training dynamics and convergence")
 
-    # Classification results
-    classification_results = ClassificationResults(
-        y_true=y_test,
-        y_pred=predicted_classes,
-        y_prob=predictions,
-        class_names=class_names,
-        model_name=model_name
-    )
+    results = analyzer.analyze(test_data)
 
-    # Confusion matrix
-    viz_manager.visualize(
-        data=classification_results,
-        plugin_name="confusion_matrix",
-        normalize='true',
-        show=show_plots
-    )
-
-    # ROC curves for smaller datasets
-    if len(class_names) <= 20:
-        viz_manager.visualize(
-            data=classification_results,
-            plugin_name="roc_pr_curves",
-            plot_type='both',
-            show=show_plots
-        )
-
-    logger.info("Visualizations completed!")
+    logger.info("Analysis complete!")
+    logger.info(f"Analysis results saved to: {analysis_dir}")
+    logger.info("Generated visualizations:")
+    logger.info("  - summary_dashboard.png: High-level overview")
+    logger.info("  - training_dynamics.png: Training curves and convergence")
+    logger.info("  - weight_learning_journey.png: Weight health analysis")
+    logger.info("  - confidence_calibration_analysis.png: Calibration metrics")
+    logger.info("  - information_flow_analysis.png: Layer-wise information flow")
+    logger.info("  - analysis_results.json: Raw metrics data")
 
 
 # ---------------------------------------------------------------------
@@ -790,33 +737,54 @@ def train_with_mae_pretraining(args: argparse.Namespace):
     logger.info(f"Classifier saved to: {classifier_path}")
 
     # -------------------------------------------------------------------------
-    # EVALUATION AND VISUALIZATION
+    # EVALUATION
     # -------------------------------------------------------------------------
 
     logger.info("=" * 70)
     logger.info("FINAL EVALUATION")
     logger.info("=" * 70)
 
-    # Evaluate
-    test_results = classifier.evaluate(x_test, y_test, batch_size=args.batch_size, verbose=1, return_dict=True)
+    test_results = classifier.evaluate(
+        x_test, y_test,
+        batch_size=args.batch_size,
+        verbose=1,
+        return_dict=True
+    )
     logger.info(f"Final Test Results: {test_results}")
 
-    # Setup visualization
-    experiment_name = f"mae_convnext_{args.dataset}_{args.variant}"
-    viz_manager = setup_visualization_manager(experiment_name, results_dir)
+    # -------------------------------------------------------------------------
+    # COMPREHENSIVE MODEL ANALYSIS
+    # -------------------------------------------------------------------------
 
-    # Generate visualizations
-    training_history_viz = convert_keras_history_to_training_history(finetune_history)
-    generate_visualizations(
-        viz_manager=viz_manager,
-        training_history=training_history_viz,
-        model=classifier,
-        x_test=x_test,
-        y_test=y_test,
-        class_names=class_names,
-        model_name=f"{args.variant}_{args.dataset}",
-        show_plots=args.show_plots
-    )
+    if args.run_analysis:
+        # Configure analysis
+        analysis_config = AnalysisConfig(
+            analyze_weights=True,
+            analyze_calibration=True,
+            analyze_information_flow=True,
+            analyze_training_dynamics=True,
+            n_samples=min(1000, len(x_test)),  # Sample size for analysis
+            compute_weight_pca=False,  # Disable for single model
+            smooth_training_curves=True,
+            smoothing_window=5,
+            plot_style='publication',
+            save_plots=True,
+            save_format='png',
+            dpi=300,
+            verbose=True
+        )
+
+        model_name = f"ConvNeXt_{args.variant}_MAE"
+
+        run_comprehensive_analysis(
+            classifier=classifier,
+            training_history=finetune_history,
+            x_test=x_test,
+            y_test=y_test,
+            model_name=model_name,
+            results_dir=results_dir,
+            config=analysis_config
+        )
 
     # -------------------------------------------------------------------------
     # SAVE SUMMARY
@@ -873,13 +841,16 @@ def train_with_mae_pretraining(args: argparse.Namespace):
     logger.info(f"Summary: {summary_path}")
     logger.info(f"Test Accuracy: {test_results['accuracy']:.4f}")
 
+    if args.run_analysis:
+        logger.info(f"Model Analysis: {os.path.join(results_dir, 'model_analysis')}")
+
 
 # ---------------------------------------------------------------------
 
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description='Train ConvNeXt V2 with MAE pretraining and supervised fine-tuning.'
+        description='Train ConvNeXt V2 with MAE pretraining and comprehensive analysis.'
     )
 
     # Dataset arguments
@@ -928,9 +899,11 @@ def main():
     parser.add_argument('--batch-size', type=int, default=64,
                         help='Training batch size')
 
-    # Visualization arguments
-    parser.add_argument('--show-plots', action='store_true', default=False,
-                        help='Show plots interactively during execution')
+    # Analysis arguments
+    parser.add_argument('--run-analysis', action='store_true', default=True,
+                        help='Run comprehensive model analysis')
+    parser.add_argument('--no-analysis', dest='run_analysis', action='store_false',
+                        help='Skip model analysis')
 
     args = parser.parse_args()
 
