@@ -617,6 +617,44 @@ class ConvNeXtV2(keras.Model):
 
         return model
 
+    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+        """Compute the output shape of the model.
+
+        This method is crucial for using the subclassed model within the Keras
+        Functional API or anywhere static shape inference is needed.
+
+        Args:
+            input_shape: Tuple representing the input shape.
+
+        Returns:
+            Tuple representing the output shape.
+        """
+        # This assumes channels_last data format
+        current_shape = input_shape
+
+        # 1. Stem
+        current_shape = self.stem_conv.compute_output_shape(current_shape)
+        current_shape = self.stem_norm.compute_output_shape(current_shape)
+
+        # 2. Stages
+        for i in range(len(self.depths)):
+            # Downsample layer
+            if i > 0:
+                norm_layer, conv_layer = self.downsample_layers_list[i - 1]
+                current_shape = norm_layer.compute_output_shape(current_shape)
+                current_shape = conv_layer.compute_output_shape(current_shape)
+
+            # The blocks within a stage do not change the shape, so we can skip them.
+
+        # 3. Head
+        if self.include_top:
+            current_shape = self.gap.compute_output_shape(current_shape)
+            current_shape = self.head_norm.compute_output_shape(current_shape)
+            if self.classifier:
+                current_shape = self.classifier.compute_output_shape(current_shape)
+
+        return current_shape
+
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization.
 

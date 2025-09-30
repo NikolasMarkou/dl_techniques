@@ -26,16 +26,12 @@ Usage Examples:
 # Create MAE with ConvNeXt V2 encoder
 encoder = ConvNeXtV2.from_variant("tiny", include_top=False, input_shape=(224, 224, 3))
 mae = MaskedAutoencoder(
-    encoder_dims=[96, 192, 384, 768],
-    encoder_output_shape=(7, 7, 768),
+    encoder=encoder,
     patch_size=16,
     mask_ratio=0.75,
     decoder_dims=[512, 256, 128, 64],
     input_shape=(224, 224, 3)
 )
-
-# Load pretrained encoder weights
-mae.encoder.set_weights(encoder.get_weights())
 
 # Train the model
 mae.compile(optimizer="adam")
@@ -80,15 +76,9 @@ class MaskedAutoencoder(keras.Model):
     Loss computed only on masked patches
     ```
 
-    **Note on Encoder**: Instead of passing an encoder model instance, you should
-    recreate the encoder architecture by providing its configuration. This ensures
-    proper serialization. The encoder should be a feature extractor (include_top=False).
-
     Args:
-        encoder_dims: List of integers, channel dimensions in each encoder stage.
-            Example: [96, 192, 384, 768] for ConvNeXt-Tiny.
-        encoder_output_shape: Tuple of integers, spatial output shape of encoder
-            (height, width, channels). Used to properly build the decoder.
+        encoder: A `keras.Model` instance to be used as the feature extractor.
+            It should be a feature extractor (e.g., `include_top=False`).
         patch_size: Integer, size of patches for masking. Defaults to 16.
         mask_ratio: Float, ratio of patches to mask (0 to 1). Defaults to 0.75.
         decoder_dims: List of integers, decoder layer dimensions.
@@ -119,19 +109,15 @@ class MaskedAutoencoder(keras.Model):
         reconstruction_loss_tracker: Metric for tracking reconstruction loss.
 
     Example:
-        >>> # Create MAE with ConvNeXt-style dimensions
+        >>> # Create MAE with a pre-built encoder
+        >>> encoder = ConvNeXtV2.from_variant("tiny", include_top=False)
         >>> mae = MaskedAutoencoder(
-        ...     encoder_dims=[96, 192, 384, 768],
-        ...     encoder_output_shape=(7, 7, 768),
+        ...     encoder=encoder,
         ...     patch_size=16,
         ...     mask_ratio=0.75,
         ...     decoder_dims=[512, 256, 128, 64],
         ...     input_shape=(224, 224, 3)
         ... )
-        >>>
-        >>> # You can then load pre-trained encoder weights
-        >>> pretrained_encoder = ConvNeXtV2.from_variant("tiny", include_top=False)
-        >>> mae.encoder.set_weights(pretrained_encoder.get_weights())
         >>>
         >>> # Compile and train
         >>> mae.compile(optimizer="adam")
@@ -140,8 +126,7 @@ class MaskedAutoencoder(keras.Model):
 
     def __init__(
             self,
-            encoder_dims: List[int],
-            encoder_output_shape: Tuple[int, int, int],
+            encoder: keras.Model,
             patch_size: int = 16,
             mask_ratio: float = 0.75,
             decoder_dims: Optional[List[int]] = None,
@@ -154,14 +139,8 @@ class MaskedAutoencoder(keras.Model):
         super().__init__(**kwargs)
 
         # Validate inputs
-        if not encoder_dims:
-            raise ValueError("encoder_dims cannot be empty")
-        if any(dim <= 0 for dim in encoder_dims):
-            raise ValueError("All dimensions in encoder_dims must be positive")
-        if len(encoder_output_shape) != 3:
-            raise ValueError(
-                f"encoder_output_shape must be 3D (H, W, C), got {encoder_output_shape}"
-            )
+        if not isinstance(encoder, keras.Model):
+            raise TypeError("encoder must be a keras.Model instance.")
         if patch_size <= 0:
             raise ValueError(f"patch_size must be positive, got {patch_size}")
         if not 0 <= mask_ratio <= 1:
@@ -172,8 +151,7 @@ class MaskedAutoencoder(keras.Model):
             raise ValueError(f"input_shape must be 3D (H, W, C), got {input_shape}")
 
         # Store configuration
-        self.encoder_dims = encoder_dims
-        self.encoder_output_shape_config = encoder_output_shape
+        self.encoder = encoder
         self.patch_size = patch_size
         self.mask_ratio = mask_ratio
         self.decoder_dims = decoder_dims
@@ -182,10 +160,20 @@ class MaskedAutoencoder(keras.Model):
         self.mask_value = mask_value
         self.input_shape_config = input_shape
 
-        # Extract encoder output shape components
-        self.encoder_height = encoder_output_shape[0]
-        self.encoder_width = encoder_output_shape[1]
-        self.encoder_channels = encoder_output_shape[2]
+        # Determine encoder's output shape to configure the decoder
+        if not self.encoder.built:
+            self.encoder.build((None,) + input_shape)
+        encoder_output_shape = self.encoder.compute_output_shape((None,) + input_shape)
+
+        if len(encoder_output_shape) != 4:
+            raise ValueError(
+                f"Expected encoder to have 4D output (batch, H, W, C), "
+                f"but got shape {encoder_output_shape}"
+            )
+
+        self.encoder_height = encoder_output_shape[1]
+        self.encoder_width = encoder_output_shape[2]
+        self.encoder_channels = encoder_output_shape[3]
 
         # CREATE sub-layers in __init__
 
@@ -197,79 +185,13 @@ class MaskedAutoencoder(keras.Model):
             name="patch_masking"
         )
 
-        # 2. Placeholder encoder - user should provide actual architecture
-        # For now, create a simple encoder placeholder
-        self.encoder = self._create_encoder_placeholder()
-
-        # 3. Decoder
+        # 2. Decoder
         self.decoder = self._create_decoder()
 
         # Loss tracker
         self.reconstruction_loss_tracker = keras.metrics.Mean(
             name="reconstruction_loss"
         )
-
-    def _create_encoder_placeholder(self) -> keras.Sequential:
-        """Create a placeholder encoder architecture.
-
-        Users should replace this with their actual encoder by setting weights
-        or by subclassing and overriding this method.
-
-        Returns:
-            Sequential encoder model.
-        """
-        layers_list = []
-
-        # Stem layer
-        layers_list.append(keras.layers.Conv2D(
-            filters=self.encoder_dims[0],
-            kernel_size=4,
-            strides=4,
-            padding="same",
-            name="encoder_stem"
-        ))
-        layers_list.append(keras.layers.LayerNormalization(name="encoder_stem_norm"))
-
-        # Encoder stages
-        for i, dim in enumerate(self.encoder_dims):
-            # Downsampling if not first stage
-            if i > 0:
-                layers_list.append(keras.layers.LayerNormalization(
-                    name=f"encoder_downsample_norm_{i}"
-                ))
-                layers_list.append(keras.layers.Conv2D(
-                    filters=dim,
-                    kernel_size=2,
-                    strides=2,
-                    padding="valid",
-                    name=f"encoder_downsample_{i}"
-                ))
-
-            # Stage blocks (simplified)
-            num_blocks = 2
-            for j in range(num_blocks):
-                layers_list.append(keras.layers.Conv2D(
-                    filters=dim,
-                    kernel_size=7,
-                    padding="same",
-                    groups=dim,
-                    activation="gelu",
-                    name=f"encoder_stage{i}_block{j}_dwconv"
-                ))
-                layers_list.append(keras.layers.LayerNormalization(
-                    name=f"encoder_stage{i}_block{j}_norm"
-                ))
-                layers_list.append(keras.layers.Dense(
-                    dim * 4,
-                    activation="gelu",
-                    name=f"encoder_stage{i}_block{j}_expand"
-                ))
-                layers_list.append(keras.layers.Dense(
-                    dim,
-                    name=f"encoder_stage{i}_block{j}_project"
-                ))
-
-        return keras.Sequential(layers_list, name="encoder")
 
     def _create_decoder(self) -> ConvDecoder:
         """Create decoder based on configuration.
@@ -577,8 +499,7 @@ class MaskedAutoencoder(keras.Model):
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration."""
         config = {
-            "encoder_dims": self.encoder_dims,
-            "encoder_output_shape": self.encoder_output_shape_config,
+            "encoder": keras.saving.serialize_keras_object(self.encoder),
             "patch_size": self.patch_size,
             "mask_ratio": self.mask_ratio,
             "decoder_dims": self.decoder_dims,
@@ -590,10 +511,13 @@ class MaskedAutoencoder(keras.Model):
         base_config = super().get_config()
         return {**base_config, **config}
 
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "MaskedAutoencoder":
+        config["encoder"] = keras.saving.deserialize_keras_object(config["encoder"])
+        return cls(**config)
+
 
 # ---------------------------------------------------------------------
 # Utility Functions
 # ---------------------------------------------------------------------
-
-
 

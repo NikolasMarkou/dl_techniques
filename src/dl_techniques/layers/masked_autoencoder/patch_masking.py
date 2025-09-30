@@ -1,6 +1,6 @@
 import keras
-import numpy as np
-from typing import Optional, Tuple, Union, List, Dict, Any
+from typing import Optional, Tuple, Union, Dict, Any
+
 
 # ---------------------------------------------------------------------
 
@@ -118,40 +118,38 @@ class PatchMasking(keras.layers.Layer):
 
     def _create_mask(
             self,
-            batch_size: int,
+            batch_size: keras.KerasTensor,
             training: bool
     ) -> keras.KerasTensor:
         """Create random binary mask for patches.
 
         Args:
-            batch_size: Integer, size of the batch.
+            batch_size: Symbolic tensor for the batch size.
             training: Boolean, whether in training mode.
 
         Returns:
             Binary mask tensor of shape (batch_size, num_patches).
         """
-        if training:
+        if training and self.mask_ratio > 0:
             num_masked = int(self.num_patches * self.mask_ratio)
+            if num_masked == 0:
+                return keras.ops.zeros((batch_size, self.num_patches), dtype="float32")
 
-            # Create mask for each sample in batch
-            masks = []
-            for _ in range(batch_size):
-                # Random permutation of patch indices
-                indices = keras.random.shuffle(
-                    keras.ops.arange(self.num_patches)
-                )
-                # First num_masked patches are masked (1), rest are visible (0)
-                mask = keras.ops.cast(
-                    keras.ops.arange(self.num_patches) < num_masked,
-                    dtype="float32"
-                )
-                # Unshuffle to match original positions
-                mask = keras.ops.take(mask, keras.ops.argsort(indices))
-                masks.append(mask)
+            # Generate random noise for each patch in each batch sample
+            noise = keras.random.uniform(shape=(batch_size, self.num_patches))
 
-            return keras.ops.stack(masks, axis=0)
+            # Find the indices that would sort the noise. This gives a random permutation of indices.
+            rand_indices = keras.ops.argsort(noise, axis=-1)
+
+            # Determine the rank of each patch. Patches with a rank less than num_masked will be masked.
+            rank = keras.ops.argsort(rand_indices, axis=-1)
+
+            # Create the mask: 1 for masked, 0 for visible.
+            mask = keras.ops.cast(rank < num_masked, dtype="float32")
+
+            return mask
         else:
-            # No masking during inference
+            # No masking during inference or if mask_ratio is 0
             return keras.ops.zeros((batch_size, self.num_patches), dtype="float32")
 
     def _extract_patches(
