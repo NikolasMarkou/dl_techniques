@@ -108,7 +108,7 @@ def get_class_names(dataset: str, num_classes: int) -> List[str]:
 
 def create_model_config(dataset: str, variant: str, input_shape: Tuple[int, int, int], num_classes: int) -> Dict[
     str, Any]:
-    """Create ConvNeXt V1 model configuration based on dataset."""
+    """Create ConvNeXt V2 model configuration based on dataset."""
 
     # Base configuration
     config = {
@@ -177,7 +177,7 @@ def create_callbacks(
 ) -> Tuple[List, str]:
     """Create training callbacks."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = os.path.join("results", f"convnext_v1_{model_name}_{timestamp}")
+    results_dir = os.path.join("results", f"convnext_v2_{model_name}_{timestamp}")
     os.makedirs(results_dir, exist_ok=True)
 
     callbacks = [
@@ -490,7 +490,7 @@ def validate_model_loading(model_path: str, test_input: tf.Tensor, original_outp
 
 def train_model(args: argparse.Namespace):
     """Main training function with comprehensive visualization and analysis."""
-    logger.info("Starting ConvNeXt V1 training script with comprehensive visualizations")
+    logger.info("Starting ConvNeXt V2 training script with comprehensive visualizations")
     setup_gpu()
 
     # Load dataset
@@ -515,7 +515,7 @@ def train_model(args: argparse.Namespace):
     )
 
     # Create model
-    logger.info(f"Creating ConvNeXt V1 model (variant: {args.variant})...")
+    logger.info(f"Creating ConvNeXt V2 model (variant: {args.variant})...")
     logger.info(f"Model will be created with input_shape: {input_shape}")
 
     model = create_convnext_v2(
@@ -569,7 +569,7 @@ def train_model(args: argparse.Namespace):
     )
 
     # Setup visualization manager
-    experiment_name = f"convnext_v1_{args.dataset}_{args.variant}"
+    experiment_name = f"convnext_v2_{args.dataset}_{args.variant}"
     viz_manager = setup_visualization_manager(experiment_name, results_dir)
 
     # Train model
@@ -599,7 +599,7 @@ def train_model(args: argparse.Namespace):
     pre_save_output = model.predict(test_sample, verbose=0)
 
     # Save final model
-    final_model_path = os.path.join(results_dir, f"convnext_v1_{args.dataset}_{args.variant}_final.keras")
+    final_model_path = os.path.join(results_dir, f"convnext_v2_{args.dataset}_{args.variant}_final.keras")
     try:
         model.save(final_model_path)
         logger.info(f"Final model saved to: {final_model_path}")
@@ -677,7 +677,7 @@ def train_model(args: argparse.Namespace):
         model=best_model,
         test_data=(x_test, y_test),
         training_history=history,
-        model_name=f"convnext_v1_{args.variant}_{args.dataset}",
+        model_name=f"convnext_v2_{args.variant}_{args.dataset}",
         results_dir=results_dir
     )
 
@@ -685,7 +685,7 @@ def train_model(args: argparse.Namespace):
 
     # Save enhanced training summary
     with open(os.path.join(results_dir, 'training_summary.txt'), 'w') as f:
-        f.write(f"ConvNeXt V1 Training Summary with Visualizations\n")
+        f.write(f"ConvNeXt V2 Training Summary with Visualizations\n")
         f.write(f"===============================================\n\n")
         f.write(f"Dataset: {args.dataset}\n")
         f.write(f"Model Variant: {args.variant}\n")
