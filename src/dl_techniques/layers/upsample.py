@@ -1,5 +1,5 @@
 """
-Construct a neural network upsampling block using various strategies.
+A neural network upsampling block using various strategies.
 
 This function serves as a factory for creating upsampling blocks, a critical
 component in decoder-style architectures such as Generative Adversarial

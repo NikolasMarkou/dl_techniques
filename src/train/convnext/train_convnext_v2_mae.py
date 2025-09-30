@@ -897,7 +897,7 @@ def main():
                         help='ConvNeXt downsampling strides')
 
     # MAE pretraining arguments
-    parser.add_argument('--mae-epochs', type=int, default=10,
+    parser.add_argument('--mae-epochs', type=int, default=100,
                         help='Number of MAE pretraining epochs')
     parser.add_argument('--mae-lr', type=float, default=1e-4,
                         help='MAE pretraining learning rate')
@@ -905,7 +905,7 @@ def main():
                         help='MAE early stopping patience')
     parser.add_argument('--patch-size', type=int, default=4,
                         help='MAE patch size for masking')
-    parser.add_argument('--mask-ratio', type=float, default=0.75,
+    parser.add_argument('--mask-ratio', type=float, default=0.5,
                         help='MAE mask ratio (0-1)')
     parser.add_argument('--decoder-depth', type=int, default=-1,
                         help='MAE decoder depth. Set to -1 for automatic calculation.')

@@ -365,11 +365,8 @@ class MPSLayer(keras.layers.Layer):
 
             # Contract with current boundary state
             # (batch_size, bond_dim) × (batch_size, bond_dim, bond_dim)
-            # -> (batch_size, bond_dim)
-            boundary = keras.ops.sum(
-                keras.ops.expand_dims(boundary, axis=-1) * weighted_core,
-                axis=1
-            )
+            # 'bi,bij->bj' = (batch, in_dim), (batch, in_dim, out_dim) -> (batch, out_dim)
+            boundary = keras.ops.einsum('bi,bij->bj', boundary, weighted_core)
 
         # Project final MPS state to output dimension
         # (batch_size, bond_dim) @ (bond_dim, output_dim) -> (batch_size, output_dim)

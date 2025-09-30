@@ -1,4 +1,5 @@
-"""Implement a Random Fourier Features (RFF) mapping to approximate kernel methods.
+"""
+A Random Fourier Features (RFF) mapping to approximate kernel methods.
 
 This layer provides an efficient, scalable alternative to traditional kernel
 machines (e.g., Support Vector Machines with an RBF kernel) by leveraging a
@@ -397,3 +398,5 @@ class RFFKernelLayer(keras.layers.Layer):
             'bias_constraint': constraints.serialize(self.bias_constraint),
         })
         return config
+
+# ---------------------------------------------------------------------
