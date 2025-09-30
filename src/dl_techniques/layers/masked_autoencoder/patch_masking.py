@@ -1,0 +1,271 @@
+import keras
+import numpy as np
+from typing import Optional, Tuple, Union, List, Dict, Any
+
+# ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable()
+class PatchMasking(keras.layers.Layer):
+    """Layer for creating patches and applying random masking.
+
+    This layer divides the input image into non-overlapping patches and
+    randomly masks a specified ratio of patches. Masked patches can be
+    replaced with a learnable mask token, zeros, or noise.
+
+    **Architecture**:
+    ```
+    Input(shape=[batch, H, W, C])
+           ↓
+    Extract Patches → [batch, num_patches_h, num_patches_w, patch_h, patch_w, C]
+           ↓
+    Generate Random Mask → [batch, num_patches] (0=visible, 1=masked)
+           ↓
+    Apply Mask Token/Value to Masked Patches
+           ↓
+    Reconstruct Image → [batch, H, W, C]
+    ```
+
+    Args:
+        patch_size: Integer, size of each square patch. Must divide image dimensions evenly.
+        mask_ratio: Float between 0 and 1, ratio of patches to mask during training.
+        mask_value: String or float, value to use for masked patches.
+            Options: "learnable" (trainable mask token), "zero", "noise", or a float value.
+        **kwargs: Additional arguments for Layer base class.
+
+    Input shape:
+        4D tensor with shape: `(batch_size, height, width, channels)`.
+        Height and width must be divisible by patch_size.
+
+    Output shape:
+        Tuple of:
+            - masked_images: 4D tensor, same shape as input with masked patches
+            - mask: 2D tensor of shape (batch_size, num_patches), binary mask
+            - num_patches: Integer, total number of patches
+
+    Attributes:
+        mask_token: Learnable mask token (if mask_value="learnable"), created in build().
+
+    Example:
+        >>> masking = PatchMasking(patch_size=16, mask_ratio=0.75)
+        >>> masked_img, mask, num_patches = masking(images, training=True)
+    """
+
+    def __init__(
+            self,
+            patch_size: int = 16,
+            mask_ratio: float = 0.75,
+            mask_value: Union[str, float] = "learnable",
+            **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+
+        # Validate inputs
+        if patch_size <= 0:
+            raise ValueError(f"patch_size must be positive, got {patch_size}")
+        if not 0 <= mask_ratio <= 1:
+            raise ValueError(f"mask_ratio must be in [0, 1], got {mask_ratio}")
+        if isinstance(mask_value, str) and mask_value not in ["learnable", "zero", "noise"]:
+            raise ValueError(
+                f"mask_value must be 'learnable', 'zero', 'noise', or a float, got {mask_value}"
+            )
+
+        # Store configuration
+        self.patch_size = patch_size
+        self.mask_ratio = mask_ratio
+        self.mask_value = mask_value
+
+        # Weights created in build()
+        self.mask_token = None
+
+        # Shape attributes computed in build()
+        self.num_patches_h = None
+        self.num_patches_w = None
+        self.num_patches = None
+        self.channels = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the layer.
+
+        Args:
+            input_shape: Shape tuple (batch, height, width, channels).
+        """
+        _, height, width, channels = input_shape
+
+        if height is None or width is None:
+            raise ValueError("Height and width must be known at build time")
+
+        if height % self.patch_size != 0 or width % self.patch_size != 0:
+            raise ValueError(
+                f"Image dimensions ({height}x{width}) must be divisible by "
+                f"patch_size ({self.patch_size})"
+            )
+
+        self.num_patches_h = height // self.patch_size
+        self.num_patches_w = width // self.patch_size
+        self.num_patches = self.num_patches_h * self.num_patches_w
+        self.channels = channels
+
+        # Create learnable mask token if needed
+        if self.mask_value == "learnable":
+            self.mask_token = self.add_weight(
+                name="mask_token",
+                shape=(1, self.patch_size, self.patch_size, channels),
+                initializer="zeros",
+                trainable=True
+            )
+
+        super().build(input_shape)
+
+    def _create_mask(
+            self,
+            batch_size: int,
+            training: bool
+    ) -> keras.KerasTensor:
+        """Create random binary mask for patches.
+
+        Args:
+            batch_size: Integer, size of the batch.
+            training: Boolean, whether in training mode.
+
+        Returns:
+            Binary mask tensor of shape (batch_size, num_patches).
+        """
+        if training:
+            num_masked = int(self.num_patches * self.mask_ratio)
+
+            # Create mask for each sample in batch
+            masks = []
+            for _ in range(batch_size):
+                # Random permutation of patch indices
+                indices = keras.random.shuffle(
+                    keras.ops.arange(self.num_patches)
+                )
+                # First num_masked patches are masked (1), rest are visible (0)
+                mask = keras.ops.cast(
+                    keras.ops.arange(self.num_patches) < num_masked,
+                    dtype="float32"
+                )
+                # Unshuffle to match original positions
+                mask = keras.ops.take(mask, keras.ops.argsort(indices))
+                masks.append(mask)
+
+            return keras.ops.stack(masks, axis=0)
+        else:
+            # No masking during inference
+            return keras.ops.zeros((batch_size, self.num_patches), dtype="float32")
+
+    def _extract_patches(
+            self,
+            images: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """Extract patches from images.
+
+        Args:
+            images: Input tensor of shape (batch, height, width, channels).
+
+        Returns:
+            Patches tensor of shape (batch, num_patches_h, num_patches_w,
+                                    patch_size, patch_size, channels).
+        """
+        batch_size = keras.ops.shape(images)[0]
+
+        # Reshape to patches
+        # (batch, H, W, C) -> (batch, num_h, patch_h, num_w, patch_w, C)
+        patches = keras.ops.reshape(
+            images,
+            (batch_size, self.num_patches_h, self.patch_size,
+             self.num_patches_w, self.patch_size, self.channels)
+        )
+        # -> (batch, num_h, num_w, patch_h, patch_w, C)
+        patches = keras.ops.transpose(patches, (0, 1, 3, 2, 4, 5))
+
+        return patches
+
+    def _reconstruct_from_patches(
+            self,
+            patches: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """Reconstruct image from patches.
+
+        Args:
+            patches: Tensor of shape (batch, num_h, num_w, patch_h, patch_w, C).
+
+        Returns:
+            Image tensor of shape (batch, height, width, channels).
+        """
+        batch_size = keras.ops.shape(patches)[0]
+
+        # (batch, num_h, num_w, patch_h, patch_w, C)
+        # -> (batch, num_h, patch_h, num_w, patch_w, C)
+        patches = keras.ops.transpose(patches, (0, 1, 3, 2, 4, 5))
+
+        # -> (batch, H, W, C)
+        height = self.num_patches_h * self.patch_size
+        width = self.num_patches_w * self.patch_size
+        images = keras.ops.reshape(
+            patches,
+            (batch_size, height, width, self.channels)
+        )
+
+        return images
+
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor, int]:
+        """Apply patch masking to inputs.
+
+        Args:
+            inputs: Input tensor of shape (batch, height, width, channels).
+            training: Boolean or None, whether in training mode.
+
+        Returns:
+            Tuple of:
+                - masked_images: Images with masked patches
+                - mask: Binary mask (1=masked, 0=visible)
+                - num_patches: Total number of patches
+        """
+        batch_size = keras.ops.shape(inputs)[0]
+
+        # Create mask
+        mask = self._create_mask(batch_size, training)
+
+        # Extract patches
+        patches = self._extract_patches(inputs)
+
+        # Apply masking
+        mask_reshaped = keras.ops.reshape(
+            mask,
+            (batch_size, self.num_patches_h, self.num_patches_w, 1, 1, 1)
+        )
+
+        if self.mask_value == "learnable":
+            mask_token = keras.ops.tile(
+                self.mask_token,
+                (batch_size, self.num_patches_h, self.num_patches_w, 1, 1, 1)
+            )
+            masked_patches = (1 - mask_reshaped) * patches + mask_reshaped * mask_token
+        elif self.mask_value == "zero":
+            masked_patches = (1 - mask_reshaped) * patches
+        elif self.mask_value == "noise":
+            noise = keras.random.normal(keras.ops.shape(patches))
+            masked_patches = (1 - mask_reshaped) * patches + mask_reshaped * noise
+        else:
+            # Use constant value
+            masked_patches = (1 - mask_reshaped) * patches + mask_reshaped * self.mask_value
+
+        # Reconstruct image from masked patches
+        masked_images = self._reconstruct_from_patches(masked_patches)
+
+        return masked_images, mask, self.num_patches
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get layer configuration."""
+        config = super().get_config()
+        config.update({
+            "patch_size": self.patch_size,
+            "mask_ratio": self.mask_ratio,
+            "mask_value": self.mask_value,
+        })
+        return config
