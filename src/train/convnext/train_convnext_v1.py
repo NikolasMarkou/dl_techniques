@@ -527,19 +527,11 @@ def train_model(args: argparse.Namespace):
         **{k: v for k, v in model_config.items() if k not in ['num_classes']}
     )
 
-    # Create optimizer
-    if use_lr_schedule:
-        optimizer = keras.optimizers.Adam(
-            learning_rate=lr_schedule,
-            weight_decay=args.weight_decay,
-            clipnorm=1.0
-        )
-    else:
-        optimizer = keras.optimizers.Adam(
-            learning_rate=lr_schedule,
-            weight_decay=args.weight_decay,
-            clipnorm=1.0
-        )
+    optimizer = keras.optimizers.AdamW(
+        learning_rate=lr_schedule,
+        weight_decay=args.weight_decay,
+        clipnorm=1.0
+    )
 
     # Compile model
     metrics = ['accuracy']
@@ -760,9 +752,11 @@ def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(description='Train a ConvNeXt V1 model with comprehensive visualizations.')
 
-    # Dataset and model arguments
+    # Dataset arguments
     parser.add_argument('--dataset', type=str, default='cifar10',
                         choices=['mnist', 'cifar10', 'cifar100'], help='Dataset to use')
+
+    # Model arguments
     parser.add_argument('--variant', type=str, default='cifar10',
                         choices=['cifar10', 'tiny', 'small', 'base', 'large', 'xlarge'], help='Model variant')
     parser.add_argument('--kernel-size', type=int, default=7, help='Depthwise kernel size')

@@ -14,6 +14,21 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
 from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2, create_convnext_v2
 
+from dl_techniques.visualization import (
+    VisualizationManager,
+    TrainingHistory,
+    ClassificationResults,
+    PlotConfig,
+    PlotStyle,
+    ColorScheme,
+    TrainingCurvesVisualization,
+    ConfusionMatrixVisualization,
+    NetworkArchitectureVisualization,
+    ModelComparisonBarChart,
+    ROCPRCurves
+)
+from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig
+
 
 # ---------------------------------------------------------------------
 
@@ -75,9 +90,25 @@ def load_dataset(dataset_name: str) -> Tuple[
 
 # ---------------------------------------------------------------------
 
+def get_class_names(dataset: str, num_classes: int) -> List[str]:
+    """Get class names for the dataset."""
+    if dataset.lower() == 'mnist':
+        return [str(i) for i in range(10)]
+    elif dataset.lower() == 'cifar10':
+        return ['airplane', 'automobile', 'bird', 'cat', 'deer',
+                'dog', 'frog', 'horse', 'ship', 'truck']
+    elif dataset.lower() == 'cifar100':
+        # CIFAR-100 has 100 classes, use generic names
+        return [f'class_{i}' for i in range(num_classes)]
+    else:
+        return [f'class_{i}' for i in range(num_classes)]
+
+
+# ---------------------------------------------------------------------
+
 def create_model_config(dataset: str, variant: str, input_shape: Tuple[int, int, int], num_classes: int) -> Dict[
     str, Any]:
-    """Create ConvNeXt V2 model configuration based on dataset."""
+    """Create ConvNeXt V1 model configuration based on dataset."""
 
     # Base configuration
     config = {
@@ -146,7 +177,7 @@ def create_callbacks(
 ) -> Tuple[List, str]:
     """Create training callbacks."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = os.path.join("results", f"convnext_v2_{model_name}_{timestamp}")
+    results_dir = os.path.join("results", f"convnext_v1_{model_name}_{timestamp}")
     os.makedirs(results_dir, exist_ok=True)
 
     callbacks = [
@@ -190,6 +221,238 @@ def create_callbacks(
 
 # ---------------------------------------------------------------------
 
+def setup_visualization_manager(experiment_name: str, results_dir: str) -> VisualizationManager:
+    """Setup and configure the visualization manager."""
+    # Create visualization directory
+    viz_dir = os.path.join(results_dir, "visualizations")
+    os.makedirs(viz_dir, exist_ok=True)
+
+    # Configure plot style for publication-quality outputs
+    config = PlotConfig(
+        style=PlotStyle.PUBLICATION,
+        color_scheme=ColorScheme(
+            primary="#2E86AB",
+            secondary="#A23B72",
+            success="#06D6A0",
+            warning="#FFD166"
+        ),
+        title_fontsize=14,
+        label_fontsize=12,
+        save_format="png",
+        dpi=300,
+        fig_size=(12, 8)
+    )
+
+    # Initialize visualization manager
+    viz_manager = VisualizationManager(
+        experiment_name=experiment_name,
+        output_dir=viz_dir,
+        config=config
+    )
+
+    # Register commonly used visualization templates
+    viz_manager.register_template("training_curves", TrainingCurvesVisualization)
+    viz_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
+    viz_manager.register_template("network_architecture", NetworkArchitectureVisualization)
+    viz_manager.register_template("model_comparison_bars", ModelComparisonBarChart)
+    viz_manager.register_template("roc_pr_curves", ROCPRCurves)
+
+    logger.info(f"Visualization manager setup complete. Plots will be saved to: {viz_dir}")
+    return viz_manager
+
+
+# ---------------------------------------------------------------------
+
+def convert_keras_history_to_training_history(keras_history: keras.callbacks.History) -> TrainingHistory:
+    """Convert Keras training history to visualization framework TrainingHistory."""
+    history_dict = keras_history.history
+    epochs = list(range(len(history_dict['loss'])))
+
+    # Extract training metrics (excluding loss)
+    train_metrics = {}
+    val_metrics = {}
+
+    for key, values in history_dict.items():
+        if key.startswith('val_') and key != 'val_loss':
+            val_metrics[key.replace('val_', '')] = values
+        elif not key.startswith('val_') and key != 'loss':
+            train_metrics[key] = values
+
+    return TrainingHistory(
+        epochs=epochs,
+        train_loss=history_dict['loss'],
+        val_loss=history_dict['val_loss'],
+        train_metrics=train_metrics,
+        val_metrics=val_metrics
+    )
+
+
+# ---------------------------------------------------------------------
+
+def create_classification_results(
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        y_prob: np.ndarray,
+        class_names: List[str],
+        model_name: str
+) -> ClassificationResults:
+    """Create ClassificationResults object for visualization."""
+    return ClassificationResults(
+        y_true=y_true,
+        y_pred=y_pred,
+        y_prob=y_prob,
+        class_names=class_names,
+        model_name=model_name
+    )
+
+
+# ---------------------------------------------------------------------
+
+def generate_comprehensive_visualizations(
+        viz_manager: VisualizationManager,
+        training_history: TrainingHistory,
+        classification_results: ClassificationResults,
+        model: keras.Model,
+        show_plots: bool = False
+):
+    """Generate comprehensive visualizations for the training results."""
+    logger.info("Generating comprehensive visualizations...")
+
+    try:
+        # 1. Training curves
+        logger.info("Creating training curves...")
+        viz_manager.visualize(
+            data=training_history,
+            plugin_name="training_curves",
+            smooth_factor=0.1,
+            show=show_plots
+        )
+
+        # 2. Model architecture
+        logger.info("Creating network architecture visualization...")
+        viz_manager.visualize(
+            data=model,
+            plugin_name="network_architecture",
+            show=show_plots
+        )
+
+        # 3. Confusion matrix
+        logger.info("Creating confusion matrix...")
+        viz_manager.visualize(
+            data=classification_results,
+            plugin_name="confusion_matrix",
+            normalize='true',
+            show=show_plots
+        )
+
+        # 4. ROC and PR curves (if multi-class)
+        if len(classification_results.class_names) <= 20:  # Avoid clutter for too many classes
+            logger.info("Creating ROC and PR curves...")
+            viz_manager.visualize(
+                data=classification_results,
+                plugin_name="roc_pr_curves",
+                plot_type='both',
+                show=show_plots
+            )
+
+        # 5. Create a comprehensive dashboard
+        logger.info("Creating comprehensive dashboard...")
+        dashboard_data = {
+            "training_curves": training_history,
+            "confusion_matrix": classification_results,
+        }
+
+        # Only add ROC curves to dashboard if reasonable number of classes
+        if len(classification_results.class_names) <= 10:
+            dashboard_data["roc_pr_curves"] = classification_results
+
+        viz_manager.create_dashboard(data=dashboard_data, show=show_plots)
+
+        logger.info("All visualizations generated successfully!")
+
+    except Exception as e:
+        logger.warning(f"Error generating visualizations: {e}")
+        logger.warning("Continuing without some visualizations...")
+
+
+# ---------------------------------------------------------------------
+
+def run_model_analysis(
+        model: keras.Model,
+        test_data: Tuple[np.ndarray, np.ndarray],
+        training_history: keras.callbacks.History,
+        model_name: str,
+        results_dir: str
+):
+    """Run comprehensive model analysis using the analyzer framework."""
+    logger.info("Running comprehensive model analysis...")
+
+    try:
+        # Setup analysis configuration
+        analysis_config = AnalysisConfig(
+            analyze_weights=True,
+            analyze_calibration=True,
+            analyze_information_flow=True,
+            analyze_training_dynamics=True,
+            save_plots=True,
+            save_format='png',
+            dpi=300,
+            plot_style='publication'
+        )
+
+        # Create analysis directory
+        analysis_dir = os.path.join(results_dir, "model_analysis")
+        os.makedirs(analysis_dir, exist_ok=True)
+
+        # Initialize analyzer
+        analyzer = ModelAnalyzer(
+            models={model_name: model},
+            training_history={model_name: training_history.history},
+            config=analysis_config,
+            output_dir=analysis_dir
+        )
+
+        # Run analysis
+        x_test, y_test = test_data
+        # The model was compiled with SparseCategoricalCrossentropy, which expects integer labels for evaluation.
+        # Converting labels to one-hot here causes model.evaluate() to fail inside the analyzer.
+        # The analyzer framework is responsible for handling label format conversions internally.
+        logger.info(f"Using original integer labels for model analysis.")
+        analysis_results = analyzer.analyze(data=(x_test, y_test))
+
+        # Generate Pareto front if applicable
+        try:
+            pareto_figure = analyzer.create_pareto_analysis()
+            if pareto_figure:
+                logger.info("Pareto analysis generated successfully!")
+        except Exception as e:
+            logger.warning(f"Could not generate Pareto analysis: {e}")
+
+        logger.info(f"Model analysis completed! Results saved to: {analysis_dir}")
+
+        # Log key findings
+        if hasattr(analysis_results, 'training_metrics') and analysis_results.training_metrics:
+            training_metrics = analysis_results.training_metrics
+            if hasattr(training_metrics, 'peak_performance'):
+                peak_acc = training_metrics.peak_performance.get(model_name, {}).get('val_accuracy')
+                if peak_acc:
+                    logger.info(f"Peak validation accuracy: {peak_acc:.4f}")
+
+            if hasattr(training_metrics, 'overfitting_index'):
+                overfit_idx = training_metrics.overfitting_index.get(model_name)
+                if overfit_idx:
+                    logger.info(f"Overfitting index: {overfit_idx:.4f}")
+
+        return analysis_results
+
+    except Exception as e:
+        logger.warning(f"Model analysis failed: {e}")
+        logger.warning("Continuing without detailed analysis...")
+        return None
+
+
+# ---------------------------------------------------------------------
+
 def validate_model_loading(model_path: str, test_input: tf.Tensor, original_output: tf.Tensor) -> bool:
     """Validate that a saved model loads correctly."""
     try:
@@ -226,17 +489,19 @@ def validate_model_loading(model_path: str, test_input: tf.Tensor, original_outp
 # ---------------------------------------------------------------------
 
 def train_model(args: argparse.Namespace):
-    """Main training function."""
-    logger.info("Starting ConvNeXt V2 training script")
+    """Main training function with comprehensive visualization and analysis."""
+    logger.info("Starting ConvNeXt V1 training script with comprehensive visualizations")
     setup_gpu()
 
     # Load dataset
     logger.info("Loading dataset...")
     (x_train, y_train), (x_test, y_test), input_shape, num_classes = load_dataset(args.dataset)
+    class_names = get_class_names(args.dataset, num_classes)
 
     logger.info(f"After load_dataset:")
     logger.info(f"  input_shape = {input_shape} (type: {type(input_shape)})")
     logger.info(f"  num_classes = {num_classes} (type: {type(num_classes)})")
+    logger.info(f"  class_names = {class_names[:5]}..." if len(class_names) > 5 else f"  class_names = {class_names}")
 
     # Create model configuration
     model_config = create_model_config(args.dataset, args.variant, input_shape, num_classes)
@@ -250,30 +515,23 @@ def train_model(args: argparse.Namespace):
     )
 
     # Create model
-    logger.info(f"Creating ConvNeXt V2 model (variant: {args.variant})...")
+    logger.info(f"Creating ConvNeXt V1 model (variant: {args.variant})...")
     logger.info(f"Model will be created with input_shape: {input_shape}")
 
-    # Create ConvNeXt V2 model
     model = create_convnext_v2(
         variant=args.variant,
         num_classes=num_classes,
         input_shape=input_shape,
+        strides=args.strides,
+        kernel_size=args.kernel_size,
         **{k: v for k, v in model_config.items() if k not in ['num_classes']}
     )
 
-    # Create optimizer
-    if use_lr_schedule:
-        optimizer = keras.optimizers.Adam(
-            learning_rate=lr_schedule,
-            weight_decay=args.weight_decay,
-            clipnorm=1.0
-        )
-    else:
-        optimizer = keras.optimizers.Adam(
-            learning_rate=lr_schedule,
-            weight_decay=args.weight_decay,
-            clipnorm=1.0
-        )
+    optimizer = keras.optimizers.AdamW(
+        learning_rate=lr_schedule,
+        weight_decay=args.weight_decay,
+        clipnorm=1.0
+    )
 
     # Compile model
     metrics = ['accuracy']
@@ -292,7 +550,6 @@ def train_model(args: argparse.Namespace):
     logger.info(f"Input shape: {input_shape}")
     logger.info(f"Model input shape: {model.input_shape}")
 
-    # Build the model
     try:
         output = model(dummy_input, training=False)
         logger.info(f"Model built successfully. Output shape: {output.shape}")
@@ -304,20 +561,16 @@ def train_model(args: argparse.Namespace):
     logger.info("Model architecture:")
     model.summary(print_fn=logger.info)
 
-    # Show adaptive ConvNeXt specific information
-    if hasattr(model, 'summary'):
-        try:
-            logger.info("ConvNeXt V2 adaptive model details:")
-            model.summary()  # This will show the adaptive configuration
-        except Exception as e:
-            logger.debug(f"Could not show detailed ConvNeXt summary: {e}")
-
-    # Create callbacks
+    # Create callbacks and results directory
     callbacks, results_dir = create_callbacks(
         model_name=f"{args.dataset}_{args.variant}",
         use_lr_schedule=use_lr_schedule,
         patience=args.patience
     )
+
+    # Setup visualization manager
+    experiment_name = f"convnext_v1_{args.dataset}_{args.variant}"
+    viz_manager = setup_visualization_manager(experiment_name, results_dir)
 
     # Train model
     logger.info("Starting model training...")
@@ -342,11 +595,11 @@ def train_model(args: argparse.Namespace):
 
     # Validate model before loading for evaluation
     logger.info("Validating model serialization...")
-    test_sample = x_test[:4]  # Small sample for validation
+    test_sample = x_test[:4]
     pre_save_output = model.predict(test_sample, verbose=0)
 
     # Save final model
-    final_model_path = os.path.join(results_dir, f"convnext_v2_{args.dataset}_{args.variant}_final.keras")
+    final_model_path = os.path.join(results_dir, f"convnext_v1_{args.dataset}_{args.variant}_final.keras")
     try:
         model.save(final_model_path)
         logger.info(f"Final model saved to: {final_model_path}")
@@ -389,27 +642,56 @@ def train_model(args: argparse.Namespace):
     test_results = best_model.evaluate(x_test, y_test, batch_size=args.batch_size, verbose=1, return_dict=True)
     logger.info(f"Final Test Results: {test_results}")
 
-    # Quick sanity check - predict a few samples
-    logger.info("Performing sanity check...")
-    sample_predictions = best_model.predict(x_test[:10], verbose=0)
-    sample_classes = np.argmax(sample_predictions, axis=1)
-    logger.info(f"Sample predictions: {sample_classes}")
-    logger.info(f"Sample true labels: {y_test[:10]}")
-
-    # Calculate and log accuracy
+    # Generate predictions for visualization
+    logger.info("Generating predictions for visualization...")
     all_predictions = best_model.predict(x_test, batch_size=args.batch_size, verbose=1)
     predicted_classes = np.argmax(all_predictions, axis=1)
+
+    # Calculate accuracy
     accuracy = np.mean(predicted_classes == y_test)
     logger.info(f"Manually calculated accuracy: {accuracy:.4f}")
 
-    # Save training summary
+    # Convert training history for visualization
+    training_history_viz = convert_keras_history_to_training_history(history)
+
+    # Create classification results
+    classification_results = create_classification_results(
+        y_true=y_test,
+        y_pred=predicted_classes,
+        y_prob=all_predictions,
+        class_names=class_names,
+        model_name=f"{args.variant}_{args.dataset}"
+    )
+
+    # Generate comprehensive visualizations
+    generate_comprehensive_visualizations(
+        viz_manager=viz_manager,
+        training_history=training_history_viz,
+        classification_results=classification_results,
+        model=best_model,
+        show_plots=args.show_plots
+    )
+
+    # Run comprehensive model analysis
+    analysis_results = run_model_analysis(
+        model=best_model,
+        test_data=(x_test, y_test),
+        training_history=history,
+        model_name=f"convnext_v1_{args.variant}_{args.dataset}",
+        results_dir=results_dir
+    )
+
+    # Additional visualization and analysis completed
+
+    # Save enhanced training summary
     with open(os.path.join(results_dir, 'training_summary.txt'), 'w') as f:
-        f.write(f"ConvNeXt V2 Training Summary\n")
-        f.write(f"============================\n\n")
+        f.write(f"ConvNeXt V1 Training Summary with Visualizations\n")
+        f.write(f"===============================================\n\n")
         f.write(f"Dataset: {args.dataset}\n")
         f.write(f"Model Variant: {args.variant}\n")
         f.write(f"Input Shape: {input_shape}\n")
         f.write(f"Number of Classes: {num_classes}\n")
+        f.write(f"Class Names: {class_names}\n\n")
 
         # Get model configuration details
         if hasattr(model, 'depths'):
@@ -439,22 +721,46 @@ def train_model(args: argparse.Namespace):
         f.write(f"  Final Validation Accuracy: {final_val_acc:.4f}\n")
         f.write(f"  Best Validation Accuracy: {best_val_acc:.4f}\n")
 
-    logger.info("Training completed successfully!")
+        # Analysis results summary
+        if analysis_results:
+            f.write(f"\nModel Analysis Summary:\n")
+            if hasattr(analysis_results, 'calibration_metrics'):
+                calibration = analysis_results.calibration_metrics
+                model_key = f"{args.variant}_{args.dataset}"
+                if model_key in calibration:
+                    f.write(f"  Expected Calibration Error (ECE): {calibration[model_key].get('ece', 'N/A')}\n")
+                    f.write(f"  Brier Score: {calibration[model_key].get('brier_score', 'N/A')}\n")
+
+        # Visualization files
+        f.write(f"\nGenerated Visualizations:\n")
+        viz_dir = os.path.join(results_dir, "visualizations")
+        if os.path.exists(viz_dir):
+            viz_files = [f for f in os.listdir(viz_dir) if f.endswith('.png')]
+            for viz_file in sorted(viz_files):
+                f.write(f"  - {viz_file}\n")
+
+    logger.info("Training completed successfully with comprehensive visualization and analysis!")
     logger.info(f"Results saved to: {results_dir}")
+    logger.info(f"Visualizations saved to: {os.path.join(results_dir, 'visualizations')}")
+    if analysis_results:
+        logger.info(f"Model analysis saved to: {os.path.join(results_dir, 'model_analysis')}")
 
 
 # ---------------------------------------------------------------------
 
 def main():
     """Main entry point."""
-    parser = argparse.ArgumentParser(description='Train a ConvNeXt V2 model.')
+    parser = argparse.ArgumentParser(description='Train a ConvNeXt V1 model with comprehensive visualizations.')
 
-    # Dataset and model arguments
+    # Dataset arguments
     parser.add_argument('--dataset', type=str, default='cifar10',
                         choices=['mnist', 'cifar10', 'cifar100'], help='Dataset to use')
+
+    # Model arguments
     parser.add_argument('--variant', type=str, default='cifar10',
-                        choices=['cifar10', 'atto', 'femto', 'pico', 'nano', 'tiny', 'base', 'large', 'huge'],
-                        help='Model variant')
+                        choices=['cifar10', 'tiny', 'small', 'base', 'large', 'xlarge'], help='Model variant')
+    parser.add_argument('--kernel-size', type=int, default=7, help='Depthwise kernel size')
+    parser.add_argument('--strides', type=int, default=4, help='Downsampling strides')
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
@@ -465,7 +771,11 @@ def main():
                         choices=['cosine', 'exponential', 'constant'], help='Learning rate schedule')
 
     # Training control
-    parser.add_argument('--patience', type=int, default=15, help='Early stopping patience')
+    parser.add_argument('--patience', type=int, default=50, help='Early stopping patience')
+
+    # Visualization arguments
+    parser.add_argument('--show-plots', action='store_true', default=False,
+                        help='Show plots interactively during execution')
 
     args = parser.parse_args()
 
