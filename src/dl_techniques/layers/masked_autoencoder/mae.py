@@ -442,12 +442,18 @@ class MaskedAutoencoder(keras.Model):
         """
         # Unpack data
         if isinstance(data, tuple):
+            # When validation_data=(x_val, y_val) is passed to fit,
+            # y_val is ignored here as MAE is self-supervised.
             x, _ = data
         else:
             x = data
 
-        # Forward pass
-        y_pred = self(x, training=False)
+        # Forward pass.
+        # We use training=True to enable patch masking during validation.
+        # This is the correct way to evaluate an MAE, as the task is to
+        # reconstruct a masked image. Keras internally ensures that layers
+        # like Dropout or BatchNormalization remain in inference mode.
+        y_pred = self(x, training=True)
 
         # Compute loss
         loss = self.compute_loss(x=x, y=None, y_pred=y_pred)

@@ -346,7 +346,7 @@ def pretrain_mae(
         x_train,  # No labels - self-supervised!
         batch_size=batch_size,
         epochs=epochs,
-        validation_data=(x_test,),  # No labels for validation either
+        validation_data=(x_test, x_test),  # Provide both x and y for validation
         callbacks=callbacks,
         verbose=1
     )
@@ -501,8 +501,9 @@ def finetune_classifier(
         metrics=metrics
     )
 
+    trainable_params_stage1 = np.sum([np.prod(w.shape) for w in classifier.trainable_weights])
     logger.info(
-        f"  Trainable parameters: {sum([keras.backend.count_params(w) for w in classifier.trainable_weights]):,}")
+        f"  Trainable parameters: {trainable_params_stage1:,}")
 
     callbacks_stage1 = create_finetune_callbacks(results_dir, 'stage1_frozen', patience=patience)
 
@@ -532,8 +533,8 @@ def finetune_classifier(
         metrics=metrics
     )
 
-    logger.info(
-        f"  Trainable parameters: {sum([keras.backend.count_params(w) for w in classifier.trainable_weights]):,}")
+    trainable_params_stage2 = np.sum([np.prod(w.shape) for w in classifier.trainable_weights])
+    logger.info(f"  Trainable parameters: {trainable_params_stage2:,}")
 
     callbacks_stage2 = create_finetune_callbacks(results_dir, 'stage2_unfrozen', patience=patience)
 
@@ -896,7 +897,7 @@ def main():
                         help='ConvNeXt downsampling strides')
 
     # MAE pretraining arguments
-    parser.add_argument('--mae-epochs', type=int, default=100,
+    parser.add_argument('--mae-epochs', type=int, default=10,
                         help='Number of MAE pretraining epochs')
     parser.add_argument('--mae-lr', type=float, default=1e-4,
                         help='MAE pretraining learning rate')
