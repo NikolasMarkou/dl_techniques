@@ -911,13 +911,13 @@ def main():
                         help='MAE decoder depth. Set to -1 for automatic calculation.')
 
     # Fine-tuning arguments
-    parser.add_argument('--finetune-epochs-stage1', type=int, default=30,
+    parser.add_argument('--finetune-epochs-stage1', type=int, default=50,
                         help='Epochs for stage 1 (frozen encoder)')
-    parser.add_argument('--finetune-epochs-stage2', type=int, default=50,
+    parser.add_argument('--finetune-epochs-stage2', type=int, default=100,
                         help='Epochs for stage 2 (unfrozen encoder)')
     parser.add_argument('--finetune-lr-stage1', type=float, default=1e-3,
                         help='Learning rate for stage 1')
-    parser.add_argument('--finetune-lr-stage2', type=float, default=1e-5,
+    parser.add_argument('--finetune-lr-stage2', type=float, default=1e-4,
                         help='Learning rate for stage 2')
     parser.add_argument('--finetune-patience', type=int, default=10,
                         help='Fine-tuning early stopping patience')
