@@ -134,7 +134,8 @@ def create_convnext_encoder(
         kernel_size=kernel_size,
         drop_path_rate=0.1,
         dropout_rate=0.0,  # No dropout in encoder for MAE
-        use_gamma=True
+        use_gamma=True,
+        use_softorthonormal_regularizer=True
     )
 
     # Build the encoder and get its output shape
@@ -194,7 +195,7 @@ def create_mae_with_convnext(
         mask_ratio=mask_ratio,
         decoder_depth=final_decoder_depth,
         norm_pix_loss=False,
-        mask_value='learnable',
+        mask_value='zero',
         input_shape=input_shape
     )
 
@@ -875,7 +876,7 @@ def main():
                         help='Number of MAE pretraining epochs')
     parser.add_argument('--mae-lr', type=float, default=1e-4,
                         help='MAE pretraining learning rate')
-    parser.add_argument('--mae-patience', type=int, default=15,
+    parser.add_argument('--mae-patience', type=int, default=25,
                         help='MAE early stopping patience')
     parser.add_argument('--patch-size', type=int, default=4,
                         help='MAE patch size for masking')
@@ -893,9 +894,9 @@ def main():
                         help='Learning rate for stage 1')
     parser.add_argument('--finetune-lr-stage2', type=float, default=1e-4,
                         help='Learning rate for stage 2')
-    parser.add_argument('--finetune-patience', type=int, default=10,
+    parser.add_argument('--finetune-patience', type=int, default=25,
                         help='Fine-tuning early stopping patience')
-    parser.add_argument('--dropout-rate', type=float, default=0.3,
+    parser.add_argument('--dropout-rate', type=float, default=0.1,
                         help='Dropout rate in classification head')
 
     # Training arguments

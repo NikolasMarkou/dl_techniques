@@ -65,7 +65,7 @@ class ConvDecoder(keras.layers.Layer):
             kernel_size: int = 3,
             activation: str = "gelu",
             use_batch_norm: bool = True,
-            final_activation: Optional[str] = None,
+            final_activation: Optional[str] = "sigmoid",
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)

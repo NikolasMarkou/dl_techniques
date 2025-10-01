@@ -1,743 +1,379 @@
 # Model Analyzer: Complete Usage Guide
 
-A comprehensive, modular analysis toolkit for deep learning models built on Keras 3.8+ and TensorFlow 2.18+. This module provides multi-dimensional model analysis including weight distributions, calibration metrics, information flow patterns, and training dynamics with publication-ready visualizations.
+A comprehensive, modular analysis toolkit for deep learning models built on Keras and TensorFlow. This module provides multi-dimensional model analysis including weight distributions, calibration metrics, information flow patterns, and training dynamics with publication-ready visualizations.
 
-## 1. Introduction
+## 1. Overview
 
-The Model Analyzer is designed to provide deep insights into your neural network models beyond simple accuracy metrics. It helps answer critical questions about model behavior:
-
-- **Weight Health**: Are my model weights well-distributed and healthy?
-- **Calibration**: How confident should I be in my model's predictions?
-- **Information Flow**: How does information propagate through my network layers?
-- **Training Dynamics**: Did my model train efficiently and converge properly?
+The Model Analyzer is designed to provide deep insights into your neural network models beyond simple accuracy metrics. It helps answer critical questions about model behavior, training efficiency, and production readiness. By automating complex analyses and generating intuitive visualizations, it streamlines the process of model selection, debugging, and hyperparameter tuning.
 
 ### Key Features
 
-- 🔍 **Comprehensive Analysis**: Four specialized analysis modules covering different aspects of model behavior
-- 📊 **Rich Visualizations**: Publication-ready plots with consistent styling and color schemes
-- 🧩 **Modular Design**: Extensible architecture for adding custom analysis components
-- 🎯 **Training Insights**: Deep analysis of training history and convergence patterns
-- 🎨 **Dashboard**: Unified summary dashboard for model comparison
-- 💾 **Serializable Results**: JSON export for reproducible analysis and reporting
+-   🔍 **Comprehensive Analysis**: Four specialized analysis modules covering weights, calibration, information flow, and training dynamics.
+-   📊 **Rich Visualizations**: Publication-ready plots and summary dashboards with consistent styling and color schemes.
+-   🧩 **Modular & Extensible**: Each analysis is independent. The architecture is designed for adding custom analyzers and visualizers.
+-   🚀 **Training & Hyperparameter Insights**: Deep analysis of training history, convergence patterns, and a powerful Pareto-front analysis for optimal model selection.
+-   💾 **Serializable Results**: Export all raw metrics to a single JSON file for reproducible analysis, reporting, or further programmatic use.
+-   💪 **Robust & Efficient**: Handles large datasets through smart sampling, caches intermediate results to avoid re-computation, and includes robust error handling.
 
 ### Module Structure
 
+The toolkit is organized into distinct components for analysis, visualization, and configuration.
+
 ```
 analyzer/
-├── analyzers/                     # Analysis components
-│   ├── base.py                   # Abstract base analyzer interface
-│   ├── weight_analyzer.py        # Weight distribution and health analysis
-│   ├── calibration_analyzer.py   # Model confidence and calibration metrics
-│   ├── information_flow_analyzer.py  # Activation patterns and information flow
-│   ├── training_dynamics_analyzer.py # Training history and convergence analysis
-│   └── __init__.py
-├── visualizers/                   # Visualization components
-│   ├── base.py                   # Abstract base visualizer interface
-│   ├── weight_visualizer.py      # Weight analysis visualizations
-│   ├── calibration_visualizer.py # Calibration and confidence plots
-│   ├── information_flow_visualizer.py # Information flow visualizations
+├── analyzers/                          # Core analysis logic components
+│   ├── base.py                         # Abstract base analyzer interface
+│   ├── weight_analyzer.py              # Weight distribution and health analysis
+│   ├── calibration_analyzer.py         # Model confidence and calibration metrics
+│   ├── information_flow_analyzer.py    # Activation patterns and information flow
+│   └── training_dynamics_analyzer.py   # Training history and convergence analysis
+├── visualizers/                        # Visualization generation components
+│   ├── base.py                         # Abstract base visualizer interface
+│   ├── weight_visualizer.py            # Weight analysis visualizations
+│   ├── calibration_visualizer.py       # Calibration and confidence plots
+│   ├── information_flow_visualizer.py  # Information flow visualizations
 │   ├── training_dynamics_visualizer.py # Training dynamics plots
-│   ├── summary_visualizer.py     # Unified summary dashboard
-│   └── __init__.py
-├── config.py                     # Configuration classes and plotting setup
-├── data_types.py                 # Structured data types and containers
-├── constants.py                  # Analysis constants and thresholds
-├── utils.py                      # Utility functions and helpers
-├── model_analyzer.py             # Main coordinator class
-├── __init__.py                   # Public API exports
-└── README.md                     # This file
+│   └── summary_visualizer.py           # Unified summary dashboard
+├── config.py                           # Configuration classes and plotting setup
+├── data_types.py                       # Structured data types (DataInput, AnalysisResults)
+├── constants.py                        # Analysis constants and thresholds
+├── utils.py                            # Utility functions and helpers
+├── model_analyzer.py                   # Main coordinator class
+└── README.md                           # This file
 ```
 
-### Core Components
+## 2. Installation & Quick Start
 
-- **ModelAnalyzer**: Main coordinator class that orchestrates all analysis
-- **AnalysisConfig**: Configuration class for customizing analysis behavior
-- **DataInput**: Structured input data container
-- **AnalysisResults**: Comprehensive results container with all analysis outputs
+### Prerequisites
 
-### Design Principles
+Ensure you have the required libraries installed.
 
-- **Modularity**: Each analysis type is independent and can be run separately
-- **Extensibility**: Easy to add new analyzers and visualizers
-- **Consistency**: Unified color schemes and styling across all visualizations
-- **Robustness**: Comprehensive error handling and graceful degradation
-- **Performance**: Efficient caching and sampling for large datasets
-
-### Technical Features
-
-- **Backend Agnostic**: Built on Keras 3.x for compatibility across backends
-- **Memory Efficient**: Smart sampling and caching strategies
-- **Publication Ready**: High-quality plots with configurable DPI and formats
-- **Serializable**: Complete analysis results can be saved and reloaded
-- **Multi-Input Support**: Limited support for complex model architectures
-
-## 2. Analysis Capabilities
-
-### Weight Analysis Metrics
-
-| Metric | Description | Interpretation |
-|--------|-------------|----------------|
-| **L1/L2 Norms** | Weight magnitude measures | Higher values indicate larger weights |
-| **Spectral Norm** | Largest singular value | Controls Lipschitz constant |
-| **Weight Distribution** | Statistical properties (mean, std, skew, kurtosis) | Indicates weight health |
-| **Sparsity** | Fraction of near-zero weights | High sparsity may indicate dead neurons |
-| **Health Score** | Combined metric (0-1) | Higher = healthier weight distribution |
-
-### Calibration Metrics
-
-| Metric | Description | Range | Ideal Value |
-|--------|-------------|-------|-------------|
-| **ECE** | Expected Calibration Error | [0, 1] | 0 (perfect calibration) |
-| **Brier Score** | Probabilistic accuracy measure | [0, 1] | 0 (perfect predictions) |
-| **Reliability** | Bin-wise calibration accuracy | [0, 1] | Close to diagonal |
-| **Confidence** | Max probability statistics | [0, 1] | Context dependent |
-
-### Information Flow Metrics
-
-| Metric | Description | Interpretation |
-|--------|-------------|----------------|
-| **Activation Statistics** | Mean, std, sparsity of activations | Layer health and utilization |
-| **Effective Rank** | Information dimensionality | Higher = more diverse representations |
-| **Positive Ratio** | Fraction of positive activations | Indicates activation patterns |
-| **Specialization Score** | Layer specialization measure | Higher = better feature learning |
-
-### Training Dynamics Metrics
-
-| Metric | Description | Interpretation |
-|--------|-------------|----------------|
-| **Epochs to Convergence** | Time to reach 95% of peak performance | Lower = faster learning |
-| **Overfitting Index** | Val loss - train loss in final third | Positive = overfitting |
-| **Training Stability** | Std of recent validation losses | Lower = more stable |
-| **Peak Performance** | Best validation metrics achieved | Higher = better model |
-| **Final Gap** | Final validation - training loss | Indicates final overfitting state |
-
-## 3. Quick Start
+```bash
+pip install keras tensorflow matplotlib seaborn scikit-learn numpy scipy pandas tqdm
+```
 
 ### 5-Minute Setup
+
+Get comprehensive analysis results for multiple models in just a few lines of code.
+
 ```python
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
+import keras
 import numpy as np
 
-# 1. Prepare your models (dictionary format)
+# 1. Prepare your models (dictionary format with descriptive names)
 models = {
     'ResNet_v1': your_resnet_model,
     'ConvNext_v2': your_convnext_model
 }
 
-# 2. Prepare your test data
+# 2. Prepare your test data and training histories (if available)
+x_test, y_test = np.random.rand(100, 32, 32, 3), np.random.randint(0, 10, 100)
 test_data = DataInput(x_data=x_test, y_data=y_test)
+# training_histories = {'ResNet_v1': history1, 'ConvNext_v2': history2} # Optional
 
-# 3. Run analysis with defaults
-config = AnalysisConfig()
-analyzer = ModelAnalyzer(models, config=config, output_dir='analysis_results')
+# 3. Configure and run the analysis
+config = AnalysisConfig(analyze_training_dynamics=True) # Enable training analysis
+analyzer = ModelAnalyzer(
+    models=models,
+    # training_history=training_histories, # Uncomment if you have histories
+    config=config,
+    output_dir='analysis_results'
+)
 results = analyzer.analyze(test_data)
 
-print("Analysis complete! Check the 'analysis_results' folder for plots.")
+print("Analysis complete! Check the 'analysis_results' folder for plots and data.")
 ```
 
-That's it! The analyzer will generate comprehensive visualizations and save them to your output directory.
+## 3. Analysis Capabilities
 
-## 4. Installation & Setup
+The analyzer computes a wide range of metrics across four key areas of model behavior.
 
-### Prerequisites
-```bash
-pip install keras>=3.8.0 tensorflow>=2.18.0 matplotlib seaborn scikit-learn numpy scipy pandas
-```
+### Weight Analysis Metrics
 
-### Project Structure
-```
-your_project/
-├── models/
-│   ├── model_v1.keras
-│   └── model_v2.keras
-├── data/
-│   ├── x_test.npy
-│   └── y_test.npy
-└── analysis/
-    └── run_analysis.py  # Your analysis script
-```
+| Metric                | Description                                         | Interpretation                                            |
+| --------------------- | --------------------------------------------------- | --------------------------------------------------------- |
+| **L1/L2/Spectral Norms** | Measures of weight magnitude and complexity.        | Higher values indicate larger weights; controls stability. |
+| **Weight Distribution** | Statistical properties (mean, std, skew, kurtosis). | Indicates weight health and potential for vanishing/exploding gradients. |
+| **Sparsity**          | Fraction of near-zero weights in a layer.           | High sparsity can indicate under-utilized or dead neurons. |
+| **Health Score**      | A combined metric (0-1) summarizing weight health.  | Higher score = healthier weight distribution.             |
 
-## 5. Basic Usage Patterns
+### Calibration & Confidence Metrics
 
-### Pattern 1: Single Model Analysis
+| Metric             | Description                                          | Ideal Value     |
+| ------------------ | ---------------------------------------------------- | --------------- |
+| **ECE**            | Expected Calibration Error. Measures gap between confidence and accuracy. | 0 (perfect calibration) |
+| **Brier Score**    | Mean squared error for probabilistic predictions.    | 0 (perfect predictions) |
+| **Mean Confidence**| Average of the max probability for each prediction.  | Context-dependent |
+| **Mean Entropy**   | Average uncertainty across all predictions.          | Context-dependent |
+
+### Information Flow Metrics
+
+| Metric                  | Description                                            | Interpretation                                                              |
+| ----------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------- |
+| **Activation Statistics** | Mean, std, and sparsity of layer activations.          | Indicates layer health, utilization, and potential for dead neurons.        |
+| **Effective Rank**      | Dimensionality of the information represented by a layer. | Higher rank suggests more diverse and expressive feature representations.  |
+| **Positive Ratio**      | Fraction of positive activations (e.g., after ReLU).   | Indicates activation patterns; values near 0 or 1 suggest saturation.       |
+| **Specialization Score**| A combined metric measuring a layer's feature learning quality. | Higher score suggests a good balance of activation, diversity, and utilization. |
+
+### Training Dynamics Metrics
+
+| Metric                  | Description                                                     | Interpretation                                            |
+| ----------------------- | --------------------------------------------------------------- | --------------------------------------------------------- |
+| **Epochs to Convergence** | Epochs to reach 95% of peak validation performance.             | Lower is faster and more efficient learning.              |
+| **Overfitting Index**   | Average (Val Loss - Train Loss) in the final third of training. | Positive values indicate overfitting.                     |
+| **Training Stability**  | Standard deviation of recent validation losses.                 | Lower values indicate more stable training convergence.   |
+| **Peak Performance**    | Best validation accuracy/loss achieved and at which epoch.      | The model's best potential performance during training.   |
+| **Final Gap**           | Difference between validation and training loss at the last epoch. | Indicates the final overfitting or underfitting state.    |
+
+## 4. Usage Patterns & Use Cases
+
+### Pattern 1: Single Model Deep Dive
+
+Use the analyzer to thoroughly debug a single model's performance and behavior.
+
 ```python
-from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
-import keras
+# Scenario: A model's performance is unexpectedly low.
+model = keras.models.load_model('path/to/problem_model.keras')
+# history = training_history_for_the_model
 
-# Load your model
-model = keras.models.load_model('path/to/your/model.keras')
-
-# Single model analysis
-models = {'MyModel': model}
 config = AnalysisConfig(
     analyze_weights=True,
+    analyze_information_flow=True,  # Check for dead neurons/layers
     analyze_calibration=True,
-    save_plots=True
+    analyze_training_dynamics=True
 )
 
-analyzer = ModelAnalyzer(models, config=config)
+analyzer = ModelAnalyzer(
+    models={'ProblemModel': model},
+    training_history={'ProblemModel': history},
+    config=config
+)
 results = analyzer.analyze(test_data)
+
+# Next steps:
+# 1. Check `weight_learning_journey.png` for exploding/vanishing weights.
+# 2. Check `information_flow_analysis.png` for dead layers (low activation/rank).
+# 3. Check `training_dynamics.png` for severe overfitting or unstable training.
 ```
 
-### Pattern 2: Multi-Model Comparison
+### Pattern 2: Multi-Model Comparison for Selection
+
+Compare different architectures or training runs to select the best candidate.
+
 ```python
-# Compare different architectures
+# Scenario: Choose the best model from multiple architectures for production.
 models = {
     'ResNet50': resnet_model,
-    'EfficientNet': efficientnet_model, 
-    'ConvNext': convnext_model,
-    'Custom_CNN': custom_model
+    'EfficientNet': efficientnet_model,
+    'ConvNext': convnext_model
 }
 
-# The analyzer automatically uses consistent colors and creates comparison plots
-analyzer = ModelAnalyzer(models, config=config)
+analyzer = ModelAnalyzer(models=models)
 results = analyzer.analyze(test_data)
+
+# Next steps:
+# 1. Start with `summary_dashboard.png`. The performance table gives a quick overview.
+# 2. Check the "Calibration Landscape" plot. Models in the bottom-left (low ECE, low Brier) are best.
+# 3. Use the "Model Similarity" plot to see which models learned similar representations.
 ```
 
 ### Pattern 3: Hyperparameter Sweep Analysis
+
+Efficiently analyze the results of a hyperparameter sweep to find the optimal configuration.
+
 ```python
-# Analyze different hyperparameter configurations
+# Scenario: Find the best learning rate and batch size from a sweep.
 models = {
     'lr_0.001_batch_32': model_1,
     'lr_0.01_batch_32': model_2,
     'lr_0.001_batch_64': model_3,
     'lr_0.01_batch_64': model_4
 }
+histories = {name: h for name, h in sweep_histories.items()}
 
-# Enable training dynamics for hyperparameter insights
 config = AnalysisConfig(
     analyze_training_dynamics=True,
-    pareto_analysis_threshold=2  # Enable Pareto analysis with 2+ models
+    pareto_analysis_threshold=2 # Generate Pareto plot if 2+ models are provided
 )
 
-# Include training histories
-training_histories = {
-    'lr_0.001_batch_32': history_1.history,
-    'lr_0.01_batch_32': history_2.history,
-    # ... etc
-}
+analyzer = ModelAnalyzer(models=models, training_history=histories, config=config)
+results = analyzer.analyze(validation_data)
 
-analyzer = ModelAnalyzer(
-    models=models,
-    training_history=training_histories,
-    config=config
-)
-results = analyzer.analyze(test_data)
-
-# Generate Pareto analysis for hyperparameter selection
+# Generate and save the Pareto analysis plot
 pareto_fig = analyzer.create_pareto_analysis()
+
+# Next steps:
+# 1. Open `pareto_analysis.png`. The scatter plot shows models on the Pareto front (optimal trade-offs between accuracy and overfitting).
+# 2. Use the heatmap to compare normalized performance across all models and metrics.
 ```
 
-## 6. Advanced Configuration
+## 5. Advanced Configuration
 
-### Complete Configuration Example
+The `AnalysisConfig` class provides fine-grained control over the analysis process.
+
 ```python
 config = AnalysisConfig(
-    # === Analysis Toggles ===
+    # === Main Toggles ===
     analyze_weights=True,
     analyze_calibration=True,
     analyze_information_flow=True,
     analyze_training_dynamics=True,
-    
-    # === Sampling Parameters ===
-    n_samples=1000,  # Reduce for faster analysis on large datasets
-    
+
+    # === Data Sampling ===
+    n_samples=1000,  # Max samples to use for data-dependent analyses (e.g., calibration)
+
     # === Weight Analysis ===
-    weight_layer_types=['Dense', 'Conv2D'],  # Only analyze these layer types
-    analyze_biases=False,  # Skip bias analysis for speed
-    compute_weight_pca=True,  # Enable model similarity analysis
-    
-    # === Calibration Settings ===
-    calibration_bins=15,  # More bins = finer calibration analysis
-    
+    weight_layer_types=['Dense', 'Conv2D'],  # Only analyze weights from these layer types
+    analyze_biases=False,                  # Exclude bias vectors from analysis
+    compute_weight_pca=True,               # Enable model similarity analysis
+
+    # === Calibration Analysis ===
+    calibration_bins=15,                   # Number of bins for ECE calculation
+
     # === Training Dynamics ===
-    smooth_training_curves=True,
-    smoothing_window=5,
-    
-    # === Visualization ===
-    plot_style='publication',  # 'publication', 'presentation', or 'draft'
+    smooth_training_curves=True,           # Apply a moving average filter to training curves
+    smoothing_window=5,                    # The window size for the smoothing filter
+
+    # === Visualization & Output ===
+    plot_style='publication',              # 'publication', 'presentation', or 'draft'
     save_plots=True,
-    save_format='png',  # 'png', 'pdf', 'svg'
+    save_format='png',                     # 'png', 'pdf', 'svg'
     dpi=300,
-    
-    # === Performance Tuning ===
-    max_layers_heatmap=12,  # Limit layers shown in weight heatmap
-    max_layers_info_flow=8,  # Limit layers in information flow analysis
+
+    # === Performance & Limits ===
+    max_layers_heatmap=12,                 # Max layers in the weight health heatmap
+    max_layers_info_flow=8,                # Max layers in information flow plots
+    verbose=True,                          # Enable detailed logging
 )
 ```
 
-### Training History Integration
-```python
-# Proper training history format
-training_histories = {}
+## 6. Understanding the Output
 
-for model_name, model in models.items():
-    # Assume you have Keras History objects
-    history = model.fit(x_train, y_train, validation_data=(x_val, y_val), ...)
-    training_histories[model_name] = history.history
+After running, the analyzer saves plots and a JSON data file to the output directory.
 
-# Initialize analyzer with training history
-analyzer = ModelAnalyzer(
-    models=models,
-    training_history=training_histories,
-    config=config,
-    output_dir='training_analysis'
-)
-
-results = analyzer.analyze(test_data)
-```
-
-## 7. Understanding the Output
-
-### File Structure
-After running the analyzer, you'll get:
 ```
 analysis_results/
-├── summary_dashboard.png          # Start here - overview of all models
-├── training_dynamics.png          # Training curves and convergence analysis
-├── weight_learning_journey.png    # Weight magnitude evolution
-├── confidence_calibration_analysis.png  # Model confidence assessment
-├── information_flow_analysis.png  # Layer-wise information flow
-├── pareto_analysis.png           # Hyperparameter optimization insights
-└── analysis_results.json         # Raw data for further analysis
+├── summary_dashboard.png              # START HERE: High-level overview of all models.
+├── training_dynamics.png              # Training curves, overfitting, and convergence analysis.
+├── weight_learning_journey.png        # Weight magnitude evolution and health heatmap.
+├── confidence_calibration_analysis.png  # Deep dive into model confidence and calibration.
+├── information_flow_analysis.png      # Layer-wise analysis of activations and information.
+├── pareto_analysis.png               # (Optional) Hyperparameter optimization insights.
+└── analysis_results.json             # Raw data for all computed metrics.
 ```
 
 ### Key Visualizations Explained
 
 #### 1. Summary Dashboard (`summary_dashboard.png`)
-**What it shows:** 2x2 grid with performance table, model similarity, confidence distributions, and calibration landscape.
 
-**How to read it:**
-- **Performance Table**: Start here - shows key metrics for each model
-- **Model Similarity**: Models close together have similar weight patterns
-- **Confidence Profiles**: Shows how confident each model is in its predictions
-- **Calibration Landscape**: Models in bottom-left are well-calibrated
+A 2x2 grid providing a holistic view of all models.
+
+-   **Performance Table**: Key metrics for each model, including training insights if history is provided.
+-   **Model Similarity**: A 2D PCA plot of weight statistics. Models that are close together have learned similar weight distributions.
+-   **Confidence Profiles**: Violin plots showing the distribution of prediction confidence (max probability) for each model.
+-   **Calibration Landscape**: A scatter plot of ECE vs. Brier Score. Models in the bottom-left quadrant are well-calibrated and have high probabilistic accuracy.
 
 #### 2. Training Dynamics (`training_dynamics.png`)
-**What it shows:** Training curves, overfitting analysis, and convergence metrics.
 
-**How to read it:**
-- **Loss/Accuracy Curves**: Look for smooth convergence
-- **Overfitting Analysis**: Positive values indicate overfitting
-- **Best Epoch Performance**: Earlier epochs = faster convergence
-- **Summary Table**: Quantitative training metrics
+A deep dive into the learning process.
+
+-   **Loss/Accuracy Curves**: Smoothed training and validation curves.
+-   **Overfitting Analysis**: Plots the gap (validation loss - training loss) over epochs. A positive gap indicates overfitting.
+-   **Best Epoch Performance**: A scatter plot showing each model's peak validation accuracy versus the epoch it was achieved. Helps identify models that learn faster.
+-   **Summary Table**: Quantitative training metrics like convergence speed and stability.
 
 #### 3. Weight Learning Journey (`weight_learning_journey.png`)
-**What it shows:** How weight magnitudes evolve through network layers.
 
-**How to read it:**
-- **Weight Evolution**: Smooth progression indicates healthy learning
-- **Health Heatmap**: Green = healthy weights, Red = potential issues
+Assesses the health and evolution of model weights.
 
-#### 4. Confidence Calibration Analysis (`confidence_calibration_analysis.png`)
-**What it shows:** How well model confidence matches actual accuracy.
+-   **Weight Evolution**: Shows how the L2 norm of weights changes across the layers of the network. Look for smooth progressions, not sudden explosions or collapses.
+-   **Health Heatmap**: A layer-by-layer health score for each model. Green indicates healthy weights; red indicates potential issues like high sparsity or unstable distributions.
 
-**How to read it:**
-- **Reliability Diagram**: Points on diagonal = perfect calibration
-- **Confidence Distributions**: Wider = more varied confidence
-- **Per-Class ECE**: Shows which classes are poorly calibrated
+#### 4. Confidence & Calibration Analysis (`confidence_calibration_analysis.png`)
 
-### Accessing Raw Results
-```python
-# Get structured summary
-summary = analyzer.get_summary_statistics()
-print(f"Best model: {summary['model_performance']}")
+Evaluates the reliability of model predictions.
 
-# Access specific metrics
-for model_name, metrics in results.calibration_metrics.items():
-    print(f"{model_name} ECE: {metrics['ece']:.3f}")
-    print(f"{model_name} Brier Score: {metrics['brier_score']:.3f}")
+-   **Reliability Diagram**: Compares predicted probability to the actual fraction of positives. A perfectly calibrated model follows the diagonal.
+-   **Confidence Distributions**: Violin plots showing how confident each model is.
+-   **Per-Class ECE**: Bar chart showing calibration error for each class, helping to identify problematic classes.
+-   **Uncertainty Landscape**: A 2D density plot of prediction confidence vs. entropy. Shows the model's uncertainty profile.
 
-# Training insights (if available)
-if results.training_metrics:
-    for model_name, epochs in results.training_metrics.epochs_to_convergence.items():
-        print(f"{model_name} converged in {epochs} epochs")
-```
+#### 5. Information Flow Analysis (`information_flow_analysis.png`)
 
-## 8. Common Use Cases
+Diagnoses how information propagates through the network.
 
-### Use Case 1: Model Selection
-```python
-# Scenario: Choose the best model from multiple architectures
+-   **Activation Flow Overview**: Tracks the mean and standard deviation of activations through the layers. Helps spot vanishing or exploding activations.
+-   **Effective Rank Evolution**: Plots the dimensionality of information at each layer. A collapsing rank may indicate a bottleneck.
+-   **Activation Health Dashboard**: A heatmap showing potential issues like dead neurons (high sparsity) or saturated activations.
+-   **Layer Specialization Analysis**: Plots a "specialization score" for each layer, indicating how well it's learning diverse features.
 
-models = {
-    'ResNet50': resnet50_model,
-    'EfficientNetB3': efficientnet_model,
-    'ConvNeXtTiny': convnext_model
-}
+#### 6. Pareto Analysis (`pareto_analysis.png`)
 
-config = AnalysisConfig(
-    analyze_calibration=True,  # Important for deployment
-    compute_weight_pca=True    # See which models are similar
-)
+(Generated with `create_pareto_analysis()`) A powerful tool for hyperparameter tuning.
 
-analyzer = ModelAnalyzer(models, config=config)
-results = analyzer.analyze(test_data)
+-   **Pareto Front Plot**: A scatter plot of Peak Accuracy vs. Overfitting Index. Models on the red-dashed "Pareto Front" represent the best possible trade-offs.
+-   **Normalized Performance Heatmap**: A heatmap comparing all models across normalized metrics (accuracy, low overfitting, fast convergence), making it easy to see which configuration excels in which area.
 
-# Decision criteria:
-# 1. Check summary_dashboard.png - look at performance table
-# 2. Check calibration_landscape - want bottom-left quadrant
-# 3. Consider model similarity - diverse models may ensemble better
-```
+## 7. Troubleshooting
 
-### Use Case 2: Debugging Training Issues
-```python
-# Scenario: Model isn't training well, need to diagnose
-
-config = AnalysisConfig(
-    analyze_training_dynamics=True,
-    analyze_weights=True,
-    smooth_training_curves=True,
-    analyze_information_flow=True  # Check for dead neurons
-)
-
-analyzer = ModelAnalyzer(
-    models={'problematic_model': model},
-    training_history={'problematic_model': training_history},
-    config=config
-)
-
-results = analyzer.analyze(test_data)
-
-# Look for:
-# 1. training_dynamics.png - overfitting? slow convergence?
-# 2. weight_learning_journey.png - dead layers? exploding weights?
-# 3. information_flow_analysis.png - dead neurons? poor specialization?
-```
-
-### Use Case 3: Production Readiness Assessment
-```python
-# Scenario: Is this model ready for production deployment?
-
-config = AnalysisConfig(
-    analyze_calibration=True,    # Critical for production
-    calibration_bins=20,         # Detailed calibration analysis
-    analyze_information_flow=True # Check layer health
-)
-
-analyzer = ModelAnalyzer(
-    models={'production_candidate': model},
-    config=config
-)
-
-results = analyzer.analyze(production_test_data)
-
-# Production readiness checklist:
-# 1. ECE < 0.05 (good calibration)
-# 2. Brier score reasonable for your domain
-# 3. No dead layers in information flow analysis
-# 4. Confidence distribution makes sense for your use case
-```
-
-### Use Case 4: Hyperparameter Optimization Results
-```python
-# Scenario: Ran a hyperparameter sweep, need to pick best config
-
-models = {f'config_{i}': model for i, model in enumerate(sweep_models)}
-histories = {f'config_{i}': hist for i, hist in enumerate(sweep_histories)}
-
-config = AnalysisConfig(
-    analyze_training_dynamics=True,
-    pareto_analysis_threshold=2
-)
-
-analyzer = ModelAnalyzer(models, training_history=histories, config=config)
-results = analyzer.analyze(validation_data)
-
-# Generate Pareto front
-pareto_fig = analyzer.create_pareto_analysis()
-
-# Decision process:
-# 1. Look at pareto_analysis.png for optimal trade-offs
-# 2. Check training_dynamics.png for stability
-# 3. Consider deployment constraints (inference speed, memory)
-```
-
-### Use Case 5: Production Model Monitoring
-```python
-# Monitor deployed model health
-config = AnalysisConfig(
-    analyze_weights=True,
-    analyze_calibration=True,
-    compute_weight_pca=True
-)
-
-analyzer = ModelAnalyzer({'production_model': model}, config=config)
-results = analyzer.analyze(recent_data)
-
-# Check for weight drift, calibration degradation
-summary = analyzer.get_summary_statistics()
-```
-
-## 9. Troubleshooting
-
-### Common Issues and Solutions
-
-#### Issue 1: "RuntimeError: dictionary changed size during iteration"
-**Cause:** Bug in model evaluation loop (fixed in latest version)
-**Solution:** Update to latest version or check model evaluation code
-
-#### Issue 2: Multi-input models give warnings/errors
-**Cause:** Analyzer has limited support for complex multi-input architectures
-```python
-# Solution: Handle multi-input models explicitly
-if model_name in analyzer._multi_input_models:
-    logger.warning(f"Limited analysis for multi-input model {model_name}")
-    # Some analyses will be skipped automatically
-```
-
-#### Issue 3: "No training metrics found"
-**Cause:** Training history uses non-standard metric names
-```python
-# Solution: Check your history keys
-print("Available metrics:", list(training_history.keys()))
-
-# Make sure you have standard names like:
-# 'loss', 'val_loss', 'accuracy', 'val_accuracy'
-```
-
-#### Issue 4: Memory issues with large models/datasets
-```python
-# Solution: Reduce sampling
-config = AnalysisConfig(
-    n_samples=500,  # Reduce from default 1000
-    analyze_information_flow=False,  # Skip memory-intensive analysis
-    max_layers_heatmap=8  # Limit layer analysis
-)
-```
-
-#### Issue 5: Plots look wrong/empty
-**Cause:** Missing data or configuration issues
-```python
-# Debug: Check what data is available
-summary = analyzer.get_summary_statistics()
-print("Available analyses:", summary['analyses_performed'])
-
-# Check individual results
-print("Calibration metrics:", bool(results.calibration_metrics))
-print("Training metrics:", bool(results.training_metrics))
-```
-
-### Debug Mode
-```python
-# Enable verbose logging for debugging
-config = AnalysisConfig(verbose=True)
-
-# Check results step by step
-results = analyzer.analyze(test_data)
-print("Analysis completed. Available data:")
-print(f"- Model metrics: {len(results.model_metrics)}")
-print(f"- Weight stats: {len(results.weight_stats)}")
-print(f"- Calibration: {len(results.calibration_metrics)}")
-```
-
-## 10. Best Practices
-
-### 1. Data Preparation
-```python
-# Use representative test data
-test_data = DataInput(x_data=x_test, y_data=y_test)
-
-# For large datasets, sampling is automatic but you can control it
-config = AnalysisConfig(n_samples=1000)  # Adjust based on memory/speed needs
-
-# Ensure your test data matches training distribution
-```
-
-### 2. Model Naming
-```python
-# Use descriptive names for easy interpretation
-models = {
-    'ResNet50_Adam_lr001': model1,  # Architecture + optimizer + hyperparams
-    'ResNet50_SGD_lr01': model2,
-    'EfficientNet_Adam_lr001': model3
-}
-
-# Avoid generic names like 'model1', 'model2'
-```
-
-### 3. Configuration Strategy
-```python
-# Start with defaults for quick overview
-config = AnalysisConfig()
-
-# Then enable specific analyses based on your needs
-if need_training_insights:
-    config.analyze_training_dynamics = True
-    
-if preparing_for_production:
-    config.analyze_calibration = True
-    config.calibration_bins = 20  # More detailed calibration
-
-if debugging_model:
-    config.analyze_information_flow = True
-    config.analyze_weights = True
-```
-
-### 4. Workflow Integration
-```python
-# Example training + analysis workflow
-def train_and_analyze(model_configs, x_train, y_train, x_val, y_val, x_test, y_test):
-    models = {}
-    histories = {}
-    
-    # Training phase
-    for name, config in model_configs.items():
-        model = create_model(config)
-        history = model.fit(x_train, y_train, validation_data=(x_val, y_val))
-        
-        models[name] = model
-        histories[name] = history.history
-    
-    # Analysis phase
-    analyzer = ModelAnalyzer(
-        models=models,
-        training_history=histories,
-        config=AnalysisConfig(analyze_training_dynamics=True),
-        output_dir=f'analysis_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+-   **Multi-Input Models**: The analyzer has limited support for models with multiple inputs. It will log warnings and automatically skip incompatible analyses (like calibration and information flow) for these models to prevent errors.
+-   **"No training metrics found"**: The analyzer robustly searches for common metric names (`accuracy`, `val_loss`, etc.). If you use non-standard names in your `history` object, analysis will be limited. Ensure your Keras history keys are standard.
+-   **Memory Issues**: For very large models or datasets, analysis can be memory-intensive. Reduce the sample size and disable the most expensive analyses in `AnalysisConfig`:
+    ```python
+    config = AnalysisConfig(
+        n_samples=500,                  # Reduce from default 1000
+        analyze_information_flow=False, # This is often the most memory-intensive
+        max_layers_heatmap=8            # Limit heatmap size
     )
-    
-    test_data = DataInput(x_data=x_test, y_data=y_test)
-    results = analyzer.analyze(test_data)
-    
-    return models, results
-```
+    ```
+-   **Plots look wrong/empty**: Enable verbose logging (`config = AnalysisConfig(verbose=True)`) and check the console output. You can also inspect the `analysis_results.json` file to see what data was successfully computed.
 
-### 5. Results Interpretation
-```python
-# Always start with the summary dashboard
-summary = analyzer.get_summary_statistics()
-print("Models analyzed:", summary['n_models'])
-print("Analyses completed:", summary['analyses_performed'])
+## 8. Extensions
 
-# Look for red flags
-for model_name, metrics in results.calibration_metrics.items():
-    if metrics['ece'] > 0.1:  # Poor calibration
-        print(f"WARNING: {model_name} has poor calibration (ECE={metrics['ece']:.3f})")
-    
-    if metrics['brier_score'] > 0.3:  # Poor probabilistic performance
-        print(f"WARNING: {model_name} has poor Brier score ({metrics['brier_score']:.3f})")
-```
+The toolkit is designed to be extensible. You can add your own custom analysis and visualization modules by inheriting from the base classes.
 
-### 6. Saving and Sharing Results
-```python
-# Results are automatically saved to output_dir
-# Share the entire directory for complete analysis
+### Creating a Custom Analyzer
 
-# For presentations, use publication style
-config = AnalysisConfig(
-    plot_style='presentation',  # Larger fonts, clearer plots
-    dpi=300,                   # High resolution
-    save_format='png'          # Universal format
-)
-
-# For papers, use publication style with PDF
-config = AnalysisConfig(
-    plot_style='publication',
-    save_format='pdf'
-)
-```
-
-### 7. Performance Optimization
-```python
-# For large-scale analysis
-config = AnalysisConfig(
-    n_samples=500,                    # Reduce sampling
-    analyze_information_flow=False,   # Skip if not needed (memory intensive)
-    max_layers_heatmap=8,            # Limit layer analysis
-    max_layers_info_flow=6,          # Limit information flow layers
-)
-
-# For quick analysis during development
-config = AnalysisConfig(
-    analyze_weights=False,           # Skip if not needed
-    analyze_information_flow=False,  # Skip expensive analysis
-    save_plots=False                 # Skip saving for speed
-)
-```
-
-## 11. Extensions
-
-### Creating Custom Analyzers
-
-Extend the `BaseAnalyzer` class to create custom analysis components:
+Extend the `BaseAnalyzer` class and implement the `analyze` method.
 
 ```python
 from analyzer.analyzers.base import BaseAnalyzer
 from analyzer.data_types import AnalysisResults, DataInput
 
-class CustomAnalyzer(BaseAnalyzer):
-    """Custom analyzer for specific domain metrics."""
-    
+class MyCustomAnalyzer(BaseAnalyzer):
     def requires_data(self) -> bool:
-        """Return True if this analyzer needs input data."""
-        return True
-    
-    def analyze(self, results: AnalysisResults, 
-                data: Optional[DataInput] = None,
-                cache: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
-        """Perform custom analysis."""
-        # Your custom analysis logic here
+        return True # This analyzer needs data
+
+    def analyze(self, results: AnalysisResults, data: DataInput, cache: dict) -> None:
+        # Your custom logic here
+        custom_metrics = {}
         for model_name, model in self.models.items():
-            # Compute custom metrics
-            custom_metrics = self._compute_custom_metrics(model, data)
-            
-            # Store in results
-            if not hasattr(results, 'custom_metrics'):
-                results.custom_metrics = {}
-            results.custom_metrics[model_name] = custom_metrics
-    
-    def _compute_custom_metrics(self, model, data):
-        """Implement your custom metric computation."""
-        return {'custom_score': 0.95}
+            # ... compute your metrics ...
+            custom_metrics[model_name] = {'my_score': 0.99}
+
+        # Store results in the main results object
+        results.custom_metrics = custom_metrics
 ```
 
-### Creating Custom Visualizers
+### Creating a Custom Visualizer
 
-Extend the `BaseVisualizer` class for custom visualizations:
+Extend the `BaseVisualizer` class and implement the plotting logic.
 
 ```python
 from analyzer.visualizers.base import BaseVisualizer
 import matplotlib.pyplot as plt
 
-class CustomVisualizer(BaseVisualizer):
-    """Custom visualizer for domain-specific plots."""
-    
+class MyCustomVisualizer(BaseVisualizer):
     def create_visualizations(self) -> None:
-        """Create custom visualizations."""
         if not hasattr(self.results, 'custom_metrics'):
             return
-            
-        fig, ax = plt.subplots(figsize=(10, 6))
-        self._plot_custom_analysis(ax)
-        
+
+        fig, ax = plt.subplots()
+        # ... your custom plotting logic ...
+        # You can access self.results, self.config, and self.model_colors
+
         if self.config.save_plots:
-            self._save_figure(fig, 'custom_analysis')
+            self._save_figure(fig, 'my_custom_plot')
         plt.close(fig)
-    
-    def _plot_custom_analysis(self, ax):
-        """Implement your custom plotting logic."""
-        # Your plotting code here
-        for model_name, metrics in self.results.custom_metrics.items():
-            color = self.model_colors.get(model_name, '#333333')
-            # Plot your custom metrics
-            pass
 ```
-
-### Integration with Analysis Pipeline
-
-Register your custom components:
-
-```python
-# Add to analyzer initialization
-analyzer = ModelAnalyzer(models, config)
-analyzer.analyzers['custom'] = CustomAnalyzer(models, config)
-
-# Add custom visualizer
-custom_viz = CustomVisualizer(results, config, output_dir, model_colors)
-custom_viz.create_visualizations()
-```
-
----
-
-This comprehensive guide should get you started with practical usage of the Model Analyzer. The key is to start simple with default settings, then gradually enable more specific analyses based on your needs. The modular design makes it easy to focus on the aspects most relevant to your particular use case, whether that's model selection, training debugging, or production readiness assessment.
