@@ -19,7 +19,7 @@ import argparse
 import numpy as np
 import tensorflow as tf
 from datetime import datetime
-from typing import Tuple, List, Dict
+from typing import Tuple, List
 
 # ---------------------------------------------------------------------
 # Local imports
@@ -32,11 +32,13 @@ from dl_techniques.layers.masked_autoencoder import (
     visualize_reconstruction,
 )
 
+# Model Analyzer imports
 from dl_techniques.analyzer import (
     ModelAnalyzer,
     AnalysisConfig,
     DataInput,
 )
+
 
 # ---------------------------------------------------------------------
 
@@ -601,7 +603,8 @@ def run_comprehensive_analysis(
     models = {model_name: classifier}
 
     # Create training history dictionary
-    training_histories = {model_name: training_history}
+    # Note: Extract .history attribute from Keras History object
+    training_histories = {model_name: training_history.history}
 
     # Initialize ModelAnalyzer
     logger.info(f"Initializing ModelAnalyzer for model: {model_name}")
