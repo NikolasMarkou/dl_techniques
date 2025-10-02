@@ -341,11 +341,11 @@ def create_bfunet_denoiser(
             # Create supervision output at current scale from a branch
             supervision_branch = BiasFreeConv2D(
                 filters=initial_filters,
-                kernel_size=1,
+                kernel_size=3,
                 activation=activation,
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
-                use_batch_norm=False,
+                use_batch_norm=True,
                 name=f'supervision_intermediate_level_{level}'
             )(x)
 

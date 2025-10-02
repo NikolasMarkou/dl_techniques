@@ -180,7 +180,7 @@ class TrainingConfig:
 
     # === Training Configuration ===
     batch_size: int = 32
-    epochs: int = 100
+    epochs: int = 50
     patches_per_image: int = 16
     augment_data: bool = True
     normalize_input: bool = True
@@ -190,12 +190,12 @@ class TrainingConfig:
     learning_rate: float = 1e-3
     optimizer_type: str = 'adam'
     lr_schedule_type: str = 'cosine_decay'
-    warmup_epochs: int = 5
+    warmup_epochs: int = 2
     weight_decay: float = 1e-5
     gradient_clipping: float = 1.0
 
     # === Monitoring Configuration ===
-    monitor_every_n_epochs: int = 5
+    monitor_every_n_epochs: int = 2
     save_best_only: bool = True
     early_stopping_patience: int = 15
     validation_steps: Optional[int] = 100
@@ -1918,9 +1918,9 @@ def parse_arguments() -> argparse.Namespace:
         choices=[
             'constant_equal', 'constant_low_to_high', 'constant_high_to_low',
             'linear_low_to_high', 'non_linear_low_to_high', 'custom_sigmoid_low_to_high',
-            'scale_by_scale_low_to_high', 'cosine_annealing', 'curriculum'
+            'scale_by_scale_low_to_high', 'cosine_annealing', 'curriculum', 'step_wise'
         ],
-        default='linear_low_to_high',
+        default='step_wise',
         help='Deep supervision weight scheduling strategy'
     )
 
