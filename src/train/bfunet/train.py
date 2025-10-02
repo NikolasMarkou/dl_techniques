@@ -39,9 +39,6 @@ References:
     - Kadkhodaie & Simoncelli: "Solving inverse problems with deep networks: The implicit prior"
     - Deep Supervision techniques for multi-scale learning
     - Bias-free convolutional architectures for image restoration
-
-Author: DL-Techniques Framework
-License: MIT
 """
 
 import gc
@@ -57,7 +54,10 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-# Local imports
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.filesystem import count_available_files
 from dl_techniques.optimization import (
@@ -65,7 +65,7 @@ from dl_techniques.optimization import (
     learning_rate_schedule_builder,
     deep_supervision_schedule_builder
 )
-from dl_techniques.models.bias_free_denoisers.bfunet_denoiser import (
+from dl_techniques.models.bias_free_denoisers.bfunet import (
     create_bfunet_denoiser,
     BFUNET_CONFIGS,
     create_bfunet_variant
@@ -2080,6 +2080,7 @@ def main() -> None:
         logger.error(f"Training failed with error: {e}")
         raise
 
+# ---------------------------------------------------------------------
 
 if __name__ == "__main__":
     main()
