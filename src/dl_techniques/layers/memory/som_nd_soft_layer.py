@@ -286,6 +286,8 @@ from typing import Tuple, Optional, Union, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
+from dl_techniques.initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
 
 # ---------------------------------------------------------------------
 
@@ -429,8 +431,8 @@ class SoftSOMLayer(keras.layers.Layer):
         reconstruction_weight: float = 1.0,
         topological_weight: float = 0.1,
         sharpness_weight: float = 0.0,
-        kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = OrthogonalHypersphereInitializer(),
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = SoftOrthonormalConstraintRegularizer(),
         **kwargs: Any
     ) -> None:
         """Initialize the Soft SOM layer."""
