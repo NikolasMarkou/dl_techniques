@@ -4,32 +4,26 @@ The `dl_techniques.layers.ffn` module provides a comprehensive collection of fee
 
 ## Overview
 
-This module includes nine different FFN layer types and a factory system for standardized creation and parameter validation. All layers are designed for modern Keras 3.x compatibility with full serialization support.
+This module includes twelve different FFN layer types and a factory system for standardized creation and parameter validation. All layers are designed for modern Keras 3.x compatibility with full serialization support.
 
 ## Available FFN Types
-
-### Factory-Supported Layers
 
 The following layers are supported by the factory system with automated parameter validation and defaults:
 
 | Type | Class | Description | Use Case |
-|------|-------|-------------|----------|
+|---|---|---|---|
+| `counting` | `CountingFFN` | Learns to count features in a sequence | Sequence processing with counting requirements |
+| `differential` | `DifferentialFFN` | Dual-pathway differential processing | Enhanced feature processing with opponent signals |
+| `gated_mlp` | `GatedMLP` | Spatially-gated MLP using 1x1 convolutions | Vision models, efficient attention alternative |
+| `geglu` | `GeGLUFFN` | GELU-based Gated Linear Unit | GELU-based gated processing in transformers |
+| `glu` | `GLUFFN` | Gated Linear Unit with configurable activation | Gated processing for improved gradient flow |
+| `logic` | `LogicFFN` | FFN with learnable soft logic operations | Tasks requiring symbolic-like reasoning |
 | `mlp` | `MLPBlock` | Standard MLP with intermediate expansion | General purpose feed-forward processing |
-| `swiglu` | `SwiGLUFFN` | SwiGLU with gating mechanism | Modern transformer architectures (LLaMa, Qwen) |
-| `differential` | `DifferentialFFN` | Dual-pathway processing | Enhanced feature processing |
-| `glu` | `GLUFFN` | Gated Linear Unit with configurable activation | Improved gradient flow |
-| `geglu` | `GeGLUFFN` | GELU-based Gated Linear Unit | GELU-based gated processing |
+| `orthoglu` | `OrthoGLUFFN` | Orthogonally-regularized GLU FFN | Deep networks needing stable training dynamics |
+| `power_mlp` | `PowerMLPLayer` | Dual-branch MLP for enhanced expressiveness | Approximating complex, non-linear functions |
 | `residual` | `ResidualBlock` | Residual block with skip connections | Deep networks requiring gradient flow |
+| `swiglu` | `SwiGLUFFN` | SwiGLU with gating mechanism | Modern transformer architectures (LLaMa, Qwen) |
 | `swin_mlp` | `SwinMLP` | Swin Transformer MLP variant | Vision models and windowed attention |
-
-### Direct-Use Layers
-
-These specialized layers are available for direct instantiation:
-
-| Class | Description | Use Case |
-|-------|-------------|----------|
-| `LogicFFN` | Logic-based FFN with learnable soft logic operations | Reasoning tasks requiring logic operations |
-| `CountingFFN` | FFN that learns to count events in sequences | Sequence processing with counting requirements |
 
 ## Factory Interface
 
@@ -75,7 +69,7 @@ from dl_techniques.layers.ffn import get_ffn_info
 # Get information about all FFN types
 info = get_ffn_info()
 
-# Print requirements for specific type
+# Print requirements for a specific type
 mlp_info = info['mlp']
 print(f"Required: {mlp_info['required_params']}")
 print(f"Optional: {list(mlp_info['optional_params'].keys())}")
@@ -193,38 +187,86 @@ swin_mlp = create_ffn_layer(
 )
 ```
 
-## Direct Layer Instantiation
-
-While the factory is the recommended approach for standardized layers, direct instantiation remains available for all layer types. This can be useful for specific use cases or when bypassing the factory is desirable.
-
-### For Factory-Supported Layers
+### CountingFFN
+**Required:** `output_dim`, `count_dim`  
+**Optional:** `counting_scope` (default: 'local'), `activation` (default: 'gelu')
 
 ```python
-from dl_techniques.layers.ffn import MLPBlock, SwiGLUFFN, GeGLUFFN
+counting_ffn = create_ffn_layer(
+    'counting',
+    output_dim=512,
+    count_dim=128,
+    counting_scope='causal'  # 'global', 'local', or 'causal'
+)
+```
+
+### LogicFFN
+**Required:** `output_dim`, `logic_dim`  
+**Optional:** `temperature` (default: 1.0), `use_bias` (default: True)
+
+```python
+logic_ffn = create_ffn_layer(
+    'logic',
+    output_dim=768,
+    logic_dim=256,
+    temperature=1.5
+)
+```
+
+### GatedMLP
+**Required:** `filters`  
+**Optional:** `attention_activation` (default: 'relu'), `output_activation` (default: 'linear')
+
+```python
+gated_mlp = create_ffn_layer(
+    'gated_mlp',
+    filters=128,
+    attention_activation='gelu'
+)
+```
+
+### OrthoGLUFFN
+**Required:** `hidden_dim`, `output_dim`  
+**Optional:** `activation` (default: 'gelu'), `ortho_reg_factor` (default: 1.0)
+
+```python
+ortho_ffn = create_ffn_layer(
+    'orthoglu',
+    hidden_dim=2048,
+    output_dim=768,
+    ortho_reg_factor=0.01
+)
+```
+
+### PowerMLPLayer
+**Required:** `units`  
+**Optional:** `k` (default: 3), `use_bias` (default: True)
+
+```python
+power_mlp = create_ffn_layer(
+    'power_mlp',
+    units=512,
+    k=2,
+    kernel_initializer='he_normal'
+)
+```
+
+## Direct Layer Instantiation
+
+While the factory is the recommended approach for standardized layer creation, direct instantiation remains available for all layer types. This can be useful for specific use cases or when bypassing the factory's automated validation and default handling is desirable.
+
+```python
+from dl_techniques.layers.ffn import MLPBlock, SwiGLUFFN, CountingFFN
 
 # Direct instantiation (bypasses factory validation and defaults)
 mlp = MLPBlock(hidden_dim=512, output_dim=256, activation='relu')
 swiglu = SwiGLUFFN(output_dim=768, ffn_expansion_factor=4)
-geglu = GeGLUFFN(hidden_dim=2048, output_dim=768)
-```
 
-### For Specialized Layers
-
-```python
-from dl_techniques.layers.ffn import LogicFFN, CountingFFN
-
-# Logic-based FFN with soft logic operations
-logic_ffn = LogicFFN(
-    output_dim=768,
-    logic_dim=256,
-    use_bias=True
-)
-
-# FFN that learns to count events in sequences
+# Useful for specialized layers with unique parameters
 counting_ffn = CountingFFN(
     output_dim=512,
     count_dim=128,
-    counting_scope='local'  # 'global', 'local', or 'causal'
+    counting_scope='local'
 )
 ```
 
@@ -366,23 +408,17 @@ ERROR Failed to create mlp FFN layer (MLPBlock). Required parameters: ['hidden_d
 
 ## Best Practices
 
-### 1. Use Factory for Standard Layers
+### 1. Use Factory for All Layers
 ```python
 # Preferred: Use factory for validation and consistency
 ffn = create_ffn_layer('mlp', hidden_dim=512, output_dim=256)
+logic_ffn = create_ffn_layer('logic', output_dim=768, logic_dim=256)
 
-# Avoid: Direct instantiation for factory-supported layers
+# Avoid: Direct instantiation, which bypasses centralized validation and defaults
 ffn = MLPBlock(hidden_dim=512, output_dim=256)
 ```
 
-### 2. Use Direct Instantiation for Specialized Layers
-```python
-# Correct: Direct instantiation for specialized layers
-logic_ffn = LogicFFN(output_dim=768, logic_dim=256)
-counting_ffn = CountingFFN(output_dim=512, count_dim=128)
-```
-
-### 3. Validate Configurations in Production
+### 2. Validate Configurations in Production
 ```python
 def create_production_ffn(ffn_type, **params):
     """Create FFN with production-grade validation."""
@@ -395,13 +431,13 @@ def create_production_ffn(ffn_type, **params):
         return create_ffn_layer('mlp', hidden_dim=512, output_dim=256)
 ```
 
-### 4. Store Configurations for Reproducibility
+### 3. Store Configurations for Reproducibility
 ```python
 # Store FFN configurations for experiment tracking
 ffn_configs = {
     'baseline': {'type': 'mlp', 'hidden_dim': 2048, 'output_dim': 768},
     'modern': {'type': 'swiglu', 'output_dim': 768, 'ffn_expansion_factor': 4},
-    'efficient': {'type': 'glu', 'hidden_dim': 1024, 'output_dim': 768}
+    'reasoning': {'type': 'logic', 'output_dim': 768, 'logic_dim': 128}
 }
 
 # Create layers from stored configurations
@@ -482,7 +518,7 @@ class MultiFFNLayer(keras.layers.Layer):
         # Create multiple FFN branches
         self.ffn_standard = create_ffn_layer('mlp', hidden_dim=output_dim*4, output_dim=output_dim)
         self.ffn_gated = create_ffn_layer('geglu', hidden_dim=output_dim*4, output_dim=output_dim)
-        self.ffn_residual = create_ffn_layer('residual', hidden_dim=output_dim*2, output_dim=output_dim)
+        self.ffn_reasoning = create_ffn_layer('logic', logic_dim=output_dim//2, output_dim=output_dim)
         
         self.output_projection = keras.layers.Dense(output_dim)
     
@@ -490,7 +526,7 @@ class MultiFFNLayer(keras.layers.Layer):
         # Process through all FFN branches
         out1 = self.ffn_standard(inputs)
         out2 = self.ffn_gated(inputs)
-        out3 = self.ffn_residual(inputs)
+        out3 = self.ffn_reasoning(inputs)
         
         # Combine outputs
         combined = keras.ops.concatenate([out1, out2, out3], axis=-1)
@@ -516,7 +552,7 @@ Get comprehensive information about all available FFN types.
 ### Types
 
 #### `FFNType`
-Literal type defining valid FFN type strings: `'mlp'`, `'swiglu'`, `'differential'`, `'glu'`, `'geglu'`, `'residual'`, `'swin_mlp'`.
+Literal type defining valid FFN type strings: `'counting'`, `'differential'`, `'gated_mlp'`, `'geglu'`, `'glu'`, `'logic'`, `'mlp'`, `'orthoglu'`, `'power_mlp'`, `'residual'`, `'swiglu'`, `'swin_mlp'`.
 
 ## Migration Guide
 
@@ -566,5 +602,5 @@ logging.getLogger("dl").setLevel(logging.DEBUG)
 - Or pass callable activation functions directly
 
 **Missing specialized layers:**
-- `LogicFFN` and `CountingFFN` must be imported and used directly
-- These are not included in the factory registry system
+- Ensure all custom layer files are correctly placed and imported.
+- All layers in this module are integrated into the factory system.

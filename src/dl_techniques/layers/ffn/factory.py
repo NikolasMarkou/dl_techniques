@@ -1,8 +1,59 @@
 """
-FFN Factory Utility for dl_techniques Framework
+A Factory Method design pattern to provide a single,
+centralized entry point for creating various Feed-Forward Network (FFN)
+architectures. By abstracting the instantiation logic, it decouples client
+code from the concrete implementation of specific FFN layers. This is a core
+component for building flexible, modular, and configuration-driven models.
 
-Provides a centralized factory function for creating feed-forward network layers
-with unified interface, type safety, and comprehensive parameter validation.
+Architectural Overview:
+The factory operates on a registry-based design (`FFN_REGISTRY`). This
+registry maps a simple string identifier (the `ffn_type`) to the corresponding
+Keras Layer class and its associated metadata, such as required parameters
+and default values.
+
+When called, the factory performs the following steps:
+1.  **Validation**: It first consults the registry to validate the requested
+    `ffn_type` and ensures that all required hyperparameters are provided in
+    `**kwargs`. This centralized validation guarantees that any layer created
+    is correctly configured.
+2.  **Class Retrieval**: It retrieves the appropriate Keras Layer class
+    associated with the `ffn_type`.
+3.  **Instantiation**: It instantiates the retrieved class, passing the
+    validated and filtered keyword arguments to its constructor.
+
+This design provides several key advantages for machine learning engineering:
+-   **Modularity and Extensibility**: New FFN architectures can be integrated
+    into the framework simply by adding them to the registry, without any
+    changes to the model-building code that uses this factory.
+-   **Configuration-Driven Experimentation**: It enables model architectures
+    to be defined in external configuration files (e.g., YAML or JSON), where
+    the choice of FFN is specified by a single string. This greatly simplifies
+    hyperparameter tuning and architectural A/B testing.
+-   **Consistency and Reliability**: It provides a single, consistent interface
+    for creating FFNs, reducing the risk of misconfiguration and ensuring that
+    all layers adhere to a common set of standards.
+
+Foundational Concepts:
+The factory itself is an application of a well-established software design
+pattern. The layers it produces, however, are based on significant research
+in deep learning. It provides access to a curated set of FFNs, each with its
+own mathematical underpinnings, including:
+
+-   The standard "expand-then-contract" MLP from the original Transformer.
+-   Advanced gated variants like GLU, GeGLU, and SwiGLU, which introduce
+    dynamic, input-dependent information filtering.
+-   Residual blocks that facilitate gradient flow in very deep networks.
+
+By using this factory, a researcher can easily switch between these different
+computational blocks to evaluate their impact on model performance.
+
+References:
+-   Gamma, E., Helm, R., Johnson, R., & Vlissides, J. (1994). Design
+    Patterns: Elements of Reusable Object-Oriented Software. Addison-Wesley.
+-   Vaswani, A., et al. (2017). Attention Is All You Need. NIPS.
+-   Shazeer, N. (2020). GLU Variants Improve Transformer. arXiv preprint
+    arXiv:2002.05202.
+
 """
 
 import keras
@@ -21,18 +72,28 @@ from .glu_ffn import GLUFFN
 from .geglu_ffn import GeGLUFFN
 from .residual_block import ResidualBlock
 from .swin_mlp import SwinMLP
+from .counting_ffn import CountingFFN
+from .logic_ffn import LogicFFN
+from .gated_mlp import GatedMLP
+from .orthoglu_ffn import OrthoGLUFFN
+from .power_mlp_layer import PowerMLPLayer
 
 # ---------------------------------------------------------------------
 # Type definition for FFN types
 # ---------------------------------------------------------------------
 
 FFNType = Literal[
-    'mlp',
-    'swiglu',
+    'counting',
     'differential',
-    'glu',
+    'gated_mlp',
     'geglu',
+    'glu',
+    'logic',
+    'mlp',
+    'orthoglu',
+    'power_mlp',
     'residual',
+    'swiglu',
     'swin_mlp'
 ]
 
@@ -41,36 +102,20 @@ FFNType = Literal[
 # ---------------------------------------------------------------------
 
 FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
-    'mlp': {
-        'class': MLPBlock,
-        'description': 'Standard MLP with intermediate expansion',
-        'required_params': ['hidden_dim', 'output_dim'],
+    'counting': {
+        'class': CountingFFN,
+        'description': 'Feed-Forward Network that learns to count features in a sequence',
+        'required_params': ['output_dim', 'count_dim'],
         'optional_params': {
+            'counting_scope': 'local',
             'activation': 'gelu',
-            'dropout_rate': 0.0,
             'use_bias': True,
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',
             'kernel_regularizer': None,
             'bias_regularizer': None
         },
-        'use_case': 'General purpose feed-forward processing in transformers'
-    },
-    'swiglu': {
-        'class': SwiGLUFFN,
-        'description': 'SwiGLU Feed-Forward Network with gating mechanism',
-        'required_params': ['output_dim'],
-        'optional_params': {
-            'ffn_expansion_factor': 4,
-            'ffn_multiple_of': 256,
-            'dropout_rate': 0.0,
-            'use_bias': False,
-            'kernel_initializer': 'glorot_uniform',
-            'bias_initializer': 'zeros',
-            'kernel_regularizer': None,
-            'bias_regularizer': None
-        },
-        'use_case': 'Modern transformer architectures (LLaMa, Qwen, etc.)'
+        'use_case': 'Sequence processing where feature frequency or position is important'
     },
     'differential': {
         'class': DifferentialFFN,
@@ -88,20 +133,21 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         },
         'use_case': 'Enhanced feature processing with differential pathways'
     },
-    'glu': {
-        'class': GLUFFN,
-        'description': 'Gated Linear Unit Feed Forward Network',
-        'required_params': ['hidden_dim', 'output_dim'],
+    'gated_mlp': {
+        'class': GatedMLP,
+        'description': 'Spatially-gated MLP using 1x1 convolutions, an alternative to self-attention',
+        'required_params': ['filters'],
         'optional_params': {
-            'activation': 'swish',
-            'dropout_rate': 0.0,
             'use_bias': True,
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',
             'kernel_regularizer': None,
-            'bias_regularizer': None
+            'bias_regularizer': None,
+            'attention_activation': 'relu',
+            'output_activation': 'linear',
+            'data_format': None
         },
-        'use_case': 'Gated processing for improved gradient flow'
+        'use_case': 'Vision models, replacing attention with a computationally cheaper alternative'
     },
     'geglu': {
         'class': GeGLUFFN,
@@ -118,6 +164,76 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         },
         'use_case': 'GELU-based gated processing for transformers'
     },
+    'glu': {
+        'class': GLUFFN,
+        'description': 'Gated Linear Unit Feed Forward Network',
+        'required_params': ['hidden_dim', 'output_dim'],
+        'optional_params': {
+            'activation': 'swish',
+            'dropout_rate': 0.0,
+            'use_bias': True,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None
+        },
+        'use_case': 'Gated processing for improved gradient flow'
+    },
+    'logic': {
+        'class': LogicFFN,
+        'description': 'Feed-Forward Network that performs soft logical reasoning',
+        'required_params': ['output_dim', 'logic_dim'],
+        'optional_params': {
+            'use_bias': True,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None,
+            'temperature': 1.0
+        },
+        'use_case': 'Tasks requiring symbolic-like reasoning or feature interaction modeling'
+    },
+    'mlp': {
+        'class': MLPBlock,
+        'description': 'Standard MLP with intermediate expansion',
+        'required_params': ['hidden_dim', 'output_dim'],
+        'optional_params': {
+            'activation': 'gelu',
+            'dropout_rate': 0.0,
+            'use_bias': True,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None
+        },
+        'use_case': 'General purpose feed-forward processing in transformers'
+    },
+    'orthoglu': {
+        'class': OrthoGLUFFN,
+        'description': 'Orthogonally-regularized Gated Linear Unit for disciplined routing',
+        'required_params': ['hidden_dim', 'output_dim'],
+        'optional_params': {
+            'activation': 'gelu',
+            'dropout_rate': 0.0,
+            'use_bias': True,
+            'ortho_reg_factor': 1.0
+        },
+        'use_case': 'Deep networks requiring stable training and decorrelated features'
+    },
+    'power_mlp': {
+        'class': PowerMLPLayer,
+        'description': 'Dual-branch MLP with ReLUK and basis functions for enhanced expressiveness',
+        'required_params': ['units'],
+        'optional_params': {
+            'k': 3,
+            'kernel_initializer': 'he_normal',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None,
+            'use_bias': True
+        },
+        'use_case': 'Tasks requiring approximation of complex functions with both sharp and smooth components'
+    },
     'residual': {
         'class': ResidualBlock,
         'description': 'Residual block with skip connections',
@@ -132,6 +248,22 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'bias_regularizer': None
         },
         'use_case': 'Deep networks requiring skip connections for gradient flow'
+    },
+    'swiglu': {
+        'class': SwiGLUFFN,
+        'description': 'SwiGLU Feed-Forward Network with gating mechanism',
+        'required_params': ['output_dim'],
+        'optional_params': {
+            'ffn_expansion_factor': 4,
+            'ffn_multiple_of': 256,
+            'dropout_rate': 0.0,
+            'use_bias': False,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None
+        },
+        'use_case': 'Modern transformer architectures (LLaMa, Qwen, etc.)'
     },
     'swin_mlp': {
         'class': SwinMLP,
@@ -204,7 +336,7 @@ def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:
         ```
     """
     if ffn_type not in FFN_REGISTRY:
-        available_types = list(FFN_REGISTRY.keys())
+        available_types = sorted(list(FFN_REGISTRY.keys()))
         raise ValueError(
             f"Unknown FFN type '{ffn_type}'. "
             f"Available types: {available_types}"
@@ -232,41 +364,43 @@ def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:
         if not (0.0 <= drop_rate <= 1.0):
             raise ValueError(f"drop_rate must be between 0.0 and 1.0, got {drop_rate}")
 
-    if 'hidden_dim' in kwargs:
-        hidden_dim = kwargs['hidden_dim']
-        if hidden_dim <= 0:
-            raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
+    positive_dims = ['hidden_dim', 'output_dim', 'count_dim', 'logic_dim', 'filters', 'units']
+    for dim_param in positive_dims:
+        if dim_param in kwargs and kwargs[dim_param] is not None:
+            if kwargs[dim_param] <= 0:
+                raise ValueError(f"{dim_param} must be positive, got {kwargs[dim_param]}")
 
-    if 'output_dim' in kwargs:
-        output_dim = kwargs['output_dim']
-        if output_dim <= 0:
-            raise ValueError(f"output_dim must be positive, got {output_dim}")
-
-    if 'output_dim' in kwargs:
-        output_dim = kwargs['output_dim']
-        if output_dim <= 0:
-            raise ValueError(f"output_dim must be positive, got {output_dim}")
-
-    # Validate SwiGLU specific parameters
+    # Validate type-specific parameters
     if ffn_type == 'swiglu':
-        if 'ffn_expansion_factor' in kwargs:
-            factor = kwargs['ffn_expansion_factor']
-            if factor <= 0:
-                raise ValueError(f"ffn_expansion_factor must be positive, got {factor}")
-
-        if 'ffn_multiple_of' in kwargs:
-            multiple = kwargs['ffn_multiple_of']
-            if multiple <= 0:
-                raise ValueError(f"ffn_multiple_of must be positive, got {multiple}")
+        if 'ffn_expansion_factor' in kwargs and kwargs['ffn_expansion_factor'] <= 0:
+            raise ValueError(f"ffn_expansion_factor must be positive, got {kwargs['ffn_expansion_factor']}")
+        if 'ffn_multiple_of' in kwargs and kwargs['ffn_multiple_of'] <= 0:
+            raise ValueError(f"ffn_multiple_of must be positive, got {kwargs['ffn_multiple_of']}")
+    elif ffn_type == 'counting':
+        if 'counting_scope' in kwargs and kwargs['counting_scope'] not in ["global", "local", "causal"]:
+            raise ValueError("counting_scope must be one of 'global', 'local', 'causal'")
+    elif ffn_type == 'logic':
+        if 'temperature' in kwargs and kwargs['temperature'] <= 0:
+            raise ValueError(f"temperature must be positive, got {kwargs['temperature']}")
+    elif ffn_type == 'gated_mlp':
+        valid_activations = {"relu", "gelu", "swish", "silu", "linear"}
+        if 'attention_activation' in kwargs and kwargs['attention_activation'] not in valid_activations:
+            raise ValueError(f"attention_activation must be one of {valid_activations}")
+        if 'output_activation' in kwargs and kwargs['output_activation'] not in valid_activations:
+            raise ValueError(f"output_activation must be one of {valid_activations}")
+    elif ffn_type == 'power_mlp':
+        if 'k' in kwargs:
+            k = kwargs['k']
+            if not isinstance(k, int) or k <= 0:
+                raise ValueError(f"k must be a positive integer, got {k}")
 
     # Validate activation functions are valid strings
-    activation_params = ['activation', 'branch_activation', 'gate_activation']
+    activation_params = ['activation', 'branch_activation', 'gate_activation', 'attention_activation', 'output_activation']
     for param in activation_params:
         if param in kwargs:
             activation = kwargs[param]
             if isinstance(activation, str) and activation != 'linear':
                 try:
-                    # Test that the activation string is valid
                     keras.activations.get(activation)
                 except (ValueError, KeyError):
                     raise ValueError(f"Unknown {param} function: '{activation}'")
@@ -295,24 +429,17 @@ def create_ffn_layer(
     dl_techniques, with comprehensive parameter validation and consistent error handling.
 
     Args:
-        ffn_type: Type of FFN layer to create. Supported types:
-            - 'mlp': Standard MLP with intermediate expansion
-            - 'swiglu': SwiGLU activation with gating mechanism
-            - 'differential': Dual-pathway processing with differential branches
-            - 'glu': Gated Linear Unit with sigmoid gating
-            - 'geglu': GELU-based Gated Linear Unit
-            - 'residual': Residual block with skip connections
-            - 'swin_mlp': Swin Transformer MLP variant
-        name: Optional name for the layer
+        ffn_type: Type of FFN layer to create. See FFNType for all supported types.
+        name: Optional name for the layer.
         **kwargs: Parameters specific to the FFN type. See individual layer
             documentation for parameter details.
 
     Returns:
-        Configured FFN layer instance
+        Configured FFN layer instance.
 
     Raises:
-        ValueError: If ffn_type is invalid or required parameters are missing
-        TypeError: If parameter types are incorrect
+        ValueError: If ffn_type is invalid or required parameters are missing.
+        TypeError: If parameter types are incorrect.
 
     Example:
         ```python
@@ -326,23 +453,6 @@ def create_ffn_layer(
             ffn_expansion_factor=4,
             dropout_rate=0.1,
             name='swiglu_ffn'
-        )
-
-        # Create differential FFN with custom activations
-        diff_ffn = create_ffn_layer(
-            'differential',
-            hidden_dim=1024,
-            output_dim=512,
-            branch_activation='relu',
-            gate_activation='sigmoid'
-        )
-
-        # Create residual block
-        res_block = create_ffn_layer(
-            'residual',
-            hidden_dim=256,
-            output_dim=256,
-            dropout_rate=0.2
         )
         ```
 
