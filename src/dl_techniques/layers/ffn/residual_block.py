@@ -1,37 +1,66 @@
-"""Defines a custom Keras Residual Block layer.
+"""
+A residual block with a learnable projection shortcut.
 
-This module provides a custom Keras layer, `ResidualBlock`, which implements a
-residual connection around a two-layer feed-forward network. The block is designed
-to be a flexible and reusable component in deep learning models.
+This layer encapsulates the core principle of residual learning, a foundational
+technique introduced in ResNet that enables the stable training of exceptionally
+deep neural networks. The central idea is to reframe the learning objective of a
+stack of layers. Instead of learning a direct, underlying mapping `H(x)`, the
+layers are tasked with learning a residual function `F(x) = H(x) - x`. The final
+output is then computed as `F(x) + x`.
 
-The main path consists of two dense layers with a configurable activation function
-and dropout. The residual (or skip) path contains a separate dense layer to project
-the input to the same dimensionality as the output of the main path. This design
-allows the block to be used even when the input and output dimensions differ.
+This formulation is powerful because it provides a "shortcut" or "skip
+connection" that allows the gradient to flow directly through the block during
+backpropagation, mitigating the vanishing gradient problem. It also simplifies
+the optimization problem: if an identity mapping is optimal for a given block,
+the network can easily achieve this by driving the weights of the main path
+`F(x)` towards zero, which is easier than fitting an identity mapping with a
+stack of non-linear layers.
 
-The layer is registered as a Keras serializable object, allowing models that
-use it to be saved and loaded seamlessly using `keras.models.save_model` and
-`keras.models.load_model`.
+Architectural Overview:
+The block consists of two parallel pathways:
 
-Example:
-    >>> import keras
-    >>> import numpy as np
-    >>>
-    >>> # Create a simple model using the ResidualBlock
-    >>> inputs = keras.Input(shape=(32,))
-    >>> x = ResidualBlock(hidden_dim=64, output_dim=16, dropout_rate=0.1)(inputs)
-    >>> x = keras.layers.LayerNormalization()(x)
-    >>> outputs = keras.layers.Dense(1, activation='sigmoid')(x)
-    >>> model = keras.Model(inputs, outputs)
-    >>>
-    >>> # Print model summary
-    >>> model.summary()
-    >>>
-    >>> # Test with dummy data
-    >>> dummy_data = np.random.rand(10, 32)
-    >>> predictions = model.predict(dummy_data)
-    >>> print(f"Output shape: {predictions.shape}")
-    Output shape: (10, 1)
+1.  **Main Path**: This is a non-linear transformation block, typically a
+    two-layer Multi-Layer Perceptron (MLP). It first projects the input into a
+    `hidden_dim` space with a non-linear activation, followed by an optional
+    dropout layer. A second linear projection then maps this hidden
+    representation to the final `output_dim`. This path is responsible for
+    learning the complex residual function `F(x)`.
+
+2.  **Residual Path (Shortcut Connection)**: This path provides the direct link
+    from input to output. In this implementation, the shortcut is a learnable
+    linear projection (a single Dense layer). This design choice, known as a
+    "projection shortcut," is crucial for flexibility. It allows the block to
+    function even when the input and output dimensions do not match, a common
+    scenario in downsampling stages of deep architectures. If the dimensions
+    were identical, this projection would learn to approximate an identity
+    mapping.
+
+The outputs of these two paths are combined via element-wise addition to
+produce the final output of the block.
+
+Foundational Mathematics:
+Let `x` be the input to the block. The output `y` is defined as:
+
+`y = F(x, {W_i}) + W_s @ x`
+
+where:
+-   `F(x, {W_i})` represents the function learned by the main path, parameterized
+    by its weights `{W_i}`. In this implementation, it is:
+    `F(x) = W_2 @ activation(W_1 @ x + b_1) + b_2`
+-   `W_s @ x` represents the projection shortcut learned by the `residual_layer`,
+    where `W_s` is the weight matrix of this linear transformation. A bias term
+    may also be included.
+
+This formulation ensures that the gradient can propagate through the `W_s @ x`
+term unimpeded, providing a robust "gradient highway" deep into the network.
+
+References:
+The concept of residual learning and the architecture of residual blocks were
+introduced in the seminal paper:
+
+-   He, K., Zhang, X., Ren, S., & Sun, J. (2016). Deep Residual Learning for
+    Image Recognition. In Proceedings of the IEEE Conference on Computer
+    Vision and Pattern Recognition (CVPR).
 
 """
 

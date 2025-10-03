@@ -1,45 +1,80 @@
 """
-This module provides the implementation of `LogicFFN`, a custom Keras 3 layer
-designed to integrate principles of soft logical reasoning into deep learning
-models. It is intended to be used as a powerful, drop-in replacement for standard
-Feed-Forward Network (FFN) or Multi-Layer Perceptron (MLP) blocks, especially
-within architectures like the Transformer.
+A feed-forward network that performs soft logical reasoning.
 
-The core idea is to move beyond simple non-linear transformations (like ReLU or GELU)
-and instead force the network to perform explicit, differentiable logical operations
-on its input features. This provides a strong inductive bias for tasks that may
-benefit from structured, logical reasoning.
+This layer replaces the standard non-linear transformations of a conventional
+Feed-Forward Network (FFN) with a structured, differentiable computation
+based on fundamental logical operations. It provides a strong inductive bias
+for tasks that may benefit from symbolic-like reasoning by forcing the model
+to learn how to combine input features using explicit soft-logic gates.
 
-Core Concepts:
--------------
-The `LogicFFN` layer operates through a sequence of carefully designed steps:
+The central hypothesis is that by decomposing complex transformations into a
+weighted combination of primitive logical functions (AND, OR, XOR), the
+network can learn more interpretable and robust representations.
 
-1.  **Input Projection & Soft-Bits:**
-    Inputs are first linearly projected into a higher-dimensional "logic space"
-    with two distinct operands (`a` and `b`). A sigmoid activation function is
-    then applied to transform these operands into "soft-bits"—continuous values
-    between 0 and 1 that approximate binary logic.
+Architectural Overview:
+The layer's architecture is designed to emulate a logical circuit:
 
-2.  **Soft Logic Operations:**
-    Three fundamental logic operations are computed in parallel using their
-    probabilistic (or "soft") counterparts:
-    - **AND:** `a * b`
-    - **OR:** `a + b - a * b`
-    - **XOR:** `(a - b)^2`
+1.  **Input Projection into Operands**: The input tensor is first linearly
+    projected into a higher-dimensional "logic space." This projected tensor
+    is then split into two equal parts, `a` and `b`, which serve as the two
+    operands for the subsequent logical operations.
 
-3.  **Dynamic Gating Mechanism:**
-    A key innovation of this layer is its dynamic gating mechanism. A separate
-    projection from the original input learns a set of weights for the three
-    logic operations. A temperature-scaled softmax is applied to these weights,
-    creating a dynamic probability distribution that determines the importance
-    of each logic operation for every token in the sequence. This allows the
-    model to adapt its reasoning strategy based on the input.
+2.  **Soft-Bit Transformation**: Both operands are passed through a sigmoid
+    activation function. This squashes their values to the range [0, 1],
+    transforming them into "soft-bits." These can be interpreted as the
+    probabilities of a feature being 'true'.
 
-4.  **Weighted Combination and Output:**
-    The results of the three logic operations are combined via a weighted sum
-    using the learned gates. This aggregated tensor, which now contains a
-    logically-processed representation of the input, is then projected back to
-    the desired output dimension.
+3.  **Parallel Logic Computation**: Three fundamental logical operations are
+    computed in parallel on the soft-bit operands, using their continuous,
+    differentiable analogues derived from probability theory.
+
+4.  **Dynamic Gating**: A separate linear projection of the original input
+    is used to generate a set of weights for the three logic operations. A
+    temperature-scaled softmax function transforms these weights into a
+    dynamic probability distribution. This gate learns to decide, for each
+    input token, the relative importance of the AND, OR, and XOR operations.
+
+5.  **Weighted Combination and Output**: The results of the three logic
+    operations are combined via a weighted sum, using the learned gates.
+    This aggregated tensor, now a logically-processed representation, is
+    projected by a final linear layer to the desired output dimension.
+
+Foundational Mathematics:
+Let `x` be the input vector. The process is as follows:
+
+1.  The operands `a` and `b` are generated and transformed into soft bits:
+    `[p_a, p_b] = W_logic @ x + b_logic`
+    `a = sigmoid(p_a)`, `b = sigmoid(p_b)`
+
+2.  The soft logic operations are defined based on probabilistic rules:
+    - **Soft AND**: `y_and = a * b`
+      (Product rule for independent probabilities: P(A ∩ B) = P(A)P(B))
+    - **Soft OR**: `y_or = a + b - a * b`
+      (Inclusion-exclusion principle: P(A ∪ B) = P(A) + P(B) - P(A ∩ B))
+    - **Soft XOR**: `y_xor = (a - b)^2`
+      (Squared difference, which is high when `a` and `b` differ and low
+      when they are similar, emulating the XOR truth table for soft values)
+
+3.  The dynamic gates `g` are computed from the input `x`:
+    `logits = W_gate @ x + b_gate`
+    `g = softmax(logits / temperature)`
+    where `g` is a vector of weights `[g_and, g_or, g_xor]`.
+
+4.  The final representation `h` is a gated combination of the logic outputs:
+    `h = g_and * y_and + g_or * y_or + g_xor * y_xor`
+
+5.  This is projected to the final output dimension: `y_out = W_out @ h + b_out`
+
+References:
+This architecture is inspired by the field of neuro-symbolic AI, which seeks
+to integrate the strengths of deep learning with symbolic reasoning. The core
+mechanisms are closely related to concepts from:
+
+-   Dong, H., et al. (2019). Neural Logic Machines. ICLR.
+-   The broader areas of probabilistic logic and fuzzy logic, which provide
+    frameworks for extending Boolean logic to handle uncertainty and
+    continuous values.
+
 """
 
 import keras

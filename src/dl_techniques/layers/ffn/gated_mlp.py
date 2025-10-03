@@ -1,49 +1,74 @@
 """
-Implementation of the Gated MLP (gMLP) architecture from the paper:
-"Pay Attention to MLPs" by Liu et al., 2021 (https://arxiv.org/abs/2105.08050)
+A spatially-gated MLP block as an alternative to self-attention.
 
-This module implements a Gated Multi-Layer Perceptron (MLP) layer for use in
-neural networks. The layer combines gating mechanisms with 1x1 convolutions
-to create a powerful feature transformation block without self-attention.
+This layer realizes the Gated MLP (gMLP) architecture, proposed as a
+computationally efficient yet powerful alternative to the self-attention
+mechanisms prevalent in Transformer models. It adapts the principles of Gated
+Linear Units (GLUs) for spatial data (e.g., image feature maps) by using
+1x1 convolutions, which act as position-wise linear transformations.
 
-Architecture:
+The core idea is to replace the explicit token-mixing of self-attention with
+an implicit, spatially-aware gating mechanism. This allows the network to
+dynamically control the flow of information at each spatial location based on
+the local features, without incurring the quadratic complexity of attention.
 
-                       +------------------+
-                       |      Input       |
-                       +--------+---------+
-                                |
-                     +----------+-----------+
-          +----------+       Split         +-----------+
-          |          +--------------------+            |
-          |                                            |
-    +-----v------+                             +-------v-----+
-    | Gate Conv  |                             |   Up Conv   |
-    | (1x1 Conv) |                             | (1x1 Conv)  |
-    +-----+------+                             +-------+-----+
-          |                                            |
-    +-----v------+                             +-------v-----+
-    | Activation |                             | Activation  |
-    | (ReLU/GELU)|                             | (ReLU/GELU) |
-    +-----+------+                             +-------+-----+
-          |                                            |
-          |          +--------------------+            |
-          +----------> Element-wise       <------------+
-                     |  Multiplication    |
-                     +----------+---------+
-                                |
-                     +----------v---------+
-                     |    Down Conv       |
-                     |    (1x1 Conv)      |
-                     +----------+---------+
-                                |
-                     +----------v---------+
-                     |    Activation      |
-                     | (Linear/ReLU/etc.) |
-                     +----------+---------+
-                                |
-                     +----------v---------+
-                     |      Output        |
-                     +--------------------+
+Architectural Overview:
+The gMLP operates through a dual-pathway gating structure, where all linear
+projections are implemented as 1x1 convolutions:
+
+1.  **Parallel Projections**: The input tensor is fed into two independent
+    1x1 convolutional layers. These function as position-wise dense layers,
+    projecting the feature vector at each spatial location into an
+    intermediate representation. One pathway learns a "gate" representation,
+    while the other learns a "value" (or "up") representation.
+
+2.  **Non-linear Activation**: The outputs of both the gate and value pathways
+    are passed through a non-linear activation function.
+
+3.  **Gating Mechanism**: The activated gate tensor is element-wise multiplied
+    with the activated value tensor. This is the central operation of the
+    layer. The gate effectively learns a dynamic, content-aware spatial mask
+    that modulates the information carried by the value pathway. Features at
+    locations where the gate has high activation are preserved, while those
+    at locations with low activation are suppressed.
+
+4.  **Output Projection**: The resulting gated tensor is passed through a
+    final 1x1 convolutional layer (the "down" projection) to produce the
+    layer's output, consolidating the filtered information.
+
+Foundational Mathematics:
+Let `X` be an input tensor with feature vectors `x_{ij}` at each spatial
+position `(i, j)`. The transformation at each position is:
+
+1.  Gate and Value Computation:
+    `g_{ij} = activation_{attn}(W_g @ x_{ij} + b_g)`
+    `v_{ij} = activation_{attn}(W_v @ x_{ij} + b_v)`
+    where `W_g` and `W_v` are the kernel weights of the gate and up 1x1
+    convolutions, respectively.
+
+2.  Gating Operation:
+    `h_{ij} = g_{ij} * v_{ij}`
+    where `*` denotes the Hadamard (element-wise) product.
+
+3.  Output Projection:
+    `y_{ij} = activation_{out}(W_d @ h_{ij} + b_d)`
+    where `W_d` is the kernel weight of the down 1x1 convolution.
+
+The use of 1x1 convolutions allows this entire sequence of operations to be
+applied efficiently across all spatial positions in parallel, with shared
+weights `{W_g, W_v, W_d}`.
+
+References:
+The gMLP architecture was introduced in:
+-   Liu, H., Dai, Z., So, D. R., & Le, Q. V. (2021). Pay Attention to MLPs.
+    In Advances in Neural Information Processing Systems (NeurIPS).
+
+The gating mechanism itself is an instance of the Gated Linear Unit,
+originally proposed in:
+-   Dauphin, Y. N., Fan, A., Auli, M., & Grangier, D. (2017). Language
+    Modeling with Gated Convolutional Networks. In Proceedings of the 34th
+    International Conference on Machine Learning (ICML).
+
 """
 
 import keras

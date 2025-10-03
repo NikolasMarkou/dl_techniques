@@ -1,16 +1,62 @@
 """
-This module implements the standard MLP (Multi-Layer Perceptron) block
-commonly used in transformer architectures.
+A position-wise Feed-Forward Network from the Transformer.
 
-The MLP block consists of:
-1. First dense layer (expansion)
-2. Activation function (typically GELU)
-3. Dropout (optional)
-4. Second dense layer (projection)
-5. Dropout (optional)
+This layer constitutes the second major sub-component within each block of a
+standard Transformer architecture, following the multi-head attention mechanism.
+Its primary role is to process the information aggregated by the attention
+mechanism, applying a non-linear transformation to each token's representation
+independently and identically. This "position-wise" application is a key
+design choice, allowing for parallel processing across the sequence.
 
-This follows the standard transformer architecture where the MLP block
-is used after the multi-head attention mechanism within each transformer layer.
+Architectural Overview:
+The network follows a simple yet effective "expand-then-contract" design:
+
+1.  **Expansion**: An initial linear layer (`fc1`) projects the input
+    representation from its original dimension (`input_dim`) into a much
+    higher-dimensional intermediate space (`hidden_dim`). This expansion,
+    typically by a factor of four, provides the model with a higher-capacity
+    "workspace" to discover and disentangle complex feature interactions.
+
+2.  **Non-linear Activation**: A non-linear activation function (commonly GELU
+    or ReLU) is applied element-wise to the expanded representation. This is
+    the critical step that allows the FFN to model complex, non-linear
+    relationships that a purely linear transformation could not capture.
+
+3.  **Contraction**: A second linear layer (`fc2`) projects the activated,
+    high-dimensional representation back down to the model's original output
+    dimension (`output_dim`), which is typically the same as the `input_dim`
+    to facilitate residual connections. This final projection synthesizes the
+    rich features learned in the expanded space into a refined output token
+    representation.
+
+This structure allows the FFN to act as a memory or knowledge store, where
+the parameters learn to recognize specific patterns from the attention output
+and map them to appropriate new representations.
+
+Foundational Mathematics:
+For an input vector `x` corresponding to a single position in the sequence,
+the computation performed by the MLP block is:
+
+`FFN(x) = W_2 * activation(W_1 @ x + b_1) + b_2`
+
+where:
+- `W_1` and `b_1` are the weight matrix and bias vector of the first linear
+  layer, projecting `x` from `input_dim` to `hidden_dim`.
+- `activation` is a non-linear function like GELU, `GELU(x) = x * Φ(x)`, where
+  `Φ(x)` is the standard Gaussian cumulative distribution function.
+- `W_2` and `b_2` are the weight matrix and bias vector of the second linear
+  layer, projecting the result back from `hidden_dim` to `output_dim`.
+
+The entire sequence of operations—expansion, non-linear filtering, and
+contraction—is applied identically to each token's vector in the sequence,
+but with shared weights across all positions.
+
+References:
+This specific FFN configuration was introduced as a core component of the
+Transformer architecture in the seminal paper:
+
+-   Vaswani, A., et al. (2017). Attention Is All You Need. NIPS.
+
 """
 
 import keras

@@ -1,3 +1,88 @@
+"""
+A Feed-Forward Network that learns to count features in a sequence.
+
+This layer provides a mechanism to augment token representations with explicit
+information about feature frequencies within a sequence. It operates on the
+principle of "soft counting," where the model first learns to identify
+semantically meaningful, countable "events" and then aggregates their
+occurrences to inform each token's final representation. This is particularly
+useful for tasks where understanding feature repetition, enumeration, or
+relative position is critical.
+
+Architectural Overview:
+The layer's architecture consists of three conceptual stages:
+
+1.  **Event Identification**: A "key" projection (`key_projection`) with a
+    sigmoid activation is applied to each input token. This projection learns
+    to identify a set of `count_dim` distinct, abstract features. The sigmoid
+    output for each feature can be interpreted as a soft probability or a
+    degree of presence for that "event" at that specific token position.
+
+2.  **Count Aggregation**: The identified events are aggregated across the
+    sequence dimension. The `counting_scope` parameter dictates the nature of
+    this aggregation, allowing the layer to capture different types of
+    contextual frequency information:
+    - 'global': A simple sum across the entire sequence. Every token receives
+      the same total count for each feature, providing a global summary.
+    - 'causal': A cumulative sum (prefix scan) from the beginning of the
+      sequence. This is suitable for autoregressive tasks, as each token's
+      count only includes information from past and present positions.
+    - 'local': A bidirectional cumulative sum. This is achieved by
+      concatenating a forward cumulative sum with a backward (reversed)
+      cumulative sum, providing each token with a rich positional signal based
+      on counts before and after it.
+
+3.  **Gated Integration**: The aggregated counts are first passed through a
+    trainable linear transformation (`count_transform`) with a non-linearity.
+    This projects the raw counts into a meaningful feature space. A learned
+    gating mechanism then dynamically blends this count-derived information
+    with the original input sequence. If the layer's `output_dim` matches the
+    `input_dim`, this blending takes the form of a residual connection, where
+    the gate controls the interpolation between the input and the transformed
+    counts. Otherwise, the gate simply scales the transformed counts.
+
+Foundational Mathematics:
+Let `x_t` be the input vector for a token at position `t`.
+
+1.  The "event" vector `k_t` is computed as:
+    `k_t = sigmoid(W_k @ x_t + b_k)`
+    where `W_k` and `b_k` are the weights and bias of the key projection. Each
+    element of `k_t` represents the soft occurrence of a specific feature.
+
+2.  The aggregated count vector `C_t` depends on the scope:
+    - Global: `C_t = sum_{i=1 to T} k_i`
+    - Causal: `C_t = sum_{i=1 to t} k_i`
+    - Local: `C_t = concat[sum_{i=1 to t} k_i, sum_{i=t to T} k_i]`
+
+3.  The final output `y_t` is produced by a gated update. First, the gate
+    `g_t` and transformed counts `C'_t` are calculated:
+    `g_t = sigmoid(W_g @ x_t + b_g)`
+    `C'_t = activation(W_c @ C_t + b_c)`
+
+    The final output is a gated mixture. For the residual case (`output_dim`
+    == `input_dim`):
+    `y_t = (1 - g_t) * x_t + g_t * C'_t`
+
+This formulation allows the network to learn not only *what* to count but
+also *how* to use those counts to refine its understanding of the sequence.
+
+References:
+This layer synthesizes several established concepts in deep learning. The
+gating mechanism is inspired by its successful use in recurrent architectures
+like LSTMs and GRUs for controlling information flow. The use of cumulative
+sums (prefix scans) as a primitive for sequence modeling has been explored in
+modern, non-attentional architectures designed for long-range dependency
+modeling.
+
+- Hochreiter, S., & Schmidhuber, J. (1997). Long short-term memory. Neural
+  Computation.
+- He, K., Zhang, X., Ren, S., & Sun, J. (2016). Deep Residual Learning for
+  Image Recognition. CVPR.
+- Poli, M., et al. (2023). Hyena Hierarchy: Towards Larger Convolutional
+  Language Models. ICML.
+
+"""
+
 import keras
 from typing import Literal, Tuple, Optional, Union, Any, Dict
 

@@ -1,11 +1,77 @@
 """
-GeGLU Feed Forward Network Implementation
-=========================================
+A Gated Linear Unit Feed-Forward Network with GELU activation.
 
-This module implements the GELU-based Gated Linear Unit (GeGLU) Feed Forward Network.
-This architecture is a prominent variant of the GLU networks described in
-"GLU Variants Improve Transformer" by Noam Shazeer (2020), and it is used in
-several high-performance models like Google's T5 and PaLM.
+This layer provides a more expressive alternative to the standard position-wise
+Feed-Forward Network (FFN) found in Transformer architectures. It is based on
+the Gated Linear Unit (GLU) family of layers, specifically the variant using
+the Gaussian Error Linear Unit (GELU) activation, as proposed by Shazeer.
+
+The fundamental insight behind GLU-based networks is to introduce a dynamic,
+input-dependent gating mechanism that controls the flow of information through
+the layer. Unlike a standard FFN which applies a static non-linearity (like
+ReLU or GELU) to all features uniformly, a GeGLU can selectively amplify or
+suppress features based on the context provided by the input itself.
+
+Architectural Overview:
+The layer operates in three main stages:
+
+1.  **Projection and Splitting**: The input tensor is first projected by a
+    single dense layer into a space twice the size of the desired hidden
+    dimension. This larger tensor is then split along its last axis into
+    two equal-sized tensors: a "gate" and a "value". This is an efficient
+    implementation equivalent to using two separate dense layers.
+
+2.  **Gating Mechanism**: The "gate" tensor is passed through a GELU
+    activation function. The resulting activated gate is then element-wise
+    multiplied with the "value" tensor. This multiplication is the core of
+    the gating mechanism.
+
+3.  **Output Projection**: The resulting gated tensor, which now contains a
+    filtered representation of the input, is passed through a final dense
+    layer to project it back to the desired output dimension.
+
+This architecture allows the network to learn complex interactions. The gate
+can be thought of as a learned filter that decides which elements of the
+value tensor are relevant and should be passed on.
+
+Foundational Mathematics:
+Let `x` be the input vector. The computation proceeds as follows:
+
+1.  A linear projection `W` expands `x` into a larger space, which is then
+    split into two vectors, the gate `g` and the value `v`. This can be
+    expressed as:
+    `[g, v] = W @ x + b`
+    where `W` has shape `(input_dim, 2 * hidden_dim)`.
+
+2.  The core gating operation combines the gate and value:
+    `h = GELU(g) * v`
+    where `*` denotes element-wise multiplication. Each element of `GELU(g)`
+    acts as a scalar multiplier for the corresponding element in `v`,
+    effectively filtering the value vector. If an element in `GELU(g)` is
+    close to zero, the corresponding feature in `v` is suppressed.
+
+3.  The final output `y` is obtained by projecting the gated vector `h`:
+    `y = W_out @ h + b_out`
+
+This formulation contrasts with a standard FFN, `y = W_out @ GELU(W_in @ x +
+b_in) + b_out`, by making the non-linear filtering dependent on a separate,
+parallel transformation of the input, granting it greater flexibility and
+expressive power.
+
+References:
+This architecture and its benefits are primarily described in:
+
+-   Shazeer, N. (2020). GLU Variants Improve Transformer. arXiv preprint
+    arXiv:2002.05202.
+
+The original Gated Linear Unit concept was introduced for convolutional
+networks in:
+
+-   Dauphin, Y. N., Fan, A., Auli, M., & Grangier, D. (2017). Language
+    Modeling with Gated Convolutional Networks. ICML.
+
+The GeGLU FFN is a key component in several state-of-the-art large language
+models, including Google's PaLM.
 
 """
 

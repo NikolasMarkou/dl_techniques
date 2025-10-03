@@ -1,36 +1,80 @@
 """
-This module defines the `PowerMLPLayer`, a custom Keras layer designed to enhance
-the expressive power of traditional Multi-Layer Perceptrons (MLPs).
+A dual-branch MLP for enhanced function approximation.
 
-At its core, the `PowerMLPLayer` implements a dual-branch architecture that
-processes the input in parallel and combines the results. This design leverages
-the complementary strengths of two different types of non-linear transformations,
-allowing the layer to model complex functions more effectively than a standard
-`Dense` layer.
+This layer enhances the expressive power of a standard Multi-Layer Perceptron
+(MLP) by implementing a parallel, dual-branch architecture. The core principle
+is that different classes of functions are better suited for modeling
+different types of patterns. By combining two complementary non-linear
+pathways, this layer can approximate complex functions more efficiently and
+effectively than a traditional MLP with a single activation function.
 
-The two parallel branches are:
+The design is rooted in function approximation theory, where a complex
+function can be decomposed into a sum of simpler, constituent functions. This
+layer operationalizes that idea by fusing a piecewise polynomial approximator
+with a smooth, global function approximator.
 
-1.  **The Main Branch (Piecewise Polynomial Power):**
-    -   **Path:** `Input → Dense → ReLU-k`
-    -   **Purpose:** This branch uses the `ReLUK` activation (`max(0, x)^k`), which is
-        a generalization of the standard ReLU. It excels at modeling sharp,
-        piecewise polynomial relationships within the data. The integer power `k`
-        controls the degree and aggressiveness of the non-linearity. This branch
-        includes a bias term in its dense layer.
+Architectural Overview:
+The layer processes the input through two parallel branches whose outputs are
+summed element-wise:
 
-2.  **The Basis Branch (Smooth Function Approximation):**
-    -   **Path:** `Input → BasisFunction → Dense`
-    -   **Purpose:** This branch first transforms the input using a set of smooth,
-        continuous basis functions (e.g., sinusoids or other periodic/non-periodic
-        functions). This allows the layer to efficiently model smooth, global trends
-        and periodic patterns that are often difficult to capture with ReLU-based
-        activations alone. This branch's dense layer intentionally omits a bias term.
+1.  **Main Branch (Piecewise Polynomial Pathway)**: This branch follows a
+    `Dense -> ReLUK` structure. It is designed to capture sharp, localized,
+    and non-linear patterns. The `ReLUK` activation, defined as
+    `max(0, x)^k`, generalizes the standard ReLU. For `k > 1`, it produces a
+    smoother, higher-order polynomial function in the positive domain,
+    allowing the network to model more complex local curvatures.
 
-The outputs of these two branches are then combined through element-wise addition.
-This fusion allows the `PowerMLPLayer` to simultaneously learn both sharp, localized
-features (from the main branch) and smooth, global patterns (from the basis branch).
-leading to superior function approximation capabilities and potentially improved
-gradient flow compared to a standard MLP.
+2.  **Basis Branch (Smooth Function Pathway)**: This branch follows a
+    `BasisFunction -> Dense` structure. It first projects the input onto a
+    set of smooth, continuous basis functions (e.g., sinusoids). A subsequent
+    linear layer then learns to combine these basis functions. This pathway
+    excels at modeling smooth, global trends and periodic patterns, which are
+    often difficult to represent efficiently with piecewise-linear activations
+    like ReLU.
+
+The final output is the sum of these two pathways, allowing the layer to
+simultaneously learn both sharp, discontinuous features and smooth, continuous
+trends within the data.
+
+Foundational Mathematics:
+Let `x` be the input vector. The layer's output `y` is the sum of the
+outputs from the two branches:
+
+`y = y_main + y_basis`
+
+The computation for each branch is as follows:
+
+-   **Main Branch**: `y_main = (max(0, W_m @ x + b_m))^k`
+    Here, `W_m` and `b_m` are the weights and bias of the main dense layer,
+    and `k` is the integer power of the `ReLUK` activation. This branch
+    learns a function that is a piecewise polynomial of degree `k`.
+
+-   **Basis Branch**: `y_basis = W_b @ φ(x)`
+    Here, `φ(x)` represents the transformation by a set of basis functions
+    (e.g., `[x, sin(x), cos(x), sin(2x), ... ]`). `W_b` is the weight matrix of
+    the basis dense layer (which intentionally lacks a bias term), learning a
+    linear combination of these basis functions.
+
+This formulation effectively models the target function as a superposition of
+a piecewise polynomial and a function from the span of the chosen basis
+functions (akin to a truncated Fourier series for sinusoidal bases).
+
+References:
+This architecture synthesizes principles from several areas of machine
+learning and approximation theory:
+
+-   The concept of using polynomial activations to increase expressiveness is
+    related to works on higher-order neural networks.
+-   The basis function branch is directly inspired by classical function
+    approximation methods, such as Radial Basis Function (RBF) Networks and
+    Fourier series analysis.
+    -   Broomhead, D. S., & Lowe, D. (1988). Multivariable functional
+        interpolation and adaptive networks. Complex Systems.
+-   The idea of combining different activation functions within a network has
+    been explored to improve performance, for example, in:
+    -   Ramachandran, P., Zoph, B., & Le, Q. V. (2017). Searching for
+        Activation Functions. arXiv preprint arXiv:1710.05941.
+
 """
 
 import keras

@@ -1,13 +1,78 @@
 """
-GLU Feed Forward Network Implementation
-======================================
+A Gated Linear Unit feed-forward network.
 
-This module implements the Gated Linear Unit (GLU) Feed Forward Network variants
-as described in the paper "GLU Variants Improve Transformer" by Noam Shazeer (2020).
+This layer serves as an advanced replacement for the standard position-wise
+Feed-Forward Network (FFN) commonly used in Transformer architectures. It is
+based on the Gated Linear Unit (GLU) principle, which introduces a dynamic,
+input-dependent gating mechanism to modulate the flow of information through
+the network, a concept extensively analyzed by Shazeer (2020).
+
+The core idea is that instead of applying a static non-linearity (like ReLU)
+to a single linear projection of the input, the GLU computes two separate
+linear projections. One projection acts as the "value," containing the primary
+information, while the other acts as the "gate." The gate, after an
+activation function, element-wise multiplies the value, selectively filtering
+or amplifying features based on the input context. This allows for a more
+nuanced and powerful transformation than a standard FFN.
+
+Architectural Overview:
+The layer's architecture is defined by two parallel pathways that process the
+input before being combined:
+
+1.  **Value Pathway**: A linear projection (`value_proj`) transforms the
+    input into an intermediate representation. This pathway carries the main
+    content to be processed.
+
+2.  **Gate Pathway**: A second, independent linear projection (`gate_proj`)
+    also transforms the input. The output of this projection is passed
+    through a non-linear activation function (e.g., Swish, GELU, Sigmoid).
+
+3.  **Gating Mechanism**: The activated gate is element-wise multiplied with
+    the output of the value pathway. This is the central operation of the
+    GLU, where the gate dynamically controls which information from the
+    value pathway is passed forward.
+
+4.  **Output Projection**: The resulting gated tensor is projected by a final
+    linear layer (`output_proj`) to the desired output dimension.
+
+This dual-pathway design provides greater expressive capacity, as the network
+can learn to ignore or emphasize different features for each specific input
+token, improving model performance and training dynamics.
+
+Foundational Mathematics:
+Let `x` be the input vector. The layer's computation is as follows:
+
+1.  Two independent linear projections are computed:
+    `g = W_g @ x + b_g`  (gate projection)
+    `v = W_v @ x + b_v`  (value projection)
+    where `W_g` and `W_v` are distinct weight matrices.
+
+2.  The gate `g` is passed through a non-linearity, and the result is
+    multiplied element-wise with the value `v`:
+    `h = activation(g) * v`
+    Here, `*` denotes the Hadamard (element-wise) product. Each element of
+    `activation(g)` acts as a scalar control for the corresponding element in
+    `v`.
+
+3.  The final output `y` is produced by a third linear projection:
+    `y = W_out @ h + b_out`
+
+The choice of `activation` function defines the specific variant of the GLU,
+such as SwiGLU (`swish`), GeGLU (`gelu`), or the original formulation with
+`sigmoid`.
 
 References:
-----------
-Shazeer, N. (2020). GLU Variants Improve Transformer. arXiv preprint.
+The application and analysis of GLU variants in the context of Transformer
+models is detailed in:
+
+-   Shazeer, N. (2020). GLU Variants Improve Transformer. arXiv preprint
+    arXiv:2002.05202.
+
+The original Gated Linear Unit concept was introduced in:
+
+-   Dauphin, Y. N., Fan, A., Auli, M., & Grangier, D. (2017). Language
+    Modeling with Gated Convolutional Networks. ICML.
+
 """
 
 import keras

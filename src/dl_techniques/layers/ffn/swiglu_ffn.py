@@ -1,3 +1,70 @@
+"""
+A SwiGLU feed-forward network, a high-performance FFN variant.
+
+This layer implements the SwiGLU (Swish-Gated Linear Unit) architecture, a
+highly effective feed-forward network that has become a standard component in
+state-of-the-art language models such as PaLM and LLaMA. It is a specific
+instantiation of the Gated Linear Unit (GLU) family, which enhances the
+standard FFN by introducing a dynamic, input-dependent gating mechanism.
+
+The core principle of SwiGLU is to use one part of the input's projection
+to modulate another part. This allows the network to selectively pass,
+suppress, or amplify features based on the context of the input itself,
+providing a more powerful and nuanced transformation than a static non-linearity
+like ReLU or GELU.
+
+Architectural Overview:
+Unlike a standard two-layer FFN, the SwiGLU architecture employs three
+distinct linear projections:
+
+1.  **Gate Projection (`gate_proj`)**: A linear transformation of the input
+    that will serve as the gate.
+2.  **Up Projection (`up_proj`)**: A second linear transformation of the input
+    that serves as the value or content.
+3.  **Down Projection (`down_proj`)**: A final linear transformation that
+    projects the gated representation back to the model's dimension.
+
+The gating mechanism works by applying a SiLU (Swish) activation to the
+output of the `gate_proj` and then performing an element-wise multiplication
+with the output of the `up_proj`.
+
+Foundational Mathematics:
+For an input vector `x`, the SwiGLU transformation is defined as:
+
+`SwiGLU(x) = (Swish(x @ W_gate) * (x @ W_up)) @ W_down`
+
+where:
+- `*` denotes element-wise multiplication (Hadamard product).
+- `W_gate`, `W_up`, and `W_down` are the weight matrices for the respective
+  projections. Bias terms may also be included.
+- `Swish(z)` is the Sigmoid Linear Unit (SiLU) activation function, defined
+  as `z * sigmoid(z)`. This smooth, non-monotonic function has been shown to
+  outperform ReLU in many deep learning contexts.
+
+A key architectural detail in models like PaLM and LLaMA is the choice of the
+hidden dimension. To maintain a similar parameter count to a standard FFN
+(which typically has one "up" and one "down" projection), the hidden dimension
+of SwiGLU is often scaled by a factor of 2/3. For a standard FFN with a 4x
+expansion, the approximate parameter count is `2 * d * 4d`. For SwiGLU, it is
+`3 * d * h` (where `h` is the hidden dim). Equating these gives a hidden
+dimension `h = (8/3)d`, which is approximately `4d * (2/3)`. This layer
+implements this scaling to ensure parameter efficiency while leveraging the
+architectural benefits of gating.
+
+References:
+The effectiveness of GLU variants in Transformers was systematically studied in:
+-   Shazeer, N. (2020). GLU Variants Improve Transformer. arXiv preprint
+    arXiv:2002.05202.
+
+The specific SwiGLU architecture with its parameter-efficient scaling was
+popularized and is a core component of modern large language models, including:
+-   Chowdhery, A., et al. (2022). PaLM: Scaling Language Modeling with
+    Pathways. arXiv preprint arXiv:2204.02311.
+-   Touvron, H., et al. (2023). LLaMA: Open and Efficient Foundation Language
+    Models. arXiv preprint arXiv:2302.13971.
+
+"""
+
 import keras
 from typing import Optional, Any, Dict, Tuple, Union
 

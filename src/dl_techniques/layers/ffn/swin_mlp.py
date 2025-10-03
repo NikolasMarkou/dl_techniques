@@ -1,3 +1,73 @@
+"""
+The MLP block from the Swin Transformer architecture.
+
+This layer constitutes the position-wise Feed-Forward Network (FFN) that serves
+as the second primary sub-component in each Swin Transformer block, following
+the windowed attention mechanism. Its function is to apply a non-linear
+transformation to each token representation independently and identically,
+enabling the model to learn complex feature interactions.
+
+While originating in the Swin Transformer, this specific MLP structure is the
+standard and widely adopted FFN design used across the majority of Transformer-
+based models.
+
+Architectural Overview:
+The network employs a simple yet highly effective "expand-then-contract"
+architectural pattern, also known as an inverted bottleneck:
+
+1.  **Expansion**: An initial linear layer (`fc1`) projects the input token
+    representations from their original dimension into a much larger
+    intermediate or hidden dimension. This expansion, typically by a factor
+    of four, creates a high-dimensional "workspace" where features can be
+    more easily separated and transformed by the subsequent non-linearity.
+
+2.  **Non-linear Activation**: A non-linear activation function, typically
+    GELU (Gaussian Error Linear Unit), is applied element-wise. This is the
+    critical step that allows the FFN to model complex relationships that
+    could not be captured by linear transformations alone. Without it, the two
+    linear layers would collapse into a single, less expressive one.
+
+3.  **Contraction**: A second linear layer (`fc2`) projects the activated,
+    high-dimensional representation back down to the model's original output
+    dimension. This step synthesizes the rich features learned in the expanded
+    space into a final, refined token representation, ready for the next
+    layer or residual connection.
+
+This structure acts as a key-value memory, where the parameters learn to
+recognize specific patterns from the attention output and map them to the
+appropriate new representations.
+
+Foundational Mathematics:
+For an input vector `x` corresponding to a single position in the sequence,
+the computation performed by the MLP block is:
+
+`FFN(x) = W_2 * activation(W_1 @ x + b_1) + b_2`
+
+where:
+- `W_1` and `b_1` are the weight matrix and bias vector of the first linear
+  layer, projecting `x` to the `hidden_dim`.
+- `activation` is a non-linear function like GELU, `GELU(x) = x * Φ(x)`, where
+  `Φ(x)` is the standard Gaussian cumulative distribution function.
+- `W_2` and `b_2` are the weight matrix and bias vector of the second linear
+  layer, projecting the result back to the `output_dim`.
+
+This same function, with shared weights `W_1, b_1, W_2, b_2`, is applied
+identically to each token vector across the entire sequence, making the
+operation highly parallelizable.
+
+References:
+This MLP block is a core component of the Swin Transformer, as detailed in:
+-   Liu, Z., et al. (2021). Swin Transformer: Hierarchical Vision Transformer
+    using Shifted Windows. In Proceedings of the IEEE/CVF International
+    Conference on Computer Vision (ICCV).
+
+It is fundamentally the same position-wise FFN structure introduced in the
+original Transformer paper:
+-   Vaswani, A., et al. (2017). Attention Is All You Need. In Advances in
+    Neural Information Processing Systems (NIPS).
+
+"""
+
 import keras
 from typing import Tuple, Optional, Dict, Any, Union, Callable
 

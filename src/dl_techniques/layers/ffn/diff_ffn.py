@@ -1,17 +1,89 @@
 """
-Neural network layer module implementing the Differential Feed-Forward Network (DifferentialFFN).
+A dual-pathway feed-forward network for differential processing.
 
-This module provides an implementation of a specialized feed-forward network that leverages
-a dual-pathway architecture with explicit positive and negative branches. The DifferentialFFN
-is inspired by biological neural systems which utilize both excitatory and inhibitory signals
-to process information.
+This layer introduces a non-standard feed-forward architecture inspired by
+the principle of push-pull or opponent processing found in biological neural
+systems, such as the human visual system. Instead of processing input signals
+through a single, monolithic pathway, it first decomposes the input into its
+positive and negative components and processes them through two parallel,
+specialized sub-networks. The final representation is derived from the
+difference between the outputs of these two pathways.
 
-The key innovation is the initial splitting of the input tensor into positive and negative
-components, which are then processed by separate pathways. The final output is computed
-from the difference between these pathways, allowing the network to model complex relationships
-by explicitly separating enhancing and suppressing factors. This approach can be particularly
-effective in attention mechanisms, feature discrimination, and scenarios where nuanced
-signal processing is required.
+The core hypothesis is that dedicating separate pathways for excitatory
+(positive) and inhibitory (negative) signals allows the network to learn
+more disentangled and robust features. This explicit separation forces the
+model to learn what aspects of the input should "push" the representation
+in a certain direction versus what should "pull" it away, potentially
+leading to better gradient flow and more nuanced function approximation.
+
+Architectural Overview:
+The layer's data flow is structured as follows:
+
+1.  **Input Decomposition**: The input tensor `x` is split into two
+    non-negative tensors: a positive part `x_pos = ReLU(x)` and a negative
+    part `x_neg = ReLU(-x)`. This ensures that for any given feature, its
+    signal is active in only one of the two pathways.
+
+2.  **Parallel Pathway Processing**: `x_pos` and `x_neg` are fed into two
+    structurally identical but independently parameterized branches. Each
+    branch consists of a sequence of linear transformations, layer
+    normalization, and non-linear activations. This allows each pathway to
+    learn specialized transformations for its respective signal type.
+
+3.  **Differential Combination**: The outputs of the positive and negative
+    pathways are combined through subtraction. This "differential" tensor
+    represents the net effect, or the balance of evidence, between the
+    features learned by the two opposing branches.
+
+4.  **Output Projection**: The resulting differential tensor is further
+    normalized and passed through a final linear projection to produce the
+    layer's output.
+
+Foundational Mathematics:
+Let `x` be the input vector. The layer's computation can be expressed as:
+
+1.  Input Splitting:
+    `x_pos = max(0, x)`
+    `x_neg = max(0, -x)`
+
+2.  Branch Functions: Let `f_pos(.)` and `f_neg(.)` represent the learned
+    functions of the positive and negative pathways, respectively. Each
+    function is a composition of Dense, LayerNorm, and Activation layers.
+    `h_pos = f_pos(x_pos)`
+    `h_neg = f_neg(x_neg)`
+
+3.  Differential Computation: The core operation is the subtraction of the
+    pathway outputs.
+    `h_diff = h_pos - h_neg`
+
+4.  Final Output: The differential representation is then transformed to the
+    final output dimension.
+    `y = W_out @ h_diff + b_out`
+
+This architecture transforms the standard FFN computation `y = f(x)` into
+`y = g(f_pos(max(0, x)) - f_neg(max(0, -x)))`, forcing the model to learn a
+function as a difference of two non-negative component functions. The default
+use of a `SoftOrthonormalConstraintRegularizer` on the weights encourages
+the learned transformations within each pathway to be well-conditioned,
+preventing feature collapse and promoting stable training dynamics.
+
+References:
+The design synthesizes several key ideas in modern deep learning:
+
+-   The input splitting is a core component of the Concatenated ReLU (CReLU)
+    activation, which was proposed to preserve information by handling
+    positive and negative phases separately.
+    - Shang, W., et al. (2016). Understanding and Improving Convolutional
+      Neural Networks via Concatenated Rectified Linear Units. ICML.
+
+-   The use of Layer Normalization is critical for stabilizing the activations
+    in each independent pathway, a technique introduced in:
+    - Ba, J. L., Kiros, J. R., & Hinton, G. E. (2016). Layer Normalization.
+      arXiv preprint arXiv:1607.06450.
+
+-   The concept of opponent processing is a foundational principle in
+    neuroscience, particularly in models of sensory perception.
+
 """
 
 import keras

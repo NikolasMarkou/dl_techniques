@@ -1,14 +1,82 @@
 """
-OrthoGLU Feed Forward Network Implementation
-===========================================
+An orthogonally-regularized Gated Linear Unit FFN.
 
-This module implements an Orthogonally-Regularized Gated Linear Unit (OrthoGLU)
-Feed Forward Network. This architecture synergizes the structured representation
-learning of the `OrthoBlock` with the dynamic information routing of the GLU
-mechanism.
+This layer synergizes two powerful concepts: the dynamic, input-dependent
+information routing of Gated Linear Units (GLU) and the training stability
+and feature decorrelation benefits of orthogonal transformations. By replacing
+the standard dense projections in a GLU with orthogonally-regularized blocks,
+this layer aims to perform "disciplined routing," where feature selection
+occurs within a structured, well-behaved latent space.
 
-This implementation strictly follows modern Keras 3 best practices for robust,
-serializable, and production-ready custom layers.
+The core design philosophy is to first map the input into a stable and
+information-rich representation and then apply the selective gating
+mechanism. This prevents the feature collapse and gradient instability that
+can sometimes affect deep or complex feed-forward networks.
+
+Architectural Overview:
+The layer's architecture enforces structure at both its input and output:
+
+1.  **Structured Projection**: The input tensor is first projected into a
+    higher-dimensional space using an `OrthoBlock`. This block's internal
+    weight matrix is regularized towards orthogonality. This initial step
+    transforms the input features into a decorrelated basis, ensuring a
+    rich and stable representation for subsequent processing.
+
+2.  **Gated Routing**: The orthogonally projected tensor is split into two
+    halves: a "gate" and a "value." The gate is passed through a non-linear
+    activation function and then element-wise multiplied with the value. This
+    is the standard GLU mechanism, which dynamically filters the information
+    in the value tensor based on the input-dependent gate.
+
+3.  **Structured Consolidation**: The resulting gated tensor is projected back
+    to the final output dimension using a second `OrthoBlock`. This step
+    re-imposes structural discipline, ensuring the final output
+    representation also inhabits a stable, decorrelated space.
+
+Foundational Mathematics:
+The layer's computation combines the GLU formulation with the properties of
+orthogonal matrices. Let `x` be the input vector.
+
+1.  The gated representation `h` is formed as:
+    `[g', v] = O_in(x)`
+    `h = activation(g') * v`
+    where `O_in` represents the input `OrthoBlock` transformation and `*` is
+    the element-wise product.
+
+2.  The key component is the `OrthoBlock`, which implements a linear
+    transformation `y = Wx` where the weight matrix `W` is encouraged to be
+    orthogonal. An orthogonal matrix satisfies the property `W^T W = I`,
+    where `I` is the identity matrix. This property has profound implications:
+    -   **Norm Preservation**: Orthogonal transformations are isometries,
+        meaning they preserve vector norms (`||Wx||_2 = ||x||_2`). This helps
+        prevent the magnitude of activations from exploding or vanishing,
+        leading to more stable training.
+    -   **Gradient Stability**: During backpropagation, the gradient norm is
+        also preserved (`||∇_x L|| = ||W^T ∇_y L|| = ||∇_y L||`). This ensures
+        that error signals propagate effectively through the layer without
+        being unduly scaled, mitigating the vanishing and exploding gradient
+        problems.
+    -   **Feature Decorrelation**: Orthogonality regularization encourages
+        the rows (and columns) of the weight matrix to be orthonormal. This
+        forces the layer to learn a set of non-redundant filters, maximizing
+        the information capacity of the learned representation.
+
+The synergy of these components allows the `OrthoGLUFFN` to learn a highly
+expressive, input-adaptive function while maintaining the desirable training
+dynamics associated with orthogonal transformations.
+
+References:
+The GLU mechanism and its variants are detailed in:
+-   Shazeer, N. (2020). GLU Variants Improve Transformer. arXiv preprint
+    arXiv:2002.05202.
+
+The benefits and techniques of using orthogonality in deep learning are
+explored in:
+-   Bansal, N., et al. (2018). Can We Gain More from Orthogonality
+    Regularizations in Training Deep Networks? NeurIPS.
+-   Cisse, M., et al. (2017). Parseval Networks: Improving Robustness to
+    Adversarial Examples. ICML.
+
 """
 
 import keras
