@@ -1,9 +1,58 @@
 """
-Reversible Instance Normalization (RevIN) Layer for Time-Series Forecasting.
+A Reversible Instance Normalization for time series forecasting.
 
-This module implements RevIN as described in:
-"Reversible Instance Normalization for Accurate Time-Series Forecasting
-against Distribution Shift" (Kim et al., ICLR 2022).
+This layer addresses the challenge of distribution shift in time series
+forecasting, a common problem where the statistical properties (e.g., mean,
+variance) of the time series change over time. Models trained on past data
+may perform poorly when faced with future data from a different distribution.
+
+Architecture and Design Philosophy:
+RevIN tackles this problem by decoupling the core forecasting task from the
+learning of instance-specific statistics. It operates as a stateful,
+two-part module: a normalization forward pass and a denormalization reverse
+pass.
+
+1.  **Normalization (Forward Pass)**: Before the main forecasting model
+    processes the input time series, RevIN normalizes each instance in the
+    batch independently. It calculates the mean and standard deviation along
+    the time dimension for each individual series and standardizes it to have
+    a zero mean and unit variance. The key insight is that this makes the
+    task for the downstream model stationary; it always sees input sequences
+    with a consistent distribution, regardless of the original scale or
+    level of the series. Crucially, the layer stores the computed mean and
+    standard deviation for each instance.
+
+2.  **Denormalization (Reverse Pass)**: After the forecasting model produces
+    its predictions in the normalized space, the `denormalize` method is
+    called. This method uses the stored statistics from the corresponding
+    input instance to reverse the normalization process, projecting the
+    forecast back into the original scale and level of the input series.
+
+This reversible design ensures that the model can focus on learning temporal
+patterns without being confounded by shifts in magnitude or level, while the
+final forecast remains correctly scaled and interpretable.
+
+Foundational Mathematics:
+The core of RevIN is instance normalization applied to time series. For each
+time series instance `xᵢ` in a batch, with `i` indexing the sample:
+-   **Statistics Computation**: The mean `μᵢ` and standard deviation `σᵢ` are
+    calculated across the time-step dimension of `xᵢ`.
+-   **Normalization**: The input to the forecasting model is `x̂ᵢ = (xᵢ - μᵢ) / (σᵢ + ε)`.
+-   **Denormalization**: If the model produces a forecast `ŷᵢ`, the final output
+    is restored via `yᵢ = ŷᵢ * (σᵢ + ε) + μᵢ`.
+
+An optional learnable affine transformation (`yᵢ = γ * x̂ᵢ + β`) can be
+applied after normalization, allowing the model to learn an optimal data
+scale for its internal processing. This transformation is also reversed during
+denormalization. By making the normalization instance-specific and perfectly
+reversible, RevIN preserves the unique statistical identity of each time
+series while standardizing the learning problem for the model.
+
+References:
+    - [Kim, T., Kim, J., Tae, Y., Park, C., Choi, J. H., & Choo, J. (2022).
+      Reversible Instance Normalization for Accurate Time-Series
+      Forecasting against Distribution Shift. In ICLR.](
+      https://arxiv.org/abs/2107.03445)
 """
 
 import keras

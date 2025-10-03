@@ -1,41 +1,66 @@
 """
-Adaptive Lag Attention Layer
+A context-aware, gated attention mechanism for autoregression.
 
-This layer improves upon a simple dynamic lag model by incorporating more robust
-attention and gating mechanisms. It calculates a forecast by attending to a set
-of historical values (lags), which can be standard or dilated.
+This layer performs a dynamic, context-dependent autoregressive forecast. It
+is designed to be a robust and interpretable component within a larger time
+series model, allowing the model to learn when and how to rely on historical
+values.
 
-Key Features & Improvements:
-    - Independent Attention Weights: Uses a sigmoid activation instead of softmax.
-      This allows the model to assign high importance to multiple lags simultaneously
-      or to ignore all lags if necessary, avoiding the "forced competition" of softmax.
-    - Explicit Gating: A separate gate neuron learns to control the overall
-      contribution of the autoregressive component. This allows the model to
-      explicitly "turn off" its reliance on past values when they are not predictive.
-    - Multi-Scale Support: Natively supports dilated lags, enabling the model to
-      attend to different time scales (e.g., daily, weekly, monthly) within a
-      single layer.
+Architecture and Design Philosophy:
+The layer's architecture is based on separating the control logic from the
+data flow. A `context_tensor`, typically from a deep encoder like an LSTM,
+acts as the controller. It does not directly participate in the forecast but
+instead generates two distinct control signals that modulate a separate
+`lag_tensor` containing historical values.
 
-Theory:
-    For each input, the layer receives a context vector and a set of lag values.
-    It then computes:
+1.  **Attention Weights**: The context is passed through a dense layer with a
+    `sigmoid` activation to produce a set of independent attention weights,
+    one for each lag. These weights determine the relative importance of
+    each historical value for the current time step.
 
-    1. Attention Weights (w): A set of independent weights between 0 and 1, one
-       for each lag, determined by the context.
-       w_i = sigmoid(f_w(context))
-    2. Gating Value (g): A single scalar value between 0 and 1 that controls the
-       overall influence of the historical data.
-       g = sigmoid(f_g(context))
-    3. Weighted Lags: The weighted sum of the historical values.
-       s = Σ w_i * y_{t-i}
-    4. Gated Output: The final prediction is the gated weighted sum.
-       prediction = g * s
+2.  **Master Gate**: In parallel, the context is passed through a second dense
+    layer, also with a `sigmoid` activation, to produce a single scalar
+    gate value. This gate acts as a master switch, controlling the overall
+    contribution of the entire autoregressive component to the final model output.
 
-Applications:
-    - Robust financial forecasting where the importance of history can vary dramatically.
-    - Modeling time series with complex, multiple, and non-stationary seasonalities.
-    - Any scenario where a model needs to dynamically decide whether to be
-      autoregressive or to rely on other exogenous features.
+The final output is the weighted sum of the lags, multiplicatively controlled
+by the master gate. This design allows the model to learn complex temporal
+strategies, such as ignoring history entirely (gate ≈ 0) during anomalous
+periods or focusing on specific seasonalities (high weights on corresponding
+lags).
+
+Foundational Mathematics:
+The two key mathematical choices distinguish this layer from standard
+attention mechanisms and provide its flexibility:
+
+1.  **Independent Sigmoid Attention**: Unlike the `softmax` function used in
+    Transformers, which forces a competitive probability distribution where
+    `sum(weights) = 1`, this layer uses a `sigmoid` activation. This yields
+    independent weights `wᵢ ∈ (0, 1)` for each lag. This is a critical
+    distinction: it allows the model to recognize that multiple historical
+    points are simultaneously important (e.g., both 7 days ago and 365 days
+    ago could have high weights), or conversely, that *no* historical points
+    are relevant. `softmax` would be forced to assign high weights to some
+    lags even if all are irrelevant.
+
+2.  **Multiplicative Gating**: The final output is computed as:
+    `output = g * (Σᵢ wᵢ * lᵢ)`
+    where `g` is the master gate, `wᵢ` are the attention weights, and `lᵢ` are
+    the lag values. The gate `g` provides a mechanism to learn the utility of
+    the entire autoregressive feature. If the context suggests that history
+    is not predictive (e.g., due to a structural break), the model can learn
+    to set `g` close to zero, effectively nullifying the layer's output and
+    allowing other parts of the model to dominate the forecast.
+
+References:
+    The concept of gating to control information flow is a foundational
+    principle in modern deep learning, most famously used in LSTMs and GRUs.
+    - [Hochreiter, S., & Schmidhuber, J. (1997). Long Short-Term Memory.
+      Neural Computation.](
+      https://www.bioinf.jku.at/publications/older/2604.pdf)
+    - [Cho, K., et al. (2014). Learning Phrase Representations using RNN
+      Encoder-Decoder for Statistical Machine Translation. In EMNLP.](
+      https://arxiv.org/abs/1406.1078)
 """
 
 import keras

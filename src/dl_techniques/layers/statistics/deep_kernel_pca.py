@@ -1,19 +1,59 @@
 """
-Deep Kernel Principal Component Analysis (DKPCA) Layer for Keras 3
+Deep Kernel Principal Component Analysis (DKPCA) algorithm.
 
-This module implements Deep Kernel PCA, a hierarchical extension of Kernel PCA
-that extracts multi-level features with forward and backward dependencies.
+This layer provides a hierarchical, multi-level extension of Kernel Principal
+Component Analysis (KPCA). It is designed to learn more expressive and
+disentangled feature representations than shallow KPCA by creating a deep
+architecture with coupled optimization across all levels.
+
+Architecture and Design Philosophy:
+The core innovation of DKPCA lies in its forward and backward coupling
+mechanisms, which distinguish it from a naive stacking of independent KPCA
+layers. The architecture consists of multiple sequential levels, where each
+level performs a kernel transformation and extracts principal components.
+
+1.  **Forward Coupling**: The data flows directionally from the input through
+    the hierarchy. The principal components extracted at level `j-1` serve as
+    the input features for level `j`. This allows the model to build
+    progressively more abstract representations, with each level operating on
+    the features learned by the one before it.
+
+2.  **Backward Coupling**: This is the key mechanism that enables joint
+    optimization across the hierarchy. Information from deeper, more abstract
+    levels (e.g., level `j+1`) flows backward to refine the representations at
+    shallower levels (e.g., level `j`). This ensures that the features learned
+    at a given level are not just optimal for reconstructing their immediate
+    input but are also useful for the feature extraction task of subsequent
+    levels. This transforms the learning problem from a greedy, layer-by-layer
+    process into a globally coherent optimization, yielding more informative
+    and disentangled features throughout the entire network.
+
+Foundational Mathematics:
+DKPCA extends the foundational principles of Kernel PCA. Standard KPCA uses
+the "kernel trick" to implicitly map data into a high-dimensional feature
+space `φ(x)` and then performs PCA in that space. This is achieved by
+constructing a kernel matrix `K` where `Kᵢⱼ = k(xᵢ, xⱼ) = <φ(xᵢ), φ(xⱼ)>`
+and finding its eigenvectors.
+
+DKPCA formulates this as a joint optimization problem across all `L` levels.
+The objective is to find sets of principal component coefficients `{α¹, α²,
+..., α^L}` that simultaneously minimize the reconstruction error at every
+level. The optimization problem is coupled: the input to the kernel `K^(j)` at
+level `j` is derived from the components `α^(j-1)`. The backward coupling is
+formalized by introducing dependencies in the objective function that link the
+solution `α^(j)` to the solution `α^(j+1)`. This creates a holistic system
+where the principal components at each level are influenced by all other
+levels, leading to a globally consistent and expressive hierarchical
+representation.
+
+References:
+    - [Tonin, P. A., et al. (2023). Deep Kernel Principal Component Analysis
+      for Multi-level Feature Learning.](https://arxiv.org/abs/2302.11220)
 """
 
 import keras
 from keras import ops, initializers, regularizers
 from typing import Optional, Union, Tuple, List, Dict, Any
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

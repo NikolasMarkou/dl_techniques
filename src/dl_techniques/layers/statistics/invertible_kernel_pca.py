@@ -1,21 +1,75 @@
 """
-Invertible Kernel PCA (ikPCA) Layer with Random Fourier Features for Keras 3
+An invertible Kernel PCA using Random Fourier Features.
 
-This module implements Invertible Kernel PCA using Random Fourier Features (RFF)
-approximation, enabling both forward transformation and exact reconstruction
-without requiring supervised learning.
+This layer addresses the classical "pre-image problem" of Kernel Principal
+Component Analysis (KPCA). While traditional KPCA is effective for non-linear
+feature extraction, it lacks a natural way to reconstruct the original data
+from its principal components. This implementation solves this by approximating
+the kernel function with an explicit, finite-dimensional feature map based on
+Random Fourier Features (RFF), making the transformation analytically invertible.
+
+Architecture and Design Philosophy:
+The architecture transforms the implicit, non-linear KPCA problem into an
+explicit, linear PCA problem in a higher-dimensional feature space. The process
+involves two main stages:
+
+1.  **Random Feature Mapping**: The input data is first projected into a
+    higher-dimensional space using a fixed, non-linear function defined by
+    Random Fourier Features. This mapping, `z(x)`, is designed such that the
+    dot product between transformed points, `z(x)ᵀz(y)`, approximates a desired
+    shift-invariant kernel function, `k(x, y)`.
+
+2.  **Linear PCA**: Standard Principal Component Analysis is then performed on
+    these explicit random features `z(x)`. This involves computing the
+    covariance of the feature matrix and finding its principal components
+    (eigenvectors).
+
+Because the feature map `z(x)` is explicit and its inverse can be
+approximated, the entire process becomes reversible. The reconstruction is
+achieved by projecting the components back to the RFF space and then applying
+the approximate inverse of the `z(x)` mapping to return to the original data
+space. This avoids the need for a separate, supervised "decoder" network for
+reconstruction.
+
+Foundational Mathematics:
+The method is built upon Bochner's theorem, which states that any
+shift-invariant kernel `k(x, y) = k(x - y)` is the Fourier transform of a
+non-negative measure. The Random Fourier Features method, introduced by
+Rahimi and Recht, leverages this by approximating the kernel as the expected
+value of a randomized feature map.
+
+For a shift-invariant kernel `k`, its approximation is:
+`k(x, y) ≈ z(x)ᵀz(y)`
+The feature map `z(x)` is defined as:
+`z(x) = sqrt(2/D) * [cos(ω₁ᵀx + b₁), ..., cos(ω_Dᵀx + b_D)]`
+where:
+-   `D` is the number of random features.
+-   `ωᵢ` are random frequency vectors sampled from a distribution `p(ω)` which
+    is the Fourier transform of the kernel `k`. For the Radial Basis Function
+    (RBF) kernel `k(x, y) = exp(-γ||x-y||²)`, `p(ω)` is a Gaussian distribution.
+-   `bᵢ` are random phase shifts sampled uniformly from `[0, 2π]`.
+
+By projecting the input data `X` into this feature space `Z`, the kernel
+matrix `K ≈ ZZᵀ`. The problem is now reduced to performing standard PCA on `Z`.
+The principal components are the eigenvectors of the covariance matrix `ZᵀZ`.
+The reconstruction from components `c` back to the original space `x` involves
+approximately solving `z(x) = Vc` for `x`, where `V` are the principal
+components. This is made possible by the explicit form of `z(x)`, primarily
+by applying the `arccos` function and solving a linear system involving the
+pseudo-inverse of the frequency matrix `ω`.
+
+References:
+    - [Gedon, A., et al. (2023). Invertible Kernel PCA with Random Fourier
+      Features.](https://arxiv.org/abs/2303.05043)
+    - [Rahimi, A., & Recht, B. (2007). Random Features for Large-Scale
+      Kernel Machines. In NIPS.](
+      https://papers.nips.cc/paper/2007/hash/013a006f03dbc5392effeb8f18fda755-Abstract.html)
 """
 
 import keras
 import numpy as np
 from keras import ops, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any, Literal
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

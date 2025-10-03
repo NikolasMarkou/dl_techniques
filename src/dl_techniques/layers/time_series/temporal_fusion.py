@@ -1,40 +1,71 @@
 """
-Temporal Fusion Layer for Advanced Time Series Forecasting
+Fuse contextual and autoregressive forecasts with a dynamic gating mechanism.
 
-This layer provides a sophisticated mechanism for fusing information from a deep
-contextual model (like an LSTM) with a dynamic autoregressive model based on
-temporal lags. It is designed for robustness, interpretability, and flexibility.
+This layer implements a sophisticated fusion strategy for time series
+forecasting, designed to combine the strengths of a deep, context-aware model
+with a simple, dynamic autoregressive model. It is particularly effective for
+time series that exhibit both complex, non-linear patterns and stable,
+history-dependent behaviors.
 
-Theory:
-    The layer operates on two parallel forecasting pathways which are then
-    intelligently blended:
+Architecture and Design Philosophy:
+The layer operates on the principle of a dynamically weighted mixture of
+experts, where two specialized forecasting pathways are blended based on the
+current input context.
 
-    1. Contextual Pathway: A rich `context_tensor` (e.g., the output of an
-       LSTM) is passed through a dense layer to produce a `context_forecast`.
-       This represents the model's understanding of the current state, including
-       any exogenous variables or complex patterns.
+1.  **The Contextual Pathway**: This path leverages a rich, latent
+    representation of the time series (the `context_tensor`), typically the
+    output of a recurrent or attentional encoder. A dense layer transforms
+    this context directly into a forecast. This pathway is responsible for
+    capturing complex, non-linear relationships, incorporating exogenous
+    features, and understanding the high-level "state" of the system.
 
-    2. Autoregressive Pathway: The same `context_tensor` is used to generate:
-       a) Independent attention weights (via sigmoid) for a set of historical
-          `lag_tensor` values.
-       b) A `lag_forecast` is computed from the attention-weighted sum of these lags.
+2.  **The Autoregressive Pathway**: This path models the forecast as a function
+    of recent past values (the `lag_tensor`). Crucially, it is not a static
+    autoregressive model. Instead, it uses a context-aware attention
+    mechanism where the `context_tensor` generates weights for each lag. This
+    allows the model to dynamically decide which past time steps are most
+    relevant for the current prediction.
 
-    3. Fusion Gating: The context also generates a scalar `fusion_gate` (g)
-       between 0 and 1. This gate dynamically interpolates between the two
-       forecasts, deciding how much to trust each pathway for the final prediction:
+3.  **The Fusion Gate**: The core of the layer is a learned gating mechanism.
+    The `context_tensor` is passed through a separate dense layer with a
+    sigmoid activation to produce a scalar "fusion gate" value between 0 and 1.
+    This gate determines the mixing proportion between the two pathways,
+    allowing the model to learn a sophisticated switching strategy. For instance,
+    it might learn to rely on the stable autoregressive path during normal
+    periods (gate ≈ 1) but switch to the more flexible contextual path during
+    anomalous events or regime shifts (gate ≈ 0).
 
-       `Final Output = (1 - g) * context_forecast + g * lag_forecast`
+Foundational Mathematics:
+The layer's operation can be described as a context-dependent, gated linear
+interpolation between two expert forecasts. Given a context vector `c` and a
+lag vector `l = [l₁, l₂, ..., lₙ]`:
 
-    This architecture allows the model to learn complex strategies, such as relying
-    on historical patterns during stable periods (gate ≈ 1) but switching to a
-    context-driven forecast during anomalous events (gate ≈ 0).
+1.  **Context Forecast**: A direct, non-linear projection of the context.
+    `f_context = W_c * c + b_c`
 
-Applications:
-    - Financial forecasting (cash flow, revenue) requiring both trend-following
-      and adaptation to market shocks.
-    - Demand forecasting with complex seasonalities and promotions.
-    - Any sequence modeling task where a blend of deep feature extraction and
-      simple autoregression is beneficial.
+2.  **Autoregressive Forecast**: A contextually-weighted sum of lags.
+    -   Attention weights: `α = sigmoid(W_α * c + b_α)`
+    -   Lag forecast: `f_lag = W_l * (Σᵢ αᵢ * lᵢ) + b_l`
+
+3.  **Fusion Gate**: A learned interpolation coefficient.
+    `g = sigmoid(W_g * c + b_g)`
+
+4.  **Final Output**: The gated combination of the two forecasts.
+    `output = (1 - g) * f_context + g * f_lag`
+
+The use of the sigmoid function ensures that the attention weights and the
+fusion gate are constrained to the (0, 1) range, allowing them to be
+interpreted as probabilities or mixing proportions.
+
+References:
+    The concept of gating is a cornerstone of modern recurrent architectures,
+    and this layer applies a similar principle to model fusion.
+    - [Hochreiter, S., & Schmidhuber, J. (1997). Long Short-Term Memory.
+      Neural Computation.](
+      https://www.bioinf.jku.at/publications/older/2604.pdf)
+    - [Dauphin, Y. N., Fan, A., Auli, M., & Grangier, D. (2017).
+      Language Modeling with Gated Convolutional Networks. In ICML.](
+      https://arxiv.org/abs/1612.08083)
 """
 
 import keras

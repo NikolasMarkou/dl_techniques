@@ -1,8 +1,63 @@
 """
-TiRex-inspired time series forecasting components for Keras.
+A hybrid sequential block combining recurrent and attention mechanisms.
 
-This module implements time series forecasting layers inspired by the TiRex architecture,
-adapted to work with Keras and our project's available components.
+This layer provides a flexible and powerful building block for deep time series
+models by unifying the two dominant paradigms for sequence processing:
+recurrence (LSTMs) and self-attention (Transformers). It is designed to
+capture the complex, multi-faceted dependencies present in time series data.
+
+Architecture and Design Philosophy:
+The block's design is founded on the principle that LSTMs and self-attention
+possess complementary inductive biases, each excelling at modeling different
+types of temporal patterns:
+-   **LSTMs (Recurrence)**: Excel at capturing local, sequential dependencies.
+    Their stateful, step-by-step processing makes them inherently adept at
+    modeling temporal ordering and evolving states over time.
+-   **Self-Attention (Transformers)**: Excels at capturing global, long-range
+    dependencies. By allowing every time step to directly interact with every
+    other time step, it can identify content-based relationships regardless of
+    their distance in the sequence.
+
+The `mixed` architecture operationalizes this synergy by processing the input
+sequentially: first with an LSTM, then with a self-attention layer. The
+hypothesis is that the LSTM first enriches each time step with a summary of
+its local, historical context. The self-attention layer then operates on these
+context-aware representations, allowing it to model global interactions
+between semantically rich, localized events rather than raw time steps.
+
+For training stability, especially in deep architectures, the block adopts the
+Pre-Layer Normalization (Pre-LN) structure. Normalization is applied *before*
+the main transformation in each sub-layer, which has been shown to promote
+smoother gradient flow and more stable training dynamics compared to the
+original Post-LN design.
+
+Foundational Mathematics:
+-   **LSTM**: The core of the LSTM is its gating mechanism (input, forget,
+    output gates). These gates are small neural networks that learn to control
+    the flow of information through the cell. The forget gate decides what
+    information to discard from the cell state, the input gate decides what
+    new information to store, and the output gate determines what part of the
+    cell state to expose. This allows LSTMs to selectively remember or forget
+    information over long sequences, mitigating the vanishing gradient problem.
+-   **Self-Attention**: The mechanism is governed by the Scaled Dot-Product
+    Attention formula:
+    `Attention(Q, K, V) = softmax(Q @ K.T / sqrt(d_k)) @ V`
+    Here, each time step in the input sequence is projected into three vectors:
+    a Query (Q), a Key (K), and a Value (V). The dot product between a query
+    and all keys produces a similarity score. These scores are scaled and
+    normalized via softmax to become attention weights, which are then used to
+    compute a weighted sum of all value vectors. This effectively allows each
+    time step to dynamically construct its representation by focusing on the
+    most relevant parts of the entire sequence.
+
+References:
+    - [Hochreiter, S., & Schmidhuber, J. (1997). Long Short-Term Memory.
+      Neural Computation.](
+      https://www.bioinf.jku.at/publications/older/2604.pdf)
+    - [Vaswani, A., et al. (2017). Attention Is All You Need. In NIPS.](
+      https://arxiv.org/abs/1706.03762)
+    - [Xiong, R., et al. (2020). On Layer Normalization in the Transformer
+      Architecture. In ICML.](https://arxiv.org/abs/2002.04745)
 """
 
 import keras
@@ -12,9 +67,9 @@ from typing import Optional, Union, Tuple, Callable, Any, Literal, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from ..norms import create_normalization_layer
-from ..attention import create_attention_layer
-from ..ffn import create_ffn_layer
+from ..ffn import create_ffn_layer, FFNType
+from ..attention import create_attention_layer, AttentionType
+from ..norms import create_normalization_layer, NormalizationType
 
 # ---------------------------------------------------------------------
 

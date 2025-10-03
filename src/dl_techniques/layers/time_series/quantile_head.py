@@ -1,8 +1,57 @@
 """
-TiRex-inspired time series forecasting components for Keras.
+A quantile prediction head for probabilistic forecasting.
 
-This module implements time series forecasting layers inspired by the TiRex architecture,
-adapted to work with Keras and our project's available components.
+This layer serves as the final output stage for a deep forecasting model,
+transforming a latent feature representation into a set of quantile
+predictions for a future time horizon. Its purpose is to enable
+probabilistic forecasting, which moves beyond single-point predictions to
+provide a richer, uncertainty-aware view of the future.
+
+Architecture and Design Philosophy:
+The architecture is intentionally simple: a linear projection from the encoder's
+feature space to the target space defined by the quantiles and the forecast
+horizon. It consists of a single `Dense` layer that maps the input features
+to a flat vector of size `num_quantiles * output_length`, followed by a
+reshape operation to structure the output.
+
+This design assumes that the upstream encoder network is responsible for
+extracting all necessary complex, non-linear patterns from the input time
+series. This head then acts as a simple, learnable mapping from that rich
+representation to the parameters of the forecast distribution, where the
+quantiles serve as a non-parametric description of that distribution's shape.
+
+Foundational Mathematics:
+This layer is designed to be trained with a quantile loss function, commonly
+known as the "pinball loss." Unlike Mean Squared Error, which trains a model
+to predict the conditional mean, the pinball loss trains a model to predict a
+specific conditional quantile. The loss for a given quantile `τ ∈ (0, 1)` is
+defined as:
+
+L_τ(y, ŷ) =
+    | (y - ŷ) * τ,         if y ≥ ŷ  (under-prediction)
+    | (y - ŷ) * (τ - 1),   if y < ŷ  (over-prediction)
+
+The intuition behind this asymmetric loss is that it penalizes over- and
+under-predictions differently. For a low quantile like τ=0.1, the penalty for
+under-prediction is small (scaled by 0.1) while the penalty for
+over-prediction is large (scaled by 0.9). To minimize this loss, the network
+learns to output a value `ŷ` that is expected to be lower than the true value
+`y` approximately 90% of the time. Conversely, for τ=0.9, the network is
+incentivized to predict a high value. For the median (τ=0.5), the penalties
+are symmetric, and the loss becomes equivalent to the Mean Absolute Error.
+
+By training the model to simultaneously minimize this loss for multiple
+quantiles (e.g., 0.1, 0.5, 0.9), the `QuantileHead` learns to output a range
+of values that collectively form a prediction interval, quantifying the
+model's uncertainty about the future.
+
+References:
+    - [Koenker, R., & Bassett Jr, G. (1978). Regression Quantiles.
+      Econometrica.](https://www.jstor.org/stable/1913643)
+    - [Taylor, J. W. (2000). A Quantile Regression Neural Network Approach to
+      Estimating the Conditional Density of Multi-period Returns. Journal
+      of Forecasting.](
+      https://onlinelibrary.wiley.com/doi/abs/10.1002/1099-131X(200009)19:5%3C299::AID-FOR779%3E3.0.CO;2-4)
 """
 
 import keras
