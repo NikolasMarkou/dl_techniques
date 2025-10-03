@@ -13,7 +13,7 @@ import keras
 import tempfile
 import os
 
-from dl_techniques.layers.som_nd_soft_layer import SoftSOMLayer
+from dl_techniques.layers.memory.som_nd_soft_layer import SoftSOMLayer
 
 
 class TestSoftSOMLayer:

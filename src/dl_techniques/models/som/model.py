@@ -104,7 +104,7 @@ from typing import Tuple, Optional, Union, List, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.som_2d_layer import SOM2dLayer
+from dl_techniques.layers.memory.som_2d_layer import SOM2dLayer
 
 # ---------------------------------------------------------------------
 

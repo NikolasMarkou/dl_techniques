@@ -5,7 +5,7 @@ import keras
 import tempfile
 import os
 
-from dl_techniques.layers.som_nd_layer import SOMLayer
+from dl_techniques.layers.memory.som_nd_layer import SOMLayer
 
 
 class TestSOMLayer:

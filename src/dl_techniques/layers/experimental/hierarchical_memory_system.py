@@ -54,7 +54,7 @@ from typing import Tuple, Optional, Union, Dict, Any, Callable, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from ..som_nd_layer import SOMLayer
+from dl_techniques.layers.memory.som_nd_layer import SOMLayer
 
 # ---------------------------------------------------------------------
 

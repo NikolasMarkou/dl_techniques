@@ -35,7 +35,7 @@ from keras import ops, layers, callbacks, datasets
 
 # Assuming these imports exist and work as intended
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.som_nd_soft_layer import SoftSOMLayer
+from dl_techniques.layers.memory.som_nd_soft_layer import SoftSOMLayer
 from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 
 # Set random seeds for reproducibility

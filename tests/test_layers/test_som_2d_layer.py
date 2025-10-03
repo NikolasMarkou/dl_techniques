@@ -22,10 +22,9 @@ import numpy as np
 import keras
 import tempfile
 import os
-from typing import Tuple, Dict, Any
 
 # Import the refined SOM2dLayer - adjust import path as needed
-from dl_techniques.layers.som_2d_layer import SOM2dLayer
+from dl_techniques.layers.memory.som_2d_layer import SOM2dLayer
 
 
 class TestSOM2dLayer:
