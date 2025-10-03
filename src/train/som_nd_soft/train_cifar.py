@@ -266,21 +266,24 @@ def create_encoder(config: CIFARSOMConfig) -> keras.Model:
             name=f"encoder_conv_{i + 1}"
         )(x)
 
-        if config.use_batch_norm:
-            x = keras.layers.BatchNormalization(name=f"encoder_bn_{i + 1}")(x)
+        if i < len(config.encoder_filters) - 1:
+            if config.use_batch_norm:
+                x = keras.layers.BatchNormalization(name=f"encoder_bn_{i + 1}")(x)
 
-        x = keras.layers.Activation('relu', name=f"encoder_relu_{i + 1}")(x)
+            x = keras.layers.Activation('relu', name=f"encoder_relu_{i + 1}")(x)
 
-        if config.use_dropout and i < len(config.encoder_filters) - 1:
-            x = keras.layers.Dropout(config.dropout_rate, name=f"encoder_dropout_{i + 1}")(x)
+            if config.use_dropout:
+                x = keras.layers.Dropout(config.dropout_rate, name=f"encoder_dropout_{i + 1}")(x)
 
     # Global pooling and dense projection
     x = keras.layers.GlobalAveragePooling2D(name="encoder_pool")(x)
 
-    if config.use_dropout:
-        x = keras.layers.Dropout(config.dropout_rate, name="encoder_dropout_final")(x)
+    x = keras.layers.Dense(config.latent_dim, activation='relu', name="latent_features")(x)
 
-    outputs = keras.layers.Dense(config.latent_dim, activation='relu', name="latent_features")(x)
+    if config.use_batch_norm:
+        x = keras.layers.BatchNormalization(name=f"encoder_bn_{i + 1}")(x)
+
+    x = keras.layers.Activation('relu', name=f"encoder_relu_{i + 1}")(x)
 
     return keras.Model(inputs, outputs, name="encoder")
 
@@ -1364,9 +1367,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--batch-size', type=int, default=64, help='Training batch size')
     parser.add_argument('--learning-rate', type=float, default=1e-3, help='Learning rate')
-    parser.add_argument('--grid-size', type=int, default=16, help='SOM grid size (square)')
-    parser.add_argument('--latent-dim', type=int, default=512, help='Latent dimension before SOM')
-    parser.add_argument('--som-temperature', type=float, default=0.3, help='SOM softmax temperature')
+    parser.add_argument('--grid-size', type=int, default=10, help='SOM grid size (square)')
+    parser.add_argument('--latent-dim', type=int, default=256, help='Latent dimension before SOM')
+    parser.add_argument('--som-temperature', type=float, default=0.5, help='SOM softmax temperature')
     parser.add_argument('--no-augmentation', action='store_true', help='Disable data augmentation')
     parser.add_argument('--output-dir', type=str, default='results', help='Output directory')
 
