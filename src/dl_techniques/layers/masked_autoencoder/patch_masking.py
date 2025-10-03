@@ -1,6 +1,46 @@
+"""
+A patch-based random masking strategy for self-supervised learning.
+
+This layer is the core data corruption mechanism for self-supervised models
+like Masked Autoencoders (MAE). It performs a structured, patch-based masking
+of the input image to create a challenging pretext task for a neural network.
+
+Architecture and Design Philosophy:
+The fundamental idea is to force a model to learn high-level semantic
+representations by predicting large missing regions of an image, rather than
+just interpolating low-level textures from adjacent pixels. To achieve this,
+the layer first deconstructs the image into a non-overlapping grid of
+patches. A random subset of these patches is then selected for masking.
+
+A key design choice, popularized by the MAE paper, is the use of a shared,
+learnable `mask_token`. Instead of simply zeroing out the masked patches,
+they are replaced with this single, trainable vector. This provides a clear
+signal to the downstream model that information is missing and allows the
+model to learn a dedicated representation for "absence," which can be more
+informative than a simple null value.
+
+Foundational Algorithm:
+The masking process is designed to be efficient and fully vectorized. To
+randomly select a fixed ratio of patches for masking without replacement, an
+indirect sorting algorithm is employed:
+1. A vector of random noise is generated, with one value for each patch in
+   the image. The shape of this vector is `(batch_size, num_patches)`.
+2. The indices that would sort this noise vector are found using an `argsort`
+   operation. This effectively produces a random permutation of the patch
+   indices for each image in the batch.
+3. The first `k` indices from this random permutation are chosen as the
+   indices to be masked, where `k` is determined by `mask_ratio`.
+This method avoids iterative sampling and is highly parallelizable on modern
+hardware accelerators like GPUs and TPUs.
+
+References:
+    - [He, K., Chen, X., Xie, S., Li, Y., Dollár, P., & Girshick, R. (2022).
+      Masked Autoencoders Are Scalable Vision Learners. In CVPR.](
+      https://arxiv.org/abs/2111.06377)
+"""
+
 import keras
 from typing import Optional, Tuple, Union, Dict, Any
-
 
 # ---------------------------------------------------------------------
 

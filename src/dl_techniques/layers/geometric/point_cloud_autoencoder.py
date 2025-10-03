@@ -2,6 +2,7 @@ import keras
 from keras import ops
 from typing import List, Dict, Any, Tuple
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PointCloudAutoencoder(keras.layers.Layer):
@@ -227,3 +228,5 @@ class CorrespondenceNetwork(keras.layers.Layer):
         config = super().get_config()
         config.update({'num_gaussians': self.num_gaussians})
         return config
+
+# ---------------------------------------------------------------------

@@ -1,17 +1,98 @@
 """
-Graph Neural Network Layer - Complete Configurable Implementation
+A configurable multi-paradigm Graph Neural Network.
 
-A comprehensive Graph Neural Network layer supporting multiple message passing schemes,
-aggregation strategies, and normalization techniques for concept relationship modeling.
+This layer provides a unified and flexible framework for graph representation
+learning by encapsulating several foundational Graph Neural Network (GNN)
+architectures. It is designed as a composite layer that stacks multiple message-
+passing blocks, allowing for the construction of deep GNNs for complex graph-
+structured data.
+
+The core principle of a GNN is to learn node representations by iteratively
+aggregating information from local neighborhoods. This layer abstracts this
+process into a configurable pipeline, enabling seamless switching between
+different message-passing, normalization, and aggregation strategies.
+
+Architectural Overview:
+The layer operates as a sequence of `num_layers` GNN blocks. Each block
+performs a transformation on the node features, informed by the graph's
+topology as defined by the adjacency matrix. The data flow within a single
+block is as follows:
+
+1.  **Message Passing**: The central mechanism where each node gathers
+    information from its neighbors. This layer supports four distinct paradigms
+    (GCN, GraphSAGE, GAT, GIN), each with a unique inductive bias.
+2.  **Non-linear Activation**: An activation function is applied to the aggregated
+    messages to introduce non-linearity, enabling the model to learn complex
+    functions.
+3.  **Regularization**: Dropout is applied to prevent overfitting on both the
+    node features and the graph structure.
+4.  **Residual Connection**: A skip connection adds the input of the block to
+    its output, facilitating gradient flow and enabling the training of deeper
+    GNNs.
+5.  **Normalization**: A normalization layer (e.g., LayerNorm, RMSNorm) is
+    applied to stabilize training and improve convergence.
+
+After the final GNN block, an optional aggregation step can be applied to
+pool node-level representations into a single graph-level embedding.
+
+Foundational Mathematics:
+The layer's behavior is determined by the chosen `message_passing` scheme. Let
+`h_i` be the feature vector for node `i` and `N(i)` be its neighbors.
+
+-   **GCN (Graph Convolutional Network)**: Treats message passing as a form of
+    spectral convolution on the graph. The update rule is a simplified,
+    spatially-localized version of this:
+    `h'_i = σ(Σ_{j ∈ N(i) ∪ {i}} (1/√(deg(i)deg(j))) * W @ h_j)`
+    This is a weighted average of a node's features and its neighbors', where
+    the weights are determined by node degrees to ensure stability.
+
+-   **GraphSAGE (Graph Sample and AGgregate)**: An inductive framework that
+    explicitly separates the aggregation of neighbor information from the
+    update step.
+    `h'_i = σ(W_self @ h_i + W_neighbor @ AGG({h_j | j ∈ N(i)}))`
+    This separation allows it to generalize to unseen nodes, as the aggregation
+    function `AGG` (e.g., mean, max) is independent of the global graph
+    structure.
+
+-   **GAT (Graph Attention Network)**: Assigns learnable, data-dependent
+    importance weights (attention) to neighbors, rather than using fixed
+    coefficients.
+    `h'_i = σ(Σ_{j ∈ N(i)} α_{ij} * W @ h_j)`
+    The attention coefficients `α_{ij}` are computed based on the features of
+    nodes `i` and `j`, allowing the model to focus on more relevant neighbors.
+
+-   **GIN (Graph Isomorphism Network)**: Designed to be a maximally powerful GNN
+    for distinguishing graph structures. Its update rule is proven to be as
+    expressive as the Weisfeiler-Lehman graph isomorphism test.
+    `h'_i = MLP((1 + ε) * h_i + Σ_{j ∈ N(i)} h_j)`
+    It uses a Multi-Layer Perceptron (MLP) as a universal function approximator
+    on the aggregated neighborhood information, with a learnable parameter `ε`
+    to balance self-features versus neighbor features.
+
+References:
+Each message passing scheme is based on a seminal paper in the field:
+-   **GCN**: Kipf, T. N., & Welling, M. (2017). Semi-Supervised Classification
+    with Graph Convolutional Networks. ICLR.
+-   **GraphSAGE**: Hamilton, W. L., Ying, R., & Leskovec, J. (2017). Inductive
+    Representation Learning on Large Graphs. NeurIPS.
+-   **GAT**: Veličković, P., et al. (2018). Graph Attention Networks. ICLR.
+-   **GIN**: Xu, K., Hu, W., Leskovec, J., & Jegelka, S. (2019). How Powerful
+    are Graph Neural Networks? ICLR.
+
 """
 
 import keras
 from keras import ops, layers, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any, Callable, Literal
 
-from dl_techniques.layers.ffn.mlp import MLPBlock
-from dl_techniques.layers.norms.rms_norm import RMSNorm
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
+from ..ffn.mlp import MLPBlock
+from ..norms.rms_norm import RMSNorm
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class GraphNeuralNetworkLayer(keras.layers.Layer):
@@ -488,3 +569,5 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

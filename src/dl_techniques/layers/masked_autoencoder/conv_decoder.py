@@ -1,3 +1,44 @@
+"""
+A lightweight convolutional decoder for image reconstruction.
+
+This decoder is designed for self-supervised learning frameworks like the
+Masked Autoencoder (MAE), where its primary role is to reconstruct an image
+from a high-level latent representation produced by an encoder.
+
+Architecture and Design Philosophy:
+The architecture follows the design principles outlined in the original MAE
+paper, which advocates for an asymmetric encoder-decoder structure. The
+encoder is a large, powerful model (e.g., a Vision Transformer), while the
+decoder is intentionally lightweight. This asymmetry is a crucial design
+choice: it forces the encoder to learn a rich, semantically meaningful
+latent representation, as a simple decoder lacks the capacity to "brute-force"
+the reconstruction from a trivial embedding.
+
+The decoder consists of a series of upsampling blocks. Each block first
+doubles the spatial resolution of the feature maps using a transposed
+convolution and then refines the features at the new resolution with a
+standard convolution. This progressive upscaling allows the model to
+reconstruct spatial details hierarchically. The process concludes with a
+final 1x1 convolution that projects the feature map to the desired number of
+output channels (e.g., 3 for an RGB image).
+
+Foundational Mathematics:
+The core operation is the `Conv2DTranspose` layer, often referred to as a
+deconvolution. While a standard convolution maps a local grid of input
+pixels to a single output pixel, a transposed convolution performs the
+reverse mapping: it projects a single input pixel onto a larger output grid.
+It is a learnable upsampling operation, where the kernel learns the optimal
+way to "paint" a higher-resolution patch from a single low-resolution feature
+vector. This is more powerful than fixed upsampling methods like bilinear or
+nearest-neighbor interpolation, as it allows the network to learn the most
+effective reconstruction patterns from data.
+
+References:
+    - [He, K., Chen, X., Xie, S., Li, Y., Dollár, P., & Girshick, R. (2022).
+      Masked Autoencoders Are Scalable Vision Learners. In CVPR.](
+      https://arxiv.org/abs/2111.06377)
+"""
+
 import keras
 from typing import Optional, Tuple, List, Dict, Any
 

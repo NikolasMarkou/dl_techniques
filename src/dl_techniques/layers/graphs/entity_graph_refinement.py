@@ -1,58 +1,81 @@
 """
-Entity-Graph Refinement Component for LLMs
+Learn a dynamic, sparse, directed graph of entity relationships.
 
-This module provides a sophisticated component for learning hierarchical relationships
-in high-dimensional embedding spaces through iterative graph refinement. It processes
-sequences of n-dimensional embeddings to dynamically extract entities, construct
-directional relationship graphs, and progressively refine them using learned patterns.
+This layer provides a mechanism for deep learning models to move beyond
+unstructured sequential representations and perform explicit relational
+reasoning. It operates by first identifying salient "entities" or concepts
+within a sequence of input embeddings and then iteratively constructing and
+refining a directed graph that captures the relationships between them. This
+provides a powerful inductive bias for tasks requiring an understanding of
+hierarchical, causal, or compositional structures.
 
-## Overview
+The architecture is modality-agnostic, capable of processing embeddings from
+any source (e.g., text, images, audio) to discover underlying relational
+structures.
 
-The EntityGraphRefinement layer enables dynamic relationship modeling in deep learning
-systems by combining attention-based entity extraction with iterative graph learning.
-This approach is particularly effective for:
+Architectural Overview:
+The layer's operation is a multi-stage pipeline designed to transform a flat
+sequence of vectors into a structured, relational graph:
 
-- **Language Models**: Discovering semantic hierarchies and concept relationships
-- **Vision Models**: Learning spatial, compositional, and object relationships
-- **Multimodal Systems**: Cross-modal entity associations and alignment
-- **Knowledge Graphs**: Dynamic relationship discovery and refinement
+1.  **Entity Extraction**: The process begins by identifying abstract concepts.
+    A learnable "entity library"—a set of `max_entities` vectors—acts as a
+    collection of concept detectors. These library vectors serve as queries in
+    a multi-head attention mechanism, attending to the input embedding
+    sequence (which serves as keys and values). The result is a set of
+    contextualized entity representations, where each one corresponds to an
+    abstract concept found within the specific input. An activity mask is
+    also computed to identify which entities were salient in the input.
 
-## Core Architecture
+2.  **Graph Initialization**: A dense, directional relationship matrix is
+    initialized with small random values. This matrix serves as a "canvas"
+    where `graph[i, j]` will eventually represent the relationship from entity
+    `i` to entity `j`.
 
-The component operates through four main stages:
+3.  **Iterative Refinement**: This is the core reasoning process. For a fixed
+    number of steps, every potential edge in the graph is updated by a shared
+    MLP. The update for the edge from entity `i` to `j` is conditioned on a
+    concatenation of the source entity's representation `E_i`, the target
+    entity's representation `E_j`, the current edge weight `G_t[i, j]`, and a
+    global context vector derived from the original input sequence. This
+    iterative, context-aware process allows the model to learn complex,
+    multi-hop relationships and emergent graph structures.
 
-1. **Entity Extraction**: Dynamic identification of salient entities from input
-   embeddings using multi-head attention against a learnable entity library
-2. **Graph Initialization**: Creation of dense directional relationship matrix
-   with controlled initial connectivity
-3. **Iterative Refinement**: Progressive learning of meaningful relationships
-   through multiple refinement steps, each conditioned on entities, previous
-   graph state, and global input context
-4. **Sparsification**: Learned pruning mechanism to focus on most important
-   connections while removing noise
+4.  **Learned Sparsification**: After refinement, a second, independent MLP
+    acts as a gating mechanism. For each edge `(i, j)`, this gate computes a
+    value between 0 and 1 based solely on the representations of entities `E_i`
+    and `E_j`. The refined graph is then element-wise multiplied by these
+    gates. This allows the model to learn to prune away irrelevant or noisy
+    connections, resulting in a sparse, interpretable final graph.
 
-## Mathematical Foundation
+Foundational Mathematics:
+Let `X` be the input embedding sequence and `L` be the learnable entity
+library.
 
-The layer implements the following key operations:
+1.  **Entity Extraction**: The contextualized entities `E` and their attention
+    scores `α` are computed as:
+    `E, α = Attention(query=L, key=X, value=X)`
 
-- **Entity Extraction**: α = softmax(Q·K^T), E = α·V where Q comes from entity library
-- **Graph Initialization**: G₀ ~ U(-ρ, ρ) with density parameter ρ
-- **Refinement Step**: G_{t+1} = tanh(MLP([E_i, E_j, G_t[i,j], C])) where C is
-  mean-pooled global context from input embeddings
-- **Sparsification**: G_final = G * σ(MLP([E_i, E_j])) with learned gating function
+2.  **Refinement Step**: The graph `G` is updated iteratively. For each step `t`:
+    `G_{t+1}[i, j] = tanh(MLP_refine([E_i, E_j, G_t[i, j], C]))`
+    where `[..., ...]` denotes concatenation and `C = mean(X)` is the global
+    context vector. The `tanh` activation constrains edge weights to [-1, 1].
 
-This mathematical framework enables learning of complex patterns including hierarchical
-structures, causal relationships, temporal dependencies, and compositional semantics
-directly from embedding sequences.
+3.  **Sparsification**: The final refined graph `G_refined` is gated:
+    `Gate[i, j] = sigmoid(MLP_gate([E_i, E_j]))`
+    `G_final = G_refined * Gate`
 
-## Key Features
+This framework synthesizes concepts from several domains. The entity
+extraction is a direct application of Transformer-style attention. The
+iterative refinement of edge states is conceptually analogous to message
+passing in Graph Neural Networks (GNNs), particularly edge-centric models.
+The overall goal of deriving a structured, symbolic-like representation from
+neural outputs aligns with the principles of neuro-symbolic AI.
 
-- **Modality-Agnostic**: Compatible with any n-dimensional embeddings (text, vision_heads, audio, etc.)
-- **Directional Relationships**: Asymmetric adjacency matrix enables hierarchy and causality learning
-- **Dynamic Entity Library**: Adaptive entity representations that evolve during training
-- **Context-Aware Refinement**: Each refinement step uses global input context for better decisions
-- **Configurable Architecture**: Highly flexible API supporting various architectural configurations
-- **Production Ready**: Comprehensive validation, robust error handling, and full serialization support
+References:
+-   Vaswani, A., et al. (2017). Attention Is All You Need. NIPS.
+-   Battaglia, P. W., et al. (2018). Relational Inductive Biases, Deep
+    Learning, and Graph Networks. arXiv preprint arXiv:1806.01261.
+
 """
 
 import keras
@@ -923,3 +946,5 @@ def extract_hierarchies(
     logger.info(f"Extracted {len(hierarchies)} hierarchical relationships")
 
     return hierarchies
+
+# ---------------------------------------------------------------------

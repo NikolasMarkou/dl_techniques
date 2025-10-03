@@ -522,8 +522,4 @@ class MaskedAutoencoder(keras.Model):
         config["encoder"] = keras.saving.deserialize_keras_object(config["encoder"])
         return cls(**config)
 
-
 # ---------------------------------------------------------------------
-# Utility Functions
-# ---------------------------------------------------------------------
-

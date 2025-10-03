@@ -1,7 +1,13 @@
 import numpy as np
 from typing import Optional, Tuple, List, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .mae import MaskedAutoencoder
+
+# ---------------------------------------------------------------------
 
 def create_mae_model(
         encoder_dims: List[int],

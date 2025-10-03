@@ -1,12 +1,80 @@
 """
-Modern Relational Graph Transformer (RELGT) Implementation
+Encode heterogeneous graph node information into unified token embeddings.
 
-This module provides a modernized implementation of the Relational Graph Transformer,
-following Keras 3 best practices and reusing existing dl_techniques components.
+This layer implements a multi-element tokenization strategy, a core innovation
+of the Relational Graph Transformer (RELGT) model. It addresses the challenge
+of representing complex, heterogeneous, and temporal graph data for processing
+by a Transformer architecture. Instead of a single monolithic encoder, it
+decomposes each node into five fundamental components and learns a specialized,
+rich representation for each before combining them into a final token.
 
-The RELGT model introduces a novel multi-element tokenization strategy for relational
-graph data and combines local attention over subgraphs with global attention to
-learnable centroids for powerful relational deep learning.
+The primary design goal is to create a comprehensive token representation that
+captures not just a node's intrinsic features but also its categorical type,
+its temporal context, its distance from a query's "seed" node, and, most
+importantly, its structural role within its local neighborhood.
+
+Architectural Overview:
+The encoder operates through five parallel, independent pathways, each
+targeting a different aspect of the node's identity:
+
+1.  **Feature Encoder**: A standard linear projection (`Dense`) learns a
+    representation of the node's continuous feature vector.
+2.  **Type Encoder**: An `Embedding` layer maps the node's categorical type
+    (e.g., 'user', 'product') into the shared embedding space.
+3.  **Hop Encoder**: An `Embedding` layer encodes the node's graph distance
+    (hop count) from the central "seed" node of the subgraph.
+4.  **Time Encoder**: A linear projection learns to represent the node's
+    relative timestamp, capturing temporal dynamics.
+5.  **Subgraph Positional Encoder**: This is the most critical component for
+    capturing topology. It uses a lightweight Graph Neural Network (GNN) to
+    generate a structural positional encoding. By feeding random features into
+    the GNN, its output becomes a function purely of the local graph
+    connectivity, creating a unique signature for each node's structural role
+    (e.g., hub, bridge, leaf).
+
+The outputs of these five encoders, all in the same `embedding_dim` space, are
+summed element-wise. This addition fuses the different facets of information
+into a single, unified token vector, which is then normalized and passed
+through dropout.
+
+Foundational Mathematics:
+The final token embedding `T` for a node is a summation of the outputs of the
+five specialized encoders `E_i`:
+
+`T = Norm(Dropout(E_feat(x_feat) + E_type(x_type) + E_hop(x_hop) + E_time(x_time) + E_pe(A_local)))`
+
+The key mathematical concept is the Subgraph Positional Encoding, `E_pe`. It is
+computed by a stack of GNN layers operating on the local adjacency matrix
+`A_local` with an initial random feature matrix `Z_random`:
+
+`H_pe = GNN_n(...GNN_1(A_local, Z_random))`
+
+The use of `Z_random` is crucial; it ensures that the resulting embedding
+`H_pe` is determined solely by the graph's structure, as the GNN's message-
+passing mechanism propagates and transforms these random features based on the
+local topology. Each GNN layer implements the symmetrically normalized graph
+convolution from Kipf & Welling:
+
+`H' = σ(D̃⁻¹/² Ã D̃⁻¹/² H W)`
+
+where `Ã = A + I` is the adjacency matrix with self-loops, and `D̃` is its
+degree matrix. This operation effectively averages a node's features with those
+of its neighbors, creating an embedding that reflects its structural context.
+
+References:
+This architecture synthesizes several foundational ideas in graph deep
+learning and sequence modeling:
+
+-   The principle of adding different embedding types (e.g., token and
+    positional) is fundamental to the Transformer architecture:
+    -   Vaswani, A., et al. (2017). Attention Is All You Need. NIPS.
+-   The GNN-based positional encoder leverages the message-passing framework
+    popularized by Graph Convolutional Networks:
+    -   Kipf, T. N., & Welling, M. (2017). Semi-Supervised Classification
+        with Graph Convolutional Networks. ICLR.
+-   The idea of using GNNs to learn structural or positional encodings is a
+    central theme in Graph Transformer models, such as Graphormer.
+
 """
 
 import keras
@@ -16,9 +84,9 @@ from typing import Optional, Union, Tuple, List, Dict, Any, Callable
 # ---------------------------------------------------------------------
 
 
-from dl_techniques.layers.ffn import create_ffn_layer
-from dl_techniques.layers.transformer import TransformerLayer
-from dl_techniques.layers.norms import create_normalization_layer
+from ..ffn import create_ffn_layer
+from ..transformer import TransformerLayer
+from ..norms import create_normalization_layer
 
 # ---------------------------------------------------------------------
 
