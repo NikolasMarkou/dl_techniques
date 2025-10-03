@@ -66,7 +66,7 @@ class CIFARSOMConfig:
 
     # === Architecture Configuration ===
     encoder_filters: List[int] = field(default_factory=lambda: [64, 128, 256])
-    encoder_kernel_sizes: List[int] = field(default_factory=lambda: [3, 3, 3])
+    encoder_kernel_sizes: List[int] = field(default_factory=lambda: [5, 3, 3])
 
     grid_shape: Tuple[int, int] = (10, 10)
     som_temperature: float = 1.0
@@ -229,7 +229,7 @@ def create_decoder(config: CIFARSOMConfig) -> keras.Model:
     x = inputs
 
     for i, filters in enumerate(config.decoder_filters):
-        x = keras.layers.UpSampling2D(size=(2,2), interpolation="nearest")
+        x = keras.layers.UpSampling2D(size=(2,2), interpolation="nearest")(x)
         x = keras.layers.Conv2D(
             filters,
             kernel_size=3,
