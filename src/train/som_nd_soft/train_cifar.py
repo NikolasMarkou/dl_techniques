@@ -6,8 +6,9 @@ as a topological bottleneck. The SOM enforces structured organization in the lat
 space, creating a continuous, topologically-ordered representation of CIFAR images.
 
 Architecture:
-    Encoder: Conv layers → Dense → SoftSOM bottleneck
-    Decoder: Dense → TransposeConv layers
+    Encoder: Conv layers → Reshape
+    Bottleneck: SoftSOM Layer on spatial feature vectors
+    Decoder: Reshape → TransposeConv layers
 
 The SOM bottleneck creates a grid of prototype vectors that organize the latent
 representations spatially, enabling:
@@ -25,7 +26,7 @@ Key Features:
     6. **Quality Metrics**: Quantization and topological error tracking
 
 Usage:
-    python train_cifar_softsom_autoencoder.py --epochs 100 --grid-size 16
+    python train_cifar.py --epochs 100 --grid-size 16
 """
 
 import gc
@@ -55,60 +56,6 @@ from dl_techniques.layers.memory.som_nd_soft_layer import SoftSOMLayer
 class CIFARSOMConfig:
     """
     Comprehensive configuration for CIFAR + SoftSOM autoencoder training.
-
-    Attributes:
-        # Data Configuration
-        dataset_name: Which CIFAR dataset ('cifar10' or 'cifar100')
-        image_size: Input image dimensions
-        use_data_augmentation: Enable training augmentation
-        augmentation_strength: Augmentation intensity [0, 1]
-
-        # Architecture Configuration
-        encoder_filters: Number of filters per encoder conv layer
-        encoder_kernel_sizes: Kernel sizes for encoder layers
-        latent_dim: Dimension of features before SOM
-
-        grid_shape: SOM grid dimensions (height, width)
-        som_temperature: Softmax temperature for assignments
-        som_use_per_dim_softmax: Use per-dimension vs global softmax
-        som_reconstruction_weight: Weight for SOM reconstruction loss
-        som_topological_weight: Weight for topological preservation
-        som_sharpness_weight: Weight for encouraging sharp assignments
-
-        decoder_filters: Number of filters per decoder conv layer
-        use_batch_norm: Enable batch normalization
-        use_dropout: Enable dropout regularization
-        dropout_rate: Dropout probability
-
-        # Training Configuration
-        batch_size: Training batch size
-        epochs: Total training epochs
-        learning_rate: Initial learning rate
-        lr_schedule: Learning rate schedule type
-        optimizer_type: Optimizer choice ('adam', 'adamw', 'rmsprop')
-        weight_decay: L2 regularization weight
-        gradient_clip_norm: Gradient clipping threshold
-
-        # Progressive Training
-        use_progressive_training: Enable multi-resolution training
-        progressive_epochs: Epochs at each resolution stage
-        initial_size: Starting image size for progressive training
-
-        # Loss Configuration
-        reconstruction_loss_type: Loss function ('mse', 'mae', 'perceptual')
-        perceptual_weight: Weight for perceptual loss component
-
-        # Monitoring Configuration
-        monitor_every_n_epochs: Visualization update frequency
-        num_reconstruction_samples: Number of samples to visualize
-        num_interpolation_samples: Number of interpolation paths
-        save_latent_projections: Enable t-SNE visualization
-
-        # Output Configuration
-        output_dir: Base output directory
-        experiment_name: Unique experiment identifier
-        save_checkpoints: Enable model checkpointing
-        checkpoint_frequency: Epochs between checkpoints
     """
 
     # === Data Configuration ===
@@ -120,14 +67,13 @@ class CIFARSOMConfig:
     # === Architecture Configuration ===
     encoder_filters: List[int] = field(default_factory=lambda: [64, 128, 256])
     encoder_kernel_sizes: List[int] = field(default_factory=lambda: [3, 3, 3])
-    latent_dim: int = 512
 
     grid_shape: Tuple[int, int] = (16, 16)
-    som_temperature: float = 0.3
+    som_temperature: float = 1.0
     som_use_per_dim_softmax: bool = True
-    som_reconstruction_weight: float = 1.5
+    som_reconstruction_weight: float = 0.0
     som_topological_weight: float = 0.5
-    som_sharpness_weight: float = 0.1
+    som_sharpness_weight: float = 0.0
 
     decoder_filters: List[int] = field(default_factory=lambda: [256, 128, 64])
     use_batch_norm: bool = True
@@ -239,22 +185,23 @@ def create_augmentation_layer(config: CIFARSOMConfig) -> keras.layers.Layer:
 
 def create_encoder(config: CIFARSOMConfig) -> keras.Model:
     """
-    Create convolutional encoder network.
+    Create convolutional encoder network that preserves spatial information.
 
     Architecture:
-        Input → Conv blocks (with BN, activation) → GlobalAvgPool → Dense → Output
+        Input → Conv blocks (with BN, activation) → Output Feature Map
 
     Args:
         config: Model configuration
 
     Returns:
-        Keras encoder model mapping images to latent vectors
+        Keras encoder model mapping images to a feature map.
     """
-    inputs = keras.Input(shape=(config.image_size, config.image_size, 3), name="image_input")
-
+    inputs = keras.Input(
+        shape=(config.image_size, config.image_size, 3),
+        name="image_input"
+    )
     x = inputs
 
-    # Convolutional feature extraction
     for i, (filters, kernel_size) in enumerate(
             zip(config.encoder_filters, config.encoder_kernel_sizes)
     ):
@@ -265,22 +212,15 @@ def create_encoder(config: CIFARSOMConfig) -> keras.Model:
             padding='same',
             name=f"encoder_conv_{i + 1}"
         )(x)
+        if config.use_batch_norm:
+            x = keras.layers.BatchNormalization(name=f"encoder_bn_{i + 1}")(x)
+        x = keras.layers.Activation('relu', name=f"encoder_relu_{i + 1}")(x)
+        if config.use_dropout:
+            x = keras.layers.Dropout(
+                config.dropout_rate, name=f"encoder_dropout_{i + 1}"
+            )(x)
 
-        if i < len(config.encoder_filters) - 1:
-            if config.use_batch_norm:
-                x = keras.layers.BatchNormalization(name=f"encoder_bn_{i + 1}")(x)
-
-            x = keras.layers.Activation('relu', name=f"encoder_relu_{i + 1}")(x)
-
-            if config.use_dropout:
-                x = keras.layers.Dropout(config.dropout_rate, name=f"encoder_dropout_{i + 1}")(x)
-
-    # Global pooling and dense projection
-    x = keras.layers.GlobalAveragePooling2D(name="encoder_pool")(x)
-
-    outputs = keras.layers.Dense(config.latent_dim, activation='relu', name="latent_features")(x)
-
-    return keras.Model(inputs, outputs, name="encoder")
+    return keras.Model(inputs, x, name="encoder")
 
 
 def create_decoder(config: CIFARSOMConfig) -> keras.Model:
@@ -288,32 +228,23 @@ def create_decoder(config: CIFARSOMConfig) -> keras.Model:
     Create convolutional decoder network with transpose convolutions.
 
     Architecture:
-        Input → Dense → Reshape → TransposeConv blocks → Output
+        Input Feature Map → TransposeConv blocks → Output Image
 
     Args:
         config: Model configuration
 
     Returns:
-        Keras decoder model mapping latent vectors to reconstructed images
+        Keras decoder model mapping latent feature maps to reconstructed images.
     """
-    inputs = keras.Input(shape=(config.latent_dim,), name="latent_input")
-
-    # Calculate spatial size after encoder
     final_spatial_size = config.image_size // (2 ** len(config.encoder_filters))
+    input_channels = config.encoder_filters[-1]
 
-    # Dense projection to spatial features
-    x = keras.layers.Dense(
-        final_spatial_size * final_spatial_size * config.decoder_filters[0],
-        activation='relu',
-        name="decoder_dense"
-    )(inputs)
+    inputs = keras.Input(
+        shape=(final_spatial_size, final_spatial_size, input_channels),
+        name="latent_map_input"
+    )
+    x = inputs
 
-    x = keras.layers.Reshape(
-        (final_spatial_size, final_spatial_size, config.decoder_filters[0]),
-        name="decoder_reshape"
-    )(x)
-
-    # Transposed convolutional upsampling
     for i, filters in enumerate(config.decoder_filters):
         x = keras.layers.Conv2DTranspose(
             filters,
@@ -322,16 +253,14 @@ def create_decoder(config: CIFARSOMConfig) -> keras.Model:
             padding='same',
             name=f"decoder_deconv_{i + 1}"
         )(x)
-
         if config.use_batch_norm:
             x = keras.layers.BatchNormalization(name=f"decoder_bn_{i + 1}")(x)
-
         x = keras.layers.Activation('relu', name=f"decoder_relu_{i + 1}")(x)
-
         if config.use_dropout and i < len(config.decoder_filters) - 1:
-            x = keras.layers.Dropout(config.dropout_rate, name=f"decoder_dropout_{i + 1}")(x)
+            x = keras.layers.Dropout(
+                config.dropout_rate, name=f"decoder_dropout_{i + 1}"
+            )(x)
 
-    # Final reconstruction layer
     outputs = keras.layers.Conv2D(
         3,
         kernel_size=3,
@@ -339,7 +268,6 @@ def create_decoder(config: CIFARSOMConfig) -> keras.Model:
         activation='sigmoid',
         name="reconstructed_image"
     )(x)
-
     return keras.Model(inputs, outputs, name="decoder")
 
 
@@ -348,10 +276,10 @@ def create_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
     Create complete autoencoder with SoftSOM topological bottleneck.
 
     Architecture:
-        Encoder → SoftSOM (topological bottleneck) → Decoder
+        Encoder → Reshape → SoftSOM (topological bottleneck) → Reshape → Decoder
 
-    The SoftSOM layer enforces spatial organization in the latent space,
-    creating a structured manifold where similar images map to nearby locations.
+    The SoftSOM layer enforces spatial organization on the encoder's feature
+    vectors, creating a structured manifold.
 
     Args:
         config: Model configuration
@@ -361,38 +289,52 @@ def create_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
     """
     logger.info("Creating CIFAR SoftSOM Autoencoder...")
 
-    # Build components
     encoder = create_encoder(config)
     decoder = create_decoder(config)
 
-    # Create end-to-end model with SOM bottleneck
-    inputs = keras.Input(shape=(config.image_size, config.image_size, 3), name="input_images")
+    inputs = keras.Input(
+        shape=(config.image_size, config.image_size, 3),
+        name="input_images"
+    )
 
-    # Encode
-    latent_features = encoder(inputs)
+    # 1. Encode image to a feature map (e.g., (batch, 4, 4, 256))
+    feature_map = encoder(inputs)
 
-    # SoftSOM topological bottleneck
-    som_features = SoftSOMLayer(
+    # Get shape info for reshaping
+    map_shape = keras.ops.shape(feature_map)
+    h, w, channels = map_shape[1], map_shape[2], map_shape[3]
+
+    # 2. Reshape feature map for SOM
+    # (batch, h, w, channels) -> (batch * h * w, channels)
+    reshaped_features = keras.layers.Reshape((-1, channels))(feature_map)
+
+    # 3. SoftSOM topological bottleneck
+    som_layer = SoftSOMLayer(
         grid_shape=config.grid_shape,
-        input_dim=config.latent_dim,
+        input_dim=channels,
         temperature=config.som_temperature,
         use_per_dimension_softmax=config.som_use_per_dim_softmax,
-        use_reconstruction_loss=True,
+        use_reconstruction_loss=config.som_reconstruction_weight > 0,
         reconstruction_weight=config.som_reconstruction_weight,
         topological_weight=config.som_topological_weight,
         sharpness_weight=config.som_sharpness_weight,
         name="soft_som_bottleneck"
-    )(latent_features)
+    )
+    som_features = som_layer(reshaped_features)
 
-    # Decode
-    reconstructed = decoder(som_features)
+    # 4. Reshape SOM output back to a spatial map
+    # (batch * h * w, channels) -> (batch, h, w, channels)
+    som_map = keras.layers.Reshape((h, w, channels))(som_features)
 
-    # Build complete model
-    autoencoder = keras.Model(inputs, reconstructed, name="cifar_softsom_autoencoder")
+    # 5. Decode the structured map back to an image
+    reconstructed = decoder(som_map)
+
+    autoencoder = keras.Model(
+        inputs, reconstructed, name="cifar_softsom_autoencoder"
+    )
 
     logger.info("Autoencoder architecture:")
     autoencoder.summary()
-
     return autoencoder
 
 
@@ -453,7 +395,9 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
             class_mask = self.y_latent_analysis == class_id
             class_indices = np.where(class_mask)[0]
             if len(class_indices) > 0:
-                self.tracked_samples.append(self.x_latent_analysis[class_indices[0]])
+                self.tracked_samples.append(
+                    self.x_latent_analysis[class_indices[0]]
+                )
                 self.tracked_labels.append(class_id)
         self.tracked_samples = np.array(self.tracked_samples)
 
@@ -480,9 +424,14 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
         }
         self.epochs_recorded: List[int] = []
 
-        logger.info(f"Comprehensive monitoring initialized with {len(self.x_viz)} viz samples")
+        msg = f"Comprehensive monitoring initialized with {len(self.x_viz)} samples"
+        logger.info(msg)
 
-    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+    def on_epoch_end(
+            self,
+            epoch: int,
+            logs: Optional[Dict[str, Any]] = None
+    ) -> None:
         """
         Create comprehensive visualizations and metrics.
 
@@ -493,18 +442,25 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
         if (epoch + 1) % self.monitor_freq != 0:
             return
 
-        logger.info(f"Creating comprehensive visualizations for epoch {epoch + 1}...")
+        logger.info(
+            f"Creating comprehensive visualizations for epoch {epoch + 1}..."
+        )
 
         try:
             # Get reconstructions
-            reconstructed = self.model.predict(self.x_viz, verbose=0, batch_size=32)
+            reconstructed = self.model.predict(
+                self.x_viz, verbose=0, batch_size=32
+            )
 
-            # Get SOM layer and models
+            # Get SOM layer and encoder model
             som_layer = self.model.get_layer("soft_som_bottleneck")
             encoder = self.model.get_layer("encoder")
 
             # Extract features for analysis
-            features = encoder.predict(self.x_latent_analysis, verbose=0, batch_size=128)
+            feature_map = encoder.predict(
+                self.x_latent_analysis, verbose=0, batch_size=128
+            )
+            features = feature_map.reshape(-1, som_layer.input_dim)
 
             # Get soft assignments and weights
             assignments = som_layer.get_soft_assignments(features)
@@ -514,7 +470,9 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
             weights_map = keras.ops.convert_to_numpy(weights_map)
 
             # Compute and store metrics
-            self._compute_and_store_metrics(reconstructed, features, weights_map, assignments, epoch + 1)
+            self._compute_and_store_metrics(
+                reconstructed, features, weights_map, assignments, epoch + 1
+            )
 
             # Create all visualizations
             self._visualize_reconstructions(reconstructed, epoch + 1)
@@ -533,7 +491,8 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
                 self._plot_metrics_curves(epoch + 1)
                 self._visualize_bmu_trajectories(epoch + 1)
 
-            if self.config.save_latent_projections and (epoch + 1) % (self.monitor_freq * 2) == 0:
+            if (self.config.save_latent_projections and
+                    (epoch + 1) % (self.monitor_freq * 2) == 0):
                 self._visualize_latent_space(features, epoch + 1)
 
             # Cleanup
@@ -555,19 +514,10 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
     ) -> None:
         """
         Compute and store reconstruction quality and SOM metrics.
-
-        Args:
-            reconstructed: Reconstructed images
-            features: Latent features
-            weights_map: SOM weights
-            assignments: Soft assignments
-            epoch: Current epoch
         """
         # Reconstruction metrics
         mse = np.mean((self.x_viz - reconstructed) ** 2)
         mae = np.mean(np.abs(self.x_viz - reconstructed))
-
-        # PSNR calculation
         psnr = 10 * np.log10(1.0 / (mse + 1e-10))
 
         # Simple SSIM approximation
@@ -576,7 +526,6 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
         var_x = np.var(self.x_viz)
         var_y = np.var(reconstructed)
         cov_xy = np.mean((self.x_viz - mean_x) * (reconstructed - mean_y))
-
         c1 = (0.01 * 1.0) ** 2
         c2 = (0.03 * 1.0) ** 2
         ssim = ((2 * mean_x * mean_y + c1) * (2 * cov_xy + c2)) / \
@@ -590,100 +539,80 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
         bmu_coords = np.unravel_index(bmu_indices, (grid_h, grid_w))
 
         # Quantization error
-        quantization_error = 0.0
+        quant_error = 0.0
         for idx, (i, j) in enumerate(zip(bmu_coords[0], bmu_coords[1])):
             bmu_prototype = weights_map[i, j, :]
             dist = np.linalg.norm(features[idx] - bmu_prototype)
-            quantization_error += dist
-        quantization_error /= len(features)
+            quant_error += dist
+        quant_error /= len(features)
 
         # Topological error
-        topological_error = 0.0
+        topo_error = 0.0
         for idx in range(len(features)):
             distances = flat_assignments[idx]
             sorted_indices = np.argsort(-distances)
-
-            bmu1_idx = sorted_indices[0]
-            bmu2_idx = sorted_indices[1]
-
+            bmu1_idx, bmu2_idx = sorted_indices[0], sorted_indices[1]
             bmu1_coords = np.unravel_index(bmu1_idx, (grid_h, grid_w))
             bmu2_coords = np.unravel_index(bmu2_idx, (grid_h, grid_w))
-
-            manhattan_dist = abs(bmu1_coords[0] - bmu2_coords[0]) + abs(bmu1_coords[1] - bmu2_coords[1])
-            if manhattan_dist > 1:
-                topological_error += 1
-        topological_error /= len(features)
+            dist = abs(bmu1_coords[0] - bmu2_coords[0]) + \
+                abs(bmu1_coords[1] - bmu2_coords[1])
+            if dist > 1:
+                topo_error += 1
+        topo_error /= len(features)
 
         # Store metrics
         self.epoch_metrics['reconstruction_mse'].append(float(mse))
         self.epoch_metrics['reconstruction_mae'].append(float(mae))
         self.epoch_metrics['psnr'].append(float(psnr))
         self.epoch_metrics['ssim'].append(float(ssim))
-        self.epoch_metrics['quantization_error'].append(float(quantization_error))
-        self.epoch_metrics['topological_error'].append(float(topological_error))
+        self.epoch_metrics['quantization_error'].append(float(quant_error))
+        self.epoch_metrics['topological_error'].append(float(topo_error))
         self.epochs_recorded.append(epoch)
 
-        logger.info(f"Epoch {epoch} - MSE: {mse:.6f}, PSNR: {psnr:.2f} dB, SSIM: {ssim:.4f}")
-        logger.info(f"Epoch {epoch} - Quant Error: {quantization_error:.4f}, Topo Error: {topological_error:.4f}")
+        logger.info(f"Epoch {epoch} - MSE: {mse:.6f}, PSNR: {psnr:.2f} dB, "
+                    f"SSIM: {ssim:.4f}")
+        logger.info(f"Epoch {epoch} - Quant Error: {quant_error:.4f}, "
+                    f"Topo Error: {topo_error:.4f}")
 
         # Save metrics
         metrics_file = self.metrics_dir / f"epoch_{epoch:03d}_metrics.json"
         with open(metrics_file, 'w') as f:
             json.dump({
-                'epoch': epoch,
-                'mse': float(mse),
-                'mae': float(mae),
-                'psnr': float(psnr),
-                'ssim': float(ssim),
-                'quantization_error': float(quantization_error),
-                'topological_error': float(topological_error)
+                'epoch': epoch, 'mse': float(mse), 'mae': float(mae),
+                'psnr': float(psnr), 'ssim': float(ssim),
+                'quantization_error': float(quant_error),
+                'topological_error': float(topo_error)
             }, f, indent=2)
 
     def _visualize_reconstructions(
-            self,
-            reconstructed: np.ndarray,
-            epoch: int
+            self, reconstructed: np.ndarray, epoch: int
     ) -> None:
-        """
-        Create side-by-side comparison of original and reconstructed images.
-
-        Args:
-            reconstructed: Reconstructed images
-            epoch: Current epoch
-        """
+        """Create side-by-side comparison of original and reconstructed."""
         n_samples = len(self.x_viz)
         n_cols = 4
         n_rows = (n_samples + n_cols - 1) // n_cols
 
-        fig, axes = plt.subplots(n_rows * 2, n_cols, figsize=(n_cols * 3, n_rows * 6))
+        fig, axes = plt.subplots(
+            n_rows * 2, n_cols, figsize=(n_cols * 3, n_rows * 6)
+        )
         fig.suptitle(f'Image Reconstructions - Epoch {epoch}', fontsize=16)
 
         for i in range(n_samples):
-            row = (i // n_cols) * 2
-            col = i % n_cols
-
-            # Original image
-            if n_rows > 1:
-                ax_orig = axes[row, col]
-                ax_recon = axes[row + 1, col]
-            else:
-                ax_orig = axes[0, col]
-                ax_recon = axes[1, col]
+            row, col = (i // n_cols) * 2, i % n_cols
+            ax_orig = axes[row, col] if n_rows > 1 else axes[0, col]
+            ax_recon = axes[row + 1, col] if n_rows > 1 else axes[1, col]
 
             ax_orig.imshow(self.x_viz[i])
             ax_orig.set_title(f'Original\nClass: {self.y_viz[i]}', fontsize=10)
             ax_orig.axis('off')
 
-            # Reconstructed image
             ax_recon.imshow(np.clip(reconstructed[i], 0, 1))
             mse = np.mean((self.x_viz[i] - reconstructed[i]) ** 2)
             ax_recon.set_title(f'Reconstructed\nMSE: {mse:.4f}', fontsize=10)
             ax_recon.axis('off')
 
-        # Hide unused subplots
         for i in range(n_samples, n_rows * n_cols):
-            row = (i // n_cols) * 2
-            col = i % n_cols
+            row, col = (i // n_cols) * 2, i % n_cols
             if n_rows > 1:
                 axes[row, col].axis('off')
                 axes[row + 1, col].axis('off')
@@ -694,31 +623,25 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
         plt.close(fig)
         gc.collect()
 
-    def _visualize_som_activations(self, assignments: np.ndarray, epoch: int) -> None:
-        """
-        Visualize SOM activation patterns for different image classes.
-
-        Args:
-            assignments: Soft assignments
-            epoch: Current epoch
-        """
+    def _visualize_som_activations(
+            self, assignments: np.ndarray, epoch: int
+    ) -> None:
+        """Visualize SOM activation patterns for different image classes."""
         try:
             unique_classes = np.unique(self.y_latent_analysis)
             n_classes = min(10, len(unique_classes))
 
             fig, axes = plt.subplots(2, 5, figsize=(20, 8))
-            fig.suptitle(f'SOM Activation Heatmaps by Class - Epoch {epoch}', fontsize=16)
+            title = f'SOM Activation Heatmaps by Class - Epoch {epoch}'
+            fig.suptitle(title, fontsize=16)
 
             for idx in range(n_classes):
                 class_label = unique_classes[idx]
                 ax = axes[idx // 5, idx % 5]
-
-                class_mask = (self.y_latent_analysis == class_label)
-                class_assignments = assignments[class_mask]
-
+                class_assignments = assignments[self.y_latent_analysis == class_label]
                 mean_activation = np.mean(class_assignments, axis=0)
-
-                im = ax.imshow(mean_activation, cmap='hot', interpolation='nearest')
+                im = ax.imshow(mean_activation, cmap='hot',
+                               interpolation='nearest')
                 ax.set_title(f'Class {class_label}', fontsize=12)
                 ax.axis('off')
                 plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -728,48 +651,34 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             plt.close(fig)
             gc.collect()
-
         except Exception as e:
             logger.warning(f"Failed to visualize SOM activations: {e}")
 
-    def _visualize_prototype_vectors(self, weights_map: np.ndarray, epoch: int) -> None:
-        """
-        Visualize learned prototype vectors as pseudo-images.
-
-        Args:
-            weights_map: SOM weight matrix
-            epoch: Current epoch
-        """
+    def _visualize_prototype_vectors(
+            self, weights_map: np.ndarray, epoch: int
+    ) -> None:
+        """Visualize learned prototype vectors as pseudo-images."""
         grid_h, grid_w, input_dim = weights_map.shape
-
-        fig, axes = plt.subplots(grid_h, grid_w, figsize=(grid_w * 1.5, grid_h * 1.5))
-        fig.suptitle(f'SOM Prototype Vectors (Learned Codebook) - Epoch {epoch}', fontsize=16)
+        fig, axes = plt.subplots(
+            grid_h, grid_w, figsize=(grid_w * 1.5, grid_h * 1.5)
+        )
+        title = f'SOM Prototype Vectors (Learned Codebook) - Epoch {epoch}'
+        fig.suptitle(title, fontsize=16)
 
         for i in range(grid_h):
             for j in range(grid_w):
-                if grid_h > 1 and grid_w > 1:
-                    ax = axes[i, j]
-                elif grid_h > 1:
-                    ax = axes[i]
-                elif grid_w > 1:
-                    ax = axes[j]
-                else:
-                    ax = axes
-
+                ax = axes[i, j] if grid_h > 1 and grid_w > 1 else axes
                 prototype = weights_map[i, j, :]
-                prototype_normalized = (prototype - prototype.min()) / (prototype.max() - prototype.min() + 1e-8)
-
-                # Reshape for visualization
-                grid_size = int(np.sqrt(input_dim))
-                if grid_size * grid_size == input_dim:
-                    prototype_img = prototype_normalized.reshape(grid_size, grid_size)
-                else:
-                    pad_size = int(np.ceil(np.sqrt(input_dim))) ** 2
-                    padded = np.pad(prototype_normalized, (0, pad_size - input_dim), mode='constant')
-                    grid_size = int(np.sqrt(pad_size))
-                    prototype_img = padded.reshape(grid_size, grid_size)
-
-                ax.imshow(prototype_img, cmap='viridis', interpolation='nearest')
+                prototype_norm = (prototype - prototype.min()) / \
+                                 (prototype.max() - prototype.min() + 1e-8)
+                pad_size = int(np.ceil(np.sqrt(input_dim))) ** 2
+                padded = np.pad(
+                    prototype_norm, (0, pad_size - input_dim), mode='constant'
+                )
+                grid_size = int(np.sqrt(pad_size))
+                prototype_img = padded.reshape(grid_size, grid_size)
+                ax.imshow(prototype_img, cmap='viridis',
+                          interpolation='nearest')
                 ax.axis('off')
                 ax.set_title(f'{i},{j}', fontsize=6)
 
@@ -780,21 +689,14 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
         gc.collect()
 
     def _visualize_u_matrix(self, weights_map: np.ndarray, epoch: int) -> None:
-        """
-        Create U-Matrix visualization showing topological quality.
-
-        Args:
-            weights_map: SOM weight matrix
-            epoch: Current epoch
-        """
-        grid_h, grid_w, input_dim = weights_map.shape
+        """Create U-Matrix visualization showing topological quality."""
+        grid_h, grid_w, _ = weights_map.shape
         u_matrix = np.zeros((grid_h, grid_w))
 
         for i in range(grid_h):
             for j in range(grid_w):
                 distances = []
                 current = weights_map[i, j, :]
-
                 for di in [-1, 0, 1]:
                     for dj in [-1, 0, 1]:
                         if di == 0 and dj == 0:
@@ -804,21 +706,12 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
                             neighbor = weights_map[ni, nj, :]
                             dist = np.linalg.norm(current - neighbor)
                             distances.append(dist)
-
                 u_matrix[i, j] = np.mean(distances) if distances else 0
 
         fig, ax = plt.subplots(figsize=(10, 8))
         im = ax.imshow(u_matrix, cmap='bone', interpolation='nearest')
         ax.set_title(f'U-Matrix (Topological Quality) - Epoch {epoch}\n'
                      f'Dark=Cluster Centers, Bright=Boundaries', fontsize=14)
-        ax.set_xlabel('Grid X')
-        ax.set_ylabel('Grid Y')
-
-        for i in range(grid_h + 1):
-            ax.axhline(i - 0.5, color='gray', linewidth=0.5, alpha=0.3)
-        for j in range(grid_w + 1):
-            ax.axvline(j - 0.5, color='gray', linewidth=0.5, alpha=0.3)
-
         plt.colorbar(im, ax=ax, label='Average Distance to Neighbors')
         plt.tight_layout()
         save_path = self.viz_dir / f"epoch_{epoch:03d}_umatrix.png"
@@ -827,19 +720,12 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
         gc.collect()
 
     def _visualize_hit_counts(self, assignments: np.ndarray, epoch: int) -> None:
-        """
-        Visualize neuron usage frequency (hit counts).
-
-        Args:
-            assignments: Soft assignments
-            epoch: Current epoch
-        """
+        """Visualize neuron usage frequency (hit counts)."""
         flat_assignments = assignments.reshape(assignments.shape[0], -1)
         bmu_indices = np.argmax(flat_assignments, axis=1)
 
         grid_h, grid_w = assignments.shape[1], assignments.shape[2]
         bmu_coords = np.unravel_index(bmu_indices, (grid_h, grid_w))
-
         hit_counts = np.zeros((grid_h, grid_w))
         for i, j in zip(bmu_coords[0], bmu_coords[1]):
             hit_counts[i, j] += 1
@@ -849,35 +735,23 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
         # Linear scale
         im1 = ax1.imshow(hit_counts, cmap='YlOrRd', interpolation='nearest')
         ax1.set_title(f'Hit Counts (Linear Scale) - Epoch {epoch}', fontsize=14)
-        ax1.set_xlabel('Grid X')
-        ax1.set_ylabel('Grid Y')
-
         for i in range(grid_h):
             for j in range(grid_w):
                 count = int(hit_counts[i, j])
+                color = 'white' if count > hit_counts.max() * 0.5 else 'black'
                 ax1.text(j, i, str(count), ha='center', va='center',
-                         color='white' if count > hit_counts.max() * 0.5 else 'black',
-                         fontsize=8)
-
+                         color=color, fontsize=8)
         plt.colorbar(im1, ax=ax1, label='Number of Samples')
 
         # Log scale
         hit_counts_log = np.log10(hit_counts + 1)
         im2 = ax2.imshow(hit_counts_log, cmap='YlOrRd', interpolation='nearest')
         ax2.set_title(f'Hit Counts (Log Scale) - Epoch {epoch}', fontsize=14)
-        ax2.set_xlabel('Grid X')
-        ax2.set_ylabel('Grid Y')
         plt.colorbar(im2, ax=ax2, label='Log10(Samples + 1)')
 
         total_neurons = grid_h * grid_w
-        active_neurons = np.sum(hit_counts > 0)
-        dead_neurons = total_neurons - active_neurons
-        max_hits = int(hit_counts.max())
-        mean_hits = hit_counts.mean()
-
-        fig.suptitle(f'Active: {active_neurons}/{total_neurons} neurons | '
-                     f'Dead: {dead_neurons} | Max: {max_hits} | Mean: {mean_hits:.1f}',
-                     fontsize=12)
+        active = np.sum(hit_counts > 0)
+        fig.suptitle(f'Active: {active}/{total_neurons} neurons', fontsize=12)
 
         plt.tight_layout()
         save_path = self.viz_dir / f"epoch_{epoch:03d}_hit_counts.png"
@@ -885,14 +759,10 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
         plt.close(fig)
         gc.collect()
 
-    def _visualize_confusion_on_grid(self, assignments: np.ndarray, epoch: int) -> None:
-        """
-        Visualize class distribution per grid cell.
-
-        Args:
-            assignments: Soft assignments
-            epoch: Current epoch
-        """
+    def _visualize_confusion_on_grid(
+            self, assignments: np.ndarray, epoch: int
+    ) -> None:
+        """Visualize class distribution per grid cell."""
         flat_assignments = assignments.reshape(assignments.shape[0], -1)
         bmu_indices = np.argmax(flat_assignments, axis=1)
 
@@ -905,39 +775,25 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
             label = self.y_latent_analysis[idx]
             confusion_grid[i, j, label] += 1
 
-        fig, axes = plt.subplots(grid_h, grid_w, figsize=(grid_w * 1.2, grid_h * 1.2))
-        fig.suptitle(f'Class Distribution per Neuron - Epoch {epoch}', fontsize=16)
+        fig, axes = plt.subplots(
+            grid_h, grid_w, figsize=(grid_w * 1.2, grid_h * 1.2)
+        )
+        fig.suptitle(
+            f'Class Distribution per Neuron - Epoch {epoch}', fontsize=16
+        )
 
         for i in range(grid_h):
             for j in range(grid_w):
-                if grid_h > 1 and grid_w > 1:
-                    ax = axes[i, j]
-                elif grid_h > 1:
-                    ax = axes[i]
-                elif grid_w > 1:
-                    ax = axes[j]
-                else:
-                    ax = axes
-
+                ax = axes[i, j] if grid_h > 1 and grid_w > 1 else axes
                 class_counts = confusion_grid[i, j, :]
-                total = class_counts.sum()
-
-                if total > 0:
+                if class_counts.sum() > 0:
                     colors = plt.cm.tab10(np.arange(10))
                     non_zero = class_counts > 0
                     ax.pie(class_counts[non_zero], colors=colors[non_zero],
                            startangle=90, counterclock=False)
-
-                    dominant_class = np.argmax(class_counts)
-                    purity = class_counts[dominant_class] / total
-                    ax.text(0, -1.3, f'{int(dominant_class)}\n({purity:.1%})',
-                            ha='center', va='top', fontsize=6,
-                            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
                 else:
-                    ax.text(0, 0, 'Empty', ha='center', va='center', fontsize=8)
-
-                ax.set_xlim(-1.2, 1.2)
-                ax.set_ylim(-1.5, 1.2)
+                    ax.text(0, 0, 'Empty', ha='center', va='center',
+                            fontsize=8)
                 ax.axis('off')
 
         plt.tight_layout()
@@ -947,19 +803,11 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
         gc.collect()
 
     def _visualize_grid_interpolations(self, epoch: int) -> None:
-        """
-        Create interpolations by walking along the SOM grid.
-
-        Args:
-            epoch: Current epoch
-        """
+        """Create interpolations by walking along the SOM grid."""
         try:
             som_layer = self.model.get_layer("soft_som_bottleneck")
             decoder = self.model.get_layer("decoder")
-
-            weights_map = som_layer.get_weights_map()
-            weights_map = keras.ops.convert_to_numpy(weights_map)
-
+            weights_map = keras.ops.convert_to_numpy(som_layer.get_weights_map())
             grid_h, grid_w = self.config.grid_shape
 
             fig, axes = plt.subplots(2, grid_w, figsize=(grid_w * 2, 4))
@@ -970,7 +818,6 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
             for col in range(grid_w):
                 prototype = weights_map[middle_row, col:col + 1, :]
                 decoded = decoder.predict(prototype, verbose=0)
-
                 axes[0, col].imshow(np.clip(decoded[0], 0, 1))
                 axes[0, col].set_title(f'({middle_row},{col})', fontsize=8)
                 axes[0, col].axis('off')
@@ -980,38 +827,30 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
             for row in range(min(grid_h, grid_w)):
                 prototype = weights_map[row:row + 1, middle_col, :]
                 decoded = decoder.predict(prototype, verbose=0)
-
                 axes[1, row].imshow(np.clip(decoded[0], 0, 1))
                 axes[1, row].set_title(f'({row},{middle_col})', fontsize=8)
                 axes[1, row].axis('off')
-
-            for col in range(grid_h, grid_w):
-                axes[1, col].axis('off')
 
             plt.tight_layout()
             save_path = self.viz_dir / f"epoch_{epoch:03d}_grid_traversals.png"
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             plt.close(fig)
             gc.collect()
-
         except Exception as e:
             logger.warning(f"Failed to create grid interpolations: {e}")
 
     def _track_sample_trajectories(self, epoch: int) -> None:
-        """
-        Track BMU positions for specific samples over training.
-
-        Args:
-            epoch: Current epoch
-        """
+        """Track BMU positions for specific samples over training."""
         try:
             som_layer = self.model.get_layer("soft_som_bottleneck")
             encoder = self.model.get_layer("encoder")
-
-            features = encoder.predict(self.tracked_samples, verbose=0, batch_size=32)
-            assignments = som_layer.get_soft_assignments(features)
-            assignments = keras.ops.convert_to_numpy(assignments)
-
+            feature_map = encoder.predict(
+                self.tracked_samples, verbose=0, batch_size=32
+            )
+            features = feature_map.reshape(-1, som_layer.input_dim)
+            assignments = keras.ops.convert_to_numpy(
+                som_layer.get_soft_assignments(features)
+            )
             flat_assignments = assignments.reshape(assignments.shape[0], -1)
             bmu_indices = np.argmax(flat_assignments, axis=1)
 
@@ -1021,64 +860,30 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
             for idx, label in enumerate(self.tracked_labels):
                 coord = (int(bmu_coords[0][idx]), int(bmu_coords[1][idx]))
                 self.bmu_trajectories[label].append((epoch, coord))
-
         except Exception as e:
             logger.warning(f"Failed to track sample trajectories: {e}")
 
     def _plot_metrics_curves(self, epoch: int) -> None:
-        """
-        Plot all metrics evolution over training.
-
-        Args:
-            epoch: Current epoch
-        """
+        """Plot all metrics evolution over training."""
         fig, axes = plt.subplots(2, 3, figsize=(18, 10))
         fig.suptitle('Training Metrics Evolution', fontsize=16)
 
-        epochs_list = self.epochs_recorded
+        metrics_map = {
+            (0, 0): ('reconstruction_mse', 'MSE'),
+            (0, 1): ('reconstruction_mae', 'MAE'),
+            (0, 2): ('psnr', 'PSNR (dB)'),
+            (1, 0): ('ssim', 'SSIM'),
+            (1, 1): ('quantization_error', 'Quantization Error'),
+            (1, 2): ('topological_error', 'Topological Error')
+        }
 
-        # MSE
-        axes[0, 0].plot(epochs_list, self.epoch_metrics['reconstruction_mse'], 'b-', linewidth=2)
-        axes[0, 0].set_title('Reconstruction MSE')
-        axes[0, 0].set_xlabel('Epoch')
-        axes[0, 0].set_ylabel('MSE')
-        axes[0, 0].grid(True, alpha=0.3)
-
-        # MAE
-        axes[0, 1].plot(epochs_list, self.epoch_metrics['reconstruction_mae'], 'g-', linewidth=2)
-        axes[0, 1].set_title('Reconstruction MAE')
-        axes[0, 1].set_xlabel('Epoch')
-        axes[0, 1].set_ylabel('MAE')
-        axes[0, 1].grid(True, alpha=0.3)
-
-        # PSNR
-        axes[0, 2].plot(epochs_list, self.epoch_metrics['psnr'], 'r-', linewidth=2)
-        axes[0, 2].set_title('PSNR')
-        axes[0, 2].set_xlabel('Epoch')
-        axes[0, 2].set_ylabel('PSNR (dB)')
-        axes[0, 2].grid(True, alpha=0.3)
-
-        # SSIM
-        axes[1, 0].plot(epochs_list, self.epoch_metrics['ssim'], 'm-', linewidth=2)
-        axes[1, 0].set_title('SSIM')
-        axes[1, 0].set_xlabel('Epoch')
-        axes[1, 0].set_ylabel('SSIM')
-        axes[1, 0].grid(True, alpha=0.3)
-
-        # Quantization Error
-        axes[1, 1].plot(epochs_list, self.epoch_metrics['quantization_error'], 'c-', linewidth=2)
-        axes[1, 1].set_title('Quantization Error')
-        axes[1, 1].set_xlabel('Epoch')
-        axes[1, 1].set_ylabel('Avg Distance to BMU')
-        axes[1, 1].grid(True, alpha=0.3)
-
-        # Topological Error
-        axes[1, 2].plot(epochs_list, self.epoch_metrics['topological_error'], 'y-', linewidth=2)
-        axes[1, 2].set_title('Topological Error')
-        axes[1, 2].set_xlabel('Epoch')
-        axes[1, 2].set_ylabel('Fraction Non-Neighbor BMU Pairs')
-        axes[1, 2].set_ylim([0, 1])
-        axes[1, 2].grid(True, alpha=0.3)
+        for (r, c), (key, label) in metrics_map.items():
+            axes[r, c].plot(self.epochs_recorded, self.epoch_metrics[key],
+                            '-', linewidth=2)
+            axes[r, c].set_title(label)
+            axes[r, c].set_xlabel('Epoch')
+            axes[r, c].set_ylabel(label)
+            axes[r, c].grid(True, alpha=0.3)
 
         plt.tight_layout()
         save_path = self.metrics_dir / "metrics_curves.png"
@@ -1087,65 +892,33 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
         gc.collect()
 
     def _visualize_bmu_trajectories(self, epoch: int) -> None:
-        """
-        Visualize BMU position evolution for tracked samples.
-
-        Args:
-            epoch: Current epoch
-        """
+        """Visualize BMU position evolution for tracked samples."""
         n_tracked = len(self.tracked_labels)
-        n_cols = 5
-        n_rows = (n_tracked + n_cols - 1) // n_cols
-
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 4))
-        if n_rows == 1:
-            axes = axes.reshape(1, -1)
-        fig.suptitle(f'BMU Trajectories During Training (up to Epoch {epoch})', fontsize=16)
+        fig, axes = plt.subplots(
+            2, 5, figsize=(20, 8), constrained_layout=True
+        )
+        title = f'BMU Trajectories During Training (up to Epoch {epoch})'
+        fig.suptitle(title, fontsize=16)
 
         grid_h, grid_w = self.config.grid_shape
 
         for idx, label in enumerate(self.tracked_labels):
-            row = idx // n_cols
-            col = idx % n_cols
-            ax = axes[row, col]
-
+            ax = axes.flatten()[idx]
             ax.set_xlim(-0.5, grid_w - 0.5)
             ax.set_ylim(-0.5, grid_h - 0.5)
             ax.set_aspect('equal')
             ax.set_title(f'Class {label}', fontsize=12)
-            ax.set_xlabel('Grid X')
-            ax.set_ylabel('Grid Y')
             ax.grid(True, alpha=0.3)
 
-            if label in self.bmu_trajectories and len(self.bmu_trajectories[label]) > 0:
-                trajectory = self.bmu_trajectories[label]
-                coords = [t[1] for t in trajectory]
-
-                x_coords = [c[1] for c in coords]
-                y_coords = [c[0] for c in coords]
-
-                for i in range(len(x_coords) - 1):
-                    color = plt.cm.coolwarm(i / max(1, len(x_coords) - 1))
-                    ax.plot(x_coords[i:i + 2], y_coords[i:i + 2], 'o-',
-                            color=color, linewidth=2, markersize=6, alpha=0.7)
-
-                ax.plot(x_coords[0], y_coords[0], 'go', markersize=12,
-                        label='Start', markeredgecolor='black', markeredgewidth=2)
-                ax.plot(x_coords[-1], y_coords[-1], 'r*', markersize=16,
-                        label='Current', markeredgecolor='black', markeredgewidth=2)
-
-                ax.legend(loc='upper right', fontsize=8)
-            else:
-                ax.text(grid_w / 2, grid_h / 2, 'No trajectory data',
-                        ha='center', va='center', fontsize=10)
-
+            if len(self.bmu_trajectories[label]) > 0:
+                coords = [t[1] for t in self.bmu_trajectories[label]]
+                x, y = [c[1] for c in coords], [c[0] for c in coords]
+                for i in range(len(x) - 1):
+                    color = plt.cm.coolwarm(i / max(1, len(x) - 1))
+                    ax.plot(x[i:i + 2], y[i:i + 2], 'o-', color=color)
+                ax.plot(x[0], y[0], 'go', ms=10, label='Start')
+                ax.plot(x[-1], y[-1], 'r*', ms=12, label='Current')
             ax.invert_yaxis()
-
-        # Hide unused subplots
-        for idx in range(n_tracked, n_rows * n_cols):
-            row = idx // n_cols
-            col = idx % n_cols
-            axes[row, col].axis('off')
 
         plt.tight_layout()
         save_path = self.viz_dir / f"epoch_{epoch:03d}_trajectories.png"
@@ -1154,42 +927,29 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
         gc.collect()
 
     def _visualize_latent_space(self, features: np.ndarray, epoch: int) -> None:
-        """
-        Create t-SNE visualization of latent space.
-
-        Args:
-            features: Latent features
-            epoch: Current epoch
-        """
+        """Create t-SNE visualization of latent space."""
         try:
             from sklearn.manifold import TSNE
-
             logger.info("Computing t-SNE projection...")
             tsne = TSNE(n_components=2, random_state=42, perplexity=30)
             features_2d = tsne.fit_transform(features)
 
             fig, ax = plt.subplots(figsize=(12, 10))
             scatter = ax.scatter(
-                features_2d[:, 0],
-                features_2d[:, 1],
-                c=self.y_latent_analysis,
-                cmap='tab10',
-                alpha=0.6,
-                s=20
+                features_2d[:, 0], features_2d[:, 1],
+                c=self.y_latent_analysis, cmap='tab10', alpha=0.6, s=20
             )
             plt.colorbar(scatter, ax=ax, label='Class')
-            ax.set_title(f'Latent Space t-SNE Projection - Epoch {epoch}', fontsize=16)
-            ax.set_xlabel('t-SNE Dimension 1')
-            ax.set_ylabel('t-SNE Dimension 2')
-
+            ax.set_title(
+                f'Latent Space t-SNE Projection - Epoch {epoch}', fontsize=16
+            )
             plt.tight_layout()
             save_path = self.viz_dir / f"epoch_{epoch:03d}_tsne.png"
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             plt.close(fig)
             gc.collect()
-
         except ImportError:
-            logger.warning("sklearn not available, skipping t-SNE visualization")
+            logger.warning("sklearn not available, skipping t-SNE")
         except Exception as e:
             logger.warning(f"Failed to create t-SNE visualization: {e}")
 
@@ -1198,71 +958,40 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
 # TRAINING ORCHESTRATION
 # =============================================================================
 
-def create_learning_rate_schedule(config: CIFARSOMConfig,
-                                  steps_per_epoch: int) -> keras.optimizers.schedules.LearningRateSchedule:
-    """
-    Create learning rate schedule.
-
-    Args:
-        config: Training configuration
-        steps_per_epoch: Number of training steps per epoch
-
-    Returns:
-        Keras learning rate schedule
-    """
+def create_learning_rate_schedule(
+    config: CIFARSOMConfig, steps_per_epoch: int
+) -> keras.optimizers.schedules.LearningRateSchedule:
+    """Create learning rate schedule."""
     total_steps = config.epochs * steps_per_epoch
 
     if config.lr_schedule == 'cosine':
         return keras.optimizers.schedules.CosineDecay(
-            config.learning_rate,
-            decay_steps=total_steps,
-            alpha=0.01
+            config.learning_rate, decay_steps=total_steps, alpha=0.01
         )
     elif config.lr_schedule == 'exponential':
         return keras.optimizers.schedules.ExponentialDecay(
-            config.learning_rate,
-            decay_steps=steps_per_epoch * 10,
+            config.learning_rate, decay_steps=steps_per_epoch * 10,
             decay_rate=0.9
         )
-    else:
-        return config.learning_rate
+    return config.learning_rate
 
 
 def train_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
-    """
-    Train CIFAR autoencoder with SoftSOM topological bottleneck.
+    """Train CIFAR autoencoder with SoftSOM topological bottleneck."""
+    msg = f"Starting training: {config.experiment_name}"
+    logger.info(msg)
 
-    Args:
-        config: Training configuration
-
-    Returns:
-        Trained Keras model
-    """
-    logger.info(f"Starting CIFAR SoftSOM Autoencoder training: {config.experiment_name}")
-
-    # Setup output directory
     output_dir = Path(config.output_dir) / config.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save configuration
-    config_path = output_dir / "config.json"
-    with open(config_path, 'w') as f:
+    with open(output_dir / "config.json", 'w') as f:
         json.dump(config.__dict__, f, indent=2, default=str)
 
-    # Load data
     (x_train, y_train), (x_test, y_test) = load_cifar_data(config)
+    x_train_aug = create_augmentation_layer(config)(x_train, training=True) \
+        if config.use_data_augmentation else x_train
 
-    # Create data augmentation
-    if config.use_data_augmentation:
-        augmentation_layer = create_augmentation_layer(config)
-        x_train_augmented = augmentation_layer(x_train, training=True)
-    else:
-        x_train_augmented = x_train
-
-    # Create model
     model = create_cifar_som_autoencoder(config)
 
-    # Setup optimizer
     steps_per_epoch = len(x_train) // config.batch_size
     lr_schedule = create_learning_rate_schedule(config, steps_per_epoch)
 
@@ -1270,80 +999,40 @@ def train_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
         optimizer = keras.optimizers.Adam(learning_rate=lr_schedule)
     elif config.optimizer_type == 'adamw':
         optimizer = keras.optimizers.AdamW(
-            learning_rate=lr_schedule,
-            weight_decay=config.weight_decay
+            learning_rate=lr_schedule, weight_decay=config.weight_decay
         )
     else:
         optimizer = keras.optimizers.RMSprop(learning_rate=lr_schedule)
 
-    # Apply gradient clipping
     if config.gradient_clip_norm > 0:
         optimizer.clipnorm = config.gradient_clip_norm
 
-    # Compile model
-    model.compile(
-        optimizer=optimizer,
-        loss='mse',
-        metrics=['mae']
-    )
+    model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
 
-    # Setup callbacks
     callbacks = [
         keras.callbacks.ModelCheckpoint(
             filepath=str(output_dir / "best_model.keras"),
-            monitor='val_loss',
-            save_best_only=True,
-            verbose=1
+            monitor='val_loss', save_best_only=True, verbose=1
         ),
         keras.callbacks.EarlyStopping(
-            monitor='val_loss',
-            patience=20,
-            restore_best_weights=True,
+            monitor='val_loss', patience=20, restore_best_weights=True,
             verbose=1
         ),
-        keras.callbacks.CSVLogger(
-            str(output_dir / "training_log.csv"),
-            append=True
-        ),
-        keras.callbacks.TensorBoard(
-            log_dir=str(output_dir / "tensorboard"),
-            histogram_freq=1
-        ),
+        keras.callbacks.CSVLogger(str(output_dir / "training_log.csv")),
+        keras.callbacks.TensorBoard(log_dir=str(output_dir / "tensorboard")),
         ComprehensiveMonitoringCallback(config, x_test, y_test)
     ]
 
-    # Train model
     logger.info("Starting training...")
     history = model.fit(
-        x_train_augmented, x_train,
-        batch_size=config.batch_size,
-        epochs=config.epochs,
-        validation_data=(x_test, x_test),
-        callbacks=callbacks,
-        verbose=1
+        x_train_aug, x_train, batch_size=config.batch_size,
+        epochs=config.epochs, validation_data=(x_test, x_test),
+        callbacks=callbacks, verbose=1
     )
 
-    # Evaluate final model
     test_loss, test_mae = model.evaluate(x_test, x_test, verbose=0)
     logger.info(f"Final test loss: {test_loss:.6f}, MAE: {test_mae:.6f}")
 
-    # Save training history
-    history_path = output_dir / "training_history.json"
-    history_dict = {k: [float(v) for v in vals] for k, vals in history.history.items()}
-    with open(history_path, 'w') as f:
-        json.dump(history_dict, f, indent=2)
-
-    # Save final metrics
-    metrics = {
-        'test_loss': float(test_loss),
-        'test_mae': float(test_mae),
-        'total_params': int(model.count_params())
-    }
-    metrics_path = output_dir / "final_metrics.json"
-    with open(metrics_path, 'w') as f:
-        json.dump(metrics, f, indent=2)
-
-    logger.info("Training completed successfully!")
     return model
 
 
@@ -1358,15 +1047,22 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    parser.add_argument('--dataset', choices=['cifar10', 'cifar100'], default='cifar10', help='Dataset choice')
-    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--batch-size', type=int, default=64, help='Training batch size')
-    parser.add_argument('--learning-rate', type=float, default=1e-3, help='Learning rate')
-    parser.add_argument('--grid-size', type=int, default=10, help='SOM grid size (square)')
-    parser.add_argument('--latent-dim', type=int, default=256, help='Latent dimension before SOM')
-    parser.add_argument('--som-temperature', type=float, default=0.5, help='SOM softmax temperature')
-    parser.add_argument('--no-augmentation', action='store_true', help='Disable data augmentation')
-    parser.add_argument('--output-dir', type=str, default='results', help='Output directory')
+    parser.add_argument('--dataset', choices=['cifar10', 'cifar100'],
+                        default='cifar10', help='Dataset choice')
+    parser.add_argument('--epochs', type=int, default=100,
+                        help='Number of training epochs')
+    parser.add_argument('--batch-size', type=int, default=64,
+                        help='Training batch size')
+    parser.add_argument('--learning-rate', type=float, default=1e-3,
+                        help='Learning rate')
+    parser.add_argument('--grid-size', type=int, default=16,
+                        help='SOM grid size (square)')
+    parser.add_argument('--som-temperature', type=float, default=1.0,
+                        help='SOM softmax temperature')
+    parser.add_argument('--no-augmentation', action='store_true',
+                        help='Disable data augmentation')
+    parser.add_argument('--output-dir', type=str, default='results',
+                        help='Output directory')
 
     return parser.parse_args()
 
@@ -1382,7 +1078,6 @@ def main() -> None:
     config = CIFARSOMConfig(
         dataset_name=args.dataset,
         grid_shape=(args.grid_size, args.grid_size),
-        latent_dim=args.latent_dim,
         som_temperature=args.som_temperature,
         use_data_augmentation=not args.no_augmentation,
         batch_size=args.batch_size,
@@ -1394,11 +1089,11 @@ def main() -> None:
     logger.info("=== CIFAR + SoftSOM Autoencoder ===")
     logger.info(f"Dataset: {config.dataset_name}")
     logger.info(f"SOM Grid: {config.grid_shape}")
-    logger.info(f"Latent Dimension: {config.latent_dim}")
     logger.info(f"Temperature: {config.som_temperature}")
-    logger.info(f"Augmentation: {'Enabled' if config.use_data_augmentation else 'Disabled'}")
+    aug_status = 'Enabled' if config.use_data_augmentation else 'Disabled'
+    logger.info(f"Augmentation: {aug_status}")
 
-    model = train_cifar_som_autoencoder(config)
+    train_cifar_som_autoencoder(config)
     logger.info("=== Training Complete ===")
 
 
