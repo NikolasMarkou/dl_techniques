@@ -68,7 +68,7 @@ class CIFARSOMConfig:
     encoder_filters: List[int] = field(default_factory=lambda: [64, 128, 256])
     encoder_kernel_sizes: List[int] = field(default_factory=lambda: [3, 3, 3])
 
-    grid_shape: Tuple[int, int] = (16, 16)
+    grid_shape: Tuple[int, int] = (10, 10)
     som_temperature: float = 1.0
     som_use_per_dim_softmax: bool = True
     som_reconstruction_weight: float = 0.0
@@ -78,7 +78,7 @@ class CIFARSOMConfig:
     decoder_filters: List[int] = field(default_factory=lambda: [256, 128, 64])
     use_batch_norm: bool = True
     use_dropout: bool = True
-    dropout_rate: float = 0.3
+    dropout_rate: float = 0.1
 
     # === Training Configuration ===
     batch_size: int = 64
@@ -206,7 +206,7 @@ def create_encoder(config: CIFARSOMConfig) -> keras.Model:
         )(x)
         if config.use_batch_norm:
             x = keras.layers.BatchNormalization(name=f"encoder_bn_{i + 1}")(x)
-        x = keras.layers.Activation('relu', name=f"encoder_relu_{i + 1}")(x)
+        x = keras.layers.Activation('gelu', name=f"encoder_relu_{i + 1}")(x)
         if config.use_dropout:
             x = keras.layers.Dropout(
                 config.dropout_rate, name=f"encoder_dropout_{i + 1}"
@@ -229,24 +229,34 @@ def create_decoder(config: CIFARSOMConfig) -> keras.Model:
     x = inputs
 
     for i, filters in enumerate(config.decoder_filters):
-        x = keras.layers.Conv2DTranspose(
+        x = keras.layers.UpSampling2D(size=(2,2), interpolation="nearest")
+        x = keras.layers.Conv2D(
             filters,
             kernel_size=3,
-            strides=2,
+            strides=1,
             padding='same',
-            name=f"decoder_deconv_{i + 1}"
+            name=f"decoder_conv_{i + 1}"
         )(x)
         if config.use_batch_norm:
             x = keras.layers.BatchNormalization(name=f"decoder_bn_{i + 1}")(x)
-        x = keras.layers.Activation('relu', name=f"decoder_relu_{i + 1}")(x)
+        x = keras.layers.Activation('gelu', name=f"decoder_relu_{i + 1}")(x)
         if config.use_dropout and i < len(config.decoder_filters) - 1:
             x = keras.layers.Dropout(
                 config.dropout_rate, name=f"decoder_dropout_{i + 1}"
             )(x)
 
-    outputs = keras.layers.Conv2D(
-        3,
+    x = keras.layers.Conv2D(
+        filters=config.decoder_filters[-1],
         kernel_size=3,
+        padding='same',
+        activation='linear'
+    )(x)
+    if config.use_batch_norm:
+        x = keras.layers.BatchNormalization()(x)
+    x = keras.layers.Activation('gelu')(x)
+    outputs = keras.layers.Conv2D(
+        filters=3,
+        kernel_size=1,
         padding='same',
         activation='sigmoid',
         name="reconstructed_image"
