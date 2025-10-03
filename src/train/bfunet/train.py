@@ -1812,30 +1812,48 @@ def train_bfunet_denoiser(config: TrainingConfig) -> keras.Model:
     # === 9. Clean Inference Model Creation ===
     logger.info("Creating clean inference model...")
     try:
-        # Create single-output model for inference (no deep supervision)
+        # Create model with SAME architecture as training model (including deep supervision)
         inference_input_shape = (None, None, config.channels)  # Variable size for inference
 
         if config.model_type in BFUNET_CONFIGS:
-            inference_model = create_bfunet_variant(
+            inference_model_full = create_bfunet_variant(
                 variant=config.model_type,
                 input_shape=inference_input_shape,
-                enable_deep_supervision=False  # Single output for inference
+                enable_deep_supervision=config.enable_deep_supervision  # Match training configuration
             )
         else:
-            inference_model = create_bfunet_denoiser(
+            inference_model_full = create_bfunet_denoiser(
                 input_shape=inference_input_shape,
                 depth=config.depth,
                 initial_filters=config.filters,
                 blocks_per_level=config.blocks_per_level,
                 kernel_size=config.kernel_size,
                 activation=config.activation,
-                enable_deep_supervision=False,  # Single output for inference
+                enable_deep_supervision=config.enable_deep_supervision,  # Match training configuration
                 model_name=f'bfunet_custom_{config.experiment_name}_inference'
             )
 
-        # Transfer trained weights to inference model
-        inference_model.set_weights(model.get_weights())
+        # Transfer trained weights to inference model (architectures now match)
+        inference_model_full.set_weights(model.get_weights())
         logger.info("Successfully transferred weights to inference model")
+
+        # If deep supervision was used, create a clean single-output model
+        if config.enable_deep_supervision and isinstance(inference_model_full.output, list):
+            logger.info("Creating single-output inference model from multi-output trained model...")
+
+            # Create new functional model that only outputs the primary prediction
+            inference_model = keras.Model(
+                inputs=inference_model_full.input,
+                outputs=inference_model_full.output[0],  # Only the primary/final output
+                name=f"{inference_model_full.name}_single_output"
+            )
+            logger.info(f"Single-output inference model created with output shape: {inference_model.output.shape}")
+
+            del inference_model_full  # Free memory
+        else:
+            # Single-output model, use as-is
+            inference_model = inference_model_full
+            logger.info("Single-output model, no modification needed")
 
         # Save clean inference model
         inference_model_path = output_dir / "inference_model.keras"
