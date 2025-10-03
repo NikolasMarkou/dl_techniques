@@ -278,12 +278,7 @@ def create_encoder(config: CIFARSOMConfig) -> keras.Model:
     # Global pooling and dense projection
     x = keras.layers.GlobalAveragePooling2D(name="encoder_pool")(x)
 
-    x = keras.layers.Dense(config.latent_dim, activation='relu', name="latent_features")(x)
-
-    if config.use_batch_norm:
-        x = keras.layers.BatchNormalization(name=f"encoder_bn_{i + 1}")(x)
-
-    x = keras.layers.Activation('relu', name=f"encoder_relu_{i + 1}")(x)
+    outputs = keras.layers.Dense(config.latent_dim, activation='relu', name="latent_features")(x)
 
     return keras.Model(inputs, outputs, name="encoder")
 
