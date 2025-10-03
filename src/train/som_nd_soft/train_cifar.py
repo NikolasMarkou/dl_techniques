@@ -320,9 +320,10 @@ def create_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
         sharpness_weight=config.som_sharpness_weight,
         name="soft_som_bottleneck"
     )
-    # CORRECTED: Wrap the SOM layer in TimeDistributed to apply it to each
-    # spatial feature vector independently, resolving the shape error.
-    time_distributed_som = keras.layers.TimeDistributed(som_layer)
+    # CORRECTED: Wrap the SOM layer and give the wrapper an explicit name.
+    time_distributed_som = keras.layers.TimeDistributed(
+        som_layer, name="time_distributed_som"
+    )
     som_features = time_distributed_som(reshaped_features)
 
     # 4. Reshape SOM output back to a spatial map
@@ -455,9 +456,11 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
                 self.x_viz, verbose=0, batch_size=32
             )
 
-            # Get SOM layer and encoder model
-            som_layer = self.model.get_layer("soft_som_bottleneck")
+            # CORRECTED: Get layers via the TimeDistributed wrapper.
+            wrapper_layer = self.model.get_layer("time_distributed_som")
+            som_layer = wrapper_layer.layer
             encoder = self.model.get_layer("encoder")
+            decoder = self.model.get_layer("decoder")
 
             # Extract features for analysis
             feature_map = encoder.predict(
@@ -484,10 +487,10 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
             self._visualize_u_matrix(weights_map, epoch + 1)
             self._visualize_hit_counts(assignments, epoch + 1)
             self._visualize_confusion_on_grid(assignments, epoch + 1)
-            self._visualize_grid_interpolations(epoch + 1)
+            self._visualize_grid_interpolations(decoder, weights_map, epoch + 1)
 
             # Track sample trajectories
-            self._track_sample_trajectories(epoch + 1)
+            self._track_sample_trajectories(encoder, som_layer, epoch + 1)
 
             # Create summary visualizations
             if len(self.epochs_recorded) > 1:
@@ -805,14 +808,12 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
         plt.close(fig)
         gc.collect()
 
-    def _visualize_grid_interpolations(self, epoch: int) -> None:
+    def _visualize_grid_interpolations(
+            self, decoder: keras.Model, weights_map: np.ndarray, epoch: int
+    ) -> None:
         """Create interpolations by walking along the SOM grid."""
         try:
-            som_layer = self.model.get_layer("soft_som_bottleneck")
-            decoder = self.model.get_layer("decoder")
-            weights_map = keras.ops.convert_to_numpy(som_layer.get_weights_map())
             grid_h, grid_w = self.config.grid_shape
-
             fig, axes = plt.subplots(2, grid_w, figsize=(grid_w * 2, 4))
             fig.suptitle(f'SOM Grid Traversals - Epoch {epoch}', fontsize=16)
 
@@ -820,7 +821,11 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
             middle_row = grid_h // 2
             for col in range(grid_w):
                 prototype = weights_map[middle_row, col:col + 1, :]
-                decoded = decoder.predict(prototype, verbose=0)
+                # The decoder expects a 4D tensor (batch, h, w, c)
+                # Here we are decoding a single prototype vector, so we
+                # create a dummy 1x1 spatial map for it.
+                dummy_map = prototype.reshape(1, 1, 1, -1)
+                decoded = decoder.predict(dummy_map, verbose=0)
                 axes[0, col].imshow(np.clip(decoded[0], 0, 1))
                 axes[0, col].set_title(f'({middle_row},{col})', fontsize=8)
                 axes[0, col].axis('off')
@@ -829,7 +834,8 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
             middle_col = grid_w // 2
             for row in range(min(grid_h, grid_w)):
                 prototype = weights_map[row:row + 1, middle_col, :]
-                decoded = decoder.predict(prototype, verbose=0)
+                dummy_map = prototype.reshape(1, 1, 1, -1)
+                decoded = decoder.predict(dummy_map, verbose=0)
                 axes[1, row].imshow(np.clip(decoded[0], 0, 1))
                 axes[1, row].set_title(f'({row},{middle_col})', fontsize=8)
                 axes[1, row].axis('off')
@@ -842,11 +848,11 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
         except Exception as e:
             logger.warning(f"Failed to create grid interpolations: {e}")
 
-    def _track_sample_trajectories(self, epoch: int) -> None:
+    def _track_sample_trajectories(
+            self, encoder: keras.Model, som_layer: SoftSOMLayer, epoch: int
+    ) -> None:
         """Track BMU positions for specific samples over training."""
         try:
-            som_layer = self.model.get_layer("soft_som_bottleneck")
-            encoder = self.model.get_layer("encoder")
             feature_map = encoder.predict(
                 self.tracked_samples, verbose=0, batch_size=32
             )
@@ -896,7 +902,6 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
 
     def _visualize_bmu_trajectories(self, epoch: int) -> None:
         """Visualize BMU position evolution for tracked samples."""
-        n_tracked = len(self.tracked_labels)
         fig, axes = plt.subplots(
             2, 5, figsize=(20, 8), constrained_layout=True
         )
