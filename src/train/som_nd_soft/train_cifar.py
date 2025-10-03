@@ -320,7 +320,6 @@ def create_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
         sharpness_weight=config.som_sharpness_weight,
         name="soft_som_bottleneck"
     )
-    # CORRECTED: Wrap the SOM layer and give the wrapper an explicit name.
     time_distributed_som = keras.layers.TimeDistributed(
         som_layer, name="time_distributed_som"
     )
@@ -456,7 +455,7 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
                 self.x_viz, verbose=0, batch_size=32
             )
 
-            # CORRECTED: Get layers via the TimeDistributed wrapper.
+            # Get layers
             wrapper_layer = self.model.get_layer("time_distributed_som")
             som_layer = wrapper_layer.layer
             encoder = self.model.get_layer("encoder")
@@ -467,9 +466,16 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
                 self.x_latent_analysis, verbose=0, batch_size=128
             )
             features = feature_map.reshape(-1, som_layer.input_dim)
+            h, w = feature_map.shape[1], feature_map.shape[2]
 
-            # Get soft assignments and weights
-            assignments = som_layer.get_soft_assignments(features)
+            # CORRECTED: Perform batched inference to prevent OOM error.
+            assignments_list = []
+            inference_batch_size = 512
+            for i in range(0, len(features), inference_batch_size):
+                batch = features[i:i + inference_batch_size]
+                assignments_batch = som_layer.get_soft_assignments(batch)
+                assignments_list.append(assignments_batch)
+            assignments = np.concatenate(assignments_list, axis=0)
             assignments = keras.ops.convert_to_numpy(assignments)
 
             weights_map = som_layer.get_weights_map()
@@ -487,7 +493,9 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
             self._visualize_u_matrix(weights_map, epoch + 1)
             self._visualize_hit_counts(assignments, epoch + 1)
             self._visualize_confusion_on_grid(assignments, epoch + 1)
-            self._visualize_grid_interpolations(decoder, weights_map, epoch + 1)
+            self._visualize_grid_interpolations(
+                decoder, weights_map, h, w, epoch + 1
+            )
 
             # Track sample trajectories
             self._track_sample_trajectories(encoder, som_layer, epoch + 1)
@@ -809,23 +817,24 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
         gc.collect()
 
     def _visualize_grid_interpolations(
-            self, decoder: keras.Model, weights_map: np.ndarray, epoch: int
+            self, decoder: keras.Model, weights_map: np.ndarray,
+            h: int, w: int, epoch: int
     ) -> None:
         """Create interpolations by walking along the SOM grid."""
         try:
-            grid_h, grid_w = self.config.grid_shape
+            grid_h, grid_w, channels = weights_map.shape
             fig, axes = plt.subplots(2, grid_w, figsize=(grid_w * 2, 4))
             fig.suptitle(f'SOM Grid Traversals - Epoch {epoch}', fontsize=16)
 
             # Horizontal traversal
             middle_row = grid_h // 2
             for col in range(grid_w):
-                prototype = weights_map[middle_row, col:col + 1, :]
-                # The decoder expects a 4D tensor (batch, h, w, c)
-                # Here we are decoding a single prototype vector, so we
-                # create a dummy 1x1 spatial map for it.
-                dummy_map = prototype.reshape(1, 1, 1, -1)
-                decoded = decoder.predict(dummy_map, verbose=0)
+                prototype = weights_map[middle_row, col, :]
+                # CORRECTED: Create a full "pure" feature map by tiling the
+                # prototype vector to match the decoder's expected input shape.
+                pure_map = np.tile(prototype, (h, w, 1))
+                pure_map = np.expand_dims(pure_map, axis=0)  # Add batch dim
+                decoded = decoder.predict(pure_map, verbose=0)
                 axes[0, col].imshow(np.clip(decoded[0], 0, 1))
                 axes[0, col].set_title(f'({middle_row},{col})', fontsize=8)
                 axes[0, col].axis('off')
@@ -833,9 +842,10 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
             # Vertical traversal
             middle_col = grid_w // 2
             for row in range(min(grid_h, grid_w)):
-                prototype = weights_map[row:row + 1, middle_col, :]
-                dummy_map = prototype.reshape(1, 1, 1, -1)
-                decoded = decoder.predict(dummy_map, verbose=0)
+                prototype = weights_map[row, middle_col, :]
+                pure_map = np.tile(prototype, (h, w, 1))
+                pure_map = np.expand_dims(pure_map, axis=0)
+                decoded = decoder.predict(pure_map, verbose=0)
                 axes[1, row].imshow(np.clip(decoded[0], 0, 1))
                 axes[1, row].set_title(f'({row},{middle_col})', fontsize=8)
                 axes[1, row].axis('off')
