@@ -31,12 +31,12 @@ Usage:
 
 import gc
 import json
-import keras
 import argparse
+import keras
 import numpy as np
+import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime
-import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, Optional, Dict, Any, List
 
@@ -91,7 +91,8 @@ class CIFARSOMConfig:
 
     # === Progressive Training ===
     use_progressive_training: bool = False
-    progressive_epochs: List[int] = field(default_factory=lambda: [20, 30, 50])
+    progressive_epochs: List[int] = field(
+        default_factory=lambda: [20, 30, 50])
     initial_size: int = 16
 
     # === Loss Configuration ===
@@ -353,8 +354,8 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
         self.metrics_dir.mkdir(parents=True, exist_ok=True)
 
         self.epoch_metrics: Dict[str, List[float]] = {
-            'reconstruction_mse': [], 'reconstruction_mae': [], 'psnr': [],
-            'ssim': [], 'quantization_error': [], 'topological_error': []
+            'reconstruction_mse': [], 'psnr': [],
+            'quantization_error': [], 'topological_error': []
         }
         self.epochs_recorded: List[int] = []
         logger.info(f"Monitoring initialized with {len(self.x_viz)} samples")
@@ -463,6 +464,7 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
         topo_error /= len(features)
 
         self.epoch_metrics['reconstruction_mse'].append(float(mse))
+        self.epoch_metrics['psnr'].append(float(psnr))
         self.epoch_metrics['quantization_error'].append(float(quant_error))
         self.epoch_metrics['topological_error'].append(float(topo_error))
         self.epochs_recorded.append(epoch)
@@ -557,7 +559,7 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
                 ax = axes[i, j] if grid_h > 1 and grid_w > 1 else axes
                 prototype = weights_map[i, j, :]
                 prototype_norm = (prototype - prototype.min()) / \
-                                 (prototype.max() - prototype.min() + 1e-8)
+                    (prototype.max() - prototype.min() + 1e-8)
                 pad_size = int(np.ceil(np.sqrt(input_dim))) ** 2
                 padded = np.pad(
                     prototype_norm, (0, pad_size - input_dim), mode='constant'
@@ -718,21 +720,23 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
 
     def _plot_metrics_curves(self, epoch: int) -> None:
         """Plot all metrics evolution over training."""
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
         fig.suptitle('Training Metrics Evolution', fontsize=16)
 
         metrics_map = {
             (0, 0): ('reconstruction_mse', 'MSE'),
             (0, 1): ('psnr', 'PSNR (dB)'),
-            (1, 1): ('quantization_error', 'Quantization Error'),
-            (1, 2): ('topological_error', 'Topological Error')
+            (1, 0): ('quantization_error', 'Quantization Error'),
+            (1, 1): ('topological_error', 'Topological Error')
         }
         for (r, c), (key, label) in metrics_map.items():
             if key in self.epoch_metrics:
-                ax = axes.flatten()[r * 3 + c]
+                ax = axes[r, c]
                 ax.plot(self.epochs_recorded, self.epoch_metrics[key])
                 ax.set_title(label)
-        plt.tight_layout()
+                ax.grid(True, linestyle='--', alpha=0.6)
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         save_path = self.metrics_dir / "metrics_curves.png"
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
