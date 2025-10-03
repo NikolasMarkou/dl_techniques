@@ -1092,7 +1092,7 @@ def main() -> None:
     logger.info("=== CIFAR + SoftSOM Autoencoder ===")
     logger.info(f"Dataset: {config.dataset_name}")
     logger.info(f"SOM Grid: {config.grid_shape}")
-    logger.info(f"Temperature: {config.temperature}")
+    logger.info(f"Temperature: {config.som_temperature}")
     aug_status = 'Enabled' if config.use_data_augmentation else 'Disabled'
     logger.info(f"Augmentation: {aug_status}")
 
