@@ -7,7 +7,7 @@ space, creating a continuous, topologically-ordered representation of CIFAR imag
 
 Architecture:
     Encoder: Conv layers → Reshape
-    Bottleneck: SoftSOM Layer on spatial feature vectors
+    Bottleneck: TimeDistributed(SoftSOM Layer) on spatial feature vectors
     Decoder: Reshape → TransposeConv layers
 
 The SOM bottleneck creates a grid of prototype vectors that organize the latent
@@ -276,7 +276,7 @@ def create_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
     Create complete autoencoder with SoftSOM topological bottleneck.
 
     Architecture:
-        Encoder → Reshape → SoftSOM (topological bottleneck) → Reshape → Decoder
+        Encoder → Reshape → TimeDistributed(SoftSOM) → Reshape → Decoder
 
     The SoftSOM layer enforces spatial organization on the encoder's feature
     vectors, creating a structured manifold.
@@ -304,8 +304,8 @@ def create_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
     map_shape = keras.ops.shape(feature_map)
     h, w, channels = map_shape[1], map_shape[2], map_shape[3]
 
-    # 2. Reshape feature map for SOM
-    # (batch, h, w, channels) -> (batch * h * w, channels)
+    # 2. Reshape feature map for SOM input
+    # (batch, h, w, channels) -> (batch, h * w, channels)
     reshaped_features = keras.layers.Reshape((-1, channels))(feature_map)
 
     # 3. SoftSOM topological bottleneck
@@ -320,10 +320,13 @@ def create_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
         sharpness_weight=config.som_sharpness_weight,
         name="soft_som_bottleneck"
     )
-    som_features = som_layer(reshaped_features)
+    # CORRECTED: Wrap the SOM layer in TimeDistributed to apply it to each
+    # spatial feature vector independently, resolving the shape error.
+    time_distributed_som = keras.layers.TimeDistributed(som_layer)
+    som_features = time_distributed_som(reshaped_features)
 
     # 4. Reshape SOM output back to a spatial map
-    # (batch * h * w, channels) -> (batch, h, w, channels)
+    # (batch, h * w, channels) -> (batch, h, w, channels)
     som_map = keras.layers.Reshape((h, w, channels))(som_features)
 
     # 5. Decode the structured map back to an image
@@ -1089,7 +1092,7 @@ def main() -> None:
     logger.info("=== CIFAR + SoftSOM Autoencoder ===")
     logger.info(f"Dataset: {config.dataset_name}")
     logger.info(f"SOM Grid: {config.grid_shape}")
-    logger.info(f"Temperature: {config.som_temperature}")
+    logger.info(f"Temperature: {config.temperature}")
     aug_status = 'Enabled' if config.use_data_augmentation else 'Disabled'
     logger.info(f"Augmentation: {aug_status}")
 
