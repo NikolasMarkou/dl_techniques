@@ -1450,6 +1450,12 @@ class DeepSupervisionWeightScheduler(keras.callbacks.Callback):
         }
         self.scheduler = deep_supervision_schedule_builder(ds_config, self.num_outputs, invert_order=False)
 
+        # Added this indicatorr here because i found myself wondering
+        logger.info("Expected scheduler: ")
+        for progress in [0.0, 0.1, 0.25, 0.5, 0.75, 1.0]:
+            schedule_at_progress = self.scheduler(progress)
+            logger.info(f"  -  at {progress} is {schedule_at_progress}")
+
     def on_epoch_begin(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
         """
         Update model loss weights at the beginning of each epoch.
