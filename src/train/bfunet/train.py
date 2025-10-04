@@ -1448,7 +1448,7 @@ class DeepSupervisionWeightScheduler(keras.callbacks.Callback):
             'type': config.deep_supervision_schedule_type,
             'config': config.deep_supervision_schedule_config
         }
-        self.scheduler = deep_supervision_schedule_builder(ds_config, self.num_outputs, invert_order=True)
+        self.scheduler = deep_supervision_schedule_builder(ds_config, self.num_outputs, invert_order=False)
 
     def on_epoch_begin(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
         """

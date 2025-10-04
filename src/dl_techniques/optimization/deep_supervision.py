@@ -958,19 +958,9 @@ def step_wise_schedule(
     # Scale progress from [0, threshold] to [0, 1] for linear interpolation
     if threshold > 0:
         scaled_progress = progress / threshold
+        return linear_low_to_high_schedule(progress=scaled_progress, no_outputs=no_outputs)
     else:
         # Edge case: threshold is 0, immediately go to shallowest layer
         weights = np.zeros(no_outputs, dtype=np.float64)
         weights[0] = 1.0
         return weights
-
-    # Initial weights favor deeper layers (higher indices)
-    initial_weights = np.arange(no_outputs, 0, -1, dtype=np.float64)
-
-    # Final weights favor shallower layers (lower indices)
-    final_weights = np.arange(1, no_outputs + 1, dtype=np.float64)
-
-    # Linear interpolation between initial and final weights
-    weights = (1 - scaled_progress) * initial_weights + scaled_progress * final_weights
-
-    return _normalize_weights(weights)
