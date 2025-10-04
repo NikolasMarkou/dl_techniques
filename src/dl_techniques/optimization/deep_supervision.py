@@ -696,10 +696,10 @@ def linear_low_to_high_schedule(progress: float, no_outputs: int) -> np.ndarray:
         Array of weights that transition linearly based on training progress.
     """
     # Initial weights favor deeper layers (higher indices)
-    initial_weights = np.arange(no_outputs, 0, -1, dtype=np.float64)
+    initial_weights = np.arange(1, no_outputs + 1, dtype=np.float64)
 
     # Final weights favor shallower layers (lower indices)
-    final_weights = np.arange(1, no_outputs + 1, dtype=np.float64)
+    final_weights = np.arange(no_outputs, 0, -1, dtype=np.float64)
 
     # Linear interpolation between initial and final weights
     weights = (1 - progress) * initial_weights + progress * final_weights
@@ -722,11 +722,11 @@ def non_linear_low_to_high_schedule(progress: float, no_outputs: int) -> np.ndar
     Returns:
         Array of weights with quadratic transition pattern.
     """
-    # Initial weights favor deeper layers
-    initial_weights = np.arange(no_outputs, 0, -1, dtype=np.float64)
+    # Initial weights favor deeper layers (higher indices)
+    initial_weights = np.arange(1, no_outputs + 1, dtype=np.float64)
 
-    # Final weights favor shallower layers
-    final_weights = np.arange(1, no_outputs + 1, dtype=np.float64)
+    # Final weights favor shallower layers (lower indices)
+    final_weights = np.arange(no_outputs, 0, -1, dtype=np.float64)
 
     # Quadratic interpolation - smoother transition in middle of training
     quadratic_factor = progress ** 2
