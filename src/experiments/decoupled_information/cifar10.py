@@ -1,3 +1,61 @@
+"""
+CIFAR-10 Loss Function Calibration and Performance Comparison.
+
+This script conducts a systematic experiment to evaluate and compare the effectiveness
+of various loss functions on the CIFAR-10 image classification task. The primary goal
+is to assess not only the final classification accuracy but also the calibration and
+reliability of the models trained with each loss function.
+
+The experiment trains a consistent, ResNet-inspired Convolutional Neural Network (CNN)
+architecture separately for each specified loss function. After training, it performs a
+multi-faceted analysis to provide a holistic view of each loss function's impact.
+
+Key Features:
+- **Configurable Architecture:** The CNN architecture is defined in the `build_model`
+  function and is highly configurable via the `ExperimentConfig` dataclass, allowing
+  for adjustments to depth, width, regularization, and the use of residual connections.
+- **Multiple Loss Functions:** A dictionary in `ExperimentConfig` defines the set of
+  loss functions to be compared, including standard choices like Categorical
+  Cross-Entropy and more advanced options like Label Smoothing, Focal Loss, and the
+  custom Decoupled Information Loss (DIL).
+- **Comprehensive Analysis:** The evaluation goes beyond simple accuracy metrics.
+  - Performance Metrics: Final test accuracy, top-5 accuracy, and loss.
+  - Calibration Analysis: Expected Calibration Error (ECE), Brier Score, and reliability
+    diagrams are generated using the `ModelAnalyzer`.
+  - Model Internals: The `ModelAnalyzer` can also inspect weight distributions and
+    activation patterns to provide deeper insights.
+- **Automated Visualization:** Utilizes a modern, plugin-based visualization framework
+  (`VisualizationManager`) to automatically generate and save publication-quality plots,
+  including:
+  - Comparative training and validation curves (accuracy and loss).
+  - Per-model and comparative confusion matrices.
+- **Structured Output:** All results, logs, model weights, and visualizations are saved
+  to a unique, timestamped directory for reproducibility and easy access.
+
+Experimental Workflow:
+1.  **Configuration:** The script starts by initializing the `ExperimentConfig` dataclass,
+    which centralizes all experimental parameters.
+2.  **Setup:** A timestamped output directory is created, and the visualization manager
+    is initialized.
+3.  **Data Loading:** The CIFAR-10 dataset is loaded and preprocessed.
+4.  **Iterative Training:** The script iterates through the defined loss functions. For each one:
+    a. A new instance of the CNN model is built and compiled with the specific loss.
+    b. The model is trained until convergence, monitored by early stopping.
+    c. The trained model and its training history are stored.
+5.  **Analysis:** All trained models are passed to the `ModelAnalyzer` for a deep-dive
+    analysis of calibration, weights, and activations.
+6.  **Visualization:** The collected training histories and test set predictions are
+    formatted into standardized data structures and passed to the `VisualizationManager`
+    to generate comparative plots.
+7.  **Reporting:** A final summary of performance and calibration metrics for all models
+    is printed to the console for a quick overview of the results.
+
+Usage:
+    To run the full experiment with the default configuration, execute the script from
+    the command line:
+    $ python calibration_effectiveness_cifar10.py
+"""
+
 import gc
 import keras
 import numpy as np
@@ -6,22 +64,31 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Callable
 
+# ------------------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.utils.datasets import load_and_preprocess_cifar10
 from dl_techniques.losses.decoupled_information_loss import DecoupledInformationLoss
-from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
-
+from dl_techniques.visualization import (
+    VisualizationManager,
+    TrainingHistory,
+    ClassificationResults,
+    MultiModelClassification,
+    TrainingCurvesVisualization,
+    ConfusionMatrixVisualization
+)
 from dl_techniques.analyzer import (
     ModelAnalyzer,
     AnalysisConfig,
     DataInput
 )
 
-
-# ==============================================================================
+# ------------------------------------------------------------------------------
 # EXPERIMENT CONFIGURATION
-# ==============================================================================
+# ------------------------------------------------------------------------------
 
 @dataclass
 class ExperimentConfig:
@@ -90,15 +157,15 @@ class ExperimentConfig:
     ))
 
 
-# ==============================================================================
+# ------------------------------------------------------------------------------
 # MODEL ARCHITECTURE BUILDING UTILITIES
-# ==============================================================================
+# ------------------------------------------------------------------------------
 
 def build_residual_block(
-    inputs: keras.layers.Layer,
-    filters: int,
-    config: ExperimentConfig,
-    block_index: int
+        inputs: keras.layers.Layer,
+        filters: int,
+        config: ExperimentConfig,
+        block_index: int
 ) -> keras.layers.Layer:
     """
     Build a residual block with skip connections.
@@ -164,10 +231,10 @@ def build_residual_block(
 
 
 def build_conv_block(
-    inputs: keras.layers.Layer,
-    filters: int,
-    config: ExperimentConfig,
-    block_index: int
+        inputs: keras.layers.Layer,
+        filters: int,
+        config: ExperimentConfig,
+        block_index: int
 ) -> keras.layers.Layer:
     """
     Build a convolutional block with optional residual connections.
@@ -209,7 +276,7 @@ def build_conv_block(
 
     # Apply dropout if specified for this layer
     dropout_rate = (config.dropout_rates[block_index]
-                   if block_index < len(config.dropout_rates) else 0.0)
+                    if block_index < len(config.dropout_rates) else 0.0)
     if dropout_rate > 0:
         x = keras.layers.Dropout(dropout_rate)(x)
 
@@ -306,9 +373,9 @@ def build_model(config: ExperimentConfig, loss_fn: Callable, name: str) -> keras
     return model
 
 
-# ==============================================================================
+# ------------------------------------------------------------------------------
 # MAIN EXPERIMENT RUNNER
-# ==============================================================================
+# ------------------------------------------------------------------------------
 
 def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     """
@@ -336,24 +403,26 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize visualization manager
-    vis_manager = VisualizationManager(
+    viz_manager = VisualizationManager(
         output_dir=experiment_dir / "visualizations",
-        config=VisualizationConfig(),
-        timestamp_dirs=False
+        experiment_name=config.experiment_name
     )
+    # Register the visualization plugins that will be used
+    viz_manager.register_template("training_curves", TrainingCurvesVisualization)
+    viz_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
 
     # Log experiment start
-    logger.info("🚀 Starting CIFAR-10 Loss Comparison Experiment (Softmax Output)")
-    logger.info(f"📁 Results will be saved to: {experiment_dir}")
+    logger.info("Starting CIFAR-10 Loss Comparison Experiment (Softmax Output)")
+    logger.info(f"Results will be saved to: {experiment_dir}")
     logger.info("=" * 80)
 
     # ===== DATASET LOADING =====
-    logger.info("📊 Loading CIFAR-10 dataset...")
+    logger.info("Loading CIFAR-10 dataset...")
     cifar10_data = load_and_preprocess_cifar10()
-    logger.info("✅ Dataset loaded successfully")
+    logger.info("Dataset loaded successfully.")
 
     # ===== MODEL TRAINING PHASE =====
-    logger.info("🏋️ Starting model training phase...")
+    logger.info("Starting model training phase...")
     trained_models = {}  # Store trained models (already with softmax output)
     all_histories = {}  # Store training histories
 
@@ -386,14 +455,14 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         # Store results
         trained_models[loss_name] = model
         all_histories[loss_name] = history.history
-        logger.info(f"✅ {loss_name} training completed!")
+        logger.info(f"{loss_name} training completed.")
 
     # ===== MEMORY MANAGEMENT =====
-    logger.info("🗑️ Triggering garbage collection...")
+    logger.info("Triggering garbage collection...")
     gc.collect()
 
     # ===== COMPREHENSIVE MODEL ANALYSIS =====
-    logger.info("📊 Performing comprehensive analysis with ModelAnalyzer...")
+    logger.info("Performing comprehensive analysis with ModelAnalyzer...")
     model_analysis_results = None
 
     try:
@@ -406,24 +475,43 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
         # Run comprehensive analysis
         model_analysis_results = analyzer.analyze(data=DataInput.from_object(cifar10_data))
-        logger.info("✅ Model analysis completed successfully!")
+        logger.info("Model analysis completed successfully.")
 
     except Exception as e:
-        logger.error(f"❌ Model analysis failed: {e}", exc_info=True)
+        logger.error(f"Model analysis failed: {e}", exc_info=True)
 
     # ===== VISUALIZATION GENERATION =====
-    logger.info("🖼️ Generating training history and confusion matrix plots...")
+    logger.info("Generating training history and confusion matrix plots using the visualization framework...")
 
-    # Plot training history comparison
-    vis_manager.plot_history(
-        histories=all_histories,
-        metrics=['accuracy', 'loss'],
-        name='training_comparison',
-        subdir='training_plots',
-        title='Loss Functions Training & Validation Comparison'
-    )
+    # 1. Plot training history comparison
+    # Convert Keras histories to the framework's TrainingHistory format
+    training_histories_data: Dict[str, TrainingHistory] = {}
+    for model_name, history_dict in all_histories.items():
+        if not history_dict or not history_dict.get('loss'):
+            logger.warning(f"Skipping visualization for {model_name} due to empty history.")
+            continue
 
-    # Generate confusion matrices for model comparison
+        train_metrics = {k: v for k, v in history_dict.items() if not k.startswith('val_') and k != 'loss'}
+        val_metrics = {k.replace('val_', ''): v for k, v in history_dict.items() if k.startswith('val_')}
+
+        training_histories_data[model_name] = TrainingHistory(
+            epochs=list(range(len(history_dict['loss']))),
+            train_loss=history_dict.get('loss', []),
+            val_loss=history_dict.get('val_loss', []),
+            train_metrics=train_metrics,
+            val_metrics=val_metrics,
+            model_name=model_name
+        )
+
+    if training_histories_data:
+        viz_manager.visualize(
+            data=training_histories_data,
+            plugin_name="training_curves",
+            metrics_to_plot=['accuracy'],
+            title='Loss Functions Training & Validation Comparison'
+        )
+
+    # 2. Generate confusion matrices for model comparison
     raw_predictions = {
         name: model.predict(cifar10_data.x_test, verbose=0)
         for name, model in trained_models.items()
@@ -433,17 +521,35 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         for name, preds in raw_predictions.items()
     }
 
-    vis_manager.plot_confusion_matrices_comparison(
-        y_true=cifar10_data.y_test,
-        model_predictions=class_predictions,
-        name='loss_function_confusion_matrices',
-        subdir='model_comparison',
-        normalize=True,
-        class_names=[str(i) for i in range(10)]
+    # Prepare data for the MultiModelClassification format
+    y_true_labels = np.argmax(cifar10_data.y_test, axis=1)
+    class_names = [str(i) for i in range(config.num_classes)]
+    model_results: Dict[str, ClassificationResults] = {}
+
+    for name in trained_models.keys():
+        model_results[name] = ClassificationResults(
+            y_true=y_true_labels,
+            y_pred=class_predictions[name],
+            y_prob=raw_predictions[name],
+            class_names=class_names,
+            model_name=name
+        )
+
+    multi_model_data = MultiModelClassification(
+        y_true=y_true_labels,
+        model_results=model_results,
+        class_names=class_names
+    )
+
+    viz_manager.visualize(
+        data=multi_model_data,
+        plugin_name="confusion_matrix",
+        normalize='true',  # Normalize by true label counts
+        title='Loss Function Confusion Matrix Comparison'
     )
 
     # ===== FINAL PERFORMANCE EVALUATION =====
-    logger.info("📈 Evaluating final model performance on test set...")
+    logger.info("Evaluating final model performance on test set...")
 
     # Debug information about test data format
     logger.info(f"Test data shape: {cifar10_data.x_test.shape}, {cifar10_data.y_test.shape}")
@@ -508,9 +614,9 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     return results_payload
 
 
-# ==============================================================================
+# ------------------------------------------------------------------------------
 # RESULTS REPORTING
-# ==============================================================================
+# ------------------------------------------------------------------------------
 
 def print_experiment_summary(results: Dict[str, Any]) -> None:
     """
@@ -524,12 +630,12 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
         results: Dictionary containing all experimental results and analysis
     """
     logger.info("=" * 80)
-    logger.info("📋 EXPERIMENT SUMMARY")
+    logger.info("EXPERIMENT SUMMARY")
     logger.info("=" * 80)
 
     # ===== PERFORMANCE METRICS SECTION =====
     if 'performance_analysis' in results and results['performance_analysis']:
-        logger.info("🎯 PERFORMANCE METRICS (on Full Test Set):")
+        logger.info("PERFORMANCE METRICS (on Full Test Set):")
         logger.info(f"{'Model':<20} {'Accuracy':<12} {'Top-5 Acc':<12} {'Loss':<12}")
         logger.info("-" * 60)
 
@@ -542,7 +648,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     # ===== CALIBRATION METRICS SECTION =====
     model_analysis = results.get('model_analysis')
     if model_analysis and model_analysis.calibration_metrics:
-        logger.info("🎯 CALIBRATION METRICS (from Model Analyzer):")
+        logger.info("CALIBRATION METRICS (from Model Analyzer):")
         logger.info(f"{'Model':<20} {'ECE':<12} {'Brier Score':<15} {'Mean Entropy':<12}")
         logger.info("-" * 65)
 
@@ -558,34 +664,34 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
         has_training_data = False
         for model_name, history_dict in results['histories'].items():
             if (history_dict.get('val_accuracy') and len(history_dict['val_accuracy']) > 0 and
-                history_dict.get('val_loss') and len(history_dict['val_loss']) > 0):
+                    history_dict.get('val_loss') and len(history_dict['val_loss']) > 0):
                 has_training_data = True
                 break
 
         if has_training_data:
-            logger.info("🏁 FINAL TRAINING METRICS (on Validation Set):")
+            logger.info("FINAL TRAINING METRICS (on Validation Set):")
             logger.info(f"{'Model':<20} {'Val Accuracy':<15} {'Val Loss':<12}")
             logger.info("-" * 50)
 
             for model_name, history_dict in results['histories'].items():
                 # Check if this specific model has actual training data
                 if (history_dict.get('val_accuracy') and len(history_dict['val_accuracy']) > 0 and
-                    history_dict.get('val_loss') and len(history_dict['val_loss']) > 0):
+                        history_dict.get('val_loss') and len(history_dict['val_loss']) > 0):
                     final_val_acc = history_dict['val_accuracy'][-1]
                     final_val_loss = history_dict['val_loss'][-1]
                     logger.info(f"{model_name:<20} {final_val_acc:<15.4f} {final_val_loss:<12.4f}")
                 else:
                     logger.info(f"{model_name:<20} {'Not trained':<15} {'Not trained':<12}")
         else:
-            logger.info("🏁 TRAINING STATUS:")
-            logger.info("⚠️  Models were not trained (epochs=0) - no training metrics available")
+            logger.info("TRAINING STATUS:")
+            logger.info("Warning: Models were not trained (epochs=0) - no training metrics available")
 
     logger.info("=" * 80)
 
 
-# ==============================================================================
+# ------------------------------------------------------------------------------
 # MAIN EXECUTION
-# ==============================================================================
+# ------------------------------------------------------------------------------
 
 def main() -> None:
     """
@@ -594,14 +700,14 @@ def main() -> None:
     This function serves as the entry point for the experiment, handling
     configuration setup, experiment execution, and error handling.
     """
-    logger.info("🚀 CIFAR-10 Loss Function Comparison (Softmax Output)")
+    logger.info("CIFAR-10 Loss Function Comparison (Softmax Output)")
     logger.info("=" * 80)
 
     # Initialize experiment configuration
     config = ExperimentConfig()
 
     # Log key configuration parameters
-    logger.info("⚙️ EXPERIMENT CONFIGURATION:")
+    logger.info("EXPERIMENT CONFIGURATION:")
     logger.info(f"   Loss Functions: {list(config.loss_functions.keys())}")
     logger.info(f"   Epochs: {config.epochs}, Batch Size: {config.batch_size}")
     logger.info(f"   Model Architecture: {len(config.conv_filters)} conv blocks, "
@@ -612,16 +718,16 @@ def main() -> None:
     try:
         # Run the complete experiment
         _ = run_experiment(config)
-        logger.info("✅ Experiment completed successfully!")
+        logger.info("Experiment completed successfully.")
 
     except Exception as e:
-        logger.error(f"❌ Experiment failed with error: {e}", exc_info=True)
+        logger.error(f"Experiment failed with error: {e}", exc_info=True)
         raise
 
 
-# ==============================================================================
+# ------------------------------------------------------------------------------
 # SCRIPT ENTRY POINT
-# ==============================================================================
+# ------------------------------------------------------------------------------
 
 if __name__ == "__main__":
     main()

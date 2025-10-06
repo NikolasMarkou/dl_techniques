@@ -6,9 +6,6 @@ masks used in transformer architectures and segmentation models. It includes bot
 attention masking patterns (causal, sliding window, etc.) and specialized masks
 for instance segmentation tasks.
 
-The module is designed to be backend-agnostic and symbolically safe for use in
-Keras 3 computational graphs, with full type hints and extensive documentation.
-
 Classes:
     MaskType: Enum for standard mask types
     MaskConfig: Configuration dataclass for mask creation
@@ -1000,5 +997,3 @@ def get_mask_info() -> Dict[str, Dict[str, Any]]:
             "optional_params": ["separation_threshold", "dtype"],
         },
     }
-
-

@@ -27,9 +27,11 @@ from typing import Dict, List, Optional, Tuple, Any, Union, Callable, Type
 plt.style.use('seaborn-v0_8-whitegrid')
 sns.set_palette("husl")
 
-# Setup logging
-logger = logging.getLogger(__name__)
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 # Configuration Classes

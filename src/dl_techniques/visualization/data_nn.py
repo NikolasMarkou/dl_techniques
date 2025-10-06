@@ -7,16 +7,16 @@ and neural network specific visualizations.
 """
 
 import keras
+import warnings
 import numpy as np
 import pandas as pd
+import seaborn as sns
+from scipy.ndimage import zoom
 import matplotlib.pyplot as plt
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from scipy.stats import gaussian_kde
 from matplotlib.patches import FancyBboxPatch
 from typing import Dict, List, Optional, Tuple, Any, Union
-
-from scipy.ndimage import zoom
-import warnings
 
 # ---------------------------------------------------------------------
 # local imports
@@ -81,8 +81,6 @@ class GradientData:
     model_name: Optional[str] = None
 
 
-# --- START OF MODIFICATION ---
-
 @dataclass
 class GradientTopologyData:
     """Container for gradient topology data."""
@@ -90,6 +88,28 @@ class GradientTopologyData:
     gradients: List[Any]
     model_name: Optional[str] = None
 
+# --- START OF MODIFICATION ---
+
+@dataclass
+class MatrixData:
+    """Container for a generic 2D matrix for visualization."""
+    matrix: np.ndarray
+    title: Optional[str] = "Matrix Visualization"
+    xlabel: Optional[str] = "X-axis"
+    ylabel: Optional[str] = "Y-axis"
+    xticklabels: Optional[List[str]] = None
+    yticklabels: Optional[List[str]] = None
+
+
+@dataclass
+class ImageData:
+    """Container for comparing multiple images."""
+    images: List[np.ndarray]
+    titles: List[str] = field(default_factory=list)
+    super_title: Optional[str] = "Image Comparison"
+
+
+# --- END OF MODIFICATION ---
 
 # ---------------------------------------------------------------------
 # Gradient Topology Visualizer (Integrated Code)
@@ -380,9 +400,6 @@ class GradientTopologyVisualizer:
         }
 
         return stats
-
-# --- END OF MODIFICATION ---
-
 
 # ---------------------------------------------------------------------
 # Data Distribution Templates
@@ -1358,8 +1375,6 @@ class GradientVisualization(VisualizationPlugin):
         return fig
 
 
-# --- START OF MODIFICATION ---
-
 # ---------------------------------------------------------------------
 # Gradient Topology Visualization
 # ---------------------------------------------------------------------
@@ -1427,5 +1442,165 @@ class GradientTopologyVisualization(VisualizationPlugin):
             gradients=data.gradients,
             **heatmap_kwargs
         )
+
+        return fig
+
+# --- START OF MODIFICATION ---
+# ---------------------------------------------------------------------
+# Generic Data Visualization Templates
+# ---------------------------------------------------------------------
+
+
+class GenericMatrixVisualization(VisualizationPlugin):
+    """Visualize a generic 2D matrix as a heatmap."""
+
+    @property
+    def name(self) -> str:
+        return "generic_matrix"
+
+    @property
+    def description(self) -> str:
+        return "Visualize a generic 2D matrix (e.g., correlation) as a heatmap"
+
+    def can_handle(self, data: Any) -> bool:
+        is_2d_ndarray = isinstance(data, np.ndarray) and data.ndim == 2
+        return isinstance(data, MatrixData) or is_2d_ndarray
+
+    def create_visualization(
+            self,
+            data: Union[MatrixData, np.ndarray],
+            ax: Optional[plt.Axes] = None,
+            **kwargs
+    ) -> plt.Figure:
+        """
+        Create a heatmap visualization for a 2D matrix.
+
+        Args:
+            data: A MatrixData object or a raw 2D numpy array.
+            ax: Optional matplotlib axes to plot on.
+            **kwargs: Additional arguments like title, xlabel, ylabel,
+                      annot, fmt, cmap, xticklabels, yticklabels.
+        """
+        if ax is None:
+            fig, ax = plt.subplots(figsize=self.config.fig_size)
+        else:
+            fig = ax.get_figure()
+
+        # Unpack data and kwargs
+        if isinstance(data, MatrixData):
+            matrix = data.matrix
+            title = kwargs.get('title', data.title)
+            xlabel = kwargs.get('xlabel', data.xlabel)
+            ylabel = kwargs.get('ylabel', data.ylabel)
+            xticklabels = kwargs.get('xticklabels', data.xticklabels)
+            yticklabels = kwargs.get('yticklabels', data.yticklabels)
+        else:
+            matrix = data
+            title = kwargs.get('title', 'Matrix Visualization')
+            xlabel = kwargs.get('xlabel', 'X-axis')
+            ylabel = kwargs.get('ylabel', 'Y-axis')
+            xticklabels = kwargs.get('xticklabels')
+            yticklabels = kwargs.get('yticklabels')
+
+        annot = kwargs.get('annot', True)
+        fmt = kwargs.get('fmt', '.2f')
+        cmap = kwargs.get('cmap', self.config.color_scheme.primary)
+
+        # Plot heatmap
+        sns.heatmap(
+            matrix,
+            ax=ax,
+            cmap=cmap,
+            annot=annot,
+            fmt=fmt,
+            xticklabels=xticklabels if xticklabels is not None else 'auto',
+            yticklabels=yticklabels if yticklabels is not None else 'auto',
+        )
+
+        ax.set_title(title)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+
+        return fig
+
+
+class ImageComparisonVisualization(VisualizationPlugin):
+    """Compare multiple images side-by-side."""
+
+    @property
+    def name(self) -> str:
+        return "image_comparison"
+
+    @property
+    def description(self) -> str:
+        return "Display multiple images side-by-side for comparison"
+
+    def can_handle(self, data: Any) -> bool:
+        is_list_of_arrays = (
+            isinstance(data, list) and
+            all(isinstance(item, np.ndarray) for item in data)
+        )
+        return isinstance(data, ImageData) or is_list_of_arrays
+
+    def create_visualization(
+            self,
+            data: Union[ImageData, List[np.ndarray]],
+            ax: Optional[plt.Axes] = None,
+            **kwargs
+    ) -> plt.Figure:
+        """
+        Create a side-by-side comparison of images.
+
+        Args:
+            data: An ImageData object or a list of numpy arrays.
+            ax: Optional matplotlib axes. Note: This plugin creates its own
+                figure with multiple subplots and will ignore this argument.
+            **kwargs: Additional arguments like titles, cmap, super_title.
+        """
+        if ax is not None:
+            warnings.warn(
+                f"{self.name} creates its own figure and will ignore "
+                "the provided 'ax' argument."
+            )
+
+        if isinstance(data, ImageData):
+            images = data.images
+            titles = kwargs.get('titles', data.titles)
+            super_title = kwargs.get('super_title', data.super_title)
+        else:
+            images = data
+            titles = kwargs.get('titles', [])
+            super_title = kwargs.get('super_title', 'Image Comparison')
+
+        n_images = len(images)
+        if n_images == 0:
+            fig, ax = plt.subplots()
+            ax.text(0.5, 0.5, 'No images to display', ha='center', va='center')
+            return fig
+
+        # Ensure titles list matches number of images
+        if len(titles) < n_images:
+            titles.extend([f'Image {i+1}' for i in range(len(titles), n_images)])
+
+        fig, axes = plt.subplots(1, n_images, figsize=(4 * n_images, 4))
+        if n_images == 1:
+            axes = [axes]
+
+        cmap = kwargs.get('cmap', 'gray')
+
+        for i, (img, title) in enumerate(zip(images, titles)):
+            ax_sub = axes[i]
+            # Handle single-channel images correctly
+            if img.ndim == 2 or (img.ndim == 3 and img.shape[2] == 1):
+                im = ax_sub.imshow(img.squeeze(), cmap=cmap)
+            else:
+                im = ax_sub.imshow(img)
+
+            ax_sub.set_title(title)
+            ax_sub.axis('off')
+            fig.colorbar(im, ax=ax_sub, fraction=0.046, pad=0.04)
+
+        if super_title:
+            fig.suptitle(super_title, fontsize=self.config.title_fontsize * 1.2)
 
         return fig

@@ -23,7 +23,12 @@ from sklearn.metrics import (
 # local imports
 # ---------------------------------------------------------------------
 
-from .core import VisualizationPlugin, CompositeVisualization, PlotConfig, VisualizationContext
+from .core import (
+    VisualizationPlugin,
+    CompositeVisualization,
+    PlotConfig,
+    VisualizationContext
+)
 
 
 # ---------------------------------------------------------------------
