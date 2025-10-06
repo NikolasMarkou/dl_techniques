@@ -766,7 +766,7 @@ class TrainingPipeline:
             GradientTopologyVisualization
         )
 
-        logger.info(f"Visualization manager ready with {len(self.viz_manager._templates)} templates")
+        logger.info(f"Visualization manager ready with {len(self.viz_manager.templates)} templates")
 
     def _compile_model(
             self,
