@@ -4,6 +4,8 @@ visualization and analysis capabilities.
 
 This framework provides a complete solution for training, monitoring,
 and analyzing computer vision models with minimal boilerplate code.
+It integrates with the dl_techniques optimization module for advanced
+optimizer and learning rate schedule configuration.
 """
 
 import gc
@@ -20,6 +22,10 @@ from typing import (
 )
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.optimization import (
+    optimizer_builder,
+    learning_rate_schedule_builder as schedule_builder
+)
 from dl_techniques.visualization import (
     VisualizationManager,
     TrainingHistory,
@@ -49,31 +55,64 @@ class TrainingConfig:
     Centralized configuration for training vision models.
 
     This dataclass encapsulates all training parameters, making experiments
-    reproducible and easy to configure. It can be populated from command-line
-    arguments, JSON files, or direct instantiation.
+    reproducible and easy to configure. It integrates with the dl_techniques
+    optimization module for advanced schedule and optimizer configuration.
 
     Attributes:
         input_shape: Input image shape (H, W, C).
         num_classes: Number of output classes.
         epochs: Maximum number of training epochs.
         batch_size: Training batch size.
-        optimizer_type: Optimizer name ('adam', 'adamw', 'sgd', 'lion').
+
+        # Learning Rate Schedule Configuration
+        lr_schedule_type: Type of LR schedule ('cosine_decay', 'exponential_decay',
+                         'cosine_decay_restarts', 'constant').
         learning_rate: Initial learning rate.
+        decay_steps: Steps over which to apply decay (auto-calculated if None).
+        decay_rate: Decay rate for exponential schedule.
+        alpha: Minimum learning rate as fraction of initial (for cosine schedules).
+        t_mul: Period multiplier for cosine restarts.
+        m_mul: LR multiplier for cosine restarts.
+        warmup_steps: Number of warmup steps (0 disables warmup).
+        warmup_start_lr: Starting learning rate for warmup phase.
+
+        # Optimizer Configuration
+        optimizer_type: Optimizer name ('adam', 'adamw', 'sgd', 'rmsprop', 'adadelta').
         weight_decay: L2 regularization coefficient (for AdamW).
-        lr_schedule_type: Type of LR schedule ('cosine', 'exponential',
-                         'reduce_on_plateau', 'constant').
-        gradient_clipping: Gradient clipping by norm. None disables clipping.
+        beta_1: First moment decay rate (Adam/AdamW).
+        beta_2: Second moment decay rate (Adam/AdamW).
+        epsilon: Numerical stability constant.
+        amsgrad: Use AMSGrad variant (Adam/AdamW).
+        rho: Decay factor (RMSprop/Adadelta).
+        momentum: Momentum factor (RMSprop/SGD).
+        centered: Use centered RMSprop.
+        nesterov: Use Nesterov momentum (SGD).
+
+        # Gradient Clipping Configuration
+        gradient_clipping_value: Clip gradients by absolute value.
+        gradient_clipping_norm_local: Clip gradients by local L2 norm.
+        gradient_clipping_norm_global: Clip gradients by global L2 norm.
+
+        # Loss Configuration
         from_logits: Whether model outputs logits (True) or probabilities (False).
+
+        # Training Control
         steps_per_epoch: Override automatic calculation of steps per epoch.
         validation_steps: Override automatic calculation of validation steps.
         early_stopping_patience: Patience for early stopping callback.
         monitor_metric: Metric to monitor for callbacks ('val_accuracy', 'val_loss').
         monitor_mode: Mode for monitoring ('max' for accuracy, 'min' for loss).
+
+        # Output & Logging
         output_dir: Base directory for experiment outputs.
         experiment_name: Name of the experiment. Auto-generated if None.
+
+        # Visualization & Analysis
         enable_visualization: Enable automatic visualization during training.
         enable_analysis: Enable model analysis after training.
         visualization_frequency: Create visualizations every N epochs.
+
+        # Model-Specific Arguments
         model_args: Additional model-specific arguments.
     """
     # --- Data & Model Configuration ---
@@ -84,12 +123,33 @@ class TrainingConfig:
     epochs: int = 100
     batch_size: int = 64
 
-    # --- Optimization Configuration ---
-    optimizer_type: str = 'adamw'
+    # --- Learning Rate Schedule Configuration ---
+    lr_schedule_type: str = 'cosine_decay'
     learning_rate: float = 1e-3
+    decay_steps: Optional[int] = None
+    decay_rate: float = 0.9
+    alpha: float = 0.0001
+    t_mul: float = 2.0
+    m_mul: float = 0.9
+    warmup_steps: int = 1000
+    warmup_start_lr: float = 1e-8
+
+    # --- Optimizer Configuration ---
+    optimizer_type: str = 'adamw'
     weight_decay: float = 1e-4
-    lr_schedule_type: str = 'cosine'
-    gradient_clipping: Optional[float] = 1.0
+    beta_1: float = 0.9
+    beta_2: float = 0.999
+    epsilon: float = 1e-7
+    amsgrad: bool = False
+    rho: float = 0.9
+    momentum: float = 0.9
+    centered: bool = False
+    nesterov: bool = True
+
+    # --- Gradient Clipping Configuration ---
+    gradient_clipping_value: Optional[float] = None
+    gradient_clipping_norm_local: Optional[float] = None
+    gradient_clipping_norm_global: Optional[float] = 1.0
 
     # --- Loss Configuration ---
     from_logits: bool = False
@@ -119,6 +179,89 @@ class TrainingConfig:
             model_name = self.model_args.get('variant', 'model')
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             self.experiment_name = f"{model_name}_{timestamp}"
+
+    def to_schedule_config(self, total_steps: int) -> Dict[str, Any]:
+        """
+        Convert training config to schedule builder config.
+
+        Args:
+            total_steps: Total training steps for decay calculation.
+
+        Returns:
+            Configuration dictionary for schedule_builder.
+        """
+        # Calculate decay_steps if not specified
+        decay_steps = self.decay_steps
+        if decay_steps is None:
+            decay_steps = total_steps
+
+        config = {
+            "type": self.lr_schedule_type,
+            "learning_rate": self.learning_rate,
+            "decay_steps": decay_steps,
+            "warmup_steps": self.warmup_steps,
+            "warmup_start_lr": self.warmup_start_lr,
+        }
+
+        # Add schedule-specific parameters
+        if self.lr_schedule_type == 'exponential_decay':
+            config["decay_rate"] = self.decay_rate
+        elif self.lr_schedule_type in ['cosine_decay', 'cosine_decay_restarts']:
+            config["alpha"] = self.alpha
+            if self.lr_schedule_type == 'cosine_decay_restarts':
+                config["t_mul"] = self.t_mul
+                config["m_mul"] = self.m_mul
+
+        return config
+
+    def to_optimizer_config(self) -> Dict[str, Any]:
+        """
+        Convert training config to optimizer builder config.
+
+        Returns:
+            Configuration dictionary for optimizer_builder.
+        """
+        config = {
+            "type": self.optimizer_type,
+            "gradient_clipping_by_value": self.gradient_clipping_value,
+            "gradient_clipping_by_norm_local": self.gradient_clipping_norm_local,
+            "gradient_clipping_by_norm": self.gradient_clipping_norm_global,
+        }
+
+        # Add optimizer-specific parameters
+        opt_type = self.optimizer_type.lower()
+
+        if opt_type in ['adam', 'adamw']:
+            config.update({
+                "beta_1": self.beta_1,
+                "beta_2": self.beta_2,
+                "epsilon": self.epsilon,
+                "amsgrad": self.amsgrad,
+            })
+            if opt_type == 'adamw':
+                config["weight_decay"] = self.weight_decay
+
+        elif opt_type == 'rmsprop':
+            config.update({
+                "rho": self.rho,
+                "momentum": self.momentum,
+                "epsilon": self.epsilon,
+                "centered": self.centered,
+            })
+
+        elif opt_type == 'adadelta':
+            config.update({
+                "rho": self.rho,
+                "epsilon": self.epsilon,
+            })
+
+        elif opt_type == 'sgd':
+            config.update({
+                "momentum": self.momentum,
+                "nesterov": self.nesterov,
+            })
+
+        return config
 
     def save(self, file_path: Path) -> None:
         """
@@ -342,7 +485,9 @@ class TrainingPipeline:
 
     This class takes a configuration, model builder, and dataset builder
     to run a complete training experiment with automatic visualization,
-    monitoring, and post-training analysis.
+    monitoring, and post-training analysis. It integrates with the
+    dl_techniques optimization module for advanced schedule and optimizer
+    configuration.
 
     Attributes:
         config: Training configuration object.
@@ -441,91 +586,6 @@ class TrainingPipeline:
 
         logger.info("Visualization manager ready")
 
-    def _create_lr_schedule(
-            self,
-            total_steps: int
-    ) -> Union[float, keras.optimizers.schedules.LearningRateSchedule]:
-        """
-        Create learning rate schedule based on configuration.
-
-        Args:
-            total_steps: Total number of training steps.
-
-        Returns:
-            Learning rate schedule object or constant float.
-        """
-        schedule_type = self.config.lr_schedule_type.lower()
-
-        if schedule_type == 'cosine':
-            return keras.optimizers.schedules.CosineDecay(
-                initial_learning_rate=self.config.learning_rate,
-                decay_steps=total_steps
-            )
-        elif schedule_type == 'exponential':
-            return keras.optimizers.schedules.ExponentialDecay(
-                initial_learning_rate=self.config.learning_rate,
-                decay_steps=total_steps // 10,
-                decay_rate=0.9
-            )
-        elif schedule_type == 'constant':
-            return self.config.learning_rate
-        elif schedule_type == 'reduce_on_plateau':
-            # Handled by callback
-            return self.config.learning_rate
-        else:
-            logger.warning(
-                f"Unknown schedule type '{schedule_type}', using constant LR"
-            )
-            return self.config.learning_rate
-
-    def _create_optimizer(
-            self,
-            lr_schedule: Union[float, keras.optimizers.schedules.LearningRateSchedule]
-    ) -> keras.optimizers.Optimizer:
-        """
-        Create optimizer based on configuration.
-
-        Args:
-            lr_schedule: Learning rate or schedule object.
-
-        Returns:
-            Configured optimizer instance.
-        """
-        opt_type = self.config.optimizer_type.lower()
-
-        common_args = {
-            'learning_rate': lr_schedule,
-            'clipnorm': self.config.gradient_clipping
-        }
-
-        if opt_type == 'adamw':
-            return keras.optimizers.AdamW(
-                weight_decay=self.config.weight_decay,
-                **common_args
-            )
-        elif opt_type == 'adam':
-            return keras.optimizers.Adam(**common_args)
-        elif opt_type == 'sgd':
-            return keras.optimizers.SGD(
-                momentum=0.9,
-                nesterov=True,
-                **common_args
-            )
-        elif opt_type == 'lion':
-            try:
-                return keras.optimizers.Lion(
-                    weight_decay=self.config.weight_decay,
-                    **common_args
-                )
-            except AttributeError:
-                logger.warning("Lion optimizer not available, using AdamW")
-                return keras.optimizers.AdamW(
-                    weight_decay=self.config.weight_decay,
-                    **common_args
-                )
-        else:
-            raise ValueError(f"Unsupported optimizer: {opt_type}")
-
     def _compile_model(
             self,
             model: keras.Model,
@@ -534,18 +594,30 @@ class TrainingPipeline:
         """
         Compile the model with configured optimizer, loss, and metrics.
 
+        Uses the dl_techniques optimization module for advanced schedule
+        and optimizer configuration with warmup support.
+
         Args:
             model: Keras model to compile.
             total_steps: Total number of training steps for LR schedule.
         """
-        logger.info("Compiling model")
+        logger.info("Compiling model using dl_techniques optimization module")
         logger.info(f"Loss configured with from_logits={self.config.from_logits}")
 
-        # Create learning rate schedule
-        lr_schedule = self._create_lr_schedule(total_steps)
+        # Handle constant learning rate (no schedule)
+        if self.config.lr_schedule_type == 'constant':
+            logger.info("Using constant learning rate (no schedule)")
+            lr_schedule = self.config.learning_rate
+        else:
+            # Build learning rate schedule using schedule_builder
+            schedule_config = self.config.to_schedule_config(total_steps)
+            logger.info(f"Building LR schedule with config: {schedule_config}")
+            lr_schedule = schedule_builder(schedule_config)
 
-        # Create optimizer
-        optimizer = self._create_optimizer(lr_schedule)
+        # Build optimizer using optimizer_builder
+        optimizer_config = self.config.to_optimizer_config()
+        logger.info(f"Building optimizer [{self.config.optimizer_type}] with config: {optimizer_config}")
+        optimizer = optimizer_builder(optimizer_config, lr_schedule)
 
         # Define loss (using configured from_logits)
         loss = keras.losses.SparseCategoricalCrossentropy(
@@ -612,17 +684,8 @@ class TrainingPipeline:
             )
         ]
 
-        # Add ReduceLROnPlateau if specified
-        if self.config.lr_schedule_type == 'reduce_on_plateau':
-            callbacks.append(
-                keras.callbacks.ReduceLROnPlateau(
-                    monitor='val_loss',
-                    factor=0.2,
-                    patience=5,
-                    min_lr=1e-7,
-                    verbose=1
-                )
-            )
+        # Note: ReduceLROnPlateau is NOT added as we're using schedule_builder
+        # which handles all schedule logic internally with warmup
 
         # Add visualization callback
         if self.config.enable_visualization and self.viz_manager is not None:
@@ -719,7 +782,7 @@ class TrainingPipeline:
         This method orchestrates the entire training process including:
         - Environment setup
         - Dataset preparation
-        - Model creation and compilation
+        - Model creation and compilation (with dl_techniques optimization)
         - Training with callbacks
         - Visualization and analysis
 
@@ -771,8 +834,13 @@ class TrainingPipeline:
         total_steps = steps_per_epoch * self.config.epochs
         self._compile_model(model, total_steps)
 
+        # Get LR schedule for callbacks (if not constant)
+        lr_schedule = None
+        if self.config.lr_schedule_type != 'constant':
+            schedule_config = self.config.to_schedule_config(total_steps)
+            lr_schedule = schedule_builder(schedule_config)
+
         # Create callbacks
-        lr_schedule = self._create_lr_schedule(total_steps)
         callbacks = self._create_callbacks(lr_schedule, custom_callbacks)
 
         # Train model
@@ -854,13 +922,13 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help='Training batch size'
     )
 
-    # Optimizer arguments
+    # Learning rate schedule arguments
     parser.add_argument(
-        '--optimizer',
+        '--lr-schedule',
         type=str,
-        default='adamw',
-        choices=['adam', 'adamw', 'sgd', 'lion'],
-        help='Optimizer type'
+        default='cosine_decay',
+        choices=['cosine_decay', 'exponential_decay', 'cosine_decay_restarts', 'constant'],
+        help='Learning rate schedule type'
     )
     parser.add_argument(
         '--learning-rate',
@@ -869,17 +937,37 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help='Initial learning rate'
     )
     parser.add_argument(
+        '--warmup-steps',
+        type=int,
+        default=1000,
+        help='Number of warmup steps'
+    )
+    parser.add_argument(
+        '--alpha',
+        type=float,
+        default=0.0001,
+        help='Minimum learning rate fraction (cosine schedules)'
+    )
+
+    # Optimizer arguments
+    parser.add_argument(
+        '--optimizer',
+        type=str,
+        default='adamw',
+        choices=['adam', 'adamw', 'sgd', 'rmsprop', 'adadelta'],
+        help='Optimizer type'
+    )
+    parser.add_argument(
         '--weight-decay',
         type=float,
         default=1e-4,
-        help='Weight decay for regularization'
+        help='Weight decay for regularization (AdamW)'
     )
     parser.add_argument(
-        '--lr-schedule',
-        type=str,
-        default='cosine',
-        choices=['cosine', 'exponential', 'reduce_on_plateau', 'constant'],
-        help='Learning rate schedule type'
+        '--gradient-clip',
+        type=float,
+        default=1.0,
+        help='Gradient clipping by global norm'
     )
 
     # Loss arguments
@@ -915,6 +1003,14 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help='Disable model analysis'
     )
 
+    # Config file
+    parser.add_argument(
+        '--config',
+        type=str,
+        default=None,
+        help='Load configuration from JSON file'
+    )
+
     return parser
 
 
@@ -928,15 +1024,27 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
     Returns:
         TrainingConfig instance.
     """
+    # If config file provided, load it and override with CLI args
+    if args.config:
+        config = TrainingConfig.load(Path(args.config))
+        # Override with CLI arguments that were explicitly set
+        # (This is simplified - in production you'd check which args were actually provided)
+        config.epochs = args.epochs
+        config.batch_size = args.batch_size
+        return config
+
     return TrainingConfig(
         input_shape=tuple(args.input_shape),
         num_classes=args.num_classes,
         epochs=args.epochs,
         batch_size=args.batch_size,
-        optimizer_type=args.optimizer,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
         lr_schedule_type=args.lr_schedule,
+        learning_rate=args.learning_rate,
+        warmup_steps=args.warmup_steps,
+        alpha=args.alpha,
+        optimizer_type=args.optimizer,
+        weight_decay=args.weight_decay,
+        gradient_clipping_norm_global=args.gradient_clip,
         from_logits=args.from_logits,
         output_dir=args.output_dir,
         experiment_name=args.experiment_name,

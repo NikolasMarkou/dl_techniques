@@ -572,7 +572,7 @@ def create_vit_argument_parser() -> argparse.ArgumentParser:
         optimizer='adamw',
         learning_rate=1e-4,
         weight_decay=0.01,
-        lr_schedule='cosine',
+        lr_schedule='cosine_decay',
     )
 
     vit_group = parser.add_argument_group('ViT-specific arguments')
