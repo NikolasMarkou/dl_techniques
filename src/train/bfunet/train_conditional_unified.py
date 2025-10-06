@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 from enum import Enum
 
-from dl_techniques.utils.train_vision.framework import (
+from dl_techniques.optimization.train_vision import (
     TrainingConfig,
     DatasetBuilder,
     TrainingPipeline,

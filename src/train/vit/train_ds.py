@@ -20,7 +20,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.transformer import TransformerLayer
 from dl_techniques.models.vit.model_ds import ViT, create_vision_transformer
 
-from dl_techniques.utils.train_vision.framework import (
+from dl_techniques.optimization.train_vision import (
     TrainingConfig,
     TrainingPipeline,
     DatasetBuilder,

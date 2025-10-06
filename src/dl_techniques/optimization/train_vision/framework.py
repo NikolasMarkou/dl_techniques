@@ -18,14 +18,11 @@ from datetime import datetime
 from dataclasses import dataclass, field, asdict
 from abc import ABC, abstractmethod
 from typing import (
-    Tuple, List, Optional, Dict, Any, Callable, Union
+    Tuple, List, Optional, Dict, Any, Callable
 )
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.optimization import (
-    optimizer_builder,
-    learning_rate_schedule_builder as schedule_builder
-)
+
 from dl_techniques.visualization import (
     VisualizationManager,
     TrainingHistory,
@@ -44,6 +41,10 @@ from dl_techniques.analyzer import (
     DataInput,
 )
 
+from .. import (
+    optimizer_builder,
+    learning_rate_schedule_builder as schedule_builder
+)
 
 # =============================================================================
 # 1. CONFIGURATION DATACLASS

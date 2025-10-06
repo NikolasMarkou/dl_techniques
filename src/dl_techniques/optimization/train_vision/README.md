@@ -68,45 +68,46 @@ TrainingConfig(
 ## 📦 Dataset Builder Template
 
 ```python
-from dl_techniques.utils.train_vision import DatasetBuilder
+from dl_techniques.optimization.train_vision import DatasetBuilder
 from dl_techniques.analyzer import DataInput
+
 
 class MyDatasetBuilder(DatasetBuilder):
     def build(self):
         # 1. Load data
         (x_train, y_train), (x_val, y_val) = load_my_data()
-        
+
         # 2. Create tf.data.Dataset
         train_ds = tf.data.Dataset.from_tensor_slices((x_train, y_train))
         val_ds = tf.data.Dataset.from_tensor_slices((x_val, y_val))
-        
+
         # 3. Apply preprocessing and augmentation
         train_ds = (train_ds
-            .shuffle(10000)
-            .map(self._preprocess, num_parallel_calls=tf.data.AUTOTUNE)
-            .map(self._augment, num_parallel_calls=tf.data.AUTOTUNE)
-            .batch(self.config.batch_size)
-            .prefetch(tf.data.AUTOTUNE))
-        
+                    .shuffle(10000)
+                    .map(self._preprocess, num_parallel_calls=tf.data.AUTOTUNE)
+                    .map(self._augment, num_parallel_calls=tf.data.AUTOTUNE)
+                    .batch(self.config.batch_size)
+                    .prefetch(tf.data.AUTOTUNE))
+
         val_ds = (val_ds
-            .map(self._preprocess, num_parallel_calls=tf.data.AUTOTUNE)
-            .batch(self.config.batch_size)
-            .prefetch(tf.data.AUTOTUNE))
-        
+                  .map(self._preprocess, num_parallel_calls=tf.data.AUTOTUNE)
+                  .batch(self.config.batch_size)
+                  .prefetch(tf.data.AUTOTUNE))
+
         # 4. Calculate steps
         steps_per_epoch = len(x_train) // self.config.batch_size
         val_steps = len(x_val) // self.config.batch_size
-        
+
         return train_ds, val_ds, steps_per_epoch, val_steps
-    
+
     def _preprocess(self, image, label):
         image = tf.cast(image, tf.float32) / 255.0
         return image, label
-    
+
     def _augment(self, image, label):
         image = tf.image.random_flip_left_right(image)
         return image, label
-    
+
     def get_test_data(self):  # Optional
         return DataInput(x_data=x_test, y_data=y_test)
 ```
@@ -115,21 +116,22 @@ class MyDatasetBuilder(DatasetBuilder):
 
 ```python
 import keras
-from dl_techniques.utils.train_vision import TrainingConfig
+from dl_techniques.optimization.train_vision import TrainingConfig
+
 
 def build_my_model(config: TrainingConfig) -> keras.Model:
     inputs = keras.Input(shape=config.input_shape)
-    
+
     # Your architecture here
     x = keras.layers.Conv2D(64, 3, padding='same')(inputs)
     x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Activation('relu')(x)
     # ... more layers ...
-    
+
     # Classification head
     x = keras.layers.GlobalAveragePooling2D()(x)
     outputs = keras.layers.Dense(config.num_classes, activation='softmax')(x)
-    
+
     return keras.Model(inputs, outputs, name='my_model')
 ```
 
@@ -138,20 +140,20 @@ def build_my_model(config: TrainingConfig) -> keras.Model:
 ### Pattern 1: Standard Classification with Warmup
 
 ```python
-from dl_techniques.utils.train_vision import TrainingConfig
+from dl_techniques.optimization.train_vision import TrainingConfig
 
 config = TrainingConfig(
     input_shape=(224, 224, 3),
     num_classes=1000,
     epochs=100,
     batch_size=64,
-    
+
     # Learning rate with warmup
     learning_rate=1e-3,
     lr_schedule_type='cosine_decay',
-    warmup_steps=1000,        # 5% of training typically
+    warmup_steps=1000,  # 5% of training typically
     warmup_start_lr=1e-8,
-    
+
     optimizer_type='adamw',
     weight_decay=1e-4,
     gradient_clipping_norm_global=1.0
@@ -567,18 +569,19 @@ with mlflow.start_run():
 ```
 
 ### Multi-GPU Training
+
 ```python
 import tensorflow as tf
-from dl_techniques.utils.train_vision import TrainingConfig, TrainingPipeline
+from dl_techniques.optimization.train_vision import TrainingConfig, TrainingPipeline
 
 strategy = tf.distribute.MirroredStrategy()
 num_gpus = strategy.num_replicas_in_sync
 
 # Scale learning rate and warmup with number of GPUs
 config = TrainingConfig(
-    learning_rate=1e-3 * num_gpus,     # Linear scaling
-    warmup_steps=1000 * num_gpus,      # Proportional warmup
-    batch_size=64 * num_gpus,          # Effective batch size
+    learning_rate=1e-3 * num_gpus,  # Linear scaling
+    warmup_steps=1000 * num_gpus,  # Proportional warmup
+    batch_size=64 * num_gpus,  # Effective batch size
 )
 
 with strategy.scope():
@@ -641,7 +644,8 @@ custom_schedule = keras.optimizers.schedules.PolynomialDecay(
 
 ```python
 import optuna
-from dl_techniques.utils.train_vision import TrainingConfig, TrainingPipeline
+from dl_techniques.optimization.train_vision import TrainingConfig, TrainingPipeline
+
 
 def objective(trial):
     config = TrainingConfig(
@@ -652,11 +656,12 @@ def objective(trial):
         enable_visualization=False,
         enable_analysis=False,
     )
-    
+
     pipeline = TrainingPipeline(config)
     model, history = pipeline.run(build_model, dataset_builder)
-    
+
     return max(history.history['val_accuracy'])
+
 
 study = optuna.create_study(direction='maximize')
 study.optimize(objective, n_trials=50)
