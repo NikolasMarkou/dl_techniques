@@ -646,7 +646,7 @@ def train_vit_model(args: argparse.Namespace) -> None:
     logger.info(f"  Analysis enabled: {config.enable_analysis}")
     logger.info(f"  Gradient tracking: {config.enable_gradient_tracking}")
     logger.info(f"  Visualization frequency: {config.visualization_frequency} epochs")
-    logger.info("=" * 80 + "\n")
+    logger.info("=" * 80)
 
     # Create dataset builder
     dataset_builder = create_dataset_builder(args.dataset, config)
