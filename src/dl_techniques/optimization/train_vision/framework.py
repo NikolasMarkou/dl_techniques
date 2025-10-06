@@ -905,8 +905,8 @@ class TrainingPipeline:
 
         try:
             # Get predictions
-            x_test = test_data.x
-            y_true = test_data.y
+            x_test = test_data.x_data
+            y_true = test_data.y_data
 
             # Make predictions
             y_prob = model.predict(x_test, verbose=0)
