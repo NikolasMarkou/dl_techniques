@@ -403,6 +403,7 @@ class EnhancedVisualizationCallback(keras.callbacks.Callback):
         frequency: Create visualizations every N epochs.
         lr_schedule: Learning rate schedule for visualization.
         track_gradients: Whether to track gradient norms.
+        sample_batch: A sample data batch for gradient computation.
     """
 
     def __init__(
@@ -411,7 +412,9 @@ class EnhancedVisualizationCallback(keras.callbacks.Callback):
             config: TrainingConfig,
             frequency: int = 10,
             lr_schedule: Optional[Any] = None,
-            track_gradients: bool = False
+            track_gradients: bool = False,
+            # CHANGED: Added sample_batch to init for gradient computation.
+            sample_batch: Optional[Tuple[tf.Tensor, tf.Tensor]] = None
     ):
         """
         Initialize the enhanced visualization callback.
@@ -422,6 +425,7 @@ class EnhancedVisualizationCallback(keras.callbacks.Callback):
             frequency: Visualization frequency in epochs.
             lr_schedule: Learning rate schedule object for plotting.
             track_gradients: Whether to track and visualize gradient norms.
+            sample_batch: A sample batch (x, y) for gradient computation.
         """
         super().__init__()
         self.viz_manager = viz_manager
@@ -429,6 +433,8 @@ class EnhancedVisualizationCallback(keras.callbacks.Callback):
         self.frequency = frequency
         self.lr_schedule = lr_schedule
         self.track_gradients = track_gradients
+        # CHANGED: Store the sample batch.
+        self.sample_batch = sample_batch
         self.history_data = {
             'epochs': [],
             'train_loss': [],
@@ -489,18 +495,39 @@ class EnhancedVisualizationCallback(keras.callbacks.Callback):
         if (epoch + 1) % self.frequency == 0:
             self._create_visualizations()
 
+    # IMPLEMENTED: Replaced placeholder with a full implementation.
     def _compute_gradient_norm(self) -> Optional[float]:
         """
         Compute the global gradient norm for the current model state.
 
+        Uses a pre-fetched sample batch to calculate the gradients of the
+        model's loss with respect to its trainable variables.
+
         Returns:
-            Global gradient norm, or None if computation fails.
+            Global gradient norm as a float, or None if computation fails.
         """
+        if not self.track_gradients or self.sample_batch is None:
+            return None
+
         try:
-            # Get a sample batch (this is simplified, in practice you'd use actual data)
-            # This would need to be passed in or accessed differently
-            return None  # Placeholder - requires actual implementation with data
-        except Exception:
+            x, y_true = self.sample_batch
+
+            with tf.GradientTape() as tape:
+                # Forward pass
+                y_pred = self.model(x, training=False)
+                # Compute loss. Assumes the model has a compiled loss function.
+                loss = self.model.compiled_loss(y_true, y_pred)
+
+            # Compute gradients
+            gradients = tape.gradient(loss, self.model.trainable_variables)
+
+            # Compute global L2 norm
+            global_norm = tf.linalg.global_norm(gradients)
+
+            return float(global_norm.numpy())
+
+        except Exception as e:
+            logger.warning(f"Could not compute gradient norm: {e}")
             return None
 
     def _create_visualizations(self):
@@ -823,10 +850,12 @@ class TrainingPipeline:
 
         logger.info("Model compilation complete")
 
+    # CHANGED: Added `train_ds` parameter to fetch a sample batch.
     def _create_callbacks(
             self,
             lr_schedule: Optional[Any] = None,
-            custom_callbacks: Optional[List[keras.callbacks.Callback]] = None
+            custom_callbacks: Optional[List[keras.callbacks.Callback]] = None,
+            train_ds: Optional[tf.data.Dataset] = None
     ) -> List[keras.callbacks.Callback]:
         """
         Create standard and custom callbacks for training.
@@ -834,9 +863,7 @@ class TrainingPipeline:
         Args:
             lr_schedule: Learning rate schedule for visualization.
             custom_callbacks: Additional user-provided callbacks.
-
-        Returns:
-            List of configured callbacks.
+            train_ds: Training dataset to fetch a sample batch from for gradient tracking.
         """
         logger.info("Creating training callbacks")
 
@@ -868,12 +895,24 @@ class TrainingPipeline:
 
         # Add enhanced visualization callback
         if self.config.enable_visualization and self.viz_manager is not None:
+            # CHANGED: Fetch a sample batch for gradient norm calculation if enabled.
+            sample_batch = None
+            if self.config.enable_gradient_tracking and train_ds is not None:
+                try:
+                    # Take one batch from the training dataset
+                    sample_batch = next(iter(train_ds))
+                    logger.info("Fetched a sample batch for gradient norm tracking.")
+                except StopIteration:
+                    logger.warning("Could not fetch a sample batch from train_ds for gradient tracking.")
+
             self.viz_callback = EnhancedVisualizationCallback(
                 viz_manager=self.viz_manager,
                 config=self.config,
                 frequency=self.config.visualization_frequency,
                 lr_schedule=lr_schedule,
-                track_gradients=self.config.enable_gradient_tracking
+                track_gradients=self.config.enable_gradient_tracking,
+                # CHANGED: Pass the fetched batch to the callback.
+                sample_batch=sample_batch
             )
             callbacks.append(self.viz_callback)
 
@@ -1161,7 +1200,8 @@ class TrainingPipeline:
             lr_schedule = schedule_builder(schedule_config)
 
         # Create callbacks
-        callbacks = self._create_callbacks(lr_schedule, custom_callbacks)
+        # CHANGED: Pass train_ds to _create_callbacks to allow it to fetch a sample batch.
+        callbacks = self._create_callbacks(lr_schedule, custom_callbacks, train_ds)
 
         # Train model
         logger.info("Starting model training")
