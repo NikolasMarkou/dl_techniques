@@ -53,7 +53,13 @@ import keras
 from keras import layers, initializers, regularizers
 from typing import Optional, Tuple, Dict, Any, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class SimplifiedFireModule(keras.layers.Layer):
@@ -174,6 +180,7 @@ class SimplifiedFireModule(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class SqueezeNoduleNetV2(keras.Model):
@@ -621,6 +628,7 @@ class SqueezeNoduleNetV2(keras.Model):
         else:
             logger.info(f"  - Parameter increase vs SqueezeNet: {-reduction:.1f}%")
 
+# ---------------------------------------------------------------------
 
 def create_squeezenodule_net_v2(
         variant: str = "v2",
@@ -666,3 +674,5 @@ def create_squeezenodule_net_v2(
     )
 
     return model
+
+# ---------------------------------------------------------------------
