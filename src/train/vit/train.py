@@ -2,15 +2,15 @@
 Vision Transformer training script using the unified training framework.
 
 This script demonstrates how to train ViT models on various datasets
-using the model-agnostic training framework with automatic visualization
-and analysis.
+using the model-agnostic training framework with comprehensive automatic
+visualization and analysis.
 """
 
 import argparse
 import numpy as np
 import keras
 import tensorflow as tf
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.transformer import TransformerLayer
@@ -37,6 +37,18 @@ class MNISTDatasetBuilder(DatasetBuilder):
     Converts grayscale images to RGB by repeating channels and applies
     normalization and augmentation.
     """
+
+    def __init__(self, config: TrainingConfig):
+        """
+        Initialize MNIST dataset builder.
+
+        Args:
+            config: Training configuration.
+        """
+        super().__init__(config)
+        self.x_test = None
+        self.y_test = None
+        self.class_names = [str(i) for i in range(10)]  # '0' through '9'
 
     def build(self) -> Tuple[
         tf.data.Dataset,
@@ -104,7 +116,13 @@ class MNISTDatasetBuilder(DatasetBuilder):
 
     def get_test_data(self) -> Optional[DataInput]:
         """Get test data for analysis."""
-        return DataInput(x_data=self.x_test, y_data=self.y_test)
+        if self.x_test is not None and self.y_test is not None:
+            return DataInput(x_data=self.x_test, y_data=self.y_test)
+        return None
+
+    def get_class_names(self) -> Optional[List[str]]:
+        """Get class names for visualization."""
+        return self.class_names
 
 
 class CIFAR10DatasetBuilder(DatasetBuilder):
@@ -113,6 +131,21 @@ class CIFAR10DatasetBuilder(DatasetBuilder):
 
     Applies normalization and standard augmentation techniques.
     """
+
+    def __init__(self, config: TrainingConfig):
+        """
+        Initialize CIFAR-10 dataset builder.
+
+        Args:
+            config: Training configuration.
+        """
+        super().__init__(config)
+        self.x_test = None
+        self.y_test = None
+        self.class_names = [
+            'airplane', 'automobile', 'bird', 'cat', 'deer',
+            'dog', 'frog', 'horse', 'ship', 'truck'
+        ]
 
     def build(self) -> Tuple[
         tf.data.Dataset,
@@ -191,7 +224,13 @@ class CIFAR10DatasetBuilder(DatasetBuilder):
 
     def get_test_data(self) -> Optional[DataInput]:
         """Get test data for analysis."""
-        return DataInput(x_data=self.x_test, y_data=self.y_test)
+        if self.x_test is not None and self.y_test is not None:
+            return DataInput(x_data=self.x_test, y_data=self.y_test)
+        return None
+
+    def get_class_names(self) -> Optional[List[str]]:
+        """Get class names for visualization."""
+        return self.class_names
 
 
 class CIFAR100DatasetBuilder(DatasetBuilder):
@@ -200,6 +239,34 @@ class CIFAR100DatasetBuilder(DatasetBuilder):
 
     Applies normalization and augmentation suitable for the more complex dataset.
     """
+
+    def __init__(self, config: TrainingConfig):
+        """
+        Initialize CIFAR-100 dataset builder.
+
+        Args:
+            config: Training configuration.
+        """
+        super().__init__(config)
+        self.x_test = None
+        self.y_test = None
+        # CIFAR-100 fine labels
+        self.class_names = [
+            'apple', 'aquarium_fish', 'baby', 'bear', 'beaver', 'bed', 'bee', 'beetle',
+            'bicycle', 'bottle', 'bowl', 'boy', 'bridge', 'bus', 'butterfly', 'camel',
+            'can', 'castle', 'caterpillar', 'cattle', 'chair', 'chimpanzee', 'clock',
+            'cloud', 'cockroach', 'couch', 'crab', 'crocodile', 'cup', 'dinosaur',
+            'dolphin', 'elephant', 'flatfish', 'forest', 'fox', 'girl', 'hamster',
+            'house', 'kangaroo', 'keyboard', 'lamp', 'lawn_mower', 'leopard', 'lion',
+            'lizard', 'lobster', 'man', 'maple_tree', 'motorcycle', 'mountain', 'mouse',
+            'mushroom', 'oak_tree', 'orange', 'orchid', 'otter', 'palm_tree', 'pear',
+            'pickup_truck', 'pine_tree', 'plain', 'plate', 'poppy', 'porcupine',
+            'possum', 'rabbit', 'raccoon', 'ray', 'road', 'rocket', 'rose', 'sea',
+            'seal', 'shark', 'shrew', 'skunk', 'skyscraper', 'snail', 'snake', 'spider',
+            'squirrel', 'streetcar', 'sunflower', 'sweet_pepper', 'table', 'tank',
+            'telephone', 'television', 'tiger', 'tractor', 'train', 'trout', 'tulip',
+            'turtle', 'wardrobe', 'whale', 'willow_tree', 'wolf', 'woman', 'worm'
+        ]
 
     def build(self) -> Tuple[
         tf.data.Dataset,
@@ -279,7 +346,13 @@ class CIFAR100DatasetBuilder(DatasetBuilder):
 
     def get_test_data(self) -> Optional[DataInput]:
         """Get test data for analysis."""
-        return DataInput(x_data=self.x_test, y_data=self.y_test)
+        if self.x_test is not None and self.y_test is not None:
+            return DataInput(x_data=self.x_test, y_data=self.y_test)
+        return None
+
+    def get_class_names(self) -> Optional[List[str]]:
+        """Get class names for visualization."""
+        return self.class_names
 
 
 # =============================================================================
@@ -367,12 +440,23 @@ def create_vit_argument_parser() -> argparse.ArgumentParser:
     """
     parser = create_argument_parser()
 
-    # Set ViT-appropriate defaults
+    # Set ViT-appropriate defaults for Transformer training
     parser.set_defaults(
         optimizer='adamw',
-        learning_rate=3e-4,
-        weight_decay=0.05,
-        lr_schedule='cosine',
+        learning_rate=3e-4,       # Conservative for transformers
+        weight_decay=0.05,         # Standard transformer weight decay
+        lr_schedule='cosine_decay',
+        warmup_steps=2000,         # Longer warmup for transformers
+        alpha=0.0001,
+        gradient_clip=1.0,
+        # Enable comprehensive visualization by default
+        no_visualization=False,
+        no_analysis=False,
+        no_convergence_analysis=False,
+        no_overfitting_analysis=False,
+        no_classification_viz=False,
+        no_final_dashboard=False,
+        enable_gradient_tracking=False,
     )
 
     vit_group = parser.add_argument_group('ViT-specific arguments')
@@ -417,6 +501,12 @@ def create_vit_config(args: argparse.Namespace) -> TrainingConfig:
     CRITICAL: Sets from_logits=True because ViT model outputs raw logits
     (Dense layer without activation).
 
+    Also configures transformer-appropriate hyperparameters including:
+    - Higher beta_2 (0.98) for transformers
+    - Longer warmup (2000 steps minimum)
+    - Conservative learning rate
+    - Comprehensive visualization enabled by default
+
     Args:
         args: Parsed command-line arguments.
 
@@ -458,6 +548,32 @@ def create_vit_config(args: argparse.Namespace) -> TrainingConfig:
     # so we must set from_logits=True for the loss function
     config.from_logits = True
 
+    # Transformer-specific optimizer settings
+    config.beta_2 = 0.98  # Higher beta_2 for transformers (instead of default 0.999)
+    config.epsilon = 1e-9  # Smaller epsilon for transformers
+
+    # Ensure adequate warmup for transformer stability
+    if config.warmup_steps < 1000:
+        logger.warning(
+            f"Warmup steps ({config.warmup_steps}) is low for transformer training. "
+            f"Setting to 2000 for stability."
+        )
+        config.warmup_steps = 2000
+        config.warmup_start_lr = 1e-9  # Very low starting LR for transformers
+
+    # Enable comprehensive visualization and analysis by default
+    # (unless explicitly disabled via command line)
+    if not hasattr(args, 'no_visualization') or not args.no_visualization:
+        config.enable_visualization = True
+        config.enable_convergence_analysis = True
+        config.enable_overfitting_analysis = True
+        config.enable_classification_viz = True
+        config.create_final_dashboard = True
+        config.visualization_frequency = 10
+
+    if not hasattr(args, 'no_analysis') or not args.no_analysis:
+        config.enable_analysis = True
+
     config.model_args = {
         'scale': args.scale,
         'patch_size': patch_size,
@@ -468,7 +584,8 @@ def create_vit_config(args: argparse.Namespace) -> TrainingConfig:
 
     # Generate descriptive experiment name
     if config.experiment_name is None or 'model_' in config.experiment_name:
-        timestamp = config.experiment_name.split('_')[-1] if config.experiment_name else ''
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         config.experiment_name = f"vit_{dataset_name}_{args.scale}_{timestamp}"
 
     return config
@@ -485,22 +602,51 @@ def train_vit_model(args: argparse.Namespace) -> None:
     Args:
         args: Parsed command-line arguments.
     """
+    logger.info("=" * 80)
     logger.info("Starting Vision Transformer training with unified framework")
+    logger.info("=" * 80)
+
     config = create_vit_config(args)
 
-    logger.info("Training configuration:")
-    logger.info(f"  Dataset: {args.dataset}")
-    logger.info(f"  Model scale: {config.model_args['scale']}")
-    logger.info(f"  Input shape: {config.input_shape}")
-    logger.info(f"  Number of classes: {config.num_classes}")
-    logger.info(f"  Patch size: {config.model_args['patch_size']}")
+    logger.info("=" * 80)
+    logger.info("TRAINING CONFIGURATION")
+    logger.info("=" * 80)
+    logger.info(f"Dataset: {args.dataset}")
+    logger.info(f"Model scale: {config.model_args['scale']}")
+    logger.info(f"Input shape: {config.input_shape}")
+    logger.info(f"Number of classes: {config.num_classes}")
+    logger.info(f"Patch size: {config.model_args['patch_size']}")
+    logger.info("")
+    logger.info("Hyperparameters:")
     logger.info(f"  Batch size: {config.batch_size}")
     logger.info(f"  Epochs: {config.epochs}")
     logger.info(f"  Learning rate: {config.learning_rate}")
     logger.info(f"  Optimizer: {config.optimizer_type}")
-    logger.info(f"  LR schedule: {config.lr_schedule_type}")
+    logger.info(f"  Beta_2: {config.beta_2} (transformer-optimized)")
     logger.info(f"  Weight decay: {config.weight_decay}")
-    logger.info(f"  From logits: {config.from_logits}")  # Log this critical setting
+    logger.info(f"  Gradient clipping: {config.gradient_clipping_norm_global}")
+    logger.info("")
+    logger.info("Learning Rate Schedule:")
+    logger.info(f"  Schedule type: {config.lr_schedule_type}")
+    logger.info(f"  Warmup steps: {config.warmup_steps}")
+    logger.info(f"  Warmup start LR: {config.warmup_start_lr}")
+    logger.info(f"  Alpha (min LR): {config.alpha}")
+    logger.info("")
+    logger.info("Training Settings:")
+    logger.info(f"  From logits: {config.from_logits} (CRITICAL for ViT)")
+    logger.info(f"  Early stopping patience: {config.early_stopping_patience}")
+    logger.info(f"  Monitor metric: {config.monitor_metric}")
+    logger.info("")
+    logger.info("Visualization & Analysis:")
+    logger.info(f"  Visualization enabled: {config.enable_visualization}")
+    logger.info(f"  Convergence analysis: {config.enable_convergence_analysis}")
+    logger.info(f"  Overfitting analysis: {config.enable_overfitting_analysis}")
+    logger.info(f"  Classification viz: {config.enable_classification_viz}")
+    logger.info(f"  Final dashboard: {config.create_final_dashboard}")
+    logger.info(f"  Analysis enabled: {config.enable_analysis}")
+    logger.info(f"  Gradient tracking: {config.enable_gradient_tracking}")
+    logger.info(f"  Visualization frequency: {config.visualization_frequency} epochs")
+    logger.info("=" * 80 + "\n")
 
     # Create dataset builder
     dataset_builder = create_dataset_builder(args.dataset, config)
@@ -515,21 +661,55 @@ def train_vit_model(args: argparse.Namespace) -> None:
     })
 
     # Run training
+    logger.info("Starting training pipeline...")
     model, history = pipeline.run(
         model_builder=build_vit_model,
         dataset_builder=dataset_builder,
         custom_callbacks=None
     )
 
-    logger.info("Training completed successfully!")
+    logger.info("=" * 80)
+    logger.info("TRAINING COMPLETED SUCCESSFULLY!")
+    logger.info("=" * 80)
     logger.info(f"Results saved to: {pipeline.experiment_dir}")
+    logger.info("")
 
     # Log final validation metrics
     if history:
-        final_metrics = {k: v[-1] for k, v in history.history.items() if 'val_' in k}
         logger.info("Final validation metrics:")
+        final_metrics = {k: v[-1] for k, v in history.history.items() if 'val_' in k}
         for metric_name, value in final_metrics.items():
             logger.info(f"  {metric_name}: {value:.4f}")
+        logger.info("")
+
+    # Log output files
+    logger.info("Generated outputs:")
+    logger.info(f"  Configuration: {pipeline.experiment_dir / 'config.json'}")
+    logger.info(f"  Best model: {pipeline.experiment_dir / 'best_model.keras'}")
+    logger.info(f"  Final model: {pipeline.experiment_dir / 'final_model.keras'}")
+    logger.info(f"  Training log: {pipeline.experiment_dir / 'training_log.csv'}")
+
+    if config.enable_visualization:
+        logger.info(f"  Visualizations: {pipeline.experiment_dir / 'visualizations/'}")
+        logger.info("    - training_curves.png")
+        logger.info("    - lr_schedule.png")
+        if config.enable_convergence_analysis:
+            logger.info("    - convergence_analysis.png")
+        if config.enable_overfitting_analysis:
+            logger.info("    - overfitting_analysis.png")
+        if config.enable_classification_viz:
+            logger.info("    - confusion_matrix.png")
+            logger.info("    - roc_pr_curves.png")
+            logger.info("    - classification_report.png")
+            logger.info("    - per_class_analysis.png")
+            logger.info("    - error_analysis.png")
+        if config.create_final_dashboard:
+            logger.info("    - final_dashboard.png")
+
+    if config.enable_analysis:
+        logger.info(f"  Analysis results: {pipeline.experiment_dir / 'analysis/'}")
+
+    logger.info("=" * 80)
 
 
 # =============================================================================
@@ -544,9 +724,14 @@ def main() -> None:
     try:
         train_vit_model(args)
     except KeyboardInterrupt:
-        logger.info("\nTraining interrupted by user.")
+        logger.info("=" * 80)
+        logger.info("Training interrupted by user.")
+        logger.info("=" * 80)
     except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}", exc_info=True)
+        logger.error("=" * 80)
+        logger.error("AN ERROR OCCURRED")
+        logger.error("=" * 80)
+        logger.error(f"Error: {e}", exc_info=True)
         raise
 
 

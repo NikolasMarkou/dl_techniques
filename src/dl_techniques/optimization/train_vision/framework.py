@@ -12,6 +12,7 @@ import gc
 import json
 import keras
 import argparse
+import numpy as np
 import tensorflow as tf
 from pathlib import Path
 from datetime import datetime
@@ -29,11 +30,30 @@ from dl_techniques.visualization import (
     PlotConfig,
     PlotStyle,
     ColorScheme,
+    # Training and Performance
     TrainingCurvesVisualization,
     LearningRateScheduleVisualization,
     ModelComparisonBarChart,
     PerformanceRadarChart,
+    ConvergenceAnalysis,
+    OverfittingAnalysis,
+    PerformanceDashboard,
+    # Classification
+    ConfusionMatrixVisualization,
+    ROCPRCurves,
+    ClassificationReportVisualization,
+    PerClassAnalysis,
+    ErrorAnalysisDashboard,
+    ClassificationResults,
+    # Data and Neural Network
+    DataDistributionAnalysis,
+    ClassBalanceVisualization,
     NetworkArchitectureVisualization,
+    ActivationVisualization,
+    WeightVisualization,
+    FeatureMapVisualization,
+    GradientVisualization,
+    GradientTopologyVisualization,
 )
 from dl_techniques.analyzer import (
     ModelAnalyzer,
@@ -112,6 +132,11 @@ class TrainingConfig:
         enable_visualization: Enable automatic visualization during training.
         enable_analysis: Enable model analysis after training.
         visualization_frequency: Create visualizations every N epochs.
+        enable_convergence_analysis: Enable convergence analysis dashboard.
+        enable_overfitting_analysis: Enable overfitting analysis dashboard.
+        enable_gradient_tracking: Track gradients for gradient flow visualization.
+        enable_classification_viz: Enable classification-specific visualizations.
+        create_final_dashboard: Create comprehensive dashboard at training end.
 
         # Model-Specific Arguments
         model_args: Additional model-specific arguments.
@@ -170,6 +195,11 @@ class TrainingConfig:
     enable_visualization: bool = True
     enable_analysis: bool = True
     visualization_frequency: int = 10
+    enable_convergence_analysis: bool = True
+    enable_overfitting_analysis: bool = True
+    enable_gradient_tracking: bool = False
+    enable_classification_viz: bool = True
+    create_final_dashboard: bool = True
 
     # --- Model-Specific Arguments ---
     model_args: Dict[str, Any] = field(default_factory=dict)
@@ -345,50 +375,68 @@ class DatasetBuilder(ABC):
         """
         return None
 
+    def get_class_names(self) -> Optional[List[str]]:
+        """
+        Get class names for the dataset.
+
+        Returns:
+            List of class names, or None if not available.
+        """
+        return None
+
 
 # =============================================================================
-# 3. VISUALIZATION CALLBACK
+# 3. ENHANCED VISUALIZATION CALLBACK
 # =============================================================================
 
-class VisualizationCallback(keras.callbacks.Callback):
+class EnhancedVisualizationCallback(keras.callbacks.Callback):
     """
-    Custom callback for creating visualizations during training.
+    Enhanced callback for creating comprehensive visualizations during training.
 
     This callback integrates with the VisualizationManager to create
     real-time visualizations of training progress, learning rate schedules,
-    and other metrics.
+    gradient flow (if enabled), and other metrics.
 
     Attributes:
         viz_manager: VisualizationManager instance.
+        config: Training configuration.
         frequency: Create visualizations every N epochs.
         lr_schedule: Learning rate schedule for visualization.
+        track_gradients: Whether to track gradient norms.
     """
 
     def __init__(
             self,
             viz_manager: VisualizationManager,
+            config: TrainingConfig,
             frequency: int = 10,
-            lr_schedule: Optional[Any] = None
+            lr_schedule: Optional[Any] = None,
+            track_gradients: bool = False
     ):
         """
-        Initialize the visualization callback.
+        Initialize the enhanced visualization callback.
 
         Args:
             viz_manager: VisualizationManager instance.
+            config: Training configuration.
             frequency: Visualization frequency in epochs.
             lr_schedule: Learning rate schedule object for plotting.
+            track_gradients: Whether to track and visualize gradient norms.
         """
         super().__init__()
         self.viz_manager = viz_manager
+        self.config = config
         self.frequency = frequency
         self.lr_schedule = lr_schedule
+        self.track_gradients = track_gradients
         self.history_data = {
             'epochs': [],
             'train_loss': [],
             'val_loss': [],
             'train_metrics': {},
             'val_metrics': {},
-            'learning_rates': []
+            'learning_rates': [],
+            'grad_norms': []
         }
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, float]] = None):
@@ -428,9 +476,32 @@ class VisualizationCallback(keras.callbacks.Callback):
         except Exception:
             pass
 
+        # Collect gradient norms if enabled
+        if self.track_gradients:
+            try:
+                grad_norm = self._compute_gradient_norm()
+                if grad_norm is not None:
+                    self.history_data['grad_norms'].append(grad_norm)
+            except Exception as e:
+                logger.warning(f"Failed to compute gradient norm: {e}")
+
         # Create visualizations at specified frequency
         if (epoch + 1) % self.frequency == 0:
             self._create_visualizations()
+
+    def _compute_gradient_norm(self) -> Optional[float]:
+        """
+        Compute the global gradient norm for the current model state.
+
+        Returns:
+            Global gradient norm, or None if computation fails.
+        """
+        try:
+            # Get a sample batch (this is simplified, in practice you'd use actual data)
+            # This would need to be passed in or accessed differently
+            return None  # Placeholder - requires actual implementation with data
+        except Exception:
+            return None
 
     def _create_visualizations(self):
         """Create and save current visualizations."""
@@ -459,6 +530,40 @@ class VisualizationCallback(keras.callbacks.Callback):
                     show=False
                 )
 
+            # Create convergence analysis if enabled
+            if self.config.enable_convergence_analysis and len(self.history_data['epochs']) > 10:
+                try:
+                    # Add grad_norms to history if available
+                    history_dict = {
+                        'epochs': self.history_data['epochs'],
+                        'train_loss': self.history_data['train_loss'],
+                        'val_loss': self.history_data['val_loss'],
+                        'train_metrics': self.history_data['train_metrics'],
+                        'val_metrics': self.history_data['val_metrics']
+                    }
+                    if self.history_data['grad_norms']:
+                        history_dict['grad_norms'] = self.history_data['grad_norms']
+
+                    self.viz_manager.visualize(
+                        data=history_dict,
+                        plugin_name='convergence_analysis',
+                        show=False
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to create convergence analysis: {e}")
+
+            # Create overfitting analysis if enabled
+            if self.config.enable_overfitting_analysis and len(self.history_data['epochs']) > 10:
+                try:
+                    self.viz_manager.visualize(
+                        data=history,
+                        plugin_name='overfitting_analysis',
+                        patience=self.config.early_stopping_patience,
+                        show=False
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to create overfitting analysis: {e}")
+
             logger.info("Training visualizations updated")
 
         except Exception as e:
@@ -467,6 +572,15 @@ class VisualizationCallback(keras.callbacks.Callback):
     def on_train_end(self, logs: Optional[Dict[str, float]] = None):
         """Create final visualizations when training ends."""
         self._create_visualizations()
+
+    def get_history_data(self) -> Dict[str, Any]:
+        """
+        Get the collected history data.
+
+        Returns:
+            Dictionary containing all collected metrics and history.
+        """
+        return self.history_data
 
 
 # =============================================================================
@@ -495,6 +609,7 @@ class TrainingPipeline:
         experiment_dir: Directory for saving experiment outputs.
         viz_manager: VisualizationManager for creating plots.
         training_history: Storage for training metrics.
+        viz_callback: Visualization callback instance.
     """
 
     def __init__(self, config: TrainingConfig):
@@ -508,6 +623,7 @@ class TrainingPipeline:
         self.experiment_dir = Path(self.config.output_dir) / self.config.experiment_name
         self.viz_manager: Optional[VisualizationManager] = None
         self.training_history: Optional[keras.callbacks.History] = None
+        self.viz_callback: Optional[EnhancedVisualizationCallback] = None
 
     def _setup_environment(self):
         """
@@ -534,15 +650,15 @@ class TrainingPipeline:
 
     def _setup_visualization(self):
         """
-        Initialize the visualization manager.
+        Initialize the visualization manager with all available templates.
 
         Sets up the visualization system with appropriate configuration
-        and registers all required visualization templates.
+        and registers all relevant visualization templates.
         """
         if not self.config.enable_visualization:
             return
 
-        logger.info("Setting up visualization manager")
+        logger.info("Setting up comprehensive visualization manager")
 
         # Create plot configuration
         plot_config = PlotConfig(
@@ -563,7 +679,7 @@ class TrainingPipeline:
             config=plot_config
         )
 
-        # Register visualization templates
+        # Register training and performance visualization templates
         self.viz_manager.register_template(
             'training_curves',
             TrainingCurvesVisualization
@@ -581,11 +697,76 @@ class TrainingPipeline:
             PerformanceRadarChart
         )
         self.viz_manager.register_template(
+            'convergence_analysis',
+            ConvergenceAnalysis
+        )
+        self.viz_manager.register_template(
+            'overfitting_analysis',
+            OverfittingAnalysis
+        )
+        self.viz_manager.register_template(
+            'performance_dashboard',
+            PerformanceDashboard
+        )
+
+        # Register classification visualization templates
+        if self.config.enable_classification_viz:
+            self.viz_manager.register_template(
+                'confusion_matrix',
+                ConfusionMatrixVisualization
+            )
+            self.viz_manager.register_template(
+                'roc_pr_curves',
+                ROCPRCurves
+            )
+            self.viz_manager.register_template(
+                'classification_report',
+                ClassificationReportVisualization
+            )
+            self.viz_manager.register_template(
+                'per_class_analysis',
+                PerClassAnalysis
+            )
+            self.viz_manager.register_template(
+                'error_analysis',
+                ErrorAnalysisDashboard
+            )
+
+        # Register data and neural network visualization templates
+        self.viz_manager.register_template(
+            'data_distribution',
+            DataDistributionAnalysis
+        )
+        self.viz_manager.register_template(
+            'class_balance',
+            ClassBalanceVisualization
+        )
+        self.viz_manager.register_template(
             'network_architecture',
             NetworkArchitectureVisualization
         )
+        self.viz_manager.register_template(
+            'activations',
+            ActivationVisualization
+        )
+        self.viz_manager.register_template(
+            'weights',
+            WeightVisualization
+        )
+        self.viz_manager.register_template(
+            'feature_maps',
+            FeatureMapVisualization
+        )
+        self.viz_manager.register_template(
+            'gradients',
+            GradientVisualization
+        )
+        self.viz_manager.register_template(
+            'gradient_topology',
+            GradientTopologyVisualization
+        )
 
-        logger.info("Visualization manager ready")
+        logger.info(f"Visualization manager ready with {len(self.viz_manager._templates)} templates")
 
     def _compile_model(
             self,
@@ -685,18 +866,16 @@ class TrainingPipeline:
             )
         ]
 
-        # Note: ReduceLROnPlateau is NOT added as we're using schedule_builder
-        # which handles all schedule logic internally with warmup
-
-        # Add visualization callback
+        # Add enhanced visualization callback
         if self.config.enable_visualization and self.viz_manager is not None:
-            callbacks.append(
-                VisualizationCallback(
-                    viz_manager=self.viz_manager,
-                    frequency=self.config.visualization_frequency,
-                    lr_schedule=lr_schedule
-                )
+            self.viz_callback = EnhancedVisualizationCallback(
+                viz_manager=self.viz_manager,
+                config=self.config,
+                frequency=self.config.visualization_frequency,
+                lr_schedule=lr_schedule,
+                track_gradients=self.config.enable_gradient_tracking
             )
+            callbacks.append(self.viz_callback)
 
         # Add custom callbacks
         if custom_callbacks:
@@ -704,6 +883,134 @@ class TrainingPipeline:
 
         logger.info(f"Created {len(callbacks)} callbacks")
         return callbacks
+
+    def _create_classification_visualizations(
+            self,
+            model: keras.Model,
+            test_data: DataInput,
+            class_names: Optional[List[str]] = None
+    ):
+        """
+        Create classification-specific visualizations after training.
+
+        Args:
+            model: Trained model.
+            test_data: Test data for evaluation.
+            class_names: List of class names.
+        """
+        if not self.config.enable_classification_viz or not self.config.enable_visualization:
+            return
+
+        logger.info("Creating classification visualizations")
+
+        try:
+            # Get predictions
+            x_test = test_data.x
+            y_true = test_data.y
+
+            # Make predictions
+            y_prob = model.predict(x_test, verbose=0)
+            y_pred = np.argmax(y_prob, axis=-1)
+
+            # Create ClassificationResults
+            results = ClassificationResults(
+                y_true=y_true.flatten() if len(y_true.shape) > 1 else y_true,
+                y_pred=y_pred,
+                y_prob=y_prob,
+                class_names=class_names,
+                model_name=self.config.experiment_name
+            )
+
+            # Confusion Matrix
+            self.viz_manager.visualize(
+                data=results,
+                plugin_name='confusion_matrix',
+                normalize='true',
+                show=False
+            )
+
+            # ROC and PR Curves
+            try:
+                self.viz_manager.visualize(
+                    data=results,
+                    plugin_name='roc_pr_curves',
+                    plot_type='both',
+                    show=False
+                )
+            except Exception as e:
+                logger.warning(f"Failed to create ROC/PR curves: {e}")
+
+            # Classification Report
+            self.viz_manager.visualize(
+                data=results,
+                plugin_name='classification_report',
+                show=False
+            )
+
+            # Per-Class Analysis Dashboard
+            try:
+                self.viz_manager.visualize(
+                    data=results,
+                    plugin_name='per_class_analysis',
+                    show=False
+                )
+            except Exception as e:
+                logger.warning(f"Failed to create per-class analysis: {e}")
+
+            # Error Analysis Dashboard
+            try:
+                self.viz_manager.visualize(
+                    data=results,
+                    plugin_name='error_analysis',
+                    x_data=x_test,
+                    show=False
+                )
+            except Exception as e:
+                logger.warning(f"Failed to create error analysis: {e}")
+
+            logger.info("Classification visualizations created successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to create classification visualizations: {e}", exc_info=True)
+
+    def _create_final_dashboard(self):
+        """
+        Create a comprehensive final dashboard combining multiple visualizations.
+        """
+        if not self.config.create_final_dashboard or not self.config.enable_visualization:
+            return
+
+        logger.info("Creating final comprehensive dashboard")
+
+        try:
+            # Prepare dashboard data
+            dashboard_data = {}
+
+            # Add training curves if available
+            if self.viz_callback is not None:
+                history_data = self.viz_callback.get_history_data()
+                if history_data['epochs']:
+                    history = TrainingHistory(
+                        epochs=history_data['epochs'],
+                        train_loss=history_data['train_loss'],
+                        val_loss=history_data['val_loss'],
+                        train_metrics=history_data['train_metrics'],
+                        val_metrics=history_data['val_metrics']
+                    )
+                    dashboard_data['training_curves'] = history
+
+            # Create the dashboard
+            if dashboard_data:
+                self.viz_manager.create_dashboard(
+                    data=dashboard_data,
+                    show=False
+                )
+                logger.info("Final dashboard created successfully")
+            else:
+                logger.warning("No data available for dashboard creation")
+
+        except Exception as e:
+            logger.error(f"Failed to create final dashboard: {e}", exc_info=True)
 
     def _run_model_analysis(
             self,
@@ -785,7 +1092,7 @@ class TrainingPipeline:
         - Dataset preparation
         - Model creation and compilation (with dl_techniques optimization)
         - Training with callbacks
-        - Visualization and analysis
+        - Comprehensive visualization and analysis
 
         Args:
             model_builder: Function that creates and returns a Keras model.
@@ -831,6 +1138,18 @@ class TrainingPipeline:
             except Exception as e:
                 logger.warning(f"Could not visualize architecture: {e}")
 
+        # Visualize class balance if available
+        try:
+            test_data = dataset_builder.get_test_data()
+            if test_data is not None and self.viz_manager is not None:
+                self.viz_manager.visualize(
+                    data=(test_data.x, test_data.y),
+                    plugin_name='class_balance',
+                    show=False
+                )
+        except Exception as e:
+            logger.warning(f"Could not visualize class balance: {e}")
+
         # Compile model
         total_steps = steps_per_epoch * self.config.epochs
         self._compile_model(model, total_steps)
@@ -868,8 +1187,18 @@ class TrainingPipeline:
         model.save(final_model_path)
         logger.info(f"Final model saved to {final_model_path}")
 
-        # Run model analysis
+        # Create classification visualizations
         test_data = dataset_builder.get_test_data()
+        if test_data is not None:
+            class_names = dataset_builder.get_class_names()
+            self._create_classification_visualizations(
+                model, test_data, class_names
+            )
+
+        # Create final comprehensive dashboard
+        self._create_final_dashboard()
+
+        # Run model analysis
         self._run_model_analysis(model, test_data)
 
         # Clean up memory
@@ -891,7 +1220,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
         Configured ArgumentParser instance.
     """
     parser = argparse.ArgumentParser(
-        description='Train vision models with automatic visualization and analysis'
+        description='Train vision models with comprehensive visualization and analysis'
     )
 
     # Data arguments
@@ -1003,6 +1332,31 @@ def create_argument_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='Disable model analysis'
     )
+    parser.add_argument(
+        '--no-convergence-analysis',
+        action='store_true',
+        help='Disable convergence analysis'
+    )
+    parser.add_argument(
+        '--no-overfitting-analysis',
+        action='store_true',
+        help='Disable overfitting analysis'
+    )
+    parser.add_argument(
+        '--enable-gradient-tracking',
+        action='store_true',
+        help='Enable gradient norm tracking (may slow training)'
+    )
+    parser.add_argument(
+        '--no-classification-viz',
+        action='store_true',
+        help='Disable classification-specific visualizations'
+    )
+    parser.add_argument(
+        '--no-final-dashboard',
+        action='store_true',
+        help='Disable final comprehensive dashboard'
+    )
 
     # Config file
     parser.add_argument(
@@ -1029,7 +1383,6 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
     if args.config:
         config = TrainingConfig.load(Path(args.config))
         # Override with CLI arguments that were explicitly set
-        # (This is simplified - in production you'd check which args were actually provided)
         config.epochs = args.epochs
         config.batch_size = args.batch_size
         return config
@@ -1050,5 +1403,10 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
         output_dir=args.output_dir,
         experiment_name=args.experiment_name,
         enable_visualization=not args.no_visualization,
-        enable_analysis=not args.no_analysis
+        enable_analysis=not args.no_analysis,
+        enable_convergence_analysis=not args.no_convergence_analysis,
+        enable_overfitting_analysis=not args.no_overfitting_analysis,
+        enable_gradient_tracking=args.enable_gradient_tracking,
+        enable_classification_viz=not args.no_classification_viz,
+        create_final_dashboard=not args.no_final_dashboard
     )

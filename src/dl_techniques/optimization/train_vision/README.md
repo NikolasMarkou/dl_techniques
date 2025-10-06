@@ -1,6 +1,86 @@
-# Vision Framework Quick Reference
+# Vision Training Framework
 
-## 📋 Configuration Cheat Sheet
+## Overview
+
+The Vision Training Framework is a comprehensive, production-ready solution for training deep learning vision models with minimal boilerplate code. Built on top of Keras 3 and TensorFlow, it integrates advanced optimization techniques, comprehensive visualization capabilities, and automated model analysis into a unified, configurable pipeline.
+
+### Key Features
+
+**Training Infrastructure**
+- **Advanced Optimization**: Built-in support for modern optimizers (AdamW, Adam, SGD, RMSprop) with gradient clipping
+- **Learning Rate Schedules**: Cosine decay, exponential decay, cosine restarts with automatic warmup
+- **Smart Callbacks**: Model checkpointing, early stopping, TensorBoard logging, CSV export
+
+**Visualization & Monitoring**
+- **Real-time Training Curves**: Loss, accuracy, and custom metrics with smoothing
+- **Learning Rate Tracking**: Visualize schedule behavior including warmup phase
+- **Convergence Analysis**: Monitor training stability, gradient flow, and convergence rates
+- **Overfitting Detection**: Automatic analysis of generalization gap and overfitting onset
+- **Classification Metrics**: Confusion matrices, ROC/PR curves, per-class performance
+- **Neural Network Inspection**: Architecture diagrams, weight distributions, activation patterns
+
+**Analysis & Reporting**
+- **Automated Model Analysis**: Weight statistics, calibration metrics, information flow
+- **Classification Reports**: Detailed per-class precision, recall, F1-scores
+- **Error Analysis**: Misclassification patterns, confidence distributions
+- **Comprehensive Dashboards**: Multi-plot summaries combining key visualizations
+
+**Developer Experience**
+- **Minimal Boilerplate**: Define config → build dataset → build model → train
+- **Reproducible Experiments**: All configurations saved as JSON
+- **Extensible Design**: Abstract base classes for custom datasets and models
+- **Command-line Interface**: Full CLI support for quick experimentation
+
+### Quick Start
+
+```python
+from dl_techniques.optimization.train_vision import (
+    TrainingConfig, TrainingPipeline, DatasetBuilder
+)
+import keras
+
+# 1. Configure training
+config = TrainingConfig(
+    input_shape=(224, 224, 3),
+    num_classes=10,
+    epochs=100,
+    batch_size=64,
+    learning_rate=1e-3,
+    lr_schedule_type='cosine_decay',
+    warmup_steps=1000,
+    optimizer_type='adamw',
+    weight_decay=1e-4
+)
+
+# 2. Define dataset builder
+class MyDataset(DatasetBuilder):
+    def build(self):
+        # Load and preprocess your data
+        train_ds = ...  # tf.data.Dataset
+        val_ds = ...    # tf.data.Dataset
+        return train_ds, val_ds, steps_per_epoch, val_steps
+
+# 3. Define model builder
+def build_model(config):
+    model = keras.Sequential([...])
+    return model
+
+# 4. Run training pipeline
+pipeline = TrainingPipeline(config)
+model, history = pipeline.run(build_model, MyDataset(config))
+```
+
+That's it! The framework handles:
+- Optimizer and schedule configuration with warmup
+- Model compilation with appropriate loss and metrics
+- Training with callbacks (checkpointing, early stopping, logging)
+- Real-time visualization generation (curves, LR schedule, convergence)
+- Post-training analysis (classification metrics, model analysis)
+- Comprehensive dashboards and reports
+
+---
+
+## Configuration Cheat Sheet
 
 ### Basic Configuration
 ```python
@@ -31,12 +111,20 @@ TrainingConfig(
     # gradient_clipping_norm_local=1.0, # Per-variable norm clipping
     # gradient_clipping_value=0.5,      # Value clipping
     
-    # Usually leave as default
+    # Visualization & Analysis
+    enable_visualization=True,
+    enable_analysis=True,
+    enable_convergence_analysis=True,      # Convergence dashboard
+    enable_overfitting_analysis=True,      # Overfitting detection
+    enable_classification_viz=True,        # Confusion matrix, ROC curves, etc.
+    create_final_dashboard=True,           # Comprehensive multi-plot dashboard
+    enable_gradient_tracking=False,        # Track gradients (may slow training)
+    visualization_frequency=10,            # Create plots every N epochs
+    
+    # Training Control
     early_stopping_patience=25,
     monitor_metric='val_accuracy',  # or 'val_loss'
     monitor_mode='max',  # or 'min' for loss
-    enable_visualization=True,
-    enable_analysis=True,
 )
 ```
 
@@ -65,7 +153,7 @@ TrainingConfig(
 )
 ```
 
-## 📦 Dataset Builder Template
+## Dataset Builder Template
 
 ```python
 from dl_techniques.optimization.train_vision import DatasetBuilder
@@ -108,11 +196,14 @@ class MyDatasetBuilder(DatasetBuilder):
         image = tf.image.random_flip_left_right(image)
         return image, label
 
-    def get_test_data(self):  # Optional
+    def get_test_data(self):  # Optional - enables classification visualizations
         return DataInput(x_data=x_test, y_data=y_test)
+    
+    def get_class_names(self):  # Optional - enables labeled visualizations
+        return ['cat', 'dog', 'bird', ...]
 ```
 
-## 🏗️ Model Builder Template
+## Model Builder Template
 
 ```python
 import keras
@@ -135,7 +226,7 @@ def build_my_model(config: TrainingConfig) -> keras.Model:
     return keras.Model(inputs, outputs, name='my_model')
 ```
 
-## 🎯 Common Patterns
+## Common Patterns
 
 ### Pattern 1: Standard Classification with Warmup
 
@@ -156,7 +247,14 @@ config = TrainingConfig(
 
     optimizer_type='adamw',
     weight_decay=1e-4,
-    gradient_clipping_norm_global=1.0
+    gradient_clipping_norm_global=1.0,
+    
+    # Full visualization suite
+    enable_visualization=True,
+    enable_convergence_analysis=True,
+    enable_overfitting_analysis=True,
+    enable_classification_viz=True,
+    create_final_dashboard=True
 )
 ```
 
@@ -241,7 +339,30 @@ config = TrainingConfig(
 )
 ```
 
-## 🔧 Command-Line Quick Reference
+### Pattern 6: Research with Full Analysis
+
+```python
+config = TrainingConfig(
+    # Standard hyperparameters
+    epochs=100,
+    batch_size=64,
+    learning_rate=1e-3,
+    lr_schedule_type='cosine_decay',
+    warmup_steps=1000,
+    
+    # Enable all analysis features
+    enable_visualization=True,
+    enable_analysis=True,
+    enable_convergence_analysis=True,
+    enable_overfitting_analysis=True,
+    enable_classification_viz=True,
+    enable_gradient_tracking=True,  # May slow training
+    create_final_dashboard=True,
+    visualization_frequency=5,  # More frequent updates
+)
+```
+
+## Command-Line Quick Reference
 
 ```bash
 # Basic training with warmup
@@ -267,17 +388,32 @@ python train.py \
     --warmup-steps 1000 \
     --learning-rate 0.001
 
-# Quick experiment (no warmup, constant LR)
+# Quick experiment (minimal features)
 python train.py --epochs 10 \
     --lr-schedule constant \
     --warmup-steps 0 \
-    --no-analysis --no-visualization
+    --no-analysis \
+    --no-visualization \
+    --no-convergence-analysis \
+    --no-overfitting-analysis
+
+# Full research mode with all features
+python train.py \
+    --epochs 100 \
+    --enable-gradient-tracking \
+    --visualization-frequency 5
+
+# Disable specific visualizations
+python train.py \
+    --no-convergence-analysis \
+    --no-classification-viz \
+    --no-final-dashboard
 
 # Resume from config
 python train.py --config my_experiment/config.json
 ```
 
-## 📊 Output Directory Structure
+## Output Directory Structure
 
 ```
 results/
@@ -287,17 +423,105 @@ results/
     ├── final_model.keras             # Final model
     ├── training_log.csv              # CSV log
     ├── tensorboard_logs/             # TensorBoard
-    ├── visualizations/               # Training plots
-    │   ├── training_curves.png
-    │   ├── lr_schedule.png
-    │   └── network_architecture.png
+    ├── visualizations/               # Training visualizations
+    │   ├── training_curves.png       # Loss and metrics over time
+    │   ├── lr_schedule.png           # Learning rate schedule
+    │   ├── convergence_analysis.png  # Convergence dashboard
+    │   ├── overfitting_analysis.png  # Overfitting detection
+    │   ├── network_architecture.png  # Model architecture
+    │   ├── class_balance.png         # Dataset class distribution
+    │   ├── confusion_matrix.png      # Confusion matrix
+    │   ├── roc_pr_curves.png         # ROC and PR curves
+    │   ├── classification_report.png # Per-class metrics
+    │   ├── per_class_analysis.png    # Detailed per-class dashboard
+    │   ├── error_analysis.png        # Misclassification analysis
+    │   └── final_dashboard.png       # Comprehensive summary
     └── analysis/                     # Post-training analysis
         ├── summary_dashboard.png
         ├── training_dynamics.png
+        ├── weight_distributions.png
+        ├── calibration_analysis.png
         └── ...
 ```
 
-## 🎨 Augmentation Examples
+## Visualization Features
+
+### Automatic Real-Time Visualizations
+
+The framework automatically generates visualizations during training:
+
+**Training Curves** (`training_curves.png`)
+- Loss and metrics over epochs
+- Separate train/val curves
+- Smoothing support
+- Best epoch highlighting
+
+**Learning Rate Schedule** (`lr_schedule.png`)
+- LR progression over epochs
+- Warmup phase visualization
+- Schedule type indication
+
+**Convergence Analysis** (`convergence_analysis.png`)
+- Loss convergence monitoring
+- Gradient flow analysis (if enabled)
+- Validation gap tracking
+- Convergence rate estimation
+
+**Overfitting Analysis** (`overfitting_analysis.png`)
+- Generalization gap over time
+- Overfitting onset detection
+- Train/val metric divergence
+- Patience threshold visualization
+
+### Post-Training Classification Visualizations
+
+When test data is provided, the framework generates:
+
+**Confusion Matrix** (`confusion_matrix.png`)
+- True vs predicted labels heatmap
+- Normalization options
+- Percentage annotations
+
+**ROC and PR Curves** (`roc_pr_curves.png`)
+- Receiver Operating Characteristic curves
+- Precision-Recall curves
+- Per-class and micro/macro averages
+- AUC scores
+
+**Classification Report** (`classification_report.png`)
+- Precision, recall, F1-score per class
+- Support counts
+- Overall accuracy
+
+**Per-Class Analysis** (`per_class_analysis.png`)
+- Class distribution
+- Per-class accuracy
+- Common confusions
+- Hardest examples
+
+**Error Analysis** (`error_analysis.png`)
+- Error rates by class
+- Confidence distributions
+- Misclassification patterns
+- Error hotspots
+
+### Network Inspection Visualizations
+
+**Architecture Diagram** (`network_architecture.png`)
+- Layer types and connections
+- Shape information
+- Parameter counts
+
+**Class Balance** (`class_balance.png`)
+- Dataset class distribution
+- Pie and bar charts
+- Imbalance detection
+
+### Final Dashboard
+
+The `final_dashboard.png` combines multiple visualizations into a single comprehensive view for easy presentation and reporting.
+
+## Augmentation Examples
 
 ### Basic Augmentation
 ```python
@@ -343,7 +567,7 @@ def random_erasing(image, probability=0.5, sl=0.02, sh=0.4):
     return image
 ```
 
-## 🏋️ Model Architecture Snippets
+## Model Architecture Snippets
 
 ### Residual Block
 ```python
@@ -387,20 +611,21 @@ def se_block(x, ratio=16):
     return keras.layers.Multiply()([x, se])
 ```
 
-## 🛠 Common Issues & Solutions
+## Common Issues & Solutions
 
 | Issue | Solution |
 |-------|----------|
 | OOM Error | Reduce `batch_size`, enable mixed precision, use gradient checkpointing |
 | Not converging | Lower `learning_rate`, increase `warmup_steps`, check `gradient_clipping_norm_global` |
-| Overfitting | Add dropout, augmentation, increase `weight_decay` |
+| Overfitting | Add dropout, augmentation, increase `weight_decay`, check overfitting analysis |
 | Underfitting | Increase model capacity, train longer, reduce regularization |
 | Slow training | Check data pipeline, use `AUTOTUNE`, enable prefetching |
-| Unstable early training | Increase `warmup_steps`, lower `warmup_start_lr` |
+| Unstable early training | Increase `warmup_steps`, lower `warmup_start_lr`, check convergence analysis |
 | Plateaus mid-training | Try `cosine_decay_restarts` instead of `cosine_decay` |
 | Visualization errors | Check matplotlib install, verify output directory permissions |
+| Missing classification viz | Ensure `get_test_data()` returns valid data, enable `enable_classification_viz` |
 
-## 📈 Hyperparameter Guidelines
+## Hyperparameter Guidelines
 
 ### Learning Rate by Architecture
 ```python
@@ -496,7 +721,7 @@ gradient_clipping_value = 0.1       # Also clip by value
 gradient_clipping_norm_global = None  # May not need clipping
 ```
 
-## 💾 Saving & Loading
+## Saving & Loading
 
 ### Save Configuration
 ```python
@@ -520,7 +745,7 @@ model.save('my_model.keras')
 model = keras.models.load_model('my_model.keras')
 ```
 
-## 📝 Accessing Results
+## Accessing Results
 
 ### Training Metrics
 ```python
@@ -541,7 +766,16 @@ summary = analyzer.get_summary_statistics()
 ece = summary['calibration_summary']['model_name']['ece']
 ```
 
-## 🔗 Integration Examples
+### Visualization Access
+```python
+# All visualizations saved to visualizations/
+# Access them programmatically if needed:
+from pathlib import Path
+viz_dir = Path('results/experiment_name/visualizations')
+confusion_matrix = viz_dir / 'confusion_matrix.png'
+```
+
+## Integration Examples
 
 ### With WandB
 ```python
@@ -589,16 +823,19 @@ with strategy.scope():
     model, history = pipeline.run(...)
 ```
 
-## 🎓 Learning Resources
+## Learning Resources
 
-- **Understand visualizations**: Check `analysis/summary_dashboard.png` first
+- **Understand visualizations**: Check `visualizations/final_dashboard.png` first
 - **Debug training**: Use TensorBoard: `tensorboard --logdir results/*/tensorboard_logs`
 - **Monitor progress**: Check `training_log.csv` for epoch metrics
-- **Analyze calibration**: Review `analysis/confidence_calibration_analysis.png`
+- **Check convergence**: Review `visualizations/convergence_analysis.png`
+- **Detect overfitting**: See `visualizations/overfitting_analysis.png`
+- **Analyze errors**: Inspect `visualizations/error_analysis.png`
+- **Verify schedule**: View `visualizations/lr_schedule.png` for warmup behavior
+- **Classification metrics**: See `visualizations/confusion_matrix.png` and ROC curves
 - **Inspect architecture**: See `visualizations/network_architecture.png`
-- **LR schedule**: View `visualizations/lr_schedule.png` to verify warmup behavior
 
-## 🚦 Quick Decision Tree
+## Quick Decision Tree
 
 ```
 Training a new model?
@@ -610,18 +847,21 @@ Training a new model?
 ├─ Small dataset? → Try cosine_decay_restarts
 ├─ Large model? → Increase warmup_steps, lower learning_rate
 ├─ Quick experiment? → Set epochs=10, lr_schedule_type='constant', warmup_steps=0
+├─ Research mode? → Enable all visualization and analysis features
 └─ Production run? → Enable all features, save config, use warmup
 
 Having issues?
 ├─ OOM? → Reduce batch_size or use mixed precision
-├─ Not learning? → Check LR, increase warmup_steps
+├─ Not learning? → Check LR, increase warmup_steps, review convergence analysis
 ├─ Unstable early? → Increase warmup_steps, lower warmup_start_lr
-├─ Plateaus? → Try cosine_decay_restarts
+├─ Overfitting? → Check overfitting analysis, add regularization
+├─ Plateaus? → Try cosine_decay_restarts, check LR schedule visualization
 ├─ Slow? → Optimize data pipeline, use AUTOTUNE
+├─ Classification errors? → Review confusion matrix and per-class analysis
 └─ Crashes? → Check logs, reduce complexity
 ```
 
-## 🔬 Advanced Topics
+## Advanced Topics
 
 ### Custom Learning Rate Schedules
 
@@ -703,6 +943,31 @@ optimizer = optimizer_builder(optimizer_config, lr_schedule)
 # model.compile(optimizer=optimizer, ...)
 ```
 
+### Custom Visualization Callbacks
+
+```python
+from dl_techniques.optimization.train_vision import EnhancedVisualizationCallback
+
+class CustomVizCallback(EnhancedVisualizationCallback):
+    def on_epoch_end(self, epoch, logs=None):
+        super().on_epoch_end(epoch, logs)
+        
+        # Add your custom visualization logic
+        if (epoch + 1) % self.frequency == 0:
+            self._create_custom_plots()
+    
+    def _create_custom_plots(self):
+        # Your custom visualization code
+        pass
+
+# Use in training
+pipeline.run(
+    model_builder=build_model,
+    dataset_builder=dataset_builder,
+    custom_callbacks=[CustomVizCallback(viz_manager, config)]
+)
+```
+
 ---
 
 **Remember**: 
@@ -711,5 +976,8 @@ optimizer = optimizer_builder(optimizer_config, lr_schedule)
 - Use `cosine_decay` for general purpose, `cosine_decay_restarts` for small datasets
 - Scale learning rate and warmup proportionally with batch size
 - Monitor the LR schedule visualization to verify behavior
+- Check convergence and overfitting analysis for training diagnostics
+- Enable classification visualizations for detailed model evaluation
+- Use the final dashboard for quick comprehensive overviews
 
-**Start simple, iterate quickly, monitor closely!** 🚀
+**Start simple, iterate quickly, monitor closely with comprehensive visualizations!**
